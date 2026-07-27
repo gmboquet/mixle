@@ -165,6 +165,44 @@ class PermutationValidationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             mallows_fit(np.array([[0, 0, 1]]))
 
+    def test_empty_rankings_and_item_sets_are_rejected_everywhere(self):
+        for rankings in (np.array([]), np.empty((0, 3)), np.empty((2, 0))):
+            for aggregate in (borda_count, copeland, kemeny_consensus, mallows_fit):
+                with self.subTest(shape=rankings.shape, aggregate=aggregate.__name__):
+                    with self.assertRaises(ValueError):
+                        aggregate(rankings)
+        for distance in (kendall_distance, spearman_footrule, cayley_distance):
+            with self.subTest(distance=distance.__name__):
+                with self.assertRaises(ValueError):
+                    distance(np.array([]), np.array([]))
+
+    def test_boolean_item_identities_are_rejected(self):
+        ranking = np.array([False, True])
+        with self.assertRaisesRegex(ValueError, "Boolean"):
+            borda_count(ranking)
+        with self.assertRaisesRegex(ValueError, "Boolean"):
+            kendall_distance(ranking, ranking)
+
+    def test_kemeny_exactness_boundary_must_be_exact_nonnegative(self):
+        rankings = np.array([[0, 1, 2], [1, 0, 2]])
+        for bad_boundary in (-1, 1.5, True, np.nan):
+            with self.subTest(exact_max_items=bad_boundary):
+                with self.assertRaisesRegex(ValueError, "exact_max_items"):
+                    kemeny_consensus(rankings, exact_max_items=bad_boundary)
+                with self.assertRaisesRegex(ValueError, "exact_max_items"):
+                    mallows_fit(rankings, exact_max_items=bad_boundary)
+
+    def test_mallows_preserves_kemeny_search_guarantee(self):
+        rankings = np.array([[0, 1, 2], [1, 0, 2]])
+        exact = mallows_fit(rankings, exact_max_items=3)
+        self.assertTrue(exact["exact"])
+        self.assertEqual(exact["search_mode"], "exact_enumeration")
+        self.assertEqual(exact["exact_max_items"], 3)
+        heuristic = mallows_fit(rankings, exact_max_items=0)
+        self.assertFalse(heuristic["exact"])
+        self.assertEqual(heuristic["search_mode"], "adjacent_swap_local_search")
+        self.assertEqual(heuristic["exact_max_items"], 0)
+
     def test_negative_control_identical_permutations_give_zero(self):
         a = np.array([2, 0, 3, 1])
         self.assertEqual(kendall_distance(a, a), 0)

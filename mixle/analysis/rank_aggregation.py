@@ -17,10 +17,23 @@ are exposed directly. Orderings are passed as sequences of item ids, best first 
 
 from __future__ import annotations
 
+import operator
 from itertools import permutations
 from typing import Any
 
 import numpy as np
+
+
+def _exact_nonnegative_integer(value: int, *, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a non-Boolean nonnegative integer.")
+    try:
+        integer = operator.index(value)
+    except TypeError as exc:
+        raise ValueError(f"{name} must be a non-Boolean nonnegative integer.") from exc
+    if integer < 0:
+        raise ValueError(f"{name} must be nonnegative, got {integer}.")
+    return int(integer)
 
 
 def _validate_permutation(ordering: Any, *, m: int | None = None) -> np.ndarray:
@@ -45,7 +58,15 @@ def _validate_permutation(ordering: Any, *, m: int | None = None) -> np.ndarray:
     raw = np.asarray(ordering)
     if raw.ndim != 1:
         raise ValueError(f"ranking must be a 1-D sequence of item ids (best first); got shape {raw.shape}")
-    if not np.issubdtype(raw.dtype, np.integer):
+    if raw.size == 0:
+        raise ValueError("ranking must contain at least one item.")
+    if raw.dtype == np.bool_ or (
+        raw.dtype == object and any(isinstance(value, (bool, np.bool_)) for value in raw.tolist())
+    ):
+        raise ValueError("ranking item ids must not be Boolean values.")
+    if np.issubdtype(raw.dtype, np.integer):
+        arr = raw.astype(int)
+    elif np.issubdtype(raw.dtype, np.floating):
         as_float = raw.astype(np.float64)
         if not np.all(np.isfinite(as_float)) or not np.all(as_float == np.round(as_float)):
             raise ValueError(
@@ -53,7 +74,9 @@ def _validate_permutation(ordering: Any, *, m: int | None = None) -> np.ndarray:
                 "a fractional or non-finite id is never a valid permutation entry, even if truncating "
                 "it to int would happen to land in range."
             )
-    arr = np.round(raw).astype(int)
+        arr = np.round(as_float).astype(int)
+    else:
+        raise ValueError("ranking must contain numeric integer item ids.")
     n = arr.shape[0]
     if m is not None and n != m:
         raise ValueError(f"rankings must be permutations of the same {m} items; got a length-{n} ranking")
@@ -66,7 +89,13 @@ def _validate_permutation(ordering: Any, *, m: int | None = None) -> np.ndarray:
 
 
 def _as_rankings(rankings: np.ndarray) -> np.ndarray:
-    raw = np.atleast_2d(np.asarray(rankings))
+    raw = np.asarray(rankings)
+    if raw.ndim == 1:
+        raw = raw[None, :]
+    if raw.ndim != 2 or raw.shape[0] == 0 or raw.shape[1] == 0:
+        raise ValueError(
+            f"rankings must contain at least one ranking over a nonempty common item set; got shape {raw.shape}"
+        )
     m = raw.shape[1]
     return np.stack([_validate_permutation(row, m=m) for row in raw])
 
@@ -177,12 +206,15 @@ def kemeny_consensus(rankings: np.ndarray, *, exact_max_items: int = 8) -> dict:
 
     The Kemeny consensus is the maximum-likelihood aggregation under the Mallows--Kendall model and the
     Condorcet-consistent choice. Exact by enumeration when ``m <= exact_max_items``; otherwise a local
-    search (adjacent transpositions) from the Borda ordering.
+    search (adjacent transpositions) from the Borda ordering. Exact enumeration evaluates ``m!``
+    permutations, so ``exact_max_items`` is an explicit factorial resource boundary; it must be an
+    exact non-Boolean nonnegative integer.
 
     Returns:
-        ``{'consensus', 'distance', 'exact'}`` -- the consensus, its total Kendall distance, and whether
-        the result is exact.
+        ``{'consensus', 'distance', 'exact', 'search_mode', 'exact_max_items'}`` -- the consensus,
+        total Kendall distance, whether the result is exact, and the requested/achieved search mode.
     """
+    exact_max_items = _exact_nonnegative_integer(exact_max_items, name="exact_max_items")
     r = _as_rankings(rankings)
     m = r.shape[1]
     if m <= exact_max_items:
@@ -191,7 +223,13 @@ def kemeny_consensus(rankings: np.ndarray, *, exact_max_items: int = 8) -> dict:
             d = _total_kendall(np.array(perm), r)
             if d < best_d:
                 best, best_d = np.array(perm), d
-        return {"consensus": best, "distance": int(best_d), "exact": True}
+        return {
+            "consensus": best,
+            "distance": int(best_d),
+            "exact": True,
+            "search_mode": "exact_enumeration",
+            "exact_max_items": exact_max_items,
+        }
 
     # local search from Borda
     cur = borda_count(r)["consensus"].copy()
@@ -206,7 +244,13 @@ def kemeny_consensus(rankings: np.ndarray, *, exact_max_items: int = 8) -> dict:
             if d < cur_d:
                 cur, cur_d = cand, d
                 improved = True
-    return {"consensus": cur, "distance": int(cur_d), "exact": False}
+    return {
+        "consensus": cur,
+        "distance": int(cur_d),
+        "exact": False,
+        "search_mode": "adjacent_swap_local_search",
+        "exact_max_items": exact_max_items,
+    }
 
 
 def _mallows_expected_distance(theta: float, m: int) -> float:
@@ -228,8 +272,10 @@ def mallows_fit(rankings: np.ndarray, *, exact_max_items: int = 8) -> dict:
     means tighter agreement (``theta -> 0`` is uniform/no-consensus).
 
     Returns:
-        ``{'center', 'theta', 'mean_distance'}``.
+        ``{'center', 'theta', 'mean_distance', 'consensus_distance', 'exact', 'search_mode',
+        'exact_max_items'}``, preserving the Kemeny search guarantee used to obtain the center.
     """
+    exact_max_items = _exact_nonnegative_integer(exact_max_items, name="exact_max_items")
     r = _as_rankings(rankings)
     m = r.shape[1]
     km = kemeny_consensus(r, exact_max_items=exact_max_items)
@@ -249,7 +295,15 @@ def mallows_fit(rankings: np.ndarray, *, exact_max_items: int = 8) -> dict:
             else:
                 hi = mid
         theta = 0.5 * (lo + hi)
-    return {"center": center, "theta": theta, "mean_distance": mean_d}
+    return {
+        "center": center,
+        "theta": theta,
+        "mean_distance": mean_d,
+        "consensus_distance": km["distance"],
+        "exact": km["exact"],
+        "search_mode": km["search_mode"],
+        "exact_max_items": km["exact_max_items"],
+    }
 
 
 __all__ = [
