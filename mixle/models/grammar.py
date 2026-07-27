@@ -75,8 +75,8 @@ def fit_induced_pcfg(
     if not 0.0 < init_p <= 1.0:
         raise ValueError("init_p must lie in (0, 1]")
     terminal_rule_mass = _finite_scalar(terminal_rule_mass, "terminal_rule_mass")
-    if not 0.0 < terminal_rule_mass <= 1.0:
-        raise ValueError("terminal_rule_mass must lie in (0, 1]")
+    if not 0.5 <= terminal_rule_mass <= 1.0:
+        raise ValueError("terminal_rule_mass must lie in [0.5, 1] so the induced grammar is proper")
     if terminal_rule_mass == 1.0 and any(len(sequence) > 1 for sequence in data):
         raise ValueError("terminal_rule_mass=1 creates no binary rules and cannot model multi-token sequences")
     rule_pseudo_count = _optional_nonnegative(rule_pseudo_count, "rule_pseudo_count")

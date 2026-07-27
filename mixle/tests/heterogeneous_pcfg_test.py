@@ -197,7 +197,7 @@ class HeterogeneousPCFGTestCase(unittest.TestCase):
         est = InducedHeterogeneousPCFGEstimator(
             max_nonterminals=3,
             terminal_estimators=[a_dist.estimator(pseudo_count=1.0), b_dist.estimator(pseudo_count=1.0)],
-            terminal_rule_mass=0.45,
+            terminal_rule_mass=0.55,
             rule_pseudo_count=1.0e-3,
             prune_threshold=1.0e-9,
             min_rule_prob=1.0e-8,

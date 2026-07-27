@@ -14,9 +14,12 @@ modeled.
 
 from __future__ import annotations
 
+import copy
 import math
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from numbers import Integral
 from typing import Any
 
 import numpy as np
@@ -49,6 +52,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
+from mixle.utils.vector import ImpossibleEvidenceError
 
 
 def _logsumexp_1d(vals: np.ndarray) -> float:
@@ -71,6 +75,222 @@ def _logsumexp_1d(vals: np.ndarray) -> float:
 BinaryRuleInput = dict[Any, Sequence[tuple[Any, Any, float]]] | Sequence[tuple[Any, Any, Any, float]]
 TerminalRuleInput = dict[Any, Sequence[tuple[Any, float]]] | Sequence[tuple[Any, Any, float]]
 EncodedPCFGData = tuple[np.ndarray, tuple[Any, ...]]
+
+
+@dataclass(frozen=True)
+class PCFGTerminationCertificate:
+    """Finite certificate that the start-symbol branching process dies out almost surely."""
+
+    proper: bool
+    reachable_nonterminals: tuple[Any, ...]
+    progeny_spectral_radius: float
+    critical_singular_classes: tuple[tuple[Any, ...], ...]
+    reason: str
+
+
+def _strongly_connected_components(graph: list[set[int]], vertices: set[int]) -> list[tuple[int, ...]]:
+    index = 0
+    stack: list[int] = []
+    on_stack: set[int] = set()
+    indices: dict[int, int] = {}
+    lowlinks: dict[int, int] = {}
+    components: list[tuple[int, ...]] = []
+
+    def visit(vertex: int) -> None:
+        nonlocal index
+        indices[vertex] = lowlinks[vertex] = index
+        index += 1
+        stack.append(vertex)
+        on_stack.add(vertex)
+        for child in graph[vertex].intersection(vertices):
+            if child not in indices:
+                visit(child)
+                lowlinks[vertex] = min(lowlinks[vertex], lowlinks[child])
+            elif child in on_stack:
+                lowlinks[vertex] = min(lowlinks[vertex], indices[child])
+        if lowlinks[vertex] == indices[vertex]:
+            component = []
+            while True:
+                child = stack.pop()
+                on_stack.remove(child)
+                component.append(child)
+                if child == vertex:
+                    break
+            components.append(tuple(sorted(component)))
+
+    for vertex in sorted(vertices):
+        if vertex not in indices:
+            visit(vertex)
+    return components
+
+
+def _termination_certificate(
+    nonterminals: Sequence[Any],
+    start_idx: int,
+    binary_rules: Sequence[tuple[int, int, int, float]],
+    terminal_rules: Sequence[tuple[int, Any, float]],
+) -> PCFGTerminationCertificate:
+    """Classify the finite multitype Galton-Watson process induced by a CNF grammar."""
+    count = len(nonterminals)
+    graph = [set() for _ in range(count)]
+    active_by_parent: list[list[tuple[int, int] | None]] = [[] for _ in range(count)]
+    progeny = np.zeros((count, count), dtype=np.float64)
+    for parent, left, right, probability in binary_rules:
+        if probability <= 0.0:
+            continue
+        graph[parent].update((left, right))
+        active_by_parent[parent].append((left, right))
+        progeny[parent, left] += probability
+        progeny[parent, right] += probability
+    for parent, _, probability in terminal_rules:
+        if probability > 0.0:
+            active_by_parent[parent].append(None)
+
+    reachable = {start_idx}
+    frontier = [start_idx]
+    while frontier:
+        parent = frontier.pop()
+        for child in graph[parent]:
+            if child not in reachable:
+                reachable.add(child)
+                frontier.append(child)
+    reachable_order = tuple(sorted(reachable))
+    names = tuple(nonterminals[index] for index in reachable_order)
+    inactive = [nonterminals[index] for index in reachable_order if not active_by_parent[index]]
+    if inactive:
+        return PCFGTerminationCertificate(
+            False,
+            names,
+            0.0,
+            (),
+            f"reachable nonterminals have no positive-probability productions: {inactive!r}",
+        )
+
+    matrix = progeny[np.ix_(reachable_order, reachable_order)]
+    spectral_radius = float(max((abs(value) for value in np.linalg.eigvals(matrix)), default=0.0))
+    tolerance = 1.0e-10
+    if spectral_radius > 1.0 + tolerance:
+        return PCFGTerminationCertificate(
+            False,
+            names,
+            spectral_radius,
+            (),
+            "the reachable mean-progeny spectral radius exceeds one",
+        )
+
+    singular_classes: list[tuple[Any, ...]] = []
+    for component in _strongly_connected_components(graph, reachable):
+        block = progeny[np.ix_(component, component)]
+        block_radius = float(max((abs(value) for value in np.linalg.eigvals(block)), default=0.0))
+        if abs(block_radius - 1.0) > tolerance:
+            continue
+        component_set = set(component)
+        singular = True
+        for parent in component:
+            for production in active_by_parent[parent]:
+                children_in_class = (
+                    0
+                    if production is None
+                    else int(production[0] in component_set) + int(production[1] in component_set)
+                )
+                if children_in_class != 1:
+                    singular = False
+                    break
+            if not singular:
+                break
+        if singular:
+            singular_classes.append(tuple(nonterminals[index] for index in component))
+    if singular_classes:
+        return PCFGTerminationCertificate(
+            False,
+            names,
+            spectral_radius,
+            tuple(singular_classes),
+            "a reachable critical class deterministically preserves an infinite derivation spine",
+        )
+    return PCFGTerminationCertificate(
+        True,
+        names,
+        spectral_radius,
+        (),
+        "all reachable branching classes become extinct almost surely",
+    )
+
+
+def _count_vector(value: Any, size: int, name: str) -> np.ndarray:
+    try:
+        raw = np.asarray(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be a rectangular real-valued vector") from exc
+    if raw.dtype.kind in {"b", "U", "S", "O"}:
+        raise TypeError(f"{name} must contain real non-boolean values")
+    try:
+        result = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be real-valued") from exc
+    if result.shape != (size,):
+        raise ValueError(f"{name} must have shape ({size},)")
+    if np.any(~np.isfinite(result)) or np.any(result < 0.0):
+        raise ValueError(f"{name} must contain finite non-negative counts")
+    return result.copy()
+
+
+def _nonnegative_finite(value: Any, name: str, *, allow_none: bool = False) -> float | None:
+    if value is None and allow_none:
+        return None
+    if isinstance(value, (bool, np.bool_, str, bytes)):
+        raise TypeError(f"{name} must be a finite non-negative real scalar")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be a finite non-negative real scalar") from exc
+    if not np.isfinite(result) or result < 0.0:
+        raise ValueError(f"{name} must be finite and non-negative")
+    return result
+
+
+def _positive_exact_integer(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be a positive exact integer")
+    result = int(value)
+    if result <= 0:
+        raise ValueError(f"{name} must be positive")
+    return result
+
+
+def _nonnegative_exact_integer(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be a non-negative exact integer")
+    result = int(value)
+    if result < 0:
+        raise ValueError(f"{name} must be non-negative")
+    return result
+
+
+def _observation_weights(value: Any, size: int) -> np.ndarray:
+    return _count_vector(value, size, "PCFG observation weights")
+
+
+def _validated_nobs(value: float | None) -> float | None:
+    return _nonnegative_finite(value, "nobs", allow_none=True)
+
+
+def _validated_sufficient_statistics(
+    value: Any,
+    num_terminal_rules: int,
+    num_binary_rules: int,
+) -> tuple[np.ndarray, np.ndarray, tuple[Any, ...]]:
+    if not isinstance(value, (tuple, list)) or len(value) != 3:
+        raise ValueError("PCFG sufficient statistics must be a three-item tuple")
+    terminal_counts = _count_vector(value[0], num_terminal_rules, "terminal rule counts")
+    binary_counts = _count_vector(value[1], num_binary_rules, "binary rule counts")
+    try:
+        emission_values = tuple(value[2])
+    except TypeError as exc:
+        raise TypeError("PCFG emission statistics must be a sequence") from exc
+    if len(emission_values) != num_terminal_rules:
+        raise ValueError("PCFG emission statistics must have one entry per terminal rule")
+    return terminal_counts, binary_counts, emission_values
 
 
 def _iter_binary_rules(binary_rules: BinaryRuleInput | None) -> Iterable[tuple[Any, Any, Any, float]]:
@@ -227,6 +447,18 @@ class HeterogeneousPCFGDistribution(SequenceEncodableProbabilityDistribution):
         self.log_terminal_probs = _log_normalized(self.terminal_probs)
         self.num_binary_rules = len(self.binary_rules)
         self.num_terminal_rules = len(self.terminal_rules)
+        self.termination_certificate = _termination_certificate(
+            self.nonterminals,
+            self.start_idx,
+            self.binary_rules,
+            self.terminal_rules,
+        )
+        if not self.termination_certificate.proper:
+            raise ValueError(
+                "PCFG does not define a proper finite-sequence distribution: "
+                f"{self.termination_certificate.reason}; "
+                f"spectral_radius={self.termination_certificate.progeny_spectral_radius:.12g}"
+            )
 
     def __str__(self) -> str:
         nts = repr(self.nonterminals)
@@ -742,8 +974,8 @@ class HeterogeneousPCFGSampler(DistributionSampler):
     ) -> None:
         self.dist = dist
         self.rng = RandomState(seed)
-        self.max_depth = max_depth
-        self.max_steps = max_steps
+        self.max_depth = _positive_exact_integer(max_depth, "max_depth")
+        self.max_steps = _positive_exact_integer(max_steps, "max_steps")
         self.emission_samplers = [d.sampler(seed=self.rng.randint(0, maxrandint)) for d in dist.emissions]
 
     def _sample_nt(self, nt: int, depth: int, budget: list[int]) -> list[Any]:
@@ -785,9 +1017,13 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
     ) -> None:
         self.emission_accumulators = list(emission_accumulators)
         self.num_terminal_rules = len(self.emission_accumulators)
-        self.num_binary_rules = int(num_binary_rules)
-        self.terminal_parents = np.asarray(terminal_parents, dtype=np.int32)
-        self.binary_parents = np.asarray(binary_parents, dtype=np.int32)
+        self.num_binary_rules = _nonnegative_exact_integer(num_binary_rules, "num_binary_rules")
+        self.terminal_parents = np.asarray(terminal_parents, dtype=np.int32).copy()
+        self.binary_parents = np.asarray(binary_parents, dtype=np.int32).copy()
+        if self.terminal_parents.shape != (self.num_terminal_rules,):
+            raise ValueError("terminal_parents must have one entry per terminal rule")
+        if self.binary_parents.shape != (self.num_binary_rules,):
+            raise ValueError("binary_parents must have one entry per binary rule")
         self.terminal_counts = np.zeros(self.num_terminal_rules, dtype=np.float64)
         self.binary_counts = np.zeros(self.num_binary_rules, dtype=np.float64)
         self.rule_key, self.emission_key = keys if keys is not None else (None, None)
@@ -805,16 +1041,15 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
 
     def initialize(self, x: Sequence[Any], weight: float, rng: RandomState) -> None:
         """Randomly initialize sufficient statistics for one observed sequence."""
-        if not self._init_rng:
-            self._rng_initialize(rng)
         enc = self.acc_to_encoder().seq_encode([x])
         self.seq_initialize(enc, np.asarray([weight]), rng)
 
     def seq_initialize(self, x: EncodedPCFGData, weights: np.ndarray, rng: RandomState) -> None:
         """Randomly initialize rule and emission statistics for encoded sequences."""
+        lengths, enc_by_rule = x
+        weights = _observation_weights(weights, len(lengths))
         if not self._init_rng:
             self._rng_initialize(rng)
-        lengths, enc_by_rule = x
         total = int(lengths.sum())
         token_weights = np.repeat(weights, lengths)
         terminal_weights = np.zeros((total, self.num_terminal_rules), dtype=np.float64)
@@ -837,6 +1072,7 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_update(self, x: EncodedPCFGData, weights: np.ndarray, estimate: HeterogeneousPCFGDistribution) -> None:
         """Update encoded-sequence statistics with inside-outside posteriors."""
         lengths, enc_by_rule = x
+        weights = _observation_weights(weights, len(lengths))
         total = int(lengths.sum())
         terminal_ld = np.empty((total, estimate.num_terminal_rules), dtype=np.float64)
         for r, dist in enumerate(estimate.emissions):
@@ -844,46 +1080,70 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
 
         terminal_weights = np.zeros((total, estimate.num_terminal_rules), dtype=np.float64)
         offsets = np.concatenate([[0], np.cumsum(lengths)]).astype(int)
+        row_statistics = []
         for i, n in enumerate(lengths):
             if n == 0 or weights[i] == 0.0:
                 continue
             start, stop = offsets[i], offsets[i + 1]
-            _, term_post, bin_counts, _ = estimate._inside_outside(terminal_ld[start:stop])
-            w = float(weights[i])
-            terminal_weights[start:stop, :] = term_post * w
-            self.terminal_counts += term_post.sum(axis=0) * w
-            self.binary_counts += bin_counts * w
+            ll, term_post, bin_counts, _ = estimate._inside_outside(terminal_ld[start:stop])
+            if not np.isfinite(ll):
+                raise ImpossibleEvidenceError(f"PCFG observation at row {i} is impossible under the model")
+            row_statistics.append((start, stop, term_post, bin_counts, float(weights[i])))
+        for start, stop, term_post, bin_counts, weight in row_statistics:
+            terminal_weights[start:stop, :] = term_post * weight
+            self.terminal_counts += term_post.sum(axis=0) * weight
+            self.binary_counts += bin_counts * weight
 
         for r, acc in enumerate(self.emission_accumulators):
             acc.seq_update(enc_by_rule[r], terminal_weights[:, r], estimate.emissions[r])
 
     def combine(self, suff_stat: tuple[np.ndarray, np.ndarray, Sequence[Any]]) -> HeterogeneousPCFGAccumulator:
         """Merge another accumulator value into this accumulator."""
-        terminal_counts, binary_counts, emission_values = suff_stat
+        terminal_counts, binary_counts, emission_values = _validated_sufficient_statistics(
+            suff_stat, self.num_terminal_rules, self.num_binary_rules
+        )
+        merged_accumulators = copy.deepcopy(self.emission_accumulators)
+        for r, value in enumerate(emission_values):
+            merged_accumulators[r].combine(value)
         self.terminal_counts += terminal_counts
         self.binary_counts += binary_counts
-        for r, value in enumerate(emission_values):
-            self.emission_accumulators[r].combine(value)
+        self.emission_accumulators = merged_accumulators
         return self
 
     def value(self) -> tuple[np.ndarray, np.ndarray, tuple[Any, ...]]:
         """Return rule counts and emission sufficient statistics."""
-        return self.terminal_counts, self.binary_counts, tuple(a.value() for a in self.emission_accumulators)
+        return (
+            self.terminal_counts.copy(),
+            self.binary_counts.copy(),
+            tuple(copy.deepcopy(a.value()) for a in self.emission_accumulators),
+        )
 
     def from_value(self, x: tuple[np.ndarray, np.ndarray, Sequence[Any]]) -> HeterogeneousPCFGAccumulator:
         """Replace this accumulator from a serialized sufficient-statistic value."""
-        terminal_counts, binary_counts, emission_values = x
+        terminal_counts, binary_counts, emission_values = _validated_sufficient_statistics(
+            x, self.num_terminal_rules, self.num_binary_rules
+        )
+        restored_accumulators = copy.deepcopy(self.emission_accumulators)
+        for r, value in enumerate(emission_values):
+            restored_accumulators[r].from_value(value)
         self.terminal_counts = terminal_counts
         self.binary_counts = binary_counts
-        for r, value in enumerate(emission_values):
-            self.emission_accumulators[r].from_value(value)
+        self.emission_accumulators = restored_accumulators
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Merge keyed rule and emission statistics into ``stats_dict``."""
+        num_terminal_rules = getattr(
+            self, "num_terminal_rules", len(self.terminal_counts)
+        )
+        num_binary_rules = getattr(self, "num_binary_rules", len(self.binary_counts))
         if self.rule_key is not None:
             if self.rule_key in stats_dict:
-                t, b = stats_dict[self.rule_key]
+                t, b, _ = _validated_sufficient_statistics(
+                    (*stats_dict[self.rule_key], (None,) * num_terminal_rules),
+                    num_terminal_rules,
+                    num_binary_rules,
+                )
                 stats_dict[self.rule_key] = (t + self.terminal_counts, b + self.binary_counts)
             else:
                 # Copy on adoption: stats_dict must never alias this accumulator's own live
@@ -894,24 +1154,40 @@ class HeterogeneousPCFGAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.rule_key] = (self.terminal_counts.copy(), self.binary_counts.copy())
         if self.emission_key is not None:
             if self.emission_key in stats_dict:
+                if len(stats_dict[self.emission_key]) != num_terminal_rules:
+                    raise ValueError(
+                        "keyed PCFG emission state must have one accumulator per terminal rule"
+                    )
                 for r, acc in enumerate(stats_dict[self.emission_key]):
                     acc.combine(self.emission_accumulators[r].value())
             else:
-                stats_dict[self.emission_key] = self.emission_accumulators
+                stats_dict[self.emission_key] = copy.deepcopy(self.emission_accumulators)
         for acc in self.emission_accumulators:
             acc.key_merge(stats_dict)
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace keyed rule and emission statistics from ``stats_dict``."""
+        num_terminal_rules = getattr(
+            self, "num_terminal_rules", len(self.terminal_counts)
+        )
+        num_binary_rules = getattr(self, "num_binary_rules", len(self.binary_counts))
         if self.rule_key is not None and self.rule_key in stats_dict:
             # Copy on replace too: without it, every tied accumulator ends up pointing at the
             # SAME array objects, so any one of them later accumulating new local data would
             # silently corrupt every other tied accumulator's counts.
-            t, b = stats_dict[self.rule_key]
-            self.terminal_counts = np.asarray(t).copy()
-            self.binary_counts = np.asarray(b).copy()
+            t, b, _ = _validated_sufficient_statistics(
+                (*stats_dict[self.rule_key], (None,) * num_terminal_rules),
+                num_terminal_rules,
+                num_binary_rules,
+            )
+            self.terminal_counts = t
+            self.binary_counts = b
         if self.emission_key is not None and self.emission_key in stats_dict:
-            self.emission_accumulators = stats_dict[self.emission_key]
+            if len(stats_dict[self.emission_key]) != num_terminal_rules:
+                raise ValueError(
+                    "keyed PCFG emission state must have one accumulator per terminal rule"
+                )
+            self.emission_accumulators = copy.deepcopy(stats_dict[self.emission_key])
         for acc in self.emission_accumulators:
             acc.key_replace(stats_dict)
 
@@ -932,9 +1208,13 @@ class HeterogeneousPCFGAccumulatorFactory(StatisticAccumulatorFactory):
         keys: tuple[str | None, str | None] | None = (None, None),
     ) -> None:
         self.factories = list(factories)
-        self.num_binary_rules = int(num_binary_rules)
-        self.terminal_parents = np.asarray(terminal_parents, dtype=np.int32)
-        self.binary_parents = np.asarray(binary_parents, dtype=np.int32)
+        self.num_binary_rules = _nonnegative_exact_integer(num_binary_rules, "num_binary_rules")
+        self.terminal_parents = np.asarray(terminal_parents, dtype=np.int32).copy()
+        self.binary_parents = np.asarray(binary_parents, dtype=np.int32).copy()
+        if self.terminal_parents.shape != (len(self.factories),):
+            raise ValueError("terminal_parents must have one entry per terminal factory")
+        if self.binary_parents.shape != (self.num_binary_rules,):
+            raise ValueError("binary_parents must have one entry per binary rule")
         self.keys = keys
 
     def make(self) -> HeterogeneousPCFGAccumulator:
@@ -972,7 +1252,7 @@ class HeterogeneousPCFGEstimator(ParameterEstimator):
         self.terminal_estimators = [est for _, est, _ in self.raw_terminal]
         self.start = self._prior.start
         self.nonterminals = self._prior.nonterminals
-        self.pseudo_count = pseudo_count
+        self.pseudo_count = _nonnegative_finite(pseudo_count, "pseudo_count", allow_none=True)
         self.name = name
         self.keys = keys
 
@@ -990,7 +1270,12 @@ class HeterogeneousPCFGEstimator(ParameterEstimator):
         self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, Sequence[Any]]
     ) -> HeterogeneousPCFGDistribution:
         """Estimate rule probabilities and terminal emissions from statistics."""
-        terminal_counts, binary_counts, emission_values = suff_stat
+        _validated_nobs(nobs)
+        terminal_counts, binary_counts, emission_values = _validated_sufficient_statistics(
+            suff_stat,
+            self._prior.num_terminal_rules,
+            self._prior.num_binary_rules,
+        )
         emissions = [
             self.terminal_estimators[r].estimate(float(terminal_counts[r]), emission_values[r])
             for r in range(len(self.terminal_estimators))
@@ -1071,18 +1356,23 @@ class InducedHeterogeneousPCFGEstimator(ParameterEstimator):
         name: str | None = None,
         keys: tuple[str | None, str | None] | None = (None, None),
     ) -> None:
-        if max_nonterminals <= 0:
-            raise ValueError("max_nonterminals must be positive.")
+        max_nonterminals = _positive_exact_integer(max_nonterminals, "max_nonterminals")
+        if not isinstance(terminal_estimators, Sequence) or isinstance(terminal_estimators, (str, bytes)):
+            raise TypeError("terminal_estimators must be a nonempty sequence")
         if len(terminal_estimators) == 0:
             raise ValueError("terminal_estimators must contain at least one estimator.")
-        if terminal_rule_mass <= 0.0 or terminal_rule_mass > 1.0:
-            raise ValueError("terminal_rule_mass must be in (0, 1].")
-        if prune_threshold < 0.0:
-            raise ValueError("prune_threshold must be non-negative.")
-        if min_rule_prob < 0.0:
-            raise ValueError("min_rule_prob must be non-negative.")
+        terminal_rule_mass = _nonnegative_finite(
+            terminal_rule_mass, "terminal_rule_mass"
+        )
+        if not np.isfinite(terminal_rule_mass) or not 0.5 <= terminal_rule_mass <= 1.0:
+            raise ValueError("terminal_rule_mass must be finite and in [0.5, 1] so the induced grammar is proper")
+        rule_pseudo_count = _nonnegative_finite(rule_pseudo_count, "rule_pseudo_count", allow_none=True)
+        prune_threshold = _nonnegative_finite(prune_threshold, "prune_threshold")
+        min_rule_prob = _nonnegative_finite(min_rule_prob, "min_rule_prob")
+        if min_rule_prob >= 1.0:
+            raise ValueError("min_rule_prob must be less than one")
 
-        self.max_nonterminals = int(max_nonterminals)
+        self.max_nonterminals = max_nonterminals
         self.terminal_family_estimators = list(terminal_estimators)
         self.num_terminal_families = len(self.terminal_family_estimators)
         self.start = start
@@ -1090,8 +1380,8 @@ class InducedHeterogeneousPCFGEstimator(ParameterEstimator):
         self.terminal_rule_mass = float(terminal_rule_mass)
         self.binary_rule_mass = 1.0 - self.terminal_rule_mass
         self.rule_pseudo_count = rule_pseudo_count
-        self.prune_threshold = float(prune_threshold)
-        self.min_rule_prob = float(min_rule_prob)
+        self.prune_threshold = prune_threshold
+        self.min_rule_prob = min_rule_prob
         self.name = name
         self.keys = keys
 
@@ -1141,6 +1431,7 @@ class InducedHeterogeneousPCFGEstimator(ParameterEstimator):
         family, in which case each nonterminal gets its own copy of the same
         family list, or one distribution per generated terminal rule.
         """
+        jitter = _nonnegative_finite(jitter, "jitter")
         if len(terminal_distributions) == self.num_terminal_families:
             emissions = [
                 terminal_distributions[j] for _ in self.nonterminals for j in range(self.num_terminal_families)
@@ -1197,7 +1488,7 @@ class InducedHeterogeneousPCFGEstimator(ParameterEstimator):
 
             if total <= 0.0:
                 if not use_prior_on_empty:
-                    continue
+                    raise ValueError("PCFG pruning removed every production for a nonterminal")
                 if term_idx:
                     term_probs[term_idx] = self._prior.terminal_probs[term_idx]
                 if bin_idx:
@@ -1224,13 +1515,32 @@ class InducedHeterogeneousPCFGEstimator(ParameterEstimator):
                 term_probs[term_idx] *= term_probs[term_idx] >= self.min_rule_prob
             if bin_idx:
                 bin_probs[bin_idx] *= bin_probs[bin_idx] >= self.min_rule_prob
-        self._normalize_rule_probs(term_probs, bin_probs, use_prior_on_empty=True)
+        self._normalize_rule_probs(term_probs, bin_probs, use_prior_on_empty=False)
+
+    def _project_to_proper_branching(self, term_probs: np.ndarray, bin_probs: np.ndarray) -> None:
+        """Project each induced parent to at most one expected child."""
+        for parent in range(self._prior.num_nonterminals):
+            term_idx = self._prior.terminal_by_parent[parent]
+            bin_idx = self._prior.binary_by_parent[parent]
+            terminal_mass = float(term_probs[term_idx].sum()) if term_idx else 0.0
+            binary_mass = float(bin_probs[bin_idx].sum()) if bin_idx else 0.0
+            if binary_mass <= 0.5 + 1.0e-12:
+                continue
+            if terminal_mass <= 0.0:
+                raise ValueError("PCFG pruning removed all terminating rules from a supercritical parent")
+            bin_probs[bin_idx] *= 0.5 / binary_mass
+            term_probs[term_idx] *= 0.5 / terminal_mass
 
     def estimate(
         self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, Sequence[Any]]
     ) -> HeterogeneousPCFGDistribution:
         """Estimate a sparse grammar from rule counts and emission statistics."""
-        terminal_counts, binary_counts, emission_values = suff_stat
+        _validated_nobs(nobs)
+        terminal_counts, binary_counts, emission_values = _validated_sufficient_statistics(
+            suff_stat,
+            self._prior.num_terminal_rules,
+            self._prior.num_binary_rules,
+        )
         emissions = [
             self.terminal_estimators[r].estimate(float(terminal_counts[r]), emission_values[r])
             for r in range(len(self.terminal_estimators))
@@ -1249,8 +1559,9 @@ class InducedHeterogeneousPCFGEstimator(ParameterEstimator):
             term_probs *= terminal_counts > 0.0
             bin_probs *= binary_counts > 0.0
 
-        self._normalize_rule_probs(term_probs, bin_probs, use_prior_on_empty=True)
+        self._normalize_rule_probs(term_probs, bin_probs, use_prior_on_empty=False)
         self._apply_probability_floor(term_probs, bin_probs)
+        self._project_to_proper_branching(term_probs, bin_probs)
 
         binary_rules = [
             (
@@ -1294,6 +1605,10 @@ class HeterogeneousPCFGDataEncoder(DataSequenceEncoder):
             flat.extend(seq)
         enc_by_rule = tuple(enc.seq_encode(flat) for enc in self.terminal_encoders)
         return lengths, enc_by_rule
+
+    def row_count(self, x: EncodedPCFGData) -> int:
+        """Return the number of encoded grammar observations, not flattened terminals."""
+        return int(np.asarray(x[0]).shape[0])
 
 
 # --- Fisher view(s) co-located with this family ---
