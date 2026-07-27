@@ -7,7 +7,9 @@ import scipy.sparse as sp
 
 import mixle.stats as stats
 from mixle.stats.graphs.temporal_graph_grammar import (
+    ApproximateTemporalGraphSample,
     LabeledTemporalGraphGrammarDistribution,
+    TemporalGraphGrammarStatistics,
 )
 
 
@@ -113,6 +115,131 @@ class TemporalGraphGrammarTest(unittest.TestCase):
         acc = est.accumulator_factory().make()
         acc.seq_update(seqs, np.ones(len(seqs)), None)
         self.assertLess(float(np.max(np.abs(est.estimate(120.0, acc.value()).motif_weights - [0.3, 0.7]))), 0.08)
+
+
+class TemporalGraphGrammarContractTest(unittest.TestCase):
+    def test_dense_and_sparse_adjacencies_share_one_validated_sample_space(self):
+        dist = stats.TemporalGraphGrammarDistribution([1, 1, 1, 1])
+        valid = np.array([[0.0, 1.0], [1.0, 0.0]])
+        self.assertEqual(dist.log_density([valid]), dist.log_density([sp.csr_array(valid)]))
+
+        invalid = [
+            np.array([[0.0, -1.0], [-1.0, 0.0]]),
+            np.array([[0.0, np.nan], [np.nan, 0.0]]),
+            np.array([[1.0, 0.0], [0.0, 0.0]]),
+            np.array([[0.0, 1.0], [0.0, 0.0]]),
+            np.zeros((2, 3)),
+        ]
+        for adjacency in invalid:
+            with self.subTest(kind="dense", adjacency=adjacency):
+                with self.assertRaises(ValueError):
+                    dist.log_density([adjacency])
+            with self.subTest(kind="sparse", adjacency=adjacency):
+                with self.assertRaises(ValueError):
+                    dist.log_density([sp.csr_array(adjacency)])
+
+    def test_motif_partition_and_distribution_parameters_are_owned_and_validated(self):
+        for bins in ((), (1,), (0, 0), (0, 1.5), (0, -1), (0, True)):
+            with self.subTest(bins=bins):
+                with self.assertRaises(ValueError):
+                    stats.CommonNeighbourMotif(bins)
+        with self.assertRaises(ValueError):
+            stats.CommonNeighbourMotif((0, 1), directed=1)
+
+        weights = np.array([1.0, 2.0, 3.0, 4.0])
+        dist = stats.TemporalGraphGrammarDistribution(weights, edge_rate=2.0)
+        weights[:] = 0.0
+        np.testing.assert_allclose(dist.motif_weights, [0.1, 0.2, 0.3, 0.4])
+        with self.assertRaises(ValueError):
+            dist.motif_weights[0] = 0.5
+
+        for bad_weights in ([0, 0, 0, 0], [-1, 1, 1, 1], [np.nan, 1, 1, 1], [1, 1]):
+            with self.subTest(weights=bad_weights):
+                with self.assertRaises(ValueError):
+                    stats.TemporalGraphGrammarDistribution(bad_weights)
+        for keyword in ("edge_rate", "node_rate", "edge_remove_rate"):
+            for value in (-1.0, np.nan, np.inf):
+                with self.subTest(keyword=keyword, value=value):
+                    with self.assertRaises(ValueError):
+                        stats.TemporalGraphGrammarDistribution([1, 1, 1, 1], **{keyword: value})
+        with self.assertRaises(ValueError):
+            stats.TemporalGraphGrammarDistribution(
+                [1, 1], motif=stats.CommonNeighbourMotif((0, 1), directed=True)
+            )
+
+    def test_exact_finite_candidate_law_is_normalized_and_preserves_zeros(self):
+        dist = stats.TemporalGraphGrammarDistribution([1, 0, 0, 0], edge_rate=2.0)
+        empty_two = np.zeros((2, 2))
+        edge_two = np.array([[0.0, 1.0], [1.0, 0.0]])
+        probability = np.exp(dist.log_density([empty_two, empty_two])) + np.exp(
+            dist.log_density([empty_two, edge_two])
+        )
+        self.assertAlmostEqual(probability, 1.0, places=12)
+        self.assertAlmostEqual(np.exp(dist.log_density([empty_two, edge_two])), 1.0 - np.exp(-2.0), places=12)
+
+        empty_three = np.zeros((3, 3))
+        edges = ((0, 1), (0, 2), (1, 2))
+        total = 0.0
+        for mask in range(1 << len(edges)):
+            current = empty_three.copy()
+            for bit, (left, right) in enumerate(edges):
+                if mask & (1 << bit):
+                    current[left, right] = current[right, left] = 1.0
+            total += np.exp(dist.log_density([empty_three, current]))
+        self.assertAlmostEqual(total, 1.0, places=12)
+
+        wedge = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 1.0], [0.0, 1.0, 0.0]])
+        triangle = wedge.copy()
+        triangle[0, 2] = triangle[2, 0] = 1.0
+        self.assertEqual(dist.log_density([wedge, triangle]), float("-inf"))
+        no_growth = stats.TemporalGraphGrammarDistribution([1, 1, 1, 1], node_rate=0.0)
+        self.assertEqual(no_growth.log_density([np.zeros((1, 1)), np.zeros((2, 2))]), float("-inf"))
+
+    def test_accumulation_and_estimation_fail_atomically_on_invalid_evidence(self):
+        estimator = stats.TemporalGraphGrammarEstimator()
+        accumulator = estimator.accumulator_factory().make()
+        empty = np.zeros((2, 2))
+        edge = np.array([[0.0, 1.0], [1.0, 0.0]])
+        accumulator.update([empty, edge], 1.0, None)
+        before = accumulator.value()
+
+        with self.assertRaises(ValueError):
+            accumulator.seq_update([[empty, edge]], np.ones(2), None)
+        with self.assertRaises(ValueError):
+            accumulator.seq_update([[empty, edge]], np.array([-1.0]), None)
+        with self.assertRaises(ValueError):
+            accumulator.update([edge, np.zeros((1, 1))], 1.0, None)
+        after = accumulator.value()
+        np.testing.assert_array_equal(after.add_counts, before.add_counts)
+        self.assertEqual(after.steps, before.steps)
+
+        corrupt = TemporalGraphGrammarStatistics(
+            1,
+            (0, 1, 2, 3),
+            False,
+            np.ones(4),
+            np.zeros(4),
+            -1.0,
+            0.0,
+            0.0,
+            1.0,
+        )
+        with self.assertRaises(ValueError):
+            estimator.estimate(1.0, corrupt)
+        with self.assertRaises(ValueError):
+            estimator.estimate(0.0, estimator.accumulator_factory().make().value())
+
+    def test_scalable_samples_are_explicitly_typed_approximations(self):
+        dist = stats.TemporalGraphGrammarDistribution([1, 1, 1, 1])
+        approximate = dist.sampler(seed=1).sample_one_scalable(num_steps=1, n_init=4)
+        self.assertIsInstance(approximate, ApproximateTemporalGraphSample)
+        self.assertFalse(approximate.receipt.exact)
+        with self.assertRaises(ValueError):
+            dist.log_density(approximate)
+        accumulator = dist.estimator().accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            accumulator.update(approximate, 1.0, None)
+        self.assertTrue(np.isfinite(dist.log_density(approximate.snapshots)))
 
 
 class SparseTemporalGraphGrammarTest(unittest.TestCase):
@@ -262,7 +389,9 @@ class ScalableSamplerTest(unittest.TestCase):
             edge_remove_rate=2.0,
         )
         seqs = [
-            gt.sampler(seed=s).sample_one_scalable(num_steps=6, seed_edges=self._seed_edges(rng, n=40))
+            gt.sampler(seed=s).sample_one_scalable(
+                num_steps=6, seed_edges=self._seed_edges(rng, n=40)
+            ).snapshots
             for s in range(60)
         ]
         self.assertTrue(all(sp.issparse(a) for seq in seqs for a in seq))  # never densified
@@ -279,13 +408,19 @@ class ScalableSamplerTest(unittest.TestCase):
         gt = stats.TemporalGraphGrammarDistribution([0.4, 0.3, 0.2, 0.1], edge_rate=5.0, node_rate=1.0)
         big = [(int(rng.randint(40_000)), int(rng.randint(40_000))) for _ in range(120_000)]
         big = [(i, j) for i, j in big if i != j]
-        snaps = gt.sampler(seed=1).sample_one_scalable(num_steps=2, seed_edges=big)  # dense would need ~13 GB
+        approximate = gt.sampler(seed=1).sample_one_scalable(
+            num_steps=2, seed_edges=big
+        )  # dense would need ~13 GB
+        self.assertFalse(approximate.receipt.exact)
+        snaps = approximate.snapshots
         self.assertTrue(all(sp.issparse(a) for a in snaps))
         self.assertGreaterEqual(snaps[-1].shape[0], 40_000)
 
     def test_scalable_directed_emits_asymmetric_sparse(self):
         gt = stats.TemporalGraphGrammarDistribution([0.25] * 4, edge_rate=3.0, node_rate=1.0, directed=True)
-        snaps = gt.sampler(seed=0).sample_one_scalable(num_steps=4, seed_edges=[(0, 1), (1, 2), (2, 0), (3, 1)])
+        snaps = gt.sampler(seed=0).sample_one_scalable(
+            num_steps=4, seed_edges=[(0, 1), (1, 2), (2, 0), (3, 1)]
+        ).snapshots
         self.assertTrue(all(sp.issparse(a) for a in snaps))
         g = snaps[-1].toarray()
         self.assertFalse(np.array_equal(g, g.T))  # directed: asymmetric adjacency
@@ -419,7 +554,9 @@ class GraphGrammarClosuresTest(unittest.TestCase):
         )
         big = [(int(rng.randint(2000)), int(rng.randint(2000))) for _ in range(8000)]
         big = [(i, j) for i, j in big if i != j]
-        s = gt.sampler(seed=1).sample_one_scalable(num_steps=6, seed_edges=big)
+        approximate = gt.sampler(seed=1).sample_one_scalable(num_steps=6, seed_edges=big)
+        self.assertFalse(approximate.receipt.exact)
+        s = approximate.snapshots
         g = s[-1].toarray()
         self.assertTrue(all(sp.issparse(a) for a in s))
         self.assertFalse(np.array_equal(g, g.T))  # genuinely directed
@@ -428,7 +565,7 @@ class GraphGrammarClosuresTest(unittest.TestCase):
         seqs = [
             gt.sampler(seed=k).sample_one_scalable(
                 num_steps=6, seed_edges=[(int(rng.randint(150)), int(rng.randint(150))) for _ in range(400)]
-            )
+            ).snapshots
             for k in range(80)
         ]
         est = stats.TemporalGraphGrammarEstimator(stats.CommonNeighbourMotif(directed=True), pseudo_count=0.5)
