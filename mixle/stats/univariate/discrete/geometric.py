@@ -26,6 +26,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.univariate.continuous.beta import BetaDistribution
+from mixle.stats.univariate.discrete._count_contracts import exact_integer_observations
 from mixle.utils.special import digamma
 
 
@@ -163,9 +164,13 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
         """
         if self.has_conj_prior:
             ga, gb, gab = self.conj_prior_params
-            if x < 1:
+            try:
+                xx = float(x)
+            except Exception:  # noqa: BLE001
                 return -np.inf
-            return (gb - gab) * (x - 1) + (ga - gab)
+            if not np.isfinite(xx) or xx < 1 or np.floor(xx) != xx:
+                return -np.inf
+            return (gb - gab) * (xx - 1) + (ga - gab)
         return self.log_density(x)
 
     def seq_expected_log_density(self, x: np.ndarray) -> np.ndarray:
@@ -173,7 +178,8 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
         if self.has_conj_prior:
             ga, gb, gab = self.conj_prior_params
             rv = (x - 1) * (gb - gab) + (ga - gab)
-            rv = np.where(x < 1, -np.inf, rv)
+            good = np.isfinite(x) & (x >= 1) & (np.floor(x) == x)
+            rv = np.where(good, rv, -np.inf)
             return rv
         return self.seq_log_density(x)
 
@@ -678,12 +684,8 @@ class GeometricEstimator(ParameterEstimator):
         b = old_b + osum - ocnt
         if a > 1 and b > 1:
             p = (a - 1) / (a + b - 2)
-        elif a <= 1 and b > 1:
-            p = 0.0
-        elif a > 1 and b <= 1:
-            p = 1.0
         else:
-            p = 0.5
+            p = a / (a + b)
         return GeometricDistribution(p, name=self.name, keys=self.keys, prior=BetaDistribution(a, b))
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> "GeometricDistribution":
@@ -741,8 +743,8 @@ class GeometricDataEncoder(DataSequenceEncoder):
             Numpy array of positive integers.
 
         """
-        rv = np.asarray(x, dtype=np.float64)
-        if np.any(rv < 1) or np.any(np.isnan(rv)) or np.any(np.floor(rv) != rv):
-            raise ValueError("GeometricDistribution requires positive integer values for x.")
-        else:
-            return rv
+        return exact_integer_observations(
+            x,
+            label="Geometric observations",
+            minimum=1,
+        )

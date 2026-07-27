@@ -26,6 +26,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.discrete._count_contracts import nonnegative_weights
 from mixle.utils.aliasing import MISSING, coalesce_alias
 from mixle.utils.special import digamma
 
@@ -304,7 +305,9 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
     def __str__(self) -> str:
         """Return a readable distribution summary."""
-        s1 = ", ".join(["%s: %s" % (repr(k), repr(v)) for k, v in sorted(self.pmap.items(), key=lambda u: u[0])])
+        s1 = ", ".join(
+            ["%s: %s" % (repr(k), repr(v)) for k, v in sorted(self.pmap.items(), key=lambda item: repr(item[0]))]
+        )
         s2 = repr(self.default_value)
         s3 = repr(self.name)
         s4 = repr(self.keys)
@@ -726,6 +729,9 @@ class CategoricalAccumulator(SequenceEncodableStatisticAccumulator):
             None, updates sufficient_stat of Accumulator, count_map.
 
         """
+        checked = nonnegative_weights([weight], shape=(1,))
+        if checked[0] == 0.0:
+            return
         self.count_map[x] = self.count_map.get(x, 0.0) + weight
 
     def initialize(self, x: Any, weight: float, rng: RandomState) -> None:
@@ -767,15 +773,14 @@ class CategoricalAccumulator(SequenceEncodableStatisticAccumulator):
             None
 
         """
-        inv_key_map = x[1]
-        bcnt = np.bincount(x[0], weights=weights)
-
-        if len(self.count_map) == 0:
-            self.count_map = dict(zip(inv_key_map, bcnt))
-
-        else:
-            for i in range(0, len(bcnt)):
-                self.count_map[inv_key_map[i]] = self.count_map.get(inv_key_map[i], 0.0) + bcnt[i]
+        indices = np.asarray(x[0], dtype=np.int64)
+        inv_key_map = np.asarray(x[1], dtype=object)
+        checked = nonnegative_weights(weights, shape=indices.shape)
+        bcnt = np.bincount(indices, weights=checked, minlength=len(inv_key_map))
+        for index, count in enumerate(bcnt):
+            if count > 0.0:
+                key = inv_key_map[index]
+                self.count_map[key] = self.count_map.get(key, 0.0) + count
 
     def seq_initialize(self, x: Any, weights: np.ndarray, rng: RandomState | None) -> None:
         """Vectorized initialization of Categorical sufficient statistics from encoded sequence of data.
@@ -892,8 +897,18 @@ class CategoricalEstimator(ParameterEstimator):
             keys: Optional sufficient-statistic key.
 
         """
-        self.pseudo_count = pseudo_count
-        self.suff_stat = suff_stat
+        if pseudo_count is not None and (
+            isinstance(pseudo_count, (bool, np.bool_)) or not np.isfinite(pseudo_count) or pseudo_count < 0.0
+        ):
+            raise ValueError("categorical pseudo_count must be finite and non-negative.")
+        if suff_stat is not None and (
+            not suff_stat or any(not np.isfinite(value) or value < 0.0 for value in suff_stat.values())
+        ):
+            raise ValueError("categorical prior statistics must be a non-empty map of finite non-negative values.")
+        # A supplied prior count map without an explicit multiplier is one unit of prior
+        # evidence. This makes the configuration meaningful instead of multiplying by None.
+        self.pseudo_count = 1.0 if suff_stat is not None and pseudo_count is None else pseudo_count
+        self.suff_stat = None if suff_stat is None else dict(suff_stat)
         self.default_value = default_value
         self.name = name
         self.keys = keys
@@ -1051,10 +1066,23 @@ class CategoricalDataEncoder(DataSequenceEncoder):
             Tuple of integer category indices and the object array mapping those indices back to labels.
 
         """
-        val_map_inv, uidx, xs = np.unique(x, return_index=True, return_inverse=True)
-        val_map_inv = np.asarray([x[i] for i in uidx], dtype=object)
-
-        return xs, val_map_inv
+        level_to_index: dict[Any, int] = {}
+        levels: list[Any] = []
+        indices = np.empty(len(x), dtype=np.int64)
+        for position, value in enumerate(x):
+            try:
+                index = level_to_index.get(value)
+            except TypeError as exc:
+                raise ValueError("categorical labels must be hashable.") from exc
+            if index is None:
+                index = len(levels)
+                try:
+                    level_to_index[value] = index
+                except TypeError as exc:
+                    raise ValueError("categorical labels must be hashable.") from exc
+                levels.append(value)
+            indices[position] = index
+        return indices, np.asarray(levels, dtype=object)
 
     def row_count(self, x: Any) -> int:
         """Return the observation count from the categorical index vector."""
@@ -1065,9 +1093,7 @@ class CategoricalDataEncoder(DataSequenceEncoder):
         if indices.ndim != 1 or levels.ndim != 1:
             raise ValueError("categorical encoded indices and levels must be one-dimensional.")
         if len(indices) and (
-            not np.issubdtype(indices.dtype, np.integer)
-            or np.any(indices < 0)
-            or np.any(indices >= len(levels))
+            not np.issubdtype(indices.dtype, np.integer) or np.any(indices < 0) or np.any(indices >= len(levels))
         ):
             raise ValueError("categorical encoded indices must refer to the encoded level table.")
         return len(indices)

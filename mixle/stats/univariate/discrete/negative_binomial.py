@@ -30,6 +30,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.discrete._count_contracts import exact_integer_observations
 from mixle.utils.special import digamma, valid_integer
 from mixle.utils.vector import gammaln
 
@@ -139,7 +140,7 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
     def __init__(self, r: float, p: float, name: str | None = None, keys: str | None = None) -> None:
         if r <= 0.0 or not np.isfinite(r):
             raise ValueError("NegativeBinomialDistribution requires r > 0.")
-        if p <= 0.0 or p >= 1.0:
+        if not np.isfinite(p) or p <= 0.0 or p >= 1.0:
             raise ValueError("NegativeBinomialDistribution requires p in (0, 1).")
         self.r = float(r)
         self.p = float(p)
@@ -535,7 +536,9 @@ class NegativeBinomialDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[int]) -> tuple[np.ndarray, np.ndarray]:
         """Encode counts with precomputed ``log(x!)`` values."""
-        rv = np.asarray(x, dtype=np.float64)
-        if rv.size and (np.any(rv < 0) or np.any(np.isnan(rv)) or np.any(np.floor(rv) != rv)):
-            raise ValueError("NegativeBinomialDistribution requires non-negative integer observations.")
+        rv = exact_integer_observations(
+            x,
+            label="Negative-binomial observations",
+            minimum=0,
+        )
         return rv, gammaln(rv + 1.0)

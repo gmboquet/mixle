@@ -24,9 +24,10 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.discrete._count_contracts import exact_integer_observations, nonnegative_weights
 from mixle.stats.univariate.discrete.categorical import CategoricalFisherView
 from mixle.utils.aliasing import MISSING, coalesce_alias
-from mixle.utils.special import digamma
+from mixle.utils.special import digamma, valid_integer
 
 
 class IntegerCategoricalFisherView(CategoricalFisherView):
@@ -246,7 +247,7 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         if self.expected_nparams is None:
             return self.log_density(x)
 
-        if (x < self.min_val) or (x > self.max_val):
+        if not valid_integer(x) or (x < self.min_val) or (x > self.max_val):
             return -np.inf
 
         idx = int(x - self.min_val)
@@ -257,11 +258,11 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         if self.expected_nparams is None:
             return self.seq_log_density(x)
 
-        v = x - self.min_val
-        u = np.bitwise_and(v >= 0, v < self.num_vals)
-        rv = np.zeros(len(x))
-        rv.fill(-np.inf)
-        rv[u] = self.expected_nparams[v[u]]
+        values = np.asarray(x, dtype=np.float64)
+        v = values - self.min_val
+        u = np.isfinite(v) & (np.floor(v) == v) & (v >= 0) & (v < self.num_vals)
+        rv = np.full(values.shape, -np.inf, dtype=np.float64)
+        rv[u] = self.expected_nparams[v[u].astype(np.int64)]
         return rv
 
     def density(self, x: int) -> float:
@@ -548,28 +549,33 @@ class IntegerCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
             estimate: Accepted for accumulator API consistency.
         """
 
+        checked = nonnegative_weights([weight], shape=(1,))
+        if checked[0] == 0.0:
+            return
+        value = int(exact_integer_observations([x], label="Integer-categorical observations")[0])
+
         if self.count_vec is None:
-            self.min_val = x
-            self.max_val = x
+            self.min_val = value
+            self.max_val = value
             self.count_vec = np.asarray([weight])
 
-        elif self.max_val < x:
+        elif self.max_val < value:
             temp_vec = self.count_vec
-            self.max_val = x
+            self.max_val = value
             self.count_vec = np.zeros(self.max_val - self.min_val + 1)
             self.count_vec[: len(temp_vec)] = temp_vec
-            self.count_vec[x - self.min_val] += weight
+            self.count_vec[value - self.min_val] += weight
 
-        elif self.min_val > x:
+        elif self.min_val > value:
             temp_vec = self.count_vec
-            temp_diff = self.min_val - x
-            self.min_val = x
+            temp_diff = self.min_val - value
+            self.min_val = value
             self.count_vec = np.zeros(self.max_val - self.min_val + 1)
             self.count_vec[temp_diff:] = temp_vec
-            self.count_vec[x - self.min_val] += weight
+            self.count_vec[value - self.min_val] += weight
 
         else:
-            self.count_vec[x - self.min_val] += weight
+            self.count_vec[value - self.min_val] += weight
 
     def initialize(self, x: int, weight: float, rng: RandomState) -> None:
         """Initialize sufficient statistics with one weighted observation.
@@ -618,10 +624,17 @@ class IntegerCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        min_x = x.min()
-        max_x = x.max()
+        values = exact_integer_observations(x, label="Integer-categorical observations")
+        checked = nonnegative_weights(weights, shape=values.shape)
+        used = checked > 0.0
+        if not np.any(used):
+            return
+        values = values[used]
+        checked = checked[used]
+        min_x = int(values.min())
+        max_x = int(values.max())
 
-        loc_cnt = np.bincount(x - min_x, weights=weights)
+        loc_cnt = np.bincount(values - min_x, weights=checked)
 
         if self.count_vec is None:
             self.count_vec = np.zeros(max_x - min_x + 1)
@@ -646,8 +659,16 @@ class IntegerCategoricalAccumulator(SequenceEncodableStatisticAccumulator):
         """Engine-resident accumulation: the weighted value histogram is reduced on the active
         engine (numpy or torch); the dynamic support range is host bookkeeping. Matches seq_update.
         """
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
-        xv = np.asarray(x)
+        xv = exact_integer_observations(x, label="Integer-categorical observations")
+        weights_np = nonnegative_weights(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            shape=xv.shape,
+        )
+        used = weights_np > 0.0
+        if not np.any(used):
+            return
+        xv = xv[used]
+        weights_np = weights_np[used]
         min_x = int(xv.min())
         max_x = int(xv.max())
 
@@ -959,4 +980,7 @@ class IntegerCategoricalDataEncoder(DataSequenceEncoder):
             Numpy array of integers.
 
         """
-        return np.asarray(x, dtype=int)
+        return exact_integer_observations(
+            x,
+            label="Integer-categorical observations",
+        )
