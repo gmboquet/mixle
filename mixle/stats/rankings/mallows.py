@@ -20,6 +20,8 @@ statistic) and fits theta by matching the mean Kendall distance to its closed-fo
 
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
+from itertools import permutations
 
 import numpy as np
 from numpy.random import RandomState
@@ -49,6 +51,18 @@ from mixle.stats.rankings._contracts import (
 )
 
 _MAX_THETA = 700.0
+
+
+@dataclass(frozen=True)
+class MallowsFitDiagnostics:
+    """Center-search and regularization evidence attached to a fitted Mallows law."""
+
+    center_algorithm: str
+    center_exact: bool
+    centers_evaluated: int
+    kendall_objective: float
+    regularized: bool
+    pseudo_count: float
 
 
 def _log_normalizer(theta: float, n: int) -> float:
@@ -107,6 +121,7 @@ class MallowsDistribution(SequenceEncodableProbabilityDistribution):
         theta: float = 1.0,
         name: str | None = None,
         keys: str | None = None,
+        fit_diagnostics: MallowsFitDiagnostics | None = None,
     ) -> None:
         """Create a Mallows distribution around a central permutation.
 
@@ -137,6 +152,9 @@ class MallowsDistribution(SequenceEncodableProbabilityDistribution):
         self.log_z = _log_normalizer(self.theta, self.dim)
         self.name = name
         self.keys = keys
+        if fit_diagnostics is not None and not isinstance(fit_diagnostics, MallowsFitDiagnostics):
+            raise TypeError("fit_diagnostics must be a MallowsFitDiagnostics record.")
+        self.fit_diagnostics = fit_diagnostics
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the Mallows distribution."""
@@ -203,6 +221,7 @@ class MallowsDistribution(SequenceEncodableProbabilityDistribution):
             dim=self.dim,
             pseudo_count=pseudo_count,
             prior_precede=prior if pseudo_count is not None else None,
+            prior_center=self.sigma0,
             name=self.name,
             keys=self.keys,
         )
@@ -360,6 +379,9 @@ class MallowsEstimator(ParameterEstimator):
         theta: float | None = None,
         pseudo_count: float | None = None,
         prior_precede: np.ndarray | None = None,
+        prior_center: Sequence[int] | np.ndarray | None = None,
+        center_exact_cap: int = 9,
+        allow_approximate_center: bool = False,
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
@@ -376,6 +398,15 @@ class MallowsEstimator(ParameterEstimator):
                 raise ValueError("prior_precede must assign one unit across each unordered pair.")
             prior = prior.copy()
         self.prior_precede = prior
+        self.prior_center = (
+            np.arange(self.dim, dtype=np.int64)
+            if prior_center is None
+            else permutation(prior_center, self.dim, label="prior_center").copy()
+        )
+        self.center_exact_cap = positive_integer(center_exact_cap, label="center_exact_cap", minimum=2)
+        if not isinstance(allow_approximate_center, (bool, np.bool_)):
+            raise TypeError("allow_approximate_center must be a Boolean.")
+        self.allow_approximate_center = bool(allow_approximate_center)
         self.name = name
         self.keys = keys
 
@@ -400,9 +431,39 @@ class MallowsEstimator(ParameterEstimator):
         if count <= 0.0:
             return MallowsDistribution(np.arange(n), 0.0, name=self.name, keys=self.keys)
 
-        # Copeland scores: how often each item precedes the others; order descending for sigma0.
-        scores = precede.sum(axis=1) - precede.sum(axis=0)
-        sigma0 = np.argsort(-scores, kind="stable")
+        exact = n <= self.center_exact_cap
+        if not exact and not self.allow_approximate_center:
+            raise ValueError(
+                f"exact Mallows center search is capped at {self.center_exact_cap} items; "
+                "set allow_approximate_center=True for a labeled Copeland approximation."
+            )
+
+        def objective(center: np.ndarray) -> float:
+            total = 0.0
+            for earlier in range(n):
+                for later in range(earlier + 1, n):
+                    total += precede[center[later], center[earlier]]
+            return total
+
+        if exact:
+            sigma0: np.ndarray | None = None
+            best_objective = math.inf
+            centers_evaluated = 0
+            for candidate_tuple in permutations(range(n)):
+                candidate = np.asarray(candidate_tuple, dtype=np.int64)
+                candidate_objective = objective(candidate)
+                centers_evaluated += 1
+                if candidate_objective < best_objective:
+                    sigma0, best_objective = candidate, candidate_objective
+            if sigma0 is None:
+                raise RuntimeError("Mallows exact center search produced no candidates.")
+            center_algorithm = "exact_kemeny_enumeration"
+        else:
+            scores = precede.sum(axis=1) - precede.sum(axis=0)
+            sigma0 = np.argsort(-scores, kind="stable")
+            best_objective = objective(sigma0)
+            centers_evaluated = 1
+            center_algorithm = "copeland_approximation"
         rank0 = np.empty(n, dtype=int)
         rank0[sigma0] = np.arange(n)
 
@@ -415,7 +476,21 @@ class MallowsEstimator(ParameterEstimator):
         mean_distance = discordant / count
 
         theta = self.theta if self.theta is not None else _solve_theta(mean_distance, n)
-        return MallowsDistribution(sigma0, theta, name=self.name, keys=self.keys)
+        diagnostics = MallowsFitDiagnostics(
+            center_algorithm=center_algorithm,
+            center_exact=exact,
+            centers_evaluated=centers_evaluated,
+            kendall_objective=best_objective,
+            regularized=self.pseudo_count is not None and self.pseudo_count > 0.0,
+            pseudo_count=0.0 if self.pseudo_count is None else self.pseudo_count,
+        )
+        return MallowsDistribution(
+            sigma0,
+            theta,
+            name=self.name,
+            keys=self.keys,
+            fit_diagnostics=diagnostics,
+        )
 
 
 class MallowsDataEncoder(DataSequenceEncoder):

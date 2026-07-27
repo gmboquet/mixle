@@ -8,7 +8,7 @@ import numpy as np
 
 from mixle.inference.estimation import fit
 from mixle.stats import MallowsDistribution
-from mixle.stats.rankings.mallows import MallowsDataEncoder
+from mixle.stats.rankings.mallows import MallowsDataEncoder, MallowsEstimator
 
 
 def _orderings(n):
@@ -79,7 +79,7 @@ class MallowsTestCase(unittest.TestCase):
         self.assertEqual(list(fitted.sigma0), list(true.sigma0))
         self.assertAlmostEqual(fitted.theta, 1.0, delta=0.15)
 
-    def test_copeland_estimator_is_not_claimed_as_exact_kemeny(self):
+    def test_estimator_solves_the_exact_kemeny_center_within_cap(self):
         data = [[1, 2, 0, 3], [1, 0, 3, 2], [1, 3, 2, 0]]
         est = MallowsDistribution([0, 1, 2, 3]).estimator()
         acc = est.accumulator_factory().make()
@@ -91,8 +91,9 @@ class MallowsTestCase(unittest.TestCase):
         exact = min(_kendall_objective(precede, p) for p in _orderings(4))
 
         self.assertEqual(count, 3.0)
-        self.assertEqual(list(fitted.sigma0), [1, 0, 2, 3])
-        self.assertGreater(_kendall_objective(precede, fitted.sigma0), exact)
+        self.assertEqual(_kendall_objective(precede, fitted.sigma0), exact)
+        self.assertTrue(fitted.fit_diagnostics.center_exact)
+        self.assertEqual(fitted.fit_diagnostics.center_algorithm, "exact_kemeny_enumeration")
 
     def test_encoder_rejects_non_permutations(self):
         with self.assertRaises(ValueError):
@@ -179,6 +180,20 @@ class MallowsTestCase(unittest.TestCase):
         dist = MallowsDistribution([0, 1, 2, 3], theta=1.0e-309)
         self.assertAlmostEqual(dist.log_z, math.log(24.0), places=12)
         self.assertAlmostEqual(dist.density([3, 2, 1, 0]), 1.0 / 24.0, places=12)
+
+    def test_large_center_approximation_requires_explicit_opt_in(self):
+        counts = np.triu(np.ones((4, 4)), 1)
+        with self.assertRaisesRegex(ValueError, "exact Mallows center search"):
+            MallowsEstimator(4, center_exact_cap=3).estimate(None, (1.0, counts))
+        fitted = MallowsEstimator(
+            4,
+            center_exact_cap=3,
+            allow_approximate_center=True,
+        ).estimate(None, (1.0, counts))
+        self.assertFalse(fitted.fit_diagnostics.center_exact)
+        self.assertEqual(fitted.fit_diagnostics.center_algorithm, "copeland_approximation")
+        with self.assertRaises(TypeError):
+            MallowsEstimator(3, allow_approximate_center="false")
 
 
 if __name__ == "__main__":
