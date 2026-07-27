@@ -823,6 +823,9 @@ __all__ = [
     "WeightedDistribution",
     "WeightedDataEncoder",
     "WeightedEstimator",
+    "WeightedObservation",
+    "WeightedStatistics",
+    "WeightedEnumerator",
     "ErdosRenyiGraphDistribution",
     "ErdosRenyiGraphSampler",
     "ErdosRenyiGraphAccumulator",
@@ -1051,7 +1054,14 @@ from mixle.stats.combinator.truncated import (
     TruncatedSampler,
     TruncatedStatistics,
 )
-from mixle.stats.combinator.weighted import WeightedDataEncoder, WeightedDistribution, WeightedEstimator
+from mixle.stats.combinator.weighted import (
+    WeightedDataEncoder,
+    WeightedDistribution,
+    WeightedEnumerator,
+    WeightedEstimator,
+    WeightedObservation,
+    WeightedStatistics,
+)
 from mixle.stats.combinator.zero_inflated import (
     ZeroInflatedDataEncoder,
     ZeroInflatedDistribution,
