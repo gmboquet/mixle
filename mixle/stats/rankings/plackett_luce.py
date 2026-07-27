@@ -40,6 +40,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.rankings._contracts import (
+    finite_nonnegative,
     permutation,
     permutation_batch,
     positive_integer,
@@ -60,6 +61,52 @@ def _reverse_logcumsumexp(g: np.ndarray) -> np.ndarray:
 def _reverse_cumsum(g: np.ndarray) -> np.ndarray:
     """Return ``rc[..., s] = sum(g[..., s:])`` along the last axis."""
     return np.cumsum(g[..., ::-1], axis=-1)[..., ::-1]
+
+
+def _scaled_worths(log_w: np.ndarray) -> np.ndarray:
+    """Exponentiate finite log-worths after overflow-safe wide centering."""
+    values = np.asarray(log_w, dtype=np.float64)
+    maximum = float(np.max(values))
+    floor = math.log(np.finfo(np.float64).tiny)
+    threshold = maximum + floor
+    centered = np.empty_like(values)
+    for index, value in enumerate(values):
+        numeric = float(value)
+        centered[index] = floor if numeric < threshold else numeric - maximum
+    return np.exp(centered)
+
+
+def _pl_statistics(
+    value: Any,
+    dim: int,
+    *,
+    label: str,
+    full: bool,
+) -> tuple[float, np.ndarray, np.ndarray]:
+    """Validate one Plackett-Luce MM statistic receipt."""
+    if isinstance(value, (str, bytes)):
+        raise TypeError(f"{label} must be a three-item statistic tuple.")
+    try:
+        if len(value) != 3:
+            raise TypeError(f"{label} must be a three-item statistic tuple.")
+    except TypeError as exc:
+        raise TypeError(f"{label} must be a three-item statistic tuple.") from exc
+    count = finite_nonnegative(value[0], label=f"{label} total weight")
+    num = np.asarray(value[1], dtype=np.float64)
+    den = np.asarray(value[2], dtype=np.float64)
+    if num.shape != (dim,) or den.shape != (dim,):
+        raise ValueError(f"{label} numerator and denominator must have shape ({dim},).")
+    if not np.all(np.isfinite(num)) or np.any(num < 0.0):
+        raise ValueError(f"{label} numerator must be finite and nonnegative.")
+    if not np.all(np.isfinite(den)) or np.any(den < 0.0):
+        raise ValueError(f"{label} denominator must be finite and nonnegative.")
+    expected = count * (dim - 1)
+    tolerance = 1.0e-10 * max(1.0, expected)
+    if full and not math.isclose(float(num.sum()), expected, rel_tol=1.0e-10, abs_tol=tolerance):
+        raise ValueError(f"{label} numerator total is incompatible with full-ranking weight.")
+    if not full and float(num.sum()) > expected + tolerance:
+        raise ValueError(f"{label} numerator total exceeds the partial-ranking maximum.")
+    return count, num.copy(), den.copy()
 
 
 class PlackettLuceDistribution(SequenceEncodableProbabilityDistribution):
@@ -286,9 +333,9 @@ class PlackettLuceAccumulator(SequenceEncodableStatisticAccumulator):
     """
 
     def __init__(self, dim: int, keys: str | None = None) -> None:
-        self.dim = dim
-        self.num = np.zeros(dim)
-        self.den = np.zeros(dim)
+        self.dim = positive_integer(dim, label="dim", minimum=2)
+        self.num = np.zeros(self.dim)
+        self.den = np.zeros(self.dim)
         self.count = 0.0
         self.keys = keys
 
@@ -312,7 +359,7 @@ class PlackettLuceAccumulator(SequenceEncodableStatisticAccumulator):
 
         if estimate is not None and estimate.dim != self.dim:
             raise ValueError("previous Plackett-Luce estimate has an incompatible dimension.")
-        worths = np.ones(k) if estimate is None else np.exp(estimate.log_w - np.max(estimate.log_w))
+        worths = np.ones(k) if estimate is None else _scaled_worths(estimate.log_w)
         go = worths[checked]  # (N, K) worths in ranked order
         suffix = _reverse_cumsum(go)  # suffix[n, s] = sum_{t>=s} w_{x[n,t]}
         inv_suffix = 1.0 / np.maximum(suffix, np.finfo(np.float64).tiny)  # guard underflowed worth sums
@@ -329,7 +376,7 @@ class PlackettLuceAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat: tuple[float, np.ndarray, np.ndarray]) -> "PlackettLuceAccumulator":
         """Merge count, numerator, and denominator arrays from another accumulator."""
-        count, num, den = suff_stat
+        count, num, den = _pl_statistics(suff_stat, self.dim, label="Plackett-Luce statistics", full=True)
         self.count += count
         self.num += num
         self.den += den
@@ -337,12 +384,16 @@ class PlackettLuceAccumulator(SequenceEncodableStatisticAccumulator):
 
     def value(self) -> tuple[float, np.ndarray, np.ndarray]:
         """Return the accumulated count, numerator counts, and denominator totals."""
-        return self.count, self.num, self.den
+        return self.count, self.num.copy(), self.den.copy()
 
     def from_value(self, x: tuple[float, np.ndarray, np.ndarray]) -> "PlackettLuceAccumulator":
         """Restore accumulator state from ``value`` output."""
-        self.count, self.num, self.den = x[0], np.asarray(x[1]), np.asarray(x[2])
-        self.dim = len(self.num)
+        self.count, self.num, self.den = _pl_statistics(
+            x,
+            self.dim,
+            label="Plackett-Luce statistics",
+            full=True,
+        )
         return self
 
     def acc_to_encoder(self) -> "PlackettLuceDataEncoder":
@@ -354,7 +405,7 @@ class PlackettLuceAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for PlackettLuceAccumulator."""
 
     def __init__(self, dim: int, keys: str | None = None) -> None:
-        self.dim = dim
+        self.dim = positive_integer(dim, label="dim", minimum=2)
         self.keys = keys
 
     def make(self) -> PlackettLuceAccumulator:
@@ -372,10 +423,8 @@ class PlackettLuceEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        if dim is None or dim < 2:
-            raise ValueError("PlackettLuceEstimator requires the number of items dim >= 2.")
-        self.dim = int(dim)
-        self.pseudo_count = pseudo_count
+        self.dim = positive_integer(dim, label="dim", minimum=2)
+        self.pseudo_count = None if pseudo_count is None else finite_nonnegative(pseudo_count, label="pseudo_count")
         self.name = name
         self.keys = keys
 
@@ -385,7 +434,14 @@ class PlackettLuceEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, np.ndarray, np.ndarray]) -> PlackettLuceDistribution:
         """Return one MM estimate from accumulated full-ranking sufficient statistics."""
-        count, num, den = suff_stat
+        if nobs is not None:
+            finite_nonnegative(nobs, label="nobs")
+        count, num, den = _pl_statistics(
+            suff_stat,
+            self.dim,
+            label="Plackett-Luce statistics",
+            full=True,
+        )
         if count <= 0.0:
             return PlackettLuceDistribution(np.zeros(self.dim), name=self.name, keys=self.keys)
 
@@ -475,7 +531,7 @@ class PlackettLucePartialDataEncoder(DataSequenceEncoder):
     """
 
     def __init__(self, dim: int) -> None:
-        self.dim = int(dim)
+        self.dim = positive_integer(dim, label="dim", minimum=2)
 
     def __str__(self) -> str:
         return "PlackettLucePartialDataEncoder(dim=%r)" % self.dim
@@ -523,7 +579,7 @@ class PlackettLucePartialAccumulator(SequenceEncodableStatisticAccumulator):
     """
 
     def __init__(self, dim: int, keys: str | None = None) -> None:
-        self.dim = int(dim)
+        self.dim = positive_integer(dim, label="dim", minimum=2)
         self.num = np.zeros(self.dim)
         self.den = np.zeros(self.dim)
         self.count = 0.0
@@ -531,7 +587,8 @@ class PlackettLucePartialAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: Sequence[int], weight: float, estimate: PlackettLuceDistribution | None) -> None:
         """Update partial-ranking sufficient statistics from one observation."""
-        self.seq_update([np.asarray(list(x), dtype=int)], np.asarray([weight], dtype=float), estimate)
+        checked = PlackettLucePartialDataEncoder(self.dim).seq_encode([x])
+        self.seq_update(checked, np.asarray([weight], dtype=float), estimate)
 
     def initialize(self, x: Sequence[int], weight: float, rng: RandomState | None) -> None:
         """Initialize statistics from one partial ranking using uniform worths."""
@@ -542,13 +599,18 @@ class PlackettLucePartialAccumulator(SequenceEncodableStatisticAccumulator):
     ) -> None:
         """Update generalized MM statistics from encoded top-m rankings."""
         k = self.dim
-        worths = np.ones(k) if estimate is None else np.exp(estimate.log_w)
-        for r, wgt in zip(x, np.asarray(weights, dtype=float)):
-            r = np.asarray(r, dtype=int)
+        checked = PlackettLucePartialDataEncoder(self.dim).seq_encode(x)
+        checked_weights = validate_weights(weights, len(checked))
+        if estimate is not None and estimate.dim != self.dim:
+            raise ValueError("previous Plackett-Luce estimate has an incompatible dimension.")
+        worths = np.ones(k) if estimate is None else _scaled_worths(estimate.log_w)
+        for r, wgt in zip(checked, checked_weights):
             avail = np.ones(k, dtype=bool)
             sum_avail = float(worths.sum())
             for s in range(r.size):
                 if (k - s) >= 2:  # a genuine choice (the final forced pick of a full ranking is skipped)
+                    if not math.isfinite(sum_avail) or sum_avail <= 0.0:
+                        raise FloatingPointError("Plackett-Luce available-worth total is not positive and finite.")
                     self.den[avail] += wgt / sum_avail
                     self.num[r[s]] += wgt
                 sum_avail -= worths[r[s]]
@@ -561,7 +623,12 @@ class PlackettLucePartialAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat: tuple[float, np.ndarray, np.ndarray]) -> "PlackettLucePartialAccumulator":
         """Merge partial-ranking sufficient statistics from another accumulator."""
-        count, num, den = suff_stat
+        count, num, den = _pl_statistics(
+            suff_stat,
+            self.dim,
+            label="partial Plackett-Luce statistics",
+            full=False,
+        )
         self.count += count
         self.num += num
         self.den += den
@@ -569,12 +636,16 @@ class PlackettLucePartialAccumulator(SequenceEncodableStatisticAccumulator):
 
     def value(self) -> tuple[float, np.ndarray, np.ndarray]:
         """Return accumulated partial-ranking count, numerator, and denominator statistics."""
-        return self.count, self.num, self.den
+        return self.count, self.num.copy(), self.den.copy()
 
     def from_value(self, x: tuple[float, np.ndarray, np.ndarray]) -> "PlackettLucePartialAccumulator":
         """Restore partial-ranking accumulator state from ``value`` output."""
-        self.count, self.num, self.den = x[0], np.asarray(x[1]), np.asarray(x[2])
-        self.dim = len(self.num)
+        self.count, self.num, self.den = _pl_statistics(
+            x,
+            self.dim,
+            label="partial Plackett-Luce statistics",
+            full=False,
+        )
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -599,7 +670,7 @@ class PlackettLucePartialAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for PlackettLucePartialAccumulator."""
 
     def __init__(self, dim: int, keys: str | None = None) -> None:
-        self.dim = int(dim)
+        self.dim = positive_integer(dim, label="dim", minimum=2)
         self.keys = keys
 
     def make(self) -> PlackettLucePartialAccumulator:
@@ -617,10 +688,8 @@ class PlackettLucePartialEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        if dim is None or dim < 2:
-            raise ValueError("PlackettLucePartialEstimator requires the number of items dim >= 2.")
-        self.dim = int(dim)
-        self.pseudo_count = pseudo_count
+        self.dim = positive_integer(dim, label="dim", minimum=2)
+        self.pseudo_count = None if pseudo_count is None else finite_nonnegative(pseudo_count, label="pseudo_count")
         self.name = name
         self.keys = keys
 
@@ -630,7 +699,14 @@ class PlackettLucePartialEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, np.ndarray, np.ndarray]) -> PlackettLuceDistribution:
         """Return one MM estimate from accumulated partial-ranking sufficient statistics."""
-        count, num, den = suff_stat
+        if nobs is not None:
+            finite_nonnegative(nobs, label="nobs")
+        count, num, den = _pl_statistics(
+            suff_stat,
+            self.dim,
+            label="partial Plackett-Luce statistics",
+            full=False,
+        )
         if count <= 0.0:
             return PlackettLuceDistribution(
                 np.zeros(self.dim),

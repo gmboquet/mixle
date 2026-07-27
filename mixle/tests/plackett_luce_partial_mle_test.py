@@ -87,6 +87,25 @@ class PlackettLucePartialMleTest(unittest.TestCase):
         )
         self.assertAlmostEqual(float(np.sum(np.exp(fit.log_w))), 1.0, places=6)
 
+    def test_partial_accumulator_rejects_corrupt_evidence_and_copies_state(self):
+        accumulator = PlackettLucePartialAccumulator(3)
+        with self.assertRaises(ValueError):
+            accumulator.update([0, 0], 1.0, None)
+        with self.assertRaises(ValueError):
+            accumulator.seq_update([np.asarray([0, 1])], np.asarray([-1.0]), None)
+        with self.assertRaises(ValueError):
+            accumulator.seq_update([np.asarray([0, 1])], np.asarray([1.0, 2.0]), None)
+        extreme = PlackettLuceDistribution([-1.0e308, 0.0, 1.0e308], allow_partial=True)
+        accumulator.update([0, 1], 1.0, extreme)
+        receipt = accumulator.value()
+        receipt[1][:] = 0.0
+        receipt[2][:] = 0.0
+        self.assertGreater(accumulator.value()[1].sum(), 0.0)
+        with self.assertRaises(ValueError):
+            PlackettLucePartialEstimator(3).estimate(None, (1.0, np.zeros(2), np.zeros(3)))
+        with self.assertRaises(ValueError):
+            PlackettLucePartialEstimator(3, pseudo_count=-1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
