@@ -20,6 +20,8 @@ Coordinates are ``(n, d)`` arrays (typically ``d = 2``); values are the measured
 
 from __future__ import annotations
 
+import math
+import operator
 from dataclasses import dataclass
 
 import numpy as np
@@ -28,6 +30,30 @@ from scipy.spatial.distance import cdist
 
 # Covariance models implemented by `_shape`; the Gaussian model is reachable under three aliases.
 _MODELS = ("spherical", "exponential", "gaussian", "squared_exponential", "squared-exponential", "rbf", "matern")
+
+
+class VarianceCalibrationError(ValueError):
+    """Base error for a variance-calibration request that has no publishable finite factor."""
+
+
+class VarianceCalibrationUnidentifiable(VarianceCalibrationError):
+    """Raised when the requested coverage holds without any identifiable positive scale."""
+
+
+class VarianceCalibrationOutOfRange(VarianceCalibrationError):
+    """Raised when the required scale is outside the finite floating-point domain."""
+
+
+def _exact_positive_integer(value: int, *, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a non-Boolean positive integer.")
+    try:
+        integer = operator.index(value)
+    except TypeError as exc:
+        raise ValueError(f"{name} must be a non-Boolean positive integer.") from exc
+    if integer <= 0:
+        raise ValueError(f"{name} must be positive, got {integer}.")
+    return int(integer)
 
 
 def _shape(model: str, h: np.ndarray, rng: float, nu: float = 1.5) -> np.ndarray:
@@ -137,19 +163,45 @@ def empirical_variogram(
     Returns:
         ``{'lag', 'semivariance', 'count', 'insufficient_evidence', 'reason'}`` -- ``lag`` /
         ``semivariance`` / ``count`` cover each non-empty distance bin. ``insufficient_evidence`` is
-        ``True`` (with ``reason`` set and the other fields empty) only when no pair falls within
-        ``[0, max_dist]`` at all -- e.g. a single input point, or a ``max_dist`` narrower than every
-        pairwise distance -- so no bin is identifiable; it is ``False`` (with ``reason`` empty)
-        whenever at least one bin is populated.
+        ``True`` (with ``reason`` set and the other fields empty) only when no valid distinct pair
+        falls within ``[0, max_dist]`` -- e.g. a ``max_dist`` narrower than every pairwise distance --
+        so no bin is identifiable; it is ``False`` (with ``reason`` empty) whenever at least one bin
+        is populated. Invalid geometry, fewer than two observations, or no distinct locations raise
+        before distance computation.
     """
-    coords = np.atleast_2d(np.asarray(coords, dtype=float))
-    z = np.asarray(values, dtype=float).ravel()
+    coords = np.asarray(coords, dtype=float)
+    z = np.asarray(values, dtype=float)
+    if coords.ndim != 2 or coords.shape[0] < 2 or coords.shape[1] == 0:
+        raise ValueError(f"coords must have shape (n, d) with n >= 2 and d >= 1, got {coords.shape}.")
+    if not np.all(np.isfinite(coords)):
+        raise ValueError("coords must contain only finite values.")
+    if z.shape != (coords.shape[0],):
+        raise ValueError(f"values must have shape ({coords.shape[0]},) to match coords, got {z.shape}.")
+    if not np.all(np.isfinite(z)):
+        raise ValueError("values must contain only finite values.")
+    n_bins = _exact_positive_integer(n_bins, name="n_bins")
     d = cdist(coords, coords)
     iu = np.triu_indices_from(d, k=1)
     dist = d[iu]
-    sv = 0.5 * (z[iu[0]] - z[iu[1]]) ** 2
+    if not np.all(np.isfinite(dist)):
+        raise ValueError("pairwise coordinate distances must remain finite.")
+    if not np.any(dist > 0.0):
+        raise ValueError("coords must contain at least two distinct locations.")
+    with np.errstate(over="ignore", invalid="ignore"):
+        sv = 0.5 * (z[iu[0]] - z[iu[1]]) ** 2
+    if not np.all(np.isfinite(sv)):
+        raise ValueError("pairwise semivariances must remain finite.")
     if max_dist is None:
-        max_dist = dist.max() / 2.0 if dist.size else 0.0
+        max_dist = float(dist.max()) / 2.0
+    else:
+        if isinstance(max_dist, (bool, np.bool_)):
+            raise ValueError("max_dist must be a finite positive scalar.")
+        max_dist_array = np.asarray(max_dist)
+        if max_dist_array.ndim != 0 or max_dist_array.dtype.kind not in "iuf":
+            raise ValueError("max_dist must be a finite positive scalar.")
+        max_dist = float(max_dist_array)
+    if not np.isfinite(max_dist) or max_dist <= 0.0:
+        raise ValueError(f"max_dist must be finite and positive, got {max_dist!r}.")
     edges = np.linspace(0, max_dist, n_bins + 1)
     idx = np.digitize(dist, edges) - 1
     # np.digitize is half-open on the right, so a pair sitting exactly on the outer edge digitizes to
@@ -399,8 +451,10 @@ def universal_kriging(
 ) -> dict[str, np.ndarray]:
     """Universal kriging: kriging with a polynomial spatial trend (drift) of the given ``degree``.
 
-    ``degree=1`` removes a linear trend, ``degree=2`` a quadratic one. Use when the field has a
-    large-scale drift on top of the stationary residual the variogram describes.
+    ``degree=0`` uses a constant drift, ``degree=1`` removes a linear trend, and ``degree=2`` a
+    quadratic one. No other degree is implemented. Use when the field has a large-scale drift on top
+    of the stationary residual the variogram describes. The selected drift basis must be full-rank
+    with at least one observation per coefficient.
 
     Returns:
         ``{'prediction', 'variance'}``.
@@ -414,7 +468,22 @@ def universal_kriging(
     z = np.asarray(values, dtype=float).ravel()
     query = np.atleast_2d(np.asarray(query, dtype=float))
     _validate_krige_geometry(coords, z, query)
+    if isinstance(degree, (bool, np.bool_)):
+        raise ValueError("degree must be one of the exact integers 0, 1, or 2.")
+    try:
+        degree = operator.index(degree)
+    except TypeError as exc:
+        raise ValueError("degree must be one of the exact integers 0, 1, or 2.") from exc
+    if degree not in (0, 1, 2):
+        raise ValueError(f"degree must be one of the exact integers 0, 1, or 2, got {degree!r}.")
     drift = _poly_basis(coords, degree)
+    n_terms = drift.shape[1]
+    rank = int(np.linalg.matrix_rank(drift))
+    if coords.shape[0] < n_terms or rank < n_terms:
+        raise ValueError(
+            f"degree-{degree} drift is not identifiable: need at least {n_terms} observations and "
+            f"full column rank {n_terms}, got {coords.shape[0]} observations and rank {rank}."
+        )
     drift0 = _poly_basis(query, degree)
     pred, var = _krige_solve(coords, z, variogram, query, drift=drift, drift0=drift0, noise=noise)
     return {"prediction": pred, "variance": var}
@@ -423,9 +492,10 @@ def universal_kriging(
 def calibrate_variance(predicted_var: np.ndarray, residuals: np.ndarray, *, target: float = 0.9) -> float:
     """Scale factor that makes kriging predictive intervals hit a target coverage.
 
-    Finds ``c`` so that standardised residuals ``residual / sqrt(c * predicted_var)`` achieve the
-    ``target`` central coverage under a Gaussian predictive. Returns the variance multiplier ``c``;
-    multiply ``predicted_var`` by it to recalibrate (generic GP/kriging variance recalibration).
+    Finds the smallest observed order-statistic scale ``c`` such that standardised residuals
+    ``residual / sqrt(c * predicted_var)`` achieve at least the ``target`` empirical central coverage
+    under a Gaussian predictive. Returns the variance multiplier ``c``; multiply ``predicted_var`` by
+    it to recalibrate (generic GP/kriging variance recalibration). No fixed search caps are used.
 
     Args:
         predicted_var: ``(m,)`` held-out kriging variances (must be strictly positive).
@@ -439,17 +509,22 @@ def calibrate_variance(predicted_var: np.ndarray, residuals: np.ndarray, *, targ
         ValueError: if ``target`` is not finite and strictly in ``(0, 1)`` -- a target ``<= 0``,
             ``>= 1``, or NaN previously converged to a silent boundary scale factor (``1e-6`` or
             ``1e6``) instead of raising; if ``predicted_var`` and ``residuals`` do not have the same
-            nonempty shape (a valid paired held-out sample is required); or if either contains
-            non-finite values, or ``predicted_var`` is not strictly positive everywhere.
+            nonempty one-dimensional shape (a valid paired held-out sample is required); or if either
+            contains non-finite values, or ``predicted_var`` is not strictly positive everywhere.
+        VarianceCalibrationUnidentifiable: if zero residuals already meet the target for every
+            positive multiplier.
+        VarianceCalibrationOutOfRange: if the required factor is outside finite representable range.
     """
-    from scipy.stats import norm
-
     if not (np.isfinite(target) and 0.0 < target < 1.0):
         raise ValueError(f"target must be finite and strictly in (0, 1), got {target!r}.")
     pv = np.asarray(predicted_var, dtype=float)
     r = np.asarray(residuals, dtype=float)
     if pv.shape != r.shape:
         raise ValueError(f"predicted_var and residuals must have the same shape, got {pv.shape} and {r.shape}.")
+    if pv.ndim != 1:
+        raise ValueError(
+            f"predicted_var and residuals must be one-dimensional paired samples, got shape {pv.shape}."
+        )
     if pv.size == 0:
         raise ValueError("predicted_var and residuals must be nonempty: calibration needs a paired held-out sample.")
     if not np.all(np.isfinite(pv)):
@@ -458,20 +533,31 @@ def calibrate_variance(predicted_var: np.ndarray, residuals: np.ndarray, *, targ
         raise ValueError("residuals must contain only finite values.")
     if not np.all(pv > 0):
         raise ValueError("predicted_var must be strictly positive (a variance of zero or less is not valid).")
-    z = norm.ppf(0.5 + target / 2.0)
+    from scipy.stats import norm
 
-    def coverage(c: float) -> float:
-        sd = np.sqrt(np.clip(c * pv, 1e-300, None))
-        return float(np.mean(np.abs(r) <= z * sd))
-
-    lo, hi = 1e-6, 1e6
-    for _ in range(100):
-        mid = np.sqrt(lo * hi)
-        if coverage(mid) < target:
-            lo = mid
-        else:
-            hi = mid
-    return float(np.sqrt(lo * hi))
+    z = float(norm.ppf(0.5 + target / 2.0))
+    required_log_scale = np.full(r.shape, -np.inf, dtype=float)
+    nonzero = r != 0.0
+    required_log_scale[nonzero] = (
+        2.0 * np.log(np.abs(r[nonzero])) - np.log(pv[nonzero]) - 2.0 * math.log(z)
+    )
+    required = max(1, math.ceil(float(np.nextafter(target * r.size, -np.inf))))
+    selected_log_scale = float(np.partition(required_log_scale, required - 1)[required - 1])
+    if selected_log_scale == -np.inf:
+        raise VarianceCalibrationUnidentifiable(
+            "target coverage is already attained by zero residuals for every positive scale; "
+            "no positive variance multiplier is identifiable."
+        )
+    min_log_scale = math.log(np.finfo(float).tiny)
+    max_log_scale = math.log(np.finfo(float).max)
+    if not np.isfinite(selected_log_scale) or not min_log_scale <= selected_log_scale <= max_log_scale:
+        raise VarianceCalibrationOutOfRange(
+            "the variance multiplier required for target coverage is outside the finite supported range."
+        )
+    scale = math.exp(selected_log_scale)
+    if not np.isfinite(scale) or scale <= 0.0:
+        raise VarianceCalibrationOutOfRange("the required variance multiplier is not a finite positive float.")
+    return scale
 
 
 __all__ = [
@@ -481,4 +567,7 @@ __all__ = [
     "ordinary_kriging",
     "universal_kriging",
     "calibrate_variance",
+    "VarianceCalibrationError",
+    "VarianceCalibrationUnidentifiable",
+    "VarianceCalibrationOutOfRange",
 ]
