@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -50,18 +51,21 @@ from mixle.stats.rankings._contracts import (
 from mixle.utils.optional_deps import numba
 
 
-@numba.njit("float64[:](float64[:, :], int64, float64)", cache=True)
-def _bt_mm(wins: np.ndarray, n_iter: int, tol: float) -> np.ndarray:
-    """Zermelo / MM fixed point for the Bradley-Terry worths from a win-count matrix; returns log-worths."""
+@numba.njit(cache=True)
+def _bt_mm(wins: np.ndarray, n_iter: int, tol: float) -> tuple[np.ndarray, bool, int, float]:
+    """Return log-worths and explicit convergence diagnostics for the Zermelo/MM fixed point."""
     k = wins.shape[0]
     p = np.ones(k) / k
     w_tot = np.zeros(k)
     n_pair = np.zeros((k, k))
+    converged = False
+    iterations = 0
+    final_diff = np.inf
     for i in range(k):
         for j in range(k):
             w_tot[i] += wins[i, j]
             n_pair[i, j] = wins[i, j] + wins[j, i]
-    for _ in range(n_iter):
+    for iteration in range(n_iter):
         newp = np.empty(k)
         for i in range(k):
             denom = 0.0
@@ -72,17 +76,64 @@ def _bt_mm(wins: np.ndarray, n_iter: int, tol: float) -> np.ndarray:
         s = newp.sum()
         if s <= 0.0:
             break
-        diff = 0.0
+        final_diff = 0.0
         for i in range(k):
             newp[i] /= s
-            diff += abs(newp[i] - p[i])
+            final_diff += abs(newp[i] - p[i])
         p = newp
-        if diff < tol:
+        iterations = iteration + 1
+        if final_diff < tol:
+            converged = True
             break
     out = np.empty(k)
     for i in range(k):
         out[i] = math.log(p[i]) if p[i] > 0.0 else -np.inf
-    return out
+    return out, converged, iterations, final_diff
+
+
+def _graph_reaches_all(adjacency: np.ndarray, start: int = 0) -> bool:
+    """Return whether every vertex is reachable from ``start`` in a Boolean graph."""
+    seen = np.zeros(adjacency.shape[0], dtype=bool)
+    pending = [start]
+    seen[start] = True
+    while pending:
+        current = pending.pop()
+        for neighbor in np.flatnonzero(adjacency[current]):
+            if not seen[neighbor]:
+                seen[neighbor] = True
+                pending.append(int(neighbor))
+    return bool(np.all(seen))
+
+
+def _validate_identifiable_counts(wins: np.ndarray, *, regularized: bool) -> None:
+    """Reject disconnected or boundary data unless an explicit prior regularizes the fit."""
+    if np.any(np.diag(wins) != 0.0):
+        raise ValueError("Bradley-Terry win counts must have a zero diagonal.")
+    if regularized:
+        return
+    compared = (wins + wins.T) > 0.0
+    if not _graph_reaches_all(compared):
+        raise ValueError(
+            "Bradley-Terry data have a disconnected comparison graph; relative component worths are unidentified. "
+            "Supply a positive pseudo_count to fit an explicitly regularized model."
+        )
+    directed = wins > 0.0
+    if not _graph_reaches_all(directed) or not _graph_reaches_all(directed.T):
+        raise ValueError(
+            "Bradley-Terry data have no finite interior MLE because the directed win graph is not strongly "
+            "connected. Supply a positive pseudo_count to fit an explicitly regularized boundary case."
+        )
+
+
+@dataclass(frozen=True)
+class BradleyTerryFitDiagnostics:
+    """Convergence and regularization evidence attached to an estimated model."""
+
+    converged: bool
+    iterations: int
+    l1_change: float
+    regularized: bool
+    pseudo_count: float
 
 
 class BradleyTerryDistribution(SequenceEncodableProbabilityDistribution):
@@ -99,7 +150,13 @@ class BradleyTerryDistribution(SequenceEncodableProbabilityDistribution):
             numpy_only_reason="Pairwise-comparison likelihood is numpy-native; the MM fit uses a numba kernel.",
         )
 
-    def __init__(self, log_w: Sequence[float] | np.ndarray, name: str | None = None, keys: str | None = None) -> None:
+    def __init__(
+        self,
+        log_w: Sequence[float] | np.ndarray,
+        name: str | None = None,
+        keys: str | None = None,
+        fit_diagnostics: BradleyTerryFitDiagnostics | None = None,
+    ) -> None:
         lw = np.asarray(log_w, dtype=float)
         if lw.ndim != 1 or lw.size < 2 or not np.all(np.isfinite(lw)):
             raise ValueError("log_w must be a finite length-K vector with K >= 2.")
@@ -113,6 +170,9 @@ class BradleyTerryDistribution(SequenceEncodableProbabilityDistribution):
         self.log_pairs = math.log(self.dim * (self.dim - 1) / 2.0)
         self.name = name
         self.keys = keys
+        if fit_diagnostics is not None and not isinstance(fit_diagnostics, BradleyTerryFitDiagnostics):
+            raise TypeError("fit_diagnostics must be a BradleyTerryFitDiagnostics record.")
+        self.fit_diagnostics = fit_diagnostics
 
     def __str__(self) -> str:
         return "BradleyTerryDistribution(%s, name=%s, keys=%s)" % (
@@ -271,12 +331,33 @@ class BradleyTerryEstimator(ParameterEstimator):
         if count <= 0.0:
             return BradleyTerryDistribution(np.zeros(k), name=self.name, keys=self.keys)
         w = np.array(wins, dtype=float)
-        if self.pseudo_count:  # symmetric smoothing: each ordered pair gets a fractional prior win
-            pc = float(self.pseudo_count)
+        pseudo_count = 0.0 if self.pseudo_count is None else self.pseudo_count
+        regularized = pseudo_count > 0.0
+        _validate_identifiable_counts(w, regularized=regularized)
+        if regularized:  # symmetric smoothing: each ordered pair gets a fractional prior win
+            pc = pseudo_count
             w = w + pc * (1.0 - np.eye(k))
-        log_w = _bt_mm(np.ascontiguousarray(w), self.max_iter, self.tol)
-        log_w[~np.isfinite(log_w)] = log_w[np.isfinite(log_w)].min() - 10.0 if np.any(np.isfinite(log_w)) else 0.0
-        return BradleyTerryDistribution(log_w, name=self.name, keys=self.keys)
+        log_w, converged, iterations, final_diff = _bt_mm(np.ascontiguousarray(w), self.max_iter, self.tol)
+        if not converged:
+            raise RuntimeError(
+                "Bradley-Terry MM fitting did not converge in "
+                f"{iterations} iterations (last L1 change {final_diff:.6g}, tolerance {self.tol:.6g})."
+            )
+        if not np.all(np.isfinite(log_w)):
+            raise RuntimeError("Bradley-Terry MM fitting produced non-finite worths.")
+        diagnostics = BradleyTerryFitDiagnostics(
+            converged=True,
+            iterations=iterations,
+            l1_change=final_diff,
+            regularized=regularized,
+            pseudo_count=pseudo_count,
+        )
+        return BradleyTerryDistribution(
+            log_w,
+            name=self.name,
+            keys=self.keys,
+            fit_diagnostics=diagnostics,
+        )
 
 
 class BradleyTerryDataEncoder(DataSequenceEncoder):
@@ -309,4 +390,5 @@ __all__ = [
     "BradleyTerryAccumulatorFactory",
     "BradleyTerryEstimator",
     "BradleyTerryDataEncoder",
+    "BradleyTerryFitDiagnostics",
 ]

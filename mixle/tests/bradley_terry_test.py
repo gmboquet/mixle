@@ -127,6 +127,41 @@ class BradleyTerryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             estimator.estimate(None, (1.0, np.zeros((3, 3))))
 
+    def test_unidentified_and_boundary_fits_fail_closed_without_prior(self):
+        estimator = BradleyTerryEstimator(3)
+        disconnected = np.zeros((3, 3))
+        disconnected[0, 1] = disconnected[1, 0] = 1.0
+        with self.assertRaisesRegex(ValueError, "disconnected"):
+            estimator.estimate(None, (2.0, disconnected))
+
+        separated = np.zeros((3, 3))
+        separated[0, 1] = separated[0, 2] = separated[1, 2] = 1.0
+        with self.assertRaisesRegex(ValueError, "finite interior MLE"):
+            estimator.estimate(None, (3.0, separated))
+
+    def test_explicit_prior_regularizes_boundary_fit_and_reports_diagnostics(self):
+        separated = np.zeros((3, 3))
+        separated[0, 1] = separated[0, 2] = separated[1, 2] = 1.0
+        fitted = BradleyTerryEstimator(3, pseudo_count=0.5).estimate(None, (3.0, separated))
+        self.assertTrue(fitted.fit_diagnostics.converged)
+        self.assertTrue(fitted.fit_diagnostics.regularized)
+        self.assertEqual(fitted.fit_diagnostics.pseudo_count, 0.5)
+        self.assertGreater(fitted.fit_diagnostics.iterations, 0)
+        self.assertTrue(np.all(np.isfinite(fitted.log_w)))
+
+    def test_invalid_diagonal_counts_and_nonconvergence_fail_closed(self):
+        diagonal = np.zeros((3, 3))
+        diagonal[0, 0] = 1.0
+        with self.assertRaisesRegex(ValueError, "zero diagonal"):
+            BradleyTerryEstimator(3, pseudo_count=0.5).estimate(None, (1.0, diagonal))
+
+        cyclic = np.zeros((3, 3))
+        cyclic[0, 1], cyclic[1, 0] = 10.0, 1.0
+        cyclic[1, 2], cyclic[2, 1] = 10.0, 1.0
+        cyclic[2, 0], cyclic[0, 2] = 2.0, 1.0
+        with self.assertRaisesRegex(RuntimeError, "did not converge"):
+            BradleyTerryEstimator(3, max_iter=1, tol=1e-15).estimate(None, (25.0, cyclic))
+
 
 if __name__ == "__main__":
     unittest.main()
