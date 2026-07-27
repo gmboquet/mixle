@@ -244,6 +244,60 @@ def test_well_formed_cohort_still_fits_normally_after_validation():
     assert np.isfinite(result.attributable_fraction)
 
 
+@pytest.mark.parametrize(
+    "covariates,time,event,kwargs,match",
+    [
+        (
+            np.empty((0, 1)),
+            np.array([]),
+            np.array([]),
+            {},
+            "at least one subject",
+        ),
+        (
+            np.array([[0.0], [1.0], [0.0], [1.0]]),
+            np.arange(1.0, 5.0),
+            np.zeros(4),
+            {},
+            "cause-one event",
+        ),
+        (
+            np.ones((5, 1)),
+            np.arange(1.0, 6.0),
+            np.array([1.0, 1.0, 0.0, 0.0, 0.0]),
+            {},
+            "full-rank variation",
+        ),
+        (
+            np.array([[0.0], [1.0], [0.0], [1.0]]),
+            np.array([0.1, 0.2, 0.3, 0.4]),
+            np.array([1.0, 1.0, 0.0, 0.0]),
+            {"latency": 1.0},
+            "post-latency risk set",
+        ),
+        (
+            np.array([[0.0], [0.0], [1.0], [1.0]]),
+            np.array([1.0, 2.0, 3.0, 4.0]),
+            np.array([0.0, 0.0, 1.0, 1.0]),
+            {},
+            "risk sets contain no",
+        ),
+    ],
+)
+def test_unidentified_cohorts_are_rejected_instead_of_returning_exact_nulls(
+    covariates, time, event, kwargs, match
+):
+    with pytest.raises(ValueError, match=match):
+        cohort_attribution(covariates, time, event, n_boot=40, rng=0, **kwargs)
+
+
+@pytest.mark.parametrize("n_boot", [True, 0, -1, 1.5, 40.0])
+def test_bootstrap_draw_count_is_a_positive_exact_integer(n_boot):
+    covariates, time, event = _simulate_cohort(seed=42, n=100)
+    with pytest.raises(ValueError, match="n_boot"):
+        cohort_attribution(covariates, time, event, n_boot=n_boot, rng=42)
+
+
 # --------------------------------------------------------------------------- MXR-080-0089: bootstrap evidence
 # A failed draw stayed NaN in the published `_AFDistribution.samples`, one converged draw was enough to
 # report a full interval, and the recorded "seed" could not actually reproduce the bootstrap.
