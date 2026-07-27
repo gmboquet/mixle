@@ -142,6 +142,8 @@ def critical_habitat_exclusion(
         A ``(K,)`` boolean array, ``True`` where the block is excluded (no-mine).
     """
     suitability_cut = _finite_scalar(suitability_cut, name="suitability_cut")
+    if suitability_cut < 0.0:
+        raise ValueError(f"suitability_cut must be nonnegative, got {suitability_cut}.")
     buffer_cells = _nonnegative_integer(buffer_cells, name="buffer_cells")
     habitat_mean = np.asarray(habitat.mean)
     if habitat_mean.ndim != 1 or habitat_mean.size == 0:

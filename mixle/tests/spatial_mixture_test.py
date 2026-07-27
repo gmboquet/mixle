@@ -173,6 +173,20 @@ class SpatialMixtureInitializationTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 SpatialMixture(bad_shape, 2, GaussianEstimator())
 
+    def test_rejects_fractional_or_boolean_topology_and_component_counts(self):
+        for bad_shape in ((1.9, 2), (True, 2), (2.0, 2)):
+            with self.subTest(shape=bad_shape):
+                with self.assertRaises(ValueError):
+                    SpatialMixture(bad_shape, 2, GaussianEstimator())
+        for bad_components in (1.9, True, 2.0):
+            with self.subTest(n_components=bad_components):
+                with self.assertRaises(ValueError):
+                    SpatialMixture((2, 2), bad_components, GaussianEstimator())
+
+    def test_rejects_grid_before_product_overflow_or_resource_allocation(self):
+        with self.assertRaisesRegex(ValueError, "supported"):
+            SpatialMixture((1_000_000, 2), 2, GaussianEstimator())
+
     def test_rejects_invalid_beta(self):
         for bad_beta in (-1.0, -0.001, float("nan"), float("inf"), float("-inf")):
             with self.assertRaises(ValueError):
@@ -187,6 +201,38 @@ class SpatialMixtureInitializationTest(unittest.TestCase):
         for bad_mf_iter in (0, -1):
             with self.assertRaises(ValueError):
                 sm.fit(obs, mf_iter=bad_mf_iter)
+
+    def test_rejects_fractional_or_boolean_iteration_controls(self):
+        sm = SpatialMixture((2, 2), 2, GaussianEstimator())
+        obs = [0.0, 1.0, 2.0, 3.0]
+        for bad in (1.5, True, 2.0):
+            with self.subTest(max_iter=bad):
+                with self.assertRaisesRegex(ValueError, "max_iter"):
+                    sm.fit(obs, max_iter=bad)
+            with self.subTest(mf_iter=bad):
+                with self.assertRaisesRegex(ValueError, "mf_iter"):
+                    sm.fit(obs, mf_iter=bad)
+
+    def test_fitted_responsibilities_are_valid_and_cannot_mutate_model_state(self):
+        sm = SpatialMixture((2, 2), 2, GaussianEstimator(), beta=0.5)
+        sm.fit([0.0, 0.1, 5.0, 5.1], seed=0, max_iter=2)
+        responsibilities = sm.responsibilities()
+        self.assertFalse(responsibilities.flags.writeable)
+        with self.assertRaises(ValueError):
+            responsibilities[0, 0] = np.nan
+        np.testing.assert_allclose(sm.responsibilities().sum(axis=1), 1.0)
+        self.assertTrue(np.isfinite(sm.entropy()).all())
+
+    def test_published_summaries_revalidate_internal_fit_state(self):
+        sm = SpatialMixture((2, 2), 2, GaussianEstimator(), beta=0.5)
+        sm.fit([0.0, 0.1, 5.0, 5.1], seed=0, max_iter=2)
+        sm._q = np.full((4, 2), np.nan)
+        with self.assertRaisesRegex(ValueError, "responsibilities"):
+            sm.responsibilities()
+        with self.assertRaisesRegex(ValueError, "responsibilities"):
+            sm.labels()
+        with self.assertRaisesRegex(ValueError, "responsibilities"):
+            sm.entropy()
 
     def test_initial_partition_is_repaired_before_the_first_reestimate(self):
         # seed=1 at this shape/k is known to draw an initial random partition with an empty
