@@ -14,11 +14,22 @@ return ``None`` from :func:`log_density_sup`, and scoring falls back to exact (n
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
+from numbers import Integral
 from typing import Any
 
 import numpy as np
+
+
+def _positive_exact_integer(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be a positive exact integer")
+    result = int(value)
+    if result <= 0:
+        raise ValueError(f"{name} must be positive")
+    return result
 
 
 def log_density_sup(dist: Any) -> float | None:
@@ -88,9 +99,16 @@ def sparse_mixture_score(mixture: Any, x: Any, max_components: int) -> SparseSco
     a :class:`SparseScore` bracket. If any positive-weight component's density is unbounded
     (``log_density_sup`` is ``None``), falls back to exact full scoring (``lower == upper``, no speedup).
     """
+    max_components = _positive_exact_integer(max_components, "max_components")
     comps = list(mixture.components)
     log_w = np.asarray(mixture.log_w, dtype=np.float64)
+    if log_w.shape != (len(comps),):
+        raise ValueError("mixture log weights must have one entry per component")
+    if np.any(np.isnan(log_w)) or np.any(log_w == np.inf):
+        raise ValueError("mixture log weights must be finite or negative infinity")
     active = [k for k in range(len(comps)) if log_w[k] > -np.inf]
+    if not active:
+        raise ValueError("mixture must have at least one positive-weight component")
 
     sups = {k: log_density_sup(comps[k]) for k in active}
     if any(sups[k] is None for k in active):  # cannot certify -> exact
@@ -108,21 +126,44 @@ def sparse_mixture_score(mixture: Any, x: Any, max_components: int) -> SparseSco
     return SparseScore(lower, upper, not drop, len(keep))
 
 
+def _canonical_component_key(component: Any) -> tuple[str, str, str] | None:
+    """Return exact serialized family-and-state identity, or ``None`` when unavailable."""
+    from mixle.utils.serialization import SerializationError, to_serializable
+
+    try:
+        payload = to_serializable(component)
+        serialized = json.dumps(
+            payload,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (SerializationError, TypeError, ValueError):
+        return None
+    component_type = type(component)
+    return component_type.__module__, component_type.__qualname__, serialized
+
+
 def collapse_identical(mixture: Any) -> Any:
     """Merge components that are identical (same family + parameters) by summing their weights -- EXACT.
 
-    A fitted huge mixture often carries duplicate components; pooling exact duplicates leaves ``log p(x)``
-    unchanged while shrinking K. Identity is keyed on the component's string form (which encodes its
-    parameters). 'Blend a mixture of closed forms' with zero approximation.
+    A fitted huge mixture often carries duplicate components; pooling exact duplicates leaves
+    ``log p(x)`` unchanged while shrinking K. Identity requires the same fully qualified family and
+    canonical serialized state. A component that cannot produce that representation is conservatively
+    left separate. 'Blend a mixture of closed forms' with zero approximation.
     """
     from mixle.stats.latent.mixture import MixtureDistribution
 
     comps = list(mixture.components)
     w = np.asarray(mixture.w, dtype=np.float64)
-    groups: dict[str, list[int]] = {}
-    order: list[str] = []
+    if w.shape != (len(comps),) or np.any(~np.isfinite(w)) or np.any(w < 0.0):
+        raise ValueError("mixture weights must be finite non-negative values matching the components")
+    groups: dict[tuple[str, str, str] | tuple[str, int], list[int]] = {}
+    order: list[tuple[str, str, str] | tuple[str, int]] = []
     for k, c in enumerate(comps):
-        key = str(c)
+        canonical = _canonical_component_key(c)
+        key: tuple[str, str, str] | tuple[str, int] = canonical if canonical is not None else ("unique", k)
         if key not in groups:
             groups[key] = []
             order.append(key)
@@ -155,10 +196,18 @@ def collapse_gaussian_mixture(mixture: Any, max_components: int) -> Any:
     """
     from mixle.stats.latent.mixture import MixtureDistribution
 
+    max_components = _positive_exact_integer(max_components, "max_components")
     comps = list(mixture.components)
-    w = [float(x) for x in mixture.w]
     if any(type(c).__name__ != "GaussianDistribution" for c in comps):
         raise ValueError("collapse_gaussian_mixture requires all-Gaussian components")
+    w_array = np.asarray(mixture.w, dtype=np.float64)
+    if w_array.shape != (len(comps),) or np.any(~np.isfinite(w_array)) or np.any(w_array < 0.0):
+        raise ValueError("mixture weights must be finite non-negative values matching the components")
+    positive = w_array > 0.0
+    comps = [component for component, keep in zip(comps, positive) if keep]
+    w = [float(weight) for weight in w_array[positive]]
+    if not comps:
+        raise ValueError("mixture must have at least one positive-weight component")
     while len(comps) > max_components:
         best = None
         for i in range(len(comps)):
