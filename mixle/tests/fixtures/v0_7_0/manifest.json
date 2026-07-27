@@ -1,9 +1,23 @@
 {
+  "artifact": "mixle.serialization_compatibility_fixtures/v1",
   "generated_by": "mixle 0.7.0",
+  "coverage_policy": {
+    "scope": "every schema classified stable in manifests/serialization_schema_manifest.json",
+    "required_families": [
+      "latent-composition",
+      "univariate-continuous",
+      "univariate-discrete"
+    ],
+    "requires_nested_composition": true
+  },
   "cases": [
     {
       "name": "gaussian",
       "file": "gaussian.json",
+      "sha256": "01c794b7af3ab0504a47ba58e88f4481d82056b82a10de544c1468ff33ec808d",
+      "schema_id": "mixle.stats.univariate.continuous.gaussian.GaussianDistribution",
+      "family": "univariate-continuous",
+      "nested_schema_ids": [],
       "type": "GaussianDistribution",
       "probe": 0.5,
       "log_density": -1.3280121234846454
@@ -11,6 +25,10 @@
     {
       "name": "poisson",
       "file": "poisson.json",
+      "sha256": "58c50fb3bed3b1e3d9aa149ec2e9fcfebdb0d263f3f8955b867846afab131f1c",
+      "schema_id": "mixle.stats.univariate.discrete.poisson.PoissonDistribution",
+      "family": "univariate-discrete",
+      "nested_schema_ids": [],
       "type": "PoissonDistribution",
       "probe": 3,
       "log_density": -1.7123179275482192
@@ -18,6 +36,10 @@
     {
       "name": "exponential",
       "file": "exponential.json",
+      "sha256": "2f0aa1452ccf9f24eae7de151313fe2f400df7739afd458b29cecebbeb1bfb36",
+      "schema_id": "mixle.stats.univariate.continuous.exponential.ExponentialDistribution",
+      "family": "univariate-continuous",
+      "nested_schema_ids": [],
       "type": "ExponentialDistribution",
       "probe": 1.0,
       "log_density": -1.0721317747748311
@@ -25,6 +47,10 @@
     {
       "name": "categorical",
       "file": "categorical.json",
+      "sha256": "1302030f1c93393e4cd37b6d1c8de86f06718bf78412950db98427ca539219ec",
+      "schema_id": "mixle.stats.univariate.discrete.categorical.CategoricalDistribution",
+      "family": "univariate-discrete",
+      "nested_schema_ids": [],
       "type": "CategoricalDistribution",
       "probe": "a",
       "log_density": -0.6931471805599453
@@ -32,6 +58,12 @@
     {
       "name": "mixture",
       "file": "mixture.json",
+      "sha256": "daa7896550eb75685a558fe592db90c22d6f58289c7900b597a7aa5a87966ef3",
+      "schema_id": "mixle.stats.latent.mixture.MixtureDistribution",
+      "family": "latent-composition",
+      "nested_schema_ids": [
+        "mixle.stats.univariate.continuous.gaussian.GaussianDistribution"
+      ],
       "type": "MixtureDistribution",
       "probe": 0.5,
       "log_density": -1.5208013695930873

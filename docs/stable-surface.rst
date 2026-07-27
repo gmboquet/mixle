@@ -34,8 +34,10 @@ behavior regresses. Each row below names that evidence.
    * - Base NumPy execution (no optional backend installed)
      - the blocking clean-wheel install + import-sweep job and the base-install optional-import guard
    * - Serialization paths explicitly covered by compatibility tests
-     - the cross-version load fixtures (0.7.0 artifacts), the serialization schema manifest + drift gate,
-       and atomic-write / safe-JSON deployment tests
+     - the five explicitly stable persistence schemas (Gaussian, Poisson, Exponential, Categorical,
+       and nested Mixture), their digest-bound 0.7.0 load fixtures and ``0->1`` migrations, the
+       dependency-profile schema drift gate, and atomic-write / safe-JSON deployment tests. Other
+       registered types are versioned but provisionally persistent.
 
 Not stable
 ----------

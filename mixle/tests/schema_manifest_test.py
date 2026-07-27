@@ -1,59 +1,60 @@
-"""The serialization schema manifest records every serializable type (worklist M11.1).
+"""Serialization schema profiles are exact, dependency-attested, and per-type versioned."""
 
-``manifests/serialization_schema_manifest.json`` is the versioned catalog of ``__pysp_type__`` ids -- the serialization
-schema surface a saved artifact's loadability depends on. This gate makes a schema change visible: a new
-serializable type that is not recorded fails here, prompting a regenerate (and, per M11.2, a cross-version
-fixture). The manifest is generated with the optional backends installed, so it is the *full* surface; this
-test tolerates a base environment (torch/jax/numba absent) by requiring the live set to be a subset of the
-recorded manifest, and only demands exact equality when torch is present.
-"""
+from __future__ import annotations
 
+import importlib.util
 import json
 import unittest
 from pathlib import Path
 
-from mixle.utils.serialization import TAG, serializable_class_ids
+from mixle.utils.serialization import OBJECT_SCHEMA_VERSION, TAG, serializable_schema_records
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-MANIFEST = REPO_ROOT / "manifests" / "serialization_schema_manifest.json"
-
-
-def _has_torch():
-    import importlib.util
-
-    return importlib.util.find_spec("torch") is not None
+ROOT = Path(__file__).resolve().parents[2]
+MANIFEST = ROOT / "manifests" / "serialization_schema_manifest.json"
 
 
 class SchemaManifestTest(unittest.TestCase):
-    def setUp(self):
-        self.manifest = json.loads(MANIFEST.read_text())
-        self.recorded = set(self.manifest["registered_types"])
-        self.live = set(serializable_class_ids())
+    @classmethod
+    def setUpClass(cls):
+        cls.manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
 
-    def test_tag_and_version_recorded(self):
+    def test_manifest_envelope_is_versioned(self):
+        self.assertEqual(self.manifest["artifact"], "mixle.serialization_schema_manifest/v2")
         self.assertEqual(self.manifest["tag"], TAG)
-        self.assertTrue(self.manifest["schema_manifest_version"])
-        self.assertGreater(len(self.recorded), 100)  # the schema surface is substantial, not empty
+        self.assertEqual(self.manifest["object_envelope_version"], OBJECT_SCHEMA_VERSION)
+        self.assertEqual(set(self.manifest["profiles"]), {"base", "full"})
 
-    def test_no_unrecorded_serializable_type(self):
-        # Every type registered in THIS environment must be in the manifest. Catches a new serializable
-        # class added without regenerating -- an unrecorded schema-surface change. Holds in any environment
-        # (a base env registers a subset of the full manifest).
-        unrecorded = sorted(self.live - self.recorded)
-        self.assertEqual(
-            unrecorded,
-            [],
-            "serializable types are not in manifests/serialization_schema_manifest.json (run "
-            "python scripts/gen_schema_manifest.py):\n" + "\n".join(unrecorded),
-        )
+    def test_base_profile_is_exact_in_every_environment(self):
+        expected = serializable_schema_records("base")
+        recorded = self.manifest["profiles"]["base"]
+        self.assertEqual(recorded["required_imports"], ["numpy", "scipy"])
+        self.assertEqual(recorded["registered_types"], sorted(expected))
+        self.assertEqual(recorded["schemas"], expected)
 
-    def test_exact_when_full_surface_present(self):
-        # With torch installed the live set is the full surface, so the manifest must match exactly --
-        # this direction catches a stale entry (a removed/renamed type still recorded).
-        if not _has_torch():
-            self.skipTest("base environment: manifest is a superset of the live subset (see subset test)")
-        stale = sorted(self.recorded - self.live)
-        self.assertEqual(stale, [], "manifest records types no longer registered; regenerate:\n" + "\n".join(stale))
+    def test_full_profile_is_exact_when_its_inventory_is_present(self):
+        recorded = self.manifest["profiles"]["full"]
+        required = recorded["required_imports"]
+        missing = [name for name in required if importlib.util.find_spec(name) is None]
+        if missing:
+            self.skipTest(f"full serialization profile dependencies absent: {missing}")
+        expected = serializable_schema_records("full")
+        self.assertEqual(recorded["registered_types"], sorted(expected))
+        self.assertEqual(recorded["schemas"], expected)
+
+    def test_every_type_has_an_explicit_schema_classification(self):
+        for profile_name, profile in self.manifest["profiles"].items():
+            with self.subTest(profile=profile_name):
+                self.assertEqual(set(profile["registered_types"]), set(profile["schemas"]))
+                for type_id, schema in profile["schemas"].items():
+                    self.assertEqual(schema["state_version"], OBJECT_SCHEMA_VERSION, type_id)
+                    self.assertIn(schema["stability"], {"stable", "provisional"}, type_id)
+                    self.assertIn(schema["codec"], {"class-owned", "constructor-validated"}, type_id)
+                    if schema["stability"] == "stable":
+                        self.assertTrue(schema["state_fields"], type_id)
+                        self.assertEqual(schema["migrations"], ["0->1"], type_id)
+                    else:
+                        self.assertIsNone(schema["state_fields"], type_id)
+                        self.assertEqual(schema["migrations"], [], type_id)
 
 
 if __name__ == "__main__":

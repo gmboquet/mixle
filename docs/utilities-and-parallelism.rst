@@ -38,10 +38,21 @@ The probability-distribution base class delegates ``to_dict``, ``from_dict``,
 metadata that should survive process boundaries. Use pickle only when you need
 full Python object fidelity and trust the environment.
 
-Serialized payloads are part of the public contract once they are written to
-disk. Keep stable type identifiers, avoid local callables in release artifacts,
-and test a load round trip from a clean process before claiming artifact
-durability.
+Every newly encoded object carries a per-type state-schema version. The
+dependency-attested base and full profiles in
+``manifests/serialization_schema_manifest.json`` classify each registered type
+as either ``stable`` or ``provisional``. Stable persistence currently covers
+the five types backed by immutable 0.7 fixtures (Gaussian, Poisson,
+Exponential, Categorical, and Mixture, including nested Gaussian components);
+their state fields and ``0->1`` migrations are explicit. Other registered
+types support versioned same-release round trips but make no cross-version
+persistence promise yet. Loading an unversioned provisional artifact fails
+with migration guidance rather than guessing that an arbitrary ``__dict__``
+layout is compatible.
+
+Keep stable type identifiers, avoid local callables in release artifacts, and
+add a prior-version fixture plus schema migration before promoting another
+type's persistence contract to stable.
 
 Optional Dependencies
 ---------------------
