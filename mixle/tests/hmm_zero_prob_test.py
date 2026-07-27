@@ -1,11 +1,4 @@
-"""Regression: a zero-probability observation must not NaN-poison HMM Baum-Welch / EM.
-
-An observation with zero emission probability under every state (all-``-inf`` log-emissions) made the
-max-subtracted emission row NaN, which the linear-space Baum-Welch kernels turned into NaN ``pi``/``xi``/
-``alpha`` -> NaN EM sufficient statistics with no error raised. The fix zeroes the impossible row at the
-emission level and guards the forward (``alpha_sum``) and backward (``beta_sum``) normalizations in the
-numba kernels. The numba and numpy paths must stay bit-identical on ordinary data.
-"""
+"""Impossible HMM evidence is explicit and never becomes synthetic Baum-Welch mass."""
 
 import unittest
 import warnings
@@ -14,6 +7,7 @@ import numpy as np
 
 import mixle.stats as stats
 from mixle.inference import optimize
+from mixle.utils.vector import ImpossibleEvidenceError
 
 
 def _hmm(use_numba, zero_symbol):
@@ -54,14 +48,17 @@ _NORMAL = [["a", "b", "a", "b", "a"], ["b", "a", "b", "a", "b"], ["a", "a", "b",
 
 
 class HmmZeroProbTest(unittest.TestCase):
-    def test_impossible_observation_does_not_nan_poison_em(self):
+    def test_impossible_observation_rejects_the_estep_transactionally(self):
         for use_numba in (True, False):
-            with warnings.catch_warnings():
-                warnings.simplefilter("error")  # a NaN/overflow warning fails the test
-                res = optimize(
-                    _IMPOSSIBLE, _hmm(use_numba, True).estimator(), max_its=5, out=None, rng=np.random.RandomState(1)
-                )
-            self.assertEqual(_has_nan(res), [], f"use_numba={use_numba}")
+            hmm = _hmm(use_numba, True)
+            accumulator = hmm.estimator().accumulator_factory().make()
+            encoded = hmm.dist_to_encoder().seq_encode(_IMPOSSIBLE)
+            with warnings.catch_warnings(), self.assertRaisesRegex(ImpossibleEvidenceError, "zero-probability"):
+                warnings.simplefilter("error")
+                accumulator.seq_update(encoded, np.ones(len(_IMPOSSIBLE)), hmm)
+            np.testing.assert_array_equal(accumulator.init_counts, [0.0, 0.0])
+            np.testing.assert_array_equal(accumulator.state_counts, [0.0, 0.0])
+            np.testing.assert_array_equal(accumulator.trans_counts, np.zeros((2, 2)))
 
     def test_impossible_sequence_log_density_is_neg_inf_not_nan(self):
         for use_numba in (True, False):
@@ -73,8 +70,24 @@ class HmmZeroProbTest(unittest.TestCase):
 
     def test_numba_numpy_bit_identical_on_normal_data(self):
         # the guards only fire on impossible rows, so ordinary fits must be unchanged across backends
-        rn = optimize(_NORMAL, _hmm(True, False).estimator(), max_its=8, out=None, rng=np.random.RandomState(2))
-        rp = optimize(_NORMAL, _hmm(False, False).estimator(), max_its=8, out=None, rng=np.random.RandomState(2))
+        init_n = _hmm(True, False)
+        init_p = _hmm(False, False)
+        rn = optimize(
+            _NORMAL,
+            init_n.estimator(),
+            max_its=8,
+            out=None,
+            rng=np.random.RandomState(2),
+            prev_estimate=init_n,
+        )
+        rp = optimize(
+            _NORMAL,
+            init_p.estimator(),
+            max_its=8,
+            out=None,
+            rng=np.random.RandomState(2),
+            prev_estimate=init_p,
+        )
 
         def flat(m):
             return np.concatenate(
@@ -85,7 +98,7 @@ class HmmZeroProbTest(unittest.TestCase):
                 ]
             )
 
-        self.assertTrue(np.array_equal(flat(rn), flat(rp), equal_nan=True))
+        np.testing.assert_allclose(flat(rn), flat(rp), rtol=0.0, atol=1.0e-15)
 
 
 if __name__ == "__main__":

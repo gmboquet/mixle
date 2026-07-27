@@ -18,6 +18,25 @@ class ImpossibleEvidenceError(ValueError):
     """Raised when log evidence has zero mass and no posterior exists."""
 
 
+def require_possible_log_evidence(log_evidence: object, *, context: str) -> np.ndarray:
+    """Return validated log evidence or raise before posterior/statistic construction.
+
+    Batch latent-variable updates must not silently discard a zero-probability
+    record or replace its undefined posterior with synthetic responsibilities.
+    This helper gives those implementations one transactional failure contract.
+    """
+    values = np.atleast_1d(np.asarray(log_evidence, dtype=np.float64))
+    invalid = np.flatnonzero(np.isnan(values) | np.isposinf(values))
+    if invalid.size:
+        raise ValueError("%s produced invalid log evidence at batch rows %s" % (context, invalid.tolist()))
+    impossible = np.flatnonzero(np.isneginf(values))
+    if impossible.size:
+        raise ImpossibleEvidenceError(
+            "%s encountered zero-probability evidence at batch rows %s" % (context, impossible.tolist())
+        )
+    return values
+
+
 def validate_initialization_probability(p: object) -> float:
     """Return a finite Bernoulli initialization probability in ``[0, 1]``."""
     if isinstance(p, (bool, np.bool_)):

@@ -523,6 +523,11 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
 
         """
 
+        vec.require_possible_log_evidence(
+            self.seq_log_density(x),
+            context="TreeHiddenMarkovModelDistribution.seq_posterior",
+        )
+
         if x[0] is not None:
             tz, (max_level, xln, xlnl, tlnz), (xbi, xp, xc, xl, txz, tp, tpz), enc_x, _ = x[0]
 
@@ -713,11 +718,7 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
         from mixle.stats.compute.pdist import DensitySemantics, join_density_semantics
 
         children = list(self.topics) + ([] if self.len_dist is None else [self.len_dist])
-        sems = [
-            c.density_semantics()
-            for c in children
-            if hasattr(c, "density_semantics") and not supports(c, Neutral)
-        ]
+        sems = [c.density_semantics() for c in children if hasattr(c, "density_semantics") and not supports(c, Neutral)]
         return join_density_semantics(sems) if sems else DensitySemantics.EXACT
 
     def sampler(self, seed: int | None = None) -> "TreeHiddenMarkovSampler":
@@ -1130,6 +1131,11 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             estimate (TreeHiddenMarkovModelDistribution): Previous estimate used for the E-step.
 
         """
+        vec.require_possible_log_evidence(
+            estimate.seq_log_density(x),
+            context="TreeHiddenMarkovAccumulator.seq_update",
+        )
+
         if x[0] is not None:
             tz, (max_level, xln, xlnl, tlnz), (xbi, xp, xc, xl, txz, tp, tpz), enc_x, len_enc = x[0]
 
@@ -1384,6 +1390,11 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         Mirrors the numpy branch of ``seq_update``.
         """
         from mixle.stats.compute.backend import backend_seq_log_density
+
+        vec.require_possible_log_evidence(
+            estimate.seq_log_density(x),
+            context="TreeHiddenMarkovAccumulator.seq_update_engine",
+        )
 
         if x[1] is None:
             return

@@ -33,6 +33,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.utils.vector import require_possible_log_evidence
 
 _LOG_ZERO = -np.inf
 
@@ -195,11 +196,7 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
         from mixle.stats.compute.pdist import DensitySemantics, join_density_semantics
 
         children = list(self.topics) + ([] if self.len_dist is None else [self.len_dist])
-        sems = [
-            c.density_semantics()
-            for c in children
-            if hasattr(c, "density_semantics") and not supports(c, Neutral)
-        ]
+        sems = [c.density_semantics() for c in children if hasattr(c, "density_semantics") and not supports(c, Neutral)]
         return join_density_semantics(sems) if sems else DensitySemantics.EXACT
 
     def sampler(self, seed=None):
@@ -357,6 +354,10 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
     def update(self, x, weight, estimate):
         """Update Baum-Welch sufficient statistics from one weighted observation."""
         emissions, prior = x
+        require_possible_log_evidence(
+            estimate.log_density(x),
+            context="SemiSupervisedHiddenMarkovEstimatorAccumulator.update",
+        )
         self._accumulate(estimate, emissions, prior, weight)
 
     def initialize(self, x, weight, rng):
@@ -380,6 +381,10 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
 
     def seq_update(self, x, weights, estimate):
         """Update sufficient statistics from encoded observations and weights."""
+        require_possible_log_evidence(
+            estimate.seq_log_density(x),
+            context="SemiSupervisedHiddenMarkovEstimatorAccumulator.seq_update",
+        )
         emissions_list, priors, _, _ = x
         for i, emissions in enumerate(emissions_list):
             self._accumulate(estimate, emissions, priors[i], float(weights[i]))
@@ -543,6 +548,23 @@ class SemiSupervisedHiddenMarkovDataEncoder(DataSequenceEncoder):
         # emissions are scored per-sequence in the forward; keep the raw lists (the emission encoder is used
         # by the per-state emission distributions through their own log_density)
         return (emissions_list, priors, len_enc, lengths)
+
+    def row_count(self, x) -> int:
+        """Return and validate the number of encoded semi-supervised sequences."""
+        if not isinstance(x, tuple) or len(x) != 4:
+            raise ValueError("semi-supervised HMM encoding must be a four-slot payload")
+        emissions_list, priors, len_enc, lengths = x
+        lengths = np.asarray(lengths)
+        if lengths.ndim != 1:
+            raise ValueError("semi-supervised HMM lengths must be one-dimensional")
+        count = len(emissions_list)
+        if len(priors) != count or len(lengths) != count:
+            raise ValueError("semi-supervised HMM encoded rows, priors, and lengths must align")
+        if any(len(emissions) != int(lengths[index]) for index, emissions in enumerate(emissions_list)):
+            raise ValueError("semi-supervised HMM encoded lengths do not match emission rows")
+        if len_enc is not None and self.len_encoder.row_count(len_enc) != count:
+            raise ValueError("semi-supervised HMM encoded length distribution rows do not align")
+        return count
 
 
 # Standard-spelling aliases for the role classes.

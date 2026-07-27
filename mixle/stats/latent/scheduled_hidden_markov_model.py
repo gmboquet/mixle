@@ -41,6 +41,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.utils.vector import require_possible_log_evidence
 
 _NEG_INF = -np.inf
 
@@ -387,6 +388,10 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: list[Any], weight: float, estimate: ScheduledHiddenMarkovModelDistribution) -> None:
         """Accumulate sufficient statistics from one weighted sequence."""
+        require_possible_log_evidence(
+            estimate.log_density(x),
+            context="ScheduledHMMAccumulator.update",
+        )
         if len(x) == 0:
             self._accumulate(
                 x, weight, np.zeros((0, self.n_states)), np.zeros((0, self.n_states, self.n_states)), estimate
@@ -398,8 +403,23 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: Any, weights: np.ndarray, estimate: ScheduledHiddenMarkovModelDistribution) -> None:
         """Accumulate weighted sufficient statistics from a batch."""
+        require_possible_log_evidence(
+            estimate.seq_log_density(x),
+            context="ScheduledHMMAccumulator.seq_update",
+        )
         for seq, w in zip(x, weights):
-            self.update(seq, float(w), estimate)
+            if len(seq) == 0:
+                self._accumulate(
+                    seq,
+                    float(w),
+                    np.zeros((0, self.n_states)),
+                    np.zeros((0, self.n_states, self.n_states)),
+                    estimate,
+                )
+                continue
+            log_b = _log_b(estimate.emissions, estimate.schedule, seq)
+            _, gamma, xi = _forward_backward(estimate._log_inits, estimate._log_trans, log_b, estimate.schedule)
+            self._accumulate(seq, float(w), gamma, xi, estimate)
 
     def initialize(self, x: list[Any], weight: float, rng: RandomState) -> None:
         """Initialize sufficient statistics with random soft state responsibilities."""
