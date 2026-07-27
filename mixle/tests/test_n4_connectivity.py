@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from scipy import sparse
+from scipy.sparse.linalg import spsolve
 
 from mixle.analysis.biodiversity import (
     _conductance_edges,
@@ -208,9 +210,9 @@ def test_effective_conductance_current_conservation_on_the_two_patch_grid():
     if free:
         free_idx = np.array(free)
         boundary_idx = np.array(sorted(boundary))
-        l_ff = laplacian[np.ix_(free_idx, free_idx)]
-        l_fd = laplacian[np.ix_(free_idx, boundary_idx)]
-        v[free_idx] = np.linalg.solve(l_ff, -(l_fd @ v[boundary_idx]))
+        l_ff = laplacian[free_idx][:, free_idx]
+        l_fd = laplacian[free_idx][:, boundary_idx]
+        v[free_idx] = spsolve(l_ff, -(l_fd @ v[boundary_idx]))
 
     current_out_source = float(np.sum(laplacian[sources, :] @ v))
     current_into_sink = float(-np.sum(laplacian[sinks, :] @ v))
@@ -286,6 +288,60 @@ def test_effective_conductance_dedupes_repeated_terminal_indices_without_error()
     # double-count that node's current.
     resistance = np.ones((2, 2))
     assert effective_conductance(resistance, sources=[0, 0], sinks=[3]) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("bad_terminal", [True, 0.9, np.float64(1.0)])
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda bad: effective_conductance(np.ones(3), [bad], [2]),
+        lambda bad: max_flow_connectivity(np.ones(3), [bad], [2]),
+        lambda bad: least_cost_corridor(np.ones(3), bad, 2),
+        lambda bad: fragmentation_impact(np.ones(3), np.zeros(3, dtype=bool), [bad], [2]),
+    ],
+)
+def test_connectivity_entry_points_reject_non_integer_terminal_identities(call, bad_terminal):
+    with pytest.raises(TypeError):
+        call(bad_terminal)
+
+
+def test_least_cost_corridor_rejects_nonpositive_resistance():
+    with pytest.raises(ValueError):
+        least_cost_corridor(np.array([-1.0, -1.0]), 0, 1)
+
+
+@pytest.mark.parametrize(
+    "mask",
+    [
+        np.array([False, np.nan, False]),
+        np.array([0.0, 0.2, 0.0]),
+        np.array([0.0, 1.0, 0.0]),
+    ],
+)
+def test_fragmentation_impact_rejects_non_boolean_or_non_integer_binary_masks(mask):
+    with pytest.raises(TypeError):
+        fragmentation_impact(np.ones(3), mask, [0], [2])
+
+
+@pytest.mark.parametrize("metric", [effective_conductance, max_flow_connectivity])
+def test_connectivity_rejects_resistance_whose_reciprocal_is_not_representable(metric):
+    with pytest.raises(ValueError, match="unrepresentable conductance"):
+        metric(np.array([1e-320, 1e-320]), [0], [1])
+
+
+@pytest.mark.parametrize("metric", [effective_conductance, max_flow_connectivity])
+def test_connectivity_handles_large_finite_resistance_without_mean_overflow(metric):
+    assert metric(np.array([1e308, 1e308]), [0], [1]) == pytest.approx(1e-308)
+
+
+def test_graph_laplacian_storage_is_sparse_and_linear_for_realistic_raster():
+    node_count, edges = _conductance_edges(np.ones((100, 100)))
+    laplacian = _graph_laplacian(node_count, edges)
+
+    assert sparse.isspmatrix_csr(laplacian)
+    assert laplacian.nnz <= node_count + 2 * len(edges)
+    storage_bytes = laplacian.data.nbytes + laplacian.indices.nbytes + laplacian.indptr.nbytes
+    assert storage_bytes < 2_000_000
 
 
 @pytest.mark.parametrize("bad_floor", [0.0, -1e-3, float("nan"), float("inf")])
