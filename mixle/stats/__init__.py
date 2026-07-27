@@ -2325,6 +2325,11 @@ def dump_models(x) -> str:
 
 # Vectorized sequence-driver API — implementations live in mixle.stats.compute.sequence so the
 # inference machinery can import them without importing this package. Re-exported here unchanged.
+# Keep the focused multivariate namespace and this consolidated namespace in
+# lockstep. Integration plumbing remains directly importable here but is
+# intentionally omitted from this module's curated ``__all__`` by the same
+# suffix policy applied above.
+from mixle.stats import multivariate as _multivariate_api  # noqa: E402
 from mixle.stats.compute.sequence import (  # noqa: E402
     density,
     log_density,
@@ -2332,3 +2337,11 @@ from mixle.stats.compute.sequence import (  # noqa: E402
     seq_log_density,
     seq_log_density_sum,
 )
+
+for _multivariate_name in _multivariate_api.__all__:
+    globals()[_multivariate_name] = getattr(_multivariate_api, _multivariate_name)
+    if not _multivariate_name.endswith(_INTERNAL_SUFFIXES) and _multivariate_name not in __all__:
+        __all__.append(_multivariate_name)
+
+del _multivariate_api
+del _multivariate_name
