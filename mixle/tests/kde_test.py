@@ -41,6 +41,41 @@ class KDETest(unittest.TestCase):
         gi = np.linspace(0, 10, 4000)
         self.assertAlmostEqual(trapezoid(refl(gi), gi), 1.0, delta=0.02)
 
+    def test_finite_interval_boundary_kernel_preserves_mass_across_bandwidth_scales(self):
+        data = np.array([0.25, 0.75])
+        grid = np.linspace(0.0, 1.0, 4001)
+        for bandwidth in (0.05, 0.2, 1.0, 10.0, 100.0):
+            with self.subTest(bandwidth=bandwidth):
+                fitted = kde(data, bandwidth=bandwidth, bounds=(0.0, 1.0))
+                self.assertAlmostEqual(trapezoid(fitted(grid), grid), 1.0, delta=2e-4)
+
+    def test_evaluate_rejects_empty_or_nonfinite_points_before_support_masking(self):
+        plain = kde(np.array([0.0, 1.0, 2.0]), bandwidth=0.5)
+        bounded = kde(np.array([0.0, 0.5, 1.0]), bandwidth=0.5, bounds=(0.0, 1.0))
+        for fitted in (plain, bounded):
+            with self.assertRaises(ValueError):
+                fitted.evaluate(np.array([]))
+            with self.assertRaises(ValueError):
+                fitted.evaluate(np.array([np.nan]))
+            with self.assertRaises(ValueError):
+                fitted.evaluate(np.array([np.inf]))
+
+    def test_fitted_state_owns_and_freezes_training_and_bandwidth_arrays(self):
+        original = np.array([0.0, 1.0, 2.0])
+        fitted = kde(original, bandwidth=0.5)
+        before = fitted.evaluate(np.array([0.0]))
+        original[:] = 100.0
+        np.testing.assert_array_equal(fitted.evaluate(np.array([0.0])), before)
+        np.testing.assert_array_equal(fitted.data[:, 0], np.array([0.0, 1.0, 2.0]))
+        self.assertFalse(fitted.data.flags.writeable)
+        with self.assertRaises(ValueError):
+            fitted.data[0, 0] = 50.0
+
+        multi = kde(np.array([[0.0, 0.0], [1.0, 2.0], [2.0, 1.0]]), bandwidth=[0.5, 0.25])
+        self.assertFalse(multi.bandwidth.flags.writeable)
+        with self.assertRaises(ValueError):
+            multi.bandwidth[0] = 10.0
+
     def test_adaptive_integrates_to_one(self):
         rng = np.random.RandomState(3)
         x = rng.standard_t(3, 3000)  # heavy tails benefit from adaptive bw
@@ -132,6 +167,15 @@ class DegenerateInputTest(unittest.TestCase):
         x = rng.normal(0, 2, 1000)
         self.assertGreater(silverman_bandwidth(x), 0)
         self.assertGreater(scott_bandwidth(x), 0)
+
+    def test_bandwidth_selectors_require_exact_positive_joint_dimension(self):
+        sample = np.array([0.0, 1.0, 2.0])
+        for bad_dimension in (0, -4, 1.5, True):
+            with self.subTest(d=bad_dimension):
+                with self.assertRaises(ValueError):
+                    silverman_bandwidth(sample, d=bad_dimension)
+                with self.assertRaises(ValueError):
+                    scott_bandwidth(sample, d=bad_dimension)
 
     # -- KDE construction: empty / singleton / constant samples with automatic bandwidth --------
 
@@ -279,6 +323,18 @@ class DegenerateInputTest(unittest.TestCase):
     def test_intensity_rejects_non_finite_events(self):
         with self.assertRaises(ValueError):
             intensity(np.array([1.0, 2.0, float("inf")]), np.linspace(0, 1, 5), bandwidth=0.5)
+
+    def test_intensity_rejects_nonfinite_or_multidimensional_grid(self):
+        events = np.array([0.0, 1.0, 2.0])
+        for bad_grid in (
+            np.array([0.0, np.nan]),
+            np.array([0.0, np.inf]),
+            np.ones((2, 2)),
+            np.array([]),
+        ):
+            with self.subTest(shape=bad_grid.shape):
+                with self.assertRaises(ValueError):
+                    intensity(events, bad_grid, bandwidth=0.5)
 
     def test_intensity_rejects_constant_events_with_automatic_bandwidth(self):
         with self.assertRaises(ValueError):

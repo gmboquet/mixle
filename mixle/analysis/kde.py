@@ -7,9 +7,9 @@ Nonparametric estimates of *where the mass is* without assuming a parametric fam
     ``(n, d)`` sample (rows are observations; row-pairing is preserved, never flattened). Automatic
     bandwidth selection (Silverman / Scott) chooses each dimension's bandwidth from that dimension's own
     marginal spread, using the joint-dimension ``n^{-1/(d+4)}`` rate. **Adaptive** (variable) bandwidths
-    that widen in the sparse tails (Abramson) work in any dimension; **boundary correction** by
-    reflection (``bounds``, for densities on a half-line or interval -- a plain KDE leaks mass across a
-    hard boundary and biases the edge down) is supported for 1-D data only.
+    that widen in the sparse tails (Abramson) work in any dimension; normalized **boundary correction**
+    (reflection on a half-line and per-kernel truncation normalization on a finite interval) is supported
+    for 1-D data only.
   * :func:`kde_mode` -- the location of a 1-D density's peak ("where is the mode, and how sure am I?")
     with a bootstrap confidence interval.
   * :func:`intensity` -- the intensity ``lambda(t)`` of a 1-D inhomogeneous Poisson / point process by
@@ -21,11 +21,26 @@ Bandwidths are in data units; ``"silverman"`` and ``"scott"`` are the rule-of-th
 
 from __future__ import annotations
 
+import operator
+
 import numpy as np
 from numpy.random import RandomState
-from scipy import stats
+from scipy import special, stats
 
 _BANDWIDTH_METHODS = ("silverman", "scott")
+
+
+def _positive_dimension(d: int) -> int:
+    """Validate the exact joint dimension used by bandwidth-rate formulas."""
+    if isinstance(d, (bool, np.bool_)):
+        raise ValueError("d must be a non-Boolean positive integer")
+    try:
+        dimension = operator.index(d)
+    except TypeError as exc:
+        raise ValueError("d must be a non-Boolean positive integer") from exc
+    if dimension <= 0:
+        raise ValueError(f"d must be positive, got {dimension}")
+    return int(dimension)
 
 
 def _as_observations(data: np.ndarray) -> np.ndarray:
@@ -102,7 +117,10 @@ def silverman_bandwidth(data: np.ndarray, *, d: int = 1) -> float:
         ValueError: ``data`` has fewer than 2 observations, non-finite entries, or zero variation (see
             :func:`_require_variation`; MXR-080-0100).
     """
-    x = np.asarray(data, dtype=float).ravel()
+    d = _positive_dimension(d)
+    x = np.asarray(data, dtype=float)
+    if x.ndim != 1:
+        raise ValueError(f"silverman_bandwidth expects a one-dimensional sample, got shape {x.shape}")
     _require_variation(x, "silverman_bandwidth")
     n = x.shape[0]
     sd = np.std(x, ddof=1)
@@ -121,7 +139,10 @@ def scott_bandwidth(data: np.ndarray, *, d: int = 1) -> float:
         ValueError: ``data`` has fewer than 2 observations, non-finite entries, or zero variation (see
             :func:`_require_variation`; MXR-080-0100).
     """
-    x = np.asarray(data, dtype=float).ravel()
+    d = _positive_dimension(d)
+    x = np.asarray(data, dtype=float)
+    if x.ndim != 1:
+        raise ValueError(f"scott_bandwidth expects a one-dimensional sample, got shape {x.shape}")
     _require_variation(x, "scott_bandwidth")
     n = x.shape[0]
     return float(np.std(x, ddof=1) * n ** (-1.0 / (d + 4.0)))
@@ -227,7 +248,8 @@ class KDE:
     Use :func:`kde` to construct. Evaluate with :meth:`evaluate` (or call the instance). Supports a
     Gaussian kernel -- an axis-aligned **product kernel** with a per-dimension bandwidth for
     multivariate ``(n, d)`` data, rows treated as observations and never reshaped -- adaptive bandwidths
-    (any dimension), and, for 1-D data only, reflection boundary correction (``bounds``; MXR-080-0099).
+    (any dimension), and, for 1-D data only, normalized boundary correction (``bounds``;
+    MXR-080-0099).
 
     Attributes:
         data: the fitted sample as ``(n, d)`` observations (``d == 1`` for a 1-D sample).
@@ -252,11 +274,20 @@ class KDE:
         if not np.all(np.isfinite(x)):
             n_bad = int(np.sum(~np.isfinite(x)))
             raise ValueError(f"KDE data must be finite, got {n_bad} of {x.size} non-finite entries")
-        self.data = x
+        if d == 0:
+            raise ValueError("KDE requires at least one dimension, got a shape-(n, 0) sample")
+        owned_data = np.array(x, dtype=float, copy=True)
+        owned_data.setflags(write=False)
+        self._data = owned_data
+        self.data = owned_data.view()
+        self.data.setflags(write=False)
         self.n = n
         self.d = d
-        bw_vec = _resolve_bandwidth_vector(x, bandwidth, d)
-        self.bandwidth = float(bw_vec[0]) if d == 1 else bw_vec
+        bw_vec = np.array(_resolve_bandwidth_vector(owned_data, bandwidth, d), copy=True)
+        bw_vec.setflags(write=False)
+        self.bandwidth = float(bw_vec[0]) if d == 1 else bw_vec.view()
+        if isinstance(self.bandwidth, np.ndarray):
+            self.bandwidth.setflags(write=False)
         if bounds is not None and d > 1:
             raise ValueError(
                 "bounds (reflection boundary correction) is only supported for 1-D KDE, got a "
@@ -264,6 +295,12 @@ class KDE:
                 "boundary correction"
             )
         self.bounds = _validate_bounds(bounds) if d == 1 else None
+        if self.bounds is not None:
+            lo, hi = self.bounds
+            if lo is not None and np.any(owned_data[:, 0] < lo):
+                raise ValueError("KDE data must lie within the declared lower support bound")
+            if hi is not None and np.any(owned_data[:, 0] > hi):
+                raise ValueError("KDE data must lie within the declared upper support bound")
         self.adaptive = adaptive
         self._local_bw = np.tile(bw_vec, (n, 1))
         if adaptive:
@@ -271,6 +308,7 @@ class KDE:
             g = np.exp(np.mean(np.log(np.clip(pilot, 1e-300, None))))
             scale = np.sqrt(g / np.clip(pilot, 1e-300, None))
             self._local_bw = bw_vec[None, :] * scale[:, None]
+        self._local_bw.setflags(write=False)
 
     def _raw_density(self, x: np.ndarray, local_bw: np.ndarray) -> np.ndarray:
         """Plain (no boundary) Gaussian product-kernel KDE at ``(m, d)`` points ``x`` using
@@ -279,38 +317,69 @@ class KDE:
         kernel = stats.norm.pdf(u) / local_bw[None, :, :]  # (m, n, d)
         return np.mean(np.prod(kernel, axis=2), axis=1)  # (m,)
 
+    def _bounded_density(self, x: np.ndarray) -> np.ndarray:
+        """Normalized truncated-Gaussian boundary kernel for a one-dimensional declared support."""
+        if self.bounds is None:  # pragma: no cover - guarded by evaluate
+            raise RuntimeError("_bounded_density requires declared bounds")
+        lo, hi = self.bounds
+        centers = self._data[:, 0]
+        bandwidths = self._local_bw[:, 0]
+        query = x[:, 0]
+        support = np.ones(query.shape[0], dtype=bool)
+        if lo is not None:
+            support &= query >= lo
+        if hi is not None:
+            support &= query <= hi
+
+        # A single reflected image is exactly normalized on a half-line and retains the conventional
+        # reflection estimator's strong edge-bias correction.
+        if lo is not None and hi is None:
+            reflected = np.array(x, copy=True)
+            reflected[:, 0] = 2.0 * lo - query
+            density = self._raw_density(x, self._local_bw) + self._raw_density(reflected, self._local_bw)
+            return np.where(support, density, 0.0)
+        if hi is not None and lo is None:
+            reflected = np.array(x, copy=True)
+            reflected[:, 0] = 2.0 * hi - query
+            density = self._raw_density(x, self._local_bw) + self._raw_density(reflected, self._local_bw)
+            return np.where(support, density, 0.0)
+        if lo is None and hi is None:
+            return self._raw_density(x, self._local_bw)
+
+        standardized = (query[:, None] - centers[None, :]) / bandwidths[None, :]
+        kernels = stats.norm.pdf(standardized) / bandwidths[None, :]
+
+        z_lo = (lo - centers) / bandwidths
+        z_hi = (hi - centers) / bandwidths
+        normalizers = 0.5 * (
+            special.erf(z_hi / np.sqrt(2.0)) - special.erf(z_lo / np.sqrt(2.0))
+        )
+        if not np.all(np.isfinite(normalizers)) or np.any(normalizers <= 0.0):
+            raise ValueError("bounded KDE kernel normalization is not finite and positive")
+
+        density = np.mean(kernels / normalizers[None, :], axis=1)
+        return np.where(support, density, 0.0)
+
     def _prepare_eval_points(self, x: np.ndarray) -> np.ndarray:
         xo = _as_observations(x)
+        if xo.shape[0] == 0:
+            raise ValueError("evaluate() requires at least one evaluation point")
         if xo.shape[1] != self.d:
             raise ValueError(
                 f"evaluate() expects points of dimension {self.d} (this KDE was fit on {self.d}-D "
                 f"data), got dimension {xo.shape[1]}"
             )
+        if not np.all(np.isfinite(xo)):
+            raise ValueError("evaluate() points must be finite (no NaN/Inf)")
         return xo
 
     def evaluate(self, x: np.ndarray) -> np.ndarray:
         """Density at points ``x`` -- ``(m,)`` for 1-D, ``(m, d)`` for multivariate -- with reflection
         boundary correction if ``bounds`` was set (1-D only). Always returns a length-``m`` array."""
         xo = self._prepare_eval_points(x)
-        dens = self._raw_density(xo, self._local_bw)
         if self.bounds is not None:
-            lo, hi = self.bounds
-            x1 = xo[:, 0]
-            if lo is not None:
-                refl = xo.copy()
-                refl[:, 0] = 2.0 * lo - x1
-                dens = dens + self._raw_density(refl, self._local_bw)
-            if hi is not None:
-                refl = xo.copy()
-                refl[:, 0] = 2.0 * hi - x1
-                dens = dens + self._raw_density(refl, self._local_bw)
-            mask = np.ones(xo.shape[0], dtype=bool)
-            if lo is not None:
-                mask &= x1 >= lo
-            if hi is not None:
-                mask &= x1 <= hi
-            dens = np.where(mask, dens, 0.0)
-        return dens
+            return self._bounded_density(xo)
+        return self._raw_density(xo, self._local_bw)
 
     __call__ = evaluate
 
@@ -325,9 +394,10 @@ def kde(data: np.ndarray, *, bandwidth="silverman", bounds=None, adaptive: bool 
             dimension), or -- for ``(n, d)`` data -- a length-``d`` sequence of positive finite numbers
             (one bandwidth per dimension). Automatic selection needs >= 2 observations with nonzero
             variation in every dimension.
-        bounds: ``(lo, hi)`` support limits for reflection boundary correction; either may be ``None``
-            for an unbounded side (e.g. ``(0.0, None)`` for a positive variable). Only supported for
-            1-D (``d == 1``) data.
+        bounds: ``(lo, hi)`` support limits for normalized boundary correction; either may be ``None``
+            for an unbounded side (e.g. ``(0.0, None)`` for a positive variable). Half-lines use an
+            exactly normalized reflected image; finite intervals normalize every truncated kernel.
+            Only supported for 1-D (``d == 1``) data.
         adaptive: use Abramson variable bandwidths (wider where the pilot density is low); supported for
             any dimension.
 
@@ -428,7 +498,7 @@ def intensity(
 
     Args:
         events: ``(m,)`` event locations.
-        grid: points ``t`` at which to evaluate the intensity.
+        grid: nonempty finite one-dimensional points ``t`` at which to evaluate the intensity.
         bandwidth: ``"silverman"``, ``"scott"``, or a float.
         domain: ``(lo, hi)`` observation window (defaults to the event range); used for edge correction.
         edge_correct: divide by the in-window kernel mass at each ``t``.
@@ -445,15 +515,18 @@ def intensity(
             explicit numeric bandwidth, previously produced a silent divide-by-near-zero blowup).
     """
     e = np.asarray(events, dtype=float)
-    if e.ndim > 1:
+    if e.ndim != 1:
         raise ValueError(f"intensity is univariate: expected a 1-D (m,) array of event locations, got shape {e.shape}")
-    e = e.ravel()
     if e.shape[0] == 0:
         raise ValueError("intensity requires at least one event, got an empty sample")
     if not np.all(np.isfinite(e)):
         n_bad = int(np.sum(~np.isfinite(e)))
         raise ValueError(f"event locations must be finite, got {n_bad} of {e.shape[0]} non-finite entries")
     grid = np.asarray(grid, dtype=float)
+    if grid.ndim != 1 or grid.size == 0:
+        raise ValueError(f"grid must be a nonempty one-dimensional evaluation array, got shape {grid.shape}")
+    if not np.all(np.isfinite(grid)):
+        raise ValueError("grid must be finite (no NaN/Inf)")
     h = _resolve_bw(e, bandwidth)
     u = (grid[:, None] - e[None, :]) / h
     lam = np.sum(stats.norm.pdf(u) / h, axis=1)
