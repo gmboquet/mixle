@@ -27,7 +27,34 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.utils.aliasing import MISSING, broadcast_pseudo_count, coalesce_alias
+from mixle.stats.multivariate._vector_contracts import (
+    batch as vector_batch,
+)
+from mixle.stats.multivariate._vector_contracts import (
+    dimension as vector_dimension,
+)
+from mixle.stats.multivariate._vector_contracts import (
+    event as vector_event,
+)
+from mixle.stats.multivariate._vector_contracts import (
+    finite_scalar,
+    gaussian_moments,
+    gaussian_prior_statistics,
+    marginal_indices,
+    pooled_gaussian_covariance,
+    pseudo_counts,
+    require_pseudo_moments,
+)
+from mixle.stats.multivariate._vector_contracts import (
+    vector as vector_parameter,
+)
+from mixle.stats.multivariate._vector_contracts import (
+    weight as observation_weight,
+)
+from mixle.stats.multivariate._vector_contracts import (
+    weights as observation_weights,
+)
+from mixle.utils.aliasing import MISSING, coalesce_alias
 from mixle.utils.special import digamma
 
 
@@ -175,17 +202,22 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         covar = coalesce_alias("covar", covar, "covariance", covariance, default=MISSING)
-        self.dim = len(mu)
-        self.mu = np.asarray(mu, dtype=float)
-        self.covar = np.asarray(covar, dtype=float)
-        if np.any(self.covar <= 0.0) or not np.all(np.isfinite(self.covar)):
-            raise ValueError("DiagonalGaussianDistribution requires finite covar > 0.")
+        self.mu = vector_parameter(mu, label="diagonal Gaussian mean")
+        self.dim = len(self.mu)
+        self.covar = vector_parameter(
+            covar,
+            label="diagonal Gaussian covariance",
+            dim=self.dim,
+            positive=True,
+        )
         self.name = name
         self.log_c = -0.5 * (np.log(2.0 * np.pi) * self.dim + np.log(self.covar).sum())
 
         self.ca = -0.5 / self.covar
         self.cb = self.mu / self.covar
         self.cc = (-0.5 * self.mu * self.mu / self.covar).sum() + self.log_c
+        for parameter in (self.mu, self.covar, self.ca, self.cb):
+            parameter.setflags(write=False)
         self.keys = keys
 
         self.set_prior(prior)
@@ -203,6 +235,8 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
 
         if isinstance(prior, MultivariateNormalGammaDistribution):
             mu, lam, a, b = prior.get_parameters()
+            if any(parameter.shape != (self.dim,) for parameter in (mu, lam, a, b)):
+                raise ValueError("diagonal Gaussian conjugate prior dimension must match the distribution")
 
             ea = np.sum((mu * mu) * (a / b) * 0.5 + (0.5 / lam) + 0.5 * (np.log(b) - digamma(a)))
             e1 = mu * a / b
@@ -269,8 +303,9 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
             Log-density at x.
 
         """
-        rv = np.dot(x * x, self.ca)
-        rv += np.dot(x, self.cb)
+        checked = vector_event(x, self.dim, label="diagonal Gaussian observation")
+        rv = np.dot(checked * checked, self.ca)
+        rv += np.dot(checked, self.cb)
         rv += self.cc
         return rv
 
@@ -289,19 +324,48 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
         unobs = np.array([i for i in range(self.dim) if i not in observed], dtype=int)
         if unobs.size == 0:
             raise ValueError("at least one dimension must be left unobserved")
-        return DiagonalGaussianDistribution(self.mu[unobs], self.covar[unobs])
+        prior = self._coordinate_prior(unobs)
+        return DiagonalGaussianDistribution(
+            self.mu[unobs],
+            self.covar[unobs],
+            name=self.name,
+            keys=self.keys,
+            prior=prior,
+        )
 
     def marginal(self, keep: Sequence[int]) -> "DiagonalGaussianDistribution":
         """Return the marginal over the dimensions ``keep``: ``DiagonalGaussian(mu[keep], covar[keep])``.
 
         Marginalizing a diagonal Gaussian simply drops the other independent coordinates (order kept).
         """
-        idx = np.asarray(list(keep), dtype=int)
-        if idx.size == 0:
-            raise ValueError("keep at least one dimension")
-        if idx.min() < 0 or idx.max() >= self.dim:
-            raise ValueError("kept indices must be in [0, dim)")
-        return DiagonalGaussianDistribution(self.mu[idx], self.covar[idx])
+        idx = marginal_indices(keep, self.dim)
+        prior = self._coordinate_prior(idx)
+        return DiagonalGaussianDistribution(
+            self.mu[idx],
+            self.covar[idx],
+            name=self.name,
+            keys=self.keys,
+            prior=prior,
+        )
+
+    def _coordinate_prior(
+        self,
+        indices: np.ndarray,
+    ) -> SequenceEncodableProbabilityDistribution | None:
+        """Restrict an independent conjugate prior to selected coordinates."""
+        if not isinstance(self.prior, MultivariateNormalGammaDistribution):
+            if len(indices) == self.dim and np.array_equal(indices, np.arange(self.dim)):
+                return self.prior
+            return None
+        mu, lam, a, b = self.prior.get_parameters()
+        return MultivariateNormalGammaDistribution(
+            mu[indices],
+            lam[indices],
+            a[indices],
+            b[indices],
+            name=self.prior.name,
+            prior=self.prior.prior,
+        )
 
     def density_cumulative(self, x: Sequence[float] | np.ndarray) -> float:
         """Exact probability-ordered cumulative ``G(x) = P(p(Y) >= p(x))`` -- the highest-density-region
@@ -344,8 +408,9 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
             Numpy array of length sz containing the log-density of each encoded observation.
 
         """
-        rv = np.dot(x * x, self.ca)
-        rv += np.dot(x, self.cb)
+        checked = vector_batch(x, self.dim, label="diagonal Gaussian observations")
+        rv = np.dot(checked * checked, self.ca)
+        rv += np.dot(checked, self.cb)
         rv += self.cc
         return rv
 
@@ -359,7 +424,10 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
     def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded data."""
         return self.backend_log_density_from_params(
-            engine.asarray(x), engine.asarray(self.mu), engine.asarray(self.covar), engine
+            engine.asarray(x),
+            engine.asarray(self.mu.copy()),
+            engine.asarray(self.covar.copy()),
+            engine,
         )
 
     @classmethod
@@ -486,7 +554,7 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
              keys: Optional sufficient-statistic key.
 
         """
-        self.dim = dim
+        self.dim = vector_dimension(dim, label="diagonal Gaussian dimension", allow_none=True)
         self.count = 0.0
         self.sum = vec.zeros(dim) if dim is not None else None
         self.sum2 = vec.zeros(dim) if dim is not None else None
@@ -508,14 +576,21 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         if self.dim is None:
-            self.dim = len(x)
+            checked = vector_parameter(x, label="diagonal Gaussian observation")
+            self.dim = len(checked)
             self.sum = vec.zeros(self.dim)
             self.sum2 = vec.zeros(self.dim)
-
-        x_weight = x * weight
-        self.count += weight
+        else:
+            checked = vector_event(x, self.dim, label="diagonal Gaussian observation")
+        if estimate is not None and (
+            not isinstance(estimate, DiagonalGaussianDistribution) or estimate.dim != self.dim
+        ):
+            raise ValueError("diagonal Gaussian accumulator estimate must have the configured dimension")
+        checked_weight = observation_weight(weight, label="diagonal Gaussian observation weight")
+        x_weight = checked * checked_weight
+        self.count += checked_weight
         self.sum += x_weight
-        x_weight *= x
+        x_weight *= checked
         self.sum2 += x_weight
 
     def initialize(self, x: Sequence[float] | np.ndarray, weight: float, rng: RandomState) -> None:
@@ -545,14 +620,26 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         if self.dim is None:
-            self.dim = len(x[0])
+            raw = np.asarray(x, dtype=np.float64)
+            if raw.ndim != 2 or raw.shape[1] == 0:
+                raise ValueError("diagonal Gaussian observations must have exact shape (N, D) with D > 0")
+            self.dim = raw.shape[1]
             self.sum = vec.zeros(self.dim)
             self.sum2 = vec.zeros(self.dim)
-
-        x_weight = np.multiply(x.T, weights)
-        self.count += weights.sum()
+        checked = vector_batch(x, self.dim, label="diagonal Gaussian observations")
+        checked_weights = observation_weights(
+            weights,
+            len(checked),
+            label="diagonal Gaussian observation weights",
+        )
+        if estimate is not None and (
+            not isinstance(estimate, DiagonalGaussianDistribution) or estimate.dim != self.dim
+        ):
+            raise ValueError("diagonal Gaussian accumulator estimate must have the configured dimension")
+        x_weight = np.multiply(checked.T, checked_weights)
+        self.count += checked_weights.sum()
         self.sum += x_weight.sum(axis=1)
-        x_weight *= x.T
+        x_weight *= checked.T
         self.sum2 += x_weight.sum(axis=1)
 
     def seq_initialize(self, x, weights: np.ndarray, rng: RandomState) -> None:
@@ -580,24 +667,33 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             This accumulator.
 
         """
-        if suff_stat[0] is not None and self.sum is not None:
-            self.sum += suff_stat[0]
-            self.sum2 += suff_stat[1]
-            self.count += suff_stat[2]
-
-        elif suff_stat[0] is not None and self.sum is None:
+        sum_x, sum_xx, count, inferred_dim = gaussian_moments(
+            suff_stat,
+            self.dim,
+            diagonal=True,
+        )
+        if sum_x is not None and self.sum is not None:
+            self.sum += sum_x
+            self.sum2 += sum_xx
+            self.count += count
+        elif sum_x is not None and self.sum is None:
             # copy on adopt: value() hands out the LIVE arrays, so adopting the caller's reference
             # makes every later in-place += here mutate the DONOR accumulator too (chunk combines
             # and keyed pooling both hit this -- caught by the keyed-protocol sweep)
-            self.sum = np.asarray(suff_stat[0], dtype=np.float64).copy()
-            self.sum2 = np.asarray(suff_stat[1], dtype=np.float64).copy()
-            self.count = suff_stat[2]
+            self.dim = inferred_dim
+            self.sum = sum_x.copy()
+            self.sum2 = sum_xx.copy()
+            self.count = count
 
         return self
 
     def value(self) -> tuple[np.ndarray, np.ndarray, float]:
         """Return ``(sum, sum_squares, count)`` sufficient statistics."""
-        return self.sum, self.sum2, self.count
+        return (
+            None if self.sum is None else self.sum.copy(),
+            None if self.sum2 is None else self.sum2.copy(),
+            self.count,
+        )
 
     def from_value(self, x: tuple[np.ndarray, np.ndarray, float]) -> "DiagonalGaussianAccumulator":
         """Replace this accumulator's sufficient statistics.
@@ -610,9 +706,11 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             This accumulator.
 
         """
-        self.sum = None if x[0] is None else np.asarray(x[0], dtype=np.float64).copy()
-        self.sum2 = None if x[1] is None else np.asarray(x[1], dtype=np.float64).copy()
-        self.count = x[2]
+        self.sum, self.sum2, self.count, self.dim = gaussian_moments(
+            x,
+            self.dim,
+            diagonal=True,
+        )
         return self
 
     def acc_to_encoder(self) -> "DiagonalGaussianDataEncoder":
@@ -635,7 +733,7 @@ class DiagonalGaussianAccumulatorFactory(StatisticAccumulatorFactory):
              keys: Optional sufficient-statistic key.
 
         """
-        self.dim = dim
+        self.dim = vector_dimension(dim, label="diagonal Gaussian dimension", allow_none=True)
         self.keys = keys
 
     def make(self) -> "DiagonalGaussianAccumulator":
@@ -671,7 +769,8 @@ class DiagonalGaussianEstimator(ParameterEstimator):
                 joint MAP estimate and carrying the posterior forward as the fitted model's prior) instead
                 of the maximum-likelihood / pseudo-count update.
             min_covar (Optional[float]): Absolute per-coordinate variance floor applied in the MLE M-step.
-                ``None`` (default) uses a tiny ``1e-8``. Negatives / NaNs are clamped to this floor.
+                ``None`` (default) uses a tiny ``1e-8``. Invalid/non-finite reduced statistics are
+                rejected rather than treated as numerical noise.
             ridge (Optional[float]): Relative variance floor coefficient. ``None`` (default) uses ``1e-6``;
                 each coordinate variance is floored at ``max(min_covar, ridge * mean(var))`` so the
                 safeguard is data-scaled. Bias is negligible at the defaults.
@@ -685,27 +784,36 @@ class DiagonalGaussianEstimator(ParameterEstimator):
             keys: Optional sufficient-statistic key.
 
         """
-        dim_loc = (
-            dim
-            if dim is not None
-            else (
-                (None if suff_stat[1] is None else int(np.sqrt(np.size(suff_stat[1]))))
-                if suff_stat[0] is None
-                else len(suff_stat[0])
-            )
-        )
-
         self.name = name
-        self.dim = dim_loc
-        pseudo_count = broadcast_pseudo_count(pseudo_count, 2)
-        self.pseudo_count = pseudo_count
-        self.prior_mu = None if suff_stat[0] is None else np.reshape(suff_stat[0], dim_loc)
-        self.prior_covar = None if suff_stat[1] is None else np.reshape(suff_stat[1], dim_loc)
+        self.prior_mu, self.prior_covar, self.dim = gaussian_prior_statistics(
+            suff_stat,
+            dim,
+            diagonal=True,
+        )
+        self.pseudo_count = pseudo_counts(
+            pseudo_count,
+            label="diagonal Gaussian pseudo-count",
+        )
+        require_pseudo_moments(self.pseudo_count, self.prior_mu, self.prior_covar)
         self.keys = keys
         self.prior = prior
         self.has_conj_prior = isinstance(prior, MultivariateNormalGammaDistribution)
-        self.min_covar = 1.0e-8 if min_covar is None else float(min_covar)
-        self.ridge = 1.0e-6 if ridge is None else float(ridge)
+        if self.has_conj_prior:
+            prior_dim = len(prior.get_parameters()[0])
+            if self.dim is None:
+                self.dim = prior_dim
+            elif self.dim != prior_dim:
+                raise ValueError("diagonal Gaussian estimator prior dimension must match its configured dimension")
+        self.min_covar = finite_scalar(
+            1.0e-8 if min_covar is None else min_covar,
+            label="diagonal Gaussian min_covar",
+            positive=True,
+        )
+        self.ridge = finite_scalar(
+            1.0e-6 if ridge is None else ridge,
+            label="diagonal Gaussian ridge",
+            nonnegative=True,
+        )
 
     def accumulator_factory(self) -> "DiagonalGaussianAccumulatorFactory":
         """Return an accumulator factory matching this estimator."""
@@ -759,7 +867,13 @@ class DiagonalGaussianEstimator(ParameterEstimator):
         new_sigma2 = np.maximum(new_sigma2, self.min_covar)  # match the MLE-path variance floor
 
         new_prior = MultivariateNormalGammaDistribution(new_mu, new_n, new_a, new_b)
-        return DiagonalGaussianDistribution(new_mu, new_sigma2, name=self.name, prior=new_prior)
+        return DiagonalGaussianDistribution(
+            new_mu,
+            new_sigma2,
+            name=self.name,
+            keys=self.keys,
+            prior=new_prior,
+        )
 
     def estimate(
         self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, float]
@@ -779,43 +893,68 @@ class DiagonalGaussianEstimator(ParameterEstimator):
             DiagonalGaussianDistribution object.
 
         """
+        sum_x, sum_xx, count, inferred_dim = gaussian_moments(
+            suff_stat,
+            self.dim,
+            diagonal=True,
+        )
+        if sum_x is None:
+            if self.dim is None:
+                raise ValueError("cannot infer diagonal Gaussian dimension from empty sufficient statistics")
+            sum_x = vec.zeros(self.dim)
+            sum_xx = vec.zeros(self.dim)
+            inferred_dim = self.dim
+        checked_stat = (sum_x, sum_xx, count)
         if self.has_conj_prior:
-            return self._estimate_conjugate(suff_stat)
+            return self._estimate_conjugate(checked_stat)
 
-        nobs = suff_stat[2]
+        nobs = count
         pc1, pc2 = self.pseudo_count
 
         if nobs <= 0:
-            # zero-responsibility component: fall back to the prior mean (or zeros)
-            # rather than dividing by zero and emitting a NaN mean.
-            d = self.dim if self.dim is not None else len(suff_stat[0])
+            d = inferred_dim
             mu = np.asarray(self.prior_mu, dtype=float) if self.prior_mu is not None else vec.zeros(d)
             covar = np.asarray(self.prior_covar, dtype=float) if self.prior_covar is not None else np.ones(d)
             floor = max(self.min_covar, self.ridge * float(np.mean(covar[covar > 0.0])) if np.any(covar > 0.0) else 0.0)
             covar = np.maximum(covar, floor)
-            return DiagonalGaussianDistribution(mu, covar, name=self.name)
+            return DiagonalGaussianDistribution(
+                mu,
+                covar,
+                name=self.name,
+                keys=self.keys,
+                prior=self.prior,
+            )
 
-        if pc1 is not None and self.prior_mu is not None:
-            mu = (suff_stat[0] + pc1 * self.prior_mu) / (nobs + pc1)
+        if pc1 not in (None, 0.0):
+            mu = (sum_x + pc1 * self.prior_mu) / (nobs + pc1)
         else:
-            mu = suff_stat[0] / nobs
+            mu = sum_x / nobs
 
-        if pc2 is not None and self.prior_covar is not None:
-            covar = (suff_stat[1] + (pc2 * self.prior_covar) - (mu * mu * nobs)) / (nobs + pc2)
-        else:
-            covar = (suff_stat[1] / nobs) - (mu * mu)
+        covar = pooled_gaussian_covariance(
+            sum_x,
+            sum_xx,
+            nobs,
+            mu,
+            pc2,
+            self.prior_mu,
+            self.prior_covar,
+            diagonal=True,
+        )
 
         # P1 variance floor: clamp non-finite / non-positive coordinates and apply a
         # data-scaled floor max(min_covar, ridge * mean(var)) so a component holding
         # few points cannot produce zero/negative/NaN variances. Bias is negligible.
         covar = np.asarray(covar, dtype=float)
-        finite = np.isfinite(covar)
-        if not finite.all():
-            covar = np.where(finite, covar, self.min_covar)
         floor = max(self.min_covar, self.ridge * float(np.mean(covar[covar > 0.0])) if np.any(covar > 0.0) else 0.0)
         covar = np.maximum(covar, floor)
 
-        return DiagonalGaussianDistribution(mu, covar, name=self.name)
+        return DiagonalGaussianDistribution(
+            mu,
+            covar,
+            name=self.name,
+            keys=self.keys,
+            prior=self.prior,
+        )
 
 
 class DiagonalGaussianDataEncoder(DataSequenceEncoder):
@@ -828,7 +967,7 @@ class DiagonalGaussianDataEncoder(DataSequenceEncoder):
             dim: Optional Gaussian dimension. Inferred from data when omitted.
 
         """
-        self.dim = dim
+        self.dim = vector_dimension(dim, label="diagonal Gaussian dimension", allow_none=True)
 
     def __str__(self) -> str:
         """Return a readable encoder summary."""
@@ -859,7 +998,9 @@ class DiagonalGaussianDataEncoder(DataSequenceEncoder):
             Encoded data matrix with shape (len(x), dim).
 
         """
+        raw = np.asarray(x, dtype=np.float64)
         if self.dim is None:
-            self.dim = len(x[0])
-        xv = np.reshape(x, (-1, self.dim))
-        return xv
+            if raw.ndim != 2 or raw.shape[1] == 0:
+                raise ValueError("diagonal Gaussian observations must have exact shape (N, D) with D > 0")
+            self.dim = raw.shape[1]
+        return vector_batch(raw, self.dim, label="diagonal Gaussian observations").copy()

@@ -26,7 +26,11 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.utils.aliasing import broadcast_pseudo_count
+from mixle.stats.univariate.continuous._gaussian_contracts import (
+    pooled_scalar_variance,
+    scalar_estimator_configuration,
+    scalar_gaussian_moments,
+)
 from mixle.utils.special import digamma
 
 
@@ -722,9 +726,8 @@ class GaussianEstimator(ParameterEstimator):
                 MAP estimate and carrying the posterior forward as the fitted model's prior) instead
                 of the maximum-likelihood / pseudo-count update.
             min_covar (Optional[float]): Absolute variance floor applied in the MLE M-step. ``None``
-                (default) uses a tiny ``1e-8`` floor; the estimated variance is also floored at a
-                relative ``1e-6 * sigma2`` to keep the safeguard data-scaled. Set explicitly to widen
-                the floor for hard / high-dimensional cases. Bias is negligible at the default.
+                (default) uses a tiny positive ``1e-8`` floor. Explicit values must be finite and
+                positive, so callers cannot accidentally disable the safeguard.
             compensated (bool): Opt-in Kahan-compensated accumulation with a running numerics-error
                 estimate for the accumulators this estimator makes; see
                 :class:`GaussianAccumulator`. ``False`` by default (no overhead).
@@ -742,14 +745,18 @@ class GaussianEstimator(ParameterEstimator):
             if not isinstance(converted_prior, NormalGammaDistribution):
                 raise TypeError("GaussianEstimator prior conversion did not produce a NormalGammaDistribution.")
             prior = converted_prior
-        pseudo_count = broadcast_pseudo_count(pseudo_count, 2)
-        self.pseudo_count = pseudo_count
-        self.suff_stat = suff_stat
+        configured_floor = 1.0e-8 if min_covar is None else min_covar
+        self.pseudo_count, self.suff_stat, self.min_covar = scalar_estimator_configuration(
+            pseudo_count,
+            suff_stat,
+            configured_floor,
+        )
         self.keys = keys
         self.name = name
         self.prior = prior
         self.has_conj_prior = isinstance(prior, NormalGammaDistribution)
-        self.min_covar = 1.0e-8 if min_covar is None else float(min_covar)
+        if not isinstance(compensated, bool):
+            raise TypeError("Gaussian compensated must be a bool")
         self.compensated = compensated
 
     def accumulator_factory(self) -> "GaussianAccumulatorFactory":
@@ -767,7 +774,9 @@ class GaussianEstimator(ParameterEstimator):
 
     def _estimate_conjugate(self, suff_stat: tuple[float, float, float, float]) -> "GaussianDistribution":
         """Closed-form NormalGamma conjugate posterior update returning the joint MAP estimate."""
-        sum_x, sum_xx, nobs_loc1, nobs_loc2 = suff_stat
+        sum_x, sum_xx, count = scalar_gaussian_moments(suff_stat)
+        nobs_loc1 = count
+        nobs_loc2 = count
         sum_xxx = sum_x  # the variance-count scatter uses the same weighted sum of x
         old_mu, old_lam, old_a, old_b = self.prior.get_parameters()
 
@@ -808,44 +817,37 @@ class GaussianEstimator(ParameterEstimator):
             A fitted Gaussian distribution.
 
         """
+        sum_x, sum_xx, count = scalar_gaussian_moments(suff_stat)
+        checked_stat = (sum_x, sum_xx, count, count)
         if self.has_conj_prior:
-            return self._estimate_conjugate(suff_stat)
+            return self._estimate_conjugate(checked_stat)
 
-        nobs_loc1 = suff_stat[2]
-        nobs_loc2 = suff_stat[3]
-
-        if nobs_loc1 == 0.0:
+        pc1, pc2 = self.pseudo_count
+        prior_mean, prior_variance = self.suff_stat
+        if pc1 not in (None, 0.0):
+            mu = (sum_x + pc1 * prior_mean) / (count + pc1)
+        elif count > 0.0:
+            mu = sum_x / count
+        elif prior_mean is not None:
+            mu = prior_mean
+        else:
             mu = 0.0
-        elif self.pseudo_count[0] is not None and self.suff_stat[0] is not None:
-            mu = (suff_stat[0] + self.pseudo_count[0] * self.suff_stat[0]) / (nobs_loc1 + self.pseudo_count[0])
-        else:
-            mu = suff_stat[0] / nobs_loc1
 
-        if nobs_loc2 == 0.0:
-            sigma2 = 0.0
-        elif self.pseudo_count[1] is not None and self.suff_stat[1] is not None:
-            sigma2 = (suff_stat[1] - mu * mu * nobs_loc2 + self.pseudo_count[1] * self.suff_stat[1]) / (
-                nobs_loc2 + self.pseudo_count[1]
-            )
-        else:
-            # E[x^2] - E[x]^2 from the (count, sum, sum_sq) exponential-family sufficient statistic.
-            # This is the *required* form for engine-swap parity: the streaming/stacked (numpy/torch)
-            # reduction produces sum_sq in a single pass, so the M-step cannot use a centered
-            # (Welford) scatter without breaking numpy<->torch accumulate parity. The subtraction can
-            # lose precision when |mu| >> sigma (large-offset data); the floor below caps the
-            # degenerate tail, and pre-centering the data is the recommended remedy for extreme offsets.
-            sigma2 = suff_stat[1] / nobs_loc2 - mu * mu
+        sigma2 = pooled_scalar_variance(
+            sum_x,
+            sum_xx,
+            count,
+            mu,
+            pc2,
+            prior_mean,
+            prior_variance,
+        )
+        if count == 0.0 and pc2 in (None, 0.0) and prior_variance is not None:
+            sigma2 = prior_variance
 
-        # P1 variance floor: clamp non-finite / non-positive variance and apply a
-        # data-scaled floor max(abs_floor, rel * sigma2) so a degenerate component
-        # cannot produce a zero/negative/NaN variance. Bias is negligible at the
-        # default abs_floor=1e-8 / rel=1e-6.
-        if not np.isfinite(sigma2) or sigma2 <= 0.0:
-            sigma2 = self.min_covar
-        else:
-            sigma2 = max(sigma2, self.min_covar, 1.0e-6 * sigma2)
+        sigma2 = max(sigma2, self.min_covar)
 
-        return GaussianDistribution(mu, sigma2, name=self.name, keys=self.keys)
+        return GaussianDistribution(mu, sigma2, name=self.name, keys=self.keys, prior=self.prior)
 
 
 class GaussianDataEncoder(DataSequenceEncoder):

@@ -62,9 +62,9 @@ class RobustCholeskyTest(unittest.TestCase):
         np.testing.assert_allclose(effective_covar, np.array([[1.0, 0.55], [0.55, 1.0]]), atol=1e-12)
         np.testing.assert_allclose(effective_covar, _covar_from_cho_factor(chol), atol=1e-12)
 
-    def test_construction_survives_non_pd_input(self):
-        d = st.MultivariateGaussianDistribution(np.zeros(2), np.array([[1.0, 1.0], [1.0, 1.0]]))
-        self.assertIsNotNone(d.chol)  # a rank-deficient covariance no longer crashes construction
+    def test_public_construction_rejects_non_pd_input(self):
+        with self.assertRaises(ValueError):
+            st.MultivariateGaussianDistribution(np.zeros(2), np.array([[1.0, 1.0], [1.0, 1.0]]))
 
     def test_severely_invalid_covariance_is_refused_not_healed(self):
         # Before this bound, the jitter-healing loop had no limit on how invalid an input it would
@@ -111,34 +111,13 @@ class RobustCholeskyTest(unittest.TestCase):
         self.assertIsNotNone(chol)
         np.testing.assert_allclose(healed, _covar_from_cho_factor(chol), atol=1e-12)
 
-    def test_scoring_and_sampling_agree_on_effective_covariance(self):
-        # The bug this guards against: log_density (scoring) and sampler.sample (sampling) must
-        # evaluate/draw from the IDENTICAL effective covariance, even when construction is handed an
-        # accepted-but-invalid covariance. The textbook Gaussian log-density is recomputed directly
-        # from d.covar -- what sampler.sample() draws from -- via independent numpy primitives
-        # (slogdet/solve, not mixle's own chol/inv_covar), so a scoring/sampling desync would be
-        # caught rather than masked by reusing the same internals on both sides. (scipy's own
-        # multivariate_normal.logpdf is deliberately NOT used here: for the near-singular case below
-        # it applies its own eigenvalue-cutoff regularization, which differs from mixle's jitter
-        # healing for reasons unrelated to this bug and would make the two incomparable.)
+    def test_public_construction_does_not_replace_invalid_covariance(self):
         for bad_covar in (
             np.array([[1.0, 0.5], [0.6, 1.0]]),  # asymmetric, PD via cho_factor's fast path
             np.array([[1.0, 1.0], [1.0, 1.0 - 1e-9]]),  # symmetric, tiny negative eigenvalue
         ):
-            mu = np.zeros(2)
-            d = st.MultivariateGaussianDistribution(mu, bad_covar)
-            x = np.array([0.3, -0.2])
-            diff = x - mu
-
-            sign, logdet = np.linalg.slogdet(d.covar)
-            self.assertGreater(sign, 0.0)
-            sampling_ll = -0.5 * (2.0 * np.log(2.0 * np.pi) + logdet + diff @ np.linalg.solve(d.covar, diff))
-
-            scoring_ll = d.log_density(x)
-            seq_ll = d.seq_log_density(x[None, :])[0]
-
-            np.testing.assert_allclose(scoring_ll, sampling_ll, rtol=1e-6, atol=1e-6)
-            np.testing.assert_allclose(seq_ll, sampling_ll, rtol=1e-6, atol=1e-6)
+            with self.assertRaises(ValueError):
+                st.MultivariateGaussianDistribution(np.zeros(2), bad_covar)
 
     def test_mvn_mixture_fit_survives_float32(self):
         # the reported crash: MPS/float32 MVN mixture at higher dim -> non-PD covariance
