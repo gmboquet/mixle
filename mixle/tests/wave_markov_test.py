@@ -121,7 +121,7 @@ class GrammarTestCase(unittest.TestCase):
             VertexReplacementGrammarEstimator,
         )
 
-        dist = VertexReplacementGrammarDistribution(None, 0.01, name="g")
+        dist = VertexReplacementGrammarDistribution(self._grammar(), 0.0, name="g")
         est = dist.estimator()
         self.assertIsInstance(est, VertexReplacementGrammarEstimator)
         self.assertIsNone(est.pseudo_count)
@@ -136,7 +136,7 @@ class GrammarTestCase(unittest.TestCase):
             VertexReplacementGrammarEstimator,
         )
 
-        est = VertexReplacementGrammarEstimator()
+        est = VertexReplacementGrammarEstimator(self._grammar())
         self.assertIsInstance(est.accumulator_factory(), VertexReplacementGrammarAccumulatorFactory)
         with self.assertWarns(DeprecationWarning):  # camelCase alias is deprecated
             self.assertIsInstance(est.accumulatorFactory(), VertexReplacementGrammarAccumulatorFactory)
@@ -147,12 +147,12 @@ class GrammarTestCase(unittest.TestCase):
             VertexReplacementGrammarDistribution,
         )
 
-        dist = VertexReplacementGrammarDistribution(None, 0.01)
+        dist = VertexReplacementGrammarDistribution(self._grammar(), 0.0)
         enc = dist.dist_to_encoder()
         self.assertEqual(enc, VertexReplacementGrammarDataEncoder())
         self.assertNotEqual(enc, object())
-        data = ["a", "b"]
-        self.assertEqual(enc.seq_encode(data), data)
+        data = [self._edge("A", "B"), self._edge("A", "B")]
+        self.assertEqual(enc.seq_encode(data), tuple(data))
         self.assertEqual(str(enc), "VertexReplacementGrammarDataEncoder")
 
     @staticmethod
@@ -335,9 +335,133 @@ class GrammarTestCase(unittest.TestCase):
         acc.update(self._edge("A", "B"), 2.0, None)
         acc.update(self._edge("A", "C"), 1.0, None)
         counts = acc.value()
-        self.assertEqual(counts.num_rules, len(counts.rule_list))
-        self.assertEqual(counts.rule_dict["S"][0].frequency, 2.0)  # the A-B rule fired with weight 2
-        self.assertEqual(counts.rule_dict["S"][1].frequency, 1.0)  # the A-C rule fired with weight 1
+        self.assertEqual(counts.counts.num_rules, len(counts.counts.rule_list))
+        self.assertEqual(counts.counts.rule_dict["S"][0].frequency, 2.0)  # the A-B rule fired with weight 2
+        self.assertEqual(counts.counts.rule_dict["S"][1].frequency, 1.0)  # the A-C rule fired with weight 1
+
+    def test_active_site_selection_keeps_marginal_normalized(self):
+        from mixle.stats.graphs.vertex_replacement_grammar import (
+            VertexReplacementGrammar,
+            VertexReplacementGrammarDistribution,
+            VertexReplacementRule,
+        )
+
+        pair = nx.Graph()
+        pair.add_node(0, nonterminal="A")
+        pair.add_node(1, nonterminal="A")
+        terminal = nx.Graph()
+        terminal.add_node(0, label="X", node_color="")
+        grammar = VertexReplacementGrammar()
+        grammar.add_rule(VertexReplacementRule("S", pair))
+        grammar.add_rule(VertexReplacementRule("A", terminal))
+        observed = nx.Graph()
+        observed.add_node(0, label="X", node_color="")
+        observed.add_node(1, label="X", node_color="")
+        dist = VertexReplacementGrammarDistribution(grammar, start_symbol="S")
+        self.assertAlmostEqual(dist.log_density(observed), 0.0, places=12)
+
+    def test_sampling_budget_never_conditions_the_rule_law(self):
+        from mixle.stats.graphs.vertex_replacement_grammar import (
+            GrammarSamplingTruncated,
+            VertexReplacementGrammar,
+            VertexReplacementRule,
+            generate_graph,
+        )
+
+        recursive = nx.Graph()
+        recursive.add_node(0, nonterminal="A")
+        terminal = nx.Graph()
+        terminal.add_node(0, label="X", node_color="")
+        grammar = VertexReplacementGrammar()
+        grammar.add_rule(VertexReplacementRule("A", recursive, 1.0))
+        grammar.add_rule(VertexReplacementRule("A", terminal, 1.0))
+        steps = [
+            generate_graph(grammar.rule_dict, target_n=1, rng=np.random.RandomState(seed), start_symbol="A", with_receipt=True)[
+                2
+            ].steps
+            for seed in range(20)
+        ]
+        self.assertIn(1, steps)
+        self.assertTrue(any(step > 1 for step in steps))
+
+        never_terminal = VertexReplacementGrammar()
+        never_terminal.add_rule(VertexReplacementRule("A", recursive, 1.0))
+        with self.assertRaises(GrammarSamplingTruncated) as caught:
+            generate_graph(never_terminal.rule_dict, target_n=1, rng=np.random.RandomState(0), start_symbol="A")
+        self.assertFalse(caught.exception.receipt.completed)
+        self.assertGreater(caught.exception.receipt.active_sites, 0)
+
+    def test_reverse_embedding_requires_all_copied_edge_attributes_to_agree(self):
+        from mixle.stats.graphs.vertex_replacement_grammar import (
+            VertexReplacementGrammar,
+            VertexReplacementGrammarDistribution,
+            VertexReplacementRule,
+        )
+
+        outer = nx.Graph()
+        outer.add_node(0, label="U", node_color="")
+        outer.add_node(1, nonterminal="A")
+        outer.add_edge(0, 1, weight=2.0, edge_color="red")
+        inner = nx.Graph()
+        inner.add_node(0, label="X", node_color="")
+        inner.add_node(1, label="Y", node_color="")
+        grammar = VertexReplacementGrammar()
+        grammar.add_rule(VertexReplacementRule("S", outer))
+        grammar.add_rule(VertexReplacementRule("A", inner, embedding=[("U", "X"), ("U", "Y")]))
+        dist = VertexReplacementGrammarDistribution(grammar, start_symbol="S")
+        generated = dist.sampler(seed=0).sample()
+        self.assertTrue(np.isfinite(dist.log_density(generated)))
+        malformed = generated.copy()
+        u = next(node for node, attrs in malformed.nodes(data=True) if attrs["label"] == "U")
+        x = next(node for node, attrs in malformed.nodes(data=True) if attrs["label"] == "X")
+        malformed.edges[u, x]["edge_color"] = "blue"
+        self.assertEqual(dist.log_density(malformed), float("-inf"))
+
+    def test_estimation_is_owned_idempotent_and_fail_closed(self):
+        from mixle.stats.graphs.vertex_replacement_grammar import VertexReplacementGrammarDistribution
+
+        base = self._freq_dist()
+        dist = VertexReplacementGrammarDistribution(
+            base.grammar,
+            start_symbol="S",
+            orig_n=7,
+            name="owned",
+            keys="shared",
+        )
+        estimator = dist.estimator(pseudo_count=1.0)
+        acc = estimator.accumulator_factory().make()
+        acc.update(self._edge("A", "B"), 1.0, None)
+        stats_value = acc.value()
+        first = estimator.estimate(None, stats_value)
+        second = estimator.estimate(None, stats_value)
+        first_freqs = [rule.frequency for rule in first.grammar.rule_dict["S"]]
+        second_freqs = [rule.frequency for rule in second.grammar.rule_dict["S"]]
+        self.assertEqual(first_freqs, second_freqs)
+        self.assertEqual([rule.frequency for rule in stats_value.counts.rule_dict["S"]], [1.0, 0.0, 0.0])
+        self.assertEqual(first.orig_n, 7)
+        self.assertEqual(first.keys, "shared")
+
+        with self.assertRaises(ValueError):
+            acc.update(self._edge("A", "Z"), 1.0, None)
+        self.assertEqual(acc.receipt().rejected_weight, 1.0)
+        with self.assertRaises(ValueError):
+            estimator.estimate(None, acc.value())
+
+    def test_distribution_owns_grammar_and_rejects_inert_controls(self):
+        from mixle.stats.graphs.vertex_replacement_grammar import VertexReplacementGrammarDistribution
+
+        grammar = self._grammar()
+        dist = VertexReplacementGrammarDistribution(grammar, 0.0, start_symbol=2)
+        before = dist.log_density(self._edge("A", "B"))
+        grammar.rule_dict[2][0].frequency = 0.0
+        grammar.rule_dict[2][0].graph.clear()
+        self.assertEqual(dist.log_density(self._edge("A", "B")), before)
+        exposed = dist.grammar
+        exposed.rule_dict[2][0].frequency = 0.0
+        self.assertEqual(dist.log_density(self._edge("A", "B")), before)
+        for kwargs in ({"mix_p": 0.1}, {"decomp_level": 1}, {"lhs_delta": 1}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                VertexReplacementGrammarDistribution(self._grammar(), **kwargs)
 
 
 class MarkovTransformTestCase(unittest.TestCase):
