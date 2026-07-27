@@ -139,13 +139,12 @@ class DistributionSerializationTestCase(unittest.TestCase):
         )
         original_init_order = list(dist.init_prob_map.items())
         original_row_order = list(dist.transition_map["banana"].items())
-        self.assertEqual(original_init_order, [("banana", 0.5), ("apple", 0.3), ("cherry", 0.2)])
-        self.assertEqual(original_row_order, [("cherry", 0.6), ("apple", 0.4)])
+        self.assertEqual(original_init_order, [("apple", 0.3), ("banana", 0.5), ("cherry", 0.2)])
+        self.assertEqual(original_row_order, [("apple", 0.4), ("banana", 0.0), ("cherry", 0.6)])
 
         loaded = stats.MarkovChainDistribution.from_json(dist.to_json())
 
-        # Not just equal probabilities-per-state (dict ``==`` is order-insensitive) -- the actual
-        # iteration order that MarkovChainSampler consumes must be unchanged.
+        # Canonical state order and all closed transition rows survive the round trip.
         self.assertEqual(list(loaded.init_prob_map.items()), original_init_order)
         self.assertEqual(list(loaded.transition_map["banana"].items()), original_row_order)
         self.assertEqual(loaded.init_prob_map, dist.init_prob_map)
@@ -156,7 +155,7 @@ class DistributionSerializationTestCase(unittest.TestCase):
         after = loaded.sampler(seed=seed).sample(size=200)
         self.assertEqual(after, before, "seeded sample sequence changed across a JSON save/load round trip")
 
-        # The legacy (non-batched) per-step sampling path is separately order-sensitive; cover it too.
+        # Cover the non-batched sampling path too.
         before_legacy = dist.sampler(seed=seed).sample(size=200, batched=False)
         after_legacy = loaded.sampler(seed=seed).sample(size=200, batched=False)
         self.assertEqual(
@@ -173,8 +172,8 @@ class DistributionSerializationTestCase(unittest.TestCase):
 
     def test_stats_json_round_trip_cached_structures(self):
         markov = stats.MarkovChainDistribution(
-            {"a": 1.0},
-            {"a": {"b": 1.0}},
+            {"a": 1.0, "b": 0.0},
+            {"a": {"b": 1.0}, "b": {"b": 1.0}},
             len_dist=stats.CategoricalDistribution({2: 1.0}),
         )
         markov_loaded = self.assert_stats_roundtrip(markov, [["a", "b"]])

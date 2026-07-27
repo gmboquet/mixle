@@ -2362,7 +2362,9 @@ class HiddenMarkovSampler(DistributionSampler):
         t_map = {i: {k: dist.transitions[i, k] for k in range(dist.n_states)} for i in range(dist.n_states)}
         p_map = {i: dist.w[i] for i in range(dist.n_states)}
 
-        self.state_sampler = MarkovChainDistribution(p_map, t_map).sampler(seed=self.rng.randint(0, maxrandint))
+        self.state_sampler = MarkovChainDistribution(p_map, t_map).path_sampler(
+            seed=self.rng.randint(0, maxrandint)
+        )
 
     def _sample_emissions_batched(self, state_seqs: list[list[Any]]) -> list[list[Any]]:
         """Draw all emissions for a batch of state paths, grouped by hidden state.
@@ -3759,7 +3761,7 @@ class HiddenMarkovDataEncoder(DataSequenceEncoder):
         len_enc = self.len_encoder.seq_encode(len_vec)
 
         len_vec = np.asarray(len_vec)
-        max_len = len_vec.max()
+        max_len = int(len_vec.max()) if len_vec.size else 0
         # len_cnt = np.bincount(len_vec)
 
         seq_x = []
@@ -3833,6 +3835,62 @@ class HiddenMarkovDataEncoder(DataSequenceEncoder):
         xs = self.emission_encoder.seq_encode(xs)
 
         return None, ((idx, sz, xs), len_enc)
+
+    def row_count(self, x: Any) -> int:
+        """Return and validate the number of encoded observation sequences."""
+        if not isinstance(x, tuple) or len(x) != 2:
+            raise ValueError("hidden-Markov encoded data must be a two-slot backend payload.")
+        python_payload, numba_payload = x
+        indices = None
+        if python_payload is not None:
+            if numba_payload is not None or not isinstance(python_payload, tuple) or len(python_payload) != 3:
+                raise ValueError("hidden-Markov Python encoding has invalid outer geometry.")
+            metadata = python_payload[0]
+            if not isinstance(metadata, tuple) or len(metadata) != 7:
+                raise ValueError("hidden-Markov Python metadata has invalid geometry.")
+            lengths = np.asarray(metadata[3])
+        else:
+            if not isinstance(numba_payload, tuple) or len(numba_payload) != 2:
+                raise ValueError("hidden-Markov Numba encoding has invalid outer geometry.")
+            sequence_payload = numba_payload[0]
+            if not isinstance(sequence_payload, tuple) or len(sequence_payload) != 3:
+                raise ValueError("hidden-Markov Numba sequence metadata has invalid geometry.")
+            indices = np.asarray(sequence_payload[0])
+            lengths = np.asarray(sequence_payload[1])
+            if indices.ndim != 1:
+                raise ValueError("hidden-Markov encoded sequence indices must be one-dimensional.")
+        if lengths.ndim != 1:
+            raise ValueError("hidden-Markov encoded lengths must be one-dimensional.")
+        try:
+            numeric_lengths = np.asarray(lengths, dtype=float)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TypeError("hidden-Markov encoded lengths must be numeric.") from exc
+        if (
+            np.any(~np.isfinite(numeric_lengths))
+            or np.any(numeric_lengths < 0)
+            or np.any(np.floor(numeric_lengths) != numeric_lengths)
+            or np.any(numeric_lengths > np.iinfo(np.intp).max)
+        ):
+            raise ValueError("hidden-Markov encoded lengths must be nonnegative integers.")
+        if indices is not None:
+            try:
+                numeric_indices = np.asarray(indices, dtype=float)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise TypeError("hidden-Markov encoded sequence indices must be numeric.") from exc
+            if (
+                np.any(~np.isfinite(numeric_indices))
+                or np.any(np.floor(numeric_indices) != numeric_indices)
+                or np.any(numeric_indices < 0)
+                or np.any(numeric_indices >= len(numeric_lengths))
+                or np.any(numeric_indices > np.iinfo(np.intp).max)
+            ):
+                raise ValueError("hidden-Markov encoded sequence indices are outside the row layout.")
+            integer_indices = np.asarray(numeric_indices, dtype=np.intp)
+            integer_lengths = np.asarray(numeric_lengths, dtype=np.intp)
+            observed = np.bincount(integer_indices, minlength=len(integer_lengths))
+            if not np.array_equal(observed, integer_lengths):
+                raise ValueError("hidden-Markov encoded sequence indices disagree with sequence lengths.")
+        return len(lengths)
 
 
 @numba.njit("float64[:,:](int32[:], float64[:,:], float64[:,:])", cache=True)

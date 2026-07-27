@@ -437,6 +437,8 @@ __all__ = [
     "LogGaussianEstimator",
     "LogGaussianDataEncoder",
     "MarkovChainDistribution",
+    "MarkovChainStatistics",
+    "NonGenerativeMarkovChainError",
     "MarkovChainSampler",
     "MarkovChainEstimator",
     "MarkovChainDataEncoder",
@@ -1740,6 +1742,8 @@ from mixle.stats.sequences.markov_chain import (
     MarkovChainEnumerator,
     MarkovChainEstimator,
     MarkovChainSampler,
+    MarkovChainStatistics,
+    NonGenerativeMarkovChainError,
 )
 from mixle.stats.sequences.sparse_markov_transform import (
     SparseMarkovAssociationDataEncoder,

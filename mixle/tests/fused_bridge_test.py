@@ -124,7 +124,7 @@ class UniversalBridgeCoverageTest(unittest.TestCase):
         data = [(float(rng.laplace(0, 1)), float(rng.randn())) for _ in range(2000)]
         _parity(self, model, data)
 
-    def test_prior_chain_takes_the_fast_template_and_matches_host(self):
+    def test_prior_chain_takes_the_bridge_and_matches_host(self):
         from mixle.stats import MarkovChainDistribution
 
         states = ["a", "b"]
@@ -135,7 +135,9 @@ class UniversalBridgeCoverageTest(unittest.TestCase):
             init = r.dirichlet(np.ones(2))
             trans = r.dirichlet(np.ones(2), size=2)
             d = MarkovChainDistribution(
-                dict(zip(states, init)), {s: dict(zip(states, trans[i])) for i, s in enumerate(states)}
+                dict(zip(states, init)),
+                {s: dict(zip(states, trans[i])) for i, s in enumerate(states)},
+                len_dist=CategoricalDistribution({length: 0.2 for length in range(1, 6)}),
             )
             d.set_prior(
                 (
@@ -150,7 +152,7 @@ class UniversalBridgeCoverageTest(unittest.TestCase):
         comps = [CompositeDistribution((chain(j), GaussianDistribution(float(j), 1.0))) for j in range(2)]
         model = MixtureDistribution(comps, [0.5, 0.5])
         plan = fc.analyze(model)
-        self.assertEqual(plan.leaf_templates[0].name, "markovchain", "prior chains take the fast template")
+        self.assertEqual(plan.leaf_templates[0].name, "bridge")
         data = [
             ([states[rng.randint(2)] for _ in range(int(rng.randint(1, 6)))], float(rng.randn())) for _ in range(1500)
         ]

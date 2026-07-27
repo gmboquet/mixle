@@ -1,19 +1,11 @@
-"""Markov-chain leaf template for the fused codegen: composites with chain factors are fusible.
-
-The chain kind rides the template system's existing machinery -- a scatter-built per-row
-per-component score table in the precompute slot (where the matrix kind's BLAS quad forms live), a
-table lookup in the row fragment, and weighted init/transition histograms scattered from the
-responsibility matrix R in the post pass. No recursion, no new kernel architecture: the encoding was
-already scatter-shaped. Parity is asserted against the host path at 1e-12, including the honesty
-edges: empty and length-1 sequences, out-of-support states hitting a component's default mass, and
-the fusibility REFUSALS (length distributions, priors).
-"""
+"""Fused bridge parity for proper Markov-chain laws and guards for lengthless factors."""
 
 import unittest
 
 import numpy as np
 
 from mixle.stats import (
+    CategoricalDistribution,
     CompositeDistribution,
     GaussianDistribution,
     MarkovChainDistribution,
@@ -31,7 +23,9 @@ def _chain(seed, states=STATES):
     init = r.dirichlet(np.ones(len(states)))
     trans = r.dirichlet(np.ones(len(states)), size=len(states))
     return MarkovChainDistribution(
-        dict(zip(states, init)), {s: dict(zip(states, trans[i])) for i, s in enumerate(states)}
+        dict(zip(states, init)),
+        {s: dict(zip(states, trans[i])) for i, s in enumerate(states)},
+        len_dist=CategoricalDistribution({length: 1.0 / 8.0 for length in range(8)}),
     )
 
 
@@ -73,7 +67,7 @@ class FusedChainParityTest(unittest.TestCase):
         )
 
     def test_out_of_support_states_hit_the_default_mass_exactly(self):
-        # component 0's chain only knows {a, b}; the data contains 'c' -> its log_dv default path
+        # Component 0's chain only knows {a, b}; rows containing c have zero mass there.
         rng = np.random.RandomState(1)
         narrow = _chain(0, states=["a", "b"])
         wide = _chain(1)
@@ -118,6 +112,14 @@ class FusibilityGuardTest(unittest.TestCase):
         plan = fc.analyze(MixtureDistribution(comps, [0.5, 0.5]))
         self.assertIsNotNone(plan)
         self.assertEqual(plan.leaf_templates[0].name, "bridge")
+
+    def test_lengthless_chain_cannot_be_used_as_a_mixture_law(self):
+        factor = MarkovChainDistribution(
+            {"a": 0.5, "b": 0.5},
+            {"a": {"a": 0.5, "b": 0.5}, "b": {"a": 0.5, "b": 0.5}},
+        )
+        with self.assertRaisesRegex(TypeError, "generative probability laws"):
+            MixtureDistribution([factor, factor], [0.5, 0.5])
 
     def test_all_chain_homogeneous_mixture_survives_the_block_em_path(self):
         """Regression pin: an ALL-chain homogeneous top mixture used to hit an IndexError inside

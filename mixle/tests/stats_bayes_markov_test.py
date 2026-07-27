@@ -67,9 +67,12 @@ def _mc_estimate():
     sd = _mc_dist()
     s_res = sd.estimator().estimate(
         None,
-        (
-            {i: INIT_COUNTS[i] for i in range(S)},
-            {i: {j: TRANS_COUNTS[i, j] for j in range(S)} for i in range(S)},
+        smc.MarkovChainStatistics(
+            1,
+            tuple(STATES),
+            tuple(float(value) for value in INIT_COUNTS),
+            tuple(tuple(float(value) for value in row) for row in TRANS_COUNTS),
+            float(np.sum(INIT_COUNTS)),
             None,
         ),
     )
@@ -108,7 +111,10 @@ def test_markov_chain_model_log_density_finite():
 
 
 def test_markov_chain_mle_unchanged_without_prior():
-    sd = smc.MarkovChainDistribution({0: 0.2, 1: 0.3, 2: 0.5}, {0: {0: 0.5, 1: 0.3, 2: 0.2}})
+    sd = smc.MarkovChainDistribution(
+        {0: 0.2, 1: 0.3, 2: 0.5},
+        {i: {j: TRANS[i, j] for j in range(S)} for i in range(S)},
+    )
     est = sd.estimator()
     assert est.has_conj_prior is False
     assert est.get_prior() is None
@@ -116,9 +122,12 @@ def test_markov_chain_mle_unchanged_without_prior():
     for x in ([0, 1, 2], [0], []):
         assert sd.expected_log_density(x) == sd.log_density(x)
     # MLE estimate matches the legacy estimate0 path exactly
-    ss = (
-        {0: 5.0, 1: 2.0, 2: 3.0},
-        {0: {0: 4.0, 1: 2.0, 2: 1.0}, 1: {1: 6.0, 2: 3.0}, 2: {0: 2.0, 1: 1.0, 2: 5.0}},
+    ss = smc.MarkovChainStatistics(
+        1,
+        tuple(STATES),
+        (5.0, 2.0, 3.0),
+        ((4.0, 2.0, 1.0), (0.0, 6.0, 3.0), (2.0, 1.0, 5.0)),
+        10.0,
         None,
     )
     res = est.estimate(None, ss)

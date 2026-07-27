@@ -33,9 +33,8 @@ NegativeBinomial (iterative dispersion over the count histogram) fuse despite no
 
 Beyond the templated kinds, coverage is COMPLETE for protocol-bearing factors:
 
-* **chain leaves** (MarkovChain with the Null length model, Dirichlet priors included): scored from
-  per-encoding init/transition log tables scatter-built before the row loop, statistics scattered from
-  the responsibility matrix in the post pass.
+* **proper chain laws** (MarkovChain with an explicit length model): handled by the native bridge so
+  their length probability and versioned sufficient-statistic contract remain intact.
 * **bridged factors** (everything else inside a composite -- nested Mixtures, HMMs, nested Composites,
   length-model chains, untemplated leaves like Laplace): scored from a precomputed per-component table
   (each column the factor's own native ``seq_log_density``), estimated by the factor's own accumulator
@@ -955,15 +954,17 @@ def _markov_chain_to_value(init_hist_k: np.ndarray, trans_hist_k: np.ndarray, en
 
 
 def _markov_chain_matches(d: Any) -> bool:
-    """Fast-path chain configs: a MarkovChainDistribution whose length model is the Null distribution
-    (its seq_log_density contributes exactly zero, so the tables carry the whole density). A Dirichlet
-    prior is fine -- the sufficient statistics are the standard count maps either way, and the
-    estimator applies its prior at estimate() exactly as on the host path (parity-tested). Chains
-    with a REAL length distribution fall through to the bridge template (native scoring/estimation,
-    length model included)."""
+    """Match only generative chains; current closed chains therefore use the native bridge.
+
+    A chain with a Null length model is a conditional likelihood factor, not a probability law over
+    finite sequences. The old table path also emitted the obsolete mutable-map statistic layout.
+    Keeping both requirements here prevents it from being selected until a future template carries
+    an explicit length law and the versioned statistic schema.
+    """
     return (
         type(d).__name__ == "MarkovChainDistribution"
         and type(getattr(d, "len_dist", None)).__name__ == "NullDistribution"
+        and getattr(d.density_semantics(), "name", None) == "LAW"
     )
 
 

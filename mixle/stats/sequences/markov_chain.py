@@ -13,10 +13,13 @@ Note if len(x) = 0, only log(P_len(0)) is returned.
 
 """
 
+import copy
 import heapq
 import itertools
+import math
 from collections.abc import Iterable, Sequence
-from typing import Any, TypeVar
+from types import MappingProxyType
+from typing import Any, NamedTuple, TypeVar
 
 import numpy as np
 from numpy.random import RandomState
@@ -34,7 +37,9 @@ from mixle.stats.combinator.null_dist import (
     NullEstimator,
 )
 from mixle.stats.compute.pdist import (
+    ContractError,
     DataSequenceEncoder,
+    DensitySemantics,
     DistributionEnumerator,
     DistributionSampler,
     EnumerationError,
@@ -47,8 +52,204 @@ from mixle.stats.compute.pdist import (
 
 T = TypeVar("T")  ### state type
 T1 = TypeVar("T1")  ### Type for length distribution sufficient statsitics value.
-suff_stat_type = tuple[dict[T, float], dict[T, dict[T, float]], Any | None]
 enc_data_type = tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Any]
+
+
+class NonGenerativeMarkovChainError(TypeError):
+    """Raised when a fixed-length Markov factor is asked to generate whole sequences."""
+
+
+class MarkovChainStatistics(NamedTuple):
+    """Immutable, versioned sufficient statistics over one closed state layout."""
+
+    schema_version: int
+    states: tuple[Any, ...]
+    initial_counts: tuple[float, ...]
+    transition_counts: tuple[tuple[float, ...], ...]
+    length_nobs: float
+    length: Any | None
+
+
+def _canonical_states(values: Iterable[Any], *, label: str) -> tuple[Any, ...]:
+    """Return unique hashable states in a stable heterogeneous-label order."""
+    try:
+        values = tuple(values)
+    except TypeError as exc:
+        raise TypeError("%s must be an iterable of hashable states." % label) from exc
+    seen = set()
+    for value in values:
+        try:
+            duplicate = value in seen
+            seen.add(value)
+        except TypeError as exc:
+            raise TypeError("%s contains an unhashable state %r." % (label, value)) from exc
+        if duplicate:
+            raise ValueError("%s contains duplicate state %r." % (label, value))
+    return tuple(
+        sorted(
+            values,
+            key=lambda value: (
+                type(value).__module__,
+                type(value).__qualname__,
+                repr(value),
+            ),
+        )
+    )
+
+
+def _finite_nonnegative(value: Any, *, label: str) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError("%s must be a finite non-negative scalar." % label)
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("%s must be a finite non-negative scalar." % label) from exc
+    if not math.isfinite(result) or result < 0.0:
+        raise ValueError("%s must be a finite non-negative scalar." % label)
+    return result
+
+
+def _checked_length(value: Any, *, label: str) -> int:
+    """Return one exact finite non-negative integer length."""
+    if isinstance(value, (bool, np.bool_, str, bytes)):
+        raise TypeError("%s must be an exact finite non-negative integer." % label)
+    array = np.asarray(value)
+    if array.ndim != 0 or np.iscomplexobj(array):
+        raise TypeError("%s must be a scalar exact finite non-negative integer." % label)
+    try:
+        numeric = float(array)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("%s must be an exact finite non-negative integer." % label) from exc
+    if not math.isfinite(numeric) or numeric < 0.0 or math.floor(numeric) != numeric:
+        raise ValueError("%s must be an exact finite non-negative integer." % label)
+    if numeric > np.iinfo(np.intp).max:
+        raise ValueError("%s exceeds the platform index range." % label)
+    return int(numeric)
+
+
+def _validated_probability_map(value: Any, *, label: str) -> dict[Any, float]:
+    if not isinstance(value, dict):
+        raise TypeError("%s must be a dict." % label)
+    result = {}
+    for key, probability in value.items():
+        try:
+            hash(key)
+        except TypeError as exc:
+            raise TypeError("%s contains an unhashable state." % label) from exc
+        result[key] = _finite_nonnegative(probability, label="%s[%r]" % (label, key))
+    return result
+
+
+def _require_simplex(probabilities: Iterable[float], *, label: str) -> None:
+    total = math.fsum(float(value) for value in probabilities)
+    if not math.isclose(total, 1.0, rel_tol=1.0e-12, abs_tol=1.0e-12):
+        raise ValueError("%s must sum to 1; got %.17g." % (label, total))
+
+
+def _validate_markov_prior(
+    prior: Any,
+    *,
+    expected_states: tuple[Any, ...] | None = None,
+) -> tuple[tuple[Any, ...], Any, tuple[Any, ...]]:
+    """Validate one exact finite-state Dirichlet prior layout."""
+    from mixle.stats.bayes.dirichlet import DirichletDistribution
+
+    if not isinstance(prior, (tuple, list)) or len(prior) != 3:
+        raise TypeError("Markov prior must be (states, init_prior, row_priors).")
+    raw_states = tuple(prior[0])
+    states = _canonical_states(raw_states, label="Markov prior states")
+    if not states:
+        raise ValueError("Markov prior states cannot be empty.")
+    if raw_states != states:
+        raise ValueError("Markov prior states must use the model's canonical state order.")
+    if expected_states is not None and states != expected_states:
+        raise ValueError("Markov prior states must exactly match the model state layout.")
+    init_prior = prior[1]
+    row_priors = tuple(prior[2])
+    if not isinstance(init_prior, DirichletDistribution):
+        raise TypeError("Markov initial prior must be a DirichletDistribution.")
+    if len(row_priors) != len(states) or any(
+        not isinstance(row, DirichletDistribution) for row in row_priors
+    ):
+        raise ValueError("Markov prior must contain one Dirichlet transition prior per state.")
+    for label, distribution in (
+        ("initial", init_prior),
+        *((("transition[%r]" % state), row) for state, row in zip(states, row_priors)),
+    ):
+        alpha = np.asarray(distribution.get_parameters(), dtype=float)
+        if alpha.shape != (len(states),) or np.any(~np.isfinite(alpha)) or np.any(alpha <= 0.0):
+            raise ValueError("%s Markov prior parameters must be a positive finite state-aligned vector." % label)
+    return states, init_prior, row_priors
+
+
+def _validate_markov_statistics(
+    value: Any,
+    *,
+    expected_states: tuple[Any, ...] | None = None,
+    path: str,
+) -> MarkovChainStatistics:
+    """Validate and normalize one immutable fixed-layout statistic."""
+    if not isinstance(value, MarkovChainStatistics) or value.schema_version != 1:
+        raise ContractError(
+            path,
+            "MarkovChainStatistics schema version 1",
+            type(value).__name__,
+            "pass the value produced by MarkovChainAccumulator.value().",
+        )
+    raw_states = tuple(value.states)
+    states = _canonical_states(raw_states, label="%s.states" % path)
+    if not states:
+        raise ValueError("%s states cannot be empty." % path)
+    if raw_states != states:
+        raise ContractError(
+            "%s.states" % path,
+            "canonical state order %r" % (states,),
+            "%r" % (raw_states,),
+        )
+    if expected_states is not None and states != expected_states:
+        raise ContractError(
+            "%s.states" % path,
+            "the configured state layout %r" % (expected_states,),
+            "%r" % (states,),
+        )
+    initial = tuple(
+        _finite_nonnegative(count, label="%s.initial_counts[%d]" % (path, index))
+        for index, count in enumerate(value.initial_counts)
+    )
+    if len(initial) != len(states):
+        raise ValueError("%s initial count vector must align with states." % path)
+    if len(value.transition_counts) != len(states):
+        raise ValueError("%s transition count matrix must have one row per state." % path)
+    transitions = tuple(
+        tuple(
+            _finite_nonnegative(count, label="%s.transition_counts[%d][%d]" % (path, row, column))
+            for column, count in enumerate(counts)
+        )
+        for row, counts in enumerate(value.transition_counts)
+    )
+    if any(len(row) != len(states) for row in transitions):
+        raise ValueError("%s transition count matrix must be square and state-aligned." % path)
+    return MarkovChainStatistics(
+        1,
+        states,
+        initial,
+        transitions,
+        _finite_nonnegative(value.length_nobs, label="%s.length_nobs" % path),
+        value.length,
+    )
+
+
+def _validate_effective_nobs(nobs: float | None, statistics: MarkovChainStatistics) -> None:
+    if nobs is None:
+        return
+    checked = _finite_nonnegative(nobs, label="Markov estimate nobs")
+    if not math.isclose(
+        checked,
+        statistics.length_nobs,
+        rel_tol=1.0e-12,
+        abs_tol=1.0e-12,
+    ):
+        raise ValueError("Markov estimate nobs must equal the statistic's effective row count.")
 
 
 # --- Conjugate Dirichlet prior machinery (folded from mixle.bstats.markov_chain) ---
@@ -78,23 +279,15 @@ def markov_chain_dirichlet_default_prior(states: Sequence[T]):
 
     """
     dirichlet = _bstats_dirichlet()
-    states = list(states)
+    states = list(_canonical_states(states, label="Markov prior states"))
     s = len(states)
+    if s == 0:
+        raise ValueError("Markov prior states cannot be empty.")
     return (
         states,
         dirichlet(np.ones(s)),
         [dirichlet(np.ones(s)) for _ in range(s)],
     )
-
-
-def _unpack_markov_chain_prior(prior):
-    """Normalize the prior into ``(states, init_prior, row_priors)``.
-
-    Accepts the ``(states, init_prior, row_priors)`` tuple form.
-
-    """
-    states, init_prior, row_priors = prior[0], prior[1], list(prior[2])
-    return list(states), init_prior, row_priors
 
 
 def _map_probs(counts: np.ndarray, alpha: np.ndarray) -> np.ndarray:
@@ -181,104 +374,147 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         self.name = name
-        self.init_prob_map = init_prob_map
-        self.transition_map = transition_map
+        raw_initial = _validated_probability_map(init_prob_map, label="init_prob_map")
+        if not isinstance(transition_map, dict):
+            raise TypeError("transition_map must be a dict of probability-row dicts.")
+        raw_transitions = {
+            state: _validated_probability_map(row, label="transition_map[%r]" % (state,))
+            for state, row in transition_map.items()
+        }
+        if isinstance(default_value, (bool, np.bool_)):
+            raise TypeError("default_value must be zero for a closed finite-state Markov chain.")
+        try:
+            checked_default = float(default_value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TypeError("default_value must be zero for a closed finite-state Markov chain.") from exc
+        if not math.isfinite(checked_default) or checked_default != 0.0:
+            raise ValueError(
+                "default_value must be 0; unknown labels require an explicit state and probability row."
+            )
+
+        states = _canonical_states(
+            set(raw_initial)
+            .union(raw_transitions)
+            .union(value for row in raw_transitions.values() for value in row),
+            label="Markov state space",
+        )
+        if not states:
+            raise ValueError("Markov state space cannot be empty.")
+        _require_simplex(raw_initial.values(), label="init_prob_map")
+        missing_rows = tuple(state for state in states if state not in raw_transitions)
+        if missing_rows:
+            raise ValueError("transition_map is missing rows for states %r." % (missing_rows,))
+
+        initial = {state: raw_initial.get(state, 0.0) for state in states}
+        transitions = {}
+        for state in states:
+            row = raw_transitions[state]
+            _require_simplex(row.values(), label="transition_map[%r]" % (state,))
+            transitions[state] = {next_state: row.get(next_state, 0.0) for next_state in states}
+
+        self.init_prob_map = MappingProxyType(initial)
+        self.transition_map = MappingProxyType(
+            {state: MappingProxyType(row) for state, row in transitions.items()}
+        )
         self.len_dist = len_dist if len_dist is not None else NullDistribution()
+        if not supports(self.len_dist, Neutral):
+            from mixle.stats.combinator.sequence import _validate_length_distribution
 
-        self.all_vals = (
-            set(init_prob_map.keys())
-            .union(set([v for u in transition_map.values() for v in u.keys()]))
-            .union(transition_map.keys())
+            _validate_length_distribution(self.len_dist)
+
+        self.all_vals = frozenset(states)
+        self.loginit_prob_map = MappingProxyType(
+            {state: -np.inf if probability == 0.0 else float(np.log(probability)) for state, probability in initial.items()}
         )
-        self.loginit_prob_map = {u[0]: -np.inf if u[1] == 0.0 else log(u[1]) for u in init_prob_map.items()}
-
-        self.log_transition_map = dict(
-            (key, dict((u[0], log(u[1])) for u in transition_map[key].items())) for key in transition_map.keys()
+        self.log_transition_map = MappingProxyType(
+            {
+                state: MappingProxyType(
+                    {
+                        next_state: -np.inf if probability == 0.0 else float(np.log(probability))
+                        for next_state, probability in row.items()
+                    }
+                )
+                for state, row in transitions.items()
+            }
         )
 
-        self.default_value = max(min(default_value, 1.0), 0.0)
-        self.log_dv = -np.inf if default_value == 0.0 else log(self.default_value)
-        self.log_dtv = -np.inf if default_value == 0.0 else (log(default_value) - np.log(len(self.all_vals) + 1))
-        self.log1p_dv = log(one + self.default_value)
+        self.default_value = 0.0
+        self.log_dv = -np.inf
+        self.log_dtv = -np.inf
+        self.log1p_dv = 0.0
 
-        num_keys = len(self.all_vals)
-
-        keys = list(self.all_vals)
-        sidx = np.argsort(keys)
-        keys = [keys[i] for i in sidx]
+        num_keys = len(states)
+        keys = list(states)
 
         self.key_map = {keys[i]: i + 1 for i in range(num_keys)}
         self.inv_key_map = keys
         self.num_keys = num_keys
 
-        self.init_log_pvec = np.zeros(num_keys + 1)
-        self.trans_log_pvec = dok_matrix((num_keys + 1, num_keys + 1))
+        self.init_log_pvec = np.full(num_keys + 1, -np.inf, dtype=float)
+        dense_transitions = np.full((num_keys + 1, num_keys + 1), -np.inf, dtype=float)
 
-        for k1, v1 in init_prob_map.items():
-            self.init_log_pvec[self.key_map.get(k1, 0.0)] = -np.inf if v1 == 0.0 else np.log(v1)
+        for k1, v1 in initial.items():
+            self.init_log_pvec[self.key_map[k1]] = -np.inf if v1 == 0.0 else np.log(v1)
 
-        for k1, v1 in transition_map.items():
-            k1_idx = self.key_map.get(k1, 0)
+        for k1, v1 in transitions.items():
+            k1_idx = self.key_map[k1]
             for k2, v2 in v1.items():
-                self.trans_log_pvec[k1_idx, self.key_map.get(k2, 0)] = -np.inf if v2 == 0 else np.log(v2)
-
-        self.init_log_pvec[0] = self.log_dv
-        self.trans_log_pvec[:, 0] = self.log_dv
-        self.trans_log_pvec[0, :] = self.log_dv - np.log(num_keys + 1)
+                dense_transitions[k1_idx, self.key_map[k2]] = -np.inf if v2 == 0 else np.log(v2)
+        self.trans_log_pvec = dok_matrix(dense_transitions)
 
         self.set_prior(prior)
 
     def __pysp_getstate__(self) -> dict[str, Any]:
-        """Return JSON-serializable state with ``init_prob_map``/``transition_map`` as order-preserving pairs.
-
-        Both maps' insertion order is load-bearing: :class:`MarkovChainSampler` turns
-        ``init_prob_map.items()`` (and, per source state, ``transition_map[state].items()``) into
-        parallel keys/probs arrays and draws a positional index from them (via ``rng.choice`` or a
-        cumulative-sum search), so a fixed seed maps to a specific *sequence position*, not a state
-        label -- for both the batched (default) and legacy per-step sampling paths. mixle's generic
-        dict encoding (:func:`mixle.utils.serialization._encode_dict`) canonicalizes key order for
-        diffable JSON output, which would silently reorder these maps on decode and change what a
-        fixed-seed sampler draws -- same seed, same per-state/per-transition probabilities, but a
-        different sampled sequence after a save/load round trip. Encoding each map as a plain list of
-        ``(key, value)`` pairs instead of a dict -- nesting a second such list for each transition row,
-        so both the outer (source-state) and inner (destination-state) order survive -- routes them
-        through the list/tuple encoders, which never reorder, so state order survives regardless of any
-        dict-key-sorting elsewhere in the serialization path.
-
-        ``log_density``/``seq_log_density`` need no such treatment: they read ``loginit_prob_map``/
-        ``log_transition_map`` only via keyed ``.get()`` lookups, and the vectorized path's
-        ``key_map``/``inv_key_map``/``init_log_pvec``/``trans_log_pvec`` are already rebuilt from
-        ``all_vals`` (a set) in a canonical sorted order at construction time, independent of
-        ``init_prob_map``/``transition_map``'s insertion order -- so scoring is unaffected by this
-        reordering and only the two raw constructor maps need order-preserving encoding.
-        """
-        state = dict(self.__dict__)
-        state["init_prob_map"] = list(self.init_prob_map.items())
-        state["transition_map"] = [(key, list(row.items())) for key, row in self.transition_map.items()]
-        return state
+        """Return the validated, canonical closed-chain tables in serializable form."""
+        return {
+            "init_prob_map": list(self.init_prob_map.items()),
+            "transition_map": [(key, list(row.items())) for key, row in self.transition_map.items()],
+            "len_dist": self.len_dist,
+            "default_value": self.default_value,
+            "name": self.name,
+            "prior": self.get_prior(),
+        }
 
     def __pysp_setstate__(self, state: dict[str, Any]) -> None:
-        """Restore state, rebuilding ``init_prob_map``/``transition_map`` from their pair-list form.
-
-        Accepts a plain dict for either map too, so pre-fix artifacts (serialized before this method
-        existed, with both maps as generic -- and therefore key-sorted -- dicts) still decode without
-        error; their original state order was already lost at write time and cannot be recovered, but
-        new writes now round-trip order-faithfully.
-        """
+        """Restore state through the constructor so every invariant is revalidated."""
         state = dict(state)
-
         init_prob_map = state["init_prob_map"]
-        state["init_prob_map"] = init_prob_map if isinstance(init_prob_map, dict) else dict(init_prob_map)
-
         transition_map = state["transition_map"]
-        if isinstance(transition_map, dict):
-            state["transition_map"] = transition_map
-        else:
-            state["transition_map"] = {
-                key: (row if isinstance(row, dict) else dict(row)) for key, row in transition_map
-            }
+        self.__init__(
+            init_prob_map if isinstance(init_prob_map, dict) else dict(init_prob_map),
+            (
+                transition_map
+                if isinstance(transition_map, dict)
+                else {key: (row if isinstance(row, dict) else dict(row)) for key, row in transition_map}
+            ),
+            len_dist=state.get("len_dist"),
+            default_value=state.get("default_value", 0.0),
+            name=state.get("name"),
+            prior=state.get("prior"),
+        )
 
-        self.__dict__.update(state)
+    def __deepcopy__(self, memo: dict[int, Any]) -> "MarkovChainDistribution":
+        """Copy immutable table views by reconstructing their owned backing dictionaries."""
+        payload = copy.deepcopy(
+            (
+                dict(self.init_prob_map),
+                {state: dict(row) for state, row in self.transition_map.items()},
+                self.len_dist,
+                self.name,
+                self.get_prior(),
+            ),
+            memo,
+        )
+        copied = type(self)(
+            payload[0],
+            payload[1],
+            len_dist=payload[2],
+            default_value=0.0,
+            name=payload[3],
+            prior=payload[4],
+        )
+        memo[id(self)] = copied
+        return copied
 
     def get_prior(self):
         """Returns the conjugate prior in ``(states, init_prior, row_priors)`` form (or None)."""
@@ -298,8 +534,6 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
             prior: ``(states, init_prior, row_priors)`` tuple or None.
 
         """
-        from mixle.stats.bayes.dirichlet import DirichletDistribution
-
         if prior is None:
             self.prior = None
             self.prior_states = None
@@ -310,26 +544,22 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
             self.has_conj_prior = False
             return
 
-        states, init_prior, row_priors = _unpack_markov_chain_prior(prior)
-        self.prior = prior
+        states, init_prior, row_priors = _validate_markov_prior(
+            prior,
+            expected_states=tuple(self.inv_key_map),
+        )
+        self.prior = (states, init_prior, row_priors)
         self.prior_states = states
         self.init_prior = init_prior
         self.row_priors = row_priors
 
-        if isinstance(init_prior, DirichletDistribution) and all(
-            isinstance(u, DirichletDistribution) for u in row_priors
-        ):
-            a0 = np.asarray(init_prior.get_parameters(), dtype=float)
-            self.e_log_init = digamma(a0) - digamma(a0.sum())
-            self.e_log_trans = np.zeros((len(states), len(states)))
-            for i, row_prior in enumerate(row_priors):
-                ai = np.asarray(row_prior.get_parameters(), dtype=float)
-                self.e_log_trans[i, :] = digamma(ai) - digamma(ai.sum())
-            self.has_conj_prior = True
-        else:
-            self.e_log_init = None
-            self.e_log_trans = None
-            self.has_conj_prior = False
+        a0 = np.asarray(init_prior.get_parameters(), dtype=float)
+        self.e_log_init = digamma(a0) - digamma(a0.sum())
+        self.e_log_trans = np.zeros((len(states), len(states)))
+        for i, row_prior in enumerate(row_priors):
+            ai = np.asarray(row_prior.get_parameters(), dtype=float)
+            self.e_log_trans[i, :] = digamma(ai) - digamma(ai.sum())
+        self.has_conj_prior = True
 
     def expected_log_density(self, x: list[T]) -> float:
         """Variational E_q[log p(x)] under the Dirichlet priors over a state sequence.
@@ -351,10 +581,14 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         rv = 0.0
         if len(x) != 0:
             idx = {s: i for i, s in enumerate(self.prior_states)}
+            if x[0] not in idx:
+                return -np.inf
             rv = float(self.e_log_init[idx[x[0]]])
             for i in range(1, len(x)):
+                if x[i - 1] not in idx or x[i] not in idx:
+                    return -np.inf
                 rv += float(self.e_log_trans[idx[x[i - 1]], idx[x[i]]])
-        rv += self.len_dist.log_density(len(x))
+        rv += self.len_dist.expected_log_density(len(x))
         return rv
 
     def seq_expected_log_density(self, x: enc_data_type) -> np.ndarray:
@@ -375,16 +609,24 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         sz, idx0, idx1, init_x, prev_x, next_x, inv_key_map, len_enc = x
 
         idx = {s: i for i, s in enumerate(self.prior_states)}
-        loc_key_map = np.asarray([idx[u] for u in inv_key_map])
+        loc_key_map = np.asarray([idx.get(u, -1) for u in inv_key_map], dtype=np.int64)
 
         rv = np.zeros(sz, dtype=float)
         if len(idx1) > 0:
-            temp = self.e_log_trans[loc_key_map[prev_x], loc_key_map[next_x]]
+            prev = loc_key_map[prev_x]
+            nxt = loc_key_map[next_x]
+            valid = (prev >= 0) & (nxt >= 0)
+            temp = np.full(len(idx1), -np.inf, dtype=float)
+            temp[valid] = self.e_log_trans[prev[valid], nxt[valid]]
             rv = np.bincount(idx1, weights=temp, minlength=sz)
-        rv[idx0] += self.e_log_init[loc_key_map[init_x]]
+        initial = loc_key_map[init_x]
+        initial_scores = np.full(len(idx0), -np.inf, dtype=float)
+        valid = initial >= 0
+        initial_scores[valid] = self.e_log_init[initial[valid]]
+        rv[idx0] += initial_scores
 
         if len_enc is not None:
-            rv += self.len_dist.seq_log_density(len_enc)
+            rv += self.len_dist.seq_expected_log_density(len_enc)
 
         return rv
 
@@ -398,6 +640,12 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
             kernel_status="numpy_only" if child.numpy_only_reason else "generic",
             numpy_only_reason=child.numpy_only_reason,
         )
+
+    def density_semantics(self):
+        """Classify a chain without a length law as a conditional fixed-length factor."""
+        if supports(self.len_dist, Neutral):
+            return DensitySemantics.LIKELIHOOD_FACTOR
+        return self.len_dist.density_semantics()
 
     def compute_declaration(self):
         """Return the symbolic declaration for Markov-chain transition and length statistics."""
@@ -431,9 +679,10 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
 
     def __str__(self):
         """Return a constructor-style representation of the distribution."""
-        s1 = repr(dict(sorted(self.init_prob_map.items(), key=lambda u: u[0])))
-        temp = sorted(self.transition_map.items(), key=lambda u: u[0])
-        s2 = repr(dict([(k, dict(sorted(v.items(), key=lambda u: u[0]))) for k, v in temp]))
+        order = lambda item: (type(item[0]).__module__, type(item[0]).__qualname__, repr(item[0]))
+        s1 = repr(dict(sorted(self.init_prob_map.items(), key=order)))
+        temp = sorted(self.transition_map.items(), key=order)
+        s2 = repr(dict((k, dict(sorted(v.items(), key=order))) for k, v in temp))
         s3 = str(self.len_dist)
         s4 = repr(self.default_value)
         s5 = repr(self.name)
@@ -622,8 +871,8 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def backend_stacked_sufficient_statistics_with_estimator(
         cls, x: enc_data_type, weights: Any, params: dict[str, Any], engine: Any, estimator: Any
-    ) -> tuple[Any, ...]:
-        """Return per-component legacy ``(initial_counts, transition_counts, length_stat)`` statistics."""
+    ) -> tuple[MarkovChainStatistics, ...]:
+        """Return versioned per-component fixed-layout Markov statistics."""
         from mixle.stats.compute.stacked import (
             StackedEstimatorView,
             stacked_component_sufficient_statistics,
@@ -633,6 +882,8 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         sz, idx0, idx1, init_x, prev_x, next_x, inv_key_map, len_enc = x
         ww = engine.asarray(weights)
         num_components = int(params["num_components"])
+        labels = tuple(params["labels"])
+        label_to_position = {label: index for index, label in enumerate(labels)}
 
         if len(idx0) > 0 and len(inv_key_map) > 0:
             init_weights = ww[engine.asarray(idx0)]
@@ -675,18 +926,31 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
             )
             length_by_component = unstack_component_stats(length_stats, num_components)
 
-        return tuple(
-            (
-                {
-                    inv_key_map[value_index]: float(init_counts[value_index, component])
-                    for value_index in range(len(inv_key_map))
-                    if init_counts[value_index, component] != 0.0
-                },
-                _markov_chain_transition_stats(inv_key_map, observed_pairs, trans_counts, component),
-                length_by_component[component],
+        length_counts = engine.sum(ww, axis=0)
+        result = []
+        for component in range(num_components):
+            dense_initial = np.zeros(len(labels), dtype=float)
+            dense_transitions = np.zeros((len(labels), len(labels)), dtype=float)
+            for value_index, label in enumerate(inv_key_map):
+                position = label_to_position.get(label)
+                if position is not None:
+                    dense_initial[position] = init_counts[value_index, component]
+            for pair_index, (prev_index, next_index) in enumerate(observed_pairs):
+                prev_position = label_to_position.get(inv_key_map[prev_index])
+                next_position = label_to_position.get(inv_key_map[next_index])
+                if prev_position is not None and next_position is not None:
+                    dense_transitions[prev_position, next_position] = trans_counts[pair_index, component]
+            result.append(
+                MarkovChainStatistics(
+                    1,
+                    labels,
+                    tuple(float(value) for value in dense_initial),
+                    tuple(tuple(float(value) for value in row) for row in dense_transitions),
+                    length_counts[component],
+                    length_by_component[component],
+                )
             )
-            for component in range(num_components)
-        )
+        return tuple(result)
 
     def gradient_fit_state(self, engine: Any, torch: Any, leaves: list[Any], recurse: Any, tensor_param: Any) -> Any:
         """Return distribution-owned state for fixed-support autograd fitting."""
@@ -718,6 +982,15 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
             MarkovChainSampler object.
 
         """
+        if supports(self.len_dist, Neutral) or self.density_semantics() is DensitySemantics.LIKELIHOOD_FACTOR:
+            raise NonGenerativeMarkovChainError(
+                "MarkovChainDistribution without a proper length law is a fixed-length likelihood factor; "
+                "use path_sampler(seed) with sample_seq(length) or sample_paths(lengths)."
+            )
+        return MarkovChainSampler(self, seed)
+
+    def path_sampler(self, seed: int | None = None) -> "MarkovChainSampler":
+        """Return a sampler for caller-supplied path lengths."""
         return MarkovChainSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> "MarkovChainEstimator":
@@ -732,7 +1005,11 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         """
         len_est = self.len_dist.estimator(pseudo_count=pseudo_count)
         return MarkovChainEstimator(
-            pseudo_count=pseudo_count, len_estimator=len_est, name=self.name, prior=self.get_prior()
+            pseudo_count=pseudo_count,
+            levels=self.inv_key_map,
+            len_estimator=len_est,
+            name=self.name,
+            prior=self.get_prior(),
         )
 
     def dist_to_encoder(self) -> "MarkovChainDataEncoder":
@@ -1013,20 +1290,6 @@ class _MarkovChainGradientFitState:
         return rv
 
 
-def _markov_chain_transition_stats(
-    inv_key_map: np.ndarray, observed_pairs: Sequence[tuple[int, int]], counts: np.ndarray, component: int
-) -> dict[Any, dict[Any, float]]:
-    """Return legacy nested transition-count maps for one stacked component."""
-    rv: dict[Any, dict[Any, float]] = {}
-    for pair_index, (prev_i, next_i) in enumerate(observed_pairs):
-        prev_key = inv_key_map[prev_i]
-        next_key = inv_key_map[next_i]
-        if prev_key not in rv:
-            rv[prev_key] = {}
-        rv[prev_key][next_key] = float(counts[pair_index, component])
-    return rv
-
-
 class MarkovChainEnumerator(DistributionEnumerator):
     """Best-first enumerator for finite-state sequences with a modeled length law."""
 
@@ -1134,9 +1397,7 @@ class MarkovChainSampler(DistributionSampler):
         Returns ``(states, init_idx, init_p, trans_cdf, has_row)`` where ``states`` is the ordered
         state list, ``init_idx``/``init_p`` give the initial-state categorical over those indices,
         ``trans_cdf`` is an ``(S, S)`` row-cumsum matrix (row ``i`` = transitions out of state ``i``,
-        zero rows for states absent from ``trans_prob``), and ``has_row`` flags which states have an
-        outgoing distribution. States absent from ``trans_prob`` are absorbing/terminal: the legacy
-        loop breaks the chain there, so batched sampling leaves the remainder unfilled too.
+        transition CDF. Construction has already proved one complete stochastic row per state.
         """
         if self._batch_tables is not None:
             return self._batch_tables
@@ -1185,6 +1446,8 @@ class MarkovChainSampler(DistributionSampler):
         size = len(lengths)
         if size == 0:
             return []
+        if np.any(lengths < 0):
+            raise ValueError("Markov path lengths must be non-negative.")
 
         max_len = int(lengths.max()) if size else 0
         out: list[list[Any]] = [[None] * int(n) for n in lengths]
@@ -1204,9 +1467,7 @@ class MarkovChainSampler(DistributionSampler):
                 out[pos][0] = states[picks[k]]
 
         for t in range(1, max_len):
-            # A chain advances at step t iff it still needs entries (lengths > t), has not stopped
-            # (cur >= 0), and its current state has an outgoing row (has_row). The first two without
-            # the third = sitting on an absorbing state: leave the remainder None, like the legacy break.
+            # A chain advances at step t iff it still needs entries and has a current state.
             needs = (lengths > t) & (cur >= 0)
             if not needs.any():
                 break
@@ -1250,10 +1511,14 @@ class MarkovChainSampler(DistributionSampler):
                 "use sample_seq(length) or sample_paths(lengths) for a fixed-length chain factor."
             )
 
+        if not isinstance(batched, (bool, np.bool_)):
+            raise TypeError("batched must be bool.")
+        if size is not None:
+            size = _checked_length(size, label="Markov sample size")
         if not batched:
             if size is not None:
-                return [self.sample(batched=False) for i in range(size)]
-            cnt = self.len_sampler.sample()
+                return [self.sample(batched=False) for _ in range(size)]
+            cnt = _checked_length(self.len_sampler.sample(), label="sampled Markov length")
             rv = [None] * cnt
             if cnt >= 1:
                 rv[0] = self.rng.choice(self.init_prob[0], p=self.init_prob[1])
@@ -1263,10 +1528,16 @@ class MarkovChainSampler(DistributionSampler):
             return rv
 
         if size is None:
-            cnt = int(self.len_sampler.sample())
+            cnt = _checked_length(self.len_sampler.sample(), label="sampled Markov length")
             return self._sample_state_paths(np.asarray([cnt], dtype=np.int64))[0]
 
-        lengths = np.asarray(self.len_sampler.sample(size=size), dtype=np.int64).reshape(-1)
+        raw_lengths = np.asarray(self.len_sampler.sample(size=size), dtype=object).reshape(-1)
+        if len(raw_lengths) != size:
+            raise ValueError("length sampler returned the wrong batch size.")
+        lengths = np.asarray(
+            [_checked_length(value, label="sampled Markov length") for value in raw_lengths],
+            dtype=np.int64,
+        )
         return self._sample_state_paths(lengths)
 
     def sample_paths(self, lengths: Sequence[int]) -> list[list[Any]]:
@@ -1283,7 +1554,13 @@ class MarkovChainSampler(DistributionSampler):
             List of state-sequences (List[T]), one per entry in ``lengths``.
 
         """
-        return self._sample_state_paths(np.asarray(list(lengths), dtype=np.int64))
+        if isinstance(lengths, (str, bytes)) or not isinstance(lengths, (Sequence, np.ndarray)):
+            raise TypeError("lengths must be a sequence of exact non-negative integers.")
+        checked = np.asarray(
+            [_checked_length(value, label="Markov path length") for value in lengths],
+            dtype=np.int64,
+        )
+        return self._sample_state_paths(checked)
 
     def sample_seq(self, size: int | None = None, v0: T | None = None, *, batched: bool = False) -> T | list[T]:
         """Sample a Markov chain sequence of length 'size' conditioned on initial state 'v0'.
@@ -1307,19 +1584,24 @@ class MarkovChainSampler(DistributionSampler):
             T or List[T] depending on arg size.
 
         """
+        if not isinstance(batched, (bool, np.bool_)):
+            raise TypeError("batched must be bool.")
+        if v0 is not None and v0 not in self.trans_prob:
+            raise ValueError("v0 must be a configured Markov state.")
         if size is not None:
+            size = _checked_length(size, label="Markov path length")
             rv = [None] * size
 
             prev_val = v0
 
-            if size > 0 and prev_val is None:
-                rv[0] = self.rng.choice(self.init_prob[0], p=self.init_prob[1])
+            if size > 0:
+                if prev_val is None:
+                    rv[0] = self.rng.choice(self.init_prob[0], p=self.init_prob[1])
+                else:
+                    rv[0] = prev_val
                 prev_val = rv[0]
 
             for i in range(1, size):
-                if prev_val not in self.trans_prob:
-                    break
-
                 levels, probs = self.trans_prob[prev_val]
                 rv[i] = self.rng.choice(levels, p=probs)
                 prev_val = rv[i]
@@ -1345,6 +1627,7 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
         self,
         len_accumulator: SequenceEncodableStatisticAccumulator | None = NullAccumulator(),
         keys: str | None = None,
+        levels: Iterable[T] | None = None,
     ) -> None:
         """Create an accumulator for Markov-chain sufficient statistics.
 
@@ -1366,6 +1649,23 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
         self.trans_count_map = dict()
         self.len_accumulator = len_accumulator if len_accumulator is not None else NullAccumulator()
         self.keys = keys
+        self.levels = None if levels is None else _canonical_states(levels, label="Markov accumulator levels")
+        if self.levels == ():
+            raise ValueError("Markov accumulator levels cannot be empty.")
+        self.length_nobs = 0.0
+
+    def _check_state(self, value: Any) -> None:
+        if self.levels is not None and value not in self.levels:
+            raise ValueError("state %r is outside the configured Markov state layout." % (value,))
+
+    def _states(self) -> tuple[Any, ...]:
+        if self.levels is not None:
+            return self.levels
+        values = set(self.init_count_map)
+        values.update(self.trans_count_map)
+        for row in self.trans_count_map.values():
+            values.update(row)
+        return _canonical_states(values, label="Markov accumulated states")
 
     def update(self, x: list[T], weight: float, estimate: MarkovChainDistribution) -> None:
         """Update sufficient statistics of MarkovChainAccumulator with weighted observation.
@@ -1382,18 +1682,23 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if x is not None:
-            self.len_accumulator.update(len(x), weight, getattr(estimate, "len_dist", None))
+        if isinstance(x, (str, bytes)) or not isinstance(x, Sequence):
+            raise TypeError("Markov observations must be state sequences.")
+        checked_weight = _finite_nonnegative(weight, label="Markov observation weight")
+        self.len_accumulator.update(len(x), checked_weight, getattr(estimate, "len_dist", None))
+        self.length_nobs += checked_weight
 
-        if x is not None and len(x) != 0:
+        if len(x) != 0:
+            for value in x:
+                self._check_state(value)
             x0 = x[0]
-            self.init_count_map[x0] = self.init_count_map.get(x0, zero) + weight
+            self.init_count_map[x0] = self.init_count_map.get(x0, zero) + checked_weight
 
             for u in x[1:]:
                 if x0 not in self.trans_count_map:
                     self.trans_count_map[x0] = dict()
 
-                self.trans_count_map[x0][u] = self.trans_count_map[x0].get(u, zero) + weight
+                self.trans_count_map[x0][u] = self.trans_count_map[x0].get(u, zero) + checked_weight
                 x0 = u
 
     def initialize(self, x: list[T], weight: float, rng: RandomState) -> None:
@@ -1409,18 +1714,23 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if x is not None:
-            self.len_accumulator.initialize(len(x), weight, rng)
+        if isinstance(x, (str, bytes)) or not isinstance(x, Sequence):
+            raise TypeError("Markov observations must be state sequences.")
+        checked_weight = _finite_nonnegative(weight, label="Markov observation weight")
+        self.len_accumulator.initialize(len(x), checked_weight, rng)
+        self.length_nobs += checked_weight
 
-        if x is not None and len(x) != 0:
+        if len(x) != 0:
+            for value in x:
+                self._check_state(value)
             x0 = x[0]
-            self.init_count_map[x0] = self.init_count_map.get(x0, zero) + weight
+            self.init_count_map[x0] = self.init_count_map.get(x0, zero) + checked_weight
 
             for u in x[1:]:
                 if x0 not in self.trans_count_map:
                     self.trans_count_map[x0] = dict()
 
-                self.trans_count_map[x0][u] = self.trans_count_map[x0].get(u, zero) + weight
+                self.trans_count_map[x0][u] = self.trans_count_map[x0].get(u, zero) + checked_weight
                 x0 = u
 
     def seq_initialize(self, x: enc_data_type, weights: np.ndarray, rng: RandomState) -> None:
@@ -1450,7 +1760,19 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         sz, idx0, idx1, init_x, prev_x, next_x, inv_key_map, len_enc = x
+        weights = np.asarray(weights)
+        if (
+            weights.shape != (sz,)
+            or not np.issubdtype(weights.dtype, np.number)
+            or np.any(~np.isfinite(weights))
+            or np.any(weights < 0.0)
+        ):
+            raise ValueError("Markov weights must be a finite non-negative vector aligned with encoded rows.")
+        weights = weights.astype(float, copy=False)
+        for value in inv_key_map:
+            self._check_state(value)
         self.len_accumulator.seq_initialize(len_enc, weights, rng)
+        self.length_nobs += float(np.sum(weights))
 
         key_sz = len(inv_key_map)
 
@@ -1507,6 +1829,17 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         sz, idx0, idx1, init_x, prev_x, next_x, inv_key_map, len_enc = x
+        weights = np.asarray(weights)
+        if (
+            weights.shape != (sz,)
+            or not np.issubdtype(weights.dtype, np.number)
+            or np.any(~np.isfinite(weights))
+            or np.any(weights < 0.0)
+        ):
+            raise ValueError("Markov weights must be a finite non-negative vector aligned with encoded rows.")
+        weights = weights.astype(float, copy=False)
+        for value in inv_key_map:
+            self._check_state(value)
 
         key_sz = len(inv_key_map)
 
@@ -1534,7 +1867,12 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
                     m = self.trans_count_map[k1]
                     m[k2] = m.get(k2, 0.0) + v
 
-        self.len_accumulator.seq_update(len_enc, weights, estimate.len_dist)
+        self.len_accumulator.seq_update(
+            len_enc,
+            weights,
+            None if estimate is None else estimate.len_dist,
+        )
+        self.length_nobs += float(np.sum(weights))
 
     def seq_update_engine(self, x: enc_data_type, weights: Any, estimate: MarkovChainDistribution, engine: Any) -> None:
         """Engine-resident E-step: initial-state counts are reduced on the active engine and the
@@ -1546,6 +1884,16 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
         sz, idx0, idx1, init_x, prev_x, next_x, inv_key_map, len_enc = x
         key_sz = len(inv_key_map)
         w_eng = engine.asarray(weights)
+        host_weights = np.asarray(engine.to_numpy(w_eng))
+        if (
+            host_weights.shape != (sz,)
+            or not np.issubdtype(host_weights.dtype, np.number)
+            or np.any(~np.isfinite(host_weights))
+            or np.any(host_weights < 0.0)
+        ):
+            raise ValueError("Markov weights must be a finite non-negative vector aligned with encoded rows.")
+        for value in inv_key_map:
+            self._check_state(value)
 
         init_count = np.asarray(
             engine.to_numpy(
@@ -1576,8 +1924,9 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
         child_seq_update(
             self.len_accumulator, len_enc, w_eng, estimate.len_dist if estimate is not None else None, engine
         )
+        self.length_nobs += float(np.sum(host_weights))
 
-    def combine(self, suff_stat: suff_stat_type) -> "MarkovChainAccumulator":
+    def combine(self, suff_stat: MarkovChainStatistics) -> "MarkovChainAccumulator":
         """Merge the sufficient statistics of arg suff_stat with MarkovChainAccumulator.
 
         Arg suff_stat is a Tuple of length three containing,
@@ -1592,26 +1941,51 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             MarkovChainAccumulator object.
 
         """
-        for item in suff_stat[0].items():
-            self.init_count_map[item[0]] = self.init_count_map.get(item[0], 0.0) + item[1]
-
-        for item in suff_stat[1].items():
-            if item[0] not in self.trans_count_map:
-                self.trans_count_map[item[0]] = dict()
-
-            item_map = self.trans_count_map[item[0]]
-            for elem in item[1].items():
-                item_map[elem[0]] = item_map.get(elem[0], 0.0) + elem[1]
-
-        self.len_accumulator = self.len_accumulator.combine(suff_stat[2])
+        current_states = self.levels
+        if current_states is None:
+            observed_states = self._states()
+            current_states = observed_states or None
+        checked = _validate_markov_statistics(
+            suff_stat,
+            expected_states=current_states,
+            path="MarkovChainAccumulator.combine",
+        )
+        if self.levels is None:
+            self.levels = checked.states
+        for index, state in enumerate(checked.states):
+            count = checked.initial_counts[index]
+            if count:
+                self.init_count_map[state] = self.init_count_map.get(state, 0.0) + count
+            for next_index, next_state in enumerate(checked.states):
+                count = checked.transition_counts[index][next_index]
+                if count:
+                    row = self.trans_count_map.setdefault(state, {})
+                    row[next_state] = row.get(next_state, 0.0) + count
+        self.len_accumulator.combine(checked.length)
+        self.length_nobs += checked.length_nobs
 
         return self
 
-    def value(self) -> suff_stat_type:
+    def value(self) -> MarkovChainStatistics:
         """Return initial-state, transition, and length sufficient statistics."""
-        return self.init_count_map, self.trans_count_map, self.len_accumulator.value()
+        states = self._states()
+        if not states:
+            raise ValueError(
+                "Markov statistics have no declared or observed states; configure estimator levels."
+            )
+        return MarkovChainStatistics(
+            1,
+            states,
+            tuple(float(self.init_count_map.get(state, 0.0)) for state in states),
+            tuple(
+                tuple(float(self.trans_count_map.get(state, {}).get(next_state, 0.0)) for next_state in states)
+                for state in states
+            ),
+            self.length_nobs,
+            self.len_accumulator.value(),
+        )
 
-    def from_value(self, x: suff_stat_type) -> "MarkovChainAccumulator":
+    def from_value(self, x: MarkovChainStatistics) -> "MarkovChainAccumulator":
         """Assign MarkovChainAccumulator sufficient statistics to value of x.
 
         Arg x is a Tuple of length three containing,
@@ -1626,20 +2000,42 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             MarkovChainAccumulator object.
 
         """
-        self.init_count_map = x[0]
-        self.trans_count_map = x[1]
-        self.len_accumulator = self.len_accumulator.from_value(x[2])
+        checked = _validate_markov_statistics(
+            x,
+            expected_states=self.levels,
+            path="MarkovChainAccumulator.from_value",
+        )
+        if self.levels is None:
+            self.levels = checked.states
+        self.init_count_map = {
+            state: checked.initial_counts[index]
+            for index, state in enumerate(checked.states)
+            if checked.initial_counts[index] != 0.0
+        }
+        self.trans_count_map = {}
+        for index, state in enumerate(checked.states):
+            row = {
+                next_state: checked.transition_counts[index][next_index]
+                for next_index, next_state in enumerate(checked.states)
+                if checked.transition_counts[index][next_index] != 0.0
+            }
+            if row:
+                self.trans_count_map[state] = row
+        self.len_accumulator.from_value(checked.length)
+        self.length_nobs = checked.length_nobs
 
         return self
 
     def scale(self, c: float) -> "MarkovChainAccumulator":
         """Scale initial, transition, and length sufficient statistics by a constant."""
+        checked = _finite_nonnegative(c, label="Markov statistic scale")
         for key in list(self.init_count_map.keys()):
-            self.init_count_map[key] *= c
+            self.init_count_map[key] *= checked
         for tmap in self.trans_count_map.values():
             for key in list(tmap.keys()):
-                tmap[key] *= c
-        self.len_accumulator.scale(c)
+                tmap[key] *= checked
+        self.len_accumulator.scale(checked)
+        self.length_nobs *= checked
         return self
 
     def key_merge(self, stats_dict: dict[str, "MarkovChainAccumulator"]) -> None:
@@ -1659,7 +2055,7 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
                 stats_dict[self.keys].combine(self.value())
 
             else:
-                stats_dict[self.keys] = self
+                stats_dict[self.keys] = copy.deepcopy(self)
 
         self.len_accumulator.key_merge(stats_dict)
 
@@ -1701,7 +2097,10 @@ class MarkovChainAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for Markov-chain sufficient-statistic accumulators."""
 
     def __init__(
-        self, len_factory: StatisticAccumulatorFactory = NullAccumulatorFactory(), keys: str | None = None
+        self,
+        len_factory: StatisticAccumulatorFactory = NullAccumulatorFactory(),
+        keys: str | None = None,
+        levels: Iterable[T] | None = None,
     ) -> None:
         """Create a factory for Markov-chain accumulators.
 
@@ -1715,11 +2114,12 @@ class MarkovChainAccumulatorFactory(StatisticAccumulatorFactory):
         """
         self.len_factory = len_factory
         self.keys = keys
+        self.levels = None if levels is None else tuple(levels)
 
     def make(self) -> "MarkovChainAccumulator":
         """Return a new Markov-chain accumulator."""
         len_acc = self.len_factory.make()
-        return MarkovChainAccumulator(len_accumulator=len_acc, keys=self.keys)
+        return MarkovChainAccumulator(len_accumulator=len_acc, keys=self.keys, levels=self.levels)
 
 
 class MarkovChainEstimator(ParameterEstimator):
@@ -1755,15 +2155,25 @@ class MarkovChainEstimator(ParameterEstimator):
             keys (Optional[str]): Keys for merging sufficient statistics of MarkovChainAccumulator objects.
         """
         self.name = name
-        self.pseudo_count = pseudo_count
-        self.levels = levels
+        self.pseudo_count = (
+            None
+            if pseudo_count is None
+            else _finite_nonnegative(pseudo_count, label="Markov pseudo_count")
+        )
+        self.levels = None if levels is None else _canonical_states(levels, label="Markov estimator levels")
+        if self.levels == ():
+            raise ValueError("Markov estimator levels cannot be empty.")
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
         self.keys = keys
         self.set_prior(prior)
 
     def accumulator_factory(self) -> "MarkovChainAccumulatorFactory":
         """Returns MarkovChainAccumulatorFactory for creating MarkovChainAccumulator."""
-        return MarkovChainAccumulatorFactory(len_factory=self.len_estimator.accumulator_factory(), keys=self.keys)
+        return MarkovChainAccumulatorFactory(
+            len_factory=self.len_estimator.accumulator_factory(),
+            keys=self.keys,
+            levels=self.levels,
+        )
 
     def get_prior(self):
         """Returns the conjugate prior in ``(states, init_prior, row_priors)`` form (or None)."""
@@ -1779,8 +2189,6 @@ class MarkovChainEstimator(ParameterEstimator):
                 all priors are Dirichlet.
 
         """
-        from mixle.stats.bayes.dirichlet import DirichletDistribution
-
         if prior is None:
             self.prior = None
             self.prior_states = None
@@ -1789,14 +2197,17 @@ class MarkovChainEstimator(ParameterEstimator):
             self.has_conj_prior = False
             return
 
-        states, init_prior, row_priors = _unpack_markov_chain_prior(prior)
-        self.prior = prior
+        states, init_prior, row_priors = _validate_markov_prior(
+            prior,
+            expected_states=self.levels,
+        )
+        if self.levels is None:
+            self.levels = states
+        self.prior = (states, init_prior, row_priors)
         self.prior_states = states
         self.init_prior = init_prior
         self.row_priors = row_priors
-        self.has_conj_prior = isinstance(init_prior, DirichletDistribution) and all(
-            isinstance(u, DirichletDistribution) for u in row_priors
-        )
+        self.has_conj_prior = True
 
     def model_log_density(self, model: "MarkovChainDistribution") -> float:
         """Log-density of the model's probabilities under the Dirichlet priors.
@@ -1824,7 +2235,7 @@ class MarkovChainEstimator(ParameterEstimator):
             rv += float(self.row_priors[i].log_density(np.maximum(tvec, tiny)))
         return rv
 
-    def estimate(self, nobs: float | None, suff_stat: suff_stat_type) -> "MarkovChainDistribution":
+    def estimate(self, nobs: float | None, suff_stat: MarkovChainStatistics) -> "MarkovChainDistribution":
         """Estimate MarkovChainDistribution from aggregated sufficient statistics from observed data.
 
         Arg suff_stat is a Tuple of length three containing,
@@ -1843,14 +2254,20 @@ class MarkovChainEstimator(ParameterEstimator):
             MarkovChainDistribution object.
 
         """
+        checked = _validate_markov_statistics(
+            suff_stat,
+            expected_states=self.levels,
+            path="MarkovChainEstimator.estimate",
+        )
+        _validate_effective_nobs(nobs, checked)
         if self.has_conj_prior:
-            return self._estimate_conjugate(nobs, suff_stat)
+            return self._estimate_conjugate(checked)
         elif self.pseudo_count is not None:
-            return self.estimate1(nobs, suff_stat)
+            return self.estimate1(checked.length_nobs, checked)
         else:
-            return self.estimate0(nobs, suff_stat)
+            return self.estimate0(checked.length_nobs, checked)
 
-    def _estimate_conjugate(self, nobs: float | None, suff_stat: suff_stat_type) -> "MarkovChainDistribution":
+    def _estimate_conjugate(self, suff_stat: MarkovChainStatistics) -> "MarkovChainDistribution":
         """Clamped Dirichlet MAP estimate over the fixed prior ``states`` ordering.
 
         The initial-state and per-row transition probabilities are the clamped Dirichlet MAP
@@ -1861,26 +2278,17 @@ class MarkovChainEstimator(ParameterEstimator):
         """
         from mixle.stats.bayes.dirichlet import DirichletDistribution
 
-        init_count_map, trans_count_map, len_val = suff_stat
+        checked = _validate_markov_statistics(
+            suff_stat,
+            expected_states=self.prior_states,
+            path="MarkovChainEstimator._estimate_conjugate",
+        )
         states = self.prior_states
         s = len(states)
-        idx = {st: i for i, st in enumerate(states)}
+        init_counts = np.asarray(checked.initial_counts, dtype=float)
+        trans_counts = np.asarray(checked.transition_counts, dtype=float)
 
-        init_counts = np.zeros(s, dtype=float)
-        for k, v in init_count_map.items():
-            if k in idx:
-                init_counts[idx[k]] += v
-
-        trans_counts = np.zeros((s, s), dtype=float)
-        for k1, row in trans_count_map.items():
-            if k1 not in idx:
-                continue
-            i = idx[k1]
-            for k2, v in row.items():
-                if k2 in idx:
-                    trans_counts[i, idx[k2]] += v
-
-        len_dist = self.len_estimator.estimate(nobs, len_val)
+        len_dist = self.len_estimator.estimate(checked.length_nobs, checked.length)
 
         a0 = np.asarray(self.init_prior.get_parameters(), dtype=float)
         init_probs = _map_probs(init_counts, a0)
@@ -1904,7 +2312,7 @@ class MarkovChainEstimator(ParameterEstimator):
             prior=(states, init_posterior, row_posteriors),
         )
 
-    def estimate0(self, nobs: float | None, suff_stat: suff_stat_type) -> "MarkovChainDistribution":
+    def estimate0(self, nobs: float | None, suff_stat: MarkovChainStatistics) -> "MarkovChainDistribution":
         """Estimate MarkovChainDistribution from aggregated sufficient statistics from observed data.
 
         Maximum likelihood estimates for initial state probabilities, transition probabilities, and the length
@@ -1923,21 +2331,40 @@ class MarkovChainEstimator(ParameterEstimator):
             MarkovChainDistribution object.
 
         """
-        temp_sum = sum(suff_stat[0].values())
-        init_prob_map = {k: v / temp_sum for k, v in suff_stat[0].items()}
+        checked = _validate_markov_statistics(
+            suff_stat,
+            expected_states=self.levels,
+            path="MarkovChainEstimator.estimate0",
+        )
+        _validate_effective_nobs(nobs, checked)
+        init_counts = np.asarray(checked.initial_counts, dtype=float)
+        initial_total = float(np.sum(init_counts))
+        if initial_total <= 0.0:
+            raise ValueError("Markov MLE requires positive initial-state evidence or a declared prior.")
+        init_prob_map = {
+            state: float(init_counts[index] / initial_total)
+            for index, state in enumerate(checked.states)
+        }
 
-        trans_map = dict()
+        trans_map = {}
+        for index, state in enumerate(checked.states):
+            row = np.asarray(checked.transition_counts[index], dtype=float)
+            total = float(np.sum(row))
+            if total <= 0.0:
+                raise ValueError(
+                    "Markov MLE row %r requires transition evidence, pseudo-count smoothing, or a prior."
+                    % (state,)
+                )
+            trans_map[state] = {
+                next_state: float(row[next_index] / total)
+                for next_index, next_state in enumerate(checked.states)
+            }
 
-        for key, tmap in suff_stat[1].items():
-            temp_sum = sum(tmap.values())
-            if temp_sum > 0:
-                trans_map[key] = {k: v / temp_sum for k, v in tmap.items()}
-
-        len_dist = self.len_estimator.estimate(nobs, suff_stat[2])
+        len_dist = self.len_estimator.estimate(checked.length_nobs, checked.length)
 
         return MarkovChainDistribution(init_prob_map, trans_map, len_dist=len_dist, name=self.name)
 
-    def estimate1(self, nobs: float | None, suff_stat: suff_stat_type) -> "MarkovChainDistribution":
+    def estimate1(self, nobs: float | None, suff_stat: MarkovChainStatistics) -> "MarkovChainDistribution":
         """Estimate MarkovChainDistribution from aggregated sufficient statistics from observed data.
 
         Maximum likelihood estimates for initial state probabilities, transition probabilities, and the length
@@ -1957,38 +2384,32 @@ class MarkovChainEstimator(ParameterEstimator):
             MarkovChainDistribution object.
 
         """
-        trans_map = dict()
-        init_prob_map = dict()
-        def_val = 0.0
-
-        all_keys = set(suff_stat[0].keys())
-        for u in suff_stat[1].values():
-            all_keys.update(u.keys())
-        if self.levels is not None:
-            all_keys.update(self.levels)
-
-        temp_sum = sum(suff_stat[0].values())
-        p_cnt0 = self.pseudo_count if self.pseudo_count is not None else 0.0
-        p_cnt1 = p_cnt0 / len(all_keys)
-
-        if (temp_sum + p_cnt0) > 0:
-            init_prob_map = {k: (suff_stat[0].get(k, 0.0) + p_cnt1) / (temp_sum + p_cnt0) for k in all_keys}
-
-        a_sum = temp_sum
-        for key, tmap in suff_stat[1].items():
-            temp_sum = sum(tmap.values())
-            a_sum += temp_sum
-            if (temp_sum + p_cnt0) > 0:
-                trans_map[key] = {k: (tmap.get(k, 0.0) + p_cnt1) / (temp_sum + p_cnt0) for k in all_keys}
-
-        len_dist = self.len_estimator.estimate(nobs, suff_stat[2])
-
-        if a_sum > 0:
-            def_val = p_cnt0 / a_sum  # p_cnt0 already coalesces self.pseudo_count None -> 0.0 above
-
-        return MarkovChainDistribution(
-            init_prob_map, trans_map, len_dist=len_dist, default_value=def_val, name=self.name
+        checked = _validate_markov_statistics(
+            suff_stat,
+            expected_states=self.levels,
+            path="MarkovChainEstimator.estimate1",
         )
+        _validate_effective_nobs(nobs, checked)
+        if self.pseudo_count is None:
+            return self.estimate0(checked.length_nobs, checked)
+        pseudo_count = _finite_nonnegative(self.pseudo_count, label="Markov pseudo_count")
+        if pseudo_count <= 0.0:
+            return self.estimate0(checked.length_nobs, checked)
+        per_state = pseudo_count / len(checked.states)
+        init_counts = np.asarray(checked.initial_counts, dtype=float) + per_state
+        init_prob_map = {
+            state: float(init_counts[index] / np.sum(init_counts))
+            for index, state in enumerate(checked.states)
+        }
+        trans_map = {}
+        for index, state in enumerate(checked.states):
+            row = np.asarray(checked.transition_counts[index], dtype=float) + per_state
+            trans_map[state] = {
+                next_state: float(row[next_index] / np.sum(row))
+                for next_index, next_state in enumerate(checked.states)
+            }
+        len_dist = self.len_estimator.estimate(checked.length_nobs, checked.length)
+        return MarkovChainDistribution(init_prob_map, trans_map, len_dist=len_dist, name=self.name)
 
 
 class MarkovChainDataEncoder(DataSequenceEncoder):
@@ -2052,9 +2473,24 @@ class MarkovChainDataEncoder(DataSequenceEncoder):
 
         import itertools
 
+        if isinstance(x, (str, bytes)) or not isinstance(x, (list, tuple, np.ndarray)):
+            raise ContractError(
+                "MarkovChainDataEncoder.seq_encode",
+                "a sequence of state sequences",
+                type(x).__name__,
+            )
+        for index, entry in enumerate(x):
+            if isinstance(entry, (str, bytes)) or not isinstance(entry, (list, tuple, np.ndarray)):
+                raise ContractError(
+                    "MarkovChainDataEncoder.seq_encode (row %d)" % index,
+                    "a state sequence",
+                    type(entry).__name__,
+                )
+
         obs_cnt = np.fromiter((len(entry) for entry in x), dtype=np.int64, count=len(x))
         n_tokens = int(obs_cnt.sum())
         flat = list(itertools.chain.from_iterable(x))
+        state_types = set(map(type, flat))
 
         # State -> first-seen integer code. Fast path: a sortable homogeneous array lets np.unique
         # produce the codes in one vectorized pass, remapped to FIRST-SEEN order so the encoding is
@@ -2067,7 +2503,6 @@ class MarkovChainDataEncoder(DataSequenceEncoder):
             # equal strings under coercion while the dict walk keeps them distinct states. One cheap
             # type-homogeneity scan gates it; anything else (tuples, custom objects, mixed types)
             # takes the dict walk with the original semantics.
-            state_types = set(map(type, flat))
             if len(state_types) == 1 and issubclass(next(iter(state_types)), _SAFE_STATE_TYPES):
                 try:
                     arr = np.asarray(flat)
@@ -2097,7 +2532,16 @@ class MarkovChainDataEncoder(DataSequenceEncoder):
             # dtype=object for heterogeneous state types: a bare asarray COERCES [1, "1"] into two
             # equal strings, silently merging states the dict walk (and every downstream key_map
             # lookup) keeps distinct -- a pre-existing hazard of the original encoder, fixed here.
-            inv_key_map = np.asarray(inv_key_map, dtype=object if len(state_types) > 1 else None)
+            safe_scalar_type = (
+                len(state_types) == 1
+                and issubclass(next(iter(state_types)), _SAFE_STATE_TYPES)
+            )
+            if safe_scalar_type:
+                inv_key_map = np.asarray(inv_key_map)
+            else:
+                object_values = np.empty(len(inv_key_map), dtype=object)
+                object_values[:] = inv_key_map
+                inv_key_map = object_values
 
         # Structure arrays from offsets, fully vectorized: rows of length >= 1 contribute their first
         # token to the init arrays; every within-row position >= 1 contributes a (prev, next) pair.
@@ -2125,3 +2569,63 @@ class MarkovChainDataEncoder(DataSequenceEncoder):
             inv_key_map,
             len_enc,
         )
+
+    def row_count(self, x: Any) -> int:
+        """Validate encoded Markov geometry and return the outer sequence count."""
+        if not isinstance(x, tuple) or len(x) != 8:
+            raise ValueError("Markov encoding must be an 8-tuple.")
+        size, idx0, idx1, init_x, prev_x, next_x, inv_key_map, len_enc = x
+        size = _checked_length(size, label="Markov encoded row count")
+        idx0 = np.asarray(idx0)
+        idx1 = np.asarray(idx1)
+        init_x = np.asarray(init_x)
+        prev_x = np.asarray(prev_x)
+        next_x = np.asarray(next_x)
+        inv_key_map = np.asarray(inv_key_map)
+        for label, array in (
+            ("initial row indices", idx0),
+            ("transition row indices", idx1),
+            ("initial state codes", init_x),
+            ("previous state codes", prev_x),
+            ("next state codes", next_x),
+        ):
+            if array.ndim != 1 or not np.issubdtype(array.dtype, np.integer):
+                raise ValueError("Markov %s must be a one-dimensional integer array." % label)
+        if len(idx0) != len(init_x) or len(idx1) != len(prev_x) or len(idx1) != len(next_x):
+            raise ValueError("Markov encoded state arrays are not aligned.")
+        if (
+            np.any(idx0 < 0)
+            or np.any(idx0 >= size)
+            or np.any(idx1 < 0)
+            or np.any(idx1 >= size)
+            or len(np.unique(idx0)) != len(idx0)
+        ):
+            raise ValueError("Markov encoded row indices are invalid.")
+        state_count = len(inv_key_map)
+        if (
+            np.any(init_x < 0)
+            or np.any(init_x >= state_count)
+            or np.any(prev_x < 0)
+            or np.any(prev_x >= state_count)
+            or np.any(next_x < 0)
+            or np.any(next_x >= state_count)
+        ):
+            raise ValueError("Markov encoded state codes are invalid.")
+        initial_rows = set(idx0.tolist())
+        if any(row not in initial_rows for row in idx1.tolist()):
+            raise ValueError("Markov transition rows must also carry an initial state.")
+        try:
+            if len(set(inv_key_map.tolist())) != state_count:
+                raise ValueError("Markov encoded state labels must be unique.")
+        except TypeError as exc:
+            raise ValueError("Markov encoded state labels must be hashable.") from exc
+        if supports(self.len_encoder, Neutral):
+            if (
+                isinstance(len_enc, (bool, np.bool_))
+                or not isinstance(len_enc, (int, np.integer))
+                or int(len_enc) != size
+            ):
+                raise ValueError("Markov null length encoding must retain the exact row count.")
+        elif self.len_encoder.row_count(len_enc) != size:
+            raise ValueError("Markov length encoding does not preserve outer rows.")
+        return size
