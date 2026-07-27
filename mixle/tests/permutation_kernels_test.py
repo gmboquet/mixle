@@ -1,6 +1,7 @@
 """Numba permutation-distance kernels -- verified against independent brute-force references."""
 
 import itertools
+import math
 import unittest
 
 import numpy as np
@@ -100,6 +101,96 @@ class PermutationKernelTest(unittest.TestCase):
     def test_unknown_metric_raises(self):
         with self.assertRaises(ValueError):
             K.permutation_distance(np.arange(3), np.arange(3), "manhattan")
+
+    def test_public_distance_helpers_reject_malformed_permutations(self):
+        malformed = (
+            np.asarray([0, 0, 2]),
+            np.asarray([0, 1.5, 2]),
+            np.asarray([-1, 1, 2]),
+            np.asarray([0, 1, 3]),
+        )
+        one_argument = (
+            K.kendall_perm,
+            K.cayley_perm,
+            K.hamming_perm,
+            K.footrule_perm,
+            K.spearman_perm,
+            K.ulam_perm,
+        )
+        for value in malformed:
+            for function in one_argument:
+                with self.subTest(value=value, function=function.__name__):
+                    with self.assertRaises((TypeError, ValueError)):
+                        function(value)
+            for metric in K.METRICS:
+                with self.subTest(value=value, metric=metric):
+                    with self.assertRaises((TypeError, ValueError)):
+                        K.permutation_distance(value, np.arange(3), metric)
+
+    def test_batched_and_rim_helpers_validate_width_center_and_rows(self):
+        with self.assertRaises(ValueError):
+            K.seq_distance_to_center([[0, 1]], np.arange(3), "kendall")
+        with self.assertRaises(ValueError):
+            K.seq_distance_to_center([[0, 0, 2]], np.arange(3), "kendall")
+        with self.assertRaises(ValueError):
+            K.seq_distance_to_center([[0, 1, 2]], [0, 0, 2], "kendall")
+        with self.assertRaises(ValueError):
+            K.seq_rim_code([[0, 1, 1]], np.arange(3))
+        with self.assertRaises(ValueError):
+            K.seq_rim_code([[0, 1]], np.arange(3))
+        with self.assertRaises(ValueError):
+            K.permutation_distance(np.arange(2), np.arange(3))
+
+
+class AssignmentKernelContractTest(unittest.TestCase):
+    def test_permanent_rejects_invalid_matrix_contracts(self):
+        invalid = (
+            np.ones((2, 3)),
+            np.asarray([[1.0, -1.0], [1.0, 1.0]]),
+            np.asarray([[1.0, np.nan], [1.0, 1.0]]),
+            np.asarray([[1.0, np.inf], [1.0, 1.0]]),
+        )
+        for matrix in invalid:
+            with self.subTest(matrix=matrix):
+                with self.assertRaises(ValueError):
+                    K.ryser_log_permanent(matrix)
+
+    def test_log_domain_permanent_handles_extreme_finite_scales(self):
+        for scale in (1.0e-200, 1.0e200):
+            matrix = np.full((3, 3), scale)
+            expected = math.log(math.factorial(3)) + 3.0 * math.log(scale)
+            with self.subTest(scale=scale):
+                self.assertAlmostEqual(K.ryser_log_permanent(matrix), expected, places=10)
+        self.assertEqual(K.ryser_log_permanent(np.zeros((2, 2))), -np.inf)
+
+    def test_sinkhorn_rejects_invalid_controls_and_infeasible_support(self):
+        invalid_scores = (
+            np.ones((2, 3)),
+            np.asarray([[0.0, np.nan], [0.0, 0.0]]),
+            np.asarray([[0.0, np.inf], [0.0, 0.0]]),
+            np.full((2, 2), -np.inf),
+            np.asarray([[0.0, -np.inf], [0.0, -np.inf]]),
+        )
+        for scores in invalid_scores:
+            with self.subTest(scores=scores):
+                with self.assertRaises((ValueError, FloatingPointError)):
+                    K.sinkhorn_bethe(scores, 10)
+        for iterations in (0, -1, 1.5, np.nan, True):
+            with self.subTest(iterations=iterations):
+                with self.assertRaises((TypeError, ValueError)):
+                    K.sinkhorn_bethe(np.zeros((2, 2)), iterations)
+
+    def test_sinkhorn_handles_feasible_exclusions_and_extreme_scores(self):
+        for scores in (
+            np.asarray([[0.0, -np.inf], [-np.inf, 0.0]]),
+            np.asarray([[-1.0e300, 0.0], [0.0, -1.0e300]]),
+        ):
+            plan, logz = K.sinkhorn_bethe(scores, 20)
+            with self.subTest(scores=scores):
+                self.assertTrue(np.all(np.isfinite(plan)))
+                self.assertTrue(np.isfinite(logz))
+                np.testing.assert_allclose(plan.sum(axis=0), 1.0)
+                np.testing.assert_allclose(plan.sum(axis=1), 1.0)
 
 
 if __name__ == "__main__":
