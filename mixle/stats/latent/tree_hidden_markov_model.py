@@ -92,6 +92,74 @@ def find_level(parents: np.ndarray) -> list[int]:
     return list(out[1:])
 
 
+def _canonical_tree_observation(
+    tree: Sequence[tuple[D, T]],
+    *,
+    tree_index: int,
+) -> tuple[list[tuple[tuple[int, int], T]], np.ndarray]:
+    """Validate a rooted tree and return entries in canonical node-ID order.
+
+    Tree-HMM numerical layouts use node IDs as dense array positions. The
+    external schema therefore requires exact IDs ``0..n-1``, one root
+    ``(0, -1)``, and a parent ID smaller than every child ID. The final rule
+    gives a deterministic topological order and makes cycles impossible.
+    """
+    try:
+        entries = list(tree)
+    except TypeError as exc:
+        raise TypeError(f"tree {tree_index} must be an iterable of topology/emission pairs.") from exc
+    if not entries:
+        raise ValueError(f"tree {tree_index} must contain exactly one root and at least one node.")
+
+    by_id: dict[int, tuple[tuple[int, int], T]] = {}
+    for position, entry in enumerate(entries):
+        try:
+            topology, emission = entry
+            node_id, parent_id = topology
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                f"tree {tree_index} entry {position} must be ((node_id, parent_id), emission)."
+            ) from exc
+        if isinstance(node_id, bool) or not isinstance(node_id, (int, np.integer)):
+            raise TypeError(f"tree {tree_index} node ID at entry {position} must be an integer.")
+        if isinstance(parent_id, bool) or not isinstance(parent_id, (int, np.integer)):
+            raise TypeError(f"tree {tree_index} parent ID at entry {position} must be an integer.")
+        node = int(node_id)
+        parent = int(parent_id)
+        if node in by_id:
+            raise ValueError(f"tree {tree_index} contains duplicate node ID {node}.")
+        by_id[node] = ((node, parent), emission)
+
+    expected_ids = set(range(len(entries)))
+    observed_ids = set(by_id)
+    if observed_ids != expected_ids:
+        missing = sorted(expected_ids - observed_ids)
+        unexpected = sorted(observed_ids - expected_ids)
+        raise ValueError(
+            f"tree {tree_index} node IDs must be exactly 0..{len(entries) - 1}; "
+            f"missing={missing}, unexpected={unexpected}."
+        )
+
+    canonical = [by_id[node] for node in range(len(entries))]
+    parents = np.asarray([entry[0][1] for entry in canonical], dtype=np.int32)
+    roots = np.flatnonzero(parents == -1)
+    if roots.tolist() != [0]:
+        raise ValueError(
+            f"tree {tree_index} must have exactly one root, node 0 with parent -1; "
+            f"root IDs are {roots.tolist()}."
+        )
+    for node in range(1, len(canonical)):
+        parent = int(parents[node])
+        if parent < 0 or parent >= len(canonical):
+            raise ValueError(f"tree {tree_index} node {node} references missing parent {parent}.")
+        if parent >= node:
+            raise ValueError(
+                f"tree {tree_index} parent {parent} must precede child {node}; "
+                "the topology must be rooted, acyclic, and in canonical ID order."
+            )
+    return canonical, parents
+
+
 class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
     """Hidden Markov model on a rooted tree with emission distributions of type T.
 
@@ -197,15 +265,15 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
         transitions = require("transitions", transitions, default=MISSING)
 
         with np.errstate(divide="ignore"):
-            self.topics = topics
+            self.topics = list(topics)
             self.num_states = len(w)
-            self.w = vec.make(w)
+            self.w = vec.make(w).copy()
             self.log_w = np.log(self.w)
 
             if not isinstance(transitions, np.ndarray):
                 transitions = np.asarray(transitions, dtype=float)
 
-            self.transitions = np.reshape(transitions, (self.num_states, self.num_states))
+            self.transitions = np.reshape(transitions, (self.num_states, self.num_states)).copy()
             self.log_transitions = np.log(self.transitions)
             self.name = name
             self.len_dist = len_dist if len_dist is not None else NullDistribution()
@@ -213,9 +281,9 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
             self.use_numba = HAS_NUMBA if use_numba is None else use_numba
 
         # Cache for the parameter-only per-level marginal state probabilities
-        # (init_prob @ transitions^k). Keyed by the (w, transitions) identities so it
-        # is rebuilt if the parameters are ever replaced. See _get_p_level.
-        self._p_level_cache: tuple[int, int, np.ndarray] | None = None
+        # (init_prob @ transitions^k). The byte-exact parameter snapshot detects
+        # both replacement and in-place mutation. See _get_p_level.
+        self._p_level_cache: tuple[bytes, bytes, np.ndarray] | None = None
 
     def _get_p_level(self, levels: int) -> np.ndarray:
         """Return per-level marginal state probabilities for the first ``levels`` levels.
@@ -225,8 +293,8 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
         smaller requests (each row k only depends on rows <= k), so we grow the cache
         monotonically and slice it.
         """
-        key_w = id(self.w)
-        key_t = id(self.transitions)
+        key_w = self.w.tobytes()
+        key_t = self.transitions.tobytes()
         cache = self._p_level_cache
         if cache is not None and cache[0] == key_w and cache[1] == key_t and cache[2].shape[0] >= levels:
             return cache[2][:levels]
@@ -677,41 +745,44 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
             return [out[tz[i] : tz[i + 1]] for i in range(len(tz) - 1)]
 
         else:
-            cnt, tz, (xln, xlnl, xlni), (idx, xbi, xp, xc, level_idx, p_nxt, eta_p, i_nxt, rns, rni), enc_x, _ = x[1]
-
+            cnt, tz, _, (_, _, xp, xc, _, _, _, _, _, _), enc_x, _ = x[1]
             num_states = self.num_states
-            max_level = len(level_idx)
-            log_a_mat = self.log_transitions
-            log_w = self.log_w
+            log_emissions = np.empty((cnt, num_states), dtype=np.float64)
+            for state in range(num_states):
+                log_emissions[:, state] = self.topics[state].seq_log_density(enc_x)
 
-            log_delta = np.ones((cnt, num_states), dtype=np.float64)
-            log_eta = np.zeros((len(xbi), num_states), dtype=np.float64)
-            state_tracker = np.zeros(cnt, dtype=np.int32)
+            children: list[list[int]] = [[] for _ in range(cnt)]
+            parents = np.full(cnt, -1, dtype=np.int32)
+            for parent, child in zip(xp, xc):
+                parent_id = int(parent)
+                child_id = int(child)
+                children[parent_id].append(child_id)
+                parents[child_id] = parent_id
 
-            # Compute state likelihood vectors, and initialize the deltas for each state
-            for i in range(num_states):
-                log_delta[:, i] += self.topics[i].seq_log_density(enc_x)
+            decoded: list[np.ndarray] = []
+            for tree_index in range(len(tz) - 1):
+                start, stop = int(tz[tree_index]), int(tz[tree_index + 1])
+                scores = log_emissions[start:stop].copy()
+                backpointers = np.zeros((stop - start, num_states), dtype=np.int32)
 
-            state_tracker[xln] += np.argmax(log_delta[xln, :], axis=1).flatten()
+                # Canonical IDs guarantee parent < child, so reverse node order is a
+                # valid postorder. Each child contributes a max-product message for
+                # every possible parent state and stores that conditional argmax.
+                for node in range(stop - 1, start - 1, -1):
+                    local_node = node - start
+                    for child in children[node]:
+                        conditional = self.log_transitions + scores[child - start][None, :]
+                        backpointers[child - start, :] = np.argmax(conditional, axis=1)
+                        scores[local_node, :] += np.max(conditional, axis=1)
 
-            #  upward pass on deltas
-            for level in range(max_level - 1, -1, -1):
-                lidx = level_idx[level]
-                idxs, xbis, xps, xcs = idx[lidx], xbi[lidx], xp[lidx], xc[lidx]
-
-                #  Get log_etas
-                log_eta[xbis, :] += np.max(np.reshape(log_delta[xcs, :], (-1, 1, num_states)) + log_a_mat, axis=2)
-                temp = np.zeros((len(xbis) + 1, num_states), dtype=np.float64)
-                temp[1:, :] += np.cumsum(log_eta[xbis, :], axis=0)
-                temp = temp[eta_p[level][1:], :] - temp[eta_p[level][:-1], :]
-                log_delta[p_nxt[level], :] += temp
-                state_tracker[p_nxt[level]] += np.argmax(log_delta[p_nxt[level], :], axis=1, keepdims=False)
-
-            #  Set the init for leaf nodes
-            log_delta[rns, :] += log_w
-            state_tracker[rns] += np.argmax(log_delta[rns, :], axis=1).flatten()
-
-            return [state_tracker[tz[i] : tz[i + 1]] for i in range(len(tz) - 1)]
+                states = np.zeros(stop - start, dtype=np.int32)
+                states[0] = int(np.argmax(self.log_w + scores[0]))
+                for node in range(start + 1, stop):
+                    local_node = node - start
+                    parent = int(parents[node])
+                    states[local_node] = backpointers[local_node, states[parent - start]]
+                decoded.append(states)
+            return decoded
 
     def density_semantics(self):
         """Return exact-or-approximate density semantics joined from child models."""
@@ -1863,6 +1934,20 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
             and self.emission_encoder == other.emission_encoder
         )
 
+    def row_count(self, x: Any) -> int:
+        """Return the number of trees represented by either encoded layout."""
+        try:
+            numba_encoding, numpy_encoding = x
+        except (TypeError, ValueError) as exc:
+            raise ValueError("tree-HMM encoded data must contain numba and NumPy layout slots.") from exc
+        if (numba_encoding is None) == (numpy_encoding is None):
+            raise ValueError("tree-HMM encoded data must contain exactly one active layout.")
+        offsets = numba_encoding[0] if numba_encoding is not None else numpy_encoding[1]
+        offsets = np.asarray(offsets)
+        if offsets.ndim != 1 or offsets.size == 0:
+            raise ValueError("tree-HMM encoded offsets must be a non-empty one-dimensional array.")
+        return int(offsets.size - 1)
+
     def _seq_encode(self, x: Sequence[Sequence[tuple[D, T]]]) -> tuple[int, np.ndarray, E5, E6, Any, Any | None]:
         """Encode trees for the pure-numpy implementation (nodes batched across trees by level).
 
@@ -1895,46 +1980,35 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
 
         cnt = 0
         eta_cnt = 0
-        for i, xx in enumerate(x):
+        for i, raw_tree in enumerate(x):
+            xx, xp0 = _canonical_tree_observation(raw_tree, tree_index=i)
             n = len(xx)
             tz.append(n)
-            if n > 0:
-                root_id.append(i)
-                root_node.append(cnt)  # flattened index of this tree's root node
-
-            xi0 = np.asarray([v[0][0] for v in xx], dtype=np.int32)
-            xp0 = np.asarray([v[0][1] for v in xx], dtype=np.int32)
-
-            p_sort = np.argsort(xp0)
-
-            xc0 = np.asarray([xx[i][0][0] for i in p_sort[1:]], dtype=np.int32)
-            ## relabel entries to be 0,1,2,3,....,n-1
-            xi0 = xi0[p_sort] + cnt
-            xp0 = xp0[p_sort]
-
-            xs.extend([xx[i][1] for i in p_sort])
+            root_id.append(i)
+            root_node.append(cnt)  # flattened index of this tree's root node
+            xs.extend(entry[1] for entry in xx)
 
             u0, u1 = np.unique(xp0[1:], return_counts=True)
+            levels = np.asarray([0, *find_level(xp0)], dtype=np.int32)
 
             #  beta parent/child combos
             if len(u1) > 0:
                 for j in range(len(u1)):
-                    xp.extend([u0[j] + cnt] * u1[j])
-                    xc.extend(cnt + xc0[np.flatnonzero(xp0[1:] == u0[j])])
+                    children = np.flatnonzero(xp0 == u0[j])
+                    xp.extend([u0[j] + cnt] * len(children))
+                    xc.extend(children + cnt)
+                    xl.extend(levels[children])
 
             if len(xp0) > 1:
                 xbi.extend([kk + eta_cnt for kk in range(len(xp0) - 1)])
                 eta_cnt += len(xp0) - 1
 
-                xl_temp = find_level(xp0)
-                xl.extend(xl_temp)
                 xln_temp = np.delete(np.arange(n), u0)
-                xlnl.extend([xl_temp[np.flatnonzero(xc0 == x)[0]] for x in xln_temp])
+                xlnl.extend(levels[xln_temp])
                 xlni.extend([i] * len(xln_temp))
                 xln.extend(xln_temp + cnt)
-                idx.extend([i] * len(xl_temp))
-
-            elif n == 1:
+                idx.extend([i] * (n - 1))
+            else:
                 #  Childless root: score it as a level-0 leaf (its marginal uses p_level[0] = w).
                 xln.append(cnt)
                 xlnl.append(0)
@@ -2032,27 +2106,21 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
 
             nc = []  # number of children for a given node.
 
-            for i, xx in enumerate(x):
+            for i, raw_tree in enumerate(x):
+                xx, xp0 = _canonical_tree_observation(raw_tree, tree_index=i)
                 n = len(xx)
-
-                xi0 = np.asarray([v[0][0] for v in xx], dtype=np.int32)
-                xp0 = np.asarray([v[0][1] for v in xx], dtype=np.int32)
-
-                p_sort = np.argsort(xp0)
-
-                xc0 = np.asarray([xx[i][0][0] for i in p_sort[1:]], dtype=np.int32)
-                #  relabel entries to be 0,1,2,3,....,n-1
-                xi0 = xi0[p_sort]
-                xp0 = xp0[p_sort]
-                xs.extend([xx[i][1] for i in p_sort])
+                xs.extend(entry[1] for entry in xx)
 
                 u0, u1 = np.unique(xp0[1:], return_counts=True)
+                levels = np.asarray([0, *find_level(xp0)], dtype=np.int32)
 
                 #  beta parent/child combos
                 if len(u1) > 0:
                     for j in range(len(u1)):
-                        xp.extend([u0[j]] * u1[j])
-                        xc.extend(xc0[np.flatnonzero(xp0[1:] == u0[j])])
+                        children = np.flatnonzero(xp0 == u0[j])
+                        xp.extend([u0[j]] * len(children))
+                        xc.extend(children)
+                        xl.extend(levels[children])
 
                     txz.append(np.sum(u1))
                     tp.extend(np.cumsum([0] + list(u1)))
@@ -2066,10 +2134,8 @@ class TreeHiddenMarkovDataEncoder(DataSequenceEncoder):
                 if len(xp0) > 1:
                     xbi.extend([kk for kk in range(len(xp0) - 1)])
 
-                    xl_temp = find_level(xp0)
-                    xl.extend(xl_temp)
                     xln_temp = [yy for yy in np.delete(np.arange(n), u0)]
-                    xlnl.extend([xl_temp[np.flatnonzero(xc0 == x)[0]] for x in xln_temp])
+                    xlnl.extend(levels[xln_temp])
                     xln.extend(xln_temp)
 
                     tlnz.append(len(xln_temp))
