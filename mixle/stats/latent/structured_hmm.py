@@ -27,6 +27,10 @@ from typing import Any
 
 import numpy as np
 
+from mixle.stats.compute.mixture_evidence import (
+    validated_probability_vector,
+    validated_row_probability_matrix,
+)
 from mixle.stats.latent.markov_stopping import (
     require_terminal_reached,
     validate_terminal_reachability,
@@ -104,11 +108,74 @@ class TransitionOperator:
         return fill(self.new_accumulator())
 
 
-def _row_normalize(m: np.ndarray) -> np.ndarray:
-    m = np.maximum(m, 0.0)
-    s = m.sum(axis=1, keepdims=True)
-    s[s == 0] = 1.0
-    return m / s
+def _exact_positive_integer(value: Any, label: str) -> int:
+    """Return an exact positive integer."""
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{label} must be an integer.")
+    result = int(value)
+    if result <= 0:
+        raise ValueError(f"{label} must be positive.")
+    return result
+
+
+def _numeric_matrix(values: Any, label: str) -> np.ndarray:
+    """Return an owned finite non-negative two-dimensional matrix."""
+    try:
+        matrix = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError(f"{label} must be a numeric matrix.") from exc
+    if matrix.ndim != 2 or 0 in matrix.shape:
+        raise ValueError(f"{label} must be a non-empty two-dimensional matrix.")
+    if np.any(~np.isfinite(matrix)) or np.any(matrix < 0.0):
+        raise ValueError(f"{label} must contain finite non-negative values.")
+    return matrix.copy()
+
+
+def _row_normalize(m: np.ndarray, fallback: np.ndarray | None = None) -> np.ndarray:
+    """Normalize finite non-negative rows, retaining explicit fallback rows when unobserved."""
+    matrix = _numeric_matrix(m, "transition counts")
+    row_sums = matrix.sum(axis=1, keepdims=True)
+    empty = row_sums[:, 0] == 0.0
+    if np.any(empty):
+        if fallback is None:
+            raise ValueError("transition counts contain an empty row and no fallback law was supplied.")
+        fallback_matrix = validated_row_probability_matrix(
+            fallback,
+            "transition fallback",
+            shape=matrix.shape,
+        )
+        matrix[empty, :] = fallback_matrix[empty, :]
+        row_sums = matrix.sum(axis=1, keepdims=True)
+    return matrix / row_sums
+
+
+def _log_probabilities(values: np.ndarray) -> np.ndarray:
+    """Take an exact probability log while preserving structural zeros as ``-inf``."""
+    with np.errstate(divide="ignore"):
+        return np.log(values)
+
+
+def _validated_transition_operator(operator: Any, n_states: int, label: str) -> TransitionOperator:
+    """Validate a transition operator's shape, stochastic matrix, and linear maps."""
+    if not isinstance(operator, TransitionOperator):
+        raise TypeError(f"{label} must be a TransitionOperator.")
+    declared_states = _exact_positive_integer(operator.n_states, f"{label} n_states")
+    if declared_states != n_states:
+        raise ValueError(f"{label} declares {declared_states} states, expected {n_states}.")
+    matrix = validated_row_probability_matrix(
+        operator.as_matrix(),
+        f"{label} matrix",
+        shape=(n_states, n_states),
+    )
+    probe = np.arange(1, n_states + 1, dtype=np.float64)
+    probe /= probe.sum()
+    forward = np.asarray(operator.forward(probe), dtype=np.float64)
+    backward = np.asarray(operator.backward(probe), dtype=np.float64)
+    if forward.shape != (n_states,) or not np.allclose(forward, probe @ matrix, rtol=1.0e-10, atol=1.0e-12):
+        raise ValueError(f"{label}.forward is inconsistent with as_matrix().")
+    if backward.shape != (n_states,) or not np.allclose(backward, matrix @ probe, rtol=1.0e-10, atol=1.0e-12):
+        raise ValueError(f"{label}.backward is inconsistent with as_matrix().")
+    return operator
 
 
 class DenseTransition(TransitionOperator):
@@ -120,9 +187,21 @@ class DenseTransition(TransitionOperator):
     """
 
     def __init__(self, a: np.ndarray, prior: np.ndarray | None = None) -> None:
-        self.a = np.asarray(a, dtype=float)
+        raw = _numeric_matrix(a, "DenseTransition matrix")
+        if raw.shape[0] != raw.shape[1]:
+            raise ValueError("DenseTransition matrix must be square.")
+        self.a = validated_row_probability_matrix(
+            raw,
+            "DenseTransition matrix",
+            shape=raw.shape,
+        )
         self.n_states = self.a.shape[0]
-        self.prior = None if prior is None else np.asarray(prior, dtype=float)
+        if prior is None:
+            self.prior = None
+        else:
+            self.prior = _numeric_matrix(prior, "DenseTransition prior")
+            if self.prior.shape != self.a.shape:
+                raise ValueError(f"DenseTransition prior must have shape {self.a.shape}.")
 
     def forward(self, alpha):
         """Push a state-belief row vector forward with the dense matrix."""
@@ -146,26 +225,47 @@ class DenseTransition(TransitionOperator):
 
     def estimate(self, acc):
         """Estimate a row-normalized dense transition from expected counts."""
-        return DenseTransition(_row_normalize(acc if self.prior is None else acc + self.prior), self.prior)
+        counts = _numeric_matrix(acc, "DenseTransition expected counts")
+        if counts.shape != self.a.shape:
+            raise ValueError(f"DenseTransition expected counts must have shape {self.a.shape}.")
+        effective = counts if self.prior is None else counts + self.prior
+        return DenseTransition(_row_normalize(effective, self.a), self.prior)
 
 
 def sticky_transition(a, kappa: float) -> DenseTransition:
     """A dense transition with a STICKY self-transition prior: ``kappa`` pseudocounts on the diagonal
     favor staying in a state (longer dwell times, cleaner segmentation -- the sticky-HMM idea)."""
-    a = np.asarray(a, dtype=float)
-    return DenseTransition(a, prior=float(kappa) * np.eye(a.shape[0]))
+    transition = DenseTransition(a)
+    try:
+        strength = float(kappa)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("sticky transition kappa must be numeric.") from exc
+    if not np.isfinite(strength) or strength < 0.0:
+        raise ValueError("sticky transition kappa must be finite and non-negative.")
+    return DenseTransition(transition.a, prior=strength * np.eye(transition.n_states))
 
 
 def dirichlet_transition(a, alpha: float) -> DenseTransition:
     """A dense transition with a symmetric Dirichlet(``alpha``) smoothing prior on every row (MAP)."""
-    a = np.asarray(a, dtype=float)
-    return DenseTransition(a, prior=np.full((a.shape[0], a.shape[0]), float(alpha)))
+    transition = DenseTransition(a)
+    try:
+        strength = float(alpha)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("Dirichlet transition alpha must be numeric.") from exc
+    if not np.isfinite(strength) or strength < 0.0:
+        raise ValueError("Dirichlet transition alpha must be finite and non-negative.")
+    return DenseTransition(
+        transition.a,
+        prior=np.full((transition.n_states, transition.n_states), strength),
+    )
 
 
 def kron_initial(pi1, pi2) -> np.ndarray:
     """Factorized initial distribution ``pi1 (x) pi2`` for a factorial (Kronecker) HMM -- the two chains
     start independently. Matches a :class:`KroneckerTransition` so the joint initial respects the factors."""
-    return np.kron(np.asarray(pi1, dtype=float), np.asarray(pi2, dtype=float))
+    first = validated_probability_vector(pi1, "first Kronecker initial probabilities")
+    second = validated_probability_vector(pi2, "second Kronecker initial probabilities")
+    return np.kron(first, second)
 
 
 class LowRankTransition(TransitionOperator):
@@ -178,8 +278,15 @@ class LowRankTransition(TransitionOperator):
     """
 
     def __init__(self, g: np.ndarray, phi: np.ndarray) -> None:
-        self.g = np.asarray(g, dtype=float)  # (K, r)
-        self.phi = np.asarray(phi, dtype=float)  # (r, K)
+        raw_g = _numeric_matrix(g, "LowRankTransition g")
+        raw_phi = _numeric_matrix(phi, "LowRankTransition phi")
+        if raw_g.shape[1] != raw_phi.shape[0] or raw_g.shape[0] != raw_phi.shape[1]:
+            raise ValueError(
+                "LowRankTransition requires g shape (K, r) and phi shape (r, K); "
+                f"got {raw_g.shape} and {raw_phi.shape}."
+            )
+        self.g = validated_row_probability_matrix(raw_g, "LowRankTransition g", shape=raw_g.shape)
+        self.phi = validated_row_probability_matrix(raw_phi, "LowRankTransition phi", shape=raw_phi.shape)
         self.n_states = self.g.shape[0]
         self.rank = self.g.shape[1]
 
@@ -214,7 +321,12 @@ class LowRankTransition(TransitionOperator):
 
     def estimate(self, acc):
         """Estimate low-rank transition factors from accumulated statistics."""
-        return LowRankTransition(_row_normalize(acc[0]), _row_normalize(acc[1]))
+        if not isinstance(acc, (list, tuple)) or len(acc) != 2:
+            raise ValueError("LowRankTransition expected counts must contain g and phi matrices.")
+        return LowRankTransition(
+            _row_normalize(acc[0], self.g),
+            _row_normalize(acc[1], self.phi),
+        )
 
 
 class SparseTransition(TransitionOperator):
@@ -225,13 +337,50 @@ class SparseTransition(TransitionOperator):
     def __init__(self, n_states: int, edges, values=None) -> None:
         from scipy.sparse import csr_matrix
 
-        self.n_states = int(n_states)
-        self.rows = np.asarray([e[0] for e in edges], dtype=int)
-        self.cols = np.asarray([e[1] for e in edges], dtype=int)
-        vals = np.ones(len(self.rows)) if values is None else np.asarray(values, dtype=float)
-        a = csr_matrix((np.maximum(vals, 0.0), (self.rows, self.cols)), shape=(self.n_states, self.n_states))
+        self.n_states = _exact_positive_integer(n_states, "SparseTransition n_states")
+        try:
+            edge_list = list(edges)
+        except TypeError as exc:
+            raise TypeError("SparseTransition edges must be an iterable of integer pairs.") from exc
+        if not edge_list:
+            raise ValueError("SparseTransition edges must not be empty.")
+        normalized_edges: list[tuple[int, int]] = []
+        for index, edge in enumerate(edge_list):
+            try:
+                source, target = edge
+            except (TypeError, ValueError) as exc:
+                raise TypeError(f"SparseTransition edge {index} must contain exactly two state IDs.") from exc
+            if (
+                isinstance(source, bool)
+                or not isinstance(source, (int, np.integer))
+                or isinstance(target, bool)
+                or not isinstance(target, (int, np.integer))
+            ):
+                raise TypeError(f"SparseTransition edge {index} state IDs must be integers.")
+            pair = (int(source), int(target))
+            if any(state < 0 or state >= self.n_states for state in pair):
+                raise ValueError(f"SparseTransition edge {index} {pair} is outside the state space.")
+            normalized_edges.append(pair)
+        if len(set(normalized_edges)) != len(normalized_edges):
+            raise ValueError("SparseTransition edges must be unique.")
+        self.rows = np.asarray([edge[0] for edge in normalized_edges], dtype=int)
+        self.cols = np.asarray([edge[1] for edge in normalized_edges], dtype=int)
+        if values is None:
+            vals = np.ones(len(self.rows), dtype=np.float64)
+        else:
+            try:
+                vals = np.asarray(values, dtype=np.float64)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise TypeError("SparseTransition values must be numeric.") from exc
+            if vals.shape != (len(self.rows),):
+                raise ValueError(f"SparseTransition values must have shape ({len(self.rows)},).")
+            if np.any(~np.isfinite(vals)) or np.any(vals < 0.0):
+                raise ValueError("SparseTransition values must be finite and non-negative.")
+        a = csr_matrix((vals, (self.rows, self.cols)), shape=(self.n_states, self.n_states))
         rs = np.asarray(a.sum(axis=1)).ravel()
-        rs[rs == 0] = 1.0
+        empty_rows = np.flatnonzero(rs == 0.0)
+        if len(empty_rows):
+            raise ValueError(f"SparseTransition every state needs positive outgoing mass; empty rows {empty_rows.tolist()}.")
         from scipy.sparse import diags
 
         self.a = diags(1.0 / rs) @ a  # row-normalized csr
@@ -259,7 +408,24 @@ class SparseTransition(TransitionOperator):
 
     def estimate(self, acc):
         """Estimate a sparse transition over the same allowed edge set."""
-        return SparseTransition(self.n_states, list(zip(self.rows.tolist(), self.cols.tolist())), acc)
+        try:
+            counts = np.asarray(acc, dtype=np.float64)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TypeError("SparseTransition expected counts must be numeric.") from exc
+        if counts.shape != self._edge_vals.shape:
+            raise ValueError(f"SparseTransition expected counts must have shape {self._edge_vals.shape}.")
+        if np.any(~np.isfinite(counts)) or np.any(counts < 0.0):
+            raise ValueError("SparseTransition expected counts must be finite and non-negative.")
+        effective = counts.copy()
+        for state in range(self.n_states):
+            edge_indices = np.flatnonzero(self.rows == state)
+            if effective[edge_indices].sum() == 0.0:
+                effective[edge_indices] = self._edge_vals[edge_indices]
+        return SparseTransition(
+            self.n_states,
+            list(zip(self.rows.tolist(), self.cols.tolist())),
+            effective,
+        )
 
 
 def left_to_right_edges(n_states: int, skip: int = 1):
@@ -293,8 +459,8 @@ def _final_state_enumerate(hmm, len_dist, max_results=50):
     final_mask = hmm.final_mask
     log_emit = {v: np.array([float(e.log_density(v)) for e in hmm.emissions]) for v in symbols}
     max_emit = np.max(np.stack([log_emit[v] for v in symbols]), axis=0)
-    log_pi = np.log(hmm.pi + 1e-300)
-    log_a = np.log(hmm.transition.as_matrix() + 1e-300)
+    log_pi = _log_probabilities(hmm.pi)
+    log_a = _log_probabilities(hmm.transition.as_matrix())
     log_len = {x: float(len_dist.log_density(x)) for x in lengths}
     l_max = max(lengths)
     ub = [np.where(final_mask, 0.0, -np.inf)]
@@ -450,11 +616,18 @@ class StructuredHMM:
         terminal_states=None,
         final_states=None,
     ) -> None:
-        self.emissions = list(emissions)
-        self.pi = np.asarray(pi, dtype=float)
-        self.transition = transition
+        try:
+            self.emissions = list(emissions)
+        except TypeError as exc:
+            raise TypeError("StructuredHMM emissions must be an iterable.") from exc
+        if not self.emissions:
+            raise ValueError("StructuredHMM requires at least one emission distribution.")
         self.K = len(self.emissions)
+        self.pi = validated_probability_vector(pi, "StructuredHMM initial probabilities", size=self.K)
+        self.transition = _validated_transition_operator(transition, self.K, "StructuredHMM transition")
         self.keys = tuple(keys)  # (init_key, trans_key) for parameter tying across models
+        if len(self.keys) != 2:
+            raise ValueError("StructuredHMM keys must contain exactly two entries.")
         self.name = name
         self.len_dist = len_dist  # optional distribution over sequence length (needed for enumeration)
         # terminal (absorbing) states: when set, the sequence length is a STOPPING TIME -- the chain only
@@ -483,23 +656,18 @@ class StructuredHMM:
             self.final_mask[list(self.final_states)] = True
         if self.terminal_states is not None and self.final_states is not None:
             raise ValueError("StructuredHMM cannot combine terminal_states and final_states")
-        # coupling invariant: emissions[k] <-> pi[k] <-> transition row/col k all index the SAME state k,
-        # so the three counts must agree (for a Kronecker op, n_states == K1*K2 emissions).
-        if not (self.K == len(self.pi) == transition.n_states):
-            raise ValueError(
-                f"state-count mismatch: {self.K} emissions, len(pi)={len(self.pi)}, "
-                f"transition.n_states={transition.n_states} must be equal."
-            )
-        s = self.pi.sum()
-        if s > 0:
-            self.pi = self.pi / s
         validate_terminal_reachability(
             self.pi,
             self.transition.as_matrix(),
             self.terminal_states,
             context="StructuredHMM",
         )
-        self._emit_est = emission_estimators or [e.estimator() for e in self.emissions]
+        if emission_estimators is None:
+            self._emit_est = [emission.estimator() for emission in self.emissions]
+        else:
+            self._emit_est = list(emission_estimators)
+            if len(self._emit_est) != self.K:
+                raise ValueError(f"StructuredHMM requires exactly {self.K} emission estimators.")
 
     def _log_b(self, seq) -> np.ndarray:
         return np.array([[float(e.log_density(x)) for e in self.emissions] for x in seq])
@@ -528,10 +696,14 @@ class StructuredHMM:
         beta = np.zeros((T, self.K))
         beta[T - 1] = 1.0
         for t in range(T - 2, -1, -1):
-            beta[t] = op.backward(b[t + 1] * beta[t + 1]) / c[t + 1] if c[t + 1] > 0 else beta[t + 1]
+            beta[t] = (
+                op.backward(b[t + 1] * beta[t + 1]) / c[t + 1]
+                if c[t + 1] > 0
+                else np.zeros(self.K)
+            )
         gamma = alpha * beta
         gsum = gamma.sum(axis=1, keepdims=True)
-        gamma = np.divide(gamma, gsum, out=np.full_like(gamma, 1.0 / self.K), where=gsum > 0)
+        gamma = np.divide(gamma, gsum, out=np.zeros_like(gamma), where=gsum > 0)
         return alpha, beta, c, b, gamma, loglik
 
     def _final_forward_backward(self, log_b, pi=None):
@@ -602,18 +774,30 @@ class StructuredHMM:
         """Most-likely state path (Viterbi / max-product). Uses the transition matrix, so it works for any
         operator; O(T K^2) -- a read-out, not the EM hot loop."""
         log_b = self._log_b(seq)
-        log_a = np.log(self.transition.as_matrix() + 1e-300)
-        log_pi = np.log(self.pi + 1e-300)
+        require_possible_log_evidence(
+            self._forward_backward(log_b)[5],
+            context="StructuredHMM.viterbi",
+        )
+        log_a = _log_probabilities(self.transition.as_matrix())
+        log_pi = _log_probabilities(self.pi)
         t_len, k = log_b.shape
         delta = np.zeros((t_len, k))
         psi = np.zeros((t_len, k), dtype=int)
         delta[0] = log_pi + log_b[0]
         for t in range(1, t_len):
-            m = delta[t - 1][:, None] + log_a  # (from, to)
+            previous = delta[t - 1]
+            if self.term_mask is not None:
+                previous = np.where(~self.term_mask, previous, -np.inf)
+            m = previous[:, None] + log_a  # (from, to)
             psi[t] = np.argmax(m, axis=0)
             delta[t] = m[psi[t], np.arange(k)] + log_b[t]
         path = np.zeros(t_len, dtype=int)
-        path[-1] = int(np.argmax(delta[-1]))
+        ending = delta[-1]
+        if self.term_mask is not None:
+            ending = np.where(self.term_mask, ending, -np.inf)
+        elif self.final_mask is not None:
+            ending = np.where(self.final_mask, ending, -np.inf)
+        path[-1] = int(np.argmax(ending))
         for t in range(t_len - 2, -1, -1):
             path[t] = psi[t + 1, path[t + 1]]
         return path
@@ -760,8 +944,22 @@ class BlockDiagonalTransition(TransitionOperator):
     """
 
     def __init__(self, blocks) -> None:
-        self.blocks = list(blocks)
-        self.sizes = [b.n_states for b in self.blocks]
+        try:
+            self.blocks = list(blocks)
+        except TypeError as exc:
+            raise TypeError("BlockDiagonalTransition blocks must be an iterable of transition operators.") from exc
+        if not self.blocks:
+            raise ValueError("BlockDiagonalTransition requires at least one block.")
+        if any(not isinstance(block, TransitionOperator) for block in self.blocks):
+            raise TypeError("BlockDiagonalTransition blocks must all be TransitionOperator instances.")
+        self.sizes = [
+            _exact_positive_integer(block.n_states, f"BlockDiagonalTransition block {index} n_states")
+            for index, block in enumerate(self.blocks)
+        ]
+        self.blocks = [
+            _validated_transition_operator(block, size, f"BlockDiagonalTransition block {index}")
+            for index, (block, size) in enumerate(zip(self.blocks, self.sizes))
+        ]
         self.offsets = np.cumsum([0] + self.sizes)
         self.n_states = int(self.offsets[-1])
 
@@ -799,6 +997,10 @@ class BlockDiagonalTransition(TransitionOperator):
 
     def estimate(self, acc):
         """Estimate each block and return a new block-diagonal transition."""
+        if not isinstance(acc, (list, tuple)) or len(acc) != len(self.blocks):
+            raise ValueError(
+                f"BlockDiagonalTransition expected counts must contain exactly {len(self.blocks)} block values."
+            )
         return BlockDiagonalTransition([b.estimate(a) for b, a in zip(self.blocks, acc)])
 
 
@@ -813,8 +1015,12 @@ class KroneckerTransition(TransitionOperator):
     """
 
     def __init__(self, op1: TransitionOperator, op2: TransitionOperator) -> None:
-        self.op1, self.op2 = op1, op2
-        self.k1, self.k2 = op1.n_states, op2.n_states
+        if not isinstance(op1, TransitionOperator) or not isinstance(op2, TransitionOperator):
+            raise TypeError("KroneckerTransition factors must be TransitionOperator instances.")
+        self.k1 = _exact_positive_integer(op1.n_states, "KroneckerTransition first factor n_states")
+        self.k2 = _exact_positive_integer(op2.n_states, "KroneckerTransition second factor n_states")
+        self.op1 = _validated_transition_operator(op1, self.k1, "KroneckerTransition first factor")
+        self.op2 = _validated_transition_operator(op2, self.k2, "KroneckerTransition second factor")
         self.n_states = self.k1 * self.k2
 
     def _a1(self):
@@ -852,7 +1058,12 @@ class KroneckerTransition(TransitionOperator):
 
     def estimate(self, acc):
         """Estimate both Kronecker factors from marginalized expected counts."""
-        return KroneckerTransition(DenseTransition(_row_normalize(acc[0])), DenseTransition(_row_normalize(acc[1])))
+        if not isinstance(acc, (list, tuple)) or len(acc) != 2:
+            raise ValueError("KroneckerTransition expected counts must contain exactly two factor matrices.")
+        return KroneckerTransition(
+            DenseTransition(_row_normalize(acc[0], self._a1())),
+            DenseTransition(_row_normalize(acc[1], self._a2())),
+        )
 
 
 def _chunk_spans(t_len: int, chunk: int, overlap: int):
@@ -1239,11 +1450,24 @@ class InputOutputHMM:
     """
 
     def __init__(self, emissions, pi, transitions, emission_estimators=None, name=None, terminal_states=None) -> None:
-        self.emissions = list(emissions)
-        self.pi = np.asarray(pi, dtype=float)
-        self.pi = self.pi / self.pi.sum() if self.pi.sum() > 0 else self.pi
-        self.transitions = list(transitions)  # one operator per input symbol
+        try:
+            self.emissions = list(emissions)
+        except TypeError as exc:
+            raise TypeError("InputOutputHMM emissions must be an iterable.") from exc
+        if not self.emissions:
+            raise ValueError("InputOutputHMM requires at least one emission distribution.")
         self.K = len(self.emissions)
+        self.pi = validated_probability_vector(pi, "InputOutputHMM initial probabilities", size=self.K)
+        try:
+            raw_transitions = list(transitions)
+        except TypeError as exc:
+            raise TypeError("InputOutputHMM transitions must be an iterable of transition operators.") from exc
+        if not raw_transitions:
+            raise ValueError("InputOutputHMM requires at least one input transition.")
+        self.transitions = [
+            _validated_transition_operator(transition, self.K, f"InputOutputHMM transition {index}")
+            for index, transition in enumerate(raw_transitions)
+        ]
         self.M = len(self.transitions)
         self.name = name
         self.terminal_states = validated_terminal_states(
@@ -1255,8 +1479,6 @@ class InputOutputHMM:
         if self.terminal_states is not None:
             self.term_mask = np.zeros(self.K, dtype=bool)
             self.term_mask[list(self.terminal_states)] = True
-        if not all(t.n_states == self.K == len(self.pi) for t in self.transitions):
-            raise ValueError("every input's transition must have n_states == #emissions == len(pi).")
         for index, transition in enumerate(self.transitions):
             validate_terminal_reachability(
                 self.pi,
@@ -1264,7 +1486,12 @@ class InputOutputHMM:
                 self.terminal_states,
                 context="InputOutputHMM transition %d" % index,
             )
-        self._emit_est = emission_estimators or [e.estimator() for e in self.emissions]
+        if emission_estimators is None:
+            self._emit_est = [emission.estimator() for emission in self.emissions]
+        else:
+            self._emit_est = list(emission_estimators)
+            if len(self._emit_est) != self.K:
+                raise ValueError(f"InputOutputHMM requires exactly {self.K} emission estimators.")
 
     def _log_b(self, seq):
         return np.array([[float(e.log_density(x)) for e in self.emissions] for x in seq])
@@ -1333,18 +1560,28 @@ class InputOutputHMM:
         EM hot loop."""
         obs, u = self._obs_inputs(seq, inputs)
         log_b = self._log_b(obs)
-        log_as = [np.log(t.as_matrix() + 1e-300) for t in self.transitions]
-        log_pi = np.log(self.pi + 1e-300)
+        require_possible_log_evidence(
+            self._forward_backward(log_b, u)[5],
+            context="InputOutputHMM.viterbi",
+        )
+        log_as = [_log_probabilities(t.as_matrix()) for t in self.transitions]
+        log_pi = _log_probabilities(self.pi)
         t_len, k = log_b.shape
         delta = np.zeros((t_len, k))
         psi = np.zeros((t_len, k), dtype=int)
         delta[0] = log_pi + log_b[0]
         for t in range(1, t_len):
-            m = delta[t - 1][:, None] + log_as[u[t - 1]]  # (from, to) under the input driving this step
+            previous = delta[t - 1]
+            if self.term_mask is not None:
+                previous = np.where(~self.term_mask, previous, -np.inf)
+            m = previous[:, None] + log_as[u[t - 1]]  # (from, to) under the input driving this step
             psi[t] = np.argmax(m, axis=0)
             delta[t] = m[psi[t], np.arange(k)] + log_b[t]
         path = np.zeros(t_len, dtype=int)
-        path[-1] = int(np.argmax(delta[-1]))
+        ending = delta[-1]
+        if self.term_mask is not None:
+            ending = np.where(self.term_mask, ending, -np.inf)
+        path[-1] = int(np.argmax(ending))
         for t in range(t_len - 2, -1, -1):
             path[t] = psi[t + 1, path[t + 1]]
         return path
