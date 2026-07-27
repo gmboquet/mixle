@@ -27,12 +27,14 @@ families' own estimators for the M-step.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from numbers import Real
 from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
 from scipy.special import logsumexp
 
+from mixle.stats.compute.mixture_evidence import validated_row_probability_matrix
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionSampler,
@@ -44,6 +46,54 @@ from mixle.stats.compute.pdist import (
 from mixle.utils.vector import require_possible_log_evidence
 
 _NEG_INF = -np.inf
+
+
+def _exact_integer(value: Any, label: str, *, minimum: int | None = None) -> int:
+    """Return an exact integer, optionally bounded below."""
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{label} must be an integer.")
+    result = int(value)
+    if minimum is not None and result < minimum:
+        raise ValueError(f"{label} must be at least {minimum}.")
+    return result
+
+
+def _schedule_phase(schedule: PhaseSchedule, t: int, length: int) -> int:
+    """Evaluate a schedule and enforce its phase-index contract."""
+    phase = schedule.phase(t, length)
+    phase = _exact_integer(phase, f"{type(schedule).__name__}.phase result", minimum=0)
+    if phase >= schedule.n_phases:
+        raise ValueError(f"{type(schedule).__name__}.phase returned {phase}, outside [0, {schedule.n_phases}).")
+    return phase
+
+
+def _validated_schedule(schedule: Any) -> PhaseSchedule:
+    """Require a schedule with an exact positive phase count."""
+    if not isinstance(schedule, PhaseSchedule):
+        raise TypeError("schedule must be a PhaseSchedule.")
+    _exact_integer(schedule.n_phases, "schedule n_phases", minimum=1)
+    return schedule
+
+
+def _owned_emission_grid(values: Any, n_phases: int, n_states: int, label: str) -> list[list[Any]]:
+    """Return an owned exact phase-by-state grid."""
+    try:
+        rows = [list(row) for row in values]
+    except TypeError as exc:
+        raise TypeError(f"{label} must be an iterable of emission rows.") from exc
+    if len(rows) != n_phases or any(len(row) != n_states for row in rows):
+        raise ValueError(f"{label} must be an exact {n_phases} x {n_states} grid.")
+    return rows
+
+
+def _validated_pseudo_count(value: Any) -> float:
+    """Return a finite non-negative scheduled-HMM pseudo-count."""
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError("ScheduledHMMEstimator pseudo_count must be a real number.")
+    result = float(value)
+    if not np.isfinite(result) or result < 0.0:
+        raise ValueError("ScheduledHMMEstimator pseudo_count must be finite and non-negative.")
+    return result
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -94,14 +144,14 @@ class ByPosition(PhaseSchedule):
     """Absolute position: ``phi(t, L) = min(t, cap - 1)`` (positions past ``cap-1`` share the last phase)."""
 
     def __init__(self, cap: int) -> None:
-        if cap < 1:
-            raise ValueError("cap must be >= 1")
-        self.cap = int(cap)
+        self.cap = _exact_integer(cap, "ByPosition cap", minimum=1)
         self.n_phases = self.cap
 
     def phase(self, t: int, length: int) -> int:
         """Return the absolute-position phase capped at the final phase."""
-        return min(int(t), self.cap - 1)
+        position = _exact_integer(t, "ByPosition position", minimum=0)
+        _exact_integer(length, "ByPosition length", minimum=0)
+        return min(position, self.cap - 1)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the absolute-position schedule."""
@@ -116,16 +166,16 @@ class ByRelativePosition(PhaseSchedule):
     """Relative position: ``phi(t, L) = min(bins - 1, floor(bins * t / L))`` -- progress through the sequence."""
 
     def __init__(self, bins: int) -> None:
-        if bins < 1:
-            raise ValueError("bins must be >= 1")
-        self.bins = int(bins)
+        self.bins = _exact_integer(bins, "ByRelativePosition bins", minimum=1)
         self.n_phases = self.bins
 
     def phase(self, t: int, length: int) -> int:
         """Return the relative-position phase for ``t / length``."""
-        if length <= 0:
+        position = _exact_integer(t, "ByRelativePosition position", minimum=0)
+        sequence_length = _exact_integer(length, "ByRelativePosition length", minimum=0)
+        if sequence_length == 0:
             return 0
-        return min(self.bins - 1, (int(t) * self.bins) // int(length))
+        return min(self.bins - 1, (position * self.bins) // sequence_length)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the relative-position schedule."""
@@ -143,14 +193,16 @@ class ByLength(PhaseSchedule):
     """
 
     def __init__(self, boundaries: Sequence[int]) -> None:
-        self.boundaries = [int(b) for b in boundaries]
+        self.boundaries = [_exact_integer(boundary, "ByLength boundary", minimum=0) for boundary in boundaries]
         if any(self.boundaries[i] >= self.boundaries[i + 1] for i in range(len(self.boundaries) - 1)):
             raise ValueError("boundaries must be strictly increasing")
         self.n_phases = len(self.boundaries) + 1
 
     def phase(self, t: int, length: int) -> int:
         """Return the length-bucket phase for the sequence length."""
-        return int(sum(1 for b in self.boundaries if length > b))
+        _exact_integer(t, "ByLength position", minimum=0)
+        sequence_length = _exact_integer(length, "ByLength length", minimum=0)
+        return sum(1 for boundary in self.boundaries if sequence_length > boundary)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the length-bucket schedule."""
@@ -170,7 +222,7 @@ def _log_b(emissions: list[list[Any]], schedule: PhaseSchedule, x: list[Any]) ->
     k = len(emissions[0])
     log_b = np.empty((length, k))
     for t in range(length):
-        em = emissions[schedule.phase(t, length)]
+        em = emissions[_schedule_phase(schedule, t, length)]
         for j in range(k):
             log_b[t, j] = em[j].log_density(x[t])
     return log_b
@@ -178,9 +230,9 @@ def _log_b(emissions: list[list[Any]], schedule: PhaseSchedule, x: list[Any]) ->
 
 def _forward(log_inits: np.ndarray, log_trans: np.ndarray, log_b: np.ndarray, schedule: PhaseSchedule) -> float:
     length = log_b.shape[0]
-    la = log_inits[schedule.phase(0, length)] + log_b[0]
+    la = log_inits[_schedule_phase(schedule, 0, length)] + log_b[0]
     for t in range(1, length):
-        a = log_trans[schedule.phase(t - 1, length)]  # transition leaving position t-1
+        a = log_trans[_schedule_phase(schedule, t - 1, length)]  # transition leaving position t-1
         la = log_b[t] + logsumexp(la[:, None] + a, axis=0)
     return float(logsumexp(la))
 
@@ -191,20 +243,20 @@ def _forward_backward(
     """Return ``(loglik, gamma (L,K), xi (L-1,K,K))`` -- state and transition posteriors."""
     length, k = log_b.shape
     la = np.empty((length, k))
-    la[0] = log_inits[schedule.phase(0, length)] + log_b[0]
+    la[0] = log_inits[_schedule_phase(schedule, 0, length)] + log_b[0]
     for t in range(1, length):
-        a = log_trans[schedule.phase(t - 1, length)]
+        a = log_trans[_schedule_phase(schedule, t - 1, length)]
         la[t] = log_b[t] + logsumexp(la[t - 1][:, None] + a, axis=0)
     loglik = float(logsumexp(la[length - 1]))
     lb = np.empty((length, k))
     lb[length - 1] = 0.0
     for t in range(length - 2, -1, -1):
-        a = log_trans[schedule.phase(t, length)]
+        a = log_trans[_schedule_phase(schedule, t, length)]
         lb[t] = logsumexp(a + (log_b[t + 1] + lb[t + 1])[None, :], axis=1)
     gamma = np.exp(la + lb - loglik)
     xi = np.empty((max(length - 1, 0), k, k))
     for t in range(length - 1):
-        a = log_trans[schedule.phase(t, length)]
+        a = log_trans[_schedule_phase(schedule, t, length)]
         m = la[t][:, None] + a + (log_b[t + 1] + lb[t + 1])[None, :] - loglik
         xi[t] = np.exp(m)
     return loglik, gamma, xi
@@ -225,20 +277,40 @@ class ScheduledHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
         len_dist: Any = None,
         name: str | None = None,
     ) -> None:
-        self.inits = np.asarray(inits, dtype=float)  # (P, K)
-        self.transitions = np.asarray(transitions, dtype=float)  # (P, K, K)
-        self.emissions = [list(row) for row in emissions]  # P x K grid of emission distributions
-        self.schedule = schedule
+        self.schedule = _validated_schedule(schedule)
+        self.n_phases = self.schedule.n_phases
+        try:
+            raw_inits = np.asarray(inits, dtype=np.float64)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TypeError("scheduled HMM inits must be a numeric phase-by-state matrix.") from exc
+        if raw_inits.ndim != 2 or raw_inits.shape[0] != self.n_phases or raw_inits.shape[1] == 0:
+            raise ValueError(f"scheduled HMM inits must have shape ({self.n_phases}, n_states) with n_states positive.")
+        self.n_states = raw_inits.shape[1]
+        self.inits = validated_row_probability_matrix(
+            raw_inits,
+            "scheduled HMM initial probabilities",
+            shape=(self.n_phases, self.n_states),
+        )
+        expected_transitions = (self.n_phases, self.n_states, self.n_states)
+        try:
+            raw_transitions = np.asarray(transitions, dtype=np.float64)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TypeError("scheduled HMM transitions must be a numeric phase-by-state tensor.") from exc
+        if raw_transitions.shape != expected_transitions:
+            raise ValueError(f"scheduled HMM transitions must have shape {expected_transitions}.")
+        self.transitions = validated_row_probability_matrix(
+            raw_transitions.reshape(self.n_phases * self.n_states, self.n_states),
+            "scheduled HMM transition probabilities",
+            shape=(self.n_phases * self.n_states, self.n_states),
+        ).reshape(expected_transitions)
+        self.emissions = _owned_emission_grid(
+            emissions,
+            self.n_phases,
+            self.n_states,
+            "scheduled HMM emissions",
+        )
         self.len_dist = len_dist
         self.name = name
-        self.n_phases = schedule.n_phases
-        self.n_states = self.inits.shape[1]
-        if self.inits.shape != (self.n_phases, self.n_states):
-            raise ValueError("inits must be (n_phases, n_states)")
-        if self.transitions.shape != (self.n_phases, self.n_states, self.n_states):
-            raise ValueError("transitions must be (n_phases, n_states, n_states)")
-        if len(self.emissions) != self.n_phases or any(len(r) != self.n_states for r in self.emissions):
-            raise ValueError("emissions must be an n_phases x n_states grid")
         with np.errstate(divide="ignore"):
             self._log_inits = np.log(self.inits)
             self._log_trans = np.log(self.transitions)
@@ -271,29 +343,25 @@ class ScheduledHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
     def estimator(self, pseudo_count: float | None = None) -> ScheduledHMMEstimator:
         """Create the matching estimator from this distribution's own components.
 
-        ``ScheduledHMMEstimator`` reuses ONE emission estimator for every phase x state, so the
-        shared prototype is taken from the first phase/state emission; the length estimator mirrors
-        ``len_dist`` when one is modeled. This keeps the prototype -> estimator convention
-        ``optimize(data, scheduled_hmm)`` relies on.
+        Every phase/state cell retains its own estimator, so heterogeneous
+        emission families survive fitting. The length estimator mirrors
+        ``len_dist`` when one is modeled.
         """
         len_est = None if self.len_dist is None else self.len_dist.estimator(pseudo_count=pseudo_count)
-        emission_est = self.emissions[0][0].estimator(pseudo_count=pseudo_count)
-        if pseudo_count is None:
-            return ScheduledHMMEstimator(
-                n_states=self.n_states,
-                schedule=self.schedule,
-                emission_estimator=emission_est,
-                len_estimator=len_est,
-                name=self.name,
-            )
-        return ScheduledHMMEstimator(
+        emission_estimators = [
+            [component.estimator(pseudo_count=pseudo_count) for component in row] for row in self.emissions
+        ]
+        arguments = dict(
             n_states=self.n_states,
             schedule=self.schedule,
-            emission_estimator=emission_est,
+            emission_estimator=None,
             len_estimator=len_est,
-            pseudo_count=pseudo_count,
             name=self.name,
+            emission_estimators=emission_estimators,
         )
+        if pseudo_count is not None:
+            arguments["pseudo_count"] = pseudo_count
+        return ScheduledHMMEstimator(**arguments)
 
     def dist_to_encoder(self) -> ScheduledHMMDataEncoder:
         """Return the pass-through scheduled HMM encoder."""
@@ -315,7 +383,7 @@ class ScheduledHMMSampler(DistributionSampler):
     def _sample_length(self) -> int:
         if self.len_sampler is None:
             raise ValueError("a len_dist is required to sample (the length is a random variable).")
-        return int(self.len_sampler.sample())
+        return _exact_integer(self.len_sampler.sample(), "scheduled HMM sampled length", minimum=0)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         """Draw one sequence or a list of sequences."""
@@ -326,13 +394,13 @@ class ScheduledHMMSampler(DistributionSampler):
         if length <= 0:
             return []
         out: list[Any] = []
-        p0 = d.schedule.phase(0, length)
+        p0 = _schedule_phase(d.schedule, 0, length)
         z = int(self.rng.choice(d.n_states, p=d.inits[p0]))
         out.append(d.emissions[p0][z].sampler(self.rng.randint(2**31)).sample())
         for t in range(1, length):
-            a = d.transitions[d.schedule.phase(t - 1, length)]
+            a = d.transitions[_schedule_phase(d.schedule, t - 1, length)]
             z = int(self.rng.choice(d.n_states, p=a[z]))
-            pt = d.schedule.phase(t, length)
+            pt = _schedule_phase(d.schedule, t, length)
             out.append(d.emissions[pt][z].sampler(self.rng.randint(2**31)).sample())
         return out
 
@@ -366,15 +434,32 @@ class ScheduledHMMDataEncoder(DataSequenceEncoder):
 class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulator for phase-pooled scheduled HMM EM sufficient statistics."""
 
-    def __init__(self, n_states: int, schedule: PhaseSchedule, emission_factory: Any, len_factory: Any = None) -> None:
-        self.n_states = int(n_states)
-        self.schedule = schedule
-        self.n_phases = schedule.n_phases
-        self.emission_factory = emission_factory
+    def __init__(
+        self,
+        n_states: int,
+        schedule: PhaseSchedule,
+        emission_factories: Any,
+        len_factory: Any = None,
+    ) -> None:
+        self.n_states = _exact_integer(n_states, "ScheduledHMMAccumulator n_states", minimum=1)
+        self.schedule = _validated_schedule(schedule)
+        self.n_phases = self.schedule.n_phases
+        self.emission_factories = (
+            [[emission_factories for _ in range(self.n_states)] for _ in range(self.n_phases)]
+            if callable(getattr(emission_factories, "make", None))
+            else _owned_emission_grid(
+                emission_factories,
+                self.n_phases,
+                self.n_states,
+                "ScheduledHMMAccumulator emission factories",
+            )
+        )
         self.len_factory = len_factory
         self.init_counts = np.zeros((self.n_phases, self.n_states))
         self.trans_counts = np.zeros((self.n_phases, self.n_states, self.n_states))
-        self.emission_acc = [[emission_factory.make() for _ in range(self.n_states)] for _ in range(self.n_phases)]
+        self.emission_acc = [
+            [self.emission_factories[p][j].make() for j in range(self.n_states)] for p in range(self.n_phases)
+        ]
         self.len_acc = None if len_factory is None else len_factory.make()
 
     def _accumulate(self, x: list[Any], weight: float, gamma: np.ndarray, xi: np.ndarray, estimate: Any) -> None:
@@ -383,11 +468,11 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
             self.len_acc.update(length, weight, None if estimate is None else estimate.len_dist)
         if length == 0:
             return
-        self.init_counts[self.schedule.phase(0, length)] += weight * gamma[0]
+        self.init_counts[_schedule_phase(self.schedule, 0, length)] += weight * gamma[0]
         for t in range(length - 1):
-            self.trans_counts[self.schedule.phase(t, length)] += weight * xi[t]
+            self.trans_counts[_schedule_phase(self.schedule, t, length)] += weight * xi[t]
         for t in range(length):
-            p = self.schedule.phase(t, length)
+            p = _schedule_phase(self.schedule, t, length)
             for j in range(self.n_states):
                 prev = None if estimate is None else estimate.emissions[p][j]
                 self.emission_acc[p][j].update(x[t], weight * gamma[t, j], prev)
@@ -487,27 +572,47 @@ class ScheduledHMMAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for scheduled HMM accumulators."""
 
     def __init__(
-        self, n_states: int, schedule: PhaseSchedule, emission_estimator: Any, len_estimator: Any = None
+        self,
+        n_states: int,
+        schedule: PhaseSchedule,
+        emission_estimators: Any,
+        len_estimator: Any = None,
     ) -> None:
-        self.n_states = n_states
-        self.schedule = schedule
-        self.emission_estimator = emission_estimator
+        self.n_states = _exact_integer(n_states, "ScheduledHMMAccumulatorFactory n_states", minimum=1)
+        self.schedule = _validated_schedule(schedule)
+        self.emission_estimators = (
+            [[emission_estimators for _ in range(self.n_states)] for _ in range(self.schedule.n_phases)]
+            if callable(getattr(emission_estimators, "accumulator_factory", None))
+            else _owned_emission_grid(
+                emission_estimators,
+                self.schedule.n_phases,
+                self.n_states,
+                "ScheduledHMMAccumulatorFactory emission estimators",
+            )
+        )
         self.len_estimator = len_estimator
 
     def make(self) -> ScheduledHMMAccumulator:
         """Create a fresh scheduled HMM accumulator."""
         len_factory = None if self.len_estimator is None else self.len_estimator.accumulator_factory()
+        emission_factories = [
+            [self.emission_estimators[p][j].accumulator_factory() for j in range(self.n_states)]
+            for p in range(self.schedule.n_phases)
+        ]
         return ScheduledHMMAccumulator(
-            self.n_states, self.schedule, self.emission_estimator.accumulator_factory(), len_factory
+            self.n_states,
+            self.schedule,
+            emission_factories,
+            len_factory,
         )
 
 
 class ScheduledHMMEstimator(ParameterEstimator):
     """EM estimator for a :class:`ScheduledHiddenMarkovModelDistribution` with a fixed schedule.
 
-    ``emission_estimator`` is the estimator for ONE emission distribution (reused for every phase x state);
-    ``len_estimator`` (optional) estimates the length distribution. The schedule is fixed (it defines the
-    parameter sharing); only the per-phase parameters are learned.
+    ``emission_estimator`` is the backward-compatible homogeneous estimator
+    prototype. ``emission_estimators`` may instead provide an exact
+    phase-by-state grid, preserving heterogeneous families.
     """
 
     def __init__(
@@ -518,30 +623,79 @@ class ScheduledHMMEstimator(ParameterEstimator):
         len_estimator: Any = None,
         pseudo_count: float = 1e-8,
         name: str | None = None,
+        *,
+        emission_estimators: Sequence[Sequence[Any]] | None = None,
     ) -> None:
-        self.n_states = int(n_states)
-        self.schedule = schedule
+        self.n_states = _exact_integer(n_states, "ScheduledHMMEstimator n_states", minimum=1)
+        self.schedule = _validated_schedule(schedule)
+        if emission_estimators is None:
+            if emission_estimator is None:
+                raise ValueError("ScheduledHMMEstimator requires an emission estimator or estimator grid.")
+            self.emission_estimators = [
+                [emission_estimator for _ in range(self.n_states)] for _ in range(self.schedule.n_phases)
+            ]
+        else:
+            if emission_estimator is not None:
+                raise ValueError("provide either emission_estimator or emission_estimators, not both.")
+            self.emission_estimators = _owned_emission_grid(
+                emission_estimators,
+                self.schedule.n_phases,
+                self.n_states,
+                "ScheduledHMMEstimator emission estimators",
+            )
+        # Retain the historical attribute for callers that introspect a homogeneous estimator.
         self.emission_estimator = emission_estimator
         self.len_estimator = len_estimator
-        self.pseudo_count = float(pseudo_count)
+        self.pseudo_count = _validated_pseudo_count(pseudo_count)
         self.name = name
 
     def accumulator_factory(self) -> ScheduledHMMAccumulatorFactory:
         """Return the accumulator factory used by this estimator."""
-        return ScheduledHMMAccumulatorFactory(self.n_states, self.schedule, self.emission_estimator, self.len_estimator)
+        return ScheduledHMMAccumulatorFactory(
+            self.n_states,
+            self.schedule,
+            self.emission_estimators,
+            self.len_estimator,
+        )
 
     def estimate(self, nobs: float | None, suff_stat: tuple) -> ScheduledHiddenMarkovModelDistribution:
         """Estimate phase-indexed initial, transition, emission, and length models."""
-        ic, tc, em_vals, lv = suff_stat
+        try:
+            ic, tc, em_vals, lv = suff_stat
+        except (TypeError, ValueError) as exc:
+            raise ValueError("ScheduledHMMEstimator sufficient statistics must contain four entries.") from exc
+        ic = np.asarray(ic, dtype=np.float64)
+        tc = np.asarray(tc, dtype=np.float64)
+        expected_initial = (self.schedule.n_phases, self.n_states)
+        expected_transition = (self.schedule.n_phases, self.n_states, self.n_states)
+        if ic.shape != expected_initial:
+            raise ValueError(f"scheduled HMM initial counts must have shape {expected_initial}.")
+        if tc.shape != expected_transition:
+            raise ValueError(f"scheduled HMM transition counts must have shape {expected_transition}.")
+        if np.any(~np.isfinite(ic)) or np.any(ic < 0.0):
+            raise ValueError("scheduled HMM initial counts must be finite and non-negative.")
+        if np.any(~np.isfinite(tc)) or np.any(tc < 0.0):
+            raise ValueError("scheduled HMM transition counts must be finite and non-negative.")
+        em_vals = _owned_emission_grid(
+            em_vals,
+            self.schedule.n_phases,
+            self.n_states,
+            "ScheduledHMMEstimator emission sufficient statistics",
+        )
         pc = self.pseudo_count
         inits = ic + pc
-        inits = inits / inits.sum(axis=1, keepdims=True)
+        initial_sums = inits.sum(axis=1, keepdims=True)
+        empty_initial = initial_sums[:, 0] == 0.0
+        inits = np.divide(inits, initial_sums, out=np.zeros_like(inits), where=initial_sums > 0.0)
+        inits[empty_initial, :] = 1.0 / self.n_states
         trans = tc + pc
         rsum = trans.sum(axis=2, keepdims=True)
-        rsum[rsum == 0] = 1.0
-        trans = trans / rsum
+        empty_transition = rsum[:, :, 0] == 0.0
+        trans = np.divide(trans, rsum, out=np.zeros_like(trans), where=rsum > 0.0)
+        for phase, state in np.argwhere(empty_transition):
+            trans[phase, state, state] = 1.0
         emissions = [
-            [self.emission_estimator.estimate(None, em_vals[p][j]) for j in range(self.n_states)]
+            [self.emission_estimators[p][j].estimate(None, em_vals[p][j]) for j in range(self.n_states)]
             for p in range(self.schedule.n_phases)
         ]
         len_dist = None if self.len_estimator is None else self.len_estimator.estimate(None, lv)
