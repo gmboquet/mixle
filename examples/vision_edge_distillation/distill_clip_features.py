@@ -21,12 +21,18 @@ from datasets import load_dataset  # noqa: E402
 from transformers import CLIPModel, CLIPProcessor  # noqa: E402
 
 CLASSES = ["airplane", "automobile", "bird", "cat", "deer", "dog", "frog", "horse", "ship", "truck"]
-clip = CLIPModel.from_pretrained("openai/clip-vit-base-patch32", use_safetensors=True).to(DEV).eval()
-proc = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32", use_fast=True)
+CLIP_ID = "openai/clip-vit-base-patch32"
+CLIP_REVISION = "3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268"
+CIFAR10_ID = "uoft-cs/cifar10"
+CIFAR10_REVISION = "0b2714987fa478483af9968de7c934580d0bb9a2"
+clip = (
+    CLIPModel.from_pretrained(CLIP_ID, revision=CLIP_REVISION, use_safetensors=True).to(DEV).eval()
+)
+proc = CLIPProcessor.from_pretrained(CLIP_ID, revision=CLIP_REVISION, use_fast=True)
 
 t0 = time.time()
-tr = load_dataset("uoft-cs/cifar10", split="train")  # all 50k
-te = load_dataset("uoft-cs/cifar10", split="test")  # all 10k
+tr = load_dataset(CIFAR10_ID, split="train", revision=CIFAR10_REVISION)  # all 50k
+te = load_dataset(CIFAR10_ID, split="test", revision=CIFAR10_REVISION)  # all 10k
 tr_imgs = [r["img"] for r in tr]
 te_imgs = [r["img"] for r in te]
 ytr = np.array([r["label"] for r in tr])
@@ -129,6 +135,15 @@ acc = evaluate()
 torch.save({k: v.cpu() for k, v in student.state_dict().items()}, "student.pt")
 torch.save({"mean": mean, "std": std, "tfeat": tfeat.cpu()}, "student_head.pt")
 metrics = {
+    "assets": {
+        "clip": {"repository": CLIP_ID, "revision": CLIP_REVISION},
+        "cifar10": {
+            "repository": CIFAR10_ID,
+            "revision": CIFAR10_REVISION,
+            "train_fingerprint": tr._fingerprint,
+            "test_fingerprint": te._fingerprint,
+        },
+    },
     "clip_zero_shot_acc": clip_zs,
     "student_acc": acc,
     "retention": acc / clip_zs,

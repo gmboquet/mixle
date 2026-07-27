@@ -4,7 +4,8 @@ This example explores whether a compact student can learn an embedding produced 
 vision model and later run without that model. Results depend on the artifact, dataset snapshot,
 hardware, and dependency versions. This tracked page intentionally publishes no 0.8.0 performance
 number; a run is evidence only when its artifact digests and environment are retained with its
-receipt.
+receipt. The scripts pin both Hugging Face repositories to full immutable commit revisions and record
+those revisions plus dataset fingerprints in ``metrics.json``.
 
 The directory demonstrates a **laptop + pool** topology: a GPU training pass distils the teacher's
 feature space into a compact student, and a separate CPU process verifies the resulting files.

@@ -11,9 +11,15 @@ dataset, dependencies, hardware, command, and output are retained together.
 
 from __future__ import annotations
 
+import json
 import time
 
 import numpy as np
+
+CIFAR10_ID = "uoft-cs/cifar10"
+CIFAR10_REVISION = "0b2714987fa478483af9968de7c934580d0bb9a2"
+BANKING77_ID = "PolyAI/banking77"
+BANKING77_REVISION = "90d4e2ee5521c04fc1488f065b8b083658768c57"
 
 
 def line(t: str) -> None:
@@ -35,12 +41,27 @@ def main() -> None:
     from datasets import load_dataset
 
     from mixle.represent import image_features
-    from mixle.scientist import distill_to_edge, encode_images, encode_texts, study
+    from mixle.scientist import distill_to_edge, encode_images, encode_texts, scientist_asset_manifest, study
 
     # 1. FOUNDATION ON LAPTOP -----------------------------------------------------------------------
     line("1. FOUNDATION ENCODER + CERTIFIED HEAD")
-    tr = load_dataset("cifar10", split="train[:2000]")
-    te = load_dataset("cifar10", split="test[:800]")
+    tr = load_dataset(CIFAR10_ID, split="train[:2000]", revision=CIFAR10_REVISION)
+    te = load_dataset(CIFAR10_ID, split="test[:800]", revision=CIFAR10_REVISION)
+    print(
+        "  ASSETS "
+        + json.dumps(
+            {
+                "models": scientist_asset_manifest(),
+                "dataset": {
+                    "repository": CIFAR10_ID,
+                    "revision": CIFAR10_REVISION,
+                    "train_fingerprint": tr._fingerprint,
+                    "test_fingerprint": te._fingerprint,
+                },
+            },
+            sort_keys=True,
+        )
+    )
     t0 = time.time()
     ztr = encode_images([r["img"] for r in tr])
     zte = encode_images([r["img"] for r in te])
@@ -55,8 +76,23 @@ def main() -> None:
 
     # 2a. EDGE DISTILLATION THAT WORKS (text) --------------------------------------------------------
     line("2a. TEXT STUDENT: MiniLM+head -> a torch-free artifact")
-    ds = load_dataset("banking77", split="train")
-    tb = load_dataset("banking77", split="test")
+    ds = load_dataset(BANKING77_ID, split="train", revision=BANKING77_REVISION)
+    tb = load_dataset(BANKING77_ID, split="test", revision=BANKING77_REVISION)
+    print(
+        "  ASSETS "
+        + json.dumps(
+            {
+                "models": scientist_asset_manifest(),
+                "dataset": {
+                    "repository": BANKING77_ID,
+                    "revision": BANKING77_REVISION,
+                    "train_fingerprint": ds._fingerprint,
+                    "test_fingerprint": tb._fingerprint,
+                },
+            },
+            sort_keys=True,
+        )
+    )
     xtr = [r["text"] for r in ds if r["label"] < 20][:1600]
     ytr = [r["label"] for r in ds if r["label"] < 20][:1600]
     xte = [r["text"] for r in tb if r["label"] < 20][:400]

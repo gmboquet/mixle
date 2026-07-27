@@ -31,7 +31,8 @@ import numpy as np
 from mixle.inference.estimation import optimize
 from mixle.models import GradLeaf
 
-CHECKPOINT = "hf-internal-testing/tiny-random-gpt2"  # a handful of KB; real GPT-2 architecture, random weights
+CHECKPOINT = "peft-internal-testing/tiny-random-gpt2"
+CHECKPOINT_REVISION = "2f18a2874922d4cc4777cdf9fbf66cfa057a691a"
 
 
 def build_peft_wrapped_module(seed: int = 0):
@@ -43,7 +44,11 @@ def build_peft_wrapped_module(seed: int = 0):
     from transformers import AutoModelForCausalLM
 
     torch.manual_seed(seed)
-    base = AutoModelForCausalLM.from_pretrained(CHECKPOINT)
+    base = AutoModelForCausalLM.from_pretrained(
+        CHECKPOINT,
+        revision=CHECKPOINT_REVISION,
+        use_safetensors=True,
+    )
     lora_cfg = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         r=4,
@@ -90,6 +95,7 @@ def toy_token_sequences(vocab: int, block: int, n: int, rng: np.random.RandomSta
 
 
 def main() -> None:
+    print(f"asset repository={CHECKPOINT} revision={CHECKPOINT_REVISION}")
     rng = np.random.RandomState(0)
     module = build_peft_wrapped_module(seed=0)
 
