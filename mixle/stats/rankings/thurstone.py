@@ -1,27 +1,27 @@
-"""Thurstone (Thurstonian) ranking model -- the Gaussian random-utility model over permutations.
+"""Thurstone ranking model as a normalized Gaussian random-utility approximation.
 
-Each item has a latent utility ``U_i ~ Normal(mu_i, 1)`` (Case V, equal variance) and an ordering is the
-descending sort of the utilities, so
+Each item has latent utility ``U_i ~ Normal(mu_i, 1)`` and a ranking is the
+descending ordering of those utilities. Exact ranking probabilities are
+Gaussian orthant probabilities and have no general closed form.
 
-    p(sigma) = P( U_sigma[0] > U_sigma[1] > ... > U_sigma[n-1] ).
+This implementation exposes an explicitly labelled, deterministic
+finite-sample approximation. ``n_mc`` common random-utility draws are converted
+to ranking counts and combined with positive symmetric Dirichlet smoothing.
+That construction is a proper categorical distribution: probabilities are
+exactly normalized, a datum's score cannot depend on its batch neighbors, and
+the sampler draws from the same represented law. Every distribution records
+the approximation provenance and conservative binomial error scale.
 
-This is the Gaussian counterpart of :class:`PlackettLuceDistribution` (which is the same construction
-with Gumbel noise). The probability is the Gaussian-orthant probability of the consecutive-difference
-cone ``D_r = U_sigma[r] - U_sigma[r+1] > 0``; ``D`` has mean ``mu_sigma[r] - mu_sigma[r+1]`` and a fixed
-tridiagonal covariance (``2`` on the diagonal, ``-1`` off it), independent of ``sigma``. There is no
-closed form for ``n > 3``, so the likelihood is a numba **Genz separation-of-variables** Monte-Carlo
-estimate of the orthant (low variance, always positive) seeded deterministically. Sampling is exact
-(draw utilities, sort); ``mu`` is fit in closed form from the pairwise-preference marginals (the
-Thurstone-Mosteller Case V estimator), identified up to an additive constant (stored mean-zero).
-
-Data type: ``List[int]`` -- a full ordering, a permutation of ``0..n-1`` with ``x[r]`` the item at rank
-``r`` (best first).
+Data type: ``List[int]`` -- a full ordering of ``0..n-1`` with ``x[rank]`` the
+item at that rank, best first.
 """
 
 from __future__ import annotations
 
 import math
+from collections import Counter
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -35,118 +35,86 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.utils.optional_deps import numba
+from mixle.stats.rankings._contracts import (
+    count_matrix_statistics,
+    finite_nonnegative,
+    finite_positive,
+    nonnegative_integer,
+    permutation,
+    permutation_batch,
+    positive_integer,
+    sample_size,
+)
+from mixle.stats.rankings._contracts import weights as validate_weights
 
 _SQRT2 = math.sqrt(2.0)
 
 
-@numba.njit("float64(float64)", cache=True)
-def _phi(x):
-    return 0.5 * (1.0 + math.erf(x / _SQRT2))
+@dataclass(frozen=True)
+class ThurstoneApproximationDiagnostics:
+    """Provenance and uncertainty scale for the approximating categorical law."""
+
+    method: str
+    draws: int
+    seed: int
+    smoothing: float
+    distinct_rankings: int
+    support_size: int
+    maximum_binomial_standard_error: float
 
 
-@numba.njit("float64(float64)", cache=True)
-def _phinv(p):
-    """Standard-normal quantile via Acklam's rational approximation (~1e-9, pure arithmetic)."""
-    if p <= 0.0:
-        return -1e10
-    if p >= 1.0:
-        return 1e10
-    a0, a1, a2, a3, a4, a5 = (
-        -3.969683028665376e01,
-        2.209460984245205e02,
-        -2.759285104469687e02,
-        1.383577518672690e02,
-        -3.066479806614716e01,
-        2.506628277459239e00,
+@dataclass(frozen=True)
+class ThurstoneFitDiagnostics:
+    """Provenance for an estimated Thurstone utility vector."""
+
+    method: str
+    exact_mle: bool
+    regularized: bool
+    pseudo_count: float
+
+
+def _checked_seed(value: Any) -> int:
+    result = nonnegative_integer(value, label="seed")
+    if result > np.iinfo(np.uint32).max:
+        raise ValueError("seed must be in [0, 2**32 - 1].")
+    return result
+
+
+def _thurstone_statistics(value: Any, dim: int) -> tuple[float, np.ndarray]:
+    """Validate full-ranking pairwise-precedence statistics."""
+    count, precede = count_matrix_statistics(
+        value,
+        dim,
+        label="Thurstone statistics",
+        entries_per_observation=dim * (dim - 1) / 2.0,
     )
-    b1, b2, b3, b4, b5 = (
-        -5.447609879822406e01,
-        1.615858368580409e02,
-        -1.556989798598866e02,
-        6.680131188771972e01,
-        -1.328068155288572e01,
-    )
-    c0, c1, c2, c3, c4, c5 = (
-        -7.784894002430293e-03,
-        -3.223964580411365e-01,
-        -2.400758277161838e00,
-        -2.549732539343734e00,
-        4.374664141464968e00,
-        2.938163982698783e00,
-    )
-    d1, d2, d3, d4 = (7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e00, 3.754408661907416e00)
-    plow, phigh = 0.02425, 1.0 - 0.02425
-    if p < plow:
-        q = math.sqrt(-2.0 * math.log(p))
-        return (((((c0 * q + c1) * q + c2) * q + c3) * q + c4) * q + c5) / (
-            (((d1 * q + d2) * q + d3) * q + d4) * q + 1.0
+    tolerance = 1.0e-10 * max(1.0, count)
+    if not np.allclose(np.diag(precede), 0.0, rtol=0.0, atol=tolerance):
+        raise ValueError("Thurstone precedence-count diagonal must be zero.")
+    pair_totals = precede + precede.T
+    off_diagonal = ~np.eye(dim, dtype=bool)
+    if not np.allclose(pair_totals[off_diagonal], count, rtol=1.0e-10, atol=tolerance):
+        raise ValueError(
+            "each Thurstone item pair must have total precedence weight equal to the observation weight."
         )
-    if p <= phigh:
-        q = p - 0.5
-        r = q * q
-        return (
-            (((((a0 * r + a1) * r + a2) * r + a3) * r + a4) * r + a5)
-            * q
-            / (((((b1 * r + b2) * r + b3) * r + b4) * r + b5) * r + 1.0)
-        )
-    q = math.sqrt(-2.0 * math.log(1.0 - p))
-    return -(((((c0 * q + c1) * q + c2) * q + c3) * q + c4) * q + c5) / ((((d1 * q + d2) * q + d3) * q + d4) * q + 1.0)
-
-
-@numba.njit("float64[:](float64[:], int64[:, :], float64[:], float64[:], int64, int64)", cache=True)
-def _seq_thurstone_logp(mu, orderings, ldiag, lsub, n_mc, seed):
-    """Genz SOV Monte-Carlo log-orthant probability of each ordering's consecutive-difference cone."""
-    np.random.seed(seed)
-    big_n, n = orderings.shape
-    d = n - 1
-    out = np.empty(big_n, dtype=np.float64)
-    lower = np.empty(d, dtype=np.float64)
-    for t in range(big_n):
-        sig = orderings[t]
-        for r in range(d):
-            lower[r] = -(mu[sig[r]] - mu[sig[r + 1]])  # constraint D_r > 0  <=>  (D_r - m_r) > -m_r
-        acc = 0.0
-        for _ in range(n_mc):
-            p_prod = 1.0
-            zprev = 0.0
-            for i in range(d):
-                s = lsub[i] * zprev if i > 0 else 0.0
-                a = (lower[i] - s) / ldiag[i]
-                lo = _phi(a)
-                f = 1.0 - lo
-                p_prod *= f
-                if i < d - 1:
-                    zprev = _phinv(lo + np.random.random() * f)
-            acc += p_prod
-        mean = acc / n_mc
-        out[t] = math.log(mean) if mean > 0.0 else -math.inf
-    return out
-
-
-def _cholesky_tridiag(d: int) -> tuple[np.ndarray, np.ndarray]:
-    """Cholesky of the fixed difference covariance tridiag(-1, 2, -1): returns (diag, sub-diagonal)."""
-    ldiag = np.empty(d)
-    lsub = np.zeros(d)
-    ldiag[0] = math.sqrt(2.0)
-    for i in range(1, d):
-        lsub[i] = -1.0 / ldiag[i - 1]
-        ldiag[i] = math.sqrt(2.0 - lsub[i] * lsub[i])
-    return ldiag, lsub
+    return count, precede
 
 
 class ThurstoneDistribution(SequenceEncodableProbabilityDistribution):
-    """Thurstone Case V Gaussian random-utility ranking model with mean utilities ``mu``."""
+    """Normalized finite-sample approximation to a Case V Thurstone law."""
 
     @classmethod
     def compute_capabilities(cls):
-        """Declare the NumPy and numba execution path used by Thurstone kernels."""
+        """Declare the NumPy execution path used to build the approximation."""
         from mixle.stats.compute.capabilities import DistributionCapabilities
 
         return DistributionCapabilities(
             engine_ready=("numpy",),
             kernel_status="numpy_only",
-            numpy_only_reason="The Gaussian-orthant likelihood runs through a dedicated numba Genz kernel.",
+            numpy_only_reason=(
+                "The labelled common-random-number approximation stores discrete ranking counts "
+                "and cannot be represented by generic tensor kernels."
+            ),
         )
 
     def __init__(
@@ -156,45 +124,97 @@ class ThurstoneDistribution(SequenceEncodableProbabilityDistribution):
         keys: str | None = None,
         n_mc: int = 4000,
         seed: int = 0,
+        smoothing: float = 0.5,
+        fit_diagnostics: ThurstoneFitDiagnostics | None = None,
     ) -> None:
-        m = np.asarray(mu, dtype=float)
-        if m.ndim != 1 or m.size < 2 or not np.all(np.isfinite(m)):
+        raw_mu = np.asarray(mu, dtype=np.float64)
+        if raw_mu.ndim != 1 or raw_mu.size < 2 or not np.all(np.isfinite(raw_mu)):
             raise ValueError("mu must be a finite length-K vector with K >= 2.")
-        self.mu = m - m.mean()  # identified up to a global location
-        self.dim = m.size
-        self.n_mc = int(n_mc)
-        self.seed = int(seed)
-        self._ldiag, self._lsub = _cholesky_tridiag(self.dim - 1)
+        self.dim = int(raw_mu.size)
+        centered = np.array(raw_mu - raw_mu.mean(), dtype=np.float64, copy=True)
+        centered.setflags(write=False)
+        self.mu = centered
+        self.n_mc = positive_integer(n_mc, label="n_mc")
+        self.seed = _checked_seed(seed)
+        self.smoothing = finite_positive(smoothing, label="smoothing")
+        if fit_diagnostics is not None and not isinstance(fit_diagnostics, ThurstoneFitDiagnostics):
+            raise TypeError("fit_diagnostics must be a ThurstoneFitDiagnostics record.")
+        self.fit_diagnostics = fit_diagnostics
         self.name = name
         self.keys = keys
 
+        rng = RandomState(self.seed)
+        utilities = self.mu + rng.standard_normal((self.n_mc, self.dim))
+        draws = np.asarray(np.argsort(-utilities, axis=1), dtype=np.int64)
+        draws.setflags(write=False)
+        self._approximation_draws = draws
+        self._ranking_counts = Counter(map(tuple, draws))
+        self._support_size = math.factorial(self.dim)
+        log_empirical_mass = math.log(self.n_mc)
+        log_smoothing_mass = math.log(self.smoothing) + math.lgamma(self.dim + 1.0)
+        self._log_normalizer = float(np.logaddexp(log_empirical_mass, log_smoothing_mass))
+        self._empirical_mixture_probability = math.exp(log_empirical_mass - self._log_normalizer)
+        self.approximation_diagnostics = ThurstoneApproximationDiagnostics(
+            method="common_random_utility_counts_with_symmetric_dirichlet_smoothing",
+            draws=self.n_mc,
+            seed=self.seed,
+            smoothing=self.smoothing,
+            distinct_rankings=len(self._ranking_counts),
+            support_size=self._support_size,
+            maximum_binomial_standard_error=0.5 / math.sqrt(self.n_mc),
+        )
+
     def __str__(self) -> str:
-        return "ThurstoneDistribution(%s, name=%s, keys=%s)" % (
+        return "ThurstoneDistribution(%s, n_mc=%r, seed=%r, smoothing=%r, name=%s, keys=%s)" % (
             repr([float(v) for v in self.mu]),
+            self.n_mc,
+            self.seed,
+            self.smoothing,
             repr(self.name),
             repr(self.keys),
         )
 
     def density(self, x: Sequence[int]) -> float:
-        """Return the probability of a full ordering."""
-        return float(np.exp(self.log_density(x)))
+        """Return the normalized approximating probability of a full ordering."""
+        return float(math.exp(self.log_density(x)))
 
     def log_density(self, x: Sequence[int]) -> float:
-        """Return the log-probability of one full ordering."""
-        return float(self.seq_log_density(np.asarray(x, dtype=np.int64)[None, :])[0])
+        """Return the normalized approximating log-probability of one ordering."""
+        checked = permutation(x, self.dim, label="Thurstone ordering")
+        count = self._ranking_counts.get(tuple(checked), 0)
+        return math.log(count + self.smoothing) - self._log_normalizer
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
-        """Return vectorized log-probabilities for encoded full orderings."""
-        x = np.ascontiguousarray(np.asarray(x, dtype=np.int64))
-        return _seq_thurstone_logp(self.mu, x, self._ldiag, self._lsub, self.n_mc, self.seed)
+        """Return batch-invariant log-probabilities for encoded full orderings."""
+        checked = permutation_batch(x, self.dim, label="Thurstone orderings")
+        return np.fromiter(
+            (
+                math.log(self._ranking_counts.get(tuple(row), 0) + self.smoothing) - self._log_normalizer
+                for row in checked
+            ),
+            dtype=np.float64,
+            count=len(checked),
+        )
 
     def sampler(self, seed: int | None = None) -> ThurstoneSampler:
-        """Return an exact random-utility sampler for this distribution."""
+        """Return a sampler for this exact approximating categorical law."""
         return ThurstoneSampler(self, seed)
 
+    def support_size(self) -> int:
+        """Return the number of full rankings in the smoothed support."""
+        return self._support_size
+
     def estimator(self, pseudo_count: float | None = None) -> ThurstoneEstimator:
-        """Return a Thurstone-Mosteller estimator with this distribution's dimension."""
-        return ThurstoneEstimator(dim=self.dim, n_mc=self.n_mc, seed=self.seed, name=self.name, keys=self.keys)
+        """Return a labelled Thurstone-Mosteller pairwise-moment estimator."""
+        return ThurstoneEstimator(
+            dim=self.dim,
+            n_mc=self.n_mc,
+            seed=self.seed,
+            smoothing=self.smoothing,
+            pseudo_count=pseudo_count,
+            name=self.name,
+            keys=self.keys,
+        )
 
     def dist_to_encoder(self) -> ThurstoneDataEncoder:
         """Return the dense full-ranking encoder used by vectorized methods."""
@@ -202,35 +222,38 @@ class ThurstoneDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class ThurstoneSampler(DistributionSampler):
-    """Exact Thurstone draws: sample utilities ``U ~ Normal(mu, 1)`` and sort descending."""
+    """Draw exactly from a distribution's empirical-plus-uniform mixture."""
 
     def __init__(self, dist: ThurstoneDistribution, seed: int | None = None) -> None:
         self.dist = dist
         self.rng = RandomState(seed)
 
     def _sample_one(self) -> list[int]:
-        u = self.dist.mu + self.rng.standard_normal(self.dist.dim)
-        return [int(i) for i in np.argsort(-u)]
+        if self.rng.random_sample() < self.dist._empirical_mixture_probability:
+            index = int(self.rng.randint(self.dist.n_mc))
+            return [int(value) for value in self.dist._approximation_draws[index]]
+        return [int(value) for value in self.rng.permutation(self.dist.dim)]
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> list[int] | list[list[int]]:
         """Draw one ordering or ``size`` iid orderings."""
         if size is None:
             return self._sample_one()
-        return [self._sample_one() for _ in range(size)]
+        return [self._sample_one() for _ in range(sample_size(size))]
 
 
 class ThurstoneAccumulator(SequenceEncodableStatisticAccumulator):
-    """Accumulate the pairwise-precedence matrix ``precede[i, j]`` = weighted count of ``i`` ranked before ``j``."""
+    """Accumulate weighted pairwise-precedence counts from full rankings."""
 
     def __init__(self, dim: int, keys: str | None = None) -> None:
-        self.dim = dim
-        self.precede = np.zeros((dim, dim))
+        self.dim = positive_integer(dim, label="dim", minimum=2)
+        self.precede = np.zeros((self.dim, self.dim))
         self.count = 0.0
         self.keys = keys
 
     def update(self, x: Sequence[int], weight: float, estimate: Any) -> None:
         """Update pairwise-precedence counts from one full ordering."""
-        self.seq_update(np.asarray([x], dtype=np.int64), np.asarray([weight], dtype=float), estimate)
+        checked = permutation(x, self.dim, label="Thurstone ordering")
+        self.seq_update(checked[None, :], np.asarray([weight], dtype=np.float64), estimate)
 
     def initialize(self, x: Sequence[int], weight: float, rng: RandomState | None) -> None:
         """Initialize precedence counts from one ordering."""
@@ -238,30 +261,31 @@ class ThurstoneAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
         """Update pairwise-precedence counts from encoded orderings."""
-        n = self.dim
-        r_idx, rp_idx = np.triu_indices(n, 1)
-        for row, w in zip(x, weights):
-            np.add.at(self.precede, (row[r_idx], row[rp_idx]), w)
-        self.count += float(np.sum(weights, dtype=np.float64))
+        checked = permutation_batch(x, self.dim, label="Thurstone orderings")
+        checked_weights = validate_weights(weights, len(checked))
+        rank, later_rank = np.triu_indices(self.dim, 1)
+        for row, weight in zip(checked, checked_weights):
+            np.add.at(self.precede, (row[rank], row[later_rank]), weight)
+        self.count += float(np.sum(checked_weights, dtype=np.float64))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize precedence counts from a batch of encoded orderings."""
         self.seq_update(x, weights, None)
 
-    def combine(self, suff_stat) -> ThurstoneAccumulator:
-        """Merge count and pairwise-precedence statistics."""
-        self.count += suff_stat[0]
-        self.precede += suff_stat[1]
+    def combine(self, suff_stat: tuple[float, np.ndarray]) -> ThurstoneAccumulator:
+        """Merge validated count and pairwise-precedence statistics."""
+        count, precede = _thurstone_statistics(suff_stat, self.dim)
+        self.count += count
+        self.precede += precede
         return self
 
-    def value(self):
-        """Return accumulated observation weight and pairwise-precedence matrix."""
-        return self.count, self.precede
+    def value(self) -> tuple[float, np.ndarray]:
+        """Return an ownership-safe statistics snapshot."""
+        return self.count, self.precede.copy()
 
-    def from_value(self, x) -> ThurstoneAccumulator:
-        """Restore accumulator state from ``value`` output."""
-        self.count, self.precede = x[0], np.asarray(x[1])
-        self.dim = self.precede.shape[0]
+    def from_value(self, x: tuple[float, np.ndarray]) -> ThurstoneAccumulator:
+        """Restore validated accumulator state."""
+        self.count, self.precede = _thurstone_statistics(x, self.dim)
         return self
 
     def acc_to_encoder(self) -> ThurstoneDataEncoder:
@@ -273,7 +297,7 @@ class ThurstoneAccumulatorFactory(StatisticAccumulatorFactory):
     """Create accumulators for Thurstone pairwise-precedence statistics."""
 
     def __init__(self, dim: int, keys: str | None = None) -> None:
-        self.dim = dim
+        self.dim = positive_integer(dim, label="dim", minimum=2)
         self.keys = keys
 
     def make(self) -> ThurstoneAccumulator:
@@ -282,16 +306,23 @@ class ThurstoneAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class ThurstoneEstimator(ParameterEstimator):
-    """Thurstone-Mosteller Case V estimator: ``mu_i - mu_j = sqrt(2) * Phi^{-1}(P(i before j))``."""
+    """Labelled pairwise-moment estimator for Case V Thurstone utilities."""
 
     def __init__(
-        self, dim: int, n_mc: int = 4000, seed: int = 0, name: str | None = None, keys: str | None = None
+        self,
+        dim: int,
+        n_mc: int = 4000,
+        seed: int = 0,
+        smoothing: float = 0.5,
+        pseudo_count: float | None = None,
+        name: str | None = None,
+        keys: str | None = None,
     ) -> None:
-        if dim is None or dim < 2:
-            raise ValueError("ThurstoneEstimator requires dim >= 2.")
-        self.dim = int(dim)
-        self.n_mc = int(n_mc)
-        self.seed = int(seed)
+        self.dim = positive_integer(dim, label="dim", minimum=2)
+        self.n_mc = positive_integer(n_mc, label="n_mc")
+        self.seed = _checked_seed(seed)
+        self.smoothing = finite_positive(smoothing, label="smoothing")
+        self.pseudo_count = None if pseudo_count is None else finite_nonnegative(pseudo_count, label="pseudo_count")
         self.name = name
         self.keys = keys
 
@@ -299,50 +330,73 @@ class ThurstoneEstimator(ParameterEstimator):
         """Return a factory for Thurstone sufficient-statistic accumulators."""
         return ThurstoneAccumulatorFactory(dim=self.dim, keys=self.keys)
 
-    def estimate(self, nobs: float | None, suff_stat) -> ThurstoneDistribution:
-        """Estimate centered latent utilities from pairwise-precedence statistics."""
-        count, precede = suff_stat
-        n = self.dim
-        kw = dict(n_mc=self.n_mc, seed=self.seed, name=self.name, keys=self.keys)
-        if count <= 0.0:
-            return ThurstoneDistribution(np.zeros(n), **kw)
-        tot = precede + precede.T
-        with np.errstate(invalid="ignore"):
-            p = np.where(tot > 0, precede / np.maximum(tot, 1e-12), 0.5)
-        np.fill_diagonal(p, 0.5)
-        p = np.clip(p, 1e-4, 1.0 - 1e-4)
+    def estimate(self, nobs: float | None, suff_stat: tuple[float, np.ndarray]) -> ThurstoneDistribution:
+        """Estimate centered utilities from validated pairwise-precedence statistics."""
+        count, precede = _thurstone_statistics(suff_stat, self.dim)
+        if nobs is not None:
+            checked_nobs = finite_nonnegative(nobs, label="nobs")
+            if not math.isclose(checked_nobs, count, rel_tol=1.0e-10, abs_tol=1.0e-10):
+                raise ValueError("nobs must equal Thurstone statistic observation weight.")
+        pseudo_count = 0.0 if self.pseudo_count is None else self.pseudo_count
+        regularized = pseudo_count > 0.0
+        if regularized:
+            precede = precede + 0.5 * pseudo_count * (1.0 - np.eye(self.dim))
+        pair_totals = precede + precede.T
+        with np.errstate(invalid="ignore", divide="ignore"):
+            pair_probability = np.where(pair_totals > 0.0, precede / pair_totals, 0.5)
+        np.fill_diagonal(pair_probability, 0.5)
+        pair_probability = np.clip(pair_probability, 1.0e-8, 1.0 - 1.0e-8)
+
         from scipy.special import ndtri
 
-        d = _SQRT2 * ndtri(p)  # pairwise utility-difference estimates
-        mu = d.mean(axis=1)  # least-squares solution of mu_i - mu_j = d_ij under sum(mu)=0
-        return ThurstoneDistribution(mu - mu.mean(), **kw)
+        pair_difference = _SQRT2 * ndtri(pair_probability)
+        mu = pair_difference.mean(axis=1)
+        diagnostics = ThurstoneFitDiagnostics(
+            method="pairwise_moment_least_squares",
+            exact_mle=False,
+            regularized=regularized,
+            pseudo_count=pseudo_count,
+        )
+        return ThurstoneDistribution(
+            mu - mu.mean(),
+            n_mc=self.n_mc,
+            seed=self.seed,
+            smoothing=self.smoothing,
+            fit_diagnostics=diagnostics,
+            name=self.name,
+            keys=self.keys,
+        )
 
 
 class ThurstoneDataEncoder(DataSequenceEncoder):
-    """Encode a sequence of orderings (permutations of 0,...,n-1) into an (N, n) integer array."""
+    """Encode full item orderings into a dense integer matrix."""
 
     def __init__(self, dim: int | None = None) -> None:
-        self.dim = dim
+        self.dim = None if dim is None else positive_integer(dim, label="dim", minimum=2)
 
     def __str__(self) -> str:
-        return "ThurstoneDataEncoder"
+        return "ThurstoneDataEncoder(dim=%s)" % self.dim
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, ThurstoneDataEncoder)
+        return isinstance(other, ThurstoneDataEncoder) and self.dim == other.dim
 
     def seq_encode(self, x: Sequence[Sequence[int]]) -> np.ndarray:
         """Validate and encode full orderings as a dense integer matrix."""
-        rv = np.asarray([list(row) for row in x], dtype=np.int64)
-        if rv.ndim != 2 or rv.shape[0] == 0:
-            raise ValueError("ThurstoneDistribution requires a non-empty sequence of orderings.")
-        expected = np.arange(rv.shape[1])
-        for row in rv:
-            if not np.array_equal(np.sort(row), expected):
-                raise ValueError("orderings must be permutations of 0,...,n-1.")
-        return rv
+        raw = np.asarray([list(row) for row in x])
+        if self.dim is None:
+            if raw.ndim != 2 or raw.shape[0] == 0:
+                raise ValueError("ThurstoneDistribution requires a non-empty sequence of orderings.")
+            return permutation_batch(raw, raw.shape[1], label="Thurstone orderings", allow_empty=False)
+        return permutation_batch(raw, self.dim, label="Thurstone orderings", allow_empty=False)
+
+    def row_count(self, x: np.ndarray) -> int:
+        """Return the number of encoded ranking rows."""
+        return len(x)
 
 
 __all__ = [
+    "ThurstoneApproximationDiagnostics",
+    "ThurstoneFitDiagnostics",
     "ThurstoneDistribution",
     "ThurstoneSampler",
     "ThurstoneAccumulator",
