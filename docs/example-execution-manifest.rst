@@ -415,7 +415,8 @@ Inventory
    * - ``examples/copula_vine_example.py``
      - Execute. Base install.
    * - ``examples/cross_modal_fit_receipt.py``
-     - Execute with optional-dependency status recorded.
+     - Execute as a synthetic multi-vector feature tutorial. It is not real
+       cross-modal evidence because it has no raw modality inputs or encoders.
    * - ``examples/doe_example.py``
      - Blocked on ``torch`` in a base install (``minimize()``'s Bayesian
        optimization routes unconditionally through

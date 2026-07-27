@@ -14,7 +14,13 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
-def bind(raw: dict[str, Any], wheel: dict[str, Any], candidate_sha: str) -> dict[str, Any]:
+def bind(
+    raw: dict[str, Any],
+    wheel: dict[str, Any],
+    candidate_sha: str,
+    *,
+    profile: str = "base",
+) -> dict[str, Any]:
     if raw.get("bomFormat") != "CycloneDX" or not isinstance(raw.get("components"), list):
         raise ValueError("input is not a CycloneDX component inventory")
     names = {component.get("name") for component in raw["components"] if isinstance(component, dict)}
@@ -26,6 +32,8 @@ def bind(raw: dict[str, Any], wheel: dict[str, Any], candidate_sha: str) -> dict
         raise ValueError("artifact metadata does not describe a wheel")
     if not isinstance(wheel.get("sha256"), str) or not _SHA256.fullmatch(wheel["sha256"]):
         raise ValueError("artifact metadata has no valid SHA-256")
+    if profile not in {"base", "all"}:
+        raise ValueError("SBOM profile must be base or all")
     return {
         "artifact": "mixle.bound_sbom/v1",
         "candidate_commit": candidate_sha,
@@ -34,7 +42,8 @@ def bind(raw: dict[str, Any], wheel: dict[str, Any], candidate_sha: str) -> dict
             "sha256": wheel["sha256"],
             "size_bytes": wheel.get("size_bytes"),
         },
-        "inventory_scope": "isolated-wheel-environment",
+        "inventory_scope": f"isolated-wheel-environment:{profile}",
+        "profile": profile,
         "cyclonedx": raw,
     }
 
@@ -44,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cyclonedx", type=Path, required=True)
     parser.add_argument("--wheel-metadata", type=Path, required=True)
     parser.add_argument("--candidate-sha", required=True)
+    parser.add_argument("--profile", choices=("base", "all"), default="base")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
@@ -51,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
             json.loads(args.cyclonedx.read_text(encoding="utf-8")),
             json.loads(args.wheel_metadata.read_text(encoding="utf-8")),
             args.candidate_sha,
+            profile=args.profile,
         )
         args.out.write_text(json.dumps(result, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:

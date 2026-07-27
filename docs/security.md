@@ -35,6 +35,12 @@ changes, generate applicable inventories, and test the installed combination.
 A missing optional dependency must fail at its boundary without masking a
 different nested import failure.
 
+Release security automation audits both the isolated base-wheel environment
+and the machine-checked ``all`` runtime-feature union, retaining separate
+candidate/wheel-bound CycloneDX inventories. A scoped Bandit gate reviews
+Mixle and release-script source for medium-or-higher confidence/severity
+findings. Dependency advisories and source analysis are distinct gates.
+
 ## Disclosure and response
 
 Use the private reporting channel in ../SECURITY.md. Preserve reproduction

@@ -7,17 +7,17 @@ into the bridge unchanged." This example reproduces that receipt with the real t
 GPT-2 checkpoint, wrapped with actual ``peft.get_peft_model`` LoRA adapters, dropped into ``GradLeaf``
 unchanged.
 
-``GradLeaf`` wants ``module.log_density(x) -> (n,)``; a causal LM's natural objective is token-level
-cross-entropy, not an unconditional density. The bridge doesn't care -- next-token log-likelihood summed
-over a sequence IS a log density over that sequence, so ``PeftCausalLMLeaf.log_density`` below is exactly
-that sum, negated back out of the standard cross-entropy loss. Everything downstream (the M-step's
-responsibility-weighted NLL, the optimizer seeing only ``requires_grad`` params) is unmodified GradLeaf.
+``GradLeaf`` wants ``module.log_density(x) -> (n,)``. A causal LM supplies the conditional factors after
+the first token, so the adapter adds an explicit uniform initial-token law. The resulting score is a
+normalized joint law over fixed-length sequences, not a conditional continuation score mislabeled as a
+density. Everything downstream (the M-step's responsibility-weighted NLL, the optimizer seeing only
+``requires_grad`` params) is unmodified GradLeaf.
 
-The receipt: after fitting,
+The receipt uses disjoint deterministic train and held-out sequences. After fitting,
   * every frozen BASE weight is bitwise-unchanged (peft froze it; the optimizer never touched it either --
     ``GradEstimator`` filters to trainable params only), and
-  * only the LoRA adapter matrices moved, and
-  * the fit is real (held-out log-likelihood improves).
+  * every trainable LoRA tensor is compared with its own pre-fit snapshot, at least one moves, and
+  * held-out log-likelihood improves.
 
 Run: ``python examples/peft_lora_grad_leaf.py``
 (needs ``pip install "mixle[torch]" transformers peft`` -- peft/transformers are example-only deps, not a
@@ -59,8 +59,7 @@ def build_peft_wrapped_module(seed: int = 0):
     peft_model = get_peft_model(base, lora_cfg)  # freezes the base, adds trainable LoRA deltas -- peft's job
 
     class PeftCausalLMLeaf(torch.nn.Module):
-        """A causal LM IS a density over token sequences: next-token log-likelihood summed over the
-        sequence. This wrapper is the only mixle-specific code -- the peft model inside is untouched."""
+        """A normalized fixed-length sequence law with a uniform initial token."""
 
         def __init__(self, lm) -> None:
             super().__init__()
@@ -76,7 +75,8 @@ def build_peft_wrapped_module(seed: int = 0):
                 shift_targets.reshape(-1),
                 reduction="none",
             ).reshape(ids.shape[0], -1)
-            return -ce.sum(-1)  # summed next-token log-likelihood == log density of the sequence
+            initial = -torch.log(torch.tensor(self.lm.config.vocab_size, device=ids.device))
+            return initial - ce.sum(-1)
 
     return PeftCausalLMLeaf(peft_model)
 
@@ -96,34 +96,53 @@ def toy_token_sequences(vocab: int, block: int, n: int, rng: np.random.RandomSta
 
 def main() -> None:
     print(f"asset repository={CHECKPOINT} revision={CHECKPOINT_REVISION}")
-    rng = np.random.RandomState(0)
     module = build_peft_wrapped_module(seed=0)
 
     base_before = {k: v.clone() for k, v in module.lm.base_model.model.state_dict().items() if "lora_" not in k}
+    adapters_before = {
+        name: parameter.detach().clone()
+        for name, parameter in module.lm.named_parameters()
+        if "lora_" in name and parameter.requires_grad
+    }
 
     block = 8
-    data = toy_token_sequences(vocab=module.lm.config.vocab_size, block=block, n=64, rng=rng)
+    train = toy_token_sequences(
+        vocab=module.lm.config.vocab_size,
+        block=block,
+        n=64,
+        rng=np.random.RandomState(0),
+    )
+    held_out = toy_token_sequences(
+        vocab=module.lm.config.vocab_size,
+        block=block,
+        n=64,
+        rng=np.random.RandomState(1),
+    )
 
     leaf = GradLeaf(module, m_steps=150, lr=0.1)
-    before_ll = float(np.mean(leaf.seq_log_density(np.stack(data))))
+    before_ll = float(np.mean(leaf.seq_log_density(np.stack(held_out))))
 
-    fitted = optimize(data, leaf, max_its=4, out=None)
+    fitted = optimize(train, leaf, max_its=4, out=None)
 
-    after_ll = float(np.mean(fitted.seq_log_density(np.stack(data))))
+    after_ll = float(np.mean(fitted.seq_log_density(np.stack(held_out))))
 
     base_after = {k: v for k, v in fitted.module.lm.base_model.model.state_dict().items() if "lora_" not in k}
     max_base_drift = max(float((base_after[k] - base_before[k]).abs().max()) for k in base_before)
-    lora_params = [p for n, p in fitted.module.lm.named_parameters() if "lora_" in n and p.requires_grad]
-    lora_moved = sum(float(p.detach().abs().sum()) for p in lora_params)
+    adapter_deltas = {
+        name: float((parameter.detach() - adapters_before[name]).abs().max())
+        for name, parameter in fitted.module.lm.named_parameters()
+        if name in adapters_before
+    }
+    moved_adapters = sorted(name for name, delta in adapter_deltas.items() if delta > 0.0)
 
     print(f"base weight drift (should be 0.0): {max_base_drift}")
-    print(f"LoRA adapter param mass (should be > 0): {lora_moved:.4f}")
-    print(f"mean log-density before fit: {before_ll:.4f}")
-    print(f"mean log-density after fit:  {after_ll:.4f}")
+    print(f"LoRA adapter tensors moved: {len(moved_adapters)}/{len(adapter_deltas)}")
+    print(f"held-out mean log-density before fit: {before_ll:.4f}")
+    print(f"held-out mean log-density after fit:  {after_ll:.4f}")
     assert max_base_drift == 0.0, "the frozen base moved -- peft/GradLeaf contract broken"
-    assert lora_moved > 0.0, "the adapter never trained"
-    assert after_ll > before_ll, "the fit made no progress"
-    print("OK: only the LoRA adapter trained; the base checkpoint is untouched; the fit improved.")
+    assert moved_adapters, "no adapter tensor changed from its pre-fit snapshot"
+    assert after_ll > before_ll, "held-out likelihood did not improve"
+    print("OK: only LoRA adapters moved; the base is untouched; held-out likelihood improved.")
 
 
 if __name__ == "__main__":

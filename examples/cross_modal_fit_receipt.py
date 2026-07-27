@@ -1,12 +1,9 @@
-"""Flagship cross-modal fit receipt (C4): one typed graph over text + image + signal + a target.
+"""Synthetic multi-vector feature fit tutorial.
 
-Each record mixes modalities: a categorical plan, an IMAGE-encoder latent, a SIGNAL-encoder latent, and
-a continuous price driven by both latents. mixle fits it into ONE heterogeneous Bayesian network where
-the image and signal latents are vector nodes (C1) and the cross-modal edges (price <- image, price <-
-signal) are recovered from data -- with an estimation certificate saying HOW every block was solved (all
-closed-form / convex here, no gradient descent). Then it predicts held-out price and reports the fit.
-
-Everything measured in-process; a few seconds, no GPU, no network.
+This does not claim real cross-modal reasoning: the two vector fields are synthetic Gaussian features,
+not encoded image/signal observations, and there is no alignment objective. The tutorial verifies that
+one heterogeneous Bayesian network can recover both declared vector-to-target edges and meet held-out
+prediction thresholds. Real modality evidence requires typed raw inputs, pinned encoders, and ablations.
 """
 
 from __future__ import annotations
@@ -36,7 +33,7 @@ def main() -> None:
     net = learn_bayesian_network(train, max_parents=2)
 
     print("=" * 70)
-    print("CROSS-MODAL FIT: one graph over categorical + image + signal + price")
+    print("SYNTHETIC MULTI-VECTOR FIT: categorical + vector A + vector B + price")
     print("=" * 70)
     print(f"model: {type(net).__name__}")
     for f in net.factors:
@@ -64,7 +61,7 @@ def main() -> None:
         "ACCEPTANCE "
         + json.dumps(
             {
-                "artifact": "mixle.cross_modal_fit_acceptance/v1",
+                "artifact": "mixle.multi_vector_fit_acceptance/v1",
                 "accepted": accepted,
                 "held_out_correlation": r,
                 "held_out_rmse": rmse,
@@ -75,8 +72,8 @@ def main() -> None:
         )
     )
     if not accepted:
-        raise RuntimeError("cross-modal acceptance failed: required edges or held-out thresholds were not met")
-    print("the required cross-modal edges were recovered; the readout is the closed-form CLG mean.")
+        raise RuntimeError("multi-vector acceptance failed: required edges or held-out thresholds were not met")
+    print("the required vector-feature edges were recovered; the readout is the closed-form CLG mean.")
 
 
 def _clg_mean(factor, record: tuple) -> float:

@@ -52,13 +52,50 @@ def _engines():
     return out
 
 
-def _time(fn, repeat: int = 3) -> float:
+def _synchronize(engine) -> None:
+    """Wait for queued device work before reading a wall-clock boundary."""
+    device = getattr(engine, "device", None)
+    device_type = getattr(device, "type", None)
+    if device_type == "cuda":
+        import torch
+
+        torch.cuda.synchronize(device)
+    elif device_type == "mps":
+        import torch
+
+        torch.mps.synchronize()
+
+
+def _consume(value) -> None:
+    """Force lazy tensor results to become observable inside the measured region."""
+    try:
+        import torch
+    except ImportError:
+        return
+    if isinstance(value, torch.Tensor):
+        value.detach().sum().cpu().item()
+
+
+def _as_numpy(value) -> np.ndarray:
+    if hasattr(value, "detach"):
+        value = value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
+def _time(fn, engine, repeat: int = 3) -> tuple[float, object]:
+    warm = fn()
+    _consume(warm)
+    _synchronize(engine)
     best = float("inf")
+    last = warm
     for _ in range(repeat):
+        _synchronize(engine)
         t0 = time.perf_counter()
-        fn()
+        last = fn()
+        _consume(last)
+        _synchronize(engine)
         best = min(best, time.perf_counter() - t0)
-    return best
+    return best, last
 
 
 def bench_gmm(n: int, engines) -> dict[str, float]:
@@ -66,10 +103,18 @@ def bench_gmm(n: int, engines) -> dict[str, float]:
     data = np.concatenate([rng.normal(-4, 1, n // 2), rng.normal(4, 1, n // 2)]).tolist()
     init = MixtureDistribution([GaussianDistribution(-1.0, 1.0), GaussianDistribution(1.0, 1.0)], [0.5, 0.5])
     est = MixtureEstimator([GaussianEstimator(), GaussianEstimator()])
-    return {
-        nm: _time(lambda e=e: optimize(data, est, max_its=10, engine=e, prev_estimate=init, out=None))
-        for nm, e in engines
-    }
+    timings = {}
+    fitted = {}
+    for name, engine in engines:
+        timings[name], fitted[name] = _time(
+            lambda e=engine: optimize(data, est, max_its=10, engine=e, prev_estimate=init, out=None),
+            engine,
+        )
+    reference = fitted["numpy"].seq_log_density(fitted["numpy"].dist_to_encoder().seq_encode(data[:256]))
+    for name, model in fitted.items():
+        score = model.seq_log_density(model.dist_to_encoder().seq_encode(data[:256]))
+        np.testing.assert_allclose(score, reference, rtol=2e-4, atol=2e-4, err_msg=f"GMM parity failed for {name}")
+    return timings
 
 
 def bench_hmm(n_seq: int, seq_len: int, engines) -> dict[str, float]:
@@ -79,10 +124,18 @@ def bench_hmm(n_seq: int, seq_len: int, engines) -> dict[str, float]:
         [GaussianDistribution(-1.0, 1.0), GaussianDistribution(1.0, 1.0)], [0.5, 0.5], [[0.8, 0.2], [0.2, 0.8]]
     )
     est = HiddenMarkovEstimator([GaussianEstimator(), GaussianEstimator()])  # default (numba encoding)
-    return {
-        nm: _time(lambda e=e: optimize(seqs, est, max_its=5, engine=e, prev_estimate=init, out=None))
-        for nm, e in engines
-    }
+    timings = {}
+    fitted = {}
+    for name, engine in engines:
+        timings[name], fitted[name] = _time(
+            lambda e=engine: optimize(seqs, est, max_its=5, engine=e, prev_estimate=init, out=None),
+            engine,
+        )
+    reference = fitted["numpy"].seq_log_density(fitted["numpy"].dist_to_encoder().seq_encode(seqs[:32]))
+    for name, model in fitted.items():
+        score = model.seq_log_density(model.dist_to_encoder().seq_encode(seqs[:32]))
+        np.testing.assert_allclose(score, reference, rtol=2e-4, atol=2e-4, err_msg=f"HMM parity failed for {name}")
+    return timings
 
 
 def bench_scoring(n: int, engines) -> dict[str, dict[str, float]]:
@@ -97,7 +150,22 @@ def bench_scoring(n: int, engines) -> dict[str, dict[str, float]]:
     out: dict[str, dict[str, float]] = {}
     for name, (dist, raw) in cases.items():
         enc = dist.dist_to_encoder().seq_encode(raw)
-        out[name] = {nm: _time(lambda e=e, d=dist, x=enc: backend_seq_log_density(d, x, e)) for nm, e in engines}
+        values = {}
+        out[name] = {}
+        for engine_name, engine in engines:
+            out[name][engine_name], values[engine_name] = _time(
+                lambda e=engine, d=dist, x=enc: backend_seq_log_density(d, x, e),
+                engine,
+            )
+        reference = _as_numpy(values["numpy"])
+        for engine_name, value in values.items():
+            np.testing.assert_allclose(
+                _as_numpy(value),
+                reference,
+                rtol=2e-4,
+                atol=2e-4,
+                err_msg=f"{name} scoring parity failed for {engine_name}",
+            )
     return out
 
 
@@ -135,8 +203,8 @@ def main() -> None:
     )
     _table("batch scoring (n=%d)" % (200_000 * a.scale), bench_scoring(200_000 * a.scale, engines))
     print(
-        "\nhonest reading: numpy/numba wins on small data (launch+transfer overhead); the engine pays off"
-        "\nas n grows or when the model itself is torch-resident. MPS is float32 by construction."
+        "\nInterpret only this synchronized, parity-checked run. Crossover depends on workload, device,"
+        "\ntransfer, and precision; MPS is float32 by construction."
     )
 
 

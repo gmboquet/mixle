@@ -19,7 +19,7 @@ jobs:
   extra:
     name: "install .[${{ matrix.extra }}]"
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -66,7 +66,9 @@ jobs:
       - name: pip check (no extra downgraded or broke a required dependency)
         run: python -m pip check
       - name: mixle still imports
-        run: python -c "import mixle; print('mixle', mixle.__version__, 'imports with [${{ matrix.extra }}]')"
+        run: |
+          python -c "import mixle; print('mixle', mixle.__version__, 'imports with [${{ matrix.extra }}]')"
+          python scripts/verify_extra_profile.py --profile "${{ matrix.extra }}"
       - name: Record exact candidate and resolved graph
         env:
           PROFILE: ${{ matrix.extra }}
@@ -80,6 +82,33 @@ jobs:
         with:
           name: extra-receipt-${{ matrix.extra }}
           path: extra-receipt-${{ matrix.extra }}.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Generate and install exact declared floors
+        env:
+          PROFILE: ${{ matrix.extra }}
+        run: |
+          python scripts/generate_extra_floor_constraints.py \
+            --profile "$PROFILE" --out "floor-$PROFILE.txt"
+          python -m venv "$RUNNER_TEMP/floor-env"
+          "$RUNNER_TEMP/floor-env/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/floor-env/bin/python" -m pip install \
+            -c "floor-$PROFILE.txt" ".[${{ matrix.extra }}]"
+          "$RUNNER_TEMP/floor-env/bin/python" -m pip check
+          "$RUNNER_TEMP/floor-env/bin/python" scripts/verify_extra_profile.py --profile "$PROFILE"
+      - name: Record exact floor dependency graph
+        env:
+          PROFILE: ${{ matrix.extra }}
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: |
+          "$RUNNER_TEMP/floor-env/bin/python" scripts/environment_receipt.py record \
+            --profile "$PROFILE" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --out "extra-floor-receipt-$PROFILE.json"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: extra-floor-receipt-${{ matrix.extra }}
+          path: extra-floor-receipt-${{ matrix.extra }}.json
           if-no-files-found: error
           retention-days: 90
 
@@ -96,6 +125,11 @@ jobs:
           pattern: extra-receipt-*
           path: extra-receipts
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: extra-floor-receipt-*
+          path: extra-floor-receipts
+          merge-multiple: true
       - name: Require every profile on this exact commit
         env:
           CANDIDATE_SHA: ${{ github.sha }}
@@ -106,9 +140,16 @@ jobs:
             --policy release-checklists/0.8.0-extra-profiles.json \
             --candidate-sha "$CANDIDATE_SHA" \
             --out extra-profile-set-receipt.json
+          python scripts/environment_receipt.py verify \
+            --directory extra-floor-receipts \
+            --policy release-checklists/0.8.0-extra-profiles.json \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --out extra-floor-profile-set-receipt.json
       - uses: actions/upload-artifact@v7
         with:
           name: extra-profile-set-${{ github.sha }}
-          path: extra-profile-set-receipt.json
+          path: |
+            extra-profile-set-receipt.json
+            extra-floor-profile-set-receipt.json
           if-no-files-found: error
           retention-days: 90

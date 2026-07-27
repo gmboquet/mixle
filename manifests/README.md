@@ -12,7 +12,9 @@ These committed JSON files are generated compatibility and governance baselines,
 - `development_policy.json` is the authoritative release-target, maturity, compatibility, and
   validation policy used to render contributor instructions; and
 - `public_claims.json` records material public claims, their evidence grades, and the exact public
-  prose occurrences that are permitted by the claim-hygiene gate.
+  prose occurrences that are permitted by the claim-hygiene gate; and
+- `dependency_drift_policy.json` records the reviewed exclusive upper bound for every base and
+  runtime-extra dependency.
 
 Run the corresponding generator in `scripts/` after changing a governed surface. Drift tests compare
 the generated result with the reviewed file in this directory. Keeping the manifests together avoids
@@ -30,3 +32,8 @@ Run ``python scripts/check_public_claims.py`` after changing public prose or rel
 checker scans README, changelog, Sphinx prose, example module docstrings, and committed benchmark
 results. New quantitative or comparative product claims fail until they are either removed or
 registered with retained evidence.
+
+Run ``python scripts/check_dependency_bounds.py`` after changing a runtime requirement. The checker
+requires every dependency to have both a floor and a compatible ceiling and requires those ceilings
+to match the reviewed drift-policy manifest. The hosted extras matrix separately installs every
+profile at its declared floors and at the current resolver result.
