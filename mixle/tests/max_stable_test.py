@@ -11,7 +11,7 @@ import warnings
 import numpy as np
 from scipy.stats import norm, spearmanr
 
-from mixle.analysis.max_stable import SmithMaxStable, fit_smith_maxstable
+from mixle.analysis.max_stable import FrechetApproximationDiagnostic, SmithMaxStable, fit_smith_maxstable
 
 
 class SmithMaxStableTest(unittest.TestCase):
@@ -114,6 +114,26 @@ class SmithMaxStableDomainValidationTest(unittest.TestCase):
             ms.bivariate_cdf(1.0, 1.0, [1.0, 2.0, 3.0])
         self.assertIn("h must have shape", str(ctx.exception))
 
+    def test_sigma_is_owned_and_read_only(self):
+        source = np.array([[1.0]])
+        model = SmithMaxStable(source)
+        before = model.extremal_coefficient([1.0])
+        source[0, 0] = 4.0
+        self.assertEqual(model.sigma[0, 0], 1.0)
+        self.assertEqual(model.extremal_coefficient([1.0]), before)
+        with self.assertRaises(ValueError):
+            model.sigma[0, 0] = 2.0
+        sampler = model.sampler(np.array([[0.0]]), seed=0)
+        self.assertEqual(sampler._chol[0, 0], 1.0)
+
+    def test_nonfinite_lags_are_rejected_before_probability_publication(self):
+        model = SmithMaxStable(np.eye(1))
+        for lag in ([np.nan], [np.inf]):
+            with self.assertRaisesRegex(ValueError, "finite"):
+                model.extremal_coefficient(lag)
+            with self.assertRaisesRegex(ValueError, "finite"):
+                model.bivariate_cdf(1.0, 1.0, lag)
+
     def test_sampler_locations_dimension_must_match_sigma(self):
         ms = SmithMaxStable(sigma=2.0 * np.eye(2))
         with self.assertRaises(ValueError):
@@ -123,6 +143,11 @@ class SmithMaxStableDomainValidationTest(unittest.TestCase):
         ms = SmithMaxStable(sigma=2.0 * np.eye(2))
         with self.assertRaises(ValueError):
             ms.sampler(np.array([[0.0, np.nan]]))
+
+    def test_sampler_locations_must_be_nonempty(self):
+        ms = SmithMaxStable(sigma=2.0 * np.eye(2))
+        with self.assertRaisesRegex(ValueError, "nonempty"):
+            ms.sampler(np.empty((0, 2)))
 
     def test_bivariate_cdf_thresholds_must_be_strictly_positive(self):
         # unit-Frechet support is (0, inf); the closed form divides by z1/z2 and logs their ratio.
@@ -233,9 +258,15 @@ class SmithMaxStableSamplingTruncationTest(unittest.TestCase):
 
     def test_n_storms_negative_or_non_integer_is_rejected(self):
         samp = self.ms.sampler(np.array([[0, 0]]), seed=0)
-        for bad in (-1, -5, 2.5):
+        for bad in (-1, -5, 2.5, True):
             with self.assertRaises(ValueError):
                 samp.sample(n_storms=bad)
+
+    def test_size_must_be_an_exact_positive_nonboolean_integer(self):
+        samp = self.ms.sampler(np.array([[0, 0]]), seed=0)
+        for bad in (0, -1, 2.5, True):
+            with self.assertRaisesRegex(ValueError, "size"):
+                samp.sample(bad, n_storms=1, tol=1e6)
 
     def test_tol_domain(self):
         samp = self.ms.sampler(np.array([[0, 0]]), seed=0)
@@ -294,6 +325,56 @@ class SmithMaxStableSamplingTruncationTest(unittest.TestCase):
         self.assertEqual(loose.n_replicates, 400)
         self.assertEqual(loose.per_site_max_abs_error.shape, (2,))
         self.assertLess(tight.max_abs_error, loose.max_abs_error)
+
+    def test_approximation_diagnostic_validates_controls_before_sampling(self):
+        samp = self.ms.sampler(np.array([[0, 0]]), seed=1)
+        for bad_n in (0, -1, 2.5, True):
+            with self.assertRaisesRegex(ValueError, "n"):
+                samp.approximation_diagnostic(n=bad_n, n_storms=1, tol=1e6)
+        for bad_levels in (
+            (),
+            (0.0, 0.5),
+            (0.5, 1.0),
+            (0.5, np.nan),
+            np.array([[0.5]]),
+        ):
+            with self.assertRaisesRegex(ValueError, "probability_levels"):
+                samp.approximation_diagnostic(
+                    n=2,
+                    probability_levels=bad_levels,
+                    n_storms=1,
+                    tol=1e6,
+                )
+
+    def test_diagnostic_result_rejects_invalid_published_state(self):
+        base = dict(
+            n_replicates=10,
+            probability_levels=(0.25, 0.5),
+            max_abs_error=0.2,
+            mean_abs_error=0.1,
+            per_site_max_abs_error=np.array([0.2]),
+        )
+        for override in (
+            {"n_replicates": True},
+            {"probability_levels": (0.0,)},
+            {"max_abs_error": np.nan},
+            {"mean_abs_error": 0.3},
+            {"per_site_max_abs_error": np.array([np.nan])},
+            {"per_site_max_abs_error": np.array([0.1])},
+        ):
+            with self.assertRaises(ValueError):
+                FrechetApproximationDiagnostic(**(base | override))
+
+    def test_valid_small_diagnostic_is_finite_and_bounded(self):
+        samp = self.ms.sampler(np.array([[0, 0]]), seed=2)
+        result = samp.approximation_diagnostic(
+            n=5,
+            probability_levels=(0.25, 0.5),
+            n_storms=1,
+            tol=1e6,
+        )
+        self.assertTrue(0.0 <= result.mean_abs_error <= result.max_abs_error <= 1.0)
+        self.assertFalse(result.per_site_max_abs_error.flags.writeable)
 
     def test_replicates_alone_do_not_fix_a_truncation_bias(self):
         # A loose tol/box gives a real, persistent bias -- more replicates should shrink the noise in
