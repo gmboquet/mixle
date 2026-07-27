@@ -57,10 +57,20 @@ class SingleChildAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        self._child.key_merge(stats_dict)
+        own_key = getattr(self, "keys", None)
+        if own_key is None:
+            self._child.key_merge(stats_dict)
+            return
+        if own_key in stats_dict:
+            self.combine(stats_dict[own_key])
+        stats_dict[own_key] = self.value()
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        self._child.key_replace(stats_dict)
+        own_key = getattr(self, "keys", None)
+        if own_key is None:
+            self._child.key_replace(stats_dict)
+        elif own_key in stats_dict:
+            self.from_value(stats_dict[own_key])
 
 
 class MaskedBaseEncoder(DataSequenceEncoder):

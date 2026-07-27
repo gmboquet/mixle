@@ -485,10 +485,18 @@ class CensoredAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
-        self.base_accumulator.key_merge(stats_dict)
+        if self.keys is None:
+            self.base_accumulator.key_merge(stats_dict)
+            return
+        if self.keys in stats_dict:
+            self.combine(stats_dict[self.keys])
+        stats_dict[self.keys] = self.value()
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
-        self.base_accumulator.key_replace(stats_dict)
+        if self.keys is None:
+            self.base_accumulator.key_replace(stats_dict)
+        elif self.keys in stats_dict:
+            self.from_value(stats_dict[self.keys])
 
     def acc_to_encoder(self) -> CensoredDataEncoder:
         return CensoredDataEncoder.from_base_encoder(self.base_accumulator.acc_to_encoder())
