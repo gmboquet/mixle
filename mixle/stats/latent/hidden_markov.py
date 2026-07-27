@@ -47,6 +47,7 @@ from mixle.stats.combinator.null_dist import (
     NullDistribution,
     NullEstimator,
 )
+from mixle.stats.compute.mixture_evidence import validated_probability_vector, validated_row_probability_matrix
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
     DistributionEnumerator,
@@ -65,7 +66,7 @@ from mixle.stats.latent._hidden_markov_numba_kernels import (
     numba_seq_log_density,
 )
 from mixle.stats.latent.heterogeneous_mixture import HeterogeneousMixtureDataEncoder
-from mixle.stats.latent.mixture import MixtureDistribution
+from mixle.stats.latent.mixture import MixtureDistribution, _owned_generative_components
 from mixle.stats.sequences.markov_chain import MarkovChainDistribution, stationary_distribution
 from mixle.utils.aliasing import MISSING, broadcast_pseudo_count, coalesce_alias, require
 from mixle.utils.optional_deps import HAS_NUMBA, numba
@@ -103,6 +104,40 @@ from mixle.inference.fisher import (
 )
 
 _STATE_POOLS: dict[int, Any] = {}  # cached thread pools by worker count (pool creation is not free)
+
+
+def _validated_hmm_transition_matrix(values: Any, n_states: int) -> tuple[np.ndarray, tuple[int, ...]]:
+    """Return an owned stochastic transition matrix and explicit unreachable-row metadata."""
+    try:
+        transitions = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("HiddenMarkovModelDistribution transitions must be a numeric matrix.") from exc
+    expected = (n_states, n_states)
+    if transitions.shape != expected:
+        raise ValueError(
+            "HiddenMarkovModelDistribution transitions must have shape %r, got %r." % (expected, transitions.shape)
+        )
+    if np.any(~np.isfinite(transitions)) or np.any(transitions < 0.0):
+        raise ValueError("HiddenMarkovModelDistribution transitions must be finite and non-negative.")
+    row_sums = transitions.sum(axis=1)
+    zero_rows = np.flatnonzero(row_sums == 0.0)
+    nonzero_rows = row_sums != 0.0
+    if not np.allclose(row_sums[nonzero_rows], 1.0, rtol=1.0e-10, atol=1.0e-12):
+        raise ValueError("HiddenMarkovModelDistribution transition rows must sum to one.")
+    return transitions.copy(), tuple(int(index) for index in zero_rows)
+
+
+def _reachable_hmm_states(initial: np.ndarray, transitions: np.ndarray) -> np.ndarray:
+    """Return the graph-reachable state mask from positive initial mass."""
+    reachable = initial > 0.0
+    frontier = list(np.flatnonzero(reachable))
+    while frontier:
+        state = frontier.pop()
+        for child in np.flatnonzero(transitions[state] > 0.0):
+            if not reachable[child]:
+                reachable[child] = True
+                frontier.append(int(child))
+    return reachable
 
 
 def _state_pool(workers: int) -> Any:
@@ -359,14 +394,15 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             topics: Emission distributions. All emissions must accept the same
                 observation type. ``components`` is accepted as an alias
                 (matching ``MixtureDistribution``).
-            w: Initial hidden-state probabilities. Values must be finite and
-                non-negative. ``weights`` is accepted as an alias.
-            transitions: Hidden-state transition probability matrix. Values
-                must be finite and non-negative.
+            w: Initial hidden-state probability simplex. ``weights`` is
+                accepted as an alias.
+            transitions: Row-stochastic hidden-state transition probability
+                matrix. A zero row is accepted only for a state unreachable
+                from ``w`` and is stored canonically as a self-loop.
             taus: Optional per-state mixture weights over ``topics``. When
                 supplied, hidden states govern transitions between mixtures
-                rather than one emission distribution per state. Values must
-                be finite and non-negative.
+                rather than one emission distribution per state. Rows must be
+                probability simplexes.
             len_dist: Optional sequence-length distribution over nonnegative
                 integers.
             name: Optional diagnostic name.
@@ -397,8 +433,8 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             use_numba: Whether vectorized sequence calls use the Numba route.
 
         Raises:
-            ValueError: If ``w``, ``transitions``, or ``taus`` (when supplied) contains a
-                non-finite or negative value.
+            ValueError: If the chain or emission-mixture probability geometry
+                is malformed.
 
         """
         topics = coalesce_alias("topics", topics, "components", components, default=MISSING)
@@ -410,40 +446,30 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         # keeps the two consistent. The numba and numpy paths are bit-identical (only speed differs).
         self.use_numba = HAS_NUMBA if use_numba is None else use_numba
 
+        self.topics = _owned_generative_components(topics, "HiddenMarkovModelDistribution topics")
+        self.n_topics = len(self.topics)
+        self.w = validated_probability_vector(w, "HiddenMarkovModelDistribution initial weights")
+        self.n_states = len(self.w)
+        self.transitions, zero_transition_rows = _validated_hmm_transition_matrix(transitions, self.n_states)
+        reachable = _reachable_hmm_states(self.w, self.transitions)
+        reachable_zero_rows = tuple(index for index in zero_transition_rows if reachable[index])
+        if reachable_zero_rows:
+            raise ValueError(
+                "HiddenMarkovModelDistribution reachable states cannot have zero transition rows: %r."
+                % (reachable_zero_rows,)
+            )
+        self.unreachable_transition_rows = zero_transition_rows
+        for index in zero_transition_rows:
+            self.transitions[index, index] = 1.0
+
+        if taus is None and self.n_topics != self.n_states:
+            raise ValueError(
+                "HiddenMarkovModelDistribution requires one topic per state when taus is omitted: "
+                "got %d topics and %d states." % (self.n_topics, self.n_states)
+            )
+
         with np.errstate(divide="ignore"):
-            self.topics = topics
-            self.n_topics = len(topics)
-            self.n_states = len(w)
-            self.w = vec.make(w)
-            if not np.isfinite(self.w).all() or np.any(self.w < 0.0):
-                # A NaN or negative initial-state "probability" silently propagates into
-                # log_density()/seq_log_density() as nan (NaN) or resurfaces far from the mistake
-                # as an opaque error out of the sampler's RandomState-based state sampler, so
-                # reject it at the constructor like the scalar families do (CategoricalDistribution
-                # .pmap, IntegerCategoricalDistribution.p_vec). Deliberately NOT also enforced here:
-                # sum(w) == 1 -- see the note by the transitions check below, which applies equally
-                # to w (e.g. a steady_state_init fit ties w to the transition matrix's stationary
-                # distribution and both are float64 sums, not exact 1.0).
-                raise ValueError("HiddenMarkovModelDistribution requires finite, non-negative w.")
             self.log_w = np.log(self.w)
-
-            if not isinstance(transitions, np.ndarray):
-                transitions = np.asarray(transitions, dtype=float)
-
-            self.transitions = np.reshape(transitions, (self.n_states, self.n_states))
-            if not np.isfinite(self.transitions).all() or np.any(self.transitions < 0.0):
-                # Same failure mode as w above: a negative entry logs as nan (log_transitions), and
-                # a NaN entry poisons every downstream score. Deliberately NOT enforced here: each
-                # row summing to 1. HiddenMarkovEstimator.estimate() legitimately emits an all-zero
-                # row (sum 0, not 1) for a hidden state with no observed outgoing transition mass
-                # (never visited during fitting) -- confirmed live in the existing suite: scanning
-                # every HiddenMarkovModelDistribution(...) constructed while running the full test
-                # suite found 42 constructions with a transitions row not summing to 1, and every
-                # one of them was either such a legitimate zero row or ordinary float64 fitting
-                # noise (e.g. 0.9999999999999999) -- never a NaN or negative entry. A hard
-                # sum-to-1 rejection would break that legitimate estimator output; the finite/
-                # non-negative check has no such counterexample.
-                raise ValueError("HiddenMarkovModelDistribution requires a finite, non-negative transitions matrix.")
             self.log_transitions = np.log(self.transitions)
             self.terminal_values = terminal_values
             self.name = name
@@ -458,16 +484,13 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
                 self.use_numba = False  # the terminal-state forward uses the non-numba per-sequence layout
 
         if taus is not None:
-            self.taus = vec.make(taus)
-            if not np.isfinite(self.taus).all() or np.any(self.taus < 0.0):
-                # Same rationale as w/transitions above: a NaN or negative taus entry silently
-                # poisons log_taus (and every state's log_density through it) instead of failing at
-                # construction. Row sum-to-1 is deliberately not enforced either, for consistency:
-                # taus[i, :] is fed straight into MixtureDistribution(topics, taus[i, :]) (see
-                # HiddenMarkovSampler.__init__), and that constructor doesn't require its weights to
-                # sum to 1 either.
-                raise ValueError("HiddenMarkovModelDistribution requires finite, non-negative taus.")
-            self.log_taus = log(self.taus)
+            self.taus = validated_row_probability_matrix(
+                taus,
+                "HiddenMarkovModelDistribution taus",
+                shape=(self.n_states, self.n_topics),
+            )
+            with np.errstate(divide="ignore"):
+                self.log_taus = np.log(self.taus)
             self.has_topics = True
         else:
             self.taus = None
@@ -936,6 +959,11 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
             max_len = len(idx_bands)
             num_seq = idx_mat.shape[0]
+            if num_seq == 0:
+                ll_ret = np.zeros(0, dtype=np.float64)
+                if self.len_dist is not None:
+                    ll_ret += self.len_dist.seq_log_density(len_enc)
+                return ll_ret
 
             good = idx_mat >= 0
 
@@ -990,6 +1018,11 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
             a_mat = self.transitions
             tot_cnt = len(idx)
             num_seq = len(sz)
+            if num_seq == 0:
+                ll_ret = np.zeros(0, dtype=np.float64)
+                if self.len_dist is not None:
+                    ll_ret += self.len_dist.seq_log_density(len_enc)
+                return ll_ret
 
             ll_ret = np.zeros(num_seq, dtype=np.float64)
             tz = np.concatenate([[0], sz]).cumsum().astype(dtype=np.int32)
@@ -1105,6 +1138,11 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         (idx, sz, enc_data), len_enc = x1
         sz = np.asarray(sz)
         n_seq = len(sz)
+        if n_seq == 0:
+            rv = engine.zeros(0)
+            if self.len_dist is not None and len_enc is not None:
+                rv = rv + backend_seq_log_density(self.len_dist, len_enc, engine)
+            return rv
         tot = int(sz.sum())
         if tot == 0:
             rv = engine.zeros(n_seq)
@@ -1327,11 +1365,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         from mixle.stats.compute.pdist import DensitySemantics, join_density_semantics
 
         children = list(self.topics) + ([] if self.len_dist is None else [self.len_dist])
-        sems = [
-            c.density_semantics()
-            for c in children
-            if hasattr(c, "density_semantics") and not supports(c, Neutral)
-        ]
+        sems = [c.density_semantics() for c in children if hasattr(c, "density_semantics") and not supports(c, Neutral)]
         return join_density_semantics(sems) if sems else DensitySemantics.EXACT
 
     def sampler(self, seed: int | None = None) -> HiddenMarkovSampler:
@@ -2362,9 +2396,7 @@ class HiddenMarkovSampler(DistributionSampler):
         t_map = {i: {k: dist.transitions[i, k] for k in range(dist.n_states)} for i in range(dist.n_states)}
         p_map = {i: dist.w[i] for i in range(dist.n_states)}
 
-        self.state_sampler = MarkovChainDistribution(p_map, t_map).path_sampler(
-            seed=self.rng.randint(0, maxrandint)
-        )
+        self.state_sampler = MarkovChainDistribution(p_map, t_map).path_sampler(seed=self.rng.randint(0, maxrandint))
 
     def _sample_emissions_batched(self, state_seqs: list[list[Any]]) -> list[list[Any]]:
         """Draw all emissions for a batch of state paths, grouped by hidden state.
@@ -2905,6 +2937,10 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
             max_len = len(idx_bands)
             num_seq = idx_mat.shape[0]
+            if num_seq == 0:
+                if self.len_accumulator is not None:
+                    self.len_accumulator.seq_update(len_enc, weights, estimate.len_dist)
+                return
 
             good = idx_mat >= 0
 
@@ -3051,6 +3087,10 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             tot_cnt = len(idx)
             seq_cnt = len(sz)
             num_states = estimate.n_states
+            if seq_cnt == 0:
+                if self.len_accumulator is not None:
+                    self.len_accumulator.seq_update(len_enc, weights, estimate.len_dist)
+                return
             pr_obs = np.zeros((tot_cnt, num_states), dtype=np.float64)
 
             max_len = sz.max()
@@ -3140,6 +3180,10 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             # numba encoding: observations are stored sequence-contiguously.
             (idx, sz, enc_data), len_enc = x1
             sz = np.asarray(sz)
+            if len(sz) == 0:
+                if self.len_accumulator is not None:
+                    self.len_accumulator.seq_update(len_enc, weights_np, estimate.len_dist)
+                return
             tot_cnt = int(sz.sum())
             offsets = np.concatenate([[0], np.cumsum(sz)]).astype(np.int64)  # gamma scatter below
             pr_dev = hmm_engine_emissions(estimate.topics, enc_data, engine, self._homogeneous_emissions)
@@ -3161,6 +3205,10 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             # or -1 when the sequence is shorter than t. Gather it into the padded layout and keep
             # the index map for scattering gamma back to the flat emission order.
             (tot_cnt, idx_bands, has_next, len_vec, idx_mat, idx_vec, enc_data), _, len_enc = x0
+            if idx_mat.shape[0] == 0:
+                if self.len_accumulator is not None:
+                    self.len_accumulator.seq_update(len_enc, weights_np, estimate.len_dist)
+                return
             pr_obs = np.empty((tot_cnt, num_states), dtype=np.float64)
             if self._homogeneous_emissions:
                 for i in range(num_states):
@@ -3647,6 +3695,8 @@ class HiddenMarkovEstimator(ParameterEstimator):
                 good_rows = ~bad_rows
                 transitions = np.zeros_like(trans_counts, dtype=np.float64)
                 transitions[good_rows, :] += trans_counts[good_rows, :] / row_sum[good_rows]
+                bad_indices = np.flatnonzero(bad_rows)
+                transitions[bad_indices, bad_indices] = 1.0
             else:
                 transitions = trans_counts / row_sum
 

@@ -1,40 +1,11 @@
-"""Constructor-time probability validation for HiddenMarkovModelDistribution.
-
-``HiddenMarkovModelDistribution.__init__`` had zero validation on its three probability-array
-parameters: ``w`` (initial hidden-state probabilities), ``transitions`` (the hidden-state
-transition matrix), and ``taus`` (optional per-state mixture weights over ``topics``). All three
-are documented and used as probability simplexes, but nothing rejected a NaN entry, a negative
-entry, or an infinite entry -- each silently produced a NaN or otherwise invalid log-density
-downstream (``log_w``/``log_transitions``/``log_taus`` are built with a bare ``np.log`` over the
-raw array) instead of raising at construction, matching the bug class already fixed for
-``CategoricalDistribution.pmap``, ``IntegerCategoricalDistribution.p_vec``, and
-``MixtureDistribution``'s weights.
-
-Deliberately NOT enforced here: each row of ``w``/``transitions``/``taus`` summing to 1.
-Instrumenting the constructor and running the full existing test suite (2690 real
-``HiddenMarkovModelDistribution`` constructions) found 42 constructions with a ``transitions`` row
-that does not sum to 1 -- and every single one was either ordinary float64 fitting noise (e.g.
-``0.9999999999999999``) or a row that sums to exactly 0. The zero-row case is not incidental:
-``HiddenMarkovEstimator.estimate()`` (this module's own M-step) intentionally leaves the
-transition row for a hidden state with no observed outgoing transition mass -- i.e. a state never
-visited during fitting -- as all zeros rather than fabricating a uniform (or any other) row. A
-hard row-sum-to-1 rejection would break that legitimate, live estimator output. None of the 42
-offending constructions had a non-finite or negative entry, so finite+non-negative has no such
-counterexample: it is unambiguous, unlike the sum-to-1 case. ``taus[i, :]`` is also fed directly
-into ``MixtureDistribution(topics, taus[i, :])`` (see ``HiddenMarkovSampler.__init__``), and that
-constructor does not require its weights to sum to 1 either, so the same scope choice keeps ``taus``
-consistent with the class it is handed to.
-
-This intentionally lives in its own file rather than in ``probability_range_validation_test.py``
-(the file this session's prior sibling fixes for ``CategoricalDistribution``/``MixtureDistribution``
-share) because that file is being extended concurrently by another change to
-``MixtureDistribution``'s own validation.
-"""
+"""Probability-law and ownership contracts for HiddenMarkovModelDistribution."""
 
 import unittest
 
 import numpy as np
 
+from mixle.engines import NUMPY_ENGINE
+from mixle.stats.compute.backend import backend_seq_log_density
 from mixle.stats.latent.hidden_markov import HiddenMarkovModelDistribution
 from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
 from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
@@ -66,6 +37,10 @@ class HiddenMarkovInitialWeightValidationTestCase(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "w"):
             HiddenMarkovModelDistribution(_gaussian_topics(), [float("inf"), 0.5], [[0.9, 0.1], [0.2, 0.8]])
 
+    def test_non_simplex_w_rejected_at_construction(self):
+        with self.assertRaisesRegex(ValueError, "sum to one"):
+            HiddenMarkovModelDistribution(_gaussian_topics(), [1.0, 1.0], [[0.9, 0.1], [0.2, 0.8]])
+
     def test_valid_w_still_constructs(self):
         hmm = HiddenMarkovModelDistribution(_gaussian_topics(), [0.5, 0.5], [[0.9, 0.1], [0.2, 0.8]])
         self.assertTrue(np.isfinite(hmm.log_density([-2.0, -2.1])))
@@ -86,19 +61,18 @@ class HiddenMarkovTransitionsValidationTestCase(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "transitions"):
             HiddenMarkovModelDistribution(_gaussian_topics(), [0.5, 0.5], [[float("inf"), 0.1], [0.2, 0.8]])
 
-    def test_transitions_not_summing_to_one_construct_by_design(self):
-        # See this module's docstring: a hard rejection here would break HiddenMarkovEstimator's own
-        # M-step output for an unvisited hidden state. Pinned as deliberate, not an oversight.
-        over = HiddenMarkovModelDistribution(_gaussian_topics(), [0.5, 0.5], [[0.9, 0.4], [0.2, 0.8]])  # row 0 = 1.3
-        self.assertAlmostEqual(float(over.transitions[0].sum()), 1.3)
-        self.assertTrue(np.isfinite(over.log_density([-2.0, -2.1])))
+    def test_transitions_not_summing_to_one_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "sum to one"):
+            HiddenMarkovModelDistribution(_gaussian_topics(), [0.5, 0.5], [[0.9, 0.4], [0.2, 0.8]])
 
-    def test_transitions_all_zero_row_still_constructs(self):
-        # Matches HiddenMarkovEstimator.estimate()'s own output for a hidden state with no observed
-        # outgoing transition mass: that row is left all-zero (sum 0), not uniform or renormalized.
-        hmm = HiddenMarkovModelDistribution(_gaussian_topics(), [0.5, 0.5], [[0.0, 0.0], [0.2, 0.8]])
-        self.assertEqual(float(hmm.transitions[0].sum()), 0.0)
-        self.assertTrue(np.isfinite(hmm.log_density([-2.0, -2.1])))
+    def test_reachable_zero_transition_row_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "reachable states"):
+            HiddenMarkovModelDistribution(_gaussian_topics(), [0.5, 0.5], [[0.0, 0.0], [0.2, 0.8]])
+
+    def test_unreachable_zero_transition_row_is_canonicalized_and_recorded(self):
+        hmm = HiddenMarkovModelDistribution(_gaussian_topics(), [1.0, 0.0], [[1.0, 0.0], [0.0, 0.0]])
+        np.testing.assert_array_equal(hmm.transitions, [[1.0, 0.0], [0.0, 1.0]])
+        self.assertEqual(hmm.unreachable_transition_rows, (1,))
 
     def test_valid_transitions_still_construct(self):
         hmm = HiddenMarkovModelDistribution(_gaussian_topics(), [0.5, 0.5], [[0.9, 0.1], [0.2, 0.8]])
@@ -142,17 +116,14 @@ class HiddenMarkovTausValidationTestCase(unittest.TestCase):
                 taus=[[float("inf"), 0.3], [0.2, 0.8]],
             )
 
-    def test_taus_not_summing_to_one_construct_by_design(self):
-        # See this module's docstring: taus[i, :] is fed straight into MixtureDistribution, which
-        # itself does not require its weights to sum to 1 either -- pinned as deliberate.
-        hmm = HiddenMarkovModelDistribution(
-            _categorical_topics(),
-            [0.6, 0.4],
-            [[0.9, 0.1], [0.3, 0.7]],
-            taus=[[0.3, 0.3], [0.2, 0.8]],  # row 0 sums to 0.6
-        )
-        self.assertAlmostEqual(float(hmm.taus[0].sum()), 0.6)
-        self.assertTrue(np.isfinite(hmm.log_density(["a", "b"])))
+    def test_taus_not_summing_to_one_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "sum to one"):
+            HiddenMarkovModelDistribution(
+                _categorical_topics(),
+                [0.6, 0.4],
+                [[0.9, 0.1], [0.3, 0.7]],
+                taus=[[0.3, 0.3], [0.2, 0.8]],
+            )
 
     def test_valid_taus_still_construct(self):
         hmm = HiddenMarkovModelDistribution(
@@ -163,6 +134,67 @@ class HiddenMarkovTausValidationTestCase(unittest.TestCase):
         )
         self.assertTrue(hmm.has_topics)
         self.assertTrue(np.isfinite(hmm.log_density(["a", "b", "a"])))
+
+
+class HiddenMarkovGeometryAndOwnershipTestCase(unittest.TestCase):
+    def test_direct_emissions_require_one_topic_per_state(self):
+        with self.assertRaisesRegex(ValueError, "one topic per state"):
+            HiddenMarkovModelDistribution([_gaussian_topics()[0]], [0.5, 0.5], [[0.9, 0.1], [0.2, 0.8]])
+
+    def test_taus_geometry_must_match_states_and_topics(self):
+        with self.assertRaisesRegex(ValueError, "shape"):
+            HiddenMarkovModelDistribution(
+                _categorical_topics(),
+                [1.0],
+                [[1.0]],
+                taus=[[1.0]],
+            )
+
+    def test_constructor_owns_probability_arrays_and_topic_container(self):
+        topics = _gaussian_topics()
+        w = np.asarray([0.5, 0.5])
+        transitions = np.asarray([[0.9, 0.1], [0.2, 0.8]])
+        hmm = HiddenMarkovModelDistribution(topics, w, transitions)
+        score = hmm.log_density([-2.0, -2.1])
+
+        topics.clear()
+        w[:] = [1.0, 0.0]
+        transitions[:] = np.eye(2)
+
+        self.assertEqual(len(hmm.topics), 2)
+        np.testing.assert_array_equal(hmm.w, [0.5, 0.5])
+        np.testing.assert_array_equal(hmm.transitions, [[0.9, 0.1], [0.2, 0.8]])
+        self.assertEqual(hmm.log_density([-2.0, -2.1]), score)
+
+
+class HiddenMarkovEmptyBatchTestCase(unittest.TestCase):
+    def test_empty_batches_are_valid_neutral_inputs(self):
+        for use_numba in (False, True):
+            with self.subTest(use_numba=use_numba):
+                hmm = HiddenMarkovModelDistribution(
+                    _gaussian_topics(),
+                    [0.5, 0.5],
+                    [[0.9, 0.1], [0.2, 0.8]],
+                    use_numba=use_numba,
+                )
+                encoder = hmm.dist_to_encoder()
+                encoded = encoder.seq_encode([])
+                self.assertEqual(encoder.row_count(encoded), 0)
+                self.assertEqual(hmm.seq_log_density(encoded).shape, (0,))
+                self.assertEqual(np.asarray(backend_seq_log_density(hmm, encoded, NUMPY_ENGINE)).shape, (0,))
+
+                estimator = hmm.estimator()
+                host_accumulator = estimator.accumulator_factory().make()
+                host_accumulator.seq_update(encoded, np.zeros(0), hmm)
+                np.testing.assert_array_equal(host_accumulator.init_counts, [0.0, 0.0])
+                np.testing.assert_array_equal(host_accumulator.state_counts, [0.0, 0.0])
+                np.testing.assert_array_equal(host_accumulator.trans_counts, np.zeros((2, 2)))
+
+                engine_accumulator = estimator.accumulator_factory().make()
+                engine_accumulator.seq_update_engine(encoded, np.zeros(0), hmm, NUMPY_ENGINE)
+                np.testing.assert_array_equal(engine_accumulator.init_counts, [0.0, 0.0])
+                np.testing.assert_array_equal(engine_accumulator.state_counts, [0.0, 0.0])
+                np.testing.assert_array_equal(engine_accumulator.trans_counts, np.zeros((2, 2)))
 
 
 if __name__ == "__main__":
