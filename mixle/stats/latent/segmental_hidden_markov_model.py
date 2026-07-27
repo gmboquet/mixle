@@ -37,6 +37,13 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.latent.markov_stopping import (
+    DEFAULT_TERMINAL_STEP_CAP,
+    require_terminal_reached,
+    validate_terminal_reachability,
+    validated_terminal_states,
+    validated_terminal_step_cap,
+)
 from mixle.stats.sequences.markov_chain import MarkovChainDistribution
 from mixle.utils.aliasing import MISSING, broadcast_pseudo_count, coalesce_alias, require
 
@@ -176,10 +183,20 @@ class SegmentalHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistrib
         self.len_dist = len_dist if len_dist is not None else NullDistribution()
         self.null_len_dist = supports(self.len_dist, Neutral)
         self.name = name
-        self.terminal_states = None if terminal_states is None else set(int(s) for s in terminal_states)
+        self.terminal_states = validated_terminal_states(
+            terminal_states,
+            self.n_states,
+            context="SegmentalHiddenMarkovModelDistribution",
+        )
         if self.terminal_states is not None:
             self._terminal_mask = np.zeros(self.n_states, dtype=bool)
             self._terminal_mask[list(self.terminal_states)] = True
+            validate_terminal_reachability(
+                self.w,
+                self.transitions,
+                self.terminal_states,
+                context="SegmentalHiddenMarkovModelDistribution",
+            )
 
     def __str__(self) -> str:
         s1 = ",".join(str(u) for u in self.emissions)
@@ -331,23 +348,28 @@ class SegmentalHiddenMarkovSampler(DistributionSampler):
         self.dist = dist
         self.rng = RandomState(seed)
         self.obs_samplers = [d.sampler(seed=self.rng.randint(0, maxrandint)) for d in dist.emissions]
-        self.len_sampler = dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
+        self.len_sampler = None if dist.null_len_dist else dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
         p_map = {i: dist.w[i] for i in range(dist.n_states)}
         t_map = {i: {j: dist.transitions[i, j] for j in range(dist.n_states)} for i in range(dist.n_states)}
-        self.state_sampler = MarkovChainDistribution(p_map, t_map).path_sampler(
-            seed=self.rng.randint(0, maxrandint)
-        )
+        self.state_sampler = MarkovChainDistribution(p_map, t_map).path_sampler(seed=self.rng.randint(0, maxrandint))
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> list[Any] | list[list[Any]]:
         """Draw one segment sequence, or ``size`` iid segment sequences."""
         if size is not None:
             return [self.sample() for _ in range(size)]
         if self.dist.terminal_states is not None:
+            max_steps = validated_terminal_step_cap(DEFAULT_TERMINAL_STEP_CAP)
             z = int(self.state_sampler.sample_seq())
             states = [z]
-            while z not in self.dist.terminal_states and len(states) < 1_000_000:
+            while z not in self.dist.terminal_states and len(states) < max_steps:
                 z = int(self.state_sampler.sample_seq(v0=z))
                 states.append(z)
+            require_terminal_reached(
+                z in self.dist.terminal_states,
+                mode="segmental terminal-state",
+                max_steps=max_steps,
+                last_state=z,
+            )
             return [self.obs_samplers[s].sample() for s in states]
         n = self.len_sampler.sample()
         states = self.state_sampler.sample_seq(n)

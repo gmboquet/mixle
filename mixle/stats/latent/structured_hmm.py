@@ -27,6 +27,12 @@ from typing import Any
 
 import numpy as np
 
+from mixle.stats.latent.markov_stopping import (
+    require_terminal_reached,
+    validate_terminal_reachability,
+    validated_state_ids,
+    validated_terminal_states,
+)
 from mixle.utils.vector import require_possible_log_evidence
 
 
@@ -453,19 +459,30 @@ class StructuredHMM:
         self.len_dist = len_dist  # optional distribution over sequence length (needed for enumeration)
         # terminal (absorbing) states: when set, the sequence length is a STOPPING TIME -- the chain only
         # transitions FROM non-terminal states and the sequence must END in a terminal state (no len_dist).
-        self.terminal_states = None if terminal_states is None else set(int(s) for s in terminal_states)
+        self.terminal_states = validated_terminal_states(
+            terminal_states,
+            self.K,
+            context="StructuredHMM",
+        )
         self.term_mask = None
-        if self.terminal_states:
+        if self.terminal_states is not None:
             self.term_mask = np.zeros(self.K, dtype=bool)
             self.term_mask[list(self.terminal_states)] = True
         # final states: the sequence may END only in one of these (a NON-absorbing boundary -- unlike
         # terminal_states, the chain still transitions through them mid-sequence). Used by the HSMM->HMM
         # expansion to require the final segment to complete. terminal_states takes precedence if both set.
-        self.final_states = None if final_states is None else set(int(s) for s in final_states)
+        self.final_states = validated_state_ids(
+            final_states,
+            self.K,
+            context="StructuredHMM",
+            field="final_states",
+        )
         self.final_mask = None
-        if self.final_states:
+        if self.final_states is not None:
             self.final_mask = np.zeros(self.K, dtype=bool)
             self.final_mask[list(self.final_states)] = True
+        if self.terminal_states is not None and self.final_states is not None:
+            raise ValueError("StructuredHMM cannot combine terminal_states and final_states")
         # coupling invariant: emissions[k] <-> pi[k] <-> transition row/col k all index the SAME state k,
         # so the three counts must agree (for a Kronecker op, n_states == K1*K2 emissions).
         if not (self.K == len(self.pi) == transition.n_states):
@@ -476,6 +493,12 @@ class StructuredHMM:
         s = self.pi.sum()
         if s > 0:
             self.pi = self.pi / s
+        validate_terminal_reachability(
+            self.pi,
+            self.transition.as_matrix(),
+            self.terminal_states,
+            context="StructuredHMM",
+        )
         self._emit_est = emission_estimators or [e.estimator() for e in self.emissions]
 
     def _log_b(self, seq) -> np.ndarray:
@@ -709,13 +732,22 @@ class _StructuredHMMSampler:
         a = h.transition.as_matrix()
         s = self.rng.choice(h.K, p=h.pi)
         out = []
+        terminated = False
         for _ in range(int(length)):
             out.append(h.emissions[s].sampler(seed=int(self.rng.randint(1, 2**31))).sample())
             if h.term_mask is not None and h.term_mask[s]:
+                terminated = True
                 break  # terminal (absorbing) state ends the sequence -- length is the stopping time
             row = a[s]
             rs = row.sum()
             s = self.rng.choice(h.K, p=row / rs) if rs > 0 else s
+        if h.term_mask is not None:
+            require_terminal_reached(
+                terminated,
+                mode="structured terminal-state",
+                max_steps=int(length),
+                last_state=int(s),
+            )
         return out
 
 
@@ -967,6 +999,12 @@ class StructuredHMMDataEncoder(DataSequenceEncoder):
         """Encode sequences as lists without changing their observations."""
         return [list(s) for s in x]
 
+    def row_count(self, x):
+        """Return the number of pass-through structured-HMM records."""
+        if not isinstance(x, list):
+            raise ValueError("structured HMM encoding must be a list of sequence records")
+        return len(x)
+
     def __eq__(self, other):
         return isinstance(other, StructuredHMMDataEncoder)
 
@@ -1208,13 +1246,24 @@ class InputOutputHMM:
         self.K = len(self.emissions)
         self.M = len(self.transitions)
         self.name = name
-        self.terminal_states = None if terminal_states is None else set(int(s) for s in terminal_states)
+        self.terminal_states = validated_terminal_states(
+            terminal_states,
+            self.K,
+            context="InputOutputHMM",
+        )
         self.term_mask = None
-        if self.terminal_states:
+        if self.terminal_states is not None:
             self.term_mask = np.zeros(self.K, dtype=bool)
             self.term_mask[list(self.terminal_states)] = True
         if not all(t.n_states == self.K == len(self.pi) for t in self.transitions):
             raise ValueError("every input's transition must have n_states == #emissions == len(pi).")
+        for index, transition in enumerate(self.transitions):
+            validate_terminal_reachability(
+                self.pi,
+                transition.as_matrix(),
+                self.terminal_states,
+                context="InputOutputHMM transition %d" % index,
+            )
         self._emit_est = emission_estimators or [e.estimator() for e in self.emissions]
 
     def _log_b(self, seq):
@@ -1390,14 +1439,23 @@ class _IOHMMSampler:
         mats = [t.as_matrix() for t in h.transitions]
         s = self.rng.choice(h.K, p=h.pi)
         out = []
+        terminated = False
         for t, m in enumerate(u):
             out.append((h.emissions[s].sampler(seed=int(self.rng.randint(1, 2**31))).sample(), m))
             if h.term_mask is not None and h.term_mask[s]:
+                terminated = True
                 break  # terminal (absorbing) state ends the sequence -- length is the stopping time
             if t + 1 < len(u):
                 row = mats[m][s]
                 rs = row.sum()
                 s = self.rng.choice(h.K, p=row / rs) if rs > 0 else s
+        if h.term_mask is not None:
+            require_terminal_reached(
+                terminated,
+                mode="input-output terminal-state",
+                max_steps=len(u),
+                last_state=int(s),
+            )
         return out
 
 
@@ -1407,6 +1465,12 @@ class IOHMMDataEncoder(DataSequenceEncoder):
     def seq_encode(self, x):
         """Encode IOHMM records as lists of ``(observation, input)`` pairs."""
         return [list(s) for s in x]
+
+    def row_count(self, x):
+        """Return the number of pass-through input-output HMM records."""
+        if not isinstance(x, list):
+            raise ValueError("input-output HMM encoding must be a list of sequence records")
+        return len(x)
 
     def __eq__(self, other):
         return isinstance(other, IOHMMDataEncoder)
@@ -1836,6 +1900,12 @@ class EDHMMDataEncoder(DataSequenceEncoder):
     def seq_encode(self, x):
         """Encode EDHMM records as observation-sequence lists."""
         return [list(s) for s in x]
+
+    def row_count(self, x):
+        """Return the number of pass-through explicit-duration HMM records."""
+        if not isinstance(x, list):
+            raise ValueError("explicit-duration HMM encoding must be a list of sequence records")
+        return len(x)
 
     def __eq__(self, other):
         return isinstance(other, EDHMMDataEncoder)

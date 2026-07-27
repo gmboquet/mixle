@@ -66,6 +66,14 @@ from mixle.stats.latent._hidden_markov_numba_kernels import (
     numba_seq_log_density,
 )
 from mixle.stats.latent.heterogeneous_mixture import HeterogeneousMixtureDataEncoder
+from mixle.stats.latent.markov_stopping import (
+    DEFAULT_TERMINAL_STEP_CAP,
+    require_terminal_reached,
+    validate_terminal_reachability,
+    validated_terminal_states,
+    validated_terminal_step_cap,
+    validated_terminal_values,
+)
 from mixle.stats.latent.mixture import MixtureDistribution, _owned_generative_components
 from mixle.stats.sequences.markov_chain import MarkovChainDistribution, stationary_distribution
 from mixle.utils.aliasing import MISSING, broadcast_pseudo_count, coalesce_alias, require
@@ -450,9 +458,27 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         self.n_topics = len(self.topics)
         self.w = validated_probability_vector(w, "HiddenMarkovModelDistribution initial weights")
         self.n_states = len(self.w)
+        self.terminal_values = validated_terminal_values(
+            terminal_values,
+            context="HiddenMarkovModelDistribution",
+        )
+        self.terminal_states = validated_terminal_states(
+            terminal_states,
+            self.n_states,
+            context="HiddenMarkovModelDistribution",
+        )
+        if self.terminal_values is not None and self.terminal_states is not None:
+            raise ValueError("HiddenMarkovModelDistribution cannot combine terminal_values and terminal_states")
+
         self.transitions, zero_transition_rows = _validated_hmm_transition_matrix(transitions, self.n_states)
         reachable = _reachable_hmm_states(self.w, self.transitions)
-        reachable_zero_rows = tuple(index for index in zero_transition_rows if reachable[index])
+        reachable_zero_rows = tuple(
+            index
+            for index in zero_transition_rows
+            if reachable[index]
+            and self.terminal_values is None
+            and (self.terminal_states is None or index not in self.terminal_states)
+        )
         if reachable_zero_rows:
             raise ValueError(
                 "HiddenMarkovModelDistribution reachable states cannot have zero transition rows: %r."
@@ -461,6 +487,12 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         self.unreachable_transition_rows = zero_transition_rows
         for index in zero_transition_rows:
             self.transitions[index, index] = 1.0
+        validate_terminal_reachability(
+            self.w,
+            self.transitions,
+            self.terminal_states,
+            context="HiddenMarkovModelDistribution",
+        )
 
         if taus is None and self.n_topics != self.n_states:
             raise ValueError(
@@ -471,13 +503,11 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         with np.errstate(divide="ignore"):
             self.log_w = np.log(self.w)
             self.log_transitions = np.log(self.transitions)
-            self.terminal_values = terminal_values
             self.name = name
             self.len_dist = len_dist if len_dist is not None else NullDistribution()
 
             # Absorbing hidden states: the sequence ends exactly when one is first entered, so the
             # length is a stopping time (not governed by len_dist). Stored as a boolean state mask.
-            self.terminal_states = None if terminal_states is None else set(int(s) for s in terminal_states)
             if self.terminal_states is not None:
                 self._terminal_mask = np.zeros(self.n_states, dtype=bool)
                 self._terminal_mask[list(self.terminal_states)] = True
@@ -2477,7 +2507,11 @@ class HiddenMarkovSampler(DistributionSampler):
         state_seqs = self.state_sampler.sample_paths(n)
         return self._sample_emissions_batched(state_seqs)
 
-    def sample_terminal(self, terminal_set: set[T]) -> list[T]:
+    def sample_terminal(
+        self,
+        terminal_set: set[T],
+        max_steps: int = DEFAULT_TERMINAL_STEP_CAP,
+    ) -> list[T]:
         """Sample one HMM sequence until an emitted terminal value appears.
 
         Args:
@@ -2487,27 +2521,41 @@ class HiddenMarkovSampler(DistributionSampler):
             A sequence whose final value belongs to ``terminal_set``.
 
         """
+        max_steps = validated_terminal_step_cap(max_steps)
         z = self.state_sampler.sample_seq()
         rv = [self.obs_samplers[z].sample()]
 
-        while rv[-1] not in terminal_set:
+        while rv[-1] not in terminal_set and len(rv) < max_steps:
             z = self.state_sampler.sample_seq(v0=z)
             rv.append(self.obs_samplers[z].sample())
+        require_terminal_reached(
+            rv[-1] in terminal_set,
+            mode="terminal-value",
+            max_steps=max_steps,
+            last_state=int(z),
+        )
 
         return rv
 
-    def sample_terminal_states(self, cap: int = 1_000_000) -> list[T]:
+    def sample_terminal_states(self, max_steps: int = DEFAULT_TERMINAL_STEP_CAP) -> list[T]:
         """Sample an HMM sequence run until the hidden chain first enters an absorbing (terminal) state.
 
         The path ``z_1, z_2, ...`` is drawn from the chain and stops the moment ``z_L`` is terminal; the
         returned sequence emits one observation per state, so its last state is terminal and all earlier
         states are not. ``cap`` guards against a terminal state that is unreachable.
         """
+        max_steps = validated_terminal_step_cap(max_steps)
         z = int(self.state_sampler.sample_seq())
         states = [z]
-        while z not in self.terminal_states and len(states) < cap:
+        while z not in self.terminal_states and len(states) < max_steps:
             z = int(self.state_sampler.sample_seq(v0=z))
             states.append(z)
+        require_terminal_reached(
+            z in self.terminal_states,
+            mode="terminal-state",
+            max_steps=max_steps,
+            last_state=z,
+        )
         return [self.obs_samplers[s].sample() for s in states]
 
     def sample(self, size: int | None = None, *, batched: bool = True):
