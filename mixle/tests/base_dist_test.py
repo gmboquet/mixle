@@ -167,17 +167,14 @@ def _build_dists():
     d21 = SequenceDistribution(
         CompositeDistribution([GaussianDistribution(mu=-6.0, sigma2=1.0), GammaDistribution(1.0, 3.0)]),
         PoissonDistribution(3.0),
-        len_normalized=True,
     )
     d22 = SequenceDistribution(
         CompositeDistribution([GaussianDistribution(mu=0.0, sigma2=1.0), GammaDistribution(3.0, 3.0)]),
         PoissonDistribution(3.0),
-        len_normalized=True,
     )
     d23 = SequenceDistribution(
         CompositeDistribution([GaussianDistribution(mu=6.0, sigma2=1.0), GammaDistribution(1.0, 3.0)]),
         PoissonDistribution(3.0),
-        len_normalized=True,
     )
 
     taus12 = [[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.1, 0.1, 0.8]]

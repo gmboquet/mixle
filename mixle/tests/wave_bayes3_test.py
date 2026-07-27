@@ -102,7 +102,10 @@ class SequenceEstimatorPriorTestCase(unittest.TestCase):
         for x in data:
             acc.update(x, 1.0, None)
 
-        entry_stats, len_stats = acc.value()
+        stats = acc.value()
+        entry_stats, len_stats = stats.elements, stats.lengths
+        self.assertAlmostEqual(stats.element_nobs, 6.0)
+        self.assertAlmostEqual(stats.length_nobs, 3.0)
         self.assertAlmostEqual(entry_stats[0], 6.0)  # six entries
         self.assertAlmostEqual(entry_stats[1], 11.0)  # sum of entries
         self.assertAlmostEqual(len_stats[0], 3.0)  # three sequences
@@ -117,7 +120,10 @@ class SequenceEstimatorPriorTestCase(unittest.TestCase):
         acc = est.accumulator_factory().make()
         acc.update([2, 2], 1.0, None)
 
-        entry_stats, len_stats = acc.value()
+        stats = acc.value()
+        entry_stats, len_stats = stats.elements, stats.lengths
+        self.assertAlmostEqual(stats.element_nobs, 2.0)
+        self.assertAlmostEqual(stats.length_nobs, 1.0)
         self.assertAlmostEqual(entry_stats[0], 2.0)
         self.assertAlmostEqual(entry_stats[1], 4.0)
         self.assertIsNone(len_stats)

@@ -1,4 +1,4 @@
-"""Sequence distributions with iid elements and an optional length model.
+"""Iid sequence laws and explicitly non-generative sequence score modes.
 
 Data type (T): Assume the sequence distribution has a base distribution 'dist' compatible with data type T and length
 distribution compatible with positive integers len_dist with respective densities P_dist() and P_len(). The density
@@ -7,17 +7,23 @@ of the sequence distribution is given by
 p_mat(x) = P_dist(x[0])*...*P_dist(x[n-1])*P_len(n),
 
 for an observation x of data type Sequence[T] having length n.
+
+Without ``len_dist`` this is conditional evidence given the observed length. With
+``len_normalized=True`` it is a length-normalized training objective. Those modes report likelihood-factor
+semantics and cannot sample.
 """
 
 from __future__ import annotations
 
+import itertools
+import math
 from collections.abc import Sequence
-from typing import Any, TypeVar
+from typing import Any, NamedTuple, TypeVar
 
 import numpy as np
 from numpy.random import RandomState
 
-from mixle.capability import Neutral, supports
+from mixle.capability import Discrete, Neutral, supports
 from mixle.engines.arithmetic import maxrandint
 from mixle.enumeration.algorithms import BufferedStream, LengthFrontierMerge, ProductEnumerator
 from mixle.inference.fisher import Path
@@ -31,6 +37,7 @@ from mixle.stats.combinator.null_dist import (
 from mixle.stats.compute.pdist import (
     ContractError,
     DataSequenceEncoder,
+    DensitySemantics,
     DistributionEnumerator,
     DistributionSampler,
     EnumerationError,
@@ -45,10 +52,118 @@ from mixle.stats.compute.pdist import (
 T = TypeVar("T")  # Data type of Sequence distribution dist.
 E1 = TypeVar("E1")  # Generic type of distribution encoding.
 E2 = TypeVar("E2")  # Generic type of length encoding.
-SS1 = TypeVar("SS1")  # Generic type for sufficient statistic of base dist.
-SS2 = TypeVar("SS2")  # Generic type for sufficient statistics of length dist.
-
 E = tuple[np.ndarray, np.ndarray, np.ndarray, E1, E2 | None]
+
+
+class NonGenerativeSequenceError(TypeError):
+    """Raised when a conditional or normalized sequence score is asked to generate."""
+
+
+class SequenceStatistics(NamedTuple):
+    """Versioned sequence child statistics with their effective observation counts."""
+
+    schema_version: int
+    element_nobs: float
+    length_nobs: float
+    elements: Any
+    lengths: Any | None
+
+
+_INFINITE_INTEGER_LENGTH_SUPPORTS = frozenset({"boolean", "non_negative_integer", "positive_integer"})
+_FINITE_LENGTH_PROOF_LIMIT = 4096
+
+
+def _finite_nonnegative(value: Any, *, label: str) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError("%s must be a finite non-negative scalar." % label)
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("%s must be a finite non-negative scalar." % label) from exc
+    if not math.isfinite(result) or result < 0.0:
+        raise ValueError("%s must be a finite non-negative scalar." % label)
+    return result
+
+
+def _checked_length(value: Any, *, label: str) -> int:
+    """Return one exactly integral, finite, non-negative length."""
+    if isinstance(value, (bool, np.bool_, str, bytes)):
+        raise TypeError("%s must be an exact finite non-negative integer." % label)
+    array = np.asarray(value)
+    if array.ndim != 0 or np.iscomplexobj(array):
+        raise TypeError("%s must be a scalar exact finite non-negative integer." % label)
+    try:
+        numeric = float(array)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("%s must be an exact finite non-negative integer." % label) from exc
+    if not math.isfinite(numeric) or numeric < 0.0 or math.floor(numeric) != numeric:
+        raise ValueError("%s must be an exact finite non-negative integer." % label)
+    if numeric > np.iinfo(np.intp).max:
+        raise ValueError("%s exceeds the platform index range." % label)
+    return int(numeric)
+
+
+def _validate_length_distribution(length_dist: SequenceEncodableProbabilityDistribution) -> None:
+    """Prove that a length law has support only on finite non-negative integers."""
+    from mixle.stats.compute.declarations import declaration_for
+
+    declaration = declaration_for(length_dist)
+    support = None if declaration is None else declaration.support
+    size = length_dist.support_size()
+    if size is not None:
+        if size > _FINITE_LENGTH_PROOF_LIMIT:
+            if supports(length_dist, Discrete) and support == "bounded_integer":
+                lower = getattr(length_dist, "min_val", getattr(length_dist, "min_index", None))
+                lower = _checked_length(lower, label="length support lower bound")
+                _checked_length(lower + size - 1, label="length support upper bound")
+                return
+            raise ValueError(
+                "finite length support has %d values and cannot be proved within the %d-value "
+                "validation bound." % (size, _FINITE_LENGTH_PROOF_LIMIT)
+            )
+        values = []
+        for value, _ in itertools.islice(
+            child_enumerator(length_dist, "SequenceDistribution.len_dist"),
+            size + 1,
+        ):
+            values.append(_checked_length(value, label="length support value"))
+        if len(values) > size or len(set(values)) != len(values):
+            raise ValueError("length distribution enumeration must expose a unique finite support.")
+        return
+
+    if support == "mixture":
+        components = tuple(getattr(length_dist, "components", ()))
+        weights = np.asarray(getattr(length_dist, "w", ()), dtype=np.float64)
+        if not components or weights.shape != (len(components),):
+            raise TypeError("length mixture does not expose aligned components and weights.")
+        for component, weight in zip(components, weights):
+            if weight > 0.0:
+                _validate_length_distribution(component)
+        return
+
+    if not supports(length_dist, Discrete) or support not in _INFINITE_INTEGER_LENGTH_SUPPORTS:
+        raise TypeError(
+            "length distribution must prove support on non-negative integers; got declared support %r."
+            % support
+        )
+
+
+def _validate_sequence_statistics(value: Any, *, path: str) -> SequenceStatistics:
+    """Validate the full sequence-statistic envelope before fitting or mutation."""
+    if not isinstance(value, SequenceStatistics) or value.schema_version != 1:
+        raise ContractError(
+            path,
+            "SequenceStatistics schema version 1",
+            type(value).__name__,
+            "pass the value produced by SequenceAccumulator.value().",
+        )
+    return SequenceStatistics(
+        1,
+        _finite_nonnegative(value.element_nobs, label="sequence element_nobs"),
+        _finite_nonnegative(value.length_nobs, label="sequence length_nobs"),
+        value.elements,
+        value.lengths,
+    )
 
 
 from mixle.inference.fisher import (
@@ -104,10 +219,14 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         """
         self.dist = dist
         self.len_dist = len_dist if len_dist is not None else NullDistribution()
-        self.len_normalized = len_normalized
+        if not isinstance(len_normalized, (bool, np.bool_)):
+            raise TypeError("len_normalized must be bool.")
+        self.len_normalized = bool(len_normalized)
         self.name = name
 
         self.null_len_dist = supports(self.len_dist, Neutral)
+        if not self.null_len_dist:
+            _validate_length_distribution(self.len_dist)
         self.set_prior(prior)
 
     def get_prior(self) -> tuple[Any, Any]:
@@ -195,46 +314,23 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         return "SequenceDistribution(%s, len_dist=%s, len_normalized=%s, name=%s)" % (s1, s2, s3, s4)
 
     def density(self, x: Sequence[T]) -> float:
-        """Evaluate the density of SequenceDistribution at observed sequence x.
+        """Return ``exp(log_density(x))`` under the sequence score contract.
 
-        Assume x is a Sequence of data type T with length n > 0. Assume P_dist() is the density for the base
-        distribution with data type T of SequenceDistribution, and P_len() is the length distribution with data type
-        int. Then,
-
-        P(x) = P_dist(x[0])*...*P_dist(x[n-1])*P_len(n), if len_normalize is False,
-
-        or,
-
-        P(x) = (P_dist(x[0])*...*P_dist(x[n-1])*P_len(n))^(1/n) if len_normalize is True.
-
-
-
-        Args:
-            x (Sequence[T]): Sequence of iid observations from base distribution of SequenceDistribution.
-
-        Returns:
-            Density evaluated at observation x.
-
-
+        In normalized mode only the element log-score is divided by the observed length; the
+        modeled length log-probability remains a full term. That mode is a training objective,
+        not a normalized generative law.
         """
-        rv = 1.0
-
-        for i in range(len(x)):
-            rv *= self.dist.density(x[i])
-
-        if not self.null_len_dist:
-            rv *= self.len_dist.density(len(x))
-
-        if self.len_normalized and len(x) > 0:
-            rv = np.power(rv, 1.0 / len(x))
-
-        return rv
+        return float(np.exp(self.log_density(x)))
 
     def density_semantics(self):
-        """Return the joined density semantics of the element distribution."""
+        """Classify conditional and length-normalized modes as likelihood factors."""
         from mixle.stats.compute.pdist import join_density_semantics
 
-        return join_density_semantics(c.density_semantics() for c in [self.dist])
+        if self.null_len_dist or self.len_normalized:
+            return DensitySemantics.LIKELIHOOD_FACTOR
+        return join_density_semantics(
+            child.density_semantics() for child in (self.dist, self.len_dist)
+        )
 
     def log_density(self, x: Sequence[T]) -> float:
         """Evaluate the log-density of SequenceDistribution at observed sequence x.
@@ -398,6 +494,13 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
             enc_seq, element_weights, params["element_route"], engine, element_estimator
         )
         element_by_component = unstack_component_stats(element_stats, num_components)
+        element_counts = engine.sum(element_weights, axis=0)
+        length_counts = engine.sum(ww, axis=0)
+        if (
+            tuple(getattr(element_counts, "shape", ())) != (num_components,)
+            or tuple(getattr(length_counts, "shape", ())) != (num_components,)
+        ):
+            raise ValueError("stacked sequence effective counts have incompatible component geometry.")
 
         if params["length_route"] is None or enc_nseq is None:
             length_by_component = tuple(None for _ in range(num_components))
@@ -413,7 +516,16 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
             )
             length_by_component = unstack_component_stats(length_stats, num_components)
 
-        return tuple((element_by_component[i], length_by_component[i]) for i in range(num_components))
+        return tuple(
+            SequenceStatistics(
+                1,
+                element_counts[i],
+                length_counts[i],
+                element_by_component[i],
+                length_by_component[i],
+            )
+            for i in range(num_components)
+        )
 
     def gradient_fit_state(self, engine: Any, torch: Any, leaves: list[Any], recurse: Any, tensor_param: Any) -> Any:
         """Return distribution-owned state for autograd fitting."""
@@ -462,12 +574,14 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
             SequenceSampler object.
 
         """
-        if self.null_len_dist:
-            raise ValueError(
-                "Error: len_dist cannot be none for SequenceDistribution.sampler(seed:Optional[int]=None)."
+        if self.null_len_dist or self.len_normalized:
+            reason = (
+                "no length law is modeled"
+                if self.null_len_dist
+                else "len_normalized is a likelihood objective, not a generative law"
             )
-        else:
-            return SequenceSampler(self.dist, self.len_dist, seed)
+            raise NonGenerativeSequenceError("SequenceDistribution cannot sample because %s." % reason)
+        return SequenceSampler(self.dist, self.len_dist, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> SequenceEstimator:
         """Return an estimator for iid sequence observations and their lengths."""
@@ -546,14 +660,13 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         lengths: list[tuple[int, float]] = []  # (L, lp_len)
         _LEN_CAP = 1 << 24
         for length, lp_len in child_enumerator(self.len_dist, "SequenceDistribution.len_dist"):
-            if not isinstance(length, (int, np.integer)) or length < 0:
-                continue
+            length = _checked_length(length, label="enumerated sequence length")
             if lp_len == -np.inf:
                 continue
             if quantizer.fine_bucket(lp_len) > max_fine_bucket:
                 truncated = True
                 break
-            lengths.append((int(length), float(lp_len)))
+            lengths.append((length, float(lp_len)))
             if len(lengths) >= _LEN_CAP:
                 truncated = True
                 break
@@ -619,10 +732,21 @@ class SequenceEnumerator(DistributionEnumerator):
         if dist.len_normalized:
             raise EnumerationError(dist, reason="len_normalized densities are not enumerable")
         elem_buf = BufferedStream(child_enumerator(dist.dist, "SequenceDistribution.dist"))
-        len_stream = BufferedStream(child_enumerator(dist.len_dist, "SequenceDistribution.len_dist"))
+        len_stream = BufferedStream(self._validated_lengths(dist))
         self._merge = LengthFrontierMerge(
             len_stream, lambda n, lp_len: ProductEnumerator([elem_buf] * n, combine=list, offset=lp_len)
         )
+
+    @staticmethod
+    def _validated_lengths(dist: SequenceDistribution):
+        for value, log_probability in child_enumerator(
+            dist.len_dist,
+            "SequenceDistribution.len_dist",
+        ):
+            yield (
+                _checked_length(value, label="enumerated sequence length"),
+                log_probability,
+            )
 
     def __next__(self) -> tuple[Any, float]:
         return next(self._merge)
@@ -683,21 +807,37 @@ class SequenceSampler(DistributionSampler):
             List[T] or List[List[T]] with length(size).
 
         """
+        if not isinstance(batched, (bool, np.bool_)):
+            raise TypeError("batched must be bool.")
         if size is None:
-            n = int(self.len_sampler.sample())
+            n = _checked_length(self.len_sampler.sample(), label="sampled sequence length")
             if batched and n > 0:
                 return list(self.dist_sampler.sample(size=n))
-            return [self.dist_sampler.sample() for i in range(n)]
+            return [self.dist_sampler.sample() for _ in range(n)]
+        if isinstance(size, (bool, np.bool_)) or not isinstance(size, (int, np.integer)):
+            raise TypeError("size must be a non-negative integer or None.")
+        size = int(size)
+        if size < 0:
+            raise ValueError("size must be a non-negative integer or None.")
         if not batched:
-            return [self.sample(batched=False) for i in range(size)]
+            return [self.sample(batched=False) for _ in range(size)]
+        if size == 0:
+            return []
 
-        lengths = np.asarray(self.len_sampler.sample(size=size)).astype(int).reshape(-1)
-        total = int(lengths.sum())
+        sampled = np.asarray(self.len_sampler.sample(size=size))
+        if sampled.shape != (size,):
+            raise ValueError("length sampler must return exactly one scalar length per requested sequence.")
+        lengths = [
+            _checked_length(value, label="sampled sequence length %d" % index)
+            for index, value in enumerate(sampled)
+        ]
+        total = sum(lengths)
+        if total > np.iinfo(np.intp).max:
+            raise ValueError("total sampled sequence length exceeds the platform index range.")
         flat = self.dist_sampler.sample(size=total) if total > 0 else []
         out: list[Any] = []
         offset = 0
         for n in lengths:
-            n = int(n)
             out.append(list(flat[offset : offset + n]))
             offset += n
         return out
@@ -737,9 +877,13 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
         self.accumulator = accumulator
         self.len_accumulator = len_accumulator
         self.keys = keys
-        self.len_normalized = len_normalized
+        if not isinstance(len_normalized, (bool, np.bool_)):
+            raise TypeError("len_normalized must be bool.")
+        self.len_normalized = bool(len_normalized)
 
         self.null_len_accumulator = supports(self.len_accumulator, Neutral)
+        self.element_nobs = 0.0
+        self.length_nobs = 0.0
 
         ### Seeds for initialize/seq_initialize consistency
         self._init_rng = False
@@ -761,23 +905,20 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        if estimate is None:
-            w = weight / len(x) if (self.len_normalized and len(x) > 0) else weight
-
-            for i in range(len(x)):
-                self.accumulator.update(x[i], w, None)
-
-            if not self.null_len_accumulator:
-                self.len_accumulator.update(len(x), weight, None)
-
-        else:
-            w = weight / len(x) if (self.len_normalized and len(x) > 0) else weight
-
-            for i in range(len(x)):
-                self.accumulator.update(x[i], w, estimate.dist)
-
-            if not self.null_len_accumulator:
-                self.len_accumulator.update(len(x), weight, estimate.len_dist)
+        checked_weight = _finite_nonnegative(weight, label="sequence weight")
+        length = len(x)
+        w = checked_weight / length if (self.len_normalized and length > 0) else checked_weight
+        child_estimate = estimate.dist if estimate is not None else None
+        for value in x:
+            self.accumulator.update(value, w, child_estimate)
+        if not self.null_len_accumulator:
+            self.len_accumulator.update(
+                length,
+                checked_weight,
+                estimate.len_dist if estimate is not None else None,
+            )
+        self.element_nobs += checked_weight if self.len_normalized and length > 0 else checked_weight * length
+        self.length_nobs += checked_weight
 
     def _rng_initialize(self, rng: RandomState) -> None:
         """Set the _len_rng for consistency between initialize and seq_initialize methods.
@@ -813,13 +954,18 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
         if not self._init_rng:
             self._rng_initialize(rng)
 
+        checked_weight = _finite_nonnegative(weight, label="sequence weight")
         if len(x) > 0:
-            w = weight / len(x) if self.len_normalized else weight
+            w = checked_weight / len(x) if self.len_normalized else checked_weight
             for xx in x:
                 self.accumulator.initialize(xx, w, rng)
 
         if not self.null_len_accumulator:
-            self.len_accumulator.initialize(len(x), weight, self._len_rng)
+            self.len_accumulator.initialize(len(x), checked_weight, self._len_rng)
+        self.element_nobs += (
+            checked_weight if self.len_normalized and len(x) > 0 else checked_weight * len(x)
+        )
+        self.length_nobs += checked_weight
 
     def seq_initialize(self, x: E, weights: np.ndarray, rng: RandomState) -> None:
         """Vectorized initialization of SequenceAccumulator sufficient statistics from sequence encoded x.
@@ -839,12 +985,21 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
         if not self._init_rng:
             self._rng_initialize(rng)
 
-        w = weights[idx] * icnt[idx] if self.len_normalized else weights[idx]
+        checked_weights = np.asarray(weights, dtype=np.float64)
+        if (
+            checked_weights.shape != (len(icnt),)
+            or np.any(~np.isfinite(checked_weights))
+            or np.any(checked_weights < 0.0)
+        ):
+            raise ValueError("sequence weights must be finite, non-negative, and aligned with sequences.")
+        w = checked_weights[idx] * icnt[idx] if self.len_normalized else checked_weights[idx]
 
         self.accumulator.seq_initialize(enc_seq, w, rng)
 
         if not self.null_len_accumulator:
-            self.len_accumulator.seq_initialize(enc_nseq, weights, self._len_rng)
+            self.len_accumulator.seq_initialize(enc_nseq, checked_weights, self._len_rng)
+        self.element_nobs += float(np.sum(w))
+        self.length_nobs += float(np.sum(checked_weights))
 
     def seq_update(self, x: E, weights: np.ndarray, estimate: SequenceDistribution | None) -> None:
         """Vectorized update of SequenceAccumulator sufficient statistics from sequence encoded x.
@@ -861,12 +1016,25 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
         """
         idx, icnt, inz, enc_seq, enc_nseq = x
 
-        w = weights[idx] * icnt[idx] if self.len_normalized else weights[idx]
+        checked_weights = np.asarray(weights, dtype=np.float64)
+        if (
+            checked_weights.shape != (len(icnt),)
+            or np.any(~np.isfinite(checked_weights))
+            or np.any(checked_weights < 0.0)
+        ):
+            raise ValueError("sequence weights must be finite, non-negative, and aligned with sequences.")
+        w = checked_weights[idx] * icnt[idx] if self.len_normalized else checked_weights[idx]
 
         self.accumulator.seq_update(enc_seq, w, estimate.dist if estimate is not None else None)
 
         if not self.null_len_accumulator:
-            self.len_accumulator.seq_update(enc_nseq, weights, estimate.len_dist if estimate is not None else None)
+            self.len_accumulator.seq_update(
+                enc_nseq,
+                checked_weights,
+                estimate.len_dist if estimate is not None else None,
+            )
+        self.element_nobs += float(np.sum(w))
+        self.length_nobs += float(np.sum(checked_weights))
 
     def seq_update_engine(self, x: E, weights: Any, estimate: SequenceDistribution | None, engine: Any) -> None:
         """Engine-resident E-step: per-element weights are gathered/normalized on the active engine
@@ -877,6 +1045,13 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
         idx, icnt, inz, enc_seq, enc_nseq = x
 
         w_eng = engine.asarray(weights)
+        checked_weights = np.asarray(engine.to_numpy(w_eng), dtype=np.float64)
+        if (
+            checked_weights.shape != (len(icnt),)
+            or np.any(~np.isfinite(checked_weights))
+            or np.any(checked_weights < 0.0)
+        ):
+            raise ValueError("sequence weights must be finite, non-negative, and aligned with sequences.")
         idx_arr = np.asarray(idx, dtype=np.int64)
         if self.len_normalized:
             w = w_eng[idx_arr] * engine.asarray(np.asarray(icnt, dtype=np.float64)[idx_arr])
@@ -889,52 +1064,76 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
             child_seq_update(
                 self.len_accumulator, enc_nseq, w_eng, estimate.len_dist if estimate is not None else None, engine
             )
+        self.element_nobs += _finite_nonnegative(
+            engine.to_numpy(engine.sum(w)),
+            label="sequence element effective count",
+        )
+        self.length_nobs += float(np.sum(checked_weights))
 
-    def combine(self, suff_stat: tuple[SS1, SS2 | None]) -> SequenceAccumulator:
+    def combine(self, suff_stat: SequenceStatistics) -> SequenceAccumulator:
         """Combine the sufficient statistics of SequenceAccumulator instance with suff_stat arg.
 
         Args:
-            suff_stat (Tuple[SS1, Optional[SS2]]): Tuple of sufficient statistics of base distribution and value for
-                length distribution.
+            suff_stat: Versioned element/length statistics and effective counts.
 
         Returns:
             SequenceAccumulator object.
 
         """
-        self.accumulator.combine(suff_stat[0])
+        checked = _validate_sequence_statistics(
+            suff_stat,
+            path="SequenceAccumulator.combine(suff_stat)",
+        )
+        self.accumulator.combine(checked.elements)
 
         if not self.null_len_accumulator:
-            self.len_accumulator.combine(suff_stat[1])
+            self.len_accumulator.combine(checked.lengths)
+        self.element_nobs += checked.element_nobs
+        self.length_nobs += checked.length_nobs
 
         return self
 
-    def value(self) -> tuple[Any, Any | None]:
-        """Return Tuple[SS1, Optional[SS2]], sufficient statistics of base accumulator and length accumulator."""
-        return self.accumulator.value(), self.len_accumulator.value()
+    def value(self) -> SequenceStatistics:
+        """Return immutable child statistics with explicit effective observation counts."""
+        return SequenceStatistics(
+            1,
+            float(self.element_nobs),
+            float(self.length_nobs),
+            self.accumulator.value(),
+            self.len_accumulator.value(),
+        )
 
-    def from_value(self, x: tuple[SS1, SS2 | None]) -> SequenceAccumulator:
+    def from_value(self, x: SequenceStatistics) -> SequenceAccumulator:
         """Set the SequenceAccumulator base accumulator and length accumulator to values of x.
 
         Args:
-            x (Tuple[SS1, Optional[SS2]]): Tuple of sufficient statistics of base distribution and value for length
-                distribution.
+            x: Versioned element/length statistics and effective counts.
 
         Returns:
             SequenceAccumulator object.
 
         """
-        self.accumulator.from_value(x[0])
+        checked = _validate_sequence_statistics(
+            x,
+            path="SequenceAccumulator.from_value(suff_stat)",
+        )
+        self.accumulator.from_value(checked.elements)
 
         if not self.null_len_accumulator:
-            self.len_accumulator.from_value(x[1])
+            self.len_accumulator.from_value(checked.lengths)
+        self.element_nobs = checked.element_nobs
+        self.length_nobs = checked.length_nobs
 
         return self
 
     def scale(self, c: float) -> SequenceAccumulator:
         """Scale element and length sufficient statistics through their accumulators."""
-        self.accumulator.scale(c)
+        checked_scale = _finite_nonnegative(c, label="sequence statistic scale")
+        self.accumulator.scale(checked_scale)
         if not self.null_len_accumulator:
-            self.len_accumulator.scale(c)
+            self.len_accumulator.scale(checked_scale)
+        self.element_nobs *= checked_scale
+        self.length_nobs *= checked_scale
         return self
 
     def get_seq_lambda(self):
@@ -1033,7 +1232,9 @@ class SequenceAccumulatorFactory(StatisticAccumulatorFactory):
         """
         self.dist_factory = dist_factory
         self.len_factory = len_factory
-        self.len_normalized = len_normalized
+        if not isinstance(len_normalized, (bool, np.bool_)):
+            raise TypeError("len_normalized must be bool.")
+        self.len_normalized = bool(len_normalized)
         self.keys = keys
 
     def make(self) -> SequenceAccumulator:
@@ -1087,7 +1288,9 @@ class SequenceEstimator(ParameterEstimator):
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
         self.len_dist = len_dist if len_dist is not None else NullDistribution()
         self.keys = keys
-        self.len_normalized = len_normalized
+        if not isinstance(len_normalized, (bool, np.bool_)):
+            raise TypeError("len_normalized must be bool.")
+        self.len_normalized = bool(len_normalized)
         self.name = name
         self.set_prior(prior)
 
@@ -1117,22 +1320,15 @@ class SequenceEstimator(ParameterEstimator):
 
         return SequenceAccumulatorFactory(dist_factory, len_factory, self.len_normalized, self.keys)
 
-    def estimate(self, nobs: float | None, suff_stat: tuple[Any, Any | None]) -> SequenceDistribution:
+    def estimate(self, nobs: float | None, suff_stat: SequenceStatistics) -> SequenceDistribution:
         """Estimate the element distribution and, when configured, the length distribution."""
-        if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != 2:
-            raise ContractError(
-                "SequenceEstimator.estimate(suff_stat)",
-                "a 2-tuple (entry_suff_stat, length_suff_stat)",
-                "%s%s"
-                % (
-                    type(suff_stat).__name__,
-                    " of length %d" % len(suff_stat) if isinstance(suff_stat, (tuple, list)) else "",
-                ),
-                "pass the 2-tuple produced by SequenceAccumulator.value(), not a bare entry sufficient statistic.",
-            )
+        checked = _validate_sequence_statistics(
+            suff_stat,
+            path="SequenceEstimator.estimate(suff_stat)",
+        )
 
         try:
-            entry_dist = self.estimator.estimate(nobs, suff_stat[0])
+            entry_dist = self.estimator.estimate(checked.element_nobs, checked.elements)
         except ContractError as e:
             raise prefix_contract_error("SequenceEstimator.estimator", e) from None
 
@@ -1146,7 +1342,7 @@ class SequenceEstimator(ParameterEstimator):
 
         else:
             try:
-                len_dist = self.len_estimator.estimate(nobs, suff_stat[1])
+                len_dist = self.len_estimator.estimate(checked.length_nobs, checked.lengths)
             except ContractError as e:
                 raise prefix_contract_error("SequenceEstimator.len_estimator", e) from None
             return SequenceDistribution(
@@ -1293,6 +1489,43 @@ class SequenceDataEncoder(DataSequenceEncoder):
         rv5 = self.len_encoder.seq_encode(nx)
 
         return rv1, rv2, rv3, rv4, rv5
+
+    def row_count(self, x: Any) -> int:
+        """Validate the ragged sequence geometry and return its outer row count."""
+        if not isinstance(x, tuple) or len(x) != 5:
+            raise ValueError("sequence encoding must be a 5-tuple.")
+        idx, inverse_lengths, nonempty, encoded_elements, encoded_lengths = x
+        idx = np.asarray(idx)
+        inverse_lengths = np.asarray(inverse_lengths, dtype=np.float64)
+        nonempty = np.asarray(nonempty)
+        if inverse_lengths.ndim != 1:
+            raise ValueError("sequence inverse lengths must be one-dimensional.")
+        nseq = len(inverse_lengths)
+        if (
+            idx.ndim != 1
+            or not np.issubdtype(idx.dtype, np.integer)
+            or np.any(idx < 0)
+            or np.any(idx >= nseq)
+        ):
+            raise ValueError("sequence element indices must reference valid outer rows.")
+        if nonempty.shape != (nseq,) or nonempty.dtype.kind != "b":
+            raise ValueError("sequence nonempty mask must be boolean and aligned with outer rows.")
+        lengths = np.bincount(idx.astype(np.int64, copy=False), minlength=nseq)
+        expected_inverse = np.zeros(nseq, dtype=np.float64)
+        active = lengths > 0
+        expected_inverse[active] = 1.0 / lengths[active]
+        if (
+            np.any(~np.isfinite(inverse_lengths))
+            or np.any(inverse_lengths < 0.0)
+            or not np.array_equal(nonempty, active)
+            or not np.allclose(inverse_lengths, expected_inverse, rtol=0.0, atol=0.0)
+        ):
+            raise ValueError("sequence inverse lengths and nonempty mask do not match element indices.")
+        if self.encoder.row_count(encoded_elements) != len(idx):
+            raise ValueError("sequence element encoding does not preserve flattened rows.")
+        if not self.null_len_enc and self.len_encoder.row_count(encoded_lengths) != nseq:
+            raise ValueError("sequence length encoding does not preserve outer rows.")
+        return nseq
 
 
 # --- Fisher view(s) co-located with this family ---

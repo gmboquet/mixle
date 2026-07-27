@@ -649,7 +649,8 @@ def _engine_to_numpy(value: Any, engine: ComputeEngine) -> Any:
     if isinstance(value, dict):
         return {key: _engine_to_numpy(child, engine) for key, child in value.items()}
     if isinstance(value, tuple):
-        return tuple(_engine_to_numpy(child, engine) for child in value)
+        converted = tuple(_engine_to_numpy(child, engine) for child in value)
+        return type(value)(*converted) if hasattr(value, "_fields") else converted
     if isinstance(value, list):
         return [_engine_to_numpy(child, engine) for child in value]
     try:
@@ -664,7 +665,8 @@ def _engine_local_to_numpy(value: Any, engine: ComputeEngine) -> Any:
     if isinstance(value, dict):
         return {key: _engine_local_to_numpy(child, engine) for key, child in value.items()}
     if isinstance(value, tuple):
-        return tuple(_engine_local_to_numpy(child, engine) for child in value)
+        converted = tuple(_engine_local_to_numpy(child, engine) for child in value)
+        return type(value)(*converted) if hasattr(value, "_fields") else converted
     if isinstance(value, list):
         return [_engine_local_to_numpy(child, engine) for child in value]
     local_fn = getattr(value, "to_local", None)

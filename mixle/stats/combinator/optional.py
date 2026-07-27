@@ -445,8 +445,10 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
             enc_data, observed_weights, params["child_route"], engine, child_estimator
         )
         child_values = unstack_component_stats(child_stats, num_components)
-        wrapper_counts = engine.stack((missing_counts, observed_counts), axis=1)
-        return tuple((wrapper_counts[i], child_values[i]) for i in range(num_components))
+        return tuple(
+            ((missing_counts[i], observed_counts[i]), child_values[i])
+            for i in range(num_components)
+        )
 
     def to_fisher(self, **kwargs):
         """Fisher view for the optional/missing-gate."""
