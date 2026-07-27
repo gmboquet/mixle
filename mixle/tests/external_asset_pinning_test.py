@@ -15,6 +15,7 @@ PINNED_SOURCES = (
     ROOT / "examples" / "foundation_to_edge.py",
     ROOT / "examples" / "laptop_scientist.py",
     ROOT / "examples" / "peft_lora_grad_leaf.py",
+    ROOT / "mixle" / "tests" / "quotient_leaf_test.py",
     ROOT / "examples" / "vision_edge_distillation" / "distill_clip_features.py",
     ROOT / "examples" / "vision_edge_distillation" / "verify_on_laptop.py",
 )

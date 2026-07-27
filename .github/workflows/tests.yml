@@ -341,7 +341,7 @@ jobs:
       - name: Install optional test extras
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[test,numba,torch,umap,jax]"
+          python -m pip install -e ".[test,numba,torch,umap,jax,scientist,examples]"
       - name: Run optional tests
         run: |
           python scripts/run_test_tier.py \
@@ -349,7 +349,21 @@ jobs:
             --candidate-sha "$GITHUB_SHA" \
             --budget-seconds 1800 \
             --receipt optional-py3.12.json \
-            -- -n auto
+            -- -n auto \
+            --ignore=mixle/tests/scientist_test.py \
+            --ignore=mixle/tests/quotient_leaf_test.py
+      - name: Require assembled scientist execution on pinned assets
+        run: |
+          python scripts/run_required_pytest.py \
+            --candidate-sha "$GITHUB_SHA" \
+            --receipt scientist-required-receipt.json \
+            -- mixle/tests/scientist_test.py -q -n 0 -m ""
+      - name: Require quotient-leaf execution on pinned CIFAR-10
+        run: |
+          python scripts/run_required_pytest.py \
+            --candidate-sha "$GITHUB_SHA" \
+            --receipt quotient-required-receipt.json \
+            -- mixle/tests/quotient_leaf_test.py -q -n 0 -m ""
       - name: Reject full-profile serialization removals
         run: |
           python scripts/verify_installed_schema_manifest.py \
@@ -404,6 +418,8 @@ jobs:
             banking77-reproduction-receipt.json
             sunspots-required-receipt.json
             adult-required-receipt.json
+            scientist-required-receipt.json
+            quotient-required-receipt.json
           if-no-files-found: error
           retention-days: 90
 

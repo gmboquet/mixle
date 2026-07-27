@@ -86,13 +86,18 @@ def test_publish_workflow_has_fail_closed_candidate_binding():
 def test_publication_is_recoverable_two_phase_and_public_transition_is_last():
     workflow = (_ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
     assert "release:\n" not in workflow
-    assert "options: [prepare, promote]" in workflow
+    assert "options: [prepare, testpypi, promote]" in workflow
     assert "prepare_run_id:" in workflow
+    assert "testpypi_run_id:" in workflow
     assert "if: inputs.phase == 'prepare'" in workflow
+    assert "if: inputs.phase == 'testpypi'" in workflow
     assert "if: inputs.phase == 'promote'" in workflow
     assert "gh release create" in workflow and "--draft" in workflow
     assert 'test "$(gh release view "$CANDIDATE_TAG" --json isDraft --jq .isDraft)" = "true"' in workflow
     assert "run-id: ${{ inputs.prepare_run_id }}" in workflow
+    assert "run-id: ${{ inputs.testpypi_run_id }}" in workflow
+    assert "repository-url: https://test.pypi.org/legacy/" in workflow
+    assert "testpypi-rehearsal.json" in workflow
     assert "skip-existing: true" in workflow
     assert workflow.index("gh-action-pypi-publish") < workflow.index("verify_published_artifacts.py")
     assert workflow.index("verify_published_artifacts.py") < workflow.index(

@@ -37,7 +37,10 @@ from mixle.models.quotient import (  # noqa: E402
 try:
     import datasets as hf_datasets
 
-    _cifar = hf_datasets.load_dataset("cifar10")
+    _cifar = hf_datasets.load_dataset(
+        "uoft-cs/cifar10",
+        revision="0b2714987fa478483af9968de7c934580d0bb9a2",
+    )
     _HAS_CIFAR = True
 except Exception:  # noqa: BLE001
     _HAS_CIFAR = False
@@ -58,7 +61,7 @@ def _gather(split, n_per_class, classes=(0, 1, 2, 3)):
     return np.stack(imgs).astype("float32"), np.array(labels, dtype=np.int64)
 
 
-@unittest.skipUnless(_HAS_CIFAR, "CIFAR-10 not available in the local HuggingFace datasets cache")
+@unittest.skipUnless(_HAS_CIFAR, "pinned CIFAR-10 asset unavailable")
 class TranslationQuotientLeafTest(unittest.TestCase):
     # Conv width/depth and training length below are deliberately small. The invariance property under test
     # is architectural (global average pooling erases spatial position by construction, independent of how

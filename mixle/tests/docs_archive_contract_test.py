@@ -21,6 +21,19 @@ def _load(name: str):
     return module
 
 
+def test_assembled_site_validator_accepts_development_landing(tmp_path):
+    development = tmp_path / "development"
+    archives = tmp_path / "archives"
+    output = tmp_path / "site"
+    development.mkdir()
+    archives.mkdir()
+    (development / "index.html").write_text("development", encoding="utf-8")
+    _load("assemble_docs_site").assemble(development, archives, output)
+    assert _load("verify_docs_site").validate(output) == []
+    (output / "main" / "index.html").unlink()
+    assert "assembled documentation lacks main/index.html" in _load("verify_docs_site").validate(output)
+
+
 def _docs(path: Path, label: str) -> Path:
     path.mkdir()
     (path / "index.html").write_text(f"<h1>{label}</h1>", encoding="utf-8")
