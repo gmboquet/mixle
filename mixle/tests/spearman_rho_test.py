@@ -5,7 +5,12 @@ import unittest
 
 import numpy as np
 
-from mixle.stats.rankings.spearman_rho import SpearmanRankingDistribution, SpearmanRankingEstimator
+from mixle.stats.rankings.representations import ItemOrdering, RankVector
+from mixle.stats.rankings.spearman_rho import (
+    SpearmanRankingDataEncoder,
+    SpearmanRankingDistribution,
+    SpearmanRankingEstimator,
+)
 
 
 def _estimate(est, data):
@@ -26,12 +31,12 @@ class SpearmanRankingEstimatorRhoTestCase(unittest.TestCase):
         dist = _estimate(SpearmanRankingEstimator(4, rho=2.5), self.data)
         self.assertEqual(dist.rho, 2.5)
 
-    def test_consensus_is_rank_vector_not_item_order(self):
+    def test_observations_are_item_orderings_and_location_is_rank_vector(self):
         data = [[2, 0, 1], [2, 0, 1], [2, 1, 0]]
 
         dist = _estimate(SpearmanRankingEstimator(3, rho=1.0), data)
 
-        np.testing.assert_array_equal(dist.sigma, np.asarray([2, 0, 1]))
+        np.testing.assert_array_equal(dist.sigma, np.asarray([1, 2, 0]))
         self.assertGreater(dist.log_density([2, 0, 1]), dist.log_density([1, 2, 0]))
 
     def test_invalid_rho_raises(self):
@@ -49,9 +54,9 @@ class SpearmanRankingEstimatorRhoTestCase(unittest.TestCase):
 
     def test_exact_expected_sufficient_statistics_recover_rho(self):
         true_dist = SpearmanRankingDistribution([0, 1, 2], rho=0.7)
-        perms = np.asarray(list(itertools.permutations(range(3))), dtype=float)
+        perms = np.asarray(list(itertools.permutations(range(3))), dtype=int)
         probs = np.exp(true_dist.seq_log_density(perms))
-        suff_stat = (1.0, np.dot(probs, perms))
+        suff_stat = (1.0, np.dot(probs, np.argsort(perms, axis=1)))
 
         fitted = SpearmanRankingEstimator(3).estimate(None, suff_stat)
 
@@ -113,6 +118,63 @@ class SpearmanRankingDimGuardTestCase(unittest.TestCase):
         self.assertEqual(est.max_dim, 3)
         refit = _estimate(est, [[0, 1, 2]])
         self.assertEqual(refit.max_dim, 3)
+
+
+class SpearmanRankingContractTestCase(unittest.TestCase):
+    def test_distribution_owns_location_and_normalizes(self):
+        sigma = np.array([0.0, 1.0, 2.0])
+        dist = SpearmanRankingDistribution(sigma, rho=0.8)
+        total = sum(dist.density(ordering) for ordering in itertools.permutations(range(3)))
+        self.assertAlmostEqual(total, 1.0, places=12)
+        score = dist.log_density([0, 1, 2])
+        sigma[:] = 100.0
+        self.assertEqual(score, dist.log_density([0, 1, 2]))
+        exposed = dist.sigma
+        exposed[0] = 4.0
+        self.assertEqual(score, dist.log_density([0, 1, 2]))
+
+    def test_distribution_and_encoder_reject_invalid_support(self):
+        dist = SpearmanRankingDistribution([0, 1, 2], rho=0.8)
+        encoder = SpearmanRankingDataEncoder(dim=3)
+        for invalid in ([0, 0, 2], [0, 1], [0, 1, 3], [0.0, 1.5, 2.0]):
+            with self.subTest(invalid=invalid), self.assertRaises((TypeError, ValueError)):
+                dist.log_density(invalid)
+            with self.subTest(encoded=invalid), self.assertRaises((TypeError, ValueError)):
+                encoder.seq_encode([invalid])
+
+    def test_controls_and_location_are_validated(self):
+        for rho in (-1.0, np.nan, np.inf):
+            with self.subTest(rho=rho), self.assertRaises(ValueError):
+                SpearmanRankingDistribution([0, 1, 2], rho=rho)
+        for max_dim in (0, 1.5, True):
+            with self.subTest(max_dim=max_dim), self.assertRaises((TypeError, ValueError)):
+                SpearmanRankingDistribution([0, 1, 2], max_dim=max_dim)
+        with self.assertRaises(ValueError):
+            SpearmanRankingDistribution([])
+        with self.assertRaises(ValueError):
+            SpearmanRankingDistribution([0.0, 1.0, np.nan])
+        with self.assertRaises(ValueError):
+            SpearmanRankingDistribution([-100.0, 0.0, 100.0])
+
+    def test_representation_conversions_are_explicit_inverses(self):
+        ordering = ItemOrdering([2, 0, 1])
+        ranks = ordering.to_rank_vector()
+        self.assertEqual(ranks, RankVector([1, 2, 0]))
+        self.assertEqual(ranks.to_item_ordering(), ordering)
+
+    def test_statistics_are_validated_and_owned(self):
+        estimator = SpearmanRankingEstimator(3, pseudo_count=0.5)
+        accumulator = estimator.accumulator_factory().make()
+        accumulator.update([2, 0, 1], 2.0, None)
+        snapshot = accumulator.value()
+        snapshot[1][:] = 0.0
+        self.assertGreater(accumulator.value()[1].sum(), 0.0)
+        fitted = estimator.estimate(2.0, accumulator.value())
+        self.assertTrue(fitted.fit_diagnostics.regularized)
+        with self.assertRaises(ValueError):
+            estimator.estimate(3.0, accumulator.value())
+        with self.assertRaises(ValueError):
+            accumulator.combine((1.0, np.zeros(3)))
 
 
 if __name__ == "__main__":

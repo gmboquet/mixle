@@ -14,12 +14,15 @@ normalizer and moment ``E_theta[d]``:
     cayley    Z = prod_{i=1}^{n-1} (1 + i phi)
     hamming   Z = sum_{m=0}^{n} C(n, m) D_m phi^m                       (D_m = subfactorial)
 
-The other three are #P-hard and use an exact small-``n`` normalizer with a numba Monte-Carlo fallback
-beyond a size cap (the fallback is an *approximation*, controlled by ``n_mc`` / ``seed``):
+The other three are #P-hard and use exact algorithms within explicit resource caps:
 
-    footrule  Z = perm(phi^{|i-j|})    exact Ryser permanent for n <= max_exact (16), else MC
-    spearman  Z = perm(phi^{(i-j)^2})  exact Ryser permanent for n <= max_exact (16), else MC
-    ulam      Z = sum over the LIS-distance histogram, exact for n <= max_enum (9), else MC
+    footrule  Z = perm(phi^{|i-j|})    exact log-domain subset permanent
+    spearman  Z = perm(phi^{(i-j)^2})  exact log-domain subset permanent
+    ulam      Z = sum over the exact LIS-distance histogram
+
+Construction fails closed above a cap; a Monte-Carlo estimate is never installed
+as a probability normalizer. The retained ``n_mc`` and ``seed`` arguments are
+compatibility metadata only and are reported as such in computation diagnostics.
 
 Data type: ``List[int]`` -- a full ordering, a permutation of ``0..n-1`` with ``x[r]`` the item at rank
 ``r`` (best first).
@@ -63,17 +66,10 @@ from mixle.stats.rankings._contracts import (
 )
 from mixle.stats.rankings._permutation_kernels import (
     METRICS,
-    _cayley_perm,
-    _footrule_perm,
-    _hamming_perm,
-    _kendall_perm,
-    _spearman_perm,
-    _ulam_perm,
     log_matrix_permanent,
     metric_id,
     seq_distance_to_center,
 )
-from mixle.utils.optional_deps import numba
 
 _MAX_THETA = 700.0
 _CLOSED_FORM = ("kendall", "cayley", "hamming")
@@ -89,6 +85,18 @@ class GeneralizedMallowsFitDiagnostics:
     distance_objective: float
     regularized: bool
     pseudo_count: float
+
+
+@dataclass(frozen=True)
+class GeneralizedMallowsComputationDiagnostics:
+    """Exactness and algorithm provenance for scoring and sampling."""
+
+    normalizer_algorithm: str
+    normalizer_exact: bool
+    sampler_algorithm: str
+    sampler_exact: bool
+    legacy_n_mc_ignored: int
+    legacy_seed_ignored: int
 
 
 # --- metric-specific normalizer and expected distance --------------------------------------------
@@ -119,7 +127,7 @@ def log_normalizer(metric: str, theta: float, n: int) -> float:
         log_binom = math.lgamma(n + 1) - np.array([math.lgamma(k + 1) + math.lgamma(n - k + 1) for k in m])
         terms = log_binom + _log_subfactorials(n) - theta * m
         return float(logsumexp(terms))
-    raise ValueError(f"log_normalizer: metric {metric!r} has no closed form (use the approximate path).")
+    raise ValueError(f"log_normalizer: metric {metric!r} has no closed form; use metric_log_normalizer().")
 
 
 def expected_distance(metric: str, theta: float, n: int) -> float:
@@ -163,72 +171,6 @@ def solve_theta(metric: str, mean_distance: float, n: int) -> float:
         else:
             hi = mid
     return 0.5 * (lo + hi)
-
-
-# --- numba Metropolis sampler (universal across metrics) -----------------------------------------
-@numba.njit("int64(int64[:], int64)", cache=True)
-def _perm_distance(r, mid):
-    """Distance of the relative-rank permutation r from the identity (dispatch by metric id)."""
-    if mid == 0:
-        return _kendall_perm(r)
-    elif mid == 1:
-        return _cayley_perm(r)
-    elif mid == 2:
-        return _hamming_perm(r)
-    elif mid == 3:
-        return _footrule_perm(r)
-    elif mid == 4:
-        return _spearman_perm(r)
-    return _ulam_perm(r)
-
-
-@numba.njit("int64[:, :](int64[:], float64, int64, int64, int64, int64, int64)", cache=True)
-def _mh_sample(rank_center, theta, mid, n_samples, burn, thin, seed):
-    """Metropolis sampler on orderings: propose a random rank transposition, accept by exp(-theta dd)."""
-    np.random.seed(seed)
-    n = rank_center.shape[0]
-    sigma = np.arange(n)  # current ordering (items at ranks); start at identity
-    np.random.shuffle(sigma)
-    r = np.empty(n, dtype=np.int64)
-    for i in range(n):
-        r[i] = rank_center[sigma[i]]
-    cur = _perm_distance(r, mid)
-    out = np.empty((n_samples, n), dtype=np.int64)
-    total = burn + n_samples * thin
-    taken = 0
-    for step in range(total):
-        a = np.random.randint(0, n)
-        b = np.random.randint(0, n)
-        if a != b:
-            sigma[a], sigma[b] = sigma[b], sigma[a]
-            r[a], r[b] = rank_center[sigma[a]], rank_center[sigma[b]]
-            prop = _perm_distance(r, mid)
-            if prop <= cur or np.random.random() < math.exp(-theta * (prop - cur)):
-                cur = prop
-            else:  # reject -> undo
-                sigma[a], sigma[b] = sigma[b], sigma[a]
-                r[a], r[b] = rank_center[sigma[a]], rank_center[sigma[b]]
-        if step >= burn and (step - burn) % thin == 0 and taken < n_samples:
-            out[taken, :] = sigma
-            taken += 1
-    return out
-
-
-# --- #P-hard normalizers (footrule / spearman / ulam): exact small-n + numba Monte-Carlo ----------
-@numba.njit("int64[:](int64, int64, int64, int64)", cache=True)
-def _uniform_distances(n, mid, n_mc, seed):
-    """Distances-from-identity of n_mc uniform random permutations (Fisher-Yates), for MC normalizers."""
-    np.random.seed(seed)
-    out = np.empty(n_mc, dtype=np.int64)
-    p = np.arange(n).astype(np.int64)
-    for k in range(n_mc):
-        for i in range(n - 1, 0, -1):
-            j = np.random.randint(0, i + 1)
-            tmp = p[i]
-            p[i] = p[j]
-            p[j] = tmp
-        out[k] = _perm_distance(p, mid)
-    return out
 
 
 @lru_cache(maxsize=16)
@@ -415,6 +357,30 @@ class GeneralizedMallowsDistribution(SequenceEncodableProbabilityDistribution):
         self.max_enum = positive_integer(max_enum, label="max_enum")
         self.log_z = metric_log_normalizer(
             metric, self.theta, n, n_mc=self.n_mc, seed=self.seed, max_exact=self.max_exact, max_enum=self.max_enum
+        )
+        normalizer_algorithm = {
+            "kendall": "closed_form_repeated_insertion",
+            "cayley": "closed_form_cycle_index",
+            "hamming": "closed_form_rencontres",
+            "footrule": "exact_log_permanent",
+            "spearman": "exact_log_permanent",
+            "ulam": "exact_distance_histogram",
+        }[metric]
+        sampler_algorithm = {
+            "kendall": "exact_repeated_insertion",
+            "cayley": "exact_ewens_insertion",
+            "hamming": "exact_conditional_permanent",
+            "footrule": "exact_conditional_permanent",
+            "spearman": "exact_conditional_permanent",
+            "ulam": "exact_enumerated_categorical",
+        }[metric]
+        self.computation_diagnostics = GeneralizedMallowsComputationDiagnostics(
+            normalizer_algorithm=normalizer_algorithm,
+            normalizer_exact=True,
+            sampler_algorithm=sampler_algorithm,
+            sampler_exact=True,
+            legacy_n_mc_ignored=self.n_mc,
+            legacy_seed_ignored=self.seed,
         )
         self.name = name
         self.keys = keys
@@ -910,5 +876,6 @@ __all__ = [
     "GeneralizedMallowsEstimator",
     "GeneralizedMallowsDataEncoder",
     "GeneralizedMallowsFitDiagnostics",
+    "GeneralizedMallowsComputationDiagnostics",
     "METRICS",
 ]

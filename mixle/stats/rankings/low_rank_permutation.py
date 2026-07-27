@@ -88,6 +88,19 @@ class LowRankPermutationFitDiagnostics:
     marginal_algorithm: str = "exact_log_permanent"
 
 
+@dataclass(frozen=True)
+class LowRankPermutationComputationDiagnostics:
+    """Exactness and algorithm provenance for the represented probability law."""
+
+    normalizer_algorithm: str = "exact_log_permanent"
+    normalizer_exact: bool = True
+    marginal_algorithm: str = "exact_log_permanent_ratios"
+    marginals_exact: bool = True
+    sampler_algorithm: str = "exact_conditional_permanent"
+    sampler_exact: bool = True
+    optional_relaxation: str = "sinkhorn_bethe_transport"
+
+
 class LowRankPermutationDistribution(SequenceEncodableProbabilityDistribution):
     """Permutation Gibbs model with a low-rank item-by-rank score matrix ``S = U V^T``."""
 
@@ -99,7 +112,7 @@ class LowRankPermutationDistribution(SequenceEncodableProbabilityDistribution):
         return DistributionCapabilities(
             engine_ready=("numpy",),
             kernel_status="numpy_only",
-            numpy_only_reason="Permanent normalizer / Sinkhorn marginals run through dedicated numba kernels.",
+            numpy_only_reason="Exact permanent normalization and marginals run through dedicated numba kernels.",
         )
 
     def __init__(
@@ -137,6 +150,7 @@ class LowRankPermutationDistribution(SequenceEncodableProbabilityDistribution):
         self.s = score
         self.s.setflags(write=False)
         self.log_z = _log_normalizer(self.s, self.max_exact, self.sinkhorn_iter)
+        self.computation_diagnostics = LowRankPermutationComputationDiagnostics()
         self.name = name
         self.keys = keys
         if fit_diagnostics is not None and not isinstance(fit_diagnostics, LowRankPermutationFitDiagnostics):
@@ -176,11 +190,11 @@ class LowRankPermutationDistribution(SequenceEncodableProbabilityDistribution):
         return plan
 
     def sampler(self, seed: int | None = None) -> LowRankPermutationSampler:
-        """Return a Metropolis sampler for this low-rank assignment model."""
+        """Return an exact conditional-permanent sampler."""
         return LowRankPermutationSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> LowRankPermutationEstimator:
-        """Return a Sinkhorn-marginal estimator with this dimension and rank."""
+        """Return an exact-marginal estimator with this dimension and rank."""
         return LowRankPermutationEstimator(
             dim=self.dim,
             rank=self.rank,
@@ -449,4 +463,5 @@ __all__ = [
     "LowRankPermutationEstimator",
     "LowRankPermutationDataEncoder",
     "LowRankPermutationFitDiagnostics",
+    "LowRankPermutationComputationDiagnostics",
 ]
