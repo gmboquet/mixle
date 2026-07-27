@@ -26,6 +26,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.discrete._count_contracts import exact_integer_observations, nonnegative_weights
 
 
 class IntegerUniformSpikeDistribution(SequenceEncodableProbabilityDistribution):
@@ -449,28 +450,33 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
 
+        checked = nonnegative_weights([weight], shape=(1,))
+        if checked[0] == 0.0:
+            return
+        value = int(exact_integer_observations([x], label="Integer-uniform-spike observations")[0])
+
         if self.count_vec is None:
-            self.min_val = x
-            self.max_val = x
+            self.min_val = value
+            self.max_val = value
             self.count_vec = np.asarray([weight])
 
-        elif self.max_val < x:
+        elif self.max_val < value:
             temp_vec = self.count_vec
-            self.max_val = x
+            self.max_val = value
             self.count_vec = np.zeros(self.max_val - self.min_val + 1)
             self.count_vec[: len(temp_vec)] = temp_vec
-            self.count_vec[x - self.min_val] += weight
+            self.count_vec[value - self.min_val] += weight
 
-        elif self.min_val > x:
+        elif self.min_val > value:
             temp_vec = self.count_vec
-            temp_diff = self.min_val - x
-            self.min_val = x
+            temp_diff = self.min_val - value
+            self.min_val = value
             self.count_vec = np.zeros(self.max_val - self.min_val + 1)
             self.count_vec[temp_diff:] = temp_vec
-            self.count_vec[x - self.min_val] += weight
+            self.count_vec[value - self.min_val] += weight
 
         else:
-            self.count_vec[x - self.min_val] += weight
+            self.count_vec[value - self.min_val] += weight
 
     def initialize(self, x: int, weight: float, rng: RandomState) -> None:
         """Initialize the accumulator with observation x and weight (delegates to update)."""
@@ -492,10 +498,17 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
 
-        min_x = x.min()
-        max_x = x.max()
+        values = exact_integer_observations(x, label="Integer-uniform-spike observations")
+        checked = nonnegative_weights(weights, shape=values.shape)
+        used = checked > 0.0
+        if not np.any(used):
+            return
+        values = values[used]
+        checked = checked[used]
+        min_x = int(values.min())
+        max_x = int(values.max())
 
-        loc_cnt = np.bincount(x - min_x, weights=weights)
+        loc_cnt = np.bincount(values - min_x, weights=checked)
 
         if self.count_vec is None:
             self.count_vec = np.zeros(max_x - min_x + 1)
@@ -520,8 +533,16 @@ class IntegerUniformSpikeAccumulator(SequenceEncodableStatisticAccumulator):
         """Engine-resident accumulation: the weighted value histogram is reduced on the active
         engine (numpy or torch); the dynamic support range is host bookkeeping. Matches seq_update.
         """
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
-        xv = np.asarray(x)
+        xv = exact_integer_observations(x, label="Integer-uniform-spike observations")
+        weights_np = nonnegative_weights(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights,
+            shape=xv.shape,
+        )
+        used = weights_np > 0.0
+        if not np.any(used):
+            return
+        xv = xv[used]
+        weights_np = weights_np[used]
         min_x = int(xv.min())
         max_x = int(xv.max())
 

@@ -29,6 +29,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.univariate.continuous.gamma import GammaDistribution
+from mixle.stats.univariate.discrete._count_contracts import exact_integer_observations
 from mixle.utils.special import digamma
 from mixle.utils.vector import gammaln
 
@@ -166,8 +167,14 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         Falls back to the plug-in ``log_density(x)`` when no conjugate prior is attached.
         """
         if self.has_conj_prior:
+            try:
+                xx = float(x)
+            except Exception:  # noqa: BLE001
+                return -np.inf
+            if not np.isfinite(xx) or xx < 0 or np.floor(xx) != xx:
+                return -np.inf
             k, theta = self.conj_prior_params
-            return (digamma(k) + np.log(theta)) * x - k * theta - gammaln(x + 1.0)
+            return (digamma(k) + np.log(theta)) * xx - k * theta - gammaln(xx + 1.0)
         return self.log_density(x)
 
     def seq_expected_log_density(self, x: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
@@ -176,8 +183,10 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
             return self.seq_log_density(x)
         vals, log_fact = x
         k, theta = self.conj_prior_params
-        rv = (digamma(k) + np.log(theta)) * vals - k * theta - log_fact
         good = np.isfinite(vals) & (vals >= 0) & (np.floor(vals) == vals)
+        safe_vals = np.where(good, vals, 0.0)
+        safe_log_fact = np.where(good, log_fact, 0.0)
+        rv = (digamma(k) + np.log(theta)) * safe_vals - k * theta - safe_log_fact
         return np.where(good, rv, -np.inf)
 
     def density(self, x: int) -> float:
@@ -784,10 +793,10 @@ class PoissonDataEncoder(DataSequenceEncoder):
             Tuple[ndarray[int], ndarray[float]].
 
         """
-        rv1 = np.asarray(x)
-
-        if np.any(rv1 < 0) or np.any(np.isnan(rv1)) or np.any(np.floor(rv1) != rv1):
-            raise ValueError("Poisson requires non-negative integer values of x.")
-        else:
-            rv2 = gammaln(rv1 + 1.0)
-            return rv1, rv2
+        rv1 = exact_integer_observations(
+            x,
+            label="Poisson observations",
+            minimum=0,
+        )
+        rv2 = gammaln(rv1 + 1.0)
+        return rv1, rv2

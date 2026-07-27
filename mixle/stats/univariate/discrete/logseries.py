@@ -32,6 +32,8 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.discrete._count_contracts import exact_integer_observations
+from mixle.utils.special import valid_integer
 
 _MIN_P = 1.0e-12
 _MAX_P = 1.0 - 1.0e-12
@@ -166,12 +168,9 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: int) -> float:
         """Return the log-mass at a single positive integer (or -inf off support)."""
-        try:
-            k = int(x)
-        except (TypeError, ValueError):
+        if not valid_integer(x) or float(x) < 1.0:
             return -np.inf
-        if k < 1 or k != x:
-            return -np.inf
+        k = int(x)
         return k * self.log_p - math.log(k) - self.log_norm
 
     def seq_log_density(self, x: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
@@ -414,7 +413,9 @@ class LogSeriesDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[int]) -> tuple[np.ndarray, np.ndarray]:
         """Encode observations as integer values and log-values."""
-        rv = np.asarray(x, dtype=np.float64)
-        if rv.size and (np.any(rv < 1.0) or np.any(rv != np.floor(rv)) or np.any(~np.isfinite(rv))):
-            raise ValueError("LogSeriesDistribution has support on the positive integers k >= 1.")
+        rv = exact_integer_observations(
+            x,
+            label="Log-series observations",
+            minimum=1,
+        )
         return rv, np.log(rv)
