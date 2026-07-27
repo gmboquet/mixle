@@ -62,6 +62,61 @@ def _distribute_child_prior(child: Any, prior: Any) -> None:
         child.has_conj_prior = prior is not None
 
 
+def _require_components(values: Sequence[Any], *, label: str) -> tuple[Any, ...]:
+    """Copy a structural child sequence and reject the unsupported empty product."""
+    children = tuple(values)
+    if not children:
+        raise ValueError("%s requires at least one component." % label)
+    return children
+
+
+def _validate_composite_encoding(
+    payload: Any,
+    encoders: Sequence[DataSequenceEncoder],
+    *,
+    label: str,
+) -> int:
+    """Require exact encoded arity and one common non-negative row count."""
+    count = len(encoders)
+    if not isinstance(payload, tuple) or len(payload) != count:
+        actual = len(payload) if isinstance(payload, tuple) else type(payload).__name__
+        raise ValueError("%s must be a tuple of exactly %d child encodings; got %s." % (label, count, actual))
+    row_count: int | None = None
+    for index, (encoder, child_payload) in enumerate(zip(encoders, payload)):
+        observed = encoder.row_count(child_payload)
+        if isinstance(observed, (bool, np.bool_)) or not isinstance(observed, (int, np.integer)):
+            raise TypeError("%s child %d row_count() must return an integer." % (label, index))
+        observed = int(observed)
+        if observed < 0:
+            raise ValueError("%s child %d reports a negative row count." % (label, index))
+        if row_count is None:
+            row_count = observed
+        elif observed != row_count:
+            raise ValueError(
+                "%s child encodings have inconsistent row counts: child 0 has %d and child %d has %d."
+                % (label, row_count, index, observed)
+            )
+    assert row_count is not None
+    return row_count
+
+
+def _validate_composite_weights(weights: Any, row_count: int) -> np.ndarray:
+    """Return a finite, non-negative weight vector aligned with encoded rows."""
+    try:
+        checked = np.asarray(weights, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("composite weights must be a finite non-negative vector.") from exc
+    if (
+        checked.shape != (row_count,)
+        or np.any(~np.isfinite(checked))
+        or np.any(checked < 0.0)
+    ):
+        raise ValueError(
+            "composite weights must be a finite non-negative vector of length %d." % row_count
+        )
+    return checked
+
+
 class CompositeDistribution(SequenceEncodableProbabilityDistribution):
     """Product distribution over heterogeneous component variables."""
 
@@ -97,9 +152,13 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             counts (int): Number of components (i.e. len(dists)).
 
         """
-        self.dists = dists
-        self.count = len(dists)
+        self.dists = _require_components(dists, label="CompositeDistribution")
         self.set_prior(prior)
+
+    @property
+    def count(self) -> int:
+        """Number of components, derived from the canonical immutable child tuple."""
+        return len(self.dists)
 
     def get_prior(self) -> list[SequenceEncodableProbabilityDistribution | None]:
         """Return the joint prior as the list of per-component child priors (in component order)."""
@@ -133,6 +192,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
 
     def seq_expected_log_density(self, x: E) -> np.ndarray:
         """Vectorized prior-expected log-density: sum of the component ``seq_expected_log_density`` values."""
+        self._validate_encoded(x, label="composite expected-log-density encoding")
         rv = self.dists[0].seq_expected_log_density(x[0])
         for i in range(1, self.count):
             rv += self.dists[i].seq_expected_log_density(x[i])
@@ -163,12 +223,26 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         """The marginal sub-composite over the given component ``indices``.
 
         Because the components are independent, the marginal of a subset of coordinates is just the
-        sub-product over those coordinates. Used (with :meth:`condition`) by ``MixtureDistribution.conditional``
-        to score the observed coordinates of a partial observation."""
-        idx = sorted(indices)
-        return CompositeDistribution([self.dists[i] for i in idx])
+        sub-product over those coordinates, in the caller's requested order. Indices must be unique,
+        integer, in range, and non-empty. Used (with :meth:`condition`) by
+        ``MixtureDistribution.conditional`` to score the observed coordinates of a partial observation.
+        """
+        if not isinstance(indices, Sequence) or isinstance(indices, (str, bytes)):
+            raise TypeError("composite marginal indices must be a sequence of integers.")
+        idx = tuple(indices)
+        if not idx:
+            raise ValueError("composite marginal indices must not be empty.")
+        if any(isinstance(i, (bool, np.bool_)) or not isinstance(i, (int, np.integer)) for i in idx):
+            raise TypeError("composite marginal indices must be integers.")
+        canonical = tuple(int(i) for i in idx)
+        if len(set(canonical)) != len(canonical):
+            raise ValueError("composite marginal indices must be unique.")
+        bad = tuple(i for i in canonical if i < 0 or i >= self.count)
+        if bad:
+            raise ValueError("composite marginal indices outside [0, %d): %r." % (self.count, bad))
+        return CompositeDistribution(tuple(self.dists[i] for i in canonical))
 
-    def condition(self, observed: dict[int, Any]) -> CompositeDistribution:
+    def condition(self, observed: Mapping[int, Any]) -> CompositeDistribution:
         """The conditional sub-composite over the UNobserved components given ``observed``.
 
         ``observed`` maps a component index to its (present) value. Since the components are independent,
@@ -176,7 +250,29 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         coordinates not in ``observed`` (the observed values do not enter). This is the per-component piece
         that makes ``MixtureDistribution.conditional`` return the posterior/imputation over the missing
         fields of a partial observation."""
-        obs = set(observed)
+        if not isinstance(observed, Mapping):
+            raise TypeError("composite observed values must be a mapping of {index: value}.")
+        bad = tuple(
+            key
+            for key in observed
+            if isinstance(key, (bool, np.bool_))
+            or not isinstance(key, (int, np.integer))
+            or int(key) < 0
+            or int(key) >= self.count
+        )
+        if bad:
+            raise ValueError("composite observed indices outside [0, %d): %r." % (self.count, bad))
+        obs = {int(key) for key in observed}
+        if len(obs) == self.count:
+            raise ValueError("conditioning must leave at least one unobserved component.")
+        for key, value in observed.items():
+            index = int(key)
+            try:
+                score = float(self.dists[index].log_density(value))
+            except (TypeError, ValueError, IndexError, KeyError, OverflowError) as exc:
+                raise ValueError("observed value at composite index %d is invalid." % index) from exc
+            if not np.isfinite(score):
+                raise ValueError("observed value at composite index %d is outside child support." % index)
         return CompositeDistribution([self.dists[i] for i in range(self.count) if i not in obs])
 
     def _check_arity(self, x: tuple[Any, ...]) -> None:
@@ -185,11 +281,21 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         would otherwise be silently accepted with the extra fields never read at all. Both are real
         caller mistakes (e.g. an extra/missing column) that should surface immediately, at the call
         site, not as a wrong log-likelihood with no signal anything was off."""
+        if not isinstance(x, (tuple, list, np.ndarray)):
+            raise TypeError("CompositeDistribution observation must be a tuple-like sequence.")
         if len(x) != self.count:
             raise ValueError(
                 "CompositeDistribution observation has %d fields but this composite has %d components."
                 % (len(x), self.count)
             )
+
+    def _validate_encoded(self, x: Any, *, label: str) -> int:
+        """Validate encoded child arity and row alignment before child dispatch."""
+        return _validate_composite_encoding(
+            x,
+            tuple(dist.dist_to_encoder() for dist in self.dists),
+            label=label,
+        )
 
     def density(self, x: tuple[Any, ...]) -> float:
         """Evaluates density of CompositeDistribution for single observation tuple x.
@@ -254,10 +360,16 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
             np.ndarray of log_density evaluated at all encoded data points.
 
         """
-        rv = self.dists[0].seq_log_density(x[0])
+        row_count = self._validate_encoded(x, label="composite log-density encoding")
+        rv = np.asarray(self.dists[0].seq_log_density(x[0]))
+        if rv.shape != (row_count,):
+            raise ValueError("composite child 0 returned an invalid batch score shape.")
 
         for i in range(1, self.count):
-            rv += self.dists[i].seq_log_density(x[i])
+            child_scores = np.asarray(self.dists[i].seq_log_density(x[i]))
+            if child_scores.shape != (row_count,):
+                raise ValueError("composite child %d returned an invalid batch score shape." % i)
+            rv = rv + child_scores
 
         return rv
 
@@ -265,6 +377,7 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
         """Engine-neutral vectorized log-density by composing child distributions."""
         from mixle.stats.compute.backend import backend_seq_log_density
 
+        self._validate_encoded(x, label="composite backend log-density encoding")
         rv = backend_seq_log_density(self.dists[0], x[0], engine)
         for i in range(1, self.count):
             rv = rv + backend_seq_log_density(self.dists[i], x[i], engine)
@@ -762,13 +875,36 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
             _acc_rng (List[RandomState]): Random states generated from seeds set by ``rng`` in ``initialize``.
 
         """
-        self.accumulators = accumulators
-        self.count = len(accumulators)
+        self.accumulators = list(_require_components(accumulators, label="CompositeAccumulator"))
         self.keys = keys
 
         ### variables for initialization
         self._init_rng = False
         self._acc_rng: list[RandomState] | None = None
+
+    @property
+    def count(self) -> int:
+        """Number of child accumulators, derived from the fixed structural list."""
+        return len(self.accumulators)
+
+    def _validate_observation(self, x: Any) -> None:
+        if not isinstance(x, (tuple, list, np.ndarray)) or len(x) != self.count:
+            actual = len(x) if isinstance(x, (tuple, list, np.ndarray)) else type(x).__name__
+            raise ValueError(
+                "composite accumulator observation must contain exactly %d fields; got %s."
+                % (self.count, actual)
+            )
+
+    def _validate_estimate(self, estimate: CompositeDistribution | None) -> None:
+        if estimate is not None and estimate.count != self.count:
+            raise ValueError("composite estimate arity does not match its accumulator.")
+
+    def _validate_encoded(self, x: Any) -> int:
+        return _validate_composite_encoding(
+            x,
+            tuple(acc.acc_to_encoder() for acc in self.accumulators),
+            label="composite accumulator encoding",
+        )
 
     def update(self, x: T, weight: float, estimate: CompositeDistribution | None) -> None:
         """Calls update on each CompositeAccumulator component[k], passing x[k] and weight along with estimate
@@ -787,6 +923,8 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
             None
 
         """
+        self._validate_observation(x)
+        self._validate_estimate(estimate)
         if estimate is not None:
             for i in range(0, self.count):
                 self.accumulators[i].update(x[i], weight, estimate.dists[i])
@@ -798,6 +936,7 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
     def _rng_initialize(self, rng: RandomState) -> None:
         seeds = rng.randint(2**31, size=self.count)
         self._acc_rng = [RandomState(seed=seed) for seed in seeds]
+        self._init_rng = True
 
     def initialize(self, x: tuple[Any, ...], weight: float, rng: np.random.RandomState) -> None:
         """Initialize each accumulator of CompositeAccumulator with component x[i] of x and weight.
@@ -815,9 +954,11 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
             None
 
         """
+        self._validate_observation(x)
         if not self._init_rng:
             self._rng_initialize(rng)
 
+        assert self._acc_rng is not None
         for i in range(0, self.count):
             self.accumulators[i].initialize(x[i], weight, self._acc_rng[i])
 
@@ -836,11 +977,14 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
             None
 
         """
+        row_count = self._validate_encoded(x)
+        checked_weights = _validate_composite_weights(weights, row_count)
         if not self._init_rng:
             self._rng_initialize(rng)
 
+        assert self._acc_rng is not None
         for i in range(0, self.count):
-            self.accumulators[i].seq_initialize(x[i], weights, self._acc_rng[i])
+            self.accumulators[i].seq_initialize(x[i], checked_weights, self._acc_rng[i])
 
     def get_seq_lambda(self) -> list[Any]:
         """Return low-level sequence kernels from all component accumulators."""
@@ -864,8 +1008,13 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        row_count = self._validate_encoded(x)
+        checked_weights = _validate_composite_weights(weights, row_count)
+        self._validate_estimate(estimate)
         for i in range(self.count):
-            self.accumulators[i].seq_update(x[i], weights, estimate.dists[i] if estimate is not None else None)
+            self.accumulators[i].seq_update(
+                x[i], checked_weights, estimate.dists[i] if estimate is not None else None
+            )
 
     def seq_update_engine(
         self, x: tuple[Any, ...], weights: Any, estimate: CompositeDistribution | None, engine: Any
@@ -875,6 +1024,11 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
         """
         from mixle.stats.compute.backend import child_seq_update
 
+        row_count = self._validate_encoded(x)
+        shape = tuple(getattr(weights, "shape", ()))
+        if shape != (row_count,):
+            raise ValueError("composite engine weights must have shape (%d,)." % row_count)
+        self._validate_estimate(estimate)
         for i in range(self.count):
             child_seq_update(
                 self.accumulators[i], x[i], weights, estimate.dists[i] if estimate is not None else None, engine
@@ -890,6 +1044,12 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
             None
 
         """
+        if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != self.count:
+            actual = len(suff_stat) if isinstance(suff_stat, (tuple, list)) else type(suff_stat).__name__
+            raise ValueError(
+                "composite sufficient statistics must contain exactly %d child values; got %s."
+                % (self.count, actual)
+            )
         for i in range(0, self.count):
             self.accumulators[i].combine(suff_stat[i])
 
@@ -910,8 +1070,14 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
             CompositeAccumulator
 
         """
-        self.accumulators = [self.accumulators[i].from_value(x[i]) for i in range(len(x))]
-        self.count = len(x)
+        if not isinstance(x, (tuple, list)) or len(x) != self.count:
+            actual = len(x) if isinstance(x, (tuple, list)) else type(x).__name__
+            raise ValueError(
+                "composite restored statistics must contain exactly %d child values; got %s."
+                % (self.count, actual)
+            )
+        restored = [self.accumulators[i].from_value(x[i]) for i in range(self.count)]
+        self.accumulators[:] = restored
 
         return self
 
@@ -990,7 +1156,7 @@ class CompositeAccumulatorFactory(StatisticAccumulatorFactory):
                 component.
             keys (Optional[str]): Declare keys for merging sufficient statistics of CompositeAccumulator objects.
         """
-        self.factories = factories
+        self.factories = _require_components(factories, label="CompositeAccumulatorFactory")
         self.keys = keys
 
     def make(self) -> CompositeAccumulator:
@@ -1029,10 +1195,14 @@ class CompositeEstimator(ParameterEstimator):
             count (int): Number of components in CompositeEstimator.
 
         """
-        self.estimators = estimators
-        self.count = len(estimators)
+        self.estimators = _require_components(estimators, label="CompositeEstimator")
         self.keys = keys
         self.set_prior(prior)
+
+    @property
+    def count(self) -> int:
+        """Number of child estimators, derived from the canonical immutable tuple."""
+        return len(self.estimators)
 
     def get_prior(self) -> list[Any]:
         """Return the joint prior as the list of per-component child estimator priors (in order)."""
@@ -1120,7 +1290,7 @@ class CompositeDataEncoder(DataSequenceEncoder):
                 CompositeDistribution.
 
         """
-        self.encoders = encoders
+        self.encoders = _require_components(encoders, label="CompositeDataEncoder")
 
     def __eq__(self, other: object) -> bool:
         """Return true when ``other`` is an equivalent composite data encoder.
@@ -1149,15 +1319,11 @@ class CompositeDataEncoder(DataSequenceEncoder):
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the component encoders."""
+        return "CompositeDataEncoder([%s])" % ",".join(map(str, self.encoders))
 
-        s = "CompositeDataEncoder(["
-
-        for d in self.encoders[:-1]:
-            s += str(d) + ","
-
-        s += str(self.encoders[-1]) + "])"
-
-        return s
+    def row_count(self, x: Any) -> int:
+        """Return the common row count after validating exact child alignment."""
+        return _validate_composite_encoding(x, self.encoders, label="composite encoder payload")
 
     def seq_encode(self, x: Sequence[tuple[Any, ...]]) -> tuple[Any, ...]:
         """Encode tuple-valued observations for vectorized ``seq_*`` methods.
