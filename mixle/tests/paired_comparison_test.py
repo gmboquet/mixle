@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 
 from mixle.stats import DavidsonDistribution, RaoKupperDistribution, ThurstoneMostellerDistribution
+from mixle.stats.rankings.paired_comparison import PairDataEncoder, _TieEncoder
 
 
 class ThurstoneMostellerTest(unittest.TestCase):
@@ -73,6 +74,89 @@ class RaoKupperTest(unittest.TestCase):
     def test_validation(self):
         with self.assertRaises(ValueError):
             RaoKupperDistribution([0.0, 0.0], nu=0.5)  # nu must be >= 1
+
+
+class PairedComparisonContractTest(unittest.TestCase):
+    def test_pair_and_tie_encoders_include_dimension_in_identity(self):
+        self.assertEqual(PairDataEncoder(3), PairDataEncoder(3))
+        self.assertNotEqual(PairDataEncoder(3), PairDataEncoder(4))
+        self.assertIn("dim=3", str(PairDataEncoder(3)))
+        self.assertEqual(_TieEncoder(3), _TieEncoder(3))
+        self.assertNotEqual(_TieEncoder(3), _TieEncoder(4))
+        self.assertIn("dim=3", str(_TieEncoder(3)))
+
+    def test_every_scoring_boundary_rejects_invalid_pairs(self):
+        pair_dist = ThurstoneMostellerDistribution(np.zeros(3))
+        invalid_pairs = ((0, 0), (-1, 0), (0, 3), (0.5, 1), (0, 1, 2))
+        for value in invalid_pairs:
+            with self.subTest(value=value):
+                with self.assertRaises((TypeError, ValueError)):
+                    pair_dist.log_density(value)
+                with self.assertRaises((TypeError, ValueError)):
+                    pair_dist.seq_log_density(np.asarray([value]))
+                with self.assertRaises((TypeError, ValueError)):
+                    pair_dist.dist_to_encoder().seq_encode([value])
+
+        tie_dist = DavidsonDistribution(np.zeros(3))
+        invalid_ties = ((0, 0, 0), (-1, 1, 0), (0, 3, 0), (0, 1, 3), (0, 1, 0.5))
+        for value in invalid_ties:
+            with self.subTest(value=value):
+                with self.assertRaises((TypeError, ValueError)):
+                    tie_dist.log_density(value)
+                with self.assertRaises((TypeError, ValueError)):
+                    tie_dist.seq_log_density(np.asarray([value]))
+                with self.assertRaises((TypeError, ValueError)):
+                    tie_dist.dist_to_encoder().seq_encode([value])
+
+    def test_accumulators_validate_weights_alignment_and_copy_state(self):
+        pair_dist = ThurstoneMostellerDistribution(np.zeros(3))
+        accumulator = pair_dist.estimator().accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            accumulator.seq_update(np.asarray([[0, 1], [1, 2]]), np.ones(1), None)
+        with self.assertRaises(ValueError):
+            accumulator.update((0, 1), -1.0, None)
+        accumulator.update((0, 1), 2.0, None)
+        value = accumulator.value()
+        value[1][0, 1] += 100.0
+        self.assertEqual(accumulator.wins[0, 1], 2.0)
+        restored = pair_dist.estimator().accumulator_factory().make().from_value(accumulator.value())
+        restored.wins[0, 1] += 100.0
+        self.assertEqual(accumulator.wins[0, 1], 2.0)
+
+        tie_dist = DavidsonDistribution(np.zeros(3))
+        tie_accumulator = tie_dist.estimator().accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            tie_accumulator.seq_update(np.asarray([[0, 1, 2], [1, 2, 0]]), np.ones(1), None)
+        tie_accumulator.update((0, 1, 2), 1.0, None)
+        tie_value = tie_accumulator.value()
+        tie_value[2][0, 1] += 100.0
+        self.assertEqual(tie_accumulator.ties[0, 1], 1.0)
+
+    def test_regularization_controls_are_honored_and_validated(self):
+        self.assertEqual(ThurstoneMostellerDistribution(np.zeros(3)).estimator(0.5).pseudo_count, 0.5)
+        self.assertEqual(DavidsonDistribution(np.zeros(3)).estimator(0.5).pseudo_count, 0.5)
+        self.assertEqual(RaoKupperDistribution(np.zeros(3)).estimator(0.5).pseudo_count, 0.5)
+        for factory in (
+            lambda: ThurstoneMostellerDistribution(np.zeros(3)).estimator(-1.0),
+            lambda: DavidsonDistribution(np.zeros(3)).estimator(-1.0),
+            lambda: RaoKupperDistribution(np.zeros(3)).estimator(-1.0),
+            lambda: DavidsonDistribution(np.zeros(3), nu=np.nan),
+            lambda: RaoKupperDistribution(np.zeros(3), nu=np.inf),
+        ):
+            with self.subTest(factory=factory):
+                with self.assertRaises((TypeError, ValueError)):
+                    factory()
+
+    def test_sampling_rejects_negative_or_fractional_sizes(self):
+        for distribution in (
+            ThurstoneMostellerDistribution(np.zeros(3)),
+            DavidsonDistribution(np.zeros(3)),
+            RaoKupperDistribution(np.zeros(3)),
+        ):
+            for size in (-1, 1.5):
+                with self.subTest(distribution=type(distribution).__name__, size=size):
+                    with self.assertRaises((TypeError, ValueError)):
+                        distribution.sampler(seed=1).sample(size)
 
 
 if __name__ == "__main__":
