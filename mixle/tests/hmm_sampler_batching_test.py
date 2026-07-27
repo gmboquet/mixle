@@ -104,7 +104,7 @@ def test_markov_chain_without_length_only_supports_explicit_lengths():
         {"a": 0.6, "b": 0.4},
         {"a": {"a": 0.7, "b": 0.3}, "b": {"a": 0.2, "b": 0.8}},
     )
-    sampler = dist.sampler(seed=11)
+    sampler = dist.path_sampler(seed=11)
 
     assert len(sampler.sample_seq(4)) == 4
     assert [len(path) for path in sampler.sample_paths([2, 5])] == [2, 5]

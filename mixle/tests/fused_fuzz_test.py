@@ -52,9 +52,11 @@ def _factor_alphabet():
     def chain_dist(rng, len_dist=None):
         init = rng.dirichlet(np.ones(3))
         trans = rng.dirichlet(np.ones(3), size=3)
-        kwargs = {} if len_dist is None else {"len_dist": len_dist}
+        length_law = len_dist or CategoricalDistribution({length: 0.2 for length in range(1, 6)})
         return MarkovChainDistribution(
-            dict(zip(STATES, init)), {s: dict(zip(STATES, trans[i])) for i, s in enumerate(STATES)}, **kwargs
+            dict(zip(STATES, init)),
+            {s: dict(zip(STATES, trans[i])) for i, s in enumerate(STATES)},
+            len_dist=length_law,
         )
 
     def chain_datum(rng):

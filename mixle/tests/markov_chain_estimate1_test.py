@@ -28,8 +28,8 @@ class MarkovChainEstimate1DirectCallTestCase(unittest.TestCase):
         # DO need to agree on: the actual probability mass for keys estimate0() reports at all.
         est = MarkovChainEstimator()
         acc = MarkovChainAccumulatorFactory().make()
-        acc.update(["a", "b", "a", "b", "a", "c"], 1.0, None)
-        acc.update(["b", "a", "c"], 1.0, None)
+        acc.update(["a", "b", "a", "b", "a", "c", "a"], 1.0, None)
+        acc.update(["b", "a", "c", "a"], 1.0, None)
         via_estimate1 = est.estimate1(None, acc.value())
         via_estimate = est.estimate(None, acc.value())
         for k, v in via_estimate.init_prob_map.items():

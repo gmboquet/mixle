@@ -708,7 +708,7 @@ class EnumerationErrorTestCase(unittest.TestCase):
     # HmmTerminalValuesEnumerationTestCase. The non-Null-length case is rejected there too.
 
     def test_markov_chain_default_value_raises(self):
-        with self.assertRaises(EnumerationError):
+        with self.assertRaisesRegex(ValueError, "default_value must be 0"):
             MarkovChainDistribution(
                 {"x": 1.0}, {"x": {"x": 1.0}}, default_value=0.1, len_dist=GeometricDistribution(0.5)
             ).enumerator()

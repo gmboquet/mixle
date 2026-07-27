@@ -608,7 +608,9 @@ class LookbackHiddenMarkovModelSampler(DistributionSampler):
         t_map = {i: {k: dist.transitions[i, k] for k in range(dist.num_states)} for i in range(dist.num_states)}
         p_map = {i: dist.w[i] for i in range(dist.num_states)}
 
-        self.state_sampler = MarkovChainDistribution(p_map, t_map).sampler(seed=self.rng.randint(0, maxrandint))
+        self.state_sampler = MarkovChainDistribution(p_map, t_map).path_sampler(
+            seed=self.rng.randint(0, maxrandint)
+        )
 
     def sample(self, size: int | None = None, *, batched: bool = True):
         """Draw iid sequences from the lookback hidden Markov distribution.
