@@ -12,8 +12,8 @@ the alpha rows of its labels. Generation of a document of length N with L topics
         (2) Draw topic-counts z_1,...,z_L ~ Multinomial(N, theta).
         (3) For each topic l = 1,2,...,L draw z_l values from the topic distribution P_l() (data type T).
 
-If included, 'len_dist' models the number of values N in a document, and 'set_dist' models the label sets
-(both are used for sampling).
+If included, 'len_dist' models the number of values N in a document, and 'set_dist' models the label sets;
+both factors are included in joint scoring and sampling and remain fixed during topic/alpha estimation.
 
 Estimation uses a mean-field variational EM (per-document gamma updates). The expected log topic weights
 are aggregated per distinct label set, and the alpha rows are updated jointly by maximizing the coupled
@@ -23,12 +23,11 @@ classic per-row fixed-point update ('update_alpha()') is used.
 
 """
 
-import sys
-
 import numpy as np
 from numpy.random import RandomState
 from scipy.special import digamma, gammaln
 
+from mixle.capability import Neutral, supports
 from mixle.engines.arithmetic import *
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
@@ -40,10 +39,103 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.stats.latent.lda import _lda_elbo_from_gamma, _lda_vi_fixed_point
+from mixle.stats.latent.lda import (
+    LDAConvergenceError,
+    LDADataEncoder,
+    LDAOptimizationDiagnostics,
+    _lda_elbo_from_gamma,
+    _lda_vi_fixed_point,
+    _positive_finite_threshold,
+    _positive_iteration_budget,
+    _validate_lda_encoded,
+    _validated_document_weights,
+    mpe,
+)
+from mixle.stats.latent.lda import (
+    update_alpha as _update_lda_alpha,
+)
 from mixle.utils.deprecation import deprecated_alias
 from mixle.utils.special import digammainv
-from mixle.utils.vector import row_choice
+from mixle.utils.vector import ImpossibleEvidenceError, row_choice
+
+
+def _canonical_label_set(labels, num_alphas=None, *, context="labeled LDA label set"):
+    """Return a nonempty sorted unique tuple of exact label-row indices."""
+    if isinstance(labels, (str, bytes)):
+        raise TypeError(f"{context} must be a sequence of exact integer indices")
+    try:
+        raw_labels = list(labels)
+    except TypeError as exc:
+        raise TypeError(f"{context} must be a sequence of exact integer indices") from exc
+    if not raw_labels:
+        raise ValueError(f"{context} must be nonempty")
+    canonical = []
+    for position, raw_label in enumerate(raw_labels):
+        if isinstance(raw_label, (str, bytes, bool, np.bool_, float, np.floating)):
+            raise TypeError(f"{context} entry {position} must be an exact integer")
+        try:
+            label = int(raw_label)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TypeError(f"{context} entry {position} must be an exact integer") from exc
+        if label < 0 or (num_alphas is not None and label >= num_alphas):
+            raise ValueError(f"{context} entry {position} is outside the alpha-row range")
+        canonical.append(label)
+    return tuple(sorted(set(canonical)))
+
+
+def _validate_labeled_lda_encoded(x, num_topics, num_alphas):
+    """Validate flattened token data and canonical label geometry."""
+    if not isinstance(x, tuple) or len(x) != 8:
+        raise TypeError("encoded labeled-LDA data must be an eight-item tuple")
+    num_documents, idx, counts, gammas, enc_data = _validate_lda_encoded(x[:5], num_topics)
+
+    def exact_vector(values, name):
+        raw = np.asarray(values)
+        if raw.ndim != 1 or raw.dtype.kind == "b":
+            raise TypeError(f"encoded labeled-LDA {name} must be a one-dimensional exact-integer array")
+        try:
+            numeric = np.asarray(values, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(f"encoded labeled-LDA {name} must contain exact integers") from exc
+        if np.any(~np.isfinite(numeric)) or np.any(numeric != np.floor(numeric)):
+            raise ValueError(f"encoded labeled-LDA {name} must contain finite exact integers")
+        return numeric.astype(np.intp)
+
+    nbx = exact_vector(x[5], "label IDs")
+    nbcnt = exact_vector(x[6], "label counts")
+    nbidx = exact_vector(x[7], "label document IDs")
+    if nbcnt.shape != (num_documents,) or np.any(nbcnt <= 0):
+        raise ValueError("every encoded labeled-LDA document must have a positive label count")
+    if nbx.shape != nbidx.shape or nbx.size != int(nbcnt.sum()):
+        raise ValueError("encoded labeled-LDA label arrays do not match the declared label counts")
+    if not np.array_equal(nbidx, np.repeat(np.arange(num_documents, dtype=np.intp), nbcnt)):
+        raise ValueError("encoded labeled-LDA label document IDs do not match the declared label counts")
+    if np.any(nbx < 0) or np.any(nbx >= num_alphas):
+        raise ValueError("encoded labeled-LDA label IDs are outside the alpha-row range")
+    offset = 0
+    for document_index, count in enumerate(nbcnt):
+        labels = nbx[offset : offset + count]
+        if labels.size > 1 and np.any(labels[1:] <= labels[:-1]):
+            raise ValueError(f"encoded labeled-LDA labels for document {document_index} must be sorted and unique")
+        offset += count
+    return num_documents, idx, counts, gammas, enc_data, nbx, nbcnt, nbidx
+
+
+def _structural_log_scores(distribution, num_documents, idx, counts, nbx, nbcnt):
+    """Return label-set and length log factors for the modeled joint law."""
+    result = np.zeros(num_documents, dtype=np.float64)
+    if distribution.set_dist is not None and not supports(distribution.set_dist, Neutral):
+        result += np.asarray(
+            [distribution.set_dist.log_density(label_set) for label_set in doc_label_sets(nbx, nbcnt)],
+            dtype=np.float64,
+        )
+    if distribution.len_dist is not None and not supports(distribution.len_dist, Neutral):
+        lengths = np.bincount(idx, weights=counts, minlength=num_documents)
+        len_enc = distribution.len_dist.dist_to_encoder().seq_encode(lengths)
+        result += np.asarray(distribution.len_dist.seq_log_density(len_enc), dtype=np.float64)
+    if result.shape != (num_documents,) or np.any(np.isnan(result)) or np.any(np.isposinf(result)):
+        raise ValueError("labeled-LDA structural laws produced invalid log densities")
+    return result
 
 
 class LabeledLDADistribution(SequenceEncodableProbabilityDistribution):
@@ -53,7 +145,16 @@ class LabeledLDADistribution(SequenceEncodableProbabilityDistribution):
     the topic distributions.
     """
 
-    def __init__(self, topics, alphas, set_dist=None, len_dist=None, gamma_threshold=1.0e-8, max_gamma_iter=100):
+    def __init__(
+        self,
+        topics,
+        alphas,
+        set_dist=None,
+        len_dist=None,
+        gamma_threshold=1.0e-8,
+        max_gamma_iter=1000,
+        fit_diagnostics=None,
+    ):
         """Create a labeled LDA distribution.
 
         Args:
@@ -77,14 +178,24 @@ class LabeledLDADistribution(SequenceEncodableProbabilityDistribution):
                 gamma_threshold (float): Convergence threshold for the variational gamma updates.
 
         """
-        self.topics = topics
+        if isinstance(topics, (str, bytes)) or len(topics) == 0:
+            raise ValueError("labeled LDA requires at least one topic distribution")
+        alpha_array = np.asarray(alphas, dtype=np.float64)
+        if alpha_array.ndim != 2 or alpha_array.shape[0] == 0 or alpha_array.shape[1] != len(topics):
+            raise ValueError("labeled-LDA alphas must be a nonempty matrix with one column per topic")
+        if np.any(~np.isfinite(alpha_array)) or np.any(alpha_array <= 0.0):
+            raise ValueError("labeled-LDA alphas must be positive and finite")
+        if fit_diagnostics is not None and not isinstance(fit_diagnostics, LDAOptimizationDiagnostics):
+            raise TypeError("fit_diagnostics must be an LDAOptimizationDiagnostics record or None")
+        self.topics = tuple(topics)
         self.nTopics = len(topics)
-        self.alphas = np.reshape(np.asarray(alphas), (-1, self.nTopics))
+        self.alphas = alpha_array.copy()
         self.num_alpha = self.alphas.shape[0]
         self.len_dist = len_dist
         self.set_dist = set_dist
-        self.gamma_threshold = gamma_threshold
-        self.max_gamma_iter = int(max_gamma_iter)
+        self.gamma_threshold = _positive_finite_threshold(gamma_threshold, "gamma_threshold")
+        self.max_gamma_iter = _positive_iteration_budget(max_gamma_iter, "max_gamma_iter")
+        self.fit_diagnostics = fit_diagnostics
 
     def __str__(self):
         """Return a constructor-style representation of the distribution."""
@@ -139,16 +250,15 @@ class LabeledLDADistribution(SequenceEncodableProbabilityDistribution):
         """
 
         num_topics = self.nTopics
-        num_documents, idx, counts, _, enc_data, _, _, _ = x
+        num_documents, idx, counts, _, _, nbx, nbcnt, _ = _validate_labeled_lda_encoded(x, self.nTopics, self.num_alpha)
 
         log_density_gamma, document_gammas, document_alphas, per_topic_log_densities = seq_posterior(self, x)
 
-        # LabeledLDA's per-document prior 'document_alphas' is the 2-d coupled mean of label rows;
-        # the shared host ELBO handles both the 1-d (plain LDA) and 2-d (labeled) alpha. LabeledLDA
-        # has no length or label-set term to add.
-        return _lda_elbo_from_gamma(
+        elbo = _lda_elbo_from_gamma(
             document_alphas, idx, counts, num_topics, log_density_gamma, document_gammas, per_topic_log_densities
         )
+        elbo += _structural_log_scores(self, num_documents, idx, counts, nbx, nbcnt)
+        return elbo
 
     @deprecated_alias("dist_to_encoder().seq_encode()", since="0.8.0", removed_in="0.10.0")
     def seq_encode(self, x):
@@ -177,7 +287,9 @@ class LabeledLDADistribution(SequenceEncodableProbabilityDistribution):
         """
 
         num_topics = self.nTopics
-        num_documents, idx, counts, _, enc_data, _, _, _ = x
+        num_documents, idx, counts, _, enc_data, _, _, _ = _validate_labeled_lda_encoded(
+            x, self.nTopics, self.num_alpha
+        )
 
         ll_mat = np.zeros((len(idx), self.nTopics))
         ll_mat.fill(-np.inf)
@@ -211,115 +323,61 @@ class LabeledLDADistribution(SequenceEncodableProbabilityDistribution):
         """Return backend capability metadata for this concrete LabeledLDA instance."""
         from mixle.stats.compute.capabilities import DistributionCapabilities, intersect_engine_ready
 
-        return DistributionCapabilities(
-            engine_ready=intersect_engine_ready(tuple(self.topics)), kernel_status="generic_latent"
-        )
+        children = tuple(self.topics)
+        if self.set_dist is not None and not supports(self.set_dist, Neutral):
+            children += (self.set_dist,)
+        if self.len_dist is not None and not supports(self.len_dist, Neutral):
+            children += (self.len_dist,)
+        return DistributionCapabilities(engine_ready=intersect_engine_ready(children), kernel_status="generic_latent")
 
     def _backend_seq_posterior(self, x, engine):
-        """Engine-resident LabeledLDA variational posterior (numpy or torch).
-
-        Returns (log_density_gamma, document_gammas, alphas_loc, per_topic_log_densities), mirroring
-        the host module-level seq_posterior but with a plain fixed-point loop on the active engine.
-        """
+        """Evaluate backend topic scores under the validated labeled-LDA VI contract."""
         from mixle.stats.compute.backend import backend_seq_log_density
 
-        num_documents, idx, counts, gammas, enc_data, nbx, nbcnt, nbidx = x
-        num_topics = self.nTopics
-        alphas = engine.asarray(self.alphas)
-
-        idx_np = np.asarray(idx, dtype=np.int64)
-        idx_e = engine.asarray(idx_np)
-        counts_e = engine.asarray(np.asarray(counts, dtype=np.float64))
-        idx_full_np = (idx_np[:, None] * num_topics + np.arange(num_topics, dtype=np.int64)).reshape(-1)
-        idx_full = engine.asarray(idx_full_np)
-
-        nbx_e = engine.asarray(np.asarray(nbx, dtype=np.int64))
-        nbidx_e = engine.asarray(np.asarray(nbidx, dtype=np.int64))
-        # per-document mean of the label alphas (coupled prior)
-        ddd = engine.index_add(
-            engine.zeros(num_documents), nbidx_e, engine.asarray(np.ones(len(np.asarray(nbidx)), dtype=np.float64))
+        num_documents, idx, counts, gammas, enc_data, nbx, nbcnt, nbidx = _validate_labeled_lda_encoded(
+            x, self.nTopics, self.num_alpha
         )
-        alphas_loc = engine.index_add(engine.zeros((num_documents, num_topics)), nbidx_e, alphas[nbx_e, :])
-        alphas_loc = alphas_loc / ddd.reshape((-1, 1))
-
-        per_topic_log_densities = engine.stack(
-            [backend_seq_log_density(self.topics[i], enc_data, engine) for i in range(num_topics)], axis=1
-        )
-        centered = per_topic_log_densities - engine.max(per_topic_log_densities, axis=1).reshape((-1, 1))
-        per_topic_weights = engine.exp(centered)
-
-        if gammas is None:
-            init_counts = engine.index_add(
-                engine.zeros(num_documents * num_topics),
-                idx_full,
-                engine.asarray(np.ones(len(idx_full_np), dtype=np.float64)),
-            ).reshape((num_documents, num_topics))
-            document_gammas = alphas_loc + init_counts / float(num_topics)
-        else:
-            document_gammas = engine.asarray(gammas)
-
-        for _ in range(self.max_gamma_iter):
-            dg = engine.digamma(document_gammas)
-            gw = engine.exp(dg - engine.max(dg, axis=1).reshape((-1, 1)))
-            row_weights = per_topic_weights * gw[idx_e, :]
-            row_sum = engine.sum(row_weights, axis=1).reshape((-1, 1))
-            log_density_gamma = row_weights / row_sum * counts_e.reshape((-1, 1))
-            gamma_updates = engine.index_add(
-                engine.zeros(num_documents * num_topics), idx_full, log_density_gamma.reshape((-1,))
-            ).reshape((num_documents, num_topics))
-            gamma_updates = gamma_updates + alphas_loc
-            rel_diff = engine.sum(engine.abs(document_gammas - gamma_updates), axis=1) / engine.sum(
-                gamma_updates, axis=1
+        document_alphas = np.zeros((num_documents, self.nTopics), dtype=np.float64)
+        for topic_index in range(self.nTopics):
+            document_alphas[:, topic_index] = np.bincount(
+                nbidx, weights=self.alphas[nbx, topic_index], minlength=num_documents
             )
-            document_gammas = gamma_updates
-            if float(np.max(engine.to_numpy(rel_diff))) <= self.gamma_threshold:
-                break
-
-        # final responsibilities consistent with the converged gammas
-        dg = engine.digamma(document_gammas)
-        gw = engine.exp(dg - engine.max(dg, axis=1).reshape((-1, 1)))
-        row_weights = per_topic_weights * gw[idx_e, :]
-        row_sum = engine.sum(row_weights, axis=1).reshape((-1, 1))
-        log_density_gamma = row_weights / row_sum * counts_e.reshape((-1, 1))
-
-        return log_density_gamma, document_gammas, alphas_loc, per_topic_log_densities
+        document_alphas /= nbcnt[:, None]
+        topic_scores = engine.stack([backend_seq_log_density(topic, enc_data, engine) for topic in self.topics], axis=1)
+        responsibilities, document_gammas = _lda_vi_fixed_point(
+            document_alphas,
+            idx,
+            counts,
+            gammas,
+            self.nTopics,
+            np.asarray(engine.to_numpy(topic_scores), dtype=np.float64),
+            self.gamma_threshold,
+            self.max_gamma_iter,
+        )
+        return (
+            engine.asarray(responsibilities),
+            engine.asarray(document_gammas),
+            engine.asarray(document_alphas),
+            topic_scores,
+        )
 
     def backend_seq_log_density(self, x, engine):
-        """Backend-neutral LabeledLDA variational lower-bound (ELBO) scoring."""
-        num_documents, idx, counts, _, enc_data, nbx, nbcnt, nbidx = x
-        num_topics = self.nTopics
-        idx_np = np.asarray(idx, dtype=np.int64)
-        idx_e = engine.asarray(idx_np)
-        counts_e = engine.asarray(np.asarray(counts, dtype=np.float64))
-        idx_full = engine.asarray((idx_np[:, None] * num_topics + np.arange(num_topics, dtype=np.int64)).reshape(-1))
-
-        log_density_gamma, document_gammas, document_alphas, per_topic_log_densities = self._backend_seq_posterior(
-            x, engine
+        """Backend-neutral labeled-LDA joint variational lower-bound scoring."""
+        num_documents, idx, counts, _, _, nbx, nbcnt, _ = _validate_labeled_lda_encoded(x, self.nTopics, self.num_alpha)
+        responsibilities, gammas, document_alphas, topic_scores = self._backend_seq_posterior(x, engine)
+        result = engine.asarray(
+            _lda_elbo_from_gamma(
+                np.asarray(engine.to_numpy(document_alphas), dtype=np.float64),
+                idx,
+                counts,
+                self.nTopics,
+                np.asarray(engine.to_numpy(responsibilities), dtype=np.float64),
+                np.asarray(engine.to_numpy(gammas), dtype=np.float64),
+                np.asarray(engine.to_numpy(topic_scores), dtype=np.float64),
+            )
         )
-
-        tiny = sys.float_info.min
-        bad = engine.isnan(log_density_gamma) | engine.isinf(log_density_gamma) | (log_density_gamma <= 0)
-        log_density_gamma = engine.where(bad, engine.asarray(tiny), log_density_gamma)
-        bad_d = engine.isnan(document_gammas) | engine.isinf(document_gammas)
-        document_gammas = engine.where(bad_d, engine.asarray(tiny), document_gammas)
-
-        gamma_sum = engine.sum(document_gammas, axis=1).reshape((-1, 1))
-        elob0 = engine.digamma(document_gammas) - engine.digamma(gamma_sum)
-        elob1 = elob0[idx_e, :]
-        elob2 = log_density_gamma * (
-            elob1 + per_topic_log_densities - engine.log(log_density_gamma) + engine.log(counts_e.reshape((-1, 1)))
-        )
-        elob3 = engine.sum(elob0 * ((document_alphas - 1.0) - (document_gammas - 1.0)), axis=1)
-        elob4 = engine.index_add(engine.zeros(num_documents * num_topics), idx_full, elob2.reshape((-1,))).reshape(
-            (num_documents, num_topics)
-        )
-        elob5 = engine.sum(elob4, axis=1)
-        elob6 = engine.sum(engine.gammaln(document_gammas), axis=1) - engine.gammaln(
-            engine.sum(document_gammas, axis=1)
-        )
-        alpha_sum = engine.sum(document_alphas, axis=1)
-        elob7 = engine.gammaln(alpha_sum) - engine.sum(engine.gammaln(document_alphas), axis=1)
-        return elob3 + elob5 + elob6 + elob7
+        result = result + engine.asarray(_structural_log_scores(self, num_documents, idx, counts, nbx, nbcnt))
+        return result
 
     def enumerator(self) -> DistributionEnumerator:
         """Not supported: LabeledLDA's ``log_density`` is a variational lower bound, not the true marginal.
@@ -364,13 +422,15 @@ class LabeledLDADistribution(SequenceEncodableProbabilityDistribution):
         return LabeledLDAEstimator(
             estimators,
             num_alphas=self.num_alpha,
+            set_dist=self.set_dist,
+            len_dist=self.len_dist,
             gamma_threshold=self.gamma_threshold,
             max_gamma_iter=self.max_gamma_iter,
         )
 
     def dist_to_encoder(self):
         """Return a data encoder for iid labeled LDA observations."""
-        return LabeledLDADataEncoder(encoder=self.topics[0].dist_to_encoder())
+        return LabeledLDADataEncoder(encoder=self.topics[0].dist_to_encoder(), num_alphas=self.num_alpha)
 
 
 class LabeledLDASampler(DistributionSampler):
@@ -395,6 +455,10 @@ class LabeledLDASampler(DistributionSampler):
                 set_dist (DistributionSampler): Sampler for label sets.
 
         """
+        if dist.set_dist is None or supports(dist.set_dist, Neutral):
+            raise ValueError("labeled-LDA sampling requires an explicit label-set distribution")
+        if dist.len_dist is None or supports(dist.len_dist, Neutral):
+            raise ValueError("labeled-LDA sampling requires an explicit document-length distribution")
         self.rng = RandomState(seed)
         self.dist = dist
         self.nTopics = dist.nTopics
@@ -418,10 +482,18 @@ class LabeledLDASampler(DistributionSampler):
         """
 
         if size is None:
-            nodes = []
-            while len(nodes) == 0:
-                nodes = self.set_dist.sample()
-            n = self.len_dist.sample()
+            nodes = _canonical_label_set(
+                self.set_dist.sample(), self.dist.num_alpha, context="sampled labeled-LDA label set"
+            )
+            raw_length = self.len_dist.sample()
+            if isinstance(raw_length, (bool, np.bool_, float, np.floating)):
+                raise TypeError("sampled labeled-LDA document length must be an exact non-negative integer")
+            try:
+                n = int(raw_length)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise TypeError("sampled labeled-LDA document length must be an exact non-negative integer") from exc
+            if n < 0:
+                raise ValueError("sampled labeled-LDA document length must be non-negative")
             nTopics = self.nTopics
             alpha_loc = self.dist.alphas[np.asarray(nodes), :].mean(axis=0)
             weights = self.rng.dirichlet(alpha_loc)
@@ -437,7 +509,7 @@ class LabeledLDASampler(DistributionSampler):
                 topics.extend([i] * topic_counts[i])
                 rv.extend(self.compSamplers[i].sample(size=topic_counts[i]))
 
-            return (rv, nodes)
+            return (rv, list(nodes))
 
         else:
             return [self.sample() for i in range(size)]
@@ -446,7 +518,7 @@ class LabeledLDASampler(DistributionSampler):
 class LabeledLDALabelSetStats:
     """Sufficient statistics for the coupled alpha update, grouped by distinct document label set.
 
-    Maps each distinct label set S (a sorted tuple of label indices, duplicates preserved) to a pair
+    Maps each distinct label set S (a sorted tuple of unique label indices) to a pair
     [n_S, m_S], where n_S is the total weight of the documents carrying label set S and m_S is the
     weighted sum of the per-document expected log topic weights E[log theta] (a vector with one entry
     per topic) over those documents.
@@ -460,7 +532,16 @@ class LabeledLDALabelSetStats:
                         [n_S, m_S] pairs. Defaults to an empty mapping.
 
         """
-        self.stats = dict() if stats is None else stats
+        self.stats = {}
+        if stats is not None:
+            for label_set, entry in stats.items():
+                try:
+                    weight, sum_log_p = entry
+                except (TypeError, ValueError) as exc:
+                    raise TypeError(
+                        "labeled-LDA label-set statistic entries must contain weight and mean logs"
+                    ) from exc
+                self.add(label_set, weight, sum_log_p)
 
     def add(self, label_set, weight, sum_log_p):
         """Accumulate document weight and summed expected log topic weights for one label set.
@@ -474,12 +555,23 @@ class LabeledLDALabelSetStats:
                 None.
 
         """
-        entry = self.stats.get(label_set)
+        canonical = _canonical_label_set(label_set, context="labeled-LDA statistic label set")
+        if isinstance(weight, (bool, np.bool_)):
+            raise TypeError("labeled-LDA label-set statistic weight must be real-valued")
+        numeric_weight = float(weight)
+        logs = np.asarray(sum_log_p, dtype=np.float64)
+        if not np.isfinite(numeric_weight) or numeric_weight < 0.0:
+            raise ValueError("labeled-LDA label-set statistic weight must be finite and non-negative")
+        if logs.ndim != 1 or np.any(~np.isfinite(logs)):
+            raise ValueError("labeled-LDA label-set mean-log statistic must be a finite vector")
+        entry = self.stats.get(canonical)
         if entry is None:
-            self.stats[label_set] = [float(weight), np.array(sum_log_p, dtype=float)]
+            self.stats[canonical] = [numeric_weight, logs.copy()]
         else:
-            entry[0] += float(weight)
-            entry[1] += sum_log_p
+            if entry[1].shape != logs.shape:
+                raise ValueError("labeled-LDA label-set mean-log statistics have inconsistent geometry")
+            entry[0] += numeric_weight
+            entry[1] += logs
 
     def combine(self, other):
         """Merge the statistics of another LabeledLDALabelSetStats instance into this instance.
@@ -681,7 +773,8 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             set_m[:, i] = np.bincount(set_ids, weights=doc_log_p[:, i] * weights, minlength=num_sets)
 
         for label_set, j in set_index.items():
-            self.set_stats.add(label_set, set_n[j], set_m[j, :])
+            if set_n[j] > 0.0:
+                self.set_stats.add(label_set, set_n[j], set_m[j, :])
 
     def initialize(self, x, weight, rng):
         """Initialize the accumulator with a single labeled document.
@@ -700,30 +793,8 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
 
-        if self.prev_alpha is None:
-            self.prev_alpha = np.ones((self.num_alphas, self.num_topics))
-
-        xdoc = x[0]
-        xnbh = x[1]
-        aloc = self.prev_alpha[xnbh, :].mean(axis=0)
-
-        theta = rng.dirichlet(aloc)
-
-        idx_list = rng.choice(self.num_topics, size=len(xdoc), replace=True, p=theta)
-
-        self.set_stats.add(tuple(sorted(int(u) for u in xnbh)), weight, weight * np.log(theta))
-        self.doc_counts += weight
-
-        for i in range(len(xdoc)):
-            idx = idx_list[i]
-            ww_v = -np.log(rng.rand(self.num_topics))
-            ww_v[idx] += 1
-            ww_v *= weight * xdoc[i][1] / ww_v.sum()
-            for j in range(self.num_topics):
-                # w = weight*x[i][1] if idx == j else 0.0
-                w = ww_v[j]
-                self.topic_counts[xnbh, j] += w / len(xnbh)
-                self.accumulators[j].initialize(xdoc[i][0], w, rng)
+        encoded = self.acc_to_encoder().seq_encode([x])
+        self.seq_initialize(encoded, _validated_document_weights([weight], 1), rng)
 
     def seq_initialize(self, x, weights, rng):
         """Vectorized initialization of the accumulator from an encoded sequence of labeled documents.
@@ -742,7 +813,10 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
 
-        num_documents, idx, counts, old_gammas, enc_data, nbx, nbcnt, nbidx = x
+        num_documents, idx, counts, old_gammas, enc_data, nbx, nbcnt, nbidx = _validate_labeled_lda_encoded(
+            x, self.num_topics, self.num_alphas
+        )
+        weights = _validated_document_weights(weights, num_documents)
 
         if not self._init_rng:
             self._rng_initialize(rng)
@@ -754,8 +828,7 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         aloc = np.zeros((num_documents, self.num_topics))
         for j in range(self.num_topics):
             aloc[:, j] = np.bincount(nbidx, weights=self.prev_alpha[nbx, j], minlength=num_documents)
-        nbcnt_loc = np.maximum(nbcnt.astype(float), 1.0)
-        aloc /= np.reshape(nbcnt_loc, (-1, 1))
+        aloc /= np.reshape(nbcnt.astype(float), (-1, 1))
 
         # Per-document topic weights theta ~ Dirichlet(aloc) via normalized gamma draws.
         theta = self._rng_theta.gamma(shape=aloc)
@@ -776,7 +849,7 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
         for j in range(self.num_topics):
             doc_w = np.bincount(idx, weights=ww_v[:, j], minlength=num_documents)
-            label_weight = doc_w[nbidx] / np.maximum(nbcnt[nbidx].astype(float), 1.0)
+            label_weight = doc_w[nbidx] / nbcnt[nbidx].astype(float)
             self.topic_counts[:, j] += np.bincount(nbx, weights=label_weight, minlength=self.num_alphas)
             self.accumulators[j].seq_initialize(enc_data, ww_v[:, j], self._rng_topics[j])
 
@@ -800,9 +873,31 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         num_alphas = self.num_alphas
         num_topics = self.num_topics
 
-        num_documents, idx, counts, old_gammas, enc_data, nbx, nbcnt, nbidx = x
-        # num_documents, idx, counts, old_gammas, enc_data = x
-        log_density_gamma, final_gammas, doc_alphas, per_topic_log_densities = seq_posterior(estimate, x)
+        num_documents, idx, counts, old_gammas, enc_data, nbx, nbcnt, nbidx = _validate_labeled_lda_encoded(
+            x, self.num_topics, self.num_alphas
+        )
+        weights = _validated_document_weights(weights, num_documents)
+        (
+            log_density_gamma,
+            final_gammas,
+            doc_alphas,
+            per_topic_log_densities,
+            diagnostics,
+        ) = seq_posterior_with_diagnostics(estimate, x)
+        structural_scores = _structural_log_scores(estimate, num_documents, idx, counts, nbx, nbcnt)
+        impossible = np.unique(
+            np.concatenate(
+                (
+                    np.asarray(diagnostics.impossible_documents, dtype=np.intp),
+                    np.flatnonzero(np.isneginf(structural_scores)),
+                )
+            )
+        )
+        if impossible.size and np.any(weights[impossible] > 0.0):
+            raise ImpossibleEvidenceError(
+                "labeled-LDA E-step encountered zero-probability evidence at document rows %s"
+                % impossible[weights[impossible] > 0.0].tolist()
+            )
         weighted_topic_counts = log_density_gamma * np.reshape(weights[idx], (-1, 1))
 
         mlpf = digamma(final_gammas) - digamma(np.sum(final_gammas, axis=1, keepdims=True))
@@ -814,7 +909,7 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             self.accumulators[i].seq_update(enc_data, weighted_topic_counts[:, i], estimate.topics[i])
 
             doc_tcnt = np.bincount(idx, weights=log_density_gamma[:, i], minlength=num_documents)
-            label_weight = doc_tcnt[nbidx] * weights[nbidx] / np.maximum(nbcnt[nbidx].astype(float), 1.0)
+            label_weight = doc_tcnt[nbidx] * weights[nbidx] / nbcnt[nbidx].astype(float)
             nbh_tcnt[:, i] = np.bincount(nbx, weights=label_weight, minlength=num_alphas)
 
         self._accumulate_set_stats(mlpf, weights, nbx, nbcnt)
@@ -825,12 +920,14 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         # Fused-EM fast path: recover the per-document ELBO that estimate.seq_log_density would
         # return, reusing the variational quantities the E-step already produced -- no second
         # variational loop and no re-scoring of topics. Mirrors LabeledLDADistribution.seq_log_density
-        # exactly (LabeledLDA's ELBO has no length/label-set term). Gated; standard path untouched.
+        # exactly, including any fixed length and label-set terms. Gated; standard path untouched.
         if self._track_ll:
             elob = _lda_elbo_from_gamma(
                 doc_alphas, idx, counts, num_topics, log_density_gamma, final_gammas, per_topic_log_densities
             )
-            self._seq_ll += float(np.dot(weights, elob))
+            elob += structural_scores
+            positive_weight = weights > 0.0
+            self._seq_ll += float(np.dot(weights[positive_weight], elob[positive_weight]))
 
         # return num_documents, idx, counts, final_gammas, enc_data
 
@@ -842,9 +939,12 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         """
         num_alphas = self.num_alphas
         num_topics = self.num_topics
-        num_documents, idx, counts, old_gammas, enc_data, nbx, nbcnt, nbidx = x
-
-        weights_np = np.asarray(engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, dtype=np.float64)
+        num_documents, idx, counts, old_gammas, enc_data, nbx, nbcnt, nbidx = _validate_labeled_lda_encoded(
+            x, self.num_topics, self.num_alphas
+        )
+        weights_np = _validated_document_weights(
+            engine.to_numpy(weights) if hasattr(engine, "to_numpy") else weights, num_documents
+        )
         idx_np = np.asarray(idx, dtype=np.int64)
         nbx_np = np.asarray(nbx, dtype=np.int64)
         nbidx_np = np.asarray(nbidx, dtype=np.int64)
@@ -852,6 +952,21 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         log_density_gamma, final_gammas, doc_alphas, per_topic_log_densities = estimate._backend_seq_posterior(
             x, engine
         )
+        score_array = np.asarray(engine.to_numpy(per_topic_log_densities), dtype=np.float64)
+        structural_scores = _structural_log_scores(estimate, num_documents, idx_np, counts, nbx_np, nbcnt)
+        impossible = np.unique(
+            np.concatenate(
+                (
+                    idx_np[~np.any(np.isfinite(score_array), axis=1)],
+                    np.flatnonzero(np.isneginf(structural_scores)),
+                )
+            )
+        )
+        if impossible.size and np.any(weights_np[impossible] > 0.0):
+            raise ImpossibleEvidenceError(
+                "labeled-LDA engine E-step encountered zero-probability evidence at document rows %s"
+                % impossible[weights_np[impossible] > 0.0].tolist()
+            )
 
         idx_e = engine.asarray(idx_np)
         nbx_e = engine.asarray(nbx_np)
@@ -863,7 +978,7 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         mlpf = engine.digamma(final_gammas) - engine.digamma(gamma_sum)
 
         nbh_cnt = engine.index_add(engine.zeros(num_alphas), nbx_e, engine.asarray(weights_np[nbidx_np]))
-        nbcnt_doc_e = engine.asarray(np.maximum(np.asarray(nbcnt)[nbidx_np].astype(np.float64), 1.0))
+        nbcnt_doc_e = engine.asarray(np.asarray(nbcnt)[nbidx_np].astype(np.float64))
         w_nbidx_e = engine.asarray(weights_np[nbidx_np])
         nbh_tcols = []
         for i in range(num_topics):
@@ -1022,7 +1137,7 @@ class LabeledLDAEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
     def acc_to_encoder(self):
         """Return a data encoder built from the topic accumulators."""
-        return LabeledLDADataEncoder(encoder=self.accumulators[0].acc_to_encoder())
+        return LabeledLDADataEncoder(encoder=self.accumulators[0].acc_to_encoder(), num_alphas=self.num_alphas)
 
 
 class LabeledLDAEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
@@ -1065,7 +1180,10 @@ class LabeledLDAEstimator(ParameterEstimator):
         fixed_alpha=None,
         gamma_threshold=1.0e-8,
         alpha_threshold=1.0e-8,
-        max_gamma_iter=100,
+        max_gamma_iter=1000,
+        max_alpha_iter=2000,
+        set_dist=None,
+        len_dist=None,
     ):
         """Create an estimator for labeled LDA distributions.
 
@@ -1092,16 +1210,35 @@ class LabeledLDAEstimator(ParameterEstimator):
 
         """
 
+        if isinstance(estimators, (str, bytes)) or len(estimators) == 0:
+            raise ValueError("LabeledLDAEstimator requires at least one topic estimator")
         self.num_topics = len(estimators)
-        self.estimators = estimators
-        self.pseudo_count = pseudo_count
-        self.num_alphas = num_alphas
+        self.estimators = tuple(estimators)
+        if pseudo_count is None:
+            self.pseudo_count = None
+        else:
+            values = np.asarray(pseudo_count, dtype=np.float64)
+            if values.shape != (2,) or np.any(~np.isfinite(values)) or np.any(values <= 0.0):
+                raise ValueError("labeled-LDA pseudo_count must contain two positive finite values")
+            self.pseudo_count = tuple(values.tolist())
+        self.num_alphas = _positive_iteration_budget(num_alphas, "num_alphas")
         self.suff_stat = suff_stat
+        if not isinstance(keys, tuple) or len(keys) != 2:
+            raise ValueError("labeled-LDA keys must be a two-item tuple")
         self.keys = keys
-        self.gamma_threshold = gamma_threshold
-        self.alpha_threshold = alpha_threshold
-        self.fixed_alpha = fixed_alpha
-        self.max_gamma_iter = int(max_gamma_iter)
+        self.gamma_threshold = _positive_finite_threshold(gamma_threshold, "gamma_threshold")
+        self.alpha_threshold = _positive_finite_threshold(alpha_threshold, "alpha_threshold")
+        self.max_gamma_iter = _positive_iteration_budget(max_gamma_iter, "max_gamma_iter")
+        self.max_alpha_iter = _positive_iteration_budget(max_alpha_iter, "max_alpha_iter")
+        if fixed_alpha is None:
+            self.fixed_alpha = None
+        else:
+            fixed = np.asarray(fixed_alpha, dtype=np.float64)
+            if fixed.shape != (self.num_alphas, self.num_topics) or np.any(~np.isfinite(fixed)) or np.any(fixed <= 0.0):
+                raise ValueError("fixed_alpha must be a positive finite num_alphas by num_topics matrix")
+            self.fixed_alpha = fixed.copy()
+        self.set_dist = set_dist
+        self.len_dist = len_dist
 
     def accumulator_factory(self):
         """Return an accumulator factory configured from this estimator."""
@@ -1142,20 +1279,55 @@ class LabeledLDAEstimator(ParameterEstimator):
         prev_alpha, set_stats, doc_counts, topic_counts, topic_suff_stats = suff_stat
 
         num_topics = self.num_topics
+        if not isinstance(set_stats, LabeledLDALabelSetStats):
+            raise TypeError("labeled-LDA set statistics must be LabeledLDALabelSetStats")
+        document_counts = np.asarray(doc_counts, dtype=np.float64)
+        if document_counts.ndim == 0:
+            valid_document_counts = True
+        else:
+            valid_document_counts = document_counts.shape in {
+                (self.num_alphas,),
+                (self.num_alphas, 1),
+            }
+        if not valid_document_counts or np.any(~np.isfinite(document_counts)) or np.any(document_counts < 0.0):
+            raise ValueError("labeled-LDA document counts have invalid geometry or values")
+        topic_counts = np.asarray(topic_counts, dtype=np.float64)
+        if (
+            topic_counts.shape != (self.num_alphas, num_topics)
+            or np.any(~np.isfinite(topic_counts))
+            or np.any(topic_counts < 0.0)
+        ):
+            raise ValueError("labeled-LDA topic counts have invalid geometry or values")
+        if len(topic_suff_stats) != num_topics:
+            raise ValueError("labeled-LDA topic statistics must contain one entry per topic")
+        if prev_alpha is None:
+            prev_alpha = self.fixed_alpha if self.fixed_alpha is not None else np.ones((self.num_alphas, num_topics))
+        prev_alpha = np.asarray(prev_alpha, dtype=np.float64)
+        if (
+            prev_alpha.shape != (self.num_alphas, num_topics)
+            or np.any(~np.isfinite(prev_alpha))
+            or np.any(prev_alpha <= 0.0)
+        ):
+            raise ValueError("previous labeled-LDA alphas have invalid geometry or values")
         topics = [self.estimators[i].estimate(topic_counts[:, i].sum(), topic_suff_stats[i]) for i in range(num_topics)]
 
-        # if doc_counts == 0:
-        # sys.stderr.write('Warning: LDA Estimation performed with zero documents.\n')
-        # LabeledLDADistribution(topics, prev_alpha, gamma_threshold=self.gamma_threshold)
-
         if self.fixed_alpha is None:
-            if prev_alpha is None:
-                prev_alpha = np.ones((self.num_alphas, num_topics))
-
             label_sets, set_n, set_m = set_stats.arrays()
+            positive_sets = set_n > 0.0
+            label_sets = [label_set for label_set, keep in zip(label_sets, positive_sets) if keep]
+            set_n = set_n[positive_sets]
+            set_m = set_m[positive_sets, :]
 
             if len(label_sets) == 0:
                 new_alpha = np.asarray(prev_alpha, dtype=float).copy()
+                diagnostics = LDAOptimizationDiagnostics(
+                    algorithm="labeled_lda_alpha",
+                    converged=True,
+                    iterations=0,
+                    max_iterations=self.max_alpha_iter,
+                    termination_reason="no_weighted_documents",
+                    final_residual=0.0,
+                )
             else:
                 if self.pseudo_count is not None:
                     set_n_eff = set_n + self.pseudo_count[0]
@@ -1164,28 +1336,81 @@ class LabeledLDAEstimator(ParameterEstimator):
                     set_n_eff = set_n
                     mean_of_logs = set_m / np.reshape(set_n, (-1, 1))
 
-                if all(len(u) == 1 for u in label_sets):
-                    # Single-label documents: the coupled objective decouples per label row into the
-                    # classic fixed-point objective, so update the observed rows independently.
-                    rows = np.asarray([u[0] for u in label_sets], dtype=int)
+                if float(set_n_eff.sum()) < 2.0 * num_topics:
                     new_alpha = np.asarray(prev_alpha, dtype=float).copy()
-                    new_alpha[rows, :] = update_alpha(new_alpha[rows, :], mean_of_logs, self.alpha_threshold)
-                else:
-                    new_alpha = update_alpha_coupled(
-                        prev_alpha, label_sets, set_n_eff, mean_of_logs, self.alpha_threshold
+                    diagnostics = LDAOptimizationDiagnostics(
+                        algorithm="labeled_lda_alpha",
+                        converged=False,
+                        iterations=0,
+                        max_iterations=self.max_alpha_iter,
+                        termination_reason="retained_previous_insufficient_effective_documents",
+                        final_residual=float("inf"),
                     )
+                else:
+                    try:
+                        if all(len(u) == 1 for u in label_sets):
+                            # Single-label documents: the coupled objective decouples per label row into the
+                            # classic fixed-point objective, so update the observed rows independently.
+                            rows = np.asarray([u[0] for u in label_sets], dtype=int)
+                            new_alpha = np.asarray(prev_alpha, dtype=float).copy()
+                            new_alpha[rows, :], diagnostics = update_alpha(
+                                new_alpha[rows, :],
+                                mean_of_logs,
+                                self.alpha_threshold,
+                                max_iter=self.max_alpha_iter,
+                                return_diagnostics=True,
+                            )
+                        else:
+                            new_alpha, diagnostics = update_alpha_coupled(
+                                prev_alpha,
+                                label_sets,
+                                set_n_eff,
+                                mean_of_logs,
+                                self.alpha_threshold,
+                                max_its=self.max_alpha_iter,
+                                return_diagnostics=True,
+                            )
+                    except LDAConvergenceError as exc:
+                        # Preserve the last accepted parameter, never a failed iterate, and carry
+                        # the exact finite-optimization failure receipt on the returned model.
+                        new_alpha = np.asarray(prev_alpha, dtype=float).copy()
+                        failed = exc.diagnostics
+                        diagnostics = LDAOptimizationDiagnostics(
+                            algorithm=failed.algorithm,
+                            converged=False,
+                            iterations=failed.iterations,
+                            max_iterations=failed.max_iterations,
+                            termination_reason="retained_previous_after_" + failed.termination_reason,
+                            final_residual=failed.final_residual,
+                            objective_trace=failed.objective_trace,
+                            residual_trace=failed.residual_trace,
+                        )
         else:
             new_alpha = np.asarray(self.fixed_alpha).copy()
+            diagnostics = LDAOptimizationDiagnostics(
+                algorithm="fixed_labeled_lda_alpha",
+                converged=True,
+                iterations=0,
+                max_iterations=0,
+                termination_reason="fixed_parameter",
+                final_residual=0.0,
+            )
 
         return LabeledLDADistribution(
-            topics, new_alpha, gamma_threshold=self.gamma_threshold, max_gamma_iter=self.max_gamma_iter
+            topics,
+            new_alpha,
+            set_dist=self.set_dist,
+            len_dist=self.len_dist,
+            gamma_threshold=self.gamma_threshold,
+            max_gamma_iter=self.max_gamma_iter,
+            fit_diagnostics=diagnostics,
         )
 
 
 class LabeledLDADataEncoder(DataSequenceEncoder):
     """Encode iid labeled LDA observations for vectorized scoring."""
 
-    def __init__(self, encoder):
+    def __init__(self, encoder, num_alphas=None):
         """Create an encoder for labeled LDA documents.
 
         Args:
@@ -1196,6 +1421,7 @@ class LabeledLDADataEncoder(DataSequenceEncoder):
 
         """
         self.encoder = encoder
+        self.num_alphas = None if num_alphas is None else _positive_iteration_budget(num_alphas, "num_alphas")
 
     def __str__(self):
         """Return a constructor-style representation of the encoder."""
@@ -1212,114 +1438,99 @@ class LabeledLDADataEncoder(DataSequenceEncoder):
 
         """
         if isinstance(other, LabeledLDADataEncoder):
-            return self.encoder == other.encoder
+            return self.encoder == other.encoder and self.num_alphas == other.num_alphas
         else:
             return False
 
     def seq_encode(self, x):
-        """Encode a sequence of iid LabeledLDA observations (labeled documents) for vectorized functions.
-
-        Return value 'rv' is a Tuple containing:
-                rv[0] (int): Number of documents.
-                rv[1] (np.ndarray): Document id for each flattened document value.
-                rv[2] (np.ndarray): Flattened array of counts for each value in each document.
-                rv[3] (Optional[np.ndarray]): Document gammas (defaults to None).
-                rv[4]: Sequence encoded flattened document values.
-                rv[5] (np.ndarray): Flattened array of label indices over all documents.
-                rv[6] (np.ndarray): Number of labels for each document.
-                rv[7] (np.ndarray): Document id for each flattened label index.
-
-        Args:
-                x (Sequence[Tuple[Sequence[Tuple[T, float]], Sequence[int]]]): Sequence of labeled documents.
-
-        Returns:
-                See above for details.
-
-        """
-
-        num_documents = len(x)
-
-        tx = []
-        ctx = []
-        nx = []
-        tidx = []
-
-        nbx = []
-        nbcnt = []
-        nbidx = []
-
-        for i in range(num_documents):
-            tokens_with_context = x[i][0]
-            nxx = x[i][1]
-
-            nx.append(len(tokens_with_context))
-            nbcnt.append(len(nxx))
-
-            for j in range(len(tokens_with_context)):
-                tidx.append(i)
-                tx.append(tokens_with_context[j][0])
-                ctx.append(tokens_with_context[j][1])
-
-            for j in range(len(nxx)):
-                nbidx.append(i)
-                nbx.append(nxx[j])
-
-        idx = np.asarray(tidx)
-        counts = np.asarray(ctx)
-        gammas = None
-        enc_data = self.encoder.seq_encode(tx)
-
-        nbx = np.asarray(nbx, dtype=int)
-        nbcnt = np.asarray(nbcnt, dtype=int)
-        nbidx = np.asarray(nbidx, dtype=int)
-
+        """Encode labeled documents under the canonical nonempty-label schema."""
+        if isinstance(x, (str, bytes)):
+            raise TypeError("labeled-LDA data must be a sequence of (document, labels) observations")
+        documents = []
+        label_sets = []
+        for document_index, observation in enumerate(x):
+            if isinstance(observation, (str, bytes)):
+                raise TypeError(f"labeled-LDA observation {document_index} must contain a document and labels")
+            try:
+                document, labels = observation
+            except (TypeError, ValueError) as exc:
+                raise TypeError(
+                    f"labeled-LDA observation {document_index} must contain exactly a document and labels"
+                ) from exc
+            documents.append(document)
+            label_sets.append(
+                _canonical_label_set(
+                    labels,
+                    self.num_alphas,
+                    context=f"labeled-LDA observation {document_index} label set",
+                )
+            )
+        num_documents, idx, counts, gammas, enc_data = LDADataEncoder(self.encoder).seq_encode(documents)
+        nbcnt = np.asarray([len(labels) for labels in label_sets], dtype=np.intp)
+        nbx = np.asarray([label for labels in label_sets for label in labels], dtype=np.intp)
+        nbidx = np.repeat(np.arange(num_documents, dtype=np.intp), nbcnt)
         return num_documents, idx, counts, gammas, enc_data, nbx, nbcnt, nbidx
 
+    def row_count(self, x):
+        """Return the validated number of document rows in an encoded payload."""
+        if not isinstance(x, tuple) or len(x) != 8:
+            raise ValueError("encoded labeled-LDA data must be an eight-item tuple")
+        value = x[0]
+        if isinstance(value, (bool, np.bool_, float, np.floating)):
+            raise TypeError("encoded labeled-LDA document count must be an integer")
+        try:
+            result = int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TypeError("encoded labeled-LDA document count must be an integer") from exc
+        if result < 0:
+            raise ValueError("encoded labeled-LDA document count must be non-negative")
+        return result
 
-def update_alpha(current_alpha, mean_log_p, alpha_threshold):
-    """Fixed-point update of the per-label alpha rows from mean expected log topic weights.
 
-    Iterates alpha <- digammainv(mean_log_p + digamma(sum(alpha))) row-wise until the relative change of
-    each row falls below alpha_threshold.
+def update_alpha(
+    current_alpha,
+    mean_log_p,
+    alpha_threshold,
+    *,
+    max_iter=1000,
+    return_diagnostics=False,
+):
+    """Run bounded independent Dirichlet updates for single-label alpha rows."""
+    alpha = np.asarray(current_alpha, dtype=np.float64)
+    mean_logs = np.asarray(mean_log_p, dtype=np.float64)
+    if alpha.ndim != 2 or alpha.shape[0] == 0 or alpha.shape[1] == 0:
+        raise ValueError("current_alpha must be a nonempty two-dimensional matrix")
+    if mean_logs.shape != alpha.shape:
+        raise ValueError("mean_log_p must have the same geometry as current_alpha")
+    if np.any(~np.isfinite(alpha)) or np.any(alpha <= 0.0):
+        raise ValueError("current_alpha must be positive and finite")
+    if np.any(~np.isfinite(mean_logs)):
+        raise ValueError("mean_log_p must be finite")
+    threshold = _positive_finite_threshold(alpha_threshold, "alpha_threshold")
+    budget = _positive_iteration_budget(max_iter, "max_iter")
 
-    Args:
-            current_alpha (np.ndarray): Current alphas matrix (num_alphas by num_topics).
-            mean_log_p (np.ndarray): Per-label mean expected log topic weights (num_alphas by num_topics).
-            alpha_threshold (float): Convergence threshold for the row-wise updates.
-
-    Returns:
-            Numpy 2-d array of updated alphas (num_alphas by num_topics).
-
-    """
-
-    alpha = current_alpha.copy()
-    asum = alpha.sum(axis=1, keepdims=True)
-    mlp = mean_log_p
-
-    its_cnt = 0
-    rv = np.zeros(alpha.shape)
-    not_done = np.arange(alpha.shape[0], dtype=int)
-
-    while len(not_done) > 0:
-        dasum = digamma(asum)
-        oldAlpha = alpha
-        alpha = digammainv(mlp + dasum)
-        asum = alpha.sum(axis=1, keepdims=True)
-        res = np.abs(alpha - oldAlpha).sum(axis=1, keepdims=True) / asum
-
-        is_done = (res <= alpha_threshold).flatten()
-
-        if np.any(is_done):
-            nis_done = ~is_done
-            rv[not_done[is_done], :] = alpha[is_done, :]
-            not_done = not_done[nis_done]
-            mlp = mlp[nis_done, :]
-            asum = asum[nis_done]
-            alpha = alpha[nis_done, :]
-
-        its_cnt += 1
-
-    return rv
+    result = np.empty_like(alpha)
+    row_diagnostics = []
+    for row_index in range(alpha.shape[0]):
+        result[row_index], _, diagnostics = _update_lda_alpha(
+            alpha[row_index],
+            mean_logs[row_index],
+            threshold,
+            max_iter=budget,
+            return_diagnostics=True,
+        )
+        row_diagnostics.append(diagnostics)
+    diagnostics = LDAOptimizationDiagnostics(
+        algorithm="labeled_lda_independent_alpha_fixed_point",
+        converged=True,
+        iterations=max(item.iterations for item in row_diagnostics),
+        max_iterations=budget,
+        termination_reason="converged",
+        final_residual=max(item.final_residual for item in row_diagnostics),
+    )
+    if return_diagnostics:
+        return result, diagnostics
+    return result
 
 
 @deprecated_alias("update_alpha", since="0.8.0", removed_in="0.10.0")
@@ -1328,7 +1539,7 @@ def updateAlpha(current_alpha, mean_log_p, alpha_threshold):
     return update_alpha(current_alpha, mean_log_p, alpha_threshold)
 
 
-def label_set_membership(label_sets):
+def label_set_membership(label_sets, num_alphas=None):
     """Returns flattened membership arrays for a sequence of label sets.
 
     Args:
@@ -1339,9 +1550,13 @@ def label_set_membership(label_sets):
             (member_set), and the per-set sizes |S| as floats.
 
     """
-    set_sizes = np.asarray([len(u) for u in label_sets], dtype=int)
-    member_label = np.asarray([l for u in label_sets for l in u], dtype=int)
-    member_set = np.repeat(np.arange(len(label_sets), dtype=int), set_sizes)
+    canonical = [
+        _canonical_label_set(labels, num_alphas, context=f"coupled alpha label set {index}")
+        for index, labels in enumerate(label_sets)
+    ]
+    set_sizes = np.asarray([len(labels) for labels in canonical], dtype=np.intp)
+    member_label = np.asarray([label for labels in canonical for label in labels], dtype=np.intp)
+    member_set = np.repeat(np.arange(len(canonical), dtype=np.intp), set_sizes)
     return member_label, member_set, set_sizes.astype(float)
 
 
@@ -1356,7 +1571,12 @@ def coupled_alpha_doc_params(alpha, label_sets):
             Numpy 2-d array with one Dirichlet parameter row per label set.
 
     """
-    member_label, member_set, set_sizes = label_set_membership(label_sets)
+    alpha = np.asarray(alpha, dtype=np.float64)
+    if alpha.ndim != 2 or alpha.shape[0] == 0 or alpha.shape[1] == 0:
+        raise ValueError("coupled alpha must be a nonempty two-dimensional matrix")
+    if np.any(~np.isfinite(alpha)) or np.any(alpha <= 0.0):
+        raise ValueError("coupled alpha must be positive and finite")
+    member_label, member_set, set_sizes = label_set_membership(label_sets, alpha.shape[0])
     a = np.zeros((len(label_sets), alpha.shape[1]))
     np.add.at(a, member_set, alpha[member_label, :])
     a /= np.reshape(set_sizes, (-1, 1))
@@ -1380,8 +1600,15 @@ def coupled_alpha_objective(alpha, label_sets, set_counts, set_mean_logs):
             Objective value F(alpha).
 
     """
+    alpha = np.asarray(alpha, dtype=np.float64)
+    counts = np.asarray(set_counts, dtype=np.float64)
+    mean_logs = np.asarray(set_mean_logs, dtype=np.float64)
+    if counts.shape != (len(label_sets),) or np.any(~np.isfinite(counts)) or np.any(counts < 0.0):
+        raise ValueError("coupled alpha set counts must be a finite non-negative vector")
+    if mean_logs.shape != (len(label_sets), alpha.shape[1]) or np.any(~np.isfinite(mean_logs)):
+        raise ValueError("coupled alpha mean-log statistics have invalid geometry or values")
     a = coupled_alpha_doc_params(alpha, label_sets)
-    return np.dot(set_counts, gammaln(a.sum(axis=1)) - gammaln(a).sum(axis=1) + (a * set_mean_logs).sum(axis=1))
+    return float(np.dot(counts, gammaln(a.sum(axis=1)) - gammaln(a).sum(axis=1) + (a * mean_logs).sum(axis=1)))
 
 
 def coupled_alpha_gradient(alpha, label_sets, set_counts, set_mean_logs):
@@ -1400,77 +1627,106 @@ def coupled_alpha_gradient(alpha, label_sets, set_counts, set_mean_logs):
             Numpy 2-d array with the same shape as alpha.
 
     """
-    member_label, member_set, set_sizes = label_set_membership(label_sets)
+    alpha = np.asarray(alpha, dtype=np.float64)
+    counts = np.asarray(set_counts, dtype=np.float64)
+    mean_logs = np.asarray(set_mean_logs, dtype=np.float64)
+    if counts.shape != (len(label_sets),) or np.any(~np.isfinite(counts)) or np.any(counts < 0.0):
+        raise ValueError("coupled alpha set counts must be a finite non-negative vector")
+    if mean_logs.shape != (len(label_sets), alpha.shape[1]) or np.any(~np.isfinite(mean_logs)):
+        raise ValueError("coupled alpha mean-log statistics have invalid geometry or values")
+    member_label, member_set, set_sizes = label_set_membership(label_sets, alpha.shape[0])
     a = coupled_alpha_doc_params(alpha, label_sets)
-    g_set = digamma(a.sum(axis=1, keepdims=True)) - digamma(a) + set_mean_logs
-    g_set *= np.reshape(set_counts / set_sizes, (-1, 1))
+    g_set = digamma(a.sum(axis=1, keepdims=True)) - digamma(a) + mean_logs
+    g_set *= np.reshape(counts / set_sizes, (-1, 1))
     g = np.zeros(alpha.shape)
     np.add.at(g, member_label, g_set[member_set, :])
     return g
 
 
-def update_alpha_coupled(current_alpha, label_sets, set_counts, set_mean_logs, alpha_threshold, max_its=2000):
-    """Coupled update of the full alphas matrix for documents with multi-label sets.
-
-    Maximizes 'coupled_alpha_objective()' over all positive alpha entries. Since each document Dirichlet
-    parameter a_S averages several alpha rows, the rows do not decouple; the objective is concave in
-    alpha (a_S is linear in alpha and the Dirichlet log-partition is convex), so ascent converges to the
-    global maximum. The ascent is run on beta = log(alpha) (keeping alpha positive) with backtracking
-    line search and an adaptive step size, warm-started from 'current_alpha', until the row-wise relative
-    change of alpha falls below alpha_threshold (matching the 'update_alpha()' convergence semantics).
-
-    Label rows that appear in no label set have zero gradient and are returned unchanged.
-
-    Args:
-            current_alpha (np.ndarray): Current alphas matrix (num_alphas by num_topics), used as warm start.
-            label_sets (Sequence[Tuple[int, ...]]): Distinct document label sets (sorted tuples).
-            set_counts (np.ndarray): Per-set document weights n_S.
-            set_mean_logs (np.ndarray): Per-set mean expected log topic weights mbar_S (one row per set).
-            alpha_threshold (float): Convergence threshold for the row-wise relative alpha changes.
-            max_its (int): Maximum number of accepted ascent steps.
-
-    Returns:
-            Numpy 2-d array of updated alphas (num_alphas by num_topics).
-
-    """
-
-    alpha = np.maximum(np.asarray(current_alpha, dtype=float), 1.0e-10)
+def update_alpha_coupled(
+    current_alpha,
+    label_sets,
+    set_counts,
+    set_mean_logs,
+    alpha_threshold,
+    max_its=2000,
+    *,
+    return_diagnostics=False,
+):
+    """Maximize the validated coupled label-row objective with bounded ascent."""
+    alpha = np.asarray(current_alpha, dtype=np.float64)
+    if alpha.ndim != 2 or alpha.shape[0] == 0 or alpha.shape[1] == 0:
+        raise ValueError("current_alpha must be a nonempty two-dimensional matrix")
+    if np.any(~np.isfinite(alpha)) or np.any(alpha <= 0.0):
+        raise ValueError("current_alpha must be positive and finite")
+    canonical_sets = [
+        _canonical_label_set(labels, alpha.shape[0], context=f"coupled alpha label set {index}")
+        for index, labels in enumerate(label_sets)
+    ]
+    if not canonical_sets:
+        raise ValueError("coupled alpha optimization requires at least one observed label set")
+    counts = np.asarray(set_counts, dtype=np.float64)
+    mean_logs = np.asarray(set_mean_logs, dtype=np.float64)
+    threshold = _positive_finite_threshold(alpha_threshold, "alpha_threshold")
+    budget = _positive_iteration_budget(max_its, "max_its")
+    f_cur = coupled_alpha_objective(alpha, canonical_sets, counts, mean_logs)
     beta = np.log(alpha)
-    f_cur = coupled_alpha_objective(alpha, label_sets, set_counts, set_mean_logs)
     step = 1.0
+    residual = float("inf")
+    objective_trace = [f_cur]
+    termination_reason = "iteration_budget_exhausted"
+    converged = False
+    iterations = 0
 
-    for its_cnt in range(max_its):
-        g_beta = coupled_alpha_gradient(alpha, label_sets, set_counts, set_mean_logs)
-        g_beta *= alpha
-        g_sq = np.sum(g_beta * g_beta)
-
-        if not np.isfinite(g_sq) or g_sq == 0.0:
+    for iterations in range(1, budget + 1):
+        g_beta = coupled_alpha_gradient(alpha, canonical_sets, counts, mean_logs) * alpha
+        g_sq = float(np.sum(g_beta * g_beta))
+        if not np.isfinite(g_sq):
+            termination_reason = "invalid_gradient"
             break
-
-        # Backtracking line search on F along the beta-space gradient direction (Armijo condition).
-        t = step
+        if g_sq <= threshold * threshold:
+            residual = float(np.sqrt(g_sq))
+            termination_reason = "stationary"
+            converged = True
+            break
+        trial_step = step
         accepted = False
-        while t >= 1.0e-16:
-            beta_new = np.clip(beta + t * g_beta, -300.0, 300.0)
+        while trial_step >= 1.0e-16:
+            beta_new = np.clip(beta + trial_step * g_beta, -300.0, 300.0)
             alpha_new = np.exp(beta_new)
-            f_new = coupled_alpha_objective(alpha_new, label_sets, set_counts, set_mean_logs)
-            if np.isfinite(f_new) and f_new >= f_cur + 1.0e-4 * t * g_sq:
+            f_new = coupled_alpha_objective(alpha_new, canonical_sets, counts, mean_logs)
+            if np.isfinite(f_new) and f_new >= f_cur + 1.0e-4 * trial_step * g_sq:
                 accepted = True
                 break
-            t *= 0.5
-
+            trial_step *= 0.5
         if not accepted:
+            residual = float(np.sqrt(g_sq))
+            termination_reason = "line_search_failed"
             break
-
-        res = np.max(np.abs(alpha_new - alpha).sum(axis=1) / alpha_new.sum(axis=1))
+        residual = float(np.max(np.abs(alpha_new - alpha).sum(axis=1) / alpha_new.sum(axis=1)))
         alpha = alpha_new
         beta = beta_new
         f_cur = f_new
-        step = min(t * 2.0, 1.0e8)
-
-        if res <= alpha_threshold:
+        objective_trace.append(float(f_new))
+        step = min(trial_step * 2.0, 1.0e8)
+        if residual <= threshold:
+            termination_reason = "converged"
+            converged = True
             break
 
+    diagnostics = LDAOptimizationDiagnostics(
+        algorithm="labeled_lda_coupled_alpha_ascent",
+        converged=converged,
+        iterations=iterations,
+        max_iterations=budget,
+        termination_reason=termination_reason,
+        final_residual=residual,
+        objective_trace=tuple(objective_trace),
+    )
+    if not converged:
+        raise LDAConvergenceError(diagnostics)
+    if return_diagnostics:
+        return alpha, diagnostics
     return alpha
 
 
@@ -1506,45 +1762,6 @@ def mpe_update(X, y, min_size=2):
     return X, s
 
 
-def mpe(x0, f, eps):
-    """Minimal polynomial extrapolation (MPE) of the fixed point of f starting from x0.
-
-    Args:
-            x0 (np.ndarray): Starting point of the fixed-point iteration.
-            f (Callable[[np.ndarray], np.ndarray]): Fixed-point map.
-            eps (float): Convergence threshold on the absolute change of the extrapolated estimate.
-
-    Returns:
-            Tuple of the extrapolated fixed point and the iteration count.
-
-    """
-
-    x1 = f(x0)
-    x2 = f(x1)
-    x3 = f(x2)
-    X = np.asarray([x0, x1, x2, x3])
-    s0 = x3
-    s = s0
-    res = np.abs(x3 - x2).sum()
-    its_cnt = 2
-
-    while res > eps:
-        y = f(X[-1, :])
-        dy = y - X[-1, :]
-        U = (X[1:, :] - X[:-1, :]).T
-        X2 = X[1:, :].T
-        c = np.dot(np.linalg.pinv(U), dy)
-        c *= -1
-        s = (np.dot(X2, c) + y) / (c.sum() + 1)
-
-        res = np.abs(s - s0).sum()
-        s0 = s
-        X = np.concatenate((X, np.reshape(y, (1, -1))), axis=0)
-        its_cnt += 1
-
-    return s, its_cnt
-
-
 def alpha_seq_lambda(meanLogP):
     """Returns the alpha fixed-point map for mean expected log topic weights meanLogP."""
 
@@ -1554,7 +1771,7 @@ def alpha_seq_lambda(meanLogP):
     return next_alpha
 
 
-def find_alpha(current_alpha, mlp, thresh):
+def find_alpha(current_alpha, mlp, thresh, *, max_iter=1000):
     """Find the alpha fixed point for mean expected log topic weights mlp via MPE.
 
     Args:
@@ -1567,56 +1784,43 @@ def find_alpha(current_alpha, mlp, thresh):
 
     """
     f = alpha_seq_lambda(mlp)
-    return mpe(current_alpha, f, thresh)
+    return mpe(current_alpha, f, thresh, max_iter=max_iter)
 
 
-def seq_posterior(estimate, x):
-    """Compute the variational posterior quantities for encoded labeled documents under 'estimate'.
-
-    Runs the shared per-document mean-field gamma fixed point (see lda._lda_vi_fixed_point), passing
-    each document's coupled Dirichlet prior 'alphas_loc' -- the mean of the alpha rows of the
-    document's label set. This is the only model difference from plain LDA, which uses a single
-    shared alpha; the fixed-point loop is otherwise identical.
-
-    Args:
-            estimate (LabeledLDADistribution): LabeledLDA model used to evaluate the posterior.
-            x: Encoded sequence of iid LabeledLDA observations (see LabeledLDADataEncoder.seq_encode()).
-
-    Returns:
-            Tuple of per-value topic responsibilities (log_density_gamma), per-document gammas (final_gammas),
-            per-document Dirichlet parameters (alphas_loc), and per-value per-topic log-densities.
-
-    """
-
-    alphas = estimate.alphas
-    topics = estimate.topics
-    gamma_threshold = estimate.gamma_threshold
-
-    num_documents, idx, counts, gammas, enc_data, nbx, nbcnt, nbidx = x
-
-    num_topics = len(topics)
-
-    per_topic_log_densities = np.asarray([topics[i].seq_log_density(enc_data) for i in range(num_topics)]).transpose()
-
-    # Per-document coupled prior: mean of the alpha rows over the document's labels.
-    ddd = np.reshape(np.bincount(nbidx, minlength=num_documents), (-1, 1)).astype(float)
-    alphas_loc = np.zeros((num_documents, num_topics))
-    for i in range(num_topics):
-        alphas_loc[:, i] = np.bincount(nbidx, weights=alphas[nbx, i], minlength=num_documents)
-    alphas_loc /= ddd
-
-    log_density_gamma, final_gammas = _lda_vi_fixed_point(
-        alphas_loc,
+def seq_posterior_with_diagnostics(estimate, x):
+    """Return labeled-LDA variational quantities and their termination record."""
+    num_documents, idx, counts, gammas, enc_data, nbx, nbcnt, nbidx = _validate_labeled_lda_encoded(
+        x, estimate.nTopics, estimate.num_alpha
+    )
+    topic_scores = np.asarray(
+        [topic.seq_log_density(enc_data) for topic in estimate.topics], dtype=np.float64
+    ).transpose()
+    if topic_scores.shape != (idx.size, estimate.nTopics):
+        raise ValueError("labeled-LDA topic scorers returned arrays with invalid geometry")
+    document_alphas = np.zeros((num_documents, estimate.nTopics), dtype=np.float64)
+    for topic_index in range(estimate.nTopics):
+        document_alphas[:, topic_index] = np.bincount(
+            nbidx, weights=estimate.alphas[nbx, topic_index], minlength=num_documents
+        )
+    document_alphas /= nbcnt[:, None]
+    responsibilities, final_gammas, diagnostics = _lda_vi_fixed_point(
+        document_alphas,
         idx,
         counts,
         gammas,
-        num_topics,
-        per_topic_log_densities,
-        gamma_threshold,
-        getattr(estimate, "max_gamma_iter", 100),
+        estimate.nTopics,
+        topic_scores,
+        estimate.gamma_threshold,
+        estimate.max_gamma_iter,
+        return_diagnostics=True,
     )
+    return responsibilities, final_gammas, document_alphas, topic_scores, diagnostics
 
-    return log_density_gamma, final_gammas, alphas_loc, per_topic_log_densities
+
+def seq_posterior(estimate, x):
+    """Compute the validated variational posterior for encoded labeled documents."""
+    responsibilities, final_gammas, document_alphas, topic_scores, _ = seq_posterior_with_diagnostics(estimate, x)
+    return responsibilities, final_gammas, document_alphas, topic_scores
 
 
 # --- Backward-compatible API naming aliases ---

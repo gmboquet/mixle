@@ -78,11 +78,10 @@ class ConcreteAliasesTest(unittest.TestCase):
         from mixle.stats.latent.labeled_lda import update_alpha, updateAlpha
 
         alpha = np.array([[1.0, 1.0, 1.0]])
-        mean_log_p = np.array([[-0.5, -0.4, -0.6]])
-        with np.errstate(over="ignore"):  # the fixed-point math overflows identically in both paths
-            with self.assertWarns(DeprecationWarning):
-                aliased = updateAlpha(alpha.copy(), mean_log_p, 1e-6)
-            np.testing.assert_allclose(aliased, update_alpha(alpha.copy(), mean_log_p, 1e-6))
+        mean_log_p = np.array([[-1.5, -1.5, -1.5]])
+        with self.assertWarns(DeprecationWarning):
+            aliased = updateAlpha(alpha.copy(), mean_log_p, 1e-6)
+        np.testing.assert_allclose(aliased, update_alpha(alpha.copy(), mean_log_p, 1e-6))
 
 
 class NoSilentDeprecatedAliasTest(unittest.TestCase):
