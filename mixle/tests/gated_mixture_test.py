@@ -8,7 +8,13 @@ import numpy as np
 
 import mixle.stats as st
 from mixle.inference import optimize
-from mixle.stats.latent.gated_mixture import GatedMixtureDistribution, SoftmaxGate
+from mixle.stats.latent.gated_mixture import (
+    GateBufferReceipt,
+    GatedMixtureDistribution,
+    GatedMixtureEstimator,
+    GateOptimizationReceipt,
+    SoftmaxGate,
+)
 
 
 def _switching_data(seed, n=1000):
@@ -82,6 +88,144 @@ class GatedMixtureTest(unittest.TestCase):
                 [st.GaussianDistribution(-1.0, 1.0), st.GaussianDistribution(1.0, 1.0)],
                 SoftmaxGate.zeros(3, 1),  # 3 gate classes, 2 experts
             )
+
+    def test_gate_parameters_and_fit_controls_are_validated_and_owned(self):
+        weight = np.zeros((2, 1))
+        bias = np.zeros(2)
+        gate = SoftmaxGate(weight, bias)
+        weight[:] = 99.0
+        bias[:] = 99.0
+        np.testing.assert_array_equal(gate.weight, np.zeros((2, 1)))
+        np.testing.assert_array_equal(gate.bias, np.zeros(2))
+
+        invalid_parameters = [
+            (np.zeros(2), np.zeros(2)),
+            (np.zeros((2, 1)), np.zeros(3)),
+            (np.asarray([[np.nan], [0.0]]), np.zeros(2)),
+        ]
+        for invalid_weight, invalid_bias in invalid_parameters:
+            with self.subTest(weight=invalid_weight, bias=invalid_bias):
+                with self.assertRaises(ValueError):
+                    SoftmaxGate(invalid_weight, invalid_bias)
+
+        z = np.asarray([[-1.0], [1.0]])
+        r = np.asarray([[1.0, 0.0], [0.0, 1.0]])
+        for kwargs in (
+            {"steps": 0},
+            {"steps": 1.5},
+            {"lr": 0.0},
+            {"lr": np.inf},
+            {"tol": -1.0},
+        ):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises((TypeError, ValueError)):
+                    gate.fit(z, r, **kwargs)
+
+        for kwargs in (
+            {"gate_steps": 0},
+            {"gate_steps": 1.5},
+            {"gate_lr": 0.0},
+            {"gate_lr": np.nan},
+            {"gate_tol": -1.0},
+            {"max_buffer_rows": 0},
+        ):
+            with self.subTest(estimator_kwargs=kwargs):
+                with self.assertRaises((TypeError, ValueError)):
+                    GatedMixtureEstimator(
+                        [st.GaussianEstimator(), st.GaussianEstimator()],
+                        gate,
+                        **kwargs,
+                    )
+
+        fitted, receipt = gate.fit_with_receipt(z, r, steps=200, lr=0.1)
+        self.assertIsInstance(receipt, GateOptimizationReceipt)
+        self.assertIs(fitted.fit_receipt, receipt)
+        self.assertGreater(receipt.steps_completed, 0)
+        self.assertLessEqual(receipt.final_loss, receipt.initial_loss)
+        self.assertTrue(np.isfinite(fitted.log_prob_batch(z)).all())
+
+    def test_gate_and_encoder_reject_invalid_covariate_geometry(self):
+        model = _proto()
+        encoder = model.dist_to_encoder()
+        empty = encoder.seq_encode([])
+        self.assertEqual(empty[0].shape, (0, 1))
+        np.testing.assert_array_equal(model.seq_log_density(empty), np.zeros(0))
+        for data in (
+            [([np.nan], 0.0)],
+            [([1.0, 2.0], 0.0)],
+            [([1.0], 0.0), ([1.0, 2.0], 1.0)],
+        ):
+            with self.subTest(data=data):
+                with self.assertRaises((TypeError, ValueError)):
+                    encoder.seq_encode(data)
+
+        class InvalidGate:
+            n_classes = 2
+            n_features = 1
+
+            def log_prob_batch(self, z):
+                return np.zeros((len(z), 2))
+
+        with self.assertRaisesRegex(ValueError, "sum to one"):
+            GatedMixtureDistribution(
+                [st.GaussianDistribution(-1.0, 1.0), st.GaussianDistribution(1.0, 1.0)],
+                InvalidGate(),
+            )
+
+    def test_impossible_evidence_has_zero_responsibility(self):
+        model = GatedMixtureDistribution(
+            [
+                st.CategoricalDistribution({"a": 1.0}),
+                st.CategoricalDistribution({"b": 1.0}),
+            ],
+            SoftmaxGate.zeros(2, 1),
+        )
+        observation = ([0.0], "outside")
+        np.testing.assert_array_equal(model.posterior(observation), [0.0, 0.0])
+        self.assertEqual(model.log_density(observation), -np.inf)
+
+        enc = model.dist_to_encoder().seq_encode([observation])
+        accumulator = model.estimator().accumulator_factory().make()
+        accumulator.seq_update(enc, np.ones(1), model)
+        comp_stats, z, responsibilities, receipt = accumulator.value()
+        self.assertEqual(comp_stats, ({}, {}))
+        np.testing.assert_array_equal(responsibilities, [[0.0, 0.0]])
+        self.assertEqual(receipt.rows_seen, 1)
+
+    def test_gate_training_buffer_is_bounded_mergeable_and_owned(self):
+        model = _proto()
+        estimator = GatedMixtureEstimator(
+            [st.GaussianEstimator(), st.GaussianEstimator()],
+            model.gate,
+            gate_steps=20,
+            max_buffer_rows=3,
+        )
+        data = [([float(index)], float(index % 2)) for index in range(10)]
+        enc = model.dist_to_encoder().seq_encode(data)
+
+        first = estimator.accumulator_factory().make()
+        first.seq_update(enc, np.ones(10), model)
+        value = first.value()
+        self.assertEqual(value[1].shape, (3, 1))
+        self.assertEqual(value[2].shape, (3, 2))
+        self.assertEqual(value[3], GateBufferReceipt(10, 3, 7, 3))
+
+        value[1][:] = 999.0
+        value[2][:] = 999.0
+        self.assertFalse(np.any(first.value()[1] == 999.0))
+        self.assertFalse(np.any(first.value()[2] == 999.0))
+
+        second = estimator.accumulator_factory().make()
+        second.seq_update(enc, np.ones(10), model)
+        first.combine(second.value())
+        combined = first.value()
+        self.assertEqual(combined[1].shape, (3, 1))
+        self.assertEqual(combined[3], GateBufferReceipt(20, 3, 17, 3))
+
+        fitted = estimator.estimate(20.0, combined)
+        self.assertIsInstance(fitted.gate_fit_receipt, GateOptimizationReceipt)
+        self.assertEqual(fitted.gate_buffer_receipt, combined[3])
+        self.assertIs(estimator.last_gate_fit_receipt, fitted.gate_fit_receipt)
 
 
 if __name__ == "__main__":
