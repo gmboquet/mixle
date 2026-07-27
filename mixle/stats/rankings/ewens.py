@@ -34,6 +34,18 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.rankings._contracts import (
+    bounded_sum_statistics,
+    finite_nonnegative,
+    finite_positive,
+    permutation,
+    permutation_batch,
+    positive_integer,
+    sample_size,
+)
+from mixle.stats.rankings._contracts import (
+    weights as validate_weights,
+)
 from mixle.stats.rankings._permutation_kernels import seq_distance_to_center
 from mixle.utils.optional_deps import numba
 
@@ -105,12 +117,8 @@ class EwensDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def __init__(self, dim: int, theta: float = 1.0, name: str | None = None, keys: str | None = None) -> None:
-        if dim is None or dim < 2:
-            raise ValueError("EwensDistribution requires dim >= 2.")
-        if theta <= 0.0 or not np.isfinite(theta):
-            raise ValueError("EwensDistribution requires theta > 0.")
-        self.dim = int(dim)
-        self.theta = float(theta)
+        self.dim = positive_integer(dim, label="dim", minimum=2)
+        self.theta = finite_positive(theta, label="theta")
         self.log_theta = math.log(self.theta)
         self.log_z = _log_normalizer(self.theta, self.dim)
         self.name = name
@@ -130,11 +138,13 @@ class EwensDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: Sequence[int]) -> float:
         """Return the log-probability of one permutation."""
-        return float(self.seq_log_density(np.asarray(x, dtype=np.int64)[None, :])[0])
+        checked = permutation(x, self.dim, label="Ewens permutation")
+        return float(self.seq_log_density(checked[None, :])[0])
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Return vectorized log-probabilities for encoded permutations."""
-        cycles = _cycle_counts(np.ascontiguousarray(np.asarray(x, dtype=np.int64)), self.dim)
+        checked = permutation_batch(x, self.dim, label="Ewens permutations")
+        cycles = _cycle_counts(checked, self.dim)
         return cycles * self.log_theta - self.log_z
 
     def sampler(self, seed: int | None = None) -> EwensSampler:
@@ -143,7 +153,13 @@ class EwensDistribution(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> EwensEstimator:
         """Return a cycle-count moment estimator for this dimension."""
-        return EwensEstimator(dim=self.dim, name=self.name, keys=self.keys)
+        return EwensEstimator(
+            dim=self.dim,
+            pseudo_count=pseudo_count,
+            prior_mean_cycles=_expected_cycles(self.theta, self.dim),
+            name=self.name,
+            keys=self.keys,
+        )
 
     def dist_to_encoder(self) -> EwensDataEncoder:
         """Return the permutation encoder used by vectorized methods."""
@@ -159,7 +175,8 @@ class EwensSampler(DistributionSampler):
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> list[int] | list[list[int]]:
         """Draw one permutation or ``size`` iid permutations."""
-        k = 1 if size is None else size
+        checked_size = sample_size(size)
+        k = 1 if checked_size is None else checked_size
         seed = int(self.rng.randint(0, 2**31 - 1))
         arr = _ewens_sample(self.dist.dim, self.dist.theta, k, seed)
         draws = [[int(v) for v in row] for row in arr]
@@ -170,14 +187,15 @@ class EwensAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate the total (weighted) cycle count and observation weight."""
 
     def __init__(self, dim: int, keys: str | None = None) -> None:
-        self.dim = dim
+        self.dim = positive_integer(dim, label="dim", minimum=2)
         self.cycle_sum = 0.0
         self.count = 0.0
         self.keys = keys
 
     def update(self, x: Sequence[int], weight: float, estimate: Any) -> None:
         """Update cycle-count statistics from one weighted permutation."""
-        self.seq_update(np.asarray([x], dtype=np.int64), np.asarray([weight], dtype=float), estimate)
+        checked = permutation(x, self.dim, label="Ewens permutation")
+        self.seq_update(checked[None, :], np.asarray([weight], dtype=float), estimate)
 
     def initialize(self, x: Sequence[int], weight: float, rng: RandomState | None) -> None:
         """Initialize cycle-count statistics from one weighted permutation."""
@@ -185,9 +203,11 @@ class EwensAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
         """Update cycle-count statistics from encoded permutations."""
-        cycles = _cycle_counts(np.ascontiguousarray(np.asarray(x, dtype=np.int64)), self.dim)
-        self.cycle_sum += float(np.sum(cycles * weights))
-        self.count += float(np.sum(weights, dtype=np.float64))
+        checked = permutation_batch(x, self.dim, label="Ewens permutations")
+        checked_weights = validate_weights(weights, len(checked))
+        cycles = _cycle_counts(checked, self.dim)
+        self.cycle_sum += float(np.sum(cycles * checked_weights))
+        self.count += float(np.sum(checked_weights, dtype=np.float64))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize cycle-count statistics from encoded permutations."""
@@ -195,8 +215,14 @@ class EwensAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat) -> EwensAccumulator:
         """Merge cycle-count totals and observation weight from another accumulator."""
-        self.cycle_sum += suff_stat[0]
-        self.count += suff_stat[1]
+        cycle_sum, count = bounded_sum_statistics(
+            suff_stat,
+            label="Ewens statistics",
+            minimum_per_observation=1.0,
+            maximum_per_observation=float(self.dim),
+        )
+        self.cycle_sum += cycle_sum
+        self.count += count
         return self
 
     def value(self):
@@ -205,7 +231,12 @@ class EwensAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x) -> EwensAccumulator:
         """Restore accumulator state from ``value`` output."""
-        self.cycle_sum, self.count = float(x[0]), float(x[1])
+        self.cycle_sum, self.count = bounded_sum_statistics(
+            x,
+            label="Ewens statistics",
+            minimum_per_observation=1.0,
+            maximum_per_observation=float(self.dim),
+        )
         return self
 
     def acc_to_encoder(self) -> EwensDataEncoder:
@@ -217,7 +248,8 @@ class EwensAccumulatorFactory(StatisticAccumulatorFactory):
     """Create accumulators for Ewens cycle-count statistics."""
 
     def __init__(self, dim: int, keys: str | None = None) -> None:
-        self.dim, self.keys = dim, keys
+        self.dim = positive_integer(dim, label="dim", minimum=2)
+        self.keys = keys
 
     def make(self) -> EwensAccumulator:
         """Create an empty Ewens accumulator."""
@@ -227,11 +259,26 @@ class EwensAccumulatorFactory(StatisticAccumulatorFactory):
 class EwensEstimator(ParameterEstimator):
     """Fit ``theta`` by matching the mean cycle count ``E[cycles] = sum_i theta/(theta+i)``."""
 
-    def __init__(self, dim: int, theta: float | None = None, name: str | None = None, keys: str | None = None) -> None:
-        if dim is None or dim < 2:
-            raise ValueError("EwensEstimator requires dim >= 2.")
-        self.dim = int(dim)
-        self.theta = theta
+    def __init__(
+        self,
+        dim: int,
+        theta: float | None = None,
+        pseudo_count: float | None = None,
+        prior_mean_cycles: float | None = None,
+        name: str | None = None,
+        keys: str | None = None,
+    ) -> None:
+        self.dim = positive_integer(dim, label="dim", minimum=2)
+        self.theta = None if theta is None else finite_positive(theta, label="theta")
+        self.pseudo_count = None if pseudo_count is None else finite_nonnegative(pseudo_count, label="pseudo_count")
+        default_prior = _expected_cycles(1.0, self.dim)
+        self.prior_mean_cycles = (
+            default_prior
+            if prior_mean_cycles is None
+            else finite_nonnegative(prior_mean_cycles, label="prior_mean_cycles")
+        )
+        if self.prior_mean_cycles < 1.0 or self.prior_mean_cycles > self.dim:
+            raise ValueError("prior_mean_cycles must be in [1, dim].")
         self.name = name
         self.keys = keys
 
@@ -241,7 +288,17 @@ class EwensEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat) -> EwensDistribution:
         """Estimate ``theta`` by matching the accumulated mean cycle count."""
-        cycle_sum, count = suff_stat
+        if nobs is not None:
+            finite_nonnegative(nobs, label="nobs")
+        cycle_sum, count = bounded_sum_statistics(
+            suff_stat,
+            label="Ewens statistics",
+            minimum_per_observation=1.0,
+            maximum_per_observation=float(self.dim),
+        )
+        if self.pseudo_count is not None and self.pseudo_count > 0.0:
+            cycle_sum += self.pseudo_count * self.prior_mean_cycles
+            count += self.pseudo_count
         if count <= 0.0:
             return EwensDistribution(self.dim, 1.0, name=self.name, keys=self.keys)
         theta = self.theta if self.theta is not None else _solve_theta(cycle_sum / count, self.dim)
@@ -252,24 +309,22 @@ class EwensDataEncoder(DataSequenceEncoder):
     """Encode a sequence of permutations of 0,...,n-1 into an (N, n) integer array."""
 
     def __init__(self, dim: int | None = None) -> None:
-        self.dim = dim
+        self.dim = None if dim is None else positive_integer(dim, label="dim", minimum=2)
 
     def __str__(self) -> str:
-        return "EwensDataEncoder"
+        return "EwensDataEncoder(dim=%s)" % self.dim
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, EwensDataEncoder)
+        return isinstance(other, EwensDataEncoder) and self.dim == other.dim
 
     def seq_encode(self, x: Sequence[Sequence[int]]) -> np.ndarray:
         """Validate and encode permutations as a dense integer matrix."""
-        rv = np.asarray([list(row) for row in x], dtype=np.int64)
-        if rv.ndim != 2 or rv.shape[0] == 0:
-            raise ValueError("EwensDistribution requires a non-empty sequence of permutations.")
-        expected = np.arange(rv.shape[1])
-        for row in rv:
-            if not np.array_equal(np.sort(row), expected):
-                raise ValueError("EwensDistribution data must be permutations of 0,...,n-1.")
-        return rv
+        raw = np.asarray([list(row) for row in x])
+        if self.dim is None:
+            if raw.ndim != 2 or raw.shape[0] == 0:
+                raise ValueError("EwensDistribution requires a non-empty sequence of permutations.")
+            return permutation_batch(raw, raw.shape[1], label="Ewens permutations", allow_empty=False)
+        return permutation_batch(raw, self.dim, label="Ewens permutations", allow_empty=False)
 
 
 __all__ = [

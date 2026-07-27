@@ -7,6 +7,7 @@ import unittest
 import numpy as np
 
 from mixle.stats import EwensDistribution
+from mixle.stats.rankings.ewens import EwensDataEncoder
 
 
 def _cycles(p):
@@ -58,6 +59,44 @@ class EwensTest(unittest.TestCase):
             EwensDistribution(5, 0.0)  # theta > 0
         with self.assertRaises(ValueError):
             EwensDistribution(1, 1.0)  # dim >= 2
+
+    def test_all_scoring_and_encoding_paths_validate_permutations(self):
+        dist = EwensDistribution(3)
+        malformed = ([0, 0, 1], [0, 1], [0, 1, 4], [0.5, 1.0, 2.0])
+        for value in malformed:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                dist.log_density(value)
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                dist.seq_log_density(np.asarray([value]))
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                dist.dist_to_encoder().seq_encode([value])
+
+    def test_encoder_identity_includes_dimension(self):
+        self.assertEqual(EwensDataEncoder(3), EwensDataEncoder(3))
+        self.assertNotEqual(EwensDataEncoder(3), EwensDataEncoder(4))
+        self.assertIn("dim=3", str(EwensDataEncoder(3)))
+
+    def test_accumulator_validates_evidence_and_statistics(self):
+        acc = EwensDistribution(3).estimator().accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            acc.update([0, 0, 1], 1.0, None)
+        with self.assertRaises(ValueError):
+            acc.seq_update(np.asarray([[0, 1, 2]]), np.asarray([-1.0]), None)
+        with self.assertRaises(ValueError):
+            acc.seq_update(np.asarray([[0, 1, 2]]), np.asarray([1.0, 2.0]), None)
+        with self.assertRaises(ValueError):
+            acc.from_value((10.0, 1.0))
+
+    def test_pseudo_count_and_controls_are_enforced(self):
+        dist = EwensDistribution(5, theta=3.0)
+        estimate = dist.estimator(pseudo_count=2.0).estimate(None, (0.0, 0.0))
+        self.assertAlmostEqual(estimate.theta, dist.theta)
+        with self.assertRaises(ValueError):
+            dist.estimator(pseudo_count=-1.0)
+        with self.assertRaises(ValueError):
+            dist.sampler().sample(-1)
+        with self.assertRaises(ValueError):
+            dist.sampler().sample(1.5)
 
 
 if __name__ == "__main__":

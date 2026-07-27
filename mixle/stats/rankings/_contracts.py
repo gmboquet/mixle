@@ -158,8 +158,14 @@ def weights(value: Any, row_count: int) -> np.ndarray:
     return result
 
 
-def matrix_statistics(value: Any, dim: int, *, label: str) -> tuple[float, np.ndarray]:
-    """Validate a ``(total_weight, dim-by-dim count matrix)`` statistic."""
+def count_matrix_statistics(
+    value: Any,
+    dim: int,
+    *,
+    label: str,
+    entries_per_observation: float,
+) -> tuple[float, np.ndarray]:
+    """Validate a weighted total and fixed-shape nonnegative count matrix."""
     if isinstance(value, (str, bytes)):
         raise TypeError(f"{label} must be a two-item statistic tuple.")
     try:
@@ -173,9 +179,48 @@ def matrix_statistics(value: Any, dim: int, *, label: str) -> tuple[float, np.nd
         raise ValueError(f"{label} count matrix must have shape ({dim}, {dim}).")
     if not np.all(np.isfinite(matrix)) or np.any(matrix < 0.0):
         raise ValueError(f"{label} count matrix must be finite and nonnegative.")
-    if not math.isclose(float(matrix.sum()), total, rel_tol=1.0e-10, abs_tol=1.0e-10):
+    expected_total = total * finite_nonnegative(
+        entries_per_observation,
+        label=f"{label} entries_per_observation",
+    )
+    if not math.isclose(float(matrix.sum()), expected_total, rel_tol=1.0e-10, abs_tol=1.0e-10):
         raise ValueError(f"{label} total weight must equal the count-matrix total.")
     return total, matrix.copy()
+
+
+def matrix_statistics(value: Any, dim: int, *, label: str) -> tuple[float, np.ndarray]:
+    """Validate a one-count-per-observation matrix statistic."""
+    return count_matrix_statistics(
+        value,
+        dim,
+        label=label,
+        entries_per_observation=1.0,
+    )
+
+
+def bounded_sum_statistics(
+    value: Any,
+    *,
+    label: str,
+    minimum_per_observation: float,
+    maximum_per_observation: float,
+) -> tuple[float, float]:
+    """Validate ``(weighted_sum, total_weight)`` with known per-observation bounds."""
+    if isinstance(value, (str, bytes)):
+        raise TypeError(f"{label} must be a two-item statistic tuple.")
+    try:
+        if len(value) != 2:
+            raise TypeError(f"{label} must be a two-item statistic tuple.")
+    except TypeError as exc:
+        raise TypeError(f"{label} must be a two-item statistic tuple.") from exc
+    weighted_sum = finite_nonnegative(value[0], label=f"{label} weighted sum")
+    total = finite_nonnegative(value[1], label=f"{label} total weight")
+    lower = finite_nonnegative(minimum_per_observation, label=f"{label} lower bound") * total
+    upper = finite_nonnegative(maximum_per_observation, label=f"{label} upper bound") * total
+    tolerance = 1.0e-10 * max(1.0, upper)
+    if weighted_sum < lower - tolerance or weighted_sum > upper + tolerance:
+        raise ValueError(f"{label} weighted sum is incompatible with total weight.")
+    return weighted_sum, total
 
 
 def tie_statistics(value: Any, dim: int, *, label: str) -> tuple[float, np.ndarray, np.ndarray]:
