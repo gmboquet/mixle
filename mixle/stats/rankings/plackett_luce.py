@@ -39,7 +39,15 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.stats.rankings._contracts import permutation_batch, positive_integer, sample_size
+from mixle.stats.rankings._contracts import (
+    permutation,
+    permutation_batch,
+    positive_integer,
+    sample_size,
+)
+from mixle.stats.rankings._contracts import (
+    weights as validate_weights,
+)
 
 _LOG_WORTH_FLOOR = -700.0
 
@@ -286,7 +294,8 @@ class PlackettLuceAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: Sequence[int], weight: float, estimate: PlackettLuceDistribution | None) -> None:
         """Update sufficient statistics from one full ranking and its weight."""
-        self.seq_update(np.asarray([x], dtype=int), np.asarray([weight], dtype=float), estimate)
+        checked = permutation(x, self.dim, label="Plackett-Luce ordering")
+        self.seq_update(checked[None, :], np.asarray([weight], dtype=float), estimate)
 
     def initialize(self, x: Sequence[int], weight: float, rng: RandomState | None) -> None:
         """Initialize statistics from one full ranking using the uniform-worth seed."""
@@ -294,21 +303,25 @@ class PlackettLuceAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: PlackettLuceDistribution | None) -> None:
         """Update MM sufficient statistics from encoded full rankings."""
+        checked = permutation_batch(x, self.dim, label="Plackett-Luce orderings")
+        checked_weights = validate_weights(weights, len(checked))
         k = self.dim
         # Numerator: every item ranked above last position is a winner at its (non-final) stage.
-        nonlast = x[:, : k - 1].reshape(-1)
-        np.add.at(self.num, nonlast, np.repeat(weights, k - 1))
+        nonlast = checked[:, : k - 1].reshape(-1)
+        np.add.at(self.num, nonlast, np.repeat(checked_weights, k - 1))
 
-        worths = np.ones(k) if estimate is None else np.exp(estimate.log_w)
-        go = worths[x]  # (N, K) worths in ranked order
+        if estimate is not None and estimate.dim != self.dim:
+            raise ValueError("previous Plackett-Luce estimate has an incompatible dimension.")
+        worths = np.ones(k) if estimate is None else np.exp(estimate.log_w - np.max(estimate.log_w))
+        go = worths[checked]  # (N, K) worths in ranked order
         suffix = _reverse_cumsum(go)  # suffix[n, s] = sum_{t>=s} w_{x[n,t]}
         inv_suffix = 1.0 / np.maximum(suffix, np.finfo(np.float64).tiny)  # guard underflowed worth sums
         prefix = np.cumsum(inv_suffix, axis=1)  # prefix[n, m] = sum_{s<=m} 1/suffix[n, s]
         # Item ranked at position t is in contention at stages 0..min(t, K-2).
         m_cols = np.minimum(np.arange(k), k - 2)
-        contrib = prefix[:, m_cols] * weights[:, None]
-        np.add.at(self.den, x.reshape(-1), contrib.reshape(-1))
-        self.count += float(np.sum(weights, dtype=np.float64))
+        contrib = prefix[:, m_cols] * checked_weights[:, None]
+        np.add.at(self.den, checked.reshape(-1), contrib.reshape(-1))
+        self.count += float(np.sum(checked_weights, dtype=np.float64))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize a batch of rankings with uniform-worth denominator statistics."""
