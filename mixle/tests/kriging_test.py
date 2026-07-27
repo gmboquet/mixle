@@ -6,6 +6,8 @@ import numpy as np
 from scipy.spatial.distance import cdist
 
 from mixle.analysis import (
+    VarianceCalibrationOutOfRange,
+    VarianceCalibrationUnidentifiable,
     Variogram,
     calibrate_variance,
     empirical_variogram,
@@ -60,16 +62,9 @@ class VariogramTest(unittest.TestCase):
         # mean(0.5*(1.0-2.0)**2, 0.5*(2.0-1.5)**2) = mean(0.5, 0.125) = 0.3125, hand-computed exactly
         np.testing.assert_allclose(ev["semivariance"], [0.3125])
 
-    def test_empirical_variogram_single_point_is_insufficient_evidence(self):
-        # A single point has no pairs at all -- a more extreme case of "every pair discarded" than
-        # the boundary bug above (dist.max() on an empty array used to crash immediately). Must now
-        # return a typed insufficient-evidence result instead of crashing or fabricating a bin.
-        ev = empirical_variogram(np.array([[0.0, 0.0]]), np.array([1.0]))
-        self.assertTrue(bool(ev["insufficient_evidence"]))
-        self.assertNotEqual(ev["reason"], "")
-        self.assertEqual(ev["lag"].size, 0)
-        self.assertEqual(ev["semivariance"].size, 0)
-        self.assertEqual(ev["count"].size, 0)
+    def test_empirical_variogram_rejects_single_point_before_distances(self):
+        with self.assertRaisesRegex(ValueError, r"n >= 2"):
+            empirical_variogram(np.array([[0.0, 0.0]]), np.array([1.0]))
 
     def test_fit_variogram_raises_clearly_on_the_boundary_repro(self):
         # Same audit repro as above, through fit_variogram: after the binning fix there is exactly 1
@@ -82,8 +77,26 @@ class VariogramTest(unittest.TestCase):
             fit_variogram(coords, values)
 
     def test_fit_variogram_raises_clearly_on_a_single_point(self):
-        with self.assertRaisesRegex(ValueError, "cannot fit a variogram"):
+        with self.assertRaisesRegex(ValueError, r"n >= 2"):
             fit_variogram(np.array([[0.0, 0.0]]), np.array([1.0]))
+
+    def test_empirical_variogram_validates_geometry_and_controls_before_binning(self):
+        valid_coords = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
+        valid_values = np.array([1.0, 2.0, 1.5])
+        bad_calls = (
+            (np.array([[0.0, np.nan], [1.0, 0.0]]), np.array([1.0, 2.0]), {}),
+            (valid_coords, np.array([1.0]), {}),
+            (np.array([[0.0, 0.0], [0.0, 0.0]]), np.array([1.0, 2.0]), {}),
+            (valid_coords, valid_values, {"n_bins": 0}),
+            (valid_coords, valid_values, {"n_bins": 1.5}),
+            (valid_coords, valid_values, {"n_bins": True}),
+            (valid_coords, valid_values, {"max_dist": 0.0}),
+            (valid_coords, valid_values, {"max_dist": np.nan}),
+        )
+        for coords, values, kwargs in bad_calls:
+            with self.subTest(kwargs=kwargs, coords_shape=coords.shape):
+                with self.assertRaises(ValueError):
+                    empirical_variogram(coords, values, **kwargs)
 
     def test_fit_variogram_still_fits_a_well_populated_point_set(self):
         # Negative control: a normal, well-populated point set is unaffected by the binning fix and
@@ -275,6 +288,18 @@ class KrigingValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "query"):
             universal_kriging(self.coords, self.z, self.vg, np.array([[1.0, 2.0, 3.0]]))
 
+    def test_universal_kriging_rejects_undefined_degrees(self):
+        for degree in (-1, 1.5, 3, True):
+            with self.subTest(degree=degree):
+                with self.assertRaisesRegex(ValueError, "degree"):
+                    universal_kriging(self.coords, self.z, self.vg, self.coords[:1], degree=degree)
+
+    def test_universal_kriging_rejects_rank_deficient_drift(self):
+        coords = np.column_stack([np.arange(5.0), np.arange(5.0)])
+        values = np.arange(5.0)
+        with self.assertRaisesRegex(ValueError, "not identifiable"):
+            universal_kriging(coords, values, self.vg, np.array([[0.5, 0.5]]), degree=1)
+
     def test_krige_solve_rejects_mismatched_drift0_shape(self):
         drift = np.ones((40, 3))
         drift0 = np.ones((1, 2))  # wrong column count relative to drift
@@ -400,6 +425,10 @@ class CalibrationValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "same shape"):
             calibrate_variance(self.pv[:5], self.resid, target=0.9)
 
+    def test_rejects_multidimensional_paired_arrays(self):
+        with self.assertRaisesRegex(ValueError, "one-dimensional"):
+            calibrate_variance(np.ones((2, 2)), np.ones((2, 2)), target=0.9)
+
     def test_rejects_empty_sample(self):
         with self.assertRaisesRegex(ValueError, "nonempty"):
             calibrate_variance(np.array([]), np.array([]), target=0.9)
@@ -434,6 +463,19 @@ class CalibrationValidationTest(unittest.TestCase):
         c = calibrate_variance(self.pv, self.resid, target=0.9)
         self.assertTrue(np.isfinite(c))
         self.assertGreater(c, 0.0)
+
+    def test_zero_residuals_are_explicitly_unidentifiable(self):
+        with self.assertRaises(VarianceCalibrationUnidentifiable):
+            calibrate_variance(np.ones(20), np.zeros(20), target=0.9)
+
+    def test_unrepresentable_required_scale_is_out_of_range(self):
+        with self.assertRaises(VarianceCalibrationOutOfRange):
+            calibrate_variance(np.ones(20), np.full(20, 1e300), target=0.9)
+
+    def test_large_finite_factor_is_not_clipped_to_an_arbitrary_search_cap(self):
+        factor = calibrate_variance(np.ones(20), np.full(20, 1e4), target=0.9)
+        self.assertGreater(factor, 1e6)
+        self.assertTrue(np.isfinite(factor))
 
 
 if __name__ == "__main__":

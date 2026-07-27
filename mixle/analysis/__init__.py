@@ -80,6 +80,9 @@ from mixle.analysis.kde import (
     silverman_bandwidth,
 )
 from mixle.analysis.kriging import (
+    VarianceCalibrationError,
+    VarianceCalibrationOutOfRange,
+    VarianceCalibrationUnidentifiable,
     Variogram,
     calibrate_variance,
     empirical_variogram,
@@ -155,6 +158,9 @@ __all__ = [
     "cohort_attribution",
     # geostatistics: variograms and kriging
     "Variogram",
+    "VarianceCalibrationError",
+    "VarianceCalibrationUnidentifiable",
+    "VarianceCalibrationOutOfRange",
     "empirical_variogram",
     "fit_variogram",
     "ordinary_kriging",
