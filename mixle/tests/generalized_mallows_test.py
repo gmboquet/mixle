@@ -33,6 +33,11 @@ def _brute_expected(metric, theta, n):
 
 
 class NormalizerTest(unittest.TestCase):
+    def test_kendall_near_zero_theta_is_the_uniform_limit(self):
+        dist = GeneralizedMallowsDistribution([0, 1, 2, 3], 1.0e-309, "kendall")
+        self.assertAlmostEqual(dist.log_z, math.log(24.0), places=12)
+        self.assertAlmostEqual(dist.density([3, 2, 1, 0]), 1.0 / 24.0, places=12)
+
     def test_log_normalizer_matches_brute_force_all_metrics(self):
         # closed form (kendall/cayley/hamming) and exact permanent / enumeration (footrule/spearman/ulam)
         for metric in METRICS:

@@ -43,17 +43,21 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.rankings._contracts import (
+    log_truncated_geometric_normalizer,
+    truncated_geometric_mean,
+)
 from mixle.stats.rankings._permutation_kernels import (
     METRICS,
-    cayley_perm,
-    footrule_perm,
-    hamming_perm,
-    kendall_perm,
+    _cayley_perm,
+    _footrule_perm,
+    _hamming_perm,
+    _kendall_perm,
+    _spearman_perm,
+    _ulam_perm,
     metric_id,
     ryser_log_permanent,
     seq_distance_to_center,
-    spearman_perm,
-    ulam_perm,
 )
 from mixle.utils.optional_deps import numba
 
@@ -81,10 +85,7 @@ def log_normalizer(metric: str, theta: float, n: int) -> float:
         return float(math.lgamma(n + 1))  # uniform: Z = n!
     phi = math.exp(-theta)
     if metric == "kendall":
-        if phi <= 0.0:
-            return 0.0
-        log1m = math.log1p(-phi)
-        return float(sum(math.log1p(-(phi ** (i + 1))) - log1m for i in range(1, n)))
+        return float(sum(log_truncated_geometric_normalizer(theta, i) for i in range(1, n)))
     if metric == "cayley":
         return float(sum(math.log1p(i * phi) for i in range(1, n)))
     if metric == "hamming":
@@ -99,16 +100,16 @@ def expected_distance(metric: str, theta: float, n: int) -> float:
     """Return ``E_theta[d]`` for a closed-form metric (uniform value at ``theta = 0``)."""
     if n <= 1:
         return 0.0
-    if theta <= 1e-7:  # uniform (the phi->1 closed forms cancel catastrophically this close to 0)
+    if theta <= 1e-7:  # uniform limits for the non-Kendall closed forms
         if metric == "kendall":
-            return n * (n - 1) / 4.0
+            return float(sum(truncated_geometric_mean(theta, i) for i in range(1, n)))
         if metric == "cayley":
             return float(sum(i / (1.0 + i) for i in range(1, n)))
         if metric == "hamming":
             return float(n - 1)  # E[fixed points] = 1 under the uniform permutation
     phi = math.exp(-theta)
     if metric == "kendall":
-        return float(sum(phi / (1.0 - phi) - (i + 1) * phi ** (i + 1) / (1.0 - phi ** (i + 1)) for i in range(1, n)))
+        return float(sum(truncated_geometric_mean(theta, i) for i in range(1, n)))
     if metric == "cayley":
         return float(sum(i * phi / (1.0 + i * phi) for i in range(1, n)))
     if metric == "hamming":
@@ -143,16 +144,16 @@ def solve_theta(metric: str, mean_distance: float, n: int) -> float:
 def _perm_distance(r, mid):
     """Distance of the relative-rank permutation r from the identity (dispatch by metric id)."""
     if mid == 0:
-        return kendall_perm(r)
+        return _kendall_perm(r)
     elif mid == 1:
-        return cayley_perm(r)
+        return _cayley_perm(r)
     elif mid == 2:
-        return hamming_perm(r)
+        return _hamming_perm(r)
     elif mid == 3:
-        return footrule_perm(r)
+        return _footrule_perm(r)
     elif mid == 4:
-        return spearman_perm(r)
-    return ulam_perm(r)
+        return _spearman_perm(r)
+    return _ulam_perm(r)
 
 
 @numba.njit("int64[:, :](int64[:], float64, int64, int64, int64, int64, int64)", cache=True)

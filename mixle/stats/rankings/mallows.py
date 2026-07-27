@@ -37,10 +37,12 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.rankings._contracts import (
     count_matrix_statistics,
     finite_nonnegative,
+    log_truncated_geometric_normalizer,
     permutation,
     permutation_batch,
     positive_integer,
     sample_size,
+    truncated_geometric_mean,
 )
 from mixle.stats.rankings._contracts import (
     weights as validate_weights,
@@ -53,30 +55,14 @@ def _log_normalizer(theta: float, n: int) -> float:
     """Return log Z(theta) for the Kendall Mallows model on n items."""
     if n <= 1:
         return 0.0
-    if theta <= 0.0:
-        return float(math.lgamma(n + 1))  # log n!
-    phi = math.exp(-theta)
-    if phi <= 0.0:
-        return 0.0  # theta -> inf, Z -> 1 (all mass on sigma0)
-    log1m_phi = math.log1p(-phi)
-    total = 0.0
-    for i in range(1, n):
-        total += math.log1p(-(phi ** (i + 1))) - log1m_phi
-    return total
+    return float(sum(log_truncated_geometric_normalizer(theta, i) for i in range(1, n)))
 
 
 def _expected_distance(theta: float, n: int) -> float:
     """Return E_theta[d] = sum_{i=1}^{n-1} E[V_i] for the Kendall Mallows model on n items."""
     if n <= 1:
         return 0.0
-    if theta <= 0.0:
-        return n * (n - 1) / 4.0
-    phi = math.exp(-theta)
-    total = 0.0
-    for i in range(1, n):
-        # V_i in {0..i} with P(k) ∝ phi^k: E[V_i] = phi/(1-phi) - (i+1) phi^{i+1} / (1 - phi^{i+1}).
-        total += phi / (1.0 - phi) - (i + 1) * phi ** (i + 1) / (1.0 - phi ** (i + 1))
-    return total
+    return float(sum(truncated_geometric_mean(theta, i) for i in range(1, n)))
 
 
 def _solve_theta(mean_distance: float, n: int) -> float:

@@ -1,6 +1,7 @@
 """Generalized Mallows Model (per-stage dispersion): factorization, normalization, recovery."""
 
 import itertools
+import math
 import unittest
 
 import numpy as np
@@ -10,6 +11,11 @@ from mixle.stats.rankings._permutation_kernels import permutation_distance, seq_
 
 
 class GMMTest(unittest.TestCase):
+    def test_near_zero_stage_theta_is_the_uniform_limit(self):
+        dist = GeneralizedMallowsModelDistribution([0, 1, 2], [1.0e-309, 1.0e-309])
+        self.assertAlmostEqual(dist.log_z, math.log(6.0), places=12)
+        self.assertAlmostEqual(dist.density([2, 1, 0]), 1.0 / 6.0, places=12)
+
     def test_rim_code_sums_to_kendall(self):
         rng = np.random.RandomState(0)
         sigma0 = np.array([2, 0, 3, 1, 4])

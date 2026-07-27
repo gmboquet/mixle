@@ -20,7 +20,6 @@ Data type: ``List[int]`` -- a full ordering, a permutation of ``0..n-1`` with ``
 
 from __future__ import annotations
 
-import math
 from collections.abc import Sequence
 from typing import Any
 
@@ -35,6 +34,10 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.rankings._contracts import (
+    log_truncated_geometric_normalizer,
+    truncated_geometric_mean,
+)
 from mixle.stats.rankings._permutation_kernels import seq_rim_code
 
 _MAX_THETA = 700.0
@@ -42,24 +45,12 @@ _MAX_THETA = 700.0
 
 def _log_psi(theta: float, m: int) -> float:
     """``log sum_{r=0}^{m} exp(-theta r)`` -- log-normalizer of a stage with values ``{0..m}``."""
-    if m <= 0:
-        return 0.0
-    if theta <= 0.0:
-        return math.log(m + 1)
-    phi = math.exp(-theta)
-    if phi <= 0.0:
-        return 0.0
-    return math.log1p(-(phi ** (m + 1))) - math.log1p(-phi)
+    return log_truncated_geometric_normalizer(theta, m)
 
 
 def _stage_mean(theta: float, m: int) -> float:
     """``E_theta[J]`` for a stage truncated-geometric on ``{0..m}``."""
-    if m <= 0:
-        return 0.0
-    if theta <= 1e-7:
-        return m / 2.0
-    phi = math.exp(-theta)
-    return phi / (1.0 - phi) - (m + 1) * phi ** (m + 1) / (1.0 - phi ** (m + 1))
+    return truncated_geometric_mean(theta, m)
 
 
 def _solve_stage_theta(mean_j: float, m: int) -> float:

@@ -72,7 +72,8 @@ def _ewens_sample(n, theta, n_samples, seed):
 def _log_normalizer(theta: float, n: int) -> float:
     if n <= 1 or theta <= 0.0:
         return 0.0 if n <= 1 else -math.inf
-    return float(math.lgamma(theta + n) - math.lgamma(theta))
+    log_theta = math.log(theta)
+    return float(sum(log_theta + math.log1p(i / theta) for i in range(n)))
 
 
 def _expected_cycles(theta: float, n: int) -> float:
