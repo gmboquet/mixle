@@ -19,13 +19,41 @@ statistics:
 
 from __future__ import annotations
 
+import operator
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from scipy import optimize
 
 
-@dataclass
+def _finite_scalar(value: Any, *, name: str) -> float:
+    """Return one finite, non-Boolean real scalar."""
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a non-Boolean finite real scalar.")
+    arr = np.asarray(value)
+    if arr.ndim != 0 or arr.dtype.kind not in "iuf":
+        raise ValueError(f"{name} must be a finite real scalar.")
+    scalar = float(arr)
+    if not np.isfinite(scalar):
+        raise ValueError(f"{name} must be finite, got {value!r}.")
+    return scalar
+
+
+def _exact_integer(value: Any, *, name: str, minimum: int) -> int:
+    """Return an exact integer control, rejecting Boolean and fractional coercion."""
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a non-Boolean integer >= {minimum}.")
+    try:
+        integer = operator.index(value)
+    except TypeError as exc:
+        raise ValueError(f"{name} must be a non-Boolean integer >= {minimum}.") from exc
+    if integer < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {integer}.")
+    return int(integer)
+
+
+@dataclass(frozen=True)
 class GPDFit:
     """Fitted Generalized Pareto Distribution for exceedances over a threshold.
 
@@ -48,6 +76,28 @@ class GPDFit:
     n_total: int
     method: str
     n_dropped_nonpositive: int = 0
+
+    def __post_init__(self) -> None:
+        shape = _finite_scalar(self.shape, name="GPDFit.shape")
+        scale = _finite_scalar(self.scale, name="GPDFit.scale")
+        threshold = _finite_scalar(self.threshold, name="GPDFit.threshold")
+        if scale <= 0.0:
+            raise ValueError(f"GPDFit.scale must be positive, got {scale}.")
+        n_exceedances = _exact_integer(self.n_exceedances, name="GPDFit.n_exceedances", minimum=2)
+        n_total = _exact_integer(self.n_total, name="GPDFit.n_total", minimum=1)
+        if n_total < n_exceedances:
+            raise ValueError("GPDFit.n_total cannot be smaller than GPDFit.n_exceedances.")
+        n_dropped = _exact_integer(self.n_dropped_nonpositive, name="GPDFit.n_dropped_nonpositive", minimum=0)
+        if self.method not in {"mle", "pwm"}:
+            raise ValueError("GPDFit.method must be 'mle' or 'pwm'.")
+        if shape < 0.0 and not np.isfinite(threshold - scale / shape):
+            raise ValueError("GPDFit has a non-finite bounded-tail endpoint.")
+        object.__setattr__(self, "shape", shape)
+        object.__setattr__(self, "scale", scale)
+        object.__setattr__(self, "threshold", threshold)
+        object.__setattr__(self, "n_exceedances", n_exceedances)
+        object.__setattr__(self, "n_total", n_total)
+        object.__setattr__(self, "n_dropped_nonpositive", n_dropped)
 
     @property
     def endpoint(self) -> float:
@@ -113,6 +163,9 @@ def gpd_fit(
             ``method`` is not ``"mle"``/``"pwm"``; the MLE optimizer fails to converge; or the fitted
             ``(shape, scale)`` is not a valid GPD (see :func:`_validate_gpd_params`).
     """
+    threshold = _finite_scalar(threshold, name="threshold")
+    if n_total is not None:
+        n_total = _exact_integer(n_total, name="n_total", minimum=1)
     z_raw = np.asarray(exceedances, dtype=float).ravel()
     if not np.all(np.isfinite(z_raw)):
         raise ValueError("exceedances must be finite; NaN/inf are invalid data, not sub-threshold observations.")
@@ -159,6 +212,9 @@ def gpd_fit(
 def peaks_over_threshold(data: np.ndarray, threshold: float, *, method: str = "mle") -> GPDFit:
     """Peaks-over-threshold: select exceedances above ``threshold`` and fit a GPD to the excesses."""
     x = np.asarray(data, dtype=float).ravel()
+    threshold = _finite_scalar(threshold, name="threshold")
+    if not np.all(np.isfinite(x)):
+        raise ValueError("data must be finite; NaN/inf cannot be treated as sub-threshold observations.")
     exc = x[x > threshold] - threshold
     return gpd_fit(exc, threshold=threshold, method=method, n_total=x.shape[0])
 
@@ -174,13 +230,28 @@ def return_level(fit: GPDFit, period: float) -> float:
             ``m = 0`` sends the level to +/-infinity and negative ``m`` is undefined for non-integer
             ``xi``).
     """
-    if not period > 0:
+    period = _finite_scalar(period, name="period")
+    if period <= 0.0:
         raise ValueError(f"period must be positive, got {period}.")
     zeta = fit.n_exceedances / fit.n_total
     m = period * zeta
-    if abs(fit.shape) < 1e-8:
-        return float(fit.threshold + fit.scale * np.log(m))
-    return float(fit.threshold + (fit.scale / fit.shape) * (m**fit.shape - 1.0))
+    if m < 1.0:
+        raise ValueError(
+            "period is below the fitted threshold's recurrence region; "
+            f"period * exceedance_rate must be >= 1, got {m}."
+        )
+    try:
+        if abs(fit.shape) < 1e-8:
+            level = float(fit.threshold + fit.scale * np.log(m))
+        else:
+            level = float(fit.threshold + (fit.scale / fit.shape) * (m**fit.shape - 1.0))
+    except OverflowError as exc:
+        raise ValueError("return level overflowed the finite numeric domain.") from exc
+    if not np.isfinite(level):
+        raise ValueError("return level must remain finite.")
+    if level < fit.threshold:
+        raise ValueError("return level fell below the fitted POT threshold.")
+    return level
 
 
 def _top_order_stats(x_sorted: np.ndarray, k: int, *, min_k: int = 1) -> tuple[np.ndarray, float]:
@@ -257,6 +328,10 @@ def mean_residual_life(data: np.ndarray, thresholds: np.ndarray) -> dict[str, np
     """
     x = np.asarray(data, dtype=float).ravel()
     thresholds = np.asarray(thresholds, dtype=float)
+    if x.size == 0 or not np.all(np.isfinite(x)):
+        raise ValueError("data must be nonempty and finite.")
+    if thresholds.ndim != 1 or not np.all(np.isfinite(thresholds)):
+        raise ValueError("thresholds must be a one-dimensional finite array.")
     me = np.empty(thresholds.shape[0])
     ne = np.empty(thresholds.shape[0], dtype=int)
     for i, u in enumerate(thresholds):

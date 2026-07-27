@@ -6,6 +6,7 @@ from unittest import mock
 import numpy as np
 
 from mixle.analysis import (
+    GPDFit,
     endpoint_estimator,
     gpd_fit,
     hill_estimator,
@@ -118,6 +119,59 @@ class GPDTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             return_level(fit, -100)
 
+    def test_raw_pot_rejects_nonfinite_data_and_threshold(self):
+        for bad_data in (
+            np.array([np.nan, 2.0, 3.0]),
+            np.array([np.inf, 2.0, 3.0]),
+        ):
+            with self.assertRaises(ValueError):
+                peaks_over_threshold(bad_data, 1.0)
+        with self.assertRaises(ValueError):
+            peaks_over_threshold(np.array([1.0, 2.0, 3.0]), np.nan)
+
+    def test_gpd_fit_requires_finite_threshold_and_exact_total(self):
+        z = np.array([1.0, 2.0, 3.0, 4.0])
+        with self.assertRaises(ValueError):
+            gpd_fit(z, threshold=np.nan, method="pwm")
+        for bad_total in (10.5, True, np.nan):
+            with self.assertRaises(ValueError):
+                gpd_fit(z, method="pwm", n_total=bad_total)
+
+    def test_direct_fit_rejects_inconsistent_metadata(self):
+        base = dict(
+            shape=0.2,
+            scale=1.0,
+            threshold=10.0,
+            n_exceedances=2,
+            n_total=100,
+            method="mle",
+        )
+        for override in (
+            {"shape": np.nan},
+            {"scale": 0.0},
+            {"threshold": np.nan},
+            {"n_exceedances": 2.5},
+            {"n_exceedances": True},
+            {"n_total": 1},
+            {"n_dropped_nonpositive": -1},
+            {"method": "other"},
+        ):
+            with self.assertRaises(ValueError):
+                GPDFit(**(base | override))
+
+    def test_return_level_requires_exceedance_tail_region(self):
+        fit = GPDFit(
+            shape=0.2,
+            scale=1.0,
+            threshold=10.0,
+            n_exceedances=2,
+            n_total=100,
+            method="mle",
+        )
+        with self.assertRaises(ValueError):
+            return_level(fit, 1.0)
+        self.assertEqual(return_level(fit, 50.0), 10.0)
+
 
 class TailIndexTest(unittest.TestCase):
     def test_hill_recovers_pareto_index(self):
@@ -197,6 +251,14 @@ class MeanResidualLifeTest(unittest.TestCase):
         mrl = mean_residual_life(x, np.array([0.0, 1.0, 2.0, 3.0]))
         # mean excess increases with threshold for a heavy (xi>0) tail
         self.assertTrue(np.all(np.diff(mrl["mean_excess"]) > 0))
+
+    def test_rejects_nonfinite_data_or_thresholds(self):
+        with self.assertRaises(ValueError):
+            mean_residual_life(np.array([np.nan, 1.0, 2.0]), np.array([0.0]))
+        with self.assertRaises(ValueError):
+            mean_residual_life(np.array([1.0, 2.0]), np.array([np.nan]))
+        with self.assertRaises(ValueError):
+            mean_residual_life(np.array([1.0, 2.0]), np.array([[0.0]]))
 
 
 class RecordsTest(unittest.TestCase):
