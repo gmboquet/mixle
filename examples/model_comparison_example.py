@@ -4,7 +4,7 @@ mixle.ppl's Bayesian model-comparison surface -- ``waic``, ``loo``, and ``compar
 fitted models by their estimated *out-of-sample* predictive accuracy (the expected log pointwise
 predictive density, elpd), the same quantity held-out validation would estimate, but computed
 from a single fit. That is a different question from "which model has the higher in-sample
-log-likelihood", which a flexible-enough wrong model can always win.
+log-likelihood", which can favor a flexible but predictively wrong model.
 
 To make the comparison have a real, unambiguous answer to recover, the data here is genuinely
 bimodal (two well-separated Gaussian modes), and the candidates are deliberately mismatched:
@@ -15,9 +15,9 @@ bimodal (two well-separated Gaussian modes), and the candidates are deliberately
 
 All three are fit with ``how='mcmc'`` so each carries real posterior draws rather than one point
 estimate -- that is what makes ``waic``/``loo`` (which integrate over parameter uncertainty)
-meaningful instead of silently falling back to a single-draw row. ``compare()`` ranks B clearly
-first by a wide elpd margin, and the raw ``waic()``/``loo()`` dicts underneath show the
-diagnostics behind that ranking, including PSIS-LOO's khat_max reliability check.
+meaningful instead of silently falling back to a single-draw row. ``compare()`` prints the current
+ranking and the raw ``waic()``/``loo()`` diagnostics, including PSIS-LOO's khat_max reliability
+check; the source does not predeclare a winner.
 
 Run: ``python examples/model_comparison_example.py``
 """

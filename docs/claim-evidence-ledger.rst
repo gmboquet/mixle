@@ -27,16 +27,22 @@ the 0.8.0 re-run, marked below).
      - Grade
      - Evidence / caveat
    * - ~90 distribution families with a common estimator/sampler/encoder contract
+     - E1
+     - Source-tree family, sampler-seed, and scipy-golden density tests cover the broad provisional
+       catalog. A clean-wheel import sweep is not behavioral evidence for every family.
+   * - Seven stable scalar families satisfy normalization, score, fit, and serialization invariants
      - E2
-     - Family, sampler-seed, and scipy-golden density tests across the catalog; imported from the
-       clean wheel by the ``clean-wheel`` CI job.
+     - The exact wheel is installed into an isolated environment; the stable invariant catalog runs
+       there with no source-tree import path and retains JUnit evidence.
    * - "5000+ tests"
      - E1
      - The full suite runs in CI (``fast`` on 3.11–3.12, ``full`` on 3.12). Not yet run from the wheel
        for the whole suite (only the import sweep is) — that is a 0.8.0 exit criterion.
-   * - One ``optimize(...)`` call fits a composed model (distribution + neural + latent) together
+   * - One ``optimize(...)`` call fits a heterogeneous composed base model
      - E2
-     - Composite/mixture/HMM estimation tests plus the nested-estimator examples; deterministic-by-default.
+     - The collection-light public fit path runs from the isolated installed wheel and retains JUnit
+       evidence. Neural and latent compositions remain E1 unless their optional installed-wheel lane
+       is retained separately.
    * - A PyTorch module fits in one line with parity to a hand-written loop
      - E1
      - ``torch_parity_test`` / ``grad_control_test`` check parity, freezing, and checkpointing (torch extra).
@@ -45,7 +51,7 @@ the 0.8.0 re-run, marked below).
      - Task/calibration/cascade tests are E1. A real Banking77 teacher/student workflow exists, but its
        exact-candidate hosted run must complete before it counts as 0.8.0 E3 evidence.
    * - HMM / GMM performance and crossover behavior
-     - No 0.8.0 claim
+     - none
      - The harness is tracked in ``benchmarks/``. Older measurements are archived and are not release
        evidence; numbers may be published only after an exact-candidate retained run.
    * - Distributed estimation over Spark / Dask / Ray / MPI by switching one argument

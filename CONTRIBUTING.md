@@ -11,35 +11,45 @@ pip install -e ".[test,lint,docs]"  # add other extras (torch, numba, spark, ...
 git config core.hooksPath .githooks # auto-format + lint-fix staged files before every commit
 ```
 
-Python 3.11+ is required; the release matrix tests Python 3.11 and 3.12.
+Python 3.11 or 3.12 is required; those are the complete 0.8.0 release matrix.
 
-## Running tests
+<!-- BEGIN GENERATED DEVELOPMENT POLICY -->
+## Authoritative development policy
 
-```sh
-# Local work: select the affected node and enforce a 30-second deadline.
-perl -e 'alarm shift; exec @ARGV' 30 python -m pytest -q -n0 -m "" path/to/some_test.py::test_name
+This summary is generated from `manifests/development_policy.json`; edit the manifest and rerun
+`python scripts/render_contributing_policy.py` rather than changing this block by hand.
 
-# Hosted checks run the broader fast, full, packaging, and environment matrix.
-python -m pytest -m fast -n auto
-python -m pytest -m "not optional and not benchmark" -n auto
-```
+Current work targets `release/0.8.0` and milestone `0.8.0`. Automated
+dependency updates target the same branch. Retarget both the manifest and Dependabot deliberately
+when the release line changes.
 
-New tests default to the `fast` gate automatically (see `mixle/tests/conftest.py`) unless they need a
-heavier tag (`slow`, `optional`, `torch`, `numba`, `jax`, `benchmark`, ...). Local
-diagnostics must remain narrowly selected and terminate at 30 seconds; broader suites belong in hosted
-checks.
+Local diagnostics must select the affected node and finish within
+30 seconds. Hosted validation owns broader execution.
+The execution tiers are `smoke`, `core`, `full`, `optional`, `numerical`, `benchmark`, `hardware`.
 
-## Linting and formatting
+Blocking validation:
 
-```sh
-ruff format mixle    # auto-format
-ruff check mixle      # lint (enforced in CI)
-mypy                  # type check (advisory in CI, not yet enforced)
-```
+- ruff format
+- ruff check
+- import-linter architecture contracts
+- typed-core mypy
+- purpose-named hosted test tiers
 
-The pre-commit hook (once enabled via `git config core.hooksPath .githooks`) runs `ruff format` +
-`ruff check --fix` on staged Python files automatically, so most formatting/lint issues never reach a
-commit.
+Advisory validation:
+
+- whole-tree mypy
+
+Public API maturity has three levels:
+
+- **stable** — Deprecate before removal and preserve the old behavior for at least two minor releases.
+- **provisional** — Usable and tested; signature or defaults may change within a minor release with a changelog entry.
+- **experimental** — No compatibility guarantee; stable modules must not depend on it.
+
+Stable deprecations remain functional for at least
+2 minor releases after announcement, emit
+`DeprecationWarning`, name their replacement/removal release, and ship migration guidance. Genuine
+security or data-corruption repairs may fail closed immediately, but must be documented explicitly.
+<!-- END GENERATED DEVELOPMENT POLICY -->
 
 ## Pull request conventions
 
@@ -47,34 +57,12 @@ commit.
 - Write the commit/PR title and body around *why*, not just *what*; the diff already shows what
   changed.
 - Include a test plan: what you ran, what passed, what you narrowed the test selection to and why.
-- Resolve the active target from the Mixle status repository. Current 0.8.0 work targets
-  `release/0.8.0` and milestone `0.8.0`.
+- Resolve the active target from the authoritative policy manifest; do not infer it from the default
+  branch.
 - Update `CHANGELOG.md`'s `[0.8.0] — Unreleased` section for any user-visible change (new public API, fixed
   bug, behavior change). Purely internal refactors with no visible effect don't need an entry.
 - Required hosted checks must be green before merge. Optional-backend and security evidence is required
   when the changed surface or release gate makes it applicable.
-
-## Deprecation policy
-
-mixle is pre-1.0 and iterates quickly, but a deprecation should still give users a chance to react
-before it becomes a hard break, not just an entry in the changelog they might not read in time:
-
-1. **Deprecate first.** Mark the old API with a `DeprecationWarning` (via `warnings.warn(...,
-   DeprecationWarning, stacklevel=2)`) that names the replacement. Document it in the docstring and in
-   `CHANGELOG.md` under `Changed` (or a `Deprecated` heading if there are several in one release).
-2. **Keep it working for one minor release.** The deprecated path should still function (not just
-   warn) for at least one full minor version after the warning is introduced, so a user pinned to a
-   slightly-behind version isn't broken by upgrading within the same minor line.
-3. **Remove in a later minor release**, with a `CHANGELOG.md` entry under `Removed` naming what was
-   removed and what replaced it, and (if the removal is significant) a one-line migration note.
-4. **Exception:** a genuine security fix or a bug fix where the "working" behavior was itself unsafe
-   (e.g. the `Boolean.coerce` / `conform_record` silent-corruption fixes in 0.7.0) does not have to
-   follow this cycle — correctness and safety win over compatibility, but the change must still be
-   called out clearly in `CHANGELOG.md` under `Fixed` so nobody is silently surprised.
-
-This project does not yet publish a formal API-stability tier (e.g. "stable" vs. "experimental"
-namespaces); until it does, treat everything under `mixle.*` as covered by this policy except names
-prefixed with a single underscore, which are implementation details and may change without notice.
 
 ## Reporting bugs / requesting features
 

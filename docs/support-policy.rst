@@ -121,7 +121,7 @@ rather than deleted:
 
       <old> is deprecated since mixle <since>; use <new> instead. It will be removed in mixle <removed_in>.
 
-* it is kept for **at least two minor releases** after the release that announces
+* it is kept for at least **2 minor releases** after the release that announces
   the deprecation (announced in ``0.8.0`` → removable no earlier than ``0.10.0``);
   and
 * its removal ships with a migration note and, for a renamed API, a runnable

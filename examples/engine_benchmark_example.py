@@ -6,10 +6,9 @@ Times three representative workloads across engines and prints a table:
   * default HMM EM (the numba encoding scored + E-stepped on the engine),
   * batch scoring for a spread of families (Gaussian / GPD / wrapped Cauchy / Watson).
 
-The point is honesty, not marketing: on small data the numpy/numba host path usually WINS (kernel-launch
-and transfer overhead dominate), and the GPU only pays past a size threshold — the table shows where.
-Sizes scale with --scale so you can find the crossover on your hardware. Apple-silicon (MPS) runs
-float32 (no float64 on MPS), so its numbers trade precision for speed by construction.
+The table reports current-run measurements without assuming which engine wins. Sizes scale with
+``--scale`` so the crossover can be measured on the named hardware. Apple-silicon (MPS) runs float32
+(no float64 on MPS), so precision differs and must be reported with timing.
 """
 
 from __future__ import annotations

@@ -1,20 +1,17 @@
 Performance Crossover: Where Specialized Packages Win
 =====================================================
 
-Mixle's value proposition is composition and heterogeneity, not beating a
-specialized single-model library on its own turf. This page states the losses as
-well as the wins, so a reader can choose the right tool. It is deliberately
-honest about cases where scikit-learn, hmmlearn, or pomegranate is the faster
-choice.
+Mixle's value proposition is composition and heterogeneity. This page explains
+how to measure the overhead relative to a specialized single-model library
+without presupposing the result.
 
 The short version
 -----------------
 
-**For a single, standard model, a specialized package is usually faster to fit
-than mixle, and mixle does not claim otherwise.** Mixle earns its keep when the
-model is a *composition* -- a mixture inside an HMM state, a neural leaf beside a
-classical one, a record of heterogeneous fields -- which the specialized packages
-do not express at all.
+For a single standard model, compare Mixle with a version-pinned specialized
+implementation on the exact workload. Mixle also supports compositions such as
+a mixture inside an HMM state, a neural leaf beside a classical one, and a record
+of heterogeneous fields; compare only systems that express the same model.
 
 Exact-candidate evidence
 ------------------------
@@ -39,16 +36,13 @@ kernel with none of that generality to pay for.
 
 So the honest framing is:
 
-* **specialized cases:** for a standalone GMM or HMM, assume that a specialized
-  implementation may be faster until an exact-candidate benchmark shows
-  otherwise;
+* **specialized cases:** for a standalone GMM or HMM, make no performance
+  conclusion until an exact-candidate benchmark measures both implementations;
 * **generality overhead vs kernel inefficiency:** the cost is the composable
   encode/accumulate/M-step machinery, paid on every fit; it is the price of
   composition, not evidence of a different or worse estimator.
-* **where mixle is the right tool:** when the model is not a single family --
-  heterogeneous records, latent structure over mixtures, neural leaves beside
-  classical ones -- there is no specialized package to lose to, because those
-  packages do not express the model.
+* **composition cases:** compare model semantics first, so a timing table does
+  not silently compare different likelihoods.
 
 GPU and backend numbers
 -----------------------

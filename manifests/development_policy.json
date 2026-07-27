@@ -1,0 +1,35 @@
+{
+  "artifact": "mixle.development_policy/v1",
+  "compatibility": {
+    "experimental": "No compatibility guarantee; stable modules must not depend on it.",
+    "provisional": "Usable and tested; signature or defaults may change within a minor release with a changelog entry.",
+    "stable": "Deprecate before removal and preserve the old behavior for at least two minor releases.",
+    "stable_deprecation_min_minor_releases": 2
+  },
+  "release": {
+    "milestone": "0.8.0",
+    "target_branch": "release/0.8.0"
+  },
+  "validation": {
+    "advisory": [
+      "whole-tree mypy"
+    ],
+    "blocking": [
+      "ruff format",
+      "ruff check",
+      "import-linter architecture contracts",
+      "typed-core mypy",
+      "purpose-named hosted test tiers"
+    ],
+    "local_command_timeout_seconds": 30,
+    "test_tiers": [
+      "smoke",
+      "core",
+      "full",
+      "optional",
+      "numerical",
+      "benchmark",
+      "hardware"
+    ]
+  }
+}

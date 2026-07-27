@@ -3,7 +3,7 @@
 A5's ``mixle.task.acquire.acquire(pool, model, k, strategy="eig", ...)`` ranks an unlabeled pool by
 expected information gain (BALD) against an ensemble of scoreable models. ``mixle/tests/task_acquire_test.py``
 already proves the underlying claim as a single test assertion (EIG-ranked labeling reaches a target
-held-out likelihood using measurably fewer labels than random, ~4x in that PR's own report). This example
+held-out likelihood with no more labels than the seeded random baseline in its bounded fixture). This example
 is that same claim, presented as something a human deciding "how many expert labels do I actually need to
 buy" can run and read directly: a budgeted labeling loop that ends with an explicit receipt --
 
@@ -16,8 +16,8 @@ as a curve rather than a single ratio number.
 available in this worktree at the time this example was written. Rather than block on it, this demo mirrors
 ``task_acquire_test.py``'s own synthetic setup directly: a noisy-threshold classification task
 (``y = 1{x > theta_true}``, label noise ``EPS_TRUE``) with a small bootstrap ensemble of ``StumpModel``
-threshold classifiers as the scoreable model family -- the textbook case where active learning has a real,
-large advantage over random sampling, since only pool points near the (unknown) threshold are informative
+threshold classifiers as the scoreable model family -- a case where pool points near the unknown threshold
+are informative
 about where it is. Swapping in a B1 dataset later (once it exists) is a drop-in replacement for
 ``make_task`` below, not a rewrite of the budgeted loop.
 

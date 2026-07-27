@@ -25,7 +25,20 @@ fi
 files=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.py$' || true)
 [ -z "$files" ] && exit 0
 
-# Format + autofix, then re-stage what changed. ($files word-splits; repo has no spaced paths.)
+# Never turn an unstaged hunk into a staged one. Formatting the working-tree copy and then adding it
+# is safe only when every change to that file is already staged; otherwise abort without touching
+# either the file or the index and let the contributor stage/format deliberately.
+# shellcheck disable=SC2086
+partially_staged=$(git diff --name-only -- $files)
+if [ -n "$partially_staged" ]; then
+  echo "pre-commit: staged Python files also contain unstaged edits; index left unchanged:" >&2
+  echo "$partially_staged" >&2
+  echo "Format and stage those files completely, or commit the staged hunks without this mutating hook." >&2
+  exit 1
+fi
+
+# Format + autofix files whose complete working-tree change is staged, then re-stage the result.
+# ($files word-splits; repo has no spaced paths.)
 # shellcheck disable=SC2086
 $RUFF format $files >/dev/null
 # shellcheck disable=SC2086

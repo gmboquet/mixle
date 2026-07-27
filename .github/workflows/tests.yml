@@ -260,11 +260,28 @@ jobs:
           python -m venv "$RUNNER_TEMP/cleanvenv"
           "$RUNNER_TEMP/cleanvenv/bin/python" -m pip install --upgrade pip
           "$RUNNER_TEMP/cleanvenv/bin/python" -m pip install dist/*.whl
+          "$RUNNER_TEMP/cleanvenv/bin/python" -m pip install pytest pytest-xdist
           "$RUNNER_TEMP/cleanvenv/bin/python" -m pip check
       - name: Import smoke + full public-module sweep from the clean wheel
         # Run as a script (its dir, not the repo root, is on sys.path) so the source tree cannot shadow
         # the installed package; the script asserts it is importing the site-packages wheel.
         run: '"$RUNNER_TEMP/cleanvenv/bin/python" scripts/import_sweep.py'
+      - name: Run stable-family and composed-fit behavior from the installed wheel
+        run: |
+          mkdir "$RUNNER_TEMP/wheel-tests"
+          cp mixle/tests/invariant_catalog_test.py mixle/tests/smoke_test.py "$RUNNER_TEMP/wheel-tests/"
+          cd "$RUNNER_TEMP/wheel-tests"
+          "$RUNNER_TEMP/cleanvenv/bin/python" -c \
+            'import pathlib,mixle; p=pathlib.Path(mixle.__file__).resolve(); assert "site-packages" in p.parts, p'
+          "$RUNNER_TEMP/cleanvenv/bin/python" -m pytest -q -n 0 -m "" \
+            invariant_catalog_test.py smoke_test.py \
+            --junitxml=clean-wheel-behavior.xml
+      - uses: actions/upload-artifact@v7
+        with:
+          name: clean-wheel-behavior-${{ github.sha }}
+          path: ${{ runner.temp }}/wheel-tests/clean-wheel-behavior.xml
+          if-no-files-found: error
+          retention-days: 90
 
   optional:
     name: optional extras / py3.12

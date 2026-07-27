@@ -34,6 +34,7 @@ import importlib
 import importlib.util
 import json
 import sys
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 
@@ -86,8 +87,15 @@ def _string_literals(node: ast.expr) -> list[str] | None:
     return None
 
 
+def _unique_exports(names: list[str], *, owner: str) -> list[str]:
+    duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
+    if duplicates:
+        raise ValueError(f"{owner} contains duplicate __all__ exports: {duplicates}")
+    return sorted(names)
+
+
 def _extract_all(path: Path) -> tuple[list[str], bool]:
-    """Return (sorted unique ``__all__`` names, fully_static). ``fully_static`` is False if any
+    """Return (sorted ``__all__`` names, fully_static). ``fully_static`` is False if any
     statement assigning/extending ``__all__`` used a non-literal value we could not resolve."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     names: list[str] = []
@@ -106,7 +114,7 @@ def _extract_all(path: Path) -> tuple[list[str], bool]:
             fully_static = False
         else:
             names.extend(literals)
-    return sorted(set(names)), fully_static
+    return _unique_exports(names, owner=str(path)), fully_static
 
 
 def build_manifest(repo_root: Path = REPO_ROOT) -> dict[str, object]:
@@ -154,7 +162,8 @@ def build_manifest(repo_root: Path = REPO_ROOT) -> dict[str, object]:
         else:
             try:
                 module = importlib.import_module(dotted)
-                packages[dotted] = {"maturity": maturity, "names": sorted(getattr(module, "__all__", []))}
+                exports = list(getattr(module, "__all__", []))
+                packages[dotted] = {"maturity": maturity, "names": _unique_exports(exports, owner=dotted)}
             except Exception as exc:  # noqa: BLE001 -- a missing optional dep must not break the manifest
                 packages[dotted] = {"maturity": maturity, "unresolved": type(exc).__name__}
     return {"artifact": ARTIFACT_ID, "packages": packages}
