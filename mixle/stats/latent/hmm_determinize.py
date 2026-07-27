@@ -29,7 +29,9 @@ from __future__ import annotations
 import heapq
 import itertools
 import math
+from collections.abc import Mapping, Sequence
 from fractions import Fraction
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
@@ -45,13 +47,43 @@ from mixle.stats.compute.pdist import (
 STRUCTURAL_ZERO = -1
 
 
+def _positive_exact_integer(value: Any, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be a positive exact integer")
+    result = int(value)
+    if result <= 0:
+        raise ValueError(f"{name} must be positive")
+    return result
+
+
+def _normalize_fraction_row(values: Sequence[Fraction], name: str) -> list[Fraction]:
+    row = [Fraction(value) for value in values]
+    if not row or any(value < 0 for value in row):
+        raise ValueError(f"{name} must contain non-negative rational weights with positive total")
+    total = sum(row, Fraction(0))
+    if total <= 0:
+        raise ValueError(f"{name} must have positive total weight")
+    return [value / total for value in row]
+
+
+def _rationalized_probability_row(values: Sequence[Any], max_denominator: int, name: str) -> list[Fraction]:
+    rational = []
+    for value in values:
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+            raise TypeError(f"{name} must contain finite non-negative real probabilities")
+        probability = float(value)
+        if not np.isfinite(probability) or probability < 0.0:
+            raise ValueError(f"{name} must contain finite non-negative real probabilities")
+        rational.append(Fraction(probability).limit_denominator(max_denominator))
+    return _normalize_fraction_row(rational, name)
+
+
 def _row_probs(exponents: np.ndarray, theta: Fraction) -> list[list[Fraction]]:
     """Exact row-normalized probabilities theta^k / sum_j theta^{k_j} (negative exponent -> 0)."""
     out = []
     for row in np.asarray(exponents):
         terms = [theta ** int(k) if int(k) >= 0 else Fraction(0) for k in row]
-        z = sum(terms)
-        out.append([t / z if z != 0 else Fraction(0) for t in terms])
+        out.append(_normalize_fraction_row(terms, "quantized probability row"))
     return out
 
 
@@ -60,6 +92,7 @@ def determinize_quantized_terminal(dist, max_states: int = 1 << 16):
 
     Raises EnumerationError if the HMM has no terminal_values, or if the belief expansion exceeds
     ``max_states`` (the twins property fails -- not finitely determinizable)."""
+    max_states = _positive_exact_integer(max_states, "max_states")
     tv = getattr(dist, "terminal_values", None)
     if tv is None:
         raise EnumerationError(dist, reason="determinization here is for the terminal_values (stopping-time) HMM")
@@ -79,19 +112,32 @@ def determinize_quantized_terminal(dist, max_states: int = 1 << 16):
 def determinize_terminal_hmm(dist, max_states: int = 1 << 16, max_denominator: int = 10**9):
     """Determinize a GENERAL terminal-value HMM (any transitions/initial, finite-discrete emissions).
 
-    Belief equality must be decidable, so the model's float probabilities are first rationalized
-    (``Fraction(p).limit_denominator(max_denominator)``) and the determinization is exact on that
-    rationalized model -- which equals the original to the rationalization precision. Requires
-    terminal_values and enumerable finite emissions. Raises EnumerationError if not finitely
-    determinizable within ``max_states`` or if an emission support is not finite/enumerable."""
+    Belief equality must be decidable, so each row of the model's float probabilities is first
+    rationalized (``Fraction(p).limit_denominator(max_denominator)``) and then normalized exactly.
+    Determinization is exact on that stochastic rational model, which approximates the source to the
+    requested rationalization precision. Requires terminal_values and enumerable finite emissions.
+    Raises EnumerationError if not finitely determinizable within ``max_states`` or if an emission
+    support is not finite/enumerable."""
+    max_states = _positive_exact_integer(max_states, "max_states")
+    max_denominator = _positive_exact_integer(max_denominator, "max_denominator")
     tv = getattr(dist, "terminal_values", None)
     if tv is None:
         raise EnumerationError(dist, reason="determinization here is for the terminal_values (stopping-time) HMM")
     tv = set(tv)
     n = dist.n_states
     md = max_denominator
-    A = [[Fraction(float(dist.transitions[s][sp])).limit_denominator(md) for sp in range(n)] for s in range(n)]
-    init = [Fraction(float(w)).limit_denominator(md) for w in dist.w]
+    try:
+        A = [
+            _rationalized_probability_row(
+                [dist.transitions[s][sp] for sp in range(n)],
+                md,
+                f"transition row {s}",
+            )
+            for s in range(n)
+        ]
+        init = _rationalized_probability_row(list(dist.w), md, "initial-state probabilities")
+    except (TypeError, ValueError) as exc:
+        raise EnumerationError(dist, reason=f"invalid rationalized HMM probabilities: {exc}") from exc
 
     cap = 1 << 16
     supports: list[dict] = []
@@ -105,6 +151,10 @@ def determinize_terminal_hmm(dist, max_states: int = 1 << 16, max_denominator: i
                 if cnt > cap:
                     raise EnumerationError(dist, reason="emission support too large to determinize")
                 if lp != -np.inf:
+                    if v in sup:
+                        raise EnumerationError(dist, reason=f"emission state {s} enumerated duplicate value {v!r}")
+                    if not isinstance(lp, Real) or not np.isfinite(lp) or float(lp) > 0.0:
+                        raise EnumerationError(dist, reason=f"emission state {s} returned invalid log probability")
                     sup[v] = Fraction(float(np.exp(lp))).limit_denominator(md)
                     level_ix.setdefault(v, len(level_ix))
         except EnumerationError:
@@ -113,7 +163,16 @@ def determinize_terminal_hmm(dist, max_states: int = 1 << 16, max_denominator: i
             raise EnumerationError(dist, reason="emission is not finite/enumerable: %s" % exc) from exc
         supports.append(sup)
     levels = list(level_ix)
-    E = [[supports[s].get(v, Fraction(0)) for v in levels] for s in range(n)]
+    try:
+        E = [
+            _normalize_fraction_row(
+                [supports[s].get(v, Fraction(0)) for v in levels],
+                f"emission row {s}",
+            )
+            for s in range(n)
+        ]
+    except ValueError as exc:
+        raise EnumerationError(dist, reason=f"invalid rationalized emission probabilities: {exc}") from exc
     return _build_machine(A, E, init, levels, tv, getattr(dist, "name", None), max_states, dist)
 
 
@@ -123,7 +182,19 @@ def _build_machine(A, E, init, levels, tv, name, max_states, src):
     Belief state = predictive distribution P(z_t | x_<t); emit (no transition) for the conditional, then
     transition the posterior for the next belief. New belief states factor the duplicated mass out of the
     originals; the result is deterministic. Raises EnumerationError past ``max_states``."""
+    max_states = _positive_exact_integer(max_states, "max_states")
     n = len(init)
+    if n == 0 or len(A) != n or len(E) != n or any(len(row) != n for row in A):
+        raise EnumerationError(src, reason="rationalized HMM geometry is inconsistent")
+    if any(len(row) != len(levels) for row in E):
+        raise EnumerationError(src, reason="rationalized emission geometry is inconsistent")
+    if any(value < 0 for value in init) or sum(init, Fraction(0)) != 1:
+        raise EnumerationError(src, reason="rationalized initial-state weights are not normalized")
+    if any(any(value < 0 for value in row) or sum(row, Fraction(0)) != 1 for row in A):
+        raise EnumerationError(src, reason="rationalized transition rows are not normalized")
+    if any(any(value < 0 for value in row) or sum(row, Fraction(0)) != 1 for row in E):
+        raise EnumerationError(src, reason="rationalized emission rows are not normalized")
+
     start = tuple(init)
     ids: dict[tuple, int] = {start: 0}
     trans: list[dict[Any, tuple[float, int]]] = []
@@ -169,10 +240,103 @@ class DeterminizedSequenceDistribution(SequenceEncodableProbabilityDistribution)
     n-best-strings."""
 
     def __init__(self, trans, accept, name: str | None = None) -> None:
-        self.trans = trans
-        self.accept = accept
-        self.n_det_states = len(trans)
+        """Build an owned, stochastic deterministic machine.
+
+        Each state must expose a positive finite log weight for every listed edge, with accept and
+        transition weights summing to one. The constructor removes only floating-point summation
+        error; materially unnormalized rows are rejected. Every state reachable from state zero
+        must retain a path to an accept edge, which certifies almost-sure finite termination.
+        """
+        if (
+            isinstance(trans, (str, bytes))
+            or not isinstance(trans, Sequence)
+            or isinstance(accept, (str, bytes))
+            or not isinstance(accept, Sequence)
+        ):
+            raise TypeError("trans and accept must be nonempty sequences of mappings")
+        if len(trans) == 0 or len(trans) != len(accept):
+            raise ValueError("trans and accept must contain the same positive number of states")
+
+        num_states = len(trans)
+        owned_trans: list[dict[Any, tuple[float, int]]] = []
+        owned_accept: list[dict[Any, float]] = []
+        for state, (transition_row, accept_row) in enumerate(zip(trans, accept)):
+            if not isinstance(transition_row, Mapping) or not isinstance(accept_row, Mapping):
+                raise TypeError("every trans and accept row must be a mapping")
+            overlap = transition_row.keys() & accept_row.keys()
+            if overlap:
+                raise ValueError(f"state {state} assigns symbols as both transitions and accepts: {overlap!r}")
+
+            raw_trans: dict[Any, tuple[float, int]] = {}
+            raw_accept: dict[Any, float] = {}
+            probabilities = []
+            for symbol, edge in transition_row.items():
+                if not isinstance(edge, (tuple, list)) or len(edge) != 2:
+                    raise TypeError("transition edges must be (log_weight, next_state) pairs")
+                log_weight, next_state = edge
+                weight = self._validated_log_weight(log_weight, f"transition edge at state {state}")
+                if isinstance(next_state, (bool, np.bool_)) or not isinstance(next_state, Integral):
+                    raise TypeError("transition destinations must be exact non-boolean integers")
+                next_state = int(next_state)
+                if not 0 <= next_state < num_states:
+                    raise ValueError("transition destination is outside the machine")
+                raw_trans[symbol] = (weight, next_state)
+                probabilities.append(math.exp(weight))
+            for symbol, log_weight in accept_row.items():
+                weight = self._validated_log_weight(log_weight, f"accept edge at state {state}")
+                raw_accept[symbol] = weight
+                probabilities.append(math.exp(weight))
+
+            total = math.fsum(probabilities)
+            if not math.isclose(total, 1.0, rel_tol=1.0e-12, abs_tol=1.0e-12):
+                raise ValueError(f"outgoing accept and transition weights at state {state} must sum to one")
+            log_total = math.log(total)
+            owned_trans.append({symbol: (weight - log_total, target) for symbol, (weight, target) in raw_trans.items()})
+            owned_accept.append({symbol: weight - log_total for symbol, weight in raw_accept.items()})
+
+        self._require_almost_sure_termination(owned_trans, owned_accept)
+        self.trans = tuple(owned_trans)
+        self.accept = tuple(owned_accept)
+        self.n_det_states = num_states
         self.name = name
+        self.termination_certified = True
+
+    @staticmethod
+    def _validated_log_weight(value: Any, name: str) -> float:
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+            raise TypeError(f"{name} must be a finite real log probability")
+        result = float(value)
+        if not np.isfinite(result) or result > 1.0e-12:
+            raise ValueError(f"{name} must be a finite log probability no greater than zero")
+        return result
+
+    @staticmethod
+    def _require_almost_sure_termination(
+        trans: Sequence[Mapping[Any, tuple[float, int]]],
+        accept: Sequence[Mapping[Any, float]],
+    ) -> None:
+        reachable = {0}
+        frontier = [0]
+        reverse: list[set[int]] = [set() for _ in trans]
+        while frontier:
+            state = frontier.pop()
+            for _weight, target in trans[state].values():
+                reverse[target].add(state)
+                if target not in reachable:
+                    reachable.add(target)
+                    frontier.append(target)
+
+        can_terminate = {state for state, row in enumerate(accept) if row}
+        frontier = list(can_terminate)
+        while frontier:
+            state = frontier.pop()
+            for predecessor in reverse[state]:
+                if predecessor not in can_terminate:
+                    can_terminate.add(predecessor)
+                    frontier.append(predecessor)
+        if not reachable <= can_terminate:
+            bad = sorted(reachable - can_terminate)
+            raise ValueError(f"reachable states {bad} cannot terminate with positive probability")
 
     def __str__(self) -> str:
         return "DeterminizedSequenceDistribution(states=%d, name=%s)" % (self.n_det_states, repr(self.name))
@@ -335,6 +499,10 @@ class DeterminizedSampler:
         """Draw one terminal-ended sequence or a list of independent sequences."""
         if size is None:
             return self._one()
+        if isinstance(size, (bool, np.bool_)) or not isinstance(size, Integral):
+            raise TypeError("size must be a non-negative exact integer or None")
+        if size < 0:
+            raise ValueError("size must be non-negative")
         return [self._one() for _ in range(size)]
 
 
