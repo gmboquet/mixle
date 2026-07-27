@@ -8,9 +8,10 @@ evidence must exist before the branch can be treated as a releasable artifact.
 Supported Environment
 ---------------------
 
-The package metadata declares Python 3.11 and newer. The effective release
-matrix is the intersection of that declaration and the optional dependencies
-used by a given surface:
+The 0.8.0 package metadata declares Python 3.11 and 3.12
+(``>=3.11,<3.13``), exactly matching the hosted interpreter matrix. The
+effective release matrix is the intersection of that declaration and the
+optional dependencies used by a given surface:
 
 * base probability, inference, and data-structure paths should install without
   Torch, JAX, Spark, Dask, MPI, pandas, Arrow, or symbolic packages;

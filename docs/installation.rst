@@ -1,7 +1,10 @@
 Installation
 ============
 
-``mixle`` supports Python 3.11 and newer. The PyPI package and import package
+``mixle`` 0.8.0 supports Python 3.11 and 3.12. The package metadata rejects
+3.13 and later because those interpreters are outside the validated release
+matrix; a later Mixle release may widen the range after adding hosted evidence.
+The PyPI package and import package
 are both named ``mixle``.
 
 Base Install

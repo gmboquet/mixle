@@ -25,7 +25,7 @@ The package family currently declares these runtime floors:
      - Runtime floor
      - Release evidence required
    * - Core ``mixle``
-     - Python 3.11 and newer
+     - Python 3.11 and 3.12
      - Wheel install, import sweep, tests, examples, and docs builds on the
        effective Python/OS matrix.
    * - Python sister packages
@@ -179,7 +179,9 @@ Evidence Over Metadata
 ----------------------
 
 Package metadata can declare compatibility, but release documentation should
-claim support only from evidence. If ``requires-python`` allows an interpreter
+claim support only from evidence. For 0.8.0, ``requires-python`` is capped below
+3.13 so installer compatibility and the tested 3.11/3.12 matrix agree. If a later
+``requires-python`` range allows an interpreter
 that was not tested with the effective dependency graph, describe it as allowed
 by metadata, not validated by the release. The same rule applies to optional
 extras, GPU paths, distributed backends, and notebook environments.

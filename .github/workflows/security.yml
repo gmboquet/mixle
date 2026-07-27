@@ -23,6 +23,7 @@ jobs:
   pip-audit:
     name: pip-audit (base install)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -30,30 +31,43 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
-      - name: Install package (base extras only)
+      - name: Build and install the exact wheel in an isolated artifact environment
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e .
-          python -m pip install pip-audit
-      - name: Audit resolved dependencies
+          python -m pip install build
+          python -m build --wheel --outdir dist
+          python -m venv "$RUNNER_TEMP/artifact-env"
+          "$RUNNER_TEMP/artifact-env/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/artifact-env/bin/python" -m pip install dist/*.whl
+          "$RUNNER_TEMP/artifact-env/bin/python" -m pip check
+          python scripts/release_metadata.py dist/*.whl --out wheel-metadata.json
+      - name: Install the audit tool outside the artifact environment
+        run: |
+          python -m venv "$RUNNER_TEMP/audit-tool"
+          "$RUNNER_TEMP/audit-tool/bin/python" -m pip install --upgrade pip pip-audit
+      - name: Audit only the isolated wheel environment
         # Blocking: a known vulnerability in a base dependency fails CI. To accept a specific finding
         # temporarily, add its ID (with a reason + review date) to .github/pip-audit-ignore.txt; only
         # IDs listed there are waived.
         run: |
+          SITE=$("$RUNNER_TEMP/artifact-env/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
           IGNORES=$(grep -vE '^[[:space:]]*#|^[[:space:]]*$' .github/pip-audit-ignore.txt | awk '{printf " --ignore-vuln %s", $1}')
           echo "waived vulns:${IGNORES:- (none)}"
-          pip-audit $IGNORES
-      # Software bill of materials: the resolved base-install dependency set, in CycloneDX JSON, from
-      # the same pip-audit invocation already used for vulnerability scanning above (no new tool).
-      # Best-effort and non-blocking for now -- SBOM generation failing should not fail the vulnerability
-      # gate above, which is the part this job actually exists to enforce.
-      - name: Generate SBOM (CycloneDX JSON)
-        if: always()
-        continue-on-error: true
-        run: pip-audit --format cyclonedx-json -o sbom.json
+          "$RUNNER_TEMP/audit-tool/bin/pip-audit" --path "$SITE" $IGNORES
+      - name: Generate and bind the artifact SBOM
+        env:
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: |
+          SITE=$("$RUNNER_TEMP/artifact-env/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+          "$RUNNER_TEMP/audit-tool/bin/pip-audit" --path "$SITE" --format cyclonedx-json -o raw-sbom.json
+          python scripts/bind_sbom.py \
+            --cyclonedx raw-sbom.json \
+            --wheel-metadata wheel-metadata.json \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --out sbom.json
       - uses: actions/upload-artifact@v7
-        if: always()
         with:
-          name: sbom
+          name: sbom-${{ github.sha }}
           path: sbom.json
-          if-no-files-found: warn
+          if-no-files-found: error
+          retention-days: 90

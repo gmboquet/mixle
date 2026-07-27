@@ -8,7 +8,7 @@ name = "mixle"
 version = "0.8.0"
 description = "A package for estimating heterogeneous probability density functions."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"
 license = "MIT"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Grant Boquet", email = "grant.boquet@gmail.com" }]
@@ -32,7 +32,10 @@ classifiers = [
 ]
 # Base install covers all distributions and local (numpy) estimation; acceleration,
 # distribution, and embedding back-ends are opt-in extras (see [project.optional-dependencies]).
-# Lower bounds are the OLDEST releases the full fast suite is verified green against, not aspirational
+# Python 3.11 and 3.12 are the complete supported interpreter range for 0.8.0. Later interpreters must
+# first be added to the hosted matrix; the upper bound prevents an unvalidated future interpreter from
+# being presented by installers as supported. Lower bounds are the OLDEST releases the full fast suite
+# is verified green against, not aspirational
 # minimums: numpy < 2.1 hits genuine product IndexError bugs (cross_validation / robust covariance) and
 # numpy < 2.4 makes the t-SNE/embedding layout version-fragile; scipy < 1.11.2 has no Python 3.12 wheel
 # and scipy < 1.13 loses von Mises / wrapped Cauchy normalization precision (scipy >=1.16 also pairs
