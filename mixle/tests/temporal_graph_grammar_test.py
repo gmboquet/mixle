@@ -807,6 +807,52 @@ class RegimeSwitchingAttributesTest(unittest.TestCase):
         self.assertAlmostEqual(cur.edge_dists[a].lam, 10.0, delta=2.0)
         self.assertEqual(len(cur.decode(data[0])), len(data[0][0]) - 1)  # Viterbi labels every transition
 
+    def test_attribute_records_are_event_aligned_and_counted_by_effective_regime_weight(self):
+        structure_a = stats.TemporalGraphGrammarDistribution([1, 1, 1, 1], edge_rate=1.0, node_rate=1.0)
+        structure_b = stats.TemporalGraphGrammarDistribution([1, 1, 1, 1], edge_rate=2.0, node_rate=2.0)
+        node_dists = [stats.GaussianDistribution(0.0, 1.0), stats.GaussianDistribution(1.0, 1.0)]
+        edge_dists = [stats.PoissonDistribution(2.0), stats.PoissonDistribution(3.0)]
+        with self.assertRaises(ValueError):
+            stats.LatentAttributedTemporalGraphGrammarDistribution(
+                [structure_a, structure_b],
+                node_dists[:1],
+                edge_dists,
+            )
+
+        dist = stats.LatentAttributedTemporalGraphGrammarDistribution(
+            [structure_a, structure_b],
+            node_dists,
+            edge_dists,
+            [0.5, 0.5],
+            [[0.8, 0.2], [0.2, 0.8]],
+        )
+        previous = np.zeros((1, 1))
+        current = np.array([[0.0, 1.0], [1.0, 0.0]])
+        observation = ([previous, current], [[0.5]], [[2]])
+        self.assertTrue(np.isfinite(dist.log_density(observation)))
+        invalid = [
+            ([previous, current], [], [[2]]),
+            ([previous, current], [[], [0.5]], [[2]]),
+            ([previous, current], [[0.5, 1.5]], [[2]]),
+            ([previous, current], [[0.5]], []),
+            ([previous, current], [[0.5]], [[]]),
+            ([previous, current], [[0.5]], [[2], []]),
+        ]
+        for value in invalid:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    dist.log_density(value)
+
+        estimator = dist.estimator(pseudo_count=0.5)
+        accumulator = estimator.accumulator_factory().make()
+        accumulator.initialize(observation, 2.0, np.random.RandomState(3))
+        value = accumulator.value()
+        self.assertAlmostEqual(float(value.node_weights.sum()), 2.0)
+        self.assertAlmostEqual(float(value.edge_weights.sum()), 2.0)
+        self.assertEqual(value.accepted_weight, 2.0)
+        with self.assertRaises(ValueError):
+            accumulator.seq_initialize([observation], np.ones(2), np.random.RandomState(4))
+
 
 class GraphGrammarClosuresTest(unittest.TestCase):
     def test_directed_scalable_sampling(self):
