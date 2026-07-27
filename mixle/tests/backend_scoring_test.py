@@ -808,15 +808,15 @@ class BackendScoringTestCase(unittest.TestCase):
                 np.asarray([-5.0, -2.0, -0.5, 1.0, 3.5]),
             ),
             (
-                "null",
+                "none_point_mass",
                 MixtureDistribution(
                     [
-                        NullDistribution(),
-                        NullDistribution(),
+                        PointMassDistribution(None),
+                        PointMassDistribution(None),
                     ],
                     [0.40, 0.60],
                 ),
-                [None, "anything", 3.0, {"x": 1}],
+                [None, None, None, None],
             ),
             (
                 "point_mass",
@@ -1634,7 +1634,6 @@ class BackendScoringTestCase(unittest.TestCase):
             "sequence_gaussian",
             "conditional_gaussian",
             "record_gaussian_poisson",
-            "weighted_gaussian",
             "markov_chain",
             "integer_markov_chain",
         )
@@ -1759,7 +1758,6 @@ class BackendScoringTestCase(unittest.TestCase):
             "composite_with_optional",
             "transform_gaussian",
             "von_mises_fisher",
-            "weighted_gaussian",
         }
         generated_resident_cases = {
             "beta",

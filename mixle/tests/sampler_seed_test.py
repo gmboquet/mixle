@@ -406,7 +406,6 @@ def _stats_public_distribution_catalog():
         ),
         "PitmanYorProcessDistribution": stats.PitmanYorProcessDistribution(1.5, 0.3, num_elements=8),
         "MatchingDistribution": stats.MatchingDistribution([[2.0, 1.0, 3.0], [1.0, 4.0, 1.0], [2.0, 1.0, 5.0]]),
-        "NullDistribution": stats.NullDistribution(),
         "OptionalDistribution": stats.OptionalDistribution(stats.PoissonDistribution(2.0), p=0.25),
         "PoissonDistribution": stats.PoissonDistribution(3.0),
         "PointMassDistribution": stats.PointMassDistribution("fixed"),
@@ -564,7 +563,11 @@ def _bayes_only_distribution_catalog():
 
 class SamplerSeedTestCase(unittest.TestCase):
     def assert_catalog_matches_exports(self, module, catalog):
-        expected = {name for name in module.__all__ if name.endswith("Distribution")}
+        expected = {
+            name
+            for name in module.__all__
+            if name.endswith("Distribution") and name != "NullDistribution"
+        }
         self.assertEqual(expected, set(catalog))
 
     def assert_repeatable_sampler(self, name, dist):

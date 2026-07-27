@@ -19,7 +19,7 @@ from mixle.stats import (
     IntegerCategoricalDistribution,
     IntegerUniformSpikeDistribution,
     MixtureDistribution,
-    NullDistribution,
+    PointMassDistribution,
     PoissonDistribution,
 )
 from mixle.stats.compute.pdist import EnumerationError
@@ -179,7 +179,7 @@ class QuantizedEnumerationIndexTestCase(unittest.TestCase):
             ("geometric", GeometricDistribution(0.4)),
             ("poisson", PoissonDistribution(3.7)),
             ("integer_uniform_spike", IntegerUniformSpikeDistribution(k=3, num_vals=6, p=0.45, min_val=1)),
-            ("null", NullDistribution()),
+            ("none_point_mass", PointMassDistribution(None)),
         ]
 
         for name, dist in cases:

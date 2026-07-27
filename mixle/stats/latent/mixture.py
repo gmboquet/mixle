@@ -24,6 +24,7 @@ import numpy as np
 from numpy.random import RandomState
 
 import mixle.utils.vector as vec
+from mixle.capability import Neutral, supports
 from mixle.engines.arithmetic import maxrandint
 from mixle.enumeration.algorithms import (
     BufferedStream,
@@ -261,6 +262,13 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
             # sampler dies later, far from the mistake), so fail at the constructor like the
             # scalar families do.
             raise ValueError("MixtureDistribution requires len(components) == len(w).")
+        neutral = [index for index, component in enumerate(components) if supports(component, Neutral)]
+        if neutral:
+            raise TypeError(
+                "MixtureDistribution components must be generative probability laws; "
+                "neutral likelihood factors found at indices %s. Use PointMassDistribution(None) "
+                "for a proper null-valued component." % neutral
+            )
         if not np.isfinite(self.w).all() or np.any(self.w < 0.0):
             # A negative or non-finite weight silently propagates into log_density() as nan (only a
             # RuntimeWarning) -- `nan < 0.0` is always False, so the old check let a NaN weight straight

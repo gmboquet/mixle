@@ -99,6 +99,19 @@ def test_markov_chain_lengths_match():
     assert [len(s) for s in legacy] == [len(s) for s in batched]
 
 
+def test_markov_chain_without_length_only_supports_explicit_lengths():
+    dist = stats.MarkovChainDistribution(
+        {"a": 0.6, "b": 0.4},
+        {"a": {"a": 0.7, "b": 0.3}, "b": {"a": 0.2, "b": 0.8}},
+    )
+    sampler = dist.sampler(seed=11)
+
+    assert len(sampler.sample_seq(4)) == 4
+    assert [len(path) for path in sampler.sample_paths([2, 5])] == [2, 5]
+    with pytest.raises(RuntimeError, match="proper length distribution"):
+        sampler.sample()
+
+
 def test_lda_lengths_match():
     dist = stats.LDADistribution(
         [

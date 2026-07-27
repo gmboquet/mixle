@@ -1,19 +1,19 @@
-"""Neutral null distribution used for optional structural slots.
+"""Neutral likelihood factor used for absent structural model slots.
 
-The null distribution and its related classes fill optional model slots while
-preserving the standard distribution, sampler, accumulator, estimator, and
-encoder interfaces.
+``NullDistribution`` is the multiplicative identity for likelihood composition:
+it contributes log-score zero for every input and carries no parameters. It is
+therefore **not** a normalized generative probability distribution and cannot be
+sampled or enumerated. Use ``PointMassDistribution(None)`` for a proper singleton
+law whose only possible value is ``None``.
 
 Notes:
     The density evaluates to 1.0 for any value (Any data type).
-    The sampler generates None for any size input.
-    Sequence encodings return None for any input.
+    Sequence encodings retain only the observation count.
 """
 
 from typing import Any, Optional
 
 import numpy as np
-from numpy.random import RandomState
 
 from mixle.enumeration.algorithms import QuantizedCrossIndex, QuantizedEnumerationIndex
 from mixle.stats.compute.pdist import (
@@ -27,8 +27,12 @@ from mixle.stats.compute.pdist import (
 )
 
 
+class NeutralFactorError(TypeError):
+    """Raised when a neutral likelihood identity is used as a generative law."""
+
+
 class NullDistribution(SequenceEncodableProbabilityDistribution):
-    """Place-holder distribution assigning density 1.0 (log-density 0.0) to any observation (Any data type)."""
+    """Non-generative likelihood identity assigning log-score zero to every observation."""
 
     @classmethod
     def compute_capabilities(cls):
@@ -47,12 +51,12 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
             distribution_type=cls,
             parameters=(),
             statistics=(),
-            support="any",
+            support="neutral_factor",
             differentiable=False,
         )
 
     def __init__(self, name: str | None = None) -> None:
-        """Create a distribution that assigns unit density to every value.
+        """Create a non-generative likelihood factor that assigns unit score to every value.
 
         Args:
             name (Optional[str]): Optional distribution name.
@@ -130,16 +134,11 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
         return tuple(None for _ in range(int(params["num_components"])))
 
     def sampler(self, seed: int | None = None) -> "NullSampler":
-        """Create a sampler for the null distribution.
-
-        Args:
-            seed (Optional[int]): Seed for random number generator (unused).
-
-        Returns:
-            NullSampler that always samples ``None``.
-
-        """
-        return NullSampler(dist=self, seed=seed)
+        """Reject generation from a likelihood identity with no normalized sample space."""
+        raise NeutralFactorError(
+            "NullDistribution is a neutral likelihood factor and cannot be sampled; "
+            "use PointMassDistribution(None) for a proper singleton law."
+        )
 
     def estimator(self, pseudo_count: float | None = None) -> "NullEstimator":
         """Create an estimator for the null distribution.
@@ -162,31 +161,36 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
         return NullDataEncoder()
 
     def enumerator(self) -> "NullEnumerator":
-        """Return an enumerator for the singleton null support."""
-        return NullEnumerator(self)
+        """Reject enumeration because a neutral factor has no probability support."""
+        from mixle.stats.compute.pdist import EnumerationError
 
-    def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0) -> QuantizedEnumerationIndex:
-        """Build the single-item bounded bit-quantized index for NullDistribution."""
-        return QuantizedEnumerationIndex.from_items(
-            [(None, 0.0)], max_bits=max_bits, bin_width_bits=bin_width_bits, sorted_items=True, truncated=False
+        raise EnumerationError(
+            self,
+            reason=(
+                "NullDistribution is a neutral likelihood factor; "
+                "use PointMassDistribution(None) for singleton support"
+            ),
         )
 
+    def quantized_index(self, max_bits: float, bin_width_bits: float = 1.0) -> QuantizedEnumerationIndex:
+        """Reject indexing because a neutral factor has no probability support."""
+        return super().quantized_index(max_bits=max_bits, bin_width_bits=bin_width_bits)
+
     def quantized_multi_cross_index(self, others, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
-        """Build an exact aligned cross-bin view for null distributions."""
-        dists = [self] + list(others)
-        if any(not isinstance(dist, NullDistribution) for dist in dists):
-            return super().quantized_multi_cross_index(others, max_bits=max_bits, bin_width_bits=bin_width_bits)
-        return QuantizedCrossIndex.from_items(
-            [(None, tuple([0.0] * len(dists)))], max_bits=max_bits, bin_width_bits=bin_width_bits, truncated=False
+        """Reject cross-indexing because neutral factors have no probability support."""
+        return super().quantized_multi_cross_index(
+            others,
+            max_bits=max_bits,
+            bin_width_bits=bin_width_bits,
         )
 
     def quantized_cross_index(self, other, max_bits, bin_width_bits: float = 1.0) -> QuantizedCrossIndex:
-        """Build an exact aligned cross-bin view for two null distributions."""
+        """Reject pairwise cross-indexing because neutral factors have no probability support."""
         return self.quantized_multi_cross_index([other], max_bits=max_bits, bin_width_bits=bin_width_bits)
 
 
 class NullEnumerator(DistributionEnumerator):
-    """Yields the single value None with probability one, matching NullSampler.sample()."""
+    """Deprecated guard that rejects enumeration of a neutral factor."""
 
     def __init__(self, dist: "NullDistribution") -> None:
         """Create an enumerator for the null distribution's empty support.
@@ -196,18 +200,17 @@ class NullEnumerator(DistributionEnumerator):
 
         """
         super().__init__(dist)
-        self._done = False
+        raise NeutralFactorError(
+            "NullDistribution is not enumerable; use PointMassDistribution(None)."
+        )
 
     def __next__(self) -> tuple[None, float]:
-        """Returns the single (None, 0.0) pair, then raises StopIteration."""
-        if self._done:
-            raise StopIteration
-        self._done = True
-        return (None, 0.0)
+        """Stop immediately; construction already rejects this non-enumerable factor."""
+        raise StopIteration
 
 
 class NullSampler(DistributionSampler):
-    """Sampler for the NullDistribution. Always returns None."""
+    """Deprecated guard that rejects sampling from a neutral factor."""
 
     def __init__(self, dist: "NullDistribution", seed: int | None = None) -> None:
         """Create a sampler for the null distribution.
@@ -217,21 +220,21 @@ class NullSampler(DistributionSampler):
             seed (Optional[int]): Seed for random number generator (unused).
 
         """
-        self.rng = RandomState(seed)
-        self.dist = dist
+        raise NeutralFactorError(
+            "NullDistribution is not samplable; use PointMassDistribution(None)."
+        )
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> None | list[None]:
-        """Returns None for a single draw, or a length-``size`` list of Nones for a batch.
+        """Reject every draw from this non-generative compatibility guard.
 
         Args:
-            size (Optional[int]): Number of samples requested. None draws one observation.
-
-        Returns:
-            None when size is None, else a list of ``size`` Nones (per the DistributionSampler
-            contract: sample(size=n) returns a length-n collection).
+            size (Optional[int]): Number of samples requested (unused).
+            batched (bool): Compatibility flag (unused).
 
         """
-        return None if size is None else [None] * size
+        raise NeutralFactorError(
+            "NullDistribution is not samplable; use PointMassDistribution(None)."
+        )
 
 
 class NullAccumulator(SequenceEncodableStatisticAccumulator):

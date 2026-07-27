@@ -493,6 +493,7 @@ __all__ = [
     "NullEstimator",
     "NullDataEncoder",
     "NullEnumerator",
+    "NeutralFactorError",
     "MISSING",
     "marginalized",
     "composite_with_missing",
@@ -992,6 +993,7 @@ from mixle.stats.combinator.hurdle import (
 )
 from mixle.stats.combinator.ignored import IgnoredDataEncoder, IgnoredDistribution, IgnoredEstimator, IgnoredSampler
 from mixle.stats.combinator.null_dist import (
+    NeutralFactorError,
     NullDataEncoder,
     NullDistribution,
     NullEnumerator,
