@@ -53,7 +53,6 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.stats.multivariate._copula_common import reject_out_of_unit_cube
 
 _CLIP = 1.0e-12  # keep PIT scores strictly inside (0,1) so the copula's Phi^{-1} stays finite
 
@@ -103,6 +102,12 @@ def _validate_columns(value: Any, dim: int, *, label: str = "copula columns") ->
     if columns.ndim != 2 or columns.shape[1] != dim or not np.all(np.isfinite(columns)):
         raise ValueError("%s must have shape (n, %d) with finite numeric values." % (label, dim))
     return columns
+
+
+def _validate_cdf_output(value: np.ndarray) -> None:
+    """Validate the closed ``[0, 1]`` range of a marginal CDF before PIT stabilization."""
+    if np.any(~np.isfinite(value)) or np.any(value < 0.0) or np.any(value > 1.0):
+        raise ValueError("marginal CDF outputs must be finite values in the closed interval [0, 1]")
 
 
 def _validate_weights(value: Any, rows: int) -> np.ndarray:
@@ -226,7 +231,7 @@ class CopulaDistribution(SequenceEncodableProbabilityDistribution):
         """Probability-integral transform of one observation: ``u_i = clip(F_i(x_i))`` in ``(0,1)``."""
         row = _validate_row(x, self.dim)
         u = np.array([float(self.marginals[i].cdf(row[i])) for i in range(self.dim)], dtype=np.float64)
-        reject_out_of_unit_cube(u)
+        _validate_cdf_output(u)
         return np.clip(u, _CLIP, 1.0 - _CLIP)
 
     def _pit_columns(self, cols: np.ndarray) -> np.ndarray:
@@ -235,7 +240,7 @@ class CopulaDistribution(SequenceEncodableProbabilityDistribution):
         u = np.empty_like(cols)
         for i in range(self.dim):
             u[:, i] = [float(self.marginals[i].cdf(v)) for v in cols[:, i]]
-        reject_out_of_unit_cube(u)
+        _validate_cdf_output(u)
         return np.clip(u, _CLIP, 1.0 - _CLIP)
 
     def density(self, x: Sequence[float]) -> float:
