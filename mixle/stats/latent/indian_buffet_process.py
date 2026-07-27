@@ -13,6 +13,7 @@ an observed feature row is deterministic, so the accumulator gathers weighted
 feature-use counts and the estimator performs the conjugate Beta update.
 """
 
+import operator
 from collections.abc import Sequence
 from typing import Any
 
@@ -42,10 +43,15 @@ def _check_data_format(data_format: str) -> str:
 
 
 def _validate_num_features(num_features: int) -> int:
-    num_features = int(num_features)
-    if num_features <= 0:
+    if isinstance(num_features, (bool, np.bool_)):
+        raise TypeError("num_features must be a positive exact integer")
+    try:
+        result = operator.index(num_features)
+    except TypeError as exc:
+        raise TypeError("num_features must be a positive exact integer") from exc
+    if result <= 0:
         raise ValueError("num_features must be positive")
-    return num_features
+    return result
 
 
 def _validate_alpha(alpha: float) -> float:
@@ -56,16 +62,26 @@ def _validate_alpha(alpha: float) -> float:
 
 
 def _validate_probability_vector(
-    p: Sequence[float] | np.ndarray, num_features: int, min_prob: float = 0.0
+    p: Sequence[float] | np.ndarray, num_features: int, min_prob: float | None = None
 ) -> np.ndarray:
     rv = np.asarray(p, dtype=np.float64)
     if rv.shape != (num_features,):
         raise ValueError("feature probability vector must have length num_features")
-    if np.any(np.isnan(rv)) or np.any(rv < 0.0) or np.any(rv > 1.0):
-        raise ValueError("feature probabilities must lie in [0, 1]")
-    if min_prob > 0.0:
+    if np.any(~np.isfinite(rv)) or np.any(rv < 0.0) or np.any(rv > 1.0):
+        raise ValueError("feature probabilities must be finite and lie in [0, 1]")
+    if min_prob is not None:
         rv = np.clip(rv, min_prob, 1.0 - min_prob)
-    return rv
+    return rv.copy()
+
+
+def _validate_min_prob(min_prob: float) -> float:
+    value = float(min_prob)
+    if not np.isfinite(value) or value < 0.0 or value >= 0.5:
+        raise ValueError("min_prob must be finite and lie in [0, 0.5)")
+    # A smaller nominal floor is not representable on both sides of one. Use
+    # one machine epsilon so plug-in probabilities and matching Beta shapes
+    # remain strictly inside the unit interval and numerically usable.
+    return float(max(value, np.finfo(np.float64).eps))
 
 
 def _is_binary_vector(x: np.ndarray, num_features: int) -> bool:
@@ -98,9 +114,18 @@ def _to_binary_vector(x: Any, num_features: int, data_format: str) -> np.ndarray
             raise ValueError("dense IBP observations must contain only 0/1 values")
         return xx.astype(bool, copy=False)
 
-    idx = np.asarray(xx, dtype=np.int64)
-    if np.any(idx < 0) or np.any(idx >= num_features):
-        raise ValueError("sparse IBP feature index out of range")
+    indices: list[int] = []
+    for raw_index in xx:
+        if isinstance(raw_index, (bool, np.bool_)):
+            raise TypeError("sparse IBP feature indices must be exact integers")
+        try:
+            index = operator.index(raw_index)
+        except TypeError as exc:
+            raise TypeError("sparse IBP feature indices must be exact integers") from exc
+        if index < 0 or index >= num_features:
+            raise ValueError("sparse IBP feature index out of range")
+        indices.append(index)
+    idx = np.asarray(indices, dtype=np.int64)
     rv = np.zeros(num_features, dtype=bool)
     if idx.size:
         rv[np.unique(idx)] = True
@@ -190,7 +215,7 @@ class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
         self.alpha = _validate_alpha(alpha)
         self.name = name
         self.keys = keys
-        self.min_prob = float(min_prob)
+        self.min_prob = _validate_min_prob(min_prob)
         self.data_format = _check_data_format(data_format)
 
         if beta_params is not None:
@@ -212,7 +237,11 @@ class IndianBuffetProcessDistribution(SequenceEncodableProbabilityDistribution):
             )
 
         beta_sum = self.beta_params.sum(axis=1)
-        self.feature_probs = self.beta_params[:, 0] / beta_sum
+        self.feature_probs = np.clip(
+            self.beta_params[:, 0] / beta_sum,
+            self.min_prob,
+            1.0 - self.min_prob,
+        )
         self.log_pvec = np.log(self.feature_probs)
         self.log_nvec = np.log1p(-self.feature_probs)
         self.log_dvec = self.log_pvec - self.log_nvec
@@ -544,7 +573,7 @@ class IndianBuffetProcessEstimator(ParameterEstimator):
         self.estimate_alpha = estimate_alpha
         self.min_alpha = float(min_alpha)
         self.max_alpha = float(max_alpha)
-        self.min_prob = float(min_prob)
+        self.min_prob = _validate_min_prob(min_prob)
         self.name = name
         self.keys = keys
         self.data_format = _check_data_format(data_format)
