@@ -37,6 +37,7 @@ from mixle.stats import (
 )
 from mixle.stats.latent.hidden_markov import hmm_engine_forward_backward, hmm_pad_log_emissions
 from mixle.stats.latent.structured_hmm import DenseTransition, InputOutputHMM, StructuredHMM, fit_chunked
+from mixle.utils.vector import ImpossibleEvidenceError
 
 
 def _emission_log_density(hmm, state, obs):
@@ -430,7 +431,7 @@ class EngineForwardBackwardImpossibleObservationTest(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(xi_sum)), "xi contains non-finite values")
         self.assertTrue(np.all(np.isfinite(pi)), "pi contains non-finite values")
 
-    def test_engine_estep_matches_host(self):
+    def test_engine_and_host_estep_reject_impossible_evidence_transactionally(self):
         dist = self._model()
         data = [["a", "b", "a"], ["a", "z", "b"], ["b", "b"]]
         enc = dist.dist_to_encoder().seq_encode(data)
@@ -438,17 +439,17 @@ class EngineForwardBackwardImpossibleObservationTest(unittest.TestCase):
         estimator = dist.estimator()
 
         host = estimator.accumulator_factory().make()
-        host.seq_update(enc, weights, dist)
+        with self.assertRaises(ImpossibleEvidenceError):
+            host.seq_update(enc, weights, dist)
         engine_acc = estimator.accumulator_factory().make()
         with np.errstate(divide="ignore", invalid="ignore"):
-            engine_acc.seq_update_engine(enc, weights, dist, NUMPY_ENGINE)
+            with self.assertRaises(ImpossibleEvidenceError):
+                engine_acc.seq_update_engine(enc, weights, dist, NUMPY_ENGINE)
 
-        np.testing.assert_allclose(engine_acc.init_counts, host.init_counts, atol=1e-9)
-        np.testing.assert_allclose(engine_acc.state_counts, host.state_counts, atol=1e-9)
-        np.testing.assert_allclose(engine_acc.trans_counts, host.trans_counts, atol=1e-9)
-        self.assertTrue(np.all(np.isfinite(engine_acc.init_counts)))
-        self.assertTrue(np.all(np.isfinite(engine_acc.state_counts)))
-        self.assertTrue(np.all(np.isfinite(engine_acc.trans_counts)))
+        for accumulator in (host, engine_acc):
+            np.testing.assert_array_equal(accumulator.init_counts, np.zeros_like(accumulator.init_counts))
+            np.testing.assert_array_equal(accumulator.state_counts, np.zeros_like(accumulator.state_counts))
+            np.testing.assert_array_equal(accumulator.trans_counts, np.zeros_like(accumulator.trans_counts))
 
 
 class LDAEmptyLastDocumentTest(unittest.TestCase):
@@ -508,11 +509,11 @@ class StructuredHMMZeroMassGuardsTest(unittest.TestCase):
         self.assertEqual(float(ll[0]), -np.inf)
         self.assertFalse(np.isnan(ll[0]))
 
-    def test_impossible_observation_posteriors_are_finite(self):
+    def test_impossible_observation_has_no_synthetic_posterior(self):
         hmm = self._model()
         with np.errstate(divide="ignore", invalid="ignore"):
-            gamma = hmm.state_posteriors([1.0, -1.0, 2.0])
-        self.assertTrue(np.all(np.isfinite(gamma)), "state posteriors contain non-finite values")
+            with self.assertRaises(ImpossibleEvidenceError):
+                hmm.state_posteriors([1.0, -1.0, 2.0])
 
     def test_fit_on_empty_batch_keeps_parameters_finite(self):
         hmm = self._model()
