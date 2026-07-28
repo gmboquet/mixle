@@ -9,9 +9,20 @@ for some worker, planning fails closed by default -- it raises
 :class:`InfeasiblePrecisionError` quoting the quantified gap -- rather than
 silently returning a plan that violates the accuracy it claims to hold; pass
 ``allow_infeasible=True`` for an explicit best-effort plan instead (see
-:meth:`HeterogeneousPlan.is_feasible`). The plan also sizes the k-way
-reduction depth so fixed-size sufficient-statistic payloads fold in
-``O(log W)`` instead of a single-root fan-in.
+:meth:`HeterogeneousPlan.is_feasible`).
+
+Meeting a budget and *certifying* it are different claims, and this module
+makes only the first: ``meets_target`` says the chosen format's gamma-n
+roundoff score clears the target at the plan's ``op_count``, whereas
+:meth:`HeterogeneousPlan.is_certified` is ``False`` for every constrained plan
+because the planner has no operation graph, magnitude/conditioning evidence,
+reduction order, or communication-topology certificate with which to prove a
+scientific target. A caller wanting numbers ranked need not opt out of
+anything; a caller wanting a proof will not find one here.
+
+The plan also sizes the 4-way (radix-4) reduction depth so fixed-size
+sufficient-statistic payloads fold in ``O(log W)`` instead of a single-root
+fan-in.
 
 This module is the pure-Python planning layer. Spark, MPI, or other distributed
 dispatchers consume the returned plan from the inference layer.
@@ -113,11 +124,16 @@ class Worker:
 class WorkerAssignment:
     """One worker's row allocation, precision, and effective throughput.
 
-    ``meets_target`` and ``achieved_rel_error`` record whether ``precision`` actually satisfies the
-    plan's ``target_rel_error`` (see :func:`plan_heterogeneous`): ``achieved_rel_error`` is the quantified
-    relative-error bound this precision achieves at the plan's ``op_count`` (``None`` when the format's
-    roundoff isn't modeled, e.g. ``fp8``). Both default to the trivially-satisfied case so callers that
-    never pass a ``target_rel_error`` see unconstrained, always-``True`` assignments.
+    ``meets_target`` is a statement about numbers: whether ``precision``'s modeled roundoff at the plan's
+    ``op_count`` actually lands at or below the plan's ``target_rel_error`` (see
+    :func:`plan_heterogeneous`), quantified by ``achieved_rel_error`` (``None`` when the format's roundoff
+    isn't modeled, e.g. ``fp8`` -- which is exactly why such a format can never *meet* a target). Both
+    default to the trivially-satisfied case so callers that never pass a ``target_rel_error`` see
+    unconstrained, always-``True`` assignments.
+
+    Whether the planner can *certify* that number is a separate question, answered by ``evidence_kind``
+    and :attr:`is_certified`: a ``"heuristic"`` assignment may legitimately report ``meets_target=True``
+    while remaining uncertified.
     """
 
     name: str
@@ -155,8 +171,34 @@ class WorkerAssignment:
         if self.evidence_kind == "unconstrained":
             if not self.meets_target or self.achieved_rel_error is not None:
                 raise ValueError("unconstrained assignments must meet_target=True and carry no error estimate")
-        elif self.meets_target:
-            raise ValueError("a heuristic estimate cannot certify meets_target=True")
+        elif self.meets_target and self.achieved_rel_error is None:
+            # A heuristic assignment MAY report meets_target=True -- that is a claim about the format's
+            # score, not a certificate (see is_certified) -- but never without the number behind it.
+            raise ValueError("a heuristic assignment cannot claim meets_target=True with no achieved_rel_error")
+
+    @property
+    def is_certified(self) -> bool:
+        """Whether ``meets_target`` rests on an accuracy certificate rather than a ranking heuristic.
+
+        ``True`` only for ``evidence_kind='unconstrained'``, where there is no target to certify. For a
+        ``"heuristic"`` assignment this is always ``False``, including when ``meets_target`` is ``True``:
+        the gamma-n score ranks formats, but the planner holds no operation graph, magnitude/conditioning
+        evidence, reduction order, or communication-topology certificate with which to prove a scientific
+        target.
+        """
+        return self.evidence_kind == "unconstrained"
+
+
+def _reduce_depth(n_workers: int) -> int:
+    """Depth of the planner's 4-way (radix-4) worker-reduction tree: ``ceil(log4(W))``, 0 for one worker.
+
+    Deliberately radix-4, not binary: the payloads folded here are fixed-size sufficient statistics, so a
+    wider node keeps the tree shallow (16 workers fold in 2 rounds, not 4) while still avoiding the
+    single-root fan-in. Callers that actually execute the fold pick their own arity -- see
+    ``mixle.inference.heterogeneous_executor.tree_reduce_values(..., branch=...)``; this number is the
+    plan's advertised radix-4 depth, so read it as ``ceil(log4(W))`` and not as a binary tree height.
+    """
+    return 0 if n_workers <= 1 else math.ceil(math.log2(n_workers) / 2)
 
 
 @dataclass(frozen=True)
@@ -174,11 +216,11 @@ class HeterogeneousPlan:
             raise ValueError("assignments must contain only WorkerAssignment records")
         object.__setattr__(self, "assignments", canonical)
         _require_nonneg_int(self.reduce_depth, "reduce_depth")
-        expected_depth = 0 if len(canonical) == 1 else math.ceil(math.log2(len(canonical)) / 2)
+        expected_depth = _reduce_depth(len(canonical))
         if self.reduce_depth != expected_depth:
             raise ValueError(
-                "reduce_depth must match the planner's worker-reduction tree (%d for %d workers)"
-                % (expected_depth, len(canonical))
+                "reduce_depth must match the planner's 4-way worker-reduction tree, ceil(log4(W)) "
+                "(%d for %d workers)" % (expected_depth, len(canonical))
             )
 
     def total_rows(self) -> int:
@@ -191,9 +233,25 @@ class HeterogeneousPlan:
         Always ``True`` for an unconstrained plan (``target_rel_error=None``). Can only be ``False`` when
         ``plan_heterogeneous`` was called with ``allow_infeasible=True`` and at least one worker's best
         available precision still could not satisfy the budget -- inspect :meth:`infeasible_assignments`
-        for which workers, and each one's quantified ``achieved_rel_error``.
+        for which workers, and each one's quantified ``achieved_rel_error``. Without that opt-in the
+        planner raises rather than returning an infeasible plan, so this is ``True`` for every plan a
+        default call returns.
+
+        Feasible is not certified: see :meth:`is_certified`.
         """
         return all(a.meets_target for a in self.assignments)
+
+    def is_certified(self) -> bool:
+        """Whether the plan's accuracy claims are certificates rather than format-ranking scores.
+
+        ``True`` only for an unconstrained plan (``target_rel_error=None``), which claims nothing about
+        accuracy in the first place. For any constrained plan this is ``False`` even when
+        :meth:`is_feasible` is ``True``: the gamma-n score behind ``meets_target`` can rank formats and
+        rule options out, but the planner has no operation graph, magnitude/conditioning evidence,
+        reduction order, or communication-topology certificate with which to prove a scientific target.
+        Supply a workload error certificate elsewhere if the target must be guaranteed.
+        """
+        return all(a.is_certified for a in self.assignments)
 
     def infeasible_assignments(self) -> tuple[WorkerAssignment, ...]:
         """The subset of assignments whose precision does not meet the plan's ``target_rel_error``."""
@@ -278,8 +336,8 @@ def plan_heterogeneous(
 
     Each worker runs the fastest precision its hardware supports that stays within ``target_rel_error``
     (``None`` = no accuracy constraint); rows are split proportionally to the resulting throughput so all
-    workers finish together. ``reduce_depth`` is the k-way tree depth for folding the sufficient-statistic
-    payloads (``~ceil(log2(W)/2)``), avoiding the single-root fan-in.
+    workers finish together. ``reduce_depth`` is the 4-way (radix-4) tree depth for folding the
+    sufficient-statistic payloads (``ceil(log4(W)) == ceil(log2(W)/2)``), avoiding the single-root fan-in.
 
     Fails closed by default: if ``target_rel_error`` is not ``None`` and some worker cannot satisfy it at
     any allowed precision, raises :class:`InfeasiblePrecisionError` identifying the worker(s) and the
@@ -287,6 +345,13 @@ def plan_heterogeneous(
     (MXR-080-0133). Pass ``allow_infeasible=True`` to instead receive a best-effort ``HeterogeneousPlan``
     whose ``is_feasible()`` is ``False`` and whose offending assignments carry ``meets_target=False`` plus
     a quantified ``achieved_rel_error``.
+
+    A target the modeled roundoff DOES clear needs no opt-in: the plan is returned normally, with
+    ``meets_target=True`` and ``is_feasible()`` -- factual statements about the format's gamma-n score at
+    ``op_count``. What such a plan is not is *certified*: ``is_certified()`` is ``False`` for every
+    constrained plan, and ``evidence_kind`` stays ``"heuristic"``, because ranking formats is not proving
+    a workload's error. Requiring ``allow_infeasible=True`` for these callers was the old behavior; it
+    claimed a target was "not achievable" while quoting an achieved error orders of magnitude below it.
 
     Raises ``ValueError`` for malformed input: no workers, a non-int or negative ``n_rows``/``op_count``,
     an empty ``allowed_precisions``, or a ``target_rel_error`` that isn't ``None`` or a finite positive
@@ -321,13 +386,16 @@ def plan_heterogeneous(
         chosen.append((w, choice, eff))
 
     if not allow_infeasible:
-        # This planner has no operation graph, magnitude/conditioning evidence, reduction order, or
-        # communication topology certificate. Its gamma-n score can rank options but cannot prove a
-        # scientific target, even when the score is below that target.
-        infeasible = [choice for _, choice, _ in chosen if target_rel_error is not None or not choice.meets_target]
+        # Fail closed on the workers whose NUMBERS miss: no supported+allowed precision scores at or below
+        # the target (or the worker cannot run any allowed precision at all). A worker whose score does
+        # clear the target is planned normally -- the plan simply is not certified (plan.is_certified()),
+        # because this planner has no operation graph, magnitude/conditioning evidence, reduction order,
+        # or communication topology certificate. Ranking is not proving; but refusing to rank, and calling
+        # an achieved ~1e-13 "not achievable" against a 1e-3 ask, was a false statement about numbers.
+        infeasible = [choice for _, choice, _ in chosen if not choice.meets_target]
         if infeasible:
             raise InfeasiblePrecisionError(
-                "plan_heterogeneous: target_rel_error=%r is not achievable for %d of %d worker(s): %s. "
+                "plan_heterogeneous: cannot certify target_rel_error=%r for %d of %d worker(s): %s. "
                 "Pass allow_infeasible=True to receive a best-effort HeterogeneousPlan instead (then "
                 "check plan.is_feasible() and plan.infeasible_assignments())."
                 % (
@@ -335,8 +403,7 @@ def plan_heterogeneous(
                     len(infeasible),
                     len(chosen),
                     "; ".join(
-                        c.reason
-                        or "format score is below the target, but no workload-specific error certificate was supplied"
+                        c.reason or "no allowed precision reaches the target and no reason was recorded"
                         for c in infeasible
                     ),
                 )
@@ -357,17 +424,20 @@ def plan_heterogeneous(
             rows = int(round(n_rows * eff / total_eff))
             rows = min(rows, n_rows - assigned)
         assigned += rows
+        # Unconstrained means BOTH that no target was asked for and that the worker could actually run an
+        # allowed precision: a capability miss (supports none of allowed_precisions) is a real miss and is
+        # reported as one even with target_rel_error=None, never relabelled as trivially satisfied.
+        unconstrained = target_rel_error is None and choice.meets_target
         assignments.append(
             WorkerAssignment(
                 name=w.name,
                 rows=rows,
                 precision=choice.precision,
                 effective_throughput=eff,
-                meets_target=target_rel_error is None,
-                achieved_rel_error=None if target_rel_error is None else choice.achieved_rel_error,
-                evidence_kind="unconstrained" if target_rel_error is None else "heuristic",
+                meets_target=choice.meets_target,
+                achieved_rel_error=None if unconstrained else choice.achieved_rel_error,
+                evidence_kind="unconstrained" if unconstrained else "heuristic",
             )
         )
 
-    depth = 0 if len(workers) == 1 else math.ceil(math.log2(len(workers)) / 2)
-    return HeterogeneousPlan(assignments=tuple(assignments), reduce_depth=depth)
+    return HeterogeneousPlan(assignments=tuple(assignments), reduce_depth=_reduce_depth(len(workers)))
