@@ -15,6 +15,20 @@ from mixle.engines.base import ComputeEngine
 from mixle.engines.precision import normalize_numpy_dtype
 
 
+def _require_bool(value: Any, name: str) -> bool:
+    """Require an actual Boolean for an execution-path feature flag (MXR-080-1563).
+
+    ``bool(value)`` is the wrong gate for a flag that selects a *compilation or numerical path*:
+    every non-empty string is truthy, so a configuration value that round-tripped through YAML/JSON/
+    an environment variable as ``"false"`` or ``"0"`` used to switch the path ON -- the exact
+    opposite of what it says. Only ``True``/``False`` (or their NumPy scalars) can mean what the flag
+    means, so anything else is refused instead of being coerced into a plausible-looking answer.
+    """
+    if not isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be a bool, got {type(value).__name__} ({value!r}).")
+    return bool(value)
+
+
 class NumpyEngine(ComputeEngine):
     """Host NumPy/SciPy engine used by the default local execution path."""
 
@@ -33,7 +47,7 @@ class NumpyEngine(ComputeEngine):
 
     def __init__(self, dtype: Any = None, prefer_fused: bool = False) -> None:
         self.dtype = normalize_numpy_dtype(dtype)
-        self.prefer_fused = prefer_fused
+        self.prefer_fused = _require_bool(prefer_fused, "NumpyEngine prefer_fused")
 
     @property
     def accumulator_dtype(self) -> Any:
