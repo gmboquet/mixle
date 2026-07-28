@@ -112,6 +112,23 @@ class MallowsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             borda_count(np.array([[0, 0, 1]]))
 
+    def test_single_item_dispersion_is_unidentifiable_not_infinite(self):
+        """MXR-080-1594 -- with one item every ranking has Kendall distance zero for every theta, so
+        the likelihood is flat and theta is unidentifiable. Reporting ``inf`` (the perfect-agreement
+        branch) claimed maximal evidence for concentration from data carrying no evidence at all."""
+        mf = mallows_fit(np.array([[0]]))
+        self.assertTrue(np.isnan(mf["theta"]))
+        self.assertFalse(np.isinf(mf["theta"]))
+        # the trivial center is still correct and still returned
+        self.assertTrue(np.array_equal(mf["center"], np.array([0])))
+        self.assertEqual(mf["mean_distance"], 0.0)
+
+    def test_two_item_perfect_agreement_still_reports_infinite_theta(self):
+        """The unidentifiability above is specific to ``m < 2``: with two or more items a zero mean
+        distance is one of several attainable outcomes, so ``inf`` remains the honest answer."""
+        mf = mallows_fit(np.array([[0, 1]] * 5))
+        self.assertEqual(mf["theta"], float("inf"))
+
 
 class PermutationValidationTest(unittest.TestCase):
     """MXR-080-0107 -- every distance/aggregation entry point must validate its ranking(s) as exact
