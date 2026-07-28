@@ -354,6 +354,36 @@ def test_a_durable_identity_does_not_change_when_the_caller_mutates_its_source_m
     assert moved.diagnostics == {"chain": {"depth": 1}}
 
 
+# MXR-080-1709: bounded constraints certified NaN (both ordered comparisons against it are false) and
+# empty vectors (the validation loop ran zero times) as admissible.
+def test_bounded_constraints_reject_nan_empty_and_non_numeric_values():
+    constraint = ConstraintSpec(lower=0, upper=1)
+    assert not constraint.accepts(float("nan"))
+    assert not constraint.accepts(float("inf"))
+    assert not constraint.accepts([])  # a vacuous container satisfies nothing
+    assert not constraint.accepts(())
+    assert not constraint.accepts(True)  # bool only compares because it subclasses int
+    assert not constraint.accepts("0.5")
+    assert not constraint.accepts([0.5, float("nan")])
+    # negative control: real in-domain values still pass, scalars and vectors alike
+    assert constraint.accepts(0.5)
+    assert constraint.accepts(0)
+    assert constraint.accepts([0.0, 0.5, 1.0])
+
+
+def test_an_unbounded_allowed_values_constraint_still_admits_its_own_vocabulary():
+    constraint = ConstraintSpec(allowed_values=("red", "green"))
+    assert constraint.accepts("red")
+    assert constraint.accepts(["red", "green"])
+    assert not constraint.accepts("blue")
+    assert not constraint.accepts([])
+
+
+def test_a_nan_value_cannot_pass_its_declared_constraint_into_a_value_spec():
+    with pytest.raises(ValueError, match="violates"):
+        ValueSpec("x", ValueRole.FIXED, "1", constraint=ConstraintSpec(lower=0, upper=1), value=float("nan"))
+
+
 def test_a_genuinely_different_record_still_gets_a_different_identity():
     # negative control: freezing the digest must not make every record look identical
     a = PriorSpec("p", "normal", {"mu": 0})
