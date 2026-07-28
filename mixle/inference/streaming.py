@@ -31,6 +31,21 @@ E0 = TypeVar("E0")
 from mixle.inference.estimation import _local_encoded_chunks, harmonic
 
 
+def _finite_count(value: Any, name: str) -> float:
+    """Return ``value`` as a finite non-negative float count.
+
+    ``streaming_accumulate`` may source ``nobs`` from a remote/distributed handle, so the count is
+    checked before it can scale an accumulator or the running ``nobs``.
+    """
+    try:
+        count = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("%s must be a real number, got %r" % (name, value)) from exc
+    if not np.isfinite(count) or count < 0.0:
+        raise ValueError("%s must be finite and non-negative, got %r" % (name, count))
+    return count
+
+
 def streaming_accumulate(
     enc_data: Any, estimator: ParameterEstimator, model: SequenceEncodableProbabilityDistribution
 ) -> tuple[float, Any]:
@@ -85,8 +100,8 @@ class _StreamingBase:
         self.encoder = encoder if encoder is not None else (model.dist_to_encoder() if model is not None else None)
         self.num_chunks = num_chunks
         self.dataset_size = None if dataset_size is None else float(dataset_size)
-        if self.dataset_size is not None and self.dataset_size <= 0.0:
-            raise ValueError("dataset_size must be positive when supplied.")
+        if self.dataset_size is not None and not (np.isfinite(self.dataset_size) and self.dataset_size > 0.0):
+            raise ValueError("dataset_size must be positive and finite when supplied.")
         self.last_batch_scale = 1.0
         self.running_accumulator = None
         self.nobs = 0.0
@@ -156,32 +171,48 @@ class StreamingEstimator(_StreamingBase):
     def update(
         self, data: Sequence[T] | None = None, *, enc_data: list[tuple[int, E0]] | None = None
     ) -> SequenceEncodableProbabilityDistribution:
-        """Consume one batch and return the updated model."""
+        """Consume one batch and return the updated model.
+
+        Every scale and count is validated finite *before* it touches the running accumulator, and the
+        running state is committed only once the M-step has succeeded -- so a failed update leaves the
+        estimator exactly where it was and the caller can retry.
+        """
         enc_batch = self._encode_batch(data, enc_data)
         self._ensure_model(enc_batch)
         batch_nobs, batch_acc = streaming_accumulate(enc_batch, self.estimator, self.model)
+        batch_nobs = _finite_count(batch_nobs, "streaming batch nobs")
         effective_nobs = batch_nobs
-        self.last_batch_scale = 1.0
+        batch_scale = 1.0
         if self.dataset_size is not None:
             if batch_nobs <= 0.0:
                 raise ValueError("cannot scale an empty minibatch to dataset_size.")
-            self.last_batch_scale = self.dataset_size / batch_nobs
-            batch_acc.scale(self.last_batch_scale)
+            batch_scale = self.dataset_size / batch_nobs
+            batch_acc.scale(batch_scale)
             effective_nobs = self.dataset_size
 
         if self.running_accumulator is None:
+            # nothing to roll back yet: the running state stays empty until the M-step succeeds
+            model = self.estimator.estimate(effective_nobs, batch_acc.value())
             self.running_accumulator = batch_acc
             self.nobs = effective_nobs
         else:
             rho = float(self.schedule(self.step + 1))
-            if rho <= 0.0 or rho > 1.0:
-                raise ValueError("streaming schedule returned %r; expected 0 < rho <= 1." % rho)
-            self.running_accumulator.scale(1.0 - rho)
-            batch_acc.scale(rho)
-            self.running_accumulator.combine(batch_acc.value())
-            self.nobs = (1.0 - rho) * self.nobs + rho * effective_nobs
+            if not np.isfinite(rho) or rho <= 0.0 or rho > 1.0:
+                raise ValueError("streaming schedule returned %r; expected a finite 0 < rho <= 1." % rho)
+            previous_value = copy.deepcopy(self.running_accumulator.value())
+            updated_nobs = (1.0 - rho) * self.nobs + rho * effective_nobs
+            try:
+                self.running_accumulator.scale(1.0 - rho)
+                batch_acc.scale(rho)
+                self.running_accumulator.combine(batch_acc.value())
+                model = self.estimator.estimate(updated_nobs, self.running_accumulator.value())
+            except Exception:
+                self.running_accumulator.from_value(previous_value)
+                raise
+            self.nobs = updated_nobs
 
-        self.model = self.estimator.estimate(self.nobs, self.running_accumulator.value())
+        self.last_batch_scale = batch_scale
+        self.model = model
         self.step += 1
         return self.model
 
@@ -237,6 +268,7 @@ class IncrementalEstimator(_StreamingBase):
         enc_batch = self._encode_batch(data, enc_data)
         self._ensure_model(enc_batch)
         batch_nobs, batch_acc = streaming_accumulate(enc_batch, self.estimator, self.model)
+        batch_nobs = _finite_count(batch_nobs, "incremental batch nobs")
 
         replacing = chunk_id in self.chunk_values
         self.chunk_values[chunk_id] = copy.deepcopy(batch_acc.value())
