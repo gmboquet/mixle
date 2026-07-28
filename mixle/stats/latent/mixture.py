@@ -99,23 +99,49 @@ def _owned_generative_components(
     *,
     minimum: int = 1,
 ) -> list[SequenceEncodableProbabilityDistribution]:
-    """Return an owned component list containing only generative laws."""
+    """Return an owned component list, rejecting components that carry no evidence.
+
+    Neutral components are refused: their density does not depend on the observation, so the mixture
+    weight on one is unidentifiable and it silently absorbs responsibility from components that do
+    explain the data.
+
+    Components that cannot generate are refused too, so a scoring-only leaf cannot silently become a
+    generative mixture component.
+
+    Marginalized emissions are the one exception, and they are not really an exception. ``marginalized``
+    is the library's own mechanism for observations with absent fields; it reports LIKELIHOOD_FACTOR
+    because it contributes 1 where a field is missing rather than a normalized density over the
+    augmented space. Refusing that tag outright made the mechanism unusable inside the latent models it
+    exists to serve -- marginalizing over missing data inside a mixture or HMM is precisely its purpose.
+    Such a component is non-generative only because the missingness rate was left unspecified, and it
+    exposes the law it wraps via ``marginalized_core``; that core is validated here in its place, so an
+    intrinsically scoring-only leaf is still rejected whether or not it is wrapped.
+
+    The mixture math is unaffected: an absent field contributes the same factor to every component, so
+    responsibilities stay proportional and the E-step is unchanged. The composite does not hide the
+    result -- density_semantics() already joins to LIKELIHOOD_FACTOR when any child is one.
+    """
     try:
         owned = list(components)
     except TypeError as exc:
         raise TypeError(f"{label} must be an iterable of probability distributions.") from exc
     if len(owned) < minimum:
         raise ValueError(f"{label} requires at least {minimum} component(s).")
-    neutral = [index for index, component in enumerate(owned) if supports(component, Neutral)]
     from mixle.stats.compute.pdist import DensitySemantics
 
-    likelihood_factors = [
-        index
-        for index, component in enumerate(owned)
-        if component.density_semantics() is DensitySemantics.LIKELIHOOD_FACTOR
-    ]
-    if neutral or likelihood_factors:
-        invalid = sorted(set(neutral).union(likelihood_factors))
+    neutral: list[int] = []
+    non_generative: list[int] = []
+    for index, component in enumerate(owned):
+        if supports(component, Neutral):
+            neutral.append(index)
+            continue
+        # A marginalization wrapper stands in for the law it wraps, which is what must be generative.
+        core = getattr(component, "marginalized_core", None)
+        subject = component if core is None else core
+        if subject.density_semantics() is DensitySemantics.LIKELIHOOD_FACTOR:
+            non_generative.append(index)
+    if neutral or non_generative:
+        invalid = sorted(set(neutral).union(non_generative))
         raise TypeError(
             f"{label} components must be generative probability laws; likelihood factors found at indices {invalid}."
         )

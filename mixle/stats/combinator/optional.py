@@ -298,6 +298,19 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
 
         return self.dist.density_semantics() if self.has_p else DensitySemantics.LIKELIHOOD_FACTOR
 
+    @property
+    def marginalized_core(self):
+        """Return the wrapped law when this is a pure marginalization, else None.
+
+        Without a missingness rate this distribution is a likelihood factor: it contributes 1 where the
+        value is absent rather than a normalized density over values-plus-missing. That makes it
+        non-generative, but only because ``p`` was not supplied -- the wrapped law is untouched, and
+        giving ``p`` makes the whole thing generative again. Callers that need to tell "unnormalized
+        because we are marginalizing over missingness" apart from "intrinsically cannot generate"
+        (a scoring-only leaf) read this: the former returns its core, the latter has no such attribute.
+        """
+        return None if self.has_p else self.dist
+
     def log_density(self, x: T) -> float:
         """Evalute the log density of the Optional distribution at x.
 
@@ -445,10 +458,7 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
             enc_data, observed_weights, params["child_route"], engine, child_estimator
         )
         child_values = unstack_component_stats(child_stats, num_components)
-        return tuple(
-            ((missing_counts[i], observed_counts[i]), child_values[i])
-            for i in range(num_components)
-        )
+        return tuple(((missing_counts[i], observed_counts[i]), child_values[i]) for i in range(num_components))
 
     def to_fisher(self, **kwargs):
         """Fisher view for the optional/missing-gate."""
@@ -754,11 +764,7 @@ class OptionalEstimator(ParameterEstimator):
         """
         self.estimator = estimator
         self.est_prob = est_prob
-        self.pseudo_count = (
-            None
-            if pseudo_count is None
-            else _finite_nonnegative(pseudo_count, label="pseudo_count")
-        )
+        self.pseudo_count = None if pseudo_count is None else _finite_nonnegative(pseudo_count, label="pseudo_count")
         self.missing_value = missing_value
         self.keys = keys
         self.name = name
@@ -795,9 +801,7 @@ class OptionalEstimator(ParameterEstimator):
             rv += float(self.prior.log_density(model.p))
         return rv
 
-    def _preserve_marginalization_provenance(
-        self, dist: OptionalDistribution
-    ) -> OptionalDistribution:
+    def _preserve_marginalization_provenance(self, dist: OptionalDistribution) -> OptionalDistribution:
         """Carry the MAR-helper marker through an estimator update."""
         if getattr(self, "_marginalized_by_helper", False):
             dist._marginalized_by_helper = True
@@ -852,8 +856,7 @@ class OptionalEstimator(ParameterEstimator):
             return self._preserve_marginalization_provenance(
                 OptionalDistribution(
                     dist,
-                    (counts[0] + self.pseudo_count)
-                    / ((2 * self.pseudo_count) + counts[0] + counts[1]),
+                    (counts[0] + self.pseudo_count) / ((2 * self.pseudo_count) + counts[0] + counts[1]),
                     missing_value=self.missing_value,
                     name=self.name,
                 )
@@ -864,9 +867,7 @@ class OptionalEstimator(ParameterEstimator):
             z_nobs = counts[0]
 
             if nobs_loc == 0:
-                result = OptionalDistribution(
-                    dist, None, missing_value=self.missing_value, name=self.name
-                )
+                result = OptionalDistribution(dist, None, missing_value=self.missing_value, name=self.name)
             else:
                 result = OptionalDistribution(
                     dist,
