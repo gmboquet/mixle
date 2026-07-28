@@ -482,6 +482,48 @@ class EngineTestCase(unittest.TestCase):
         # the generic rule is unaffected for plain (non-subclassed) ndarrays
         self.assertIsInstance(engine_of(np.asarray([1.0, 2.0])), NumpyEngine)
 
+    def test_registration_requires_a_type_engine_and_explicit_collision_policy(self):
+        import mixle.engines as engines_module
+        from mixle.engines import SYMBOLIC_ENGINE, register_array_type
+
+        class Payload:
+            pass
+
+        with self.assertRaises(TypeError):
+            register_array_type("not a type", NUMPY_ENGINE)
+        with self.assertRaises(TypeError):
+            register_array_type(Payload, "not an engine")
+        with self.assertRaises(ValueError):
+            register_array_type(object, NUMPY_ENGINE)
+        register_array_type(Payload, NUMPY_ENGINE)
+        self.addCleanup(engines_module._ARRAY_ENGINE_REGISTRY.pop, Payload, None)
+        with self.assertRaises(ValueError):
+            register_array_type(Payload, SYMBOLIC_ENGINE)
+        register_array_type(Payload, SYMBOLIC_ENGINE, override=True)
+        self.assertIs(engine_of(Payload()), SYMBOLIC_ENGINE)
+
+    def test_cyclic_containers_raise_stable_boundary_errors(self):
+        cyclic = []
+        cyclic.append(cyclic)
+        with self.assertRaisesRegex(ValueError, "cyclic container"):
+            engine_of(cyclic)
+        with self.assertRaisesRegex(ValueError, "cyclic container"):
+            to_numpy(cyclic)
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_arithmetic_dispatch_discovers_keyword_and_mixed_engine_operands(self):
+        tensor = torch.tensor([1.0, 2.0], dtype=torch.float64)
+        converted = ar.asarray(x=tensor)
+        self.assertIsInstance(converted, torch.Tensor)
+        with self.assertRaisesRegex(TypeError, "mixed compute engines"):
+            ar.where(cond=np.array([True, False]), x=tensor, y=tensor)
+
+    def test_compute_engine_rejects_noncallable_required_operation(self):
+        with self.assertRaisesRegex(TypeError, "callable.*log"):
+
+            class InvalidEngine(NumpyEngine):
+                log = 42
+
     def test_to_numpy_flat_array_still_converts_correctly(self):
         # Negative control for the recursive to_numpy fix (MXR-080-0123): a plain, non-nested
         # array must still convert exactly as before.
