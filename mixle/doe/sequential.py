@@ -24,15 +24,16 @@ It composes the rest of this codebase's decision machinery rather than reinventi
     round whose posterior is miscalibrated is flagged in the record the controller sees.
 
 The audit trail (:class:`SequentialDesignResult`) is meant to be trustworthy even when a round goes
-wrong: the ``summary``/``decision`` recorded for a round are copies, isolated in both directions from
-callback mutation (see :class:`DesignRound`), and a ``fit``/``propose``/``acquire``/``combine``
-exception is caught, recorded as an explicit failed round, and then either re-raised or swallowed
-depending on the caller-selected ``on_error`` policy -- never a silent, traceless abort.
+wrong: ``summary``/``decision`` records are detached portable JSON values, and every callback,
+validation, and history-copy failure is recorded as an explicit failed round before the selected
+``on_error`` policy returns or raises -- never a silent, traceless abort.
 """
 
 from __future__ import annotations
 
 import copy
+import json
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -61,12 +62,10 @@ class DesignRound:
     and ``proposed_action`` are shared by reference -- they may be large or otherwise-uncopyable fit
     artifacts (a GP posterior, a torch module) that callbacks should treat as read-only by convention.
 
-    If a ``fit``/``propose``/``acquire``/``combine`` callback raises during this round, that failure is
-    recorded rather than left implicit: ``failed`` is ``True``, ``failed_step`` names which callback
-    raised, and ``error`` is a short ``f"{type}: {message}"`` description of the exception. A failed
-    round's ``state``/``summary``/``decision`` reflect whatever completed before the failure (e.g. a
-    round that fails in ``acquire`` still has a valid ``state``, ``summary``, and ``decision`` -- only
-    the acquisition of the next sample did not complete).
+    If any callback, record validation, or history-copy stage fails during this round, that failure is
+    recorded rather than left implicit: ``failed`` is ``True``, ``failed_step`` names the exact stage,
+    and ``error`` is a short ``f"{type}: {message}"`` description of the exception. A failed round's
+    ``state``/``summary``/``decision`` reflect whatever completed before the failure.
     """
 
     index: int
@@ -75,7 +74,7 @@ class DesignRound:
     decision: dict[str, Any]
     proposed_action: Any = None
     failed: bool = False
-    failed_step: str | None = None  # "fit" | "propose" | "acquire" | "combine", set only when failed
+    failed_step: str | None = None  # Exact callback/validation/history-copy stage, only when failed.
     error: str | None = None  # f"{type(exc).__name__}: {exc}", set only when failed
 
 
@@ -96,10 +95,11 @@ class SequentialDesignResult:
 
 
 class SequentialDesignError(RuntimeError):
-    """Raised by :func:`sequential_design` when a round's ``fit``/``propose``/``acquire``/``combine``
-    callback raises and ``on_error="raise"`` (the default). ``result`` is the partial audit trail up to
-    and including the failed round (see :attr:`DesignRound.failed`), so a caller that wants both
-    fail-fast propagation *and* the ability to inspect what happened can do::
+    """Raised when a callback, validation, or history-copy stage fails under ``on_error="raise"``.
+
+    ``result`` is the partial audit trail up to and including the failed round (see
+    :attr:`DesignRound.failed`), so a caller that wants both fail-fast propagation and the ability to
+    inspect what happened can do::
 
         try:
             sequential_design(..., on_error="raise")
@@ -135,6 +135,55 @@ def _copy_safe_history(rounds: list[DesignRound]) -> list[DesignRound]:
     ]
 
 
+def _validate_json_value(value: Any, path: str, active: set[int]) -> None:
+    """Require the exact portable JSON value model, including finite numeric values and string keys."""
+    if value is None or type(value) in (bool, int, str):
+        return
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError(f"{path} must not contain non-finite numbers.")
+        return
+    if type(value) not in (dict, list):
+        raise TypeError(f"{path} contains non-JSON value {type(value).__name__}.")
+    identity = id(value)
+    if identity in active:
+        raise ValueError(f"{path} contains a circular reference.")
+    active.add(identity)
+    try:
+        if type(value) is dict:
+            for key, item in value.items():
+                if type(key) is not str:
+                    raise TypeError(f"{path} contains non-string object key {key!r}.")
+                _validate_json_value(item, f"{path}.{key}", active)
+        else:
+            for index, item in enumerate(value):
+                _validate_json_value(item, f"{path}[{index}]", active)
+    finally:
+        active.remove(identity)
+
+
+def _canonical_json_dict(value: Any, label: str) -> dict[str, Any]:
+    """Validate one audit record and return a detached canonical JSON copy."""
+    if type(value) is not dict:
+        raise TypeError(f"{label} must return a dict, got {type(value).__name__}")
+    _validate_json_value(value, label, set())
+    payload = json.dumps(value, allow_nan=False, sort_keys=True, separators=(",", ":"))
+    decoded = json.loads(payload)
+    if type(decoded) is not dict:  # Defensive: the top-level check above already establishes this.
+        raise RuntimeError(f"{label} JSON normalization did not produce an object.")
+    return decoded
+
+
+def _validate_decision(decision: Any) -> dict[str, Any]:
+    """Validate and detach the controller decision before any proposal or acquisition side effect."""
+    record = _canonical_json_dict(decision, "should_continue()")
+    if "keep_going" not in record or type(record["keep_going"]) is not bool:
+        raise TypeError("should_continue() decision requires an actual Boolean 'keep_going' field.")
+    if type(record.get("reason")) is not str or not record["reason"].strip():
+        raise ValueError("should_continue() decision requires a nonempty string 'reason' field.")
+    return record
+
+
 def _handle_callback_failure(
     result: SequentialDesignResult,
     index: int,
@@ -144,7 +193,7 @@ def _handle_callback_failure(
     *,
     existing_round: DesignRound | None,
 ) -> SequentialDesignResult:
-    """Record an explicit failure round for a ``step`` callback exception (appending a new round if
+    """Record an explicit failure round for a named stage exception (appending a new round if
     ``fit`` failed before this round had one, otherwise marking the round already appended this
     iteration), set ``stopped_reason``, and then either re-raise (per ``on_error="raise"``) or return
     the partial result (per ``on_error="record_and_stop"``)."""
@@ -191,8 +240,9 @@ def sequential_design(
         fit: data -> state (e.g. a posterior). Called once per round on the accumulated data.
         summarize: (state, round_index) -> a JSON-friendly uncertainty summary dict. This is what the
             controller sees, so put the decision-relevant numbers (and any calibration flag) here.
-        should_continue: (history-so-far, including the current round's state/summary) -> a dict with a
-            truthy ``"keep_going"``. Everything else in the dict is recorded as the round's decision.
+        should_continue: (history-so-far, including the current round's state/summary) -> a dict with
+            an actual Boolean ``"keep_going"`` and a nonempty string ``"reason"``. Everything else in
+            the dict is recorded as the round's decision.
             ``history`` is a copy-safe view (see :class:`DesignRound`) -- mutating it does not affect
             the returned audit trail.
         propose: (state, history) -> the next action/design point. Return ``None`` to stop the loop
@@ -203,8 +253,8 @@ def sequential_design(
         max_rounds: maximum number of adaptive acquisitions after the initial fit. The audit trail
             therefore contains at most max_rounds + 1 fitted states: index 0 for the initial data,
             followed by one state per acquired sample.
-        on_error: what to do when ``fit``, ``propose``, ``acquire``, or ``combine`` raises. In every
-            case the failure is first recorded as an explicit failed round (see
+        on_error: what to do when any callback, audit-record validation, or history-copy stage raises.
+            In every case the failure is first recorded as an explicit failed round (see
             :attr:`DesignRound.failed`) so the audit trail always shows what happened -- the policy only
             controls what happens *after* that:
 
@@ -238,21 +288,40 @@ def sequential_design(
         except Exception as exc:  # noqa: BLE001 - a callback's exception type is unknown; record+policy decide next
             return _handle_callback_failure(result, i, "fit", exc, on_error, existing_round=None)
 
-        summary = summarize(state, i)
-        if not isinstance(summary, dict):
-            raise TypeError(f"summarize() must return a dict, got {type(summary).__name__}")
-
-        this_round = DesignRound(
-            index=i, state=state, summary=copy.deepcopy(summary), decision={}, proposed_action=None
-        )
+        this_round = DesignRound(index=i, state=state, summary={}, decision={}, proposed_action=None)
         result.rounds.append(this_round)
 
-        decision = should_continue(_copy_safe_history(result.rounds))
-        if not isinstance(decision, dict):
-            raise TypeError(f"should_continue() must return a dict, got {type(decision).__name__}")
-        this_round.decision = copy.deepcopy(decision)
+        try:
+            summary = summarize(state, i)
+        except Exception as exc:  # noqa: BLE001 - callback failure is recorded with its exact stage
+            return _handle_callback_failure(result, i, "summarize", exc, on_error, existing_round=this_round)
+        try:
+            this_round.summary = _canonical_json_dict(summary, "summarize()")
+        except Exception as exc:  # noqa: BLE001 - record-contract failure follows the selected policy
+            return _handle_callback_failure(
+                result, i, "summary_validation", exc, on_error, existing_round=this_round
+            )
 
-        if not decision.get("keep_going", False):
+        try:
+            decision_history = _copy_safe_history(result.rounds)
+        except Exception as exc:  # noqa: BLE001 - history materialization is an auditable stage
+            return _handle_callback_failure(
+                result, i, "decision_history", exc, on_error, existing_round=this_round
+            )
+        try:
+            decision = should_continue(decision_history)
+        except Exception as exc:  # noqa: BLE001 - callback failure is recorded with its exact stage
+            return _handle_callback_failure(
+                result, i, "should_continue", exc, on_error, existing_round=this_round
+            )
+        try:
+            this_round.decision = _validate_decision(decision)
+        except Exception as exc:  # noqa: BLE001 - side effects remain gated behind decision validation
+            return _handle_callback_failure(
+                result, i, "decision_validation", exc, on_error, existing_round=this_round
+            )
+
+        if not this_round.decision["keep_going"]:
             result.stopped_reason = "controller_stop"
             return result
         if i >= max_rounds:
@@ -260,7 +329,13 @@ def sequential_design(
             return result
 
         try:
-            action = propose(state, _copy_safe_history(result.rounds))
+            proposal_history = _copy_safe_history(result.rounds)
+        except Exception as exc:  # noqa: BLE001 - history materialization is an auditable stage
+            return _handle_callback_failure(
+                result, i, "proposal_history", exc, on_error, existing_round=this_round
+            )
+        try:
+            action = propose(state, proposal_history)
         except Exception as exc:  # noqa: BLE001 - a callback's exception type is unknown; record+policy decide next
             return _handle_callback_failure(result, i, "propose", exc, on_error, existing_round=this_round)
 
