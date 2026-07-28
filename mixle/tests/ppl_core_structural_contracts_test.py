@@ -32,7 +32,9 @@ class StructuralFitControlContractTest(unittest.TestCase):
         indexed = Normal(free(2, name="theta")[Field("group")], free)
         with self.assertRaisesRegex(NotImplementedError, "local execution"):
             indexed.fit([0.0, 1.0], given={"group": [0, 1]}, backend="mp")
-        with self.assertRaisesRegex(ValueError, "positive integer"):
+        # the shared control validator names the bound explicitly ("... must be an integer >= 1")
+        # rather than saying "positive integer"
+        with self.assertRaisesRegex(ValueError, r"max_iter must be an integer >= 1"):
             indexed.fit([0.0, 1.0], given={"group": [0, 1]}, max_its=0)
 
         with self.assertRaisesRegex(NotImplementedError, "how='map'"):

@@ -97,18 +97,27 @@ def _classic_rhat(x: np.ndarray) -> float:
     return float(np.sqrt(((n - 1.0) / n * w + b / n) / w))
 
 
-def _validate_chains(draws: np.ndarray, fn_name: str) -> np.ndarray:
-    """Return a finite ``(n_chains, n_draws)`` matrix or reject an invalid diagnostic input."""
+def _validate_chains(draws: np.ndarray, fn_name: str, *, min_chains: int = 2) -> np.ndarray:
+    """Return a finite ``(n_chains, n_draws)`` matrix or reject an invalid diagnostic input.
+
+    ``min_chains`` is 2 for R-hat, which compares independent chains and is meaningless with one.
+    The ESS estimators pass 1: they consume :func:`_split_chains` output, so a single long chain
+    becomes two half-chains -- the standard split-ESS construction -- and a single-chain sampler is
+    a perfectly ordinary thing to want an effective sample size for.
+    """
     try:
         x = np.asarray(draws, dtype=float)
     except (TypeError, ValueError) as error:
         raise ValueError(f"{fn_name}(): draws must be a rectangular numeric matrix.") from error
     if x.ndim != 2:
         raise ValueError(f"{fn_name}(): draws must have shape (n_chains, n_draws), got {x.shape}.")
-    if x.shape[0] < 2:
-        raise ValueError(f"{fn_name}(): at least two independent chains are required, got {x.shape[0]}.")
-    if x.shape[1] < 4:
-        raise ValueError(f"{fn_name}(): at least four draws per chain are required, got {x.shape[1]}.")
+    if x.shape[0] < min_chains:
+        plural = "chain is" if min_chains == 1 else "independent chains are"
+        raise ValueError(f"{fn_name}(): at least {min_chains} {plural} required, got {x.shape[0]}.")
+    # Every caller splits each chain in half first, so a half must itself clear the four-draw floor.
+    required = 4 if x.shape[0] >= 2 else 8
+    if x.shape[1] < required:
+        raise ValueError(f"{fn_name}(): at least {required} draws per chain are required, got {x.shape[1]}.")
     if not np.isfinite(x).all():
         raise ValueError(f"{fn_name}(): draws must be finite (no NaN or Inf).")
     return x
@@ -141,7 +150,7 @@ def split_rhat(draws: np.ndarray) -> float:
 
 def bulk_ess(draws: np.ndarray) -> float:
     """Bulk ESS of split rank-normalized draws; constant chains return ``NaN``."""
-    split = _split_chains(_validate_chains(draws, "bulk_ess"))
+    split = _split_chains(_validate_chains(draws, "bulk_ess", min_chains=1))
     if np.ptp(split) == 0:
         return float("nan")
     return _ess_chains(_rank_normalize(split).reshape(split.shape))
@@ -149,7 +158,7 @@ def bulk_ess(draws: np.ndarray) -> float:
 
 def tail_ess(draws: np.ndarray) -> float:
     """Tail ESS from split 5% and 95% quantile indicators; unavailable cases return ``NaN``."""
-    split = _split_chains(_validate_chains(draws, "tail_ess"))
+    split = _split_chains(_validate_chains(draws, "tail_ess", min_chains=1))
     q05, q95 = np.quantile(split, 0.05), np.quantile(split, 0.95)
     lower = _ess_chains((split <= q05).astype(float))
     upper = _ess_chains((split >= q95).astype(float))
@@ -317,14 +326,9 @@ def _validate_stacking_lpd(pointwise_lpd: np.ndarray) -> np.ndarray:
     except (TypeError, ValueError) as error:
         raise ValueError("loo_stacking_weights(): pointwise_lpd must be a rectangular numeric matrix.") from error
     if lpd.ndim != 2:
-        raise ValueError(
-            "loo_stacking_weights(): pointwise_lpd must have shape (n_obs, n_models), "
-            f"got {lpd.shape}."
-        )
+        raise ValueError(f"loo_stacking_weights(): pointwise_lpd must have shape (n_obs, n_models), got {lpd.shape}.")
     if lpd.shape[0] == 0 or lpd.shape[1] == 0:
-        raise ValueError(
-            "loo_stacking_weights(): pointwise_lpd must contain at least one observation and one model."
-        )
+        raise ValueError("loo_stacking_weights(): pointwise_lpd must contain at least one observation and one model.")
     if not np.isfinite(lpd).all():
         raise ValueError("loo_stacking_weights(): pointwise_lpd must be finite (no NaN or Inf).")
     return lpd
@@ -399,9 +403,7 @@ def loo_stacking_weights(
     receive the weights together with convergence, iteration, objective, and termination metadata.
     """
     if not isinstance(return_result, (bool, np.bool_)):
-        raise ValueError(
-            f"loo_stacking_weights(): return_result must be boolean, got {return_result!r}."
-        )
+        raise ValueError(f"loo_stacking_weights(): return_result must be boolean, got {return_result!r}.")
     result = _loo_stacking_fit(pointwise_lpd, iters, tol)
     return result if return_result else result["weights"]
 

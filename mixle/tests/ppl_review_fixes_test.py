@@ -200,10 +200,21 @@ def test_p10_nig_sigma_posterior_mean_is_e_sigma_not_sqrt_e_sigma2():
     data = list(rng.normal(0.0, 2.0, size=60))
     m = Normal(mean=free, sd=free).fit(data, how="conjugate")
     arr = np.asarray(data, dtype=float)
-    s = float(((arr - arr.mean()) ** 2).sum())
-    a_n, b_n = 1.0 + arr.size / 2.0, 0.5 * s
+    n = float(arr.size)
+    xbar = float(arr.mean())
+    s = float(((arr - xbar) ** 2).sum())
+    # _nig_conjugate_fit's documented proper default prior (mu0, kappa, alpha, beta) = (0, 1e-6, 2, 1).
+    # This used to hard-code alpha=1, beta=0 -- an improper reference prior the implementation does
+    # not use -- so the expected value drifted from the posterior actually being summarized.
+    mu0, kappa, alpha, beta = 0.0, 1.0e-6, 2.0, 1.0
+    lam_n = kappa + n
+    a_n = alpha + n / 2.0
+    b_n = beta + 0.5 * s + 0.5 * kappa * n / lam_n * (xbar - mu0) ** 2
     e_sigma = math.sqrt(b_n) * math.exp(math.lgamma(a_n - 0.5) - math.lgamma(a_n))
     assert m.result.summary()["sigma"]["mean"] == pytest.approx(e_sigma, rel=1e-12)
+    # the regression this guards: sqrt(E[sigma^2]) is a strictly larger number (Jensen), so a
+    # relapse to labeling it "mean" would not slip past the check above.
+    assert math.sqrt(b_n / (a_n - 1.0)) > e_sigma
     # sanity: the Monte-Carlo mean of sigma draws agrees with the labeled mean
     draws = m.result.samples("sigma", n=4000, rng=np.random.RandomState(0))
     assert float(draws.mean()) == pytest.approx(e_sigma, rel=0.05)

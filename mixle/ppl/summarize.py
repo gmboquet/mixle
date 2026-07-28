@@ -30,9 +30,7 @@ def hdi(samples: Sequence[float], prob: float = 0.94) -> tuple[float, float]:
     except (TypeError, ValueError) as error:
         raise TypeError("samples must be a finite one-dimensional numeric sequence") from error
     if x.ndim != 1:
-        raise ValueError(
-            "samples must be one-dimensional; select one coordinate before computing a multivariate HDI"
-        )
+        raise ValueError("samples must be one-dimensional; select one coordinate before computing a multivariate HDI")
     if not np.all(np.isfinite(x)):
         raise ValueError("samples must contain only finite posterior draws")
     x = np.sort(x)
@@ -85,18 +83,22 @@ def posterior_summary(fitted: RandomVariable, *, hdi_prob: float = 0.94) -> dict
             draws = np.asarray(fitted.posterior(name), dtype=float)
             lo, hi = hdi(draws, hdi_prob)
             row["hdi_low"], row["hdi_high"] = lo, hi
+            # The ESS estimators take (n_chains, n_draws). A fit that exposes a flat vector of draws
+            # ran a single chain, so present it as one -- passing the 1-D array straight through made
+            # them raise, and every ess/ess_tail came back None with diagnostic_status "failed".
+            chains = draws.reshape(1, -1) if draws.ndim == 1 else draws
             if isinstance(bulk_by_parameter, dict) and name in bulk_by_parameter:
                 row["ess"] = float(bulk_by_parameter[name])
             else:
                 from mixle.ppl.diagnostics import bulk_ess
 
-                row["ess"] = float(bulk_ess(draws))
+                row["ess"] = float(bulk_ess(chains))
             if isinstance(tail_by_parameter, dict) and name in tail_by_parameter:
                 row["ess_tail"] = float(tail_by_parameter[name])
             else:
                 from mixle.ppl.diagnostics import tail_ess
 
-                row["ess_tail"] = float(tail_ess(draws))
+                row["ess_tail"] = float(tail_ess(chains))
             row["diagnostic_status"] = "ok"
         except (KeyError, NotImplementedError) as error:
             row["diagnostic_status"] = "unavailable"

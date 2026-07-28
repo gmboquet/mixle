@@ -33,11 +33,29 @@ class RankNormalizedDiagnosticsTest(unittest.TestCase):
         mismatched = np.vstack([pattern, pattern * 100.0])
         self.assertGreater(split_rhat(mismatched), 1.1)
 
-    def test_malformed_and_single_chain_inputs_are_rejected(self):
-        for draws in (np.arange(20.0), np.zeros((2, 2, 5)), np.ones((1, 20))):
+    def test_malformed_inputs_are_rejected(self):
+        # Shape errors are shape errors for every diagnostic: a flat vector and a 3-D array are
+        # neither (n_chains, n_draws).
+        for draws in (np.arange(20.0), np.zeros((2, 2, 5))):
             for diagnostic in (split_rhat, bulk_ess, tail_ess):
                 with self.assertRaises(ValueError):
                     diagnostic(draws)
+
+    def test_single_chain_is_rejected_for_rhat_but_estimable_for_ess(self):
+        # R-hat compares independent chains and is meaningless with one, so it still rejects.
+        # The ESS estimators split each chain into halves before estimating, which is exactly the
+        # standard split-ESS construction -- a single long chain is an ordinary thing to want an
+        # effective sample size for, and refusing it left every single-chain fit with ess=None.
+        one_chain = np.linspace(0.0, 1.0, 64).reshape(1, -1)
+        with self.assertRaises(ValueError):
+            split_rhat(one_chain)
+        self.assertTrue(np.isfinite(bulk_ess(one_chain)))
+        self.assertTrue(np.isfinite(tail_ess(one_chain)))
+
+    def test_single_chain_ess_still_needs_enough_draws_to_split(self):
+        # Halving one chain must leave each half above the four-draw floor, so the floor doubles.
+        with self.assertRaises(ValueError):
+            bulk_ess(np.linspace(0.0, 1.0, 6).reshape(1, -1))
         nonfinite = np.ones((2, 20))
         nonfinite[0, 0] = np.nan
         with self.assertRaises(ValueError):
