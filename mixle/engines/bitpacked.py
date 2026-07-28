@@ -30,9 +30,9 @@ BITPACKED_EXTENSION_DIAGNOSTIC = _BITPACKED_EXTENSION.diagnostic
 if HAS_BITPACKED:  # pragma: no cover - depends on the optional local build
     _binary_gemm_c, _ternary_gemm_c = _BITPACKED_EXTENSION.values
 
-# pack_pm1's declared alphabet is {-1,+1} OR {0,1} (see its docstring); the union is {-1,0,1}. pack_ternary's
-# declared alphabet is {-1,0,+1}. Both are the same set, so one check serves both entry points.
-_PM1_ALPHABET = (-1, 0, 1)
+_PM1_ALPHABET = (-1, 1)
+_ZERO_ONE_ALPHABET = (0, 1)
+_TERNARY_ALPHABET = (-1, 0, 1)
 
 
 def _require_exact_int(value: Any, name: str) -> int:
@@ -59,24 +59,44 @@ def _require_nonnegative_int(value: Any, name: str) -> int:
     return v
 
 
-def _validate_alphabet(x: np.ndarray, name: str) -> None:
-    """Raise ``ValueError`` unless every value of ``x`` is an exact member of the declared ``{-1,0,+1}``
-    alphabet. Packing silently mapped every positive value to ``+1`` and everything else to ``-1``, so
-    out-of-alphabet inputs like ``2``, ``-9``, or ``0.2`` were reinterpreted via the sign test instead of
-    being rejected.
-    """
-    if x.dtype == np.bool_ or x.size == 0:
-        return  # booleans are always {0,1}-valid by construction
+def _require_vector_or_matrix(x: Any, name: str) -> np.ndarray:
+    arr = np.asarray(x)
+    if arr.ndim not in (1, 2):
+        raise ValueError(f"{name} must be a vector or matrix; got shape {arr.shape!r}")
+    return arr
+
+
+def _validate_finite(x: np.ndarray, name: str, alphabet: tuple[int, ...]) -> None:
     if np.issubdtype(x.dtype, np.floating) and not np.all(np.isfinite(x)):
-        raise ValueError(f"{name} contains non-finite values (NaN/Inf); expected values in {_PM1_ALPHABET!r}")
+        raise ValueError(f"{name} contains non-finite values (NaN/Inf); expected values in {alphabet!r}")
+
+
+def _matches_alphabet(x: np.ndarray, alphabet: tuple[int, ...]) -> bool:
     mask = np.zeros(x.shape, dtype=bool)
-    for v in _PM1_ALPHABET:
+    for v in alphabet:
         mask |= x == v
-    if not np.all(mask):
-        bad = np.unique(np.asarray(x)[~mask])
-        raise ValueError(
-            f"{name} values must be exactly one of {_PM1_ALPHABET!r}; got out-of-alphabet value(s) {bad[:8].tolist()!r}"
-        )
+    return bool(np.all(mask))
+
+
+def _validate_pm1_alphabet(x: np.ndarray, name: str) -> None:
+    """Require one complete binary alphabet, never the incompatible alphabets' three-value union."""
+    _validate_finite(x, name, _TERNARY_ALPHABET)
+    if x.dtype == np.bool_ or x.size == 0:
+        return
+    if _matches_alphabet(x, _PM1_ALPHABET) or _matches_alphabet(x, _ZERO_ONE_ALPHABET):
+        return
+    bad = np.unique(x)
+    raise ValueError(
+        f"{name} must use either {_PM1_ALPHABET!r} or {_ZERO_ONE_ALPHABET!r} consistently; "
+        f"got values {bad[:8].tolist()!r}"
+    )
+
+
+def _validate_ternary_alphabet(x: np.ndarray, name: str) -> None:
+    _validate_finite(x, name, _TERNARY_ALPHABET)
+    if not _matches_alphabet(x, _TERNARY_ALPHABET):
+        bad = np.unique(x)
+        raise ValueError(f"{name} values must be in {_TERNARY_ALPHABET!r}; got {bad[:8].tolist()!r}")
 
 
 def _check_2d(a: np.ndarray, name: str) -> None:
@@ -100,10 +120,53 @@ def _check_word_count(a: np.ndarray, b: np.ndarray, a_name: str, b_name: str) ->
         )
 
 
+def _as_packed_matrix(value: Any, name: str) -> np.ndarray:
+    """Validate packed words before uint64 conversion, preventing fractional truncation and wrapping."""
+    raw = np.asarray(value)
+    _check_2d(raw, name)
+    if raw.dtype == np.bool_:
+        raise ValueError(f"{name} must contain uint64 words, not booleans")
+    if np.issubdtype(raw.dtype, np.integer):
+        if raw.size and np.any(raw < 0):
+            raise ValueError(f"{name} must not contain negative words")
+    elif np.issubdtype(raw.dtype, np.floating):
+        if raw.size and (
+            not np.all(np.isfinite(raw))
+            or not np.array_equal(raw, np.trunc(raw))
+            or np.any(raw < 0)
+            or np.any(raw >= 2**64)
+        ):
+            raise ValueError(f"{name} must contain exact finite uint64 words")
+    else:
+        checked = np.empty(raw.shape, dtype=np.uint64)
+        for index, item in np.ndenumerate(raw):
+            word = _require_nonnegative_int(item, name)
+            if word > np.iinfo(np.uint64).max:
+                raise ValueError(f"{name} word exceeds uint64 range")
+            checked[index] = word
+        return np.ascontiguousarray(checked)
+    return np.ascontiguousarray(raw, dtype=np.uint64)
+
+
+def _require_canonical_padding(packed: np.ndarray, dim: int, name: str) -> None:
+    """Require unused trailing packbits lanes to be zero."""
+    if dim == 0:
+        return
+    byte_rows = packed.view(np.uint8).reshape(packed.shape[0], -1)
+    used_bytes, remaining_bits = divmod(dim, 8)
+    if remaining_bits:
+        padding_mask = (1 << (8 - remaining_bits)) - 1
+        if np.any(byte_rows[:, used_bytes] & padding_mask):
+            raise ValueError(f"{name} has nonzero padding bits beyond dim={dim}")
+        used_bytes += 1
+    if np.any(byte_rows[:, used_bytes:]):
+        raise ValueError(f"{name} has nonzero padding bytes beyond dim={dim}")
+
+
 def pack_pm1(x: Any) -> np.ndarray:
     """Pack a ``{-1,+1}`` (or ``{0,1}``) array's rows to ``uint64`` words; last axis padded to a 64-multiple."""
-    arr = np.asarray(x)
-    _validate_alphabet(arr, "pack_pm1 input")
+    arr = _require_vector_or_matrix(x, "pack_pm1 input")
+    _validate_pm1_alphabet(arr, "pack_pm1 input")
     bits = (arr > 0).astype(np.uint8)
     if bits.ndim == 1:
         bits = bits[None, :]
@@ -125,16 +188,16 @@ def binary_gemm(a_packed: Any, b_packed: Any, dim: int) -> np.ndarray:
     a mismatched pair and an out-of-bounds read in the ``nogil`` kernel.
     """
     dim = _require_nonnegative_int(dim, "dim")
-    a = np.ascontiguousarray(a_packed, dtype=np.uint64)
-    b = np.ascontiguousarray(b_packed, dtype=np.uint64)
-    _check_2d(a, "a_packed")
-    _check_2d(b, "b_packed")
+    a = _as_packed_matrix(a_packed, "a_packed")
+    b = _as_packed_matrix(b_packed, "b_packed")
     _check_word_count(a, b, "a_packed", "b_packed")
     expected_words = (dim + 63) // 64
     if a.shape[1] != expected_words:
         raise ValueError(
             f"dim={dim} implies {expected_words} packed word(s) per row, but a_packed/b_packed have {a.shape[1]}"
         )
+    _require_canonical_padding(a, dim, "a_packed")
+    _require_canonical_padding(b, dim, "b_packed")
     if HAS_BITPACKED:
         return _binary_gemm_c(a, b, int(dim))
     # correct, memory-bounded numpy fallback: one row of A vs all rows of B at a time
@@ -149,10 +212,8 @@ def binary_gemm(a_packed: Any, b_packed: Any, dim: int) -> np.ndarray:
 
 def binary_dot(a: Any, b: Any) -> np.ndarray:
     """Exact dot products of a batch of ``{-1,+1}`` vectors ``a`` (N, D) against ``b`` (M, D). Returns (N, M)."""
-    a = np.asarray(a)
-    b = np.asarray(b)
-    if a.ndim == 0 or b.ndim == 0:
-        raise ValueError("binary_dot inputs must have at least one dimension")
+    a = _require_vector_or_matrix(a, "binary_dot a")
+    b = _require_vector_or_matrix(b, "binary_dot b")
     if a.shape[-1] != b.shape[-1]:
         raise ValueError(
             f"binary_dot requires matching trailing (true, unpacked) dimensions, got {a.shape[-1]} and {b.shape[-1]}"
@@ -186,8 +247,8 @@ def ternary_gemm(a_sign: Any, a_nz: Any, b_sign: Any, b_nz: Any) -> np.ndarray:
 
 def pack_ternary(x: Any) -> tuple[np.ndarray, np.ndarray]:
     """Pack a ``{-1,0,+1}`` array's rows into (sign, nonzero) bit-plane uint64 words for :func:`ternary_gemm`."""
-    x = np.asarray(x)
-    _validate_alphabet(x, "pack_ternary input")
+    x = _require_vector_or_matrix(x, "pack_ternary input")
+    _validate_ternary_alphabet(x, "pack_ternary input")
     sign = pack_pm1(x > 0)  # sign bit set where value > 0 (the 0/-1 entries are gated by the nz mask)
     nz = pack_pm1(x != 0)
     return sign, nz
