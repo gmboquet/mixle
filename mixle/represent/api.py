@@ -61,12 +61,56 @@ class Embedder:
         coerced = [str(x) for x in items] if self.kind == "text" else list(items)
         return np.asarray(self.featurizer.transform(coerced), dtype=np.float32)
 
+    def _embed(self, rows: list) -> np.ndarray:
+        """Embed an explicit list of whole records into unit-normalized ``(n, dim)`` rows."""
+        vec = self.result.encode(self._units(rows))
+        return vec / np.maximum(np.linalg.norm(vec, axis=1, keepdims=True), 1e-12)
+
+    def transform_one(self, item: Any) -> np.ndarray:
+        """Embed exactly ONE item; always returns a single ``(dim,)`` vector.
+
+        The unambiguous single-record contract. ``item`` is one whole record no matter which
+        container it happens to be, so a list-valued record (``[1, 2]``) embeds to one vector here
+        exactly as the equivalent tuple or dict does -- see :meth:`transform` for why the container
+        alone cannot decide that.
+        """
+        return self._embed([item])[0]
+
+    def transform_batch(self, items: Any) -> np.ndarray:
+        """Embed a SEQUENCE of items; always returns an ``(n, dim)`` block.
+
+        The unambiguous batch contract: every element of ``items`` is one whole record, never one
+        record's field.
+        """
+        return self._embed(list(items))
+
     def transform(self, items: Any) -> np.ndarray:
-        """Embed items into the learned space, unit-normalized (so dot = cosine similarity)."""
-        one = not isinstance(items, (list, np.ndarray))
-        vec = self.result.encode(self._units([items] if one else list(items)))
-        vec = vec / np.maximum(np.linalg.norm(vec, axis=1, keepdims=True), 1e-12)
-        return vec[0] if one else vec
+        """Embed one item or a batch of them, unit-normalized (so dot = cosine similarity).
+
+        A convenience wrapper over :meth:`transform_one`/:meth:`transform_batch` whose one-vs-batch
+        decision is a guess from the outer container. That guess is only sound while a record
+        cannot itself be list-shaped, and for ``kind="record"`` it can: ``_kind_of`` accepts a list
+        as one record at fit time, so ``[1, 2]`` is a legitimate single record while ``[{...},
+        {...}]`` is just as legitimately a batch of two. Rather than silently returning two
+        embedding rows for a single declared record -- training and serving disagreeing about the
+        same record type -- the genuinely ambiguous shape raises and names the two explicit methods
+        that carry no ambiguity at all.
+
+        Raises:
+            ValueError: If ``items`` is a ``kind="record"`` sequence whose own elements are not
+                themselves record containers, so it is indistinguishable from one list-shaped
+                record. Call :meth:`transform_one` or :meth:`transform_batch` instead.
+        """
+        if not isinstance(items, (list, np.ndarray)):
+            return self.transform_one(items)
+        rows = list(items)
+        if self.kind == "record" and rows and not all(isinstance(r, (dict, tuple, list, np.ndarray)) for r in rows):
+            raise ValueError(
+                "transform() cannot tell whether this list is one record or a batch of records: its "
+                "elements are not themselves records. Call transform_one(item) for a single "
+                "list-shaped record or transform_batch(items) for a sequence of records."
+            )
+        return self.transform_batch(rows)
 
     def retrieve(self, query: Any, k: int = 5) -> list[tuple[int, float]]:
         """Top-``k`` fitted-corpus neighbours of ``query`` as ``(corpus index, cosine similarity)``.
@@ -80,7 +124,7 @@ class Embedder:
         kf = float(k)
         if kf < 0 or kf != round(kf):
             raise ValueError(f"k must be a non-negative integer, got {k!r}")
-        q = self.transform(query)
+        q = self.transform_one(query)  # a query is exactly one item; never guess batch-ness here
         sims = self.corpus_vectors @ q
         order = np.argsort(-sims)[: int(kf)]
         return [(int(i), float(sims[i])) for i in order]
