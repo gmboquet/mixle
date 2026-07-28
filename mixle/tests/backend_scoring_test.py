@@ -233,10 +233,11 @@ class BackendScoringTestCase(unittest.TestCase):
                 JointMixtureDistribution(
                     components1=[GaussianDistribution(-1.0, 0.8), GaussianDistribution(2.0, 1.5)],
                     components2=[PoissonDistribution(1.5), PoissonDistribution(4.0)],
-                    w1=[0.4, 0.6],
-                    w2=[0.5, 0.5],
-                    taus12=[[0.8, 0.2], [0.25, 0.75]],
-                    taus21=[[0.64, 0.18181818181818182], [0.36, 0.8181818181818182]],
+                    # The canonical joint, w1[k1] * taus12[k1][k2], stated directly. The legacy
+                    # four-argument form is ambiguous here and says so: w2=[0.5, 0.5] with that taus21
+                    # implies a different joint than w1/taus12 do, so the constructor warns and uses the
+                    # w1/taus12 one. Passing it outright keeps the same law and drops the ambiguity.
+                    joint_weights=[[0.32, 0.08], [0.15, 0.45]],
                 ),
                 [(-1.2, 0), (0.0, 2), (2.6, 5), (1.9, 3)],
             ),
