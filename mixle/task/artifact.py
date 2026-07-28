@@ -490,13 +490,19 @@ def save_arrays(
 
     Arrays and manifest are staged together and published to ``path`` in one atomic step (see
     ``_atomic_artifact_write``), so a failed update never leaves new arrays paired with the old manifest.
+
+    Written compressed. This payload holds quantized edge students whose whole point is bytes on a
+    device, and every member costs a fixed ~128-byte ``.npy`` header plus zip framing -- on a small
+    student the per-member framing outweighs the weights themselves. ``np.load`` reads compressed and
+    stored archives identically, so this is transparent to :func:`load_arrays` and to any artifact
+    written by an earlier version.
     """
     import numpy as np
 
     get_arrays_builder(builder)  # fail fast before writing anything
 
     def _write(staging: str) -> None:
-        np.savez(os.path.join(staging, ARRAYS_NAME), **arrays)
+        np.savez_compressed(os.path.join(staging, ARRAYS_NAME), **arrays)
         _write_manifest(
             staging,
             TaskManifest(

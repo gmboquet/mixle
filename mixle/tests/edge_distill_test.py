@@ -411,10 +411,12 @@ class DistillForEdgeTest(unittest.TestCase):
         self.assertGreater(res.agreement, 0.7)
 
     def test_quantization_unlocks_byte_budgets_fp32_cannot_meet(self):
-        # 1000 bytes, MLP-only space. The smallest fp32 MLP here is (64*4+4 + 4*2+2)*4 = 1080 bytes
-        # -- over budget BY CONSTRUCTION, so the fp32 arm must come back infeasible. The int8 arm has
-        # the same architecture space at ~1/4 the bytes, so the search must find a fitting student.
-        dev = DeviceSpec(max_bytes=1000)
+        # 15 kB, MLP-only space. footprint() budgets the *exported artifact*, which is the weights plus
+        # a manifest whose size does not depend on the weight dtype (~2.5 kB here). So the space has to
+        # be wide enough that weights dominate: the smallest fp32 MLP here is (128*32+32 + 32*2+2)*4 =
+        # 16776 payload bytes, over budget BY CONSTRUCTION, so the fp32 arm must come back infeasible.
+        # The int8 arm quantizes the same architectures to ~1/4 the weight bytes and fits.
+        dev = DeviceSpec(max_bytes=15_000)
 
         def arm(bits):
             return distill_for_edge(
@@ -424,8 +426,8 @@ class DistillForEdgeTest(unittest.TestCase):
                 dev,
                 space=EdgeSpace(
                     families=("mlp",),
-                    dim_choices=(64, 128),
-                    hidden_range=(4, 12),
+                    dim_choices=(128, 256),
+                    hidden_range=(32, 64),
                     epochs_range=(30, 90),
                     bits_choices=bits,
                 ),
@@ -439,7 +441,12 @@ class DistillForEdgeTest(unittest.TestCase):
         int8 = arm((8,))
         self.assertFalse(fp32.feasible)  # deterministic: every fp32 candidate exceeds the budget
         self.assertTrue(int8.feasible)  # quantization brings the same shapes under it
-        self.assertLessEqual(int8.footprint.bytes, 1000)
+        self.assertLessEqual(int8.footprint.bytes, 15_000)
+        # ~4x on the weights themselves, against what THIS recipe would have cost in fp32 (the search
+        # is free to pick a wider architecture than fp32 could afford, so compare like for like).
+        dim, hidden = int8.recipe["dim"], int8.recipe["hidden"][0]
+        fp32_payload = 4 * (dim * hidden + hidden + hidden * 2 + 2)
+        self.assertLess(int8.footprint.payload_bytes, 0.30 * fp32_payload)
         self.assertEqual(int8.recipe["bits"], 8)
         self.assertTrue(int8.footprint.torch_free)
         self.assertGreater(int8.agreement, 0.7)  # squeezed 4x, still matches the teacher
