@@ -20,6 +20,20 @@ from typing import Any
 from mixle.task.calibrate import ESCALATE, CalibratedTaskModel
 from mixle.task.economics import CostModel, RoutePlan, recommend_route
 
+_TEACHER_MODES = frozenset({"batch", "item"})
+
+
+def _is_batch_container(out: Any) -> bool:
+    """Whether ``out`` is a sized, indexable batch of labels rather than one scalar label.
+
+    Deliberately structural rather than a ``list``/``tuple`` allowlist: NumPy arrays, torch tensors,
+    and any other sized indexable batch protocol are all valid teacher outputs. ``str``/``bytes`` are
+    sized and indexable but are scalar labels, and a ``dict`` is not a positional batch.
+    """
+    if isinstance(out, (str, bytes, bytearray, dict)):
+        return False
+    return hasattr(out, "__len__") and hasattr(out, "__getitem__")
+
 
 @dataclass
 class CascadeStats:
@@ -40,16 +54,44 @@ class Cascade:
     """Serve ``text -> label`` through a confident local model, escalating to the teacher when needed."""
 
     def __init__(
-        self, model: CalibratedTaskModel, teacher: Callable[..., Any], *, cost: CostModel | None = None
+        self,
+        model: CalibratedTaskModel,
+        teacher: Callable[..., Any],
+        *,
+        cost: CostModel | None = None,
+        teacher_mode: str = "batch",
     ) -> None:
+        if teacher_mode not in _TEACHER_MODES:
+            raise ValueError(f"teacher_mode must be one of {sorted(_TEACHER_MODES)}, got {teacher_mode!r}")
         self.model = model
         self.teacher = teacher
         self.cost = cost
+        self.teacher_mode = teacher_mode
         self.stats = CascadeStats()
 
     def _teacher_label(self, text: Any) -> Any:
+        """One teacher answer for one request, normalized to a scalar label.
+
+        ``teacher_mode="item"`` calls ``teacher(text)`` and takes the result verbatim.
+        ``teacher_mode="batch"`` (the default, and this class's documented convention) calls
+        ``teacher([text])`` and unwraps a one-element batch. That unwrap used to test for ``list`` /
+        ``tuple`` only, so an ordinary NumPy batch output ``array(["teacher-label"])`` -- and every
+        tensor or other sequence-like batch protocol -- was harvested and served as the whole
+        container instead of its single element, breaking the scalar-answer contract and poisoning
+        targeted retraining with array-valued labels.
+        """
+        if self.teacher_mode == "item":
+            return self.teacher(text)
         out = self.teacher([text])
-        return out[0] if isinstance(out, (list, tuple)) else out
+        if not _is_batch_container(out):
+            raise TypeError(
+                f"a batch teacher must return one label per input; got {type(out).__name__} for a "
+                "one-request batch. Pass teacher_mode='item' for a teacher that takes one request "
+                "and returns its label directly."
+            )
+        if len(out) != 1:
+            raise ValueError(f"teacher returned {len(out)} labels for a one-request batch; exactly one is required")
+        return out[0]
 
     def __call__(self, text: Any) -> Any:
         """Answer one request, escalating to the teacher only when the local model defers; updates stats."""
