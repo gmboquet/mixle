@@ -223,8 +223,25 @@ def _validated_mixture_state(model: Any, k: int) -> tuple[np.ndarray, np.ndarray
 
 
 def _weighted_component_responsibilities(log_joint: np.ndarray, weights: np.ndarray) -> np.ndarray:
-    """Normalize component log-joints with explicit non-finite semantics."""
-    scores = np.asarray(log_joint, dtype=np.float64).copy()
+    """Weighted component responsibilities, computed exactly as the serial E-step computes them.
+
+    This used to reimplement the normalization: it folded the observation weight into the softmax
+    denominator (``exp(s - m) * (w / T)``) where MixtureAccumulator.seq_update divides first and
+    weights after (``(exp(s - m) / T) * w``). Those are algebraically identical and differ in the
+    last ULP, so a component-parallel fit drifted from the serial fit on the final digit -- and the
+    drift compounds across EM iterations. `optimize(backend="model_parallel")` is documented to
+    reproduce the serial trajectory bit for bit, and it could not, because two implementations of
+    one contract were being kept in step by hand.
+
+    Delegate to the canonical normalizer instead, so bit-identity holds by construction. The extra
+    input validation this function performed is preserved: the shared normalizer rejects NaN
+    log-likelihoods and impossible rows itself, and the weight checks stay here because the shared
+    path takes weights only afterwards.
+    """
+    from mixle.stats.compute.mixture_evidence import normalize_mixture_log_scores
+    from mixle.stats.latent.effective_sample import validated_weighted_responsibilities
+
+    scores = np.asarray(log_joint, dtype=np.float64)
     obs_weights = np.asarray(weights, dtype=np.float64)
     if scores.ndim != 2 or scores.shape[1] == 0:
         raise ValueError("component log-joints must be a non-empty two-dimensional matrix")
@@ -235,26 +252,17 @@ def _weighted_component_responsibilities(log_joint: np.ndarray, weights: np.ndar
     if np.any(np.isnan(scores)):
         raise ValueError("component log-likelihoods must not contain NaN")
 
-    positive = np.isposinf(scores)
-    has_positive = positive.any(axis=1)
-    all_negative = np.isneginf(scores).all(axis=1)
-    if np.any(all_negative):
-        rows = np.flatnonzero(all_negative).tolist()
+    normalized = normalize_mixture_log_scores(scores)
+    if np.any(normalized.impossible):
+        rows = np.flatnonzero(normalized.impossible).tolist()
         raise ImpossibleEvidenceError("mixture evidence has zero probability at row(s) %s" % rows)
-
-    # A +inf log-joint dominates every finite entry. Multiple +inf branches
-    # split the limiting mass equally, matching a stable softmax's explicit
-    # extended-real convention.
-    if np.any(has_positive):
-        scores[has_positive] = np.where(positive[has_positive], 0.0, -np.inf)
-
-    maxima = scores.max(axis=1, keepdims=True)
-    scores -= maxima
-    np.exp(scores, out=scores)
-    np.sum(scores, axis=1, keepdims=True, out=maxima)
-    np.divide(obs_weights[:, None], maxima, out=maxima)
-    scores *= maxima
-    return scores
+    return validated_weighted_responsibilities(
+        normalized.responsibilities * obs_weights[:, None],
+        obs_weights,
+        scores.shape[1],
+        label="mixture weighted responsibilities",
+        allow_unassigned=True,
+    )
 
 
 def _fold_component_into(
@@ -317,9 +325,7 @@ def _fold_into(
     elif _sequence_ok(acc, model, enc, dc):
         indices, inverse_counts, _nonzero, element_encoding, length_encoding = enc
         element_weights = (
-            weights[indices] * inverse_counts[indices]
-            if getattr(acc, "len_normalized", False)
-            else weights[indices]
+            weights[indices] * inverse_counts[indices] if getattr(acc, "len_normalized", False) else weights[indices]
         )
         _fold_into(acc.accumulator, model.dist, element_encoding, element_weights, pset, num_workers)
         if not getattr(acc, "null_len_accumulator", False):
