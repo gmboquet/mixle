@@ -37,6 +37,25 @@ class OpsProjectTest(unittest.TestCase):
         with self.assertRaises(CapabilityError):
             project(object(), GaussianDistribution(0.0, 1.0))
 
+    def test_sample_budget_is_exact_not_truncated(self):
+        # MXR-080-1727: n_samples went through int(), so 2.9 silently became a two-draw
+        # "projection" and 0 or a negative budget reached the fitter as an empty-data error about
+        # something else entirely. The budget is the accuracy of an empirical projection; a
+        # nonsensical one is refused where it was given.
+        for bad in (2.9, 0, -5, True, "20000"):
+            with self.subTest(n_samples=bad):
+                with self.assertRaises(ValueError):
+                    project(GaussianDistribution(0.0, 1.0), GaussianDistribution(0.0, 1.0), n_samples=bad)
+        with self.assertRaises(ValueError):
+            project(GaussianDistribution(0.0, 1.0), GaussianDistribution(0.0, 1.0), n_samples=100, max_its=0)
+
+    def test_docstring_does_not_claim_an_exact_kl_projection(self):
+        # MXR-080-1727: a finite Monte Carlo draw fitted by a capped, locally-optimal EM is not
+        # "exactly" the forward-KL projection, and nothing here estimates the gap.
+        doc = project.__doc__ or ""
+        self.assertNotIn("exactly the projection", doc)
+        self.assertIn("empirical M-projection, not the exact one", doc)
+
 
 if __name__ == "__main__":
     unittest.main()
