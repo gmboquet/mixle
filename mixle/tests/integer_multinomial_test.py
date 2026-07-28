@@ -144,9 +144,7 @@ class IntegerMultinomialAuditContractTestCase(unittest.TestCase):
 
     def test_numpy_and_generated_scores_agree_on_zero_counts(self):
         dist = IntegerMultinomialDistribution(0, [0.0, 1.0])
-        encoded = dist.dist_to_encoder().seq_encode(
-            [[(0, 0), (1, 2)], [(10, 0)], [(0, 1)]]
-        )
+        encoded = dist.dist_to_encoder().seq_encode([[(0, 0), (1, 2)], [(10, 0)], [(0, 1)]])
         expected = dist.seq_log_density(encoded)
         actual = np.asarray(dist.backend_seq_log_density(encoded, NUMPY_ENGINE))
         np.testing.assert_allclose(actual, expected)
@@ -157,9 +155,7 @@ class IntegerMultinomialAuditContractTestCase(unittest.TestCase):
     def test_stacked_scores_include_the_same_base_measure(self):
         first = IntegerMultinomialDistribution(0, [0.25, 0.75])
         second = IntegerMultinomialDistribution(0, [0.6, 0.4])
-        encoded = first.dist_to_encoder().seq_encode(
-            [[(0, 1), (1, 1)], [(1, 2)], []]
-        )
+        encoded = first.dist_to_encoder().seq_encode([[(0, 1), (1, 1)], [(1, 2)], []])
         params = IntegerMultinomialDistribution.backend_stacked_params(
             [first, second],
             NUMPY_ENGINE,
@@ -171,9 +167,7 @@ class IntegerMultinomialAuditContractTestCase(unittest.TestCase):
                 NUMPY_ENGINE,
             )
         )
-        expected = np.column_stack(
-            (first.seq_log_density(encoded), second.seq_log_density(encoded))
-        )
+        expected = np.column_stack((first.seq_log_density(encoded), second.seq_log_density(encoded)))
         np.testing.assert_allclose(actual, expected)
 
     def test_empty_batches_accumulate_with_fixed_support(self):
@@ -209,7 +203,7 @@ class IntegerMultinomialAuditContractTestCase(unittest.TestCase):
     def test_estimator_controls_and_empty_learned_support_fail_closed(self):
         for kwargs in (
             {"min_val": 2, "max_val": 1},
-            {"min_val": 0},
+            {"max_val": 1},
             {"pseudo_count": -1.0},
             {"pseudo_count": np.nan},
             {"pseudo_count": 1.0, "suff_stat": (0, [0.0, 0.0])},
@@ -222,6 +216,28 @@ class IntegerMultinomialAuditContractTestCase(unittest.TestCase):
         accumulator.seq_update(encoded, np.ones(1), None)
         with self.assertRaises(ValueError, msg="support"):
             estimator.estimate(None, accumulator.value())
+
+    def test_min_val_alone_pins_the_floor_and_learns_the_ceiling(self):
+        # min_val without max_val is a supported configuration: the floor is fixed, the ceiling
+        # grows with the data. Categories below the floor are still rejected.
+        estimator = IntegerMultinomialEstimator(min_val=0, pseudo_count=1.0)
+        accumulator = estimator.accumulator_factory().make()
+        for datum in ([(3, 2)], [(5, 1)], [(4, 3)]):
+            accumulator.update(datum, 1.0, None)
+        distribution = estimator.estimate(None, accumulator.value())
+        self.assertEqual(distribution.min_val, 0)
+        self.assertEqual(distribution.max_val, 5)
+        self.assertEqual(len(distribution.p_vec), 6)
+
+        below_floor = estimator.accumulator_factory().make()
+        with self.assertRaises(ValueError):
+            below_floor.update([(-1, 1)], 1.0, None)
+
+        seq = estimator.accumulator_factory().make()
+        encoded = seq.acc_to_encoder().seq_encode([[(3, 2)], [(5, 1)]])
+        seq.seq_update(encoded, np.ones(2), None)
+        self.assertEqual(seq.value()[0], 0)
+        np.testing.assert_allclose(seq.value()[1], [0.0, 0.0, 0.0, 2.0, 0.0, 1.0])
 
 
 if __name__ == "__main__":

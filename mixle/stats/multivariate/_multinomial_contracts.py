@@ -108,7 +108,9 @@ def canonical_integer_bag(
         )
         if count == 0:
             continue
-        is_outside = min_val is not None and max_val is not None and not min_val <= category <= max_val
+        # Each bound is checked on its own: a pinned floor with a learned ceiling passes max_val=None
+        # and still has to reject categories below the floor.
+        is_outside = (min_val is not None and category < min_val) or (max_val is not None and category > max_val)
         if is_outside:
             outside = True
             if reject_outside:

@@ -110,6 +110,16 @@ def _validate_integer_encoding(
     return rows, indices, counts, categories, value[4], totals
 
 
+def _outside(stat_min: int, stat_counts: np.ndarray, min_val: int | None, max_val: int | None) -> bool:
+    """Return whether a count statistic's support escapes a declared one.
+
+    ``max_val`` is None when only the floor is pinned, in which case the support may grow upward.
+    """
+    if min_val is not None and stat_min < min_val:
+        return True
+    return max_val is not None and stat_min + len(stat_counts) - 1 > max_val
+
+
 def _validate_integer_statistics(
     value: Any,
 ) -> tuple[int | None, np.ndarray | None, Any | None]:
@@ -780,15 +790,19 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
             keys (Optional[str]): Key used by ``key_merge`` and ``key_replace``.
 
         """
-        if (min_val is None) != (max_val is None):
-            raise ValueError("integer multinomial accumulator support requires both min_val and max_val")
+        if max_val is not None and min_val is None:
+            raise ValueError("integer multinomial accumulator max_val requires min_val")
         if min_val is not None:
             min_val = exact_integer(min_val, label="integer multinomial accumulator minimum")
-            max_val = exact_integer(max_val, label="integer multinomial accumulator maximum")
-            if min_val > max_val:
-                raise ValueError("integer multinomial accumulator support minimum must not exceed maximum")
+            if max_val is not None:
+                max_val = exact_integer(max_val, label="integer multinomial accumulator maximum")
+                if min_val > max_val:
+                    raise ValueError("integer multinomial accumulator support minimum must not exceed maximum")
         self.min_val = min_val
         self.max_val = max_val
+        # max_val is also the running maximum once observations arrive, so the configured ceiling is
+        # kept separately -- otherwise a learned ceiling would start rejecting larger categories.
+        self.fixed_max_val = max_val
         self.fixed_support = (min_val is not None) if fixed_support is None else bool(fixed_support)
         if self.fixed_support and min_val is None:
             raise ValueError("fixed integer multinomial support requires explicit bounds")
@@ -815,7 +829,7 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         pairs, cc, _ = canonical_integer_bag(
             x,
             min_val=self.min_val,
-            max_val=self.max_val,
+            max_val=self.fixed_max_val,
             reject_outside=self.fixed_support,
         )
         checked_weight = finite_weight(
@@ -826,9 +840,12 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
             raise TypeError("integer multinomial accumulator estimate must be an integer multinomial distribution")
         for xx, cnt in pairs:
             if self.count_vec is None:
-                self.min_val = xx
+                # A pinned floor bases the vector at min_val even when nothing that low was observed;
+                # canonical_integer_bag already refused anything below it, so xx >= min_val.
+                self.min_val = self.min_val if self.fixed_support else xx
                 self.max_val = xx
-                self.count_vec = vec.make([checked_weight * cnt])
+                self.count_vec = vec.zeros(self.max_val - self.min_val + 1)
+                self.count_vec[xx - self.min_val] += checked_weight * cnt
             elif self.max_val < xx:
                 temp_vec = self.count_vec
                 self.max_val = xx
@@ -900,12 +917,12 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         active_val = val[nonzero]
         active_cnt = cnt[nonzero]
         active_idx = idx[nonzero]
-        if (
-            self.fixed_support
-            and len(active_val)
-            and (np.any(active_val < self.min_val) or np.any(active_val > self.max_val))
-        ):
-            raise ValueError("integer multinomial category is outside the fixed accumulator support")
+        if self.fixed_support and len(active_val):
+            outside = bool(np.any(active_val < self.min_val))
+            if self.fixed_max_val is not None:
+                outside = outside or bool(np.any(active_val > self.fixed_max_val))
+            if outside:
+                raise ValueError("integer multinomial category is outside the fixed accumulator support")
         if len(active_val):
             min_x = int(active_val.min())
             max_x = int(active_val.max())
@@ -915,9 +932,11 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
             )
 
             if self.count_vec is None:
-                self.count_vec = np.zeros(max_x - min_x + 1)
-                self.min_val = min_x
+                # A pinned floor bases the vector at min_val; the guard above already rejected
+                # anything below it, so min_x >= min_val.
+                self.min_val = self.min_val if self.fixed_support else min_x
                 self.max_val = max_x
+                self.count_vec = np.zeros(self.max_val - self.min_val + 1)
 
             if self.min_val > min_x or self.max_val < max_x:
                 prev_min = self.min_val
@@ -960,12 +979,12 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         active_val = val[nonzero]
         active_cnt = cnt[nonzero]
         active_idx = idx[nonzero]
-        if (
-            self.fixed_support
-            and len(active_val)
-            and (np.any(active_val < self.min_val) or np.any(active_val > self.max_val))
-        ):
-            raise ValueError("integer multinomial category is outside the fixed accumulator support")
+        if self.fixed_support and len(active_val):
+            outside = bool(np.any(active_val < self.min_val))
+            if self.fixed_max_val is not None:
+                outside = outside or bool(np.any(active_val > self.fixed_max_val))
+            if outside:
+                raise ValueError("integer multinomial category is outside the fixed accumulator support")
         if len(active_val):
             min_x = int(active_val.min())
             max_x = int(active_val.max())
@@ -983,9 +1002,11 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
             )
 
             if self.count_vec is None:
-                self.count_vec = np.zeros(max_x - min_x + 1)
-                self.min_val = min_x
+                # A pinned floor bases the vector at min_val; the guard above already rejected
+                # anything below it, so min_x >= min_val.
+                self.min_val = self.min_val if self.fixed_support else min_x
                 self.max_val = max_x
+                self.count_vec = np.zeros(self.max_val - self.min_val + 1)
 
             if self.min_val > min_x or self.max_val < max_x:
                 prev_min = self.min_val
@@ -1044,16 +1065,15 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         stat_min, stat_counts, len_stat = _validate_integer_statistics(suff_stat)
-        if (
-            self.fixed_support
-            and stat_counts is not None
-            and (stat_min < self.min_val or stat_min + len(stat_counts) - 1 > self.max_val)
-        ):
-            raise ValueError("integer multinomial statistic lies outside fixed accumulator support")
+        if self.fixed_support and stat_counts is not None:
+            if _outside(stat_min, stat_counts, self.min_val, self.fixed_max_val):
+                raise ValueError("integer multinomial statistic lies outside fixed accumulator support")
         if self.count_vec is None and stat_counts is not None:
-            self.min_val = stat_min
+            self.min_val = self.min_val if self.fixed_support else stat_min
             self.max_val = stat_min + len(stat_counts) - 1
-            self.count_vec = stat_counts.copy()
+            self.count_vec = vec.zeros(self.max_val - self.min_val + 1)
+            offset = stat_min - self.min_val
+            self.count_vec[offset : offset + len(stat_counts)] = stat_counts
 
         elif self.count_vec is not None and stat_counts is not None:
             if self.min_val == stat_min and len(self.count_vec) == len(stat_counts):
@@ -1116,15 +1136,22 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         stat_min, stat_counts, len_stat = _validate_integer_statistics(x)
-        if (
-            self.fixed_support
-            and stat_counts is not None
-            and (stat_min < self.min_val or stat_min + len(stat_counts) - 1 > self.max_val)
-        ):
-            raise ValueError("integer multinomial statistic lies outside fixed accumulator support")
-        if self.fixed_support:
+        if self.fixed_support and stat_counts is not None:
+            if _outside(stat_min, stat_counts, self.min_val, self.fixed_max_val):
+                raise ValueError("integer multinomial statistic lies outside fixed accumulator support")
+        if self.fixed_support and self.fixed_max_val is not None:
             self.count_vec.fill(0.0)
             if stat_counts is not None:
+                offset = stat_min - self.min_val
+                self.count_vec[offset : offset + len(stat_counts)] = stat_counts
+        elif self.fixed_support:
+            # Floor pinned, ceiling learned: rebase the restored counts at the pinned floor.
+            if stat_counts is None:
+                self.max_val = None
+                self.count_vec = None
+            else:
+                self.max_val = stat_min + len(stat_counts) - 1
+                self.count_vec = vec.zeros(self.max_val - self.min_val + 1)
                 offset = stat_min - self.min_val
                 self.count_vec[offset : offset + len(stat_counts)] = stat_counts
         else:
@@ -1178,7 +1205,7 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         return IntegerMultinomialDataEncoder(
             len_encoder=len_encoder,
             min_val=self.min_val if self.fixed_support else None,
-            max_val=self.max_val if self.fixed_support else None,
+            max_val=self.fixed_max_val,
         )
 
 
@@ -1211,13 +1238,14 @@ class IntegerMultinomialAccumulatorFactory(StatisticAccumulatorFactory):
             len_factory (StatisticAccumulatorFactory): Factory for trial-count accumulators.
 
         """
-        if (min_val is None) != (max_val is None):
-            raise ValueError("integer multinomial accumulator factory support requires both bounds")
+        if max_val is not None and min_val is None:
+            raise ValueError("integer multinomial accumulator factory max_val requires min_val")
         if min_val is not None:
             min_val = exact_integer(min_val, label="integer multinomial factory minimum")
-            max_val = exact_integer(max_val, label="integer multinomial factory maximum")
-            if min_val > max_val:
-                raise ValueError("integer multinomial factory minimum must not exceed maximum")
+            if max_val is not None:
+                max_val = exact_integer(max_val, label="integer multinomial factory maximum")
+                if min_val > max_val:
+                    raise ValueError("integer multinomial factory minimum must not exceed maximum")
         self.min_val = min_val
         self.max_val = max_val
         self.fixed_support = (min_val is not None) if fixed_support is None else bool(fixed_support)
@@ -1255,8 +1283,10 @@ class IntegerMultinomialEstimator(ParameterEstimator):
         """Estimate integer multinomial distributions from accumulated count statistics.
 
         Args:
-            min_val (Optional[int]): Smallest integer category to include when support is fixed.
-            max_val (Optional[int]): Largest integer category to include when support is fixed.
+            min_val (Optional[int]): Smallest integer category to include. Given alone it pins the floor and
+                lets the ceiling be learned; observations below it are rejected.
+            max_val (Optional[int]): Largest integer category to include. Requires ``min_val``, and together
+                the two fix the support entirely.
             len_estimator (Optional[ParameterEstimator]): Estimator for the trial-count distribution.
             len_dist (Optional[SequenceEncodableProbabilityDistribution]): Optional
                 SequenceEncodableProbabilityDistribution that fixes the trial-count distribution.
@@ -1266,8 +1296,8 @@ class IntegerMultinomialEstimator(ParameterEstimator):
             keys (Optional[str]): Optional key for sharing sufficient statistics.
 
         Attributes:
-            min_val (Optional[int]): Smallest integer category to include when support is fixed.
-            max_val (Optional[int]): Largest integer category to include when support is fixed.
+            min_val (Optional[int]): Smallest integer category to include, or None when the floor is learned.
+            max_val (Optional[int]): Largest integer category to include, or None when the ceiling is learned.
             len_estimator (ParameterEstimator): Estimator for trial counts, or ``NullEstimator`` when omitted.
             len_dist (Optional[SequenceEncodableProbabilityDistribution]): Optional
                 SequenceEncodableProbabilityDistribution that fixes trial-count behavior.
@@ -1278,13 +1308,21 @@ class IntegerMultinomialEstimator(ParameterEstimator):
             keys (Optional[str]): Optional key for sharing sufficient statistics.
 
         """
-        if (min_val is None) != (max_val is None):
-            raise ValueError("integer multinomial fixed support requires both min_val and max_val")
+        # min_val alone is a pinned floor with a learned ceiling, which is what the accumulator
+        # already implements: it leaves count_vec unallocated so the support grows upward, and
+        # passes reject_outside=fixed_support so observations below the floor are refused. Only the
+        # estimator disagreed, rejecting the combination outright -- while the line below it still
+        # reads ``fixed_support = min_val is not None``, written for exactly this case. A ceiling
+        # without a floor stays an error: the distribution is parameterized by (min_val, p_vec) with
+        # the maximum derived, so a bare max_val has nothing to anchor to.
+        if max_val is not None and min_val is None:
+            raise ValueError("integer multinomial max_val requires min_val; the support is anchored at its minimum")
         if min_val is not None:
             min_val = exact_integer(min_val, label="integer multinomial estimator minimum")
-            max_val = exact_integer(max_val, label="integer multinomial estimator maximum")
-            if min_val > max_val:
-                raise ValueError("integer multinomial estimator minimum must not exceed maximum")
+            if max_val is not None:
+                max_val = exact_integer(max_val, label="integer multinomial estimator maximum")
+                if min_val > max_val:
+                    raise ValueError("integer multinomial estimator minimum must not exceed maximum")
         if pseudo_count is not None:
             pseudo_count = finite_weight(
                 pseudo_count,
@@ -1312,7 +1350,9 @@ class IntegerMultinomialEstimator(ParameterEstimator):
                     raw_prior,
                     label="integer multinomial prior probabilities",
                 )
-            if min_val is not None and (prior_min < min_val or prior_min + len(prior_prob) - 1 > max_val):
+            outside = min_val is not None and prior_min < min_val
+            outside = outside or (max_val is not None and prior_min + len(prior_prob) - 1 > max_val)
+            if outside:
                 raise ValueError("integer multinomial prior support lies outside fixed support")
         self.suff_stat = None if prior_prob is None else (prior_min, prior_prob)
         self.pseudo_count = pseudo_count
@@ -1369,7 +1409,7 @@ class IntegerMultinomialEstimator(ParameterEstimator):
         stat_min, stat_counts, len_stat = _validate_integer_statistics(suff_stat)
         len_dist = self.len_dist if self.len_dist is not None else self.len_estimator.estimate(nobs, len_stat)
 
-        if self.fixed_support:
+        if self.fixed_support and self.max_val is not None:
             min_val = self.min_val
             max_val = self.max_val
             if stat_counts is not None and (stat_min < min_val or stat_min + len(stat_counts) - 1 > max_val):
@@ -1388,6 +1428,12 @@ class IntegerMultinomialEstimator(ParameterEstimator):
                 )
             min_val = min(bound[0] for bound in supports_)
             max_val = max(bound[1] for bound in supports_)
+            if self.min_val is not None:
+                # Floor pinned, ceiling learned. The accumulator already refused observations below
+                # the floor, so reaching here with a lower one means a prior statistic disagrees.
+                if min_val < self.min_val:
+                    raise ValueError("integer multinomial prior support lies below the fixed estimator minimum")
+                min_val = self.min_val
 
         count_vec = vec.zeros(max_val - min_val + 1)
         if stat_counts is not None:
@@ -1434,11 +1480,11 @@ class IntegerMultinomialDataEncoder(DataSequenceEncoder):
 
         """
         self.len_encoder = len_encoder if len_encoder is not None else NullDataEncoder()
-        if (min_val is None) != (max_val is None):
-            raise ValueError("integer multinomial encoder support requires both bounds")
+        if max_val is not None and min_val is None:
+            raise ValueError("integer multinomial encoder max_val requires min_val")
         self.min_val = None if min_val is None else exact_integer(min_val, label="integer multinomial encoder minimum")
         self.max_val = None if max_val is None else exact_integer(max_val, label="integer multinomial encoder maximum")
-        if self.min_val is not None and self.min_val > self.max_val:
+        if self.min_val is not None and self.max_val is not None and self.min_val > self.max_val:
             raise ValueError("integer multinomial encoder minimum must not exceed maximum")
 
     def __str__(self) -> str:
@@ -1497,7 +1543,7 @@ class IntegerMultinomialDataEncoder(DataSequenceEncoder):
         tcnt = []
 
         for i, y in enumerate(x):
-            pairs, cc, _outside = canonical_integer_bag(
+            pairs, cc, _ = canonical_integer_bag(
                 y,
                 min_val=self.min_val,
                 max_val=self.max_val,
