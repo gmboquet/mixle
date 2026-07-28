@@ -110,12 +110,22 @@ def induce_leaf_for_unseen_type(
 
 
 def _try_automatic_profiler(rows, *, rng, max_its):
+    """Fit the profiler's prototype, or return ``None`` so the caller's next fallback gets a turn."""
     from mixle.inference.estimation import optimize
     from mixle.stats.combinator.ignored import IgnoredDistribution
     from mixle.utils.automatic.profiling import get_prototype
 
     prototype = get_prototype(rows, seed=0)
-    fitted = optimize(rows, prototype, max_its=max_its, rng=rng)
+    try:
+        fitted = optimize(rows, prototype, max_its=max_its, rng=rng)
+    except ValueError:
+        # The profiler recognized a shape but its prototype will not fit these rows -- EM never
+        # reaches a finite objective, so optimize() refuses to return a model. That is this
+        # function's "does not apply" answer, exactly like the IgnoredDistribution case below:
+        # induce_leaf_for_unseen_type is a cascade, and the numeric/sequence fallbacks exist for
+        # precisely the rows the profiler cannot model. Letting the error out skipped them and
+        # replaced the cascade's own clear TypeError with an EM diagnostic.
+        return None
     if isinstance(fitted, IgnoredDistribution):
         return None
     return fitted
