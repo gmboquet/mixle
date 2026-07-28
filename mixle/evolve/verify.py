@@ -55,6 +55,7 @@ the calibration no-regression rule, multiplicity) and never edits the underlying
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -186,6 +187,54 @@ def _calibration_no_regression(
     return status, {"champion_calib": champ_cal, "challenger_calib": chal_cal, "calib_tol": calib_tol, "ok": ok}
 
 
+def _check_policy(*, alpha: float, min_effect: float, calib_tol: float) -> None:
+    """Validate the gate's policy knobs before any of them can authorize a promotion.
+
+    None of these had a domain check, and each fails in a different, quiet direction:
+    ``alpha=2`` promotes unconditionally because every valid p-value is below it; a negative
+    ``min_effect`` makes the effect-size floor vacuous (``abs(mean_diff) >= -1`` is always true), and
+    a negative ``calib_tol`` inverts the no-regression rule into a requirement that the challenger be
+    strictly *better* calibrated; a NaN in any of them turns its comparison into a silent ``False``,
+    which reads as "no evidence" for alpha but as "no floor breached" nowhere consistent. These are
+    release-promotion policy, so they fail loudly rather than degrade.
+    """
+    if not math.isfinite(alpha) or not 0.0 < alpha < 1.0:
+        raise ValueError(f"alpha must be a finite significance level in (0, 1), got {alpha!r}")
+    if not math.isfinite(min_effect) or min_effect < 0.0:
+        raise ValueError(f"min_effect must be a finite, non-negative effect-size floor, got {min_effect!r}")
+    if not math.isfinite(calib_tol) or calib_tol < 0.0:
+        raise ValueError(f"calib_tol must be a finite, non-negative tolerance, got {calib_tol!r}")
+
+
+def _check_pointwise(vec: Any, side: str, objective: Objective, n_rows: int | None) -> np.ndarray:
+    """Require exactly one score per held-out row: a flat ``(len(data),)`` vector, nothing else.
+
+    Both vectors used to be flattened with ``.reshape(-1)`` and then compared only to each other, so
+    any pair of same-sized arrays passed. Two ``(2, 2)`` score matrices were accepted as four paired
+    observations for a 100-row dataset, and the challenger promoted on them. That lets accidental
+    broadcasting, an aggregation that collapsed rows, or fabricated replication decide a release
+    promotion, and the paired test's own assumption -- one score per held-out observation, paired by
+    position -- is silently violated with no trace in the verdict.
+
+    Enforced here rather than in the objectives themselves because this is the gate: it is the
+    function that turns a vector into a promotion decision, and a custom :class:`Objective` is
+    caller-supplied code.
+    """
+    arr = np.asarray(vec, dtype=float)
+    if arr.ndim != 1:
+        raise ValueError(
+            f"objective {objective.name!r} returned a {arr.shape} {side} score array; the paired gate "
+            "requires a flat (len(data),) vector of one score per held-out row, not a shape that has "
+            "to be flattened or broadcast to become one."
+        )
+    if n_rows is not None and arr.shape[0] != n_rows:
+        raise ValueError(
+            f"objective {objective.name!r} returned {arr.shape[0]} {side} scores for {n_rows} held-out "
+            "rows; the paired gate requires exactly one score per row, paired by position."
+        )
+    return arr
+
+
 def challenger_beats_champion(
     champion: Any,
     challenger: Any,
@@ -227,7 +276,13 @@ def challenger_beats_champion(
         A :class:`Verdict`. ``verdict.promote`` is the single promotion predicate; it is always
         ``False`` for a scalar-only objective, regardless of ``favored`` -- see module docstring
         point 8 and :attr:`Verdict.has_statistical_evidence`.
+
+    Raises:
+        ValueError: if a policy value is outside its domain (see :func:`_check_policy`), or if a
+            pointwise vector does not carry exactly one score per held-out row (see
+            :func:`_check_pointwise`).
     """
+    _check_policy(alpha=alpha, min_effect=min_effect, calib_tol=calib_tol)
     champ_vec = objective.pointwise(champion, data)
     chal_vec = objective.pointwise(challenger, data)
 
@@ -256,8 +311,9 @@ def challenger_beats_champion(
         evidence["scalar_only"] = {"champion": champ_s, "challenger": chal_s}
         return Verdict(favored, float(delta), float("nan"), (float("nan"), float("nan")), calibration_status, evidence)
 
-    champ_vec = np.asarray(champ_vec, dtype=float).reshape(-1)
-    chal_vec = np.asarray(chal_vec, dtype=float).reshape(-1)
+    n_rows = len(data) if hasattr(data, "__len__") else None
+    champ_vec = _check_pointwise(champ_vec, "champion", objective, n_rows)
+    chal_vec = _check_pointwise(chal_vec, "challenger", objective, n_rows)
     if champ_vec.shape[0] != chal_vec.shape[0]:
         raise ValueError(
             "pairing-integrity violation: champion vector has %d entries, challenger has %d -- both "

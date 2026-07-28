@@ -332,5 +332,95 @@ class DecisionTailRiskTest(unittest.TestCase):
             self.assertGreaterEqual(res["risk_profile"]["cvar"], res["risk_profile"]["var"])
 
 
+class LedgerIntegrityTest(unittest.TestCase):
+    """MXR-080-1761: the ledger is the evidence, so it must own and attest its own rows."""
+
+    def _ledger(self, n=3):
+        led = EvolutionLedger()
+        for i in range(n):
+            led.record(operator=f"op{i}", delta=float(i), verdict={"promote": False}, cost=1.0, parent_hash="p")
+        return led
+
+    def test_the_returned_row_is_not_the_stored_row(self):
+        led = self._ledger(1)
+        returned = led.record(operator="x", delta=1.0, verdict=None, cost=0.0, parent_hash=None)
+        returned["delta"] = 999.0
+        returned["meta"]["injected"] = True
+        self.assertEqual(led.rows[-1]["delta"], 1.0)
+        self.assertNotIn("injected", led.rows[-1]["meta"])
+        self.assertTrue(led.verify())
+
+    def test_the_rows_view_cannot_rewrite_or_clear_the_trail(self):
+        led = self._ledger()
+        view = led.rows
+        view[0]["delta"] = 999.0
+        with self.assertRaises(AttributeError):
+            led.rows.clear()
+        self.assertEqual(led.rows[0]["delta"], 0.0)
+        self.assertEqual(len(led), 3)
+        self.assertTrue(led.verify())
+
+    def test_rows_carry_sequence_schema_and_chained_digests(self):
+        led = self._ledger()
+        rows = led.rows
+        self.assertEqual([row["seq"] for row in rows], [0, 1, 2])
+        self.assertTrue(all(row["schema_version"] == 1 for row in rows))
+        self.assertEqual(rows[1]["prev_hash"], rows[0]["row_hash"])
+        self.assertTrue(led.verify())
+
+    def test_verify_detects_edits_deletions_and_reordering(self):
+        base = self._ledger().rows
+
+        tampered = [dict(row) for row in base]
+        tampered[1]["delta"] = 42.0
+        self.assertFalse(EvolutionLedger(tampered).verify())
+
+        self.assertFalse(EvolutionLedger([base[0], base[2]]).verify())  # deletion
+        self.assertFalse(EvolutionLedger([base[0], base[2], base[1]]).verify())  # reordering
+        self.assertFalse(EvolutionLedger(list(base[1:])).verify())  # front truncation
+        self.assertTrue(EvolutionLedger(list(base)).verify())  # intact
+
+    def test_json_round_trip_preserves_verifiability(self):
+        led = self._ledger()
+        self.assertTrue(EvolutionLedger.from_json(led.to_json()).verify())
+
+
+class _MutatingOperator:
+    """An operator that damages the champion it is handed and then fails."""
+
+    name = "mutating"
+    cost_hint = 1.0
+
+    def applicable(self, model, data, *, ctx):
+        del data, ctx
+        return True
+
+    def propose(self, model, data, *, ctx):
+        del data, ctx
+        model.sabotaged = 99
+        raise RuntimeError("operator blew up after mutating the champion")
+
+
+class ChampionIsolationTest(unittest.TestCase):
+    """MXR-080-1763: a failed operator must not be able to change the returned champion."""
+
+    def setUp(self):
+        rng = np.random.RandomState(0)
+        self.data = list(rng.normal(3.0, 2.0, 200))
+        self.nll = nll_objective()
+
+    def test_a_failed_operator_cannot_mutate_the_returned_champion(self):
+        champion = _fit(self.data, 3.0, 2.0)
+        result = improve(champion, self.data, objective=self.nll, operators=[_MutatingOperator()], seed=0)
+        self.assertFalse(result.verified)
+        self.assertIs(result.model, champion)
+        self.assertFalse(hasattr(champion, "sabotaged"))
+
+    def test_a_working_operator_still_produces_a_verified_improvement(self):
+        # Negative control: isolating operators must not break the ordinary proposal path.
+        result = improve(GaussianDistribution(0.0, 1.0), self.data, objective=self.nll, seed=0)
+        self.assertTrue(result.verified)
+
+
 if __name__ == "__main__":
     unittest.main()

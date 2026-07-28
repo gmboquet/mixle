@@ -15,7 +15,15 @@ import unittest
 
 import numpy as np
 
-from mixle.evolve import decision_regret_objective, log_score_objective, nll_objective
+from mixle.evolve import (
+    calibration_objective,
+    crps_objective,
+    decision_regret_objective,
+    interval_objective,
+    log_score_objective,
+    nll_objective,
+)
+from mixle.evolve.objective import sample_ensemble
 from mixle.inference import bayes_action, log_score, posterior
 from mixle.inference.estimation import optimize
 from mixle.stats import GaussianDistribution
@@ -151,6 +159,48 @@ class DecisionRegretObjectiveTest(unittest.TestCase):
     def test_pointwise_is_still_none_scalar_only(self):
         obj = decision_regret_objective(self._sq_loss, [0.0, 1.0])
         self.assertIsNone(obj.pointwise(GaussianDistribution(0.0, 1.0), [0.0, 1.0]))
+
+
+class EnsembleBudgetTest(unittest.TestCase):
+    """MXR-080-1767: a sampled objective must run the ensemble its signature advertises."""
+
+    class _ShortSampler:
+        def sample(self, m):
+            del m
+            return np.array([1.0, 2.0])  # always two draws, whatever was asked for
+
+    class _ShortModel:
+        def sampler(self, seed):
+            del seed
+            return EnsembleBudgetTest._ShortSampler()
+
+    def test_a_sampler_returning_fewer_draws_than_requested_is_rejected(self):
+        with self.assertRaises(ValueError):
+            sample_ensemble(self._ShortModel(), 3, 10, seed=0)
+
+    def test_a_realized_ensemble_matching_the_request_is_accepted(self):
+        model = GaussianDistribution(0.0, 1.0)
+        self.assertEqual(sample_ensemble(model, 4, 7, seed=0).shape, (4, 7))
+
+    def test_invalid_ensemble_and_row_counts_are_rejected(self):
+        model = GaussianDistribution(0.0, 1.0)
+        for bad in (0, -1, 2.5, float("nan"), True):
+            with self.subTest(m=bad), self.assertRaises(ValueError):
+                sample_ensemble(model, 3, bad, seed=0)
+            with self.subTest(n=bad), self.assertRaises(ValueError):
+                sample_ensemble(model, bad, 3, seed=0)
+
+    def test_objective_builders_validate_their_advertised_budgets(self):
+        for bad in (0, -1, 2.5):
+            with self.subTest(ensemble=bad):
+                with self.assertRaises(ValueError):
+                    crps_objective(ensemble=bad)
+                with self.assertRaises(ValueError):
+                    interval_objective(ensemble=bad)
+                with self.assertRaises(ValueError):
+                    calibration_objective(ensemble=bad)
+                with self.assertRaises(ValueError):
+                    calibration_objective(bins=bad)
 
 
 if __name__ == "__main__":

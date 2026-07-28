@@ -390,5 +390,78 @@ class CalibrationErrorGuardTest(unittest.TestCase):
         self.assertEqual(d["calibrated"], False)
 
 
+class _FixedVectorObjective:
+    """An objective returning caller-chosen score arrays, ignoring the model and the data."""
+
+    name = "fixed"
+    lower_is_better = True
+
+    def __init__(self, champ, chal):
+        self._champ, self._chal = np.asarray(champ, dtype=float), np.asarray(chal, dtype=float)
+
+    def pointwise(self, model, data):
+        return self._champ if model == "champ" else self._chal
+
+    def scalar(self, model, data):
+        return float(np.mean(self.pointwise(model, data)))
+
+
+class PointwiseRowBindingTest(unittest.TestCase):
+    """MXR-080-1765: pointwise scores must be one-per-held-out-row, not merely mutually same-sized."""
+
+    def test_a_score_matrix_is_not_four_paired_observations_for_a_hundred_rows(self):
+        objective = _FixedVectorObjective([[2.0, 2.0], [2.0, 2.0]], [[1.0, 1.0], [1.0, 1.0]])
+        with self.assertRaises(ValueError):
+            challenger_beats_champion("champ", "chal", list(range(100)), objective=objective, require_calibration=False)
+
+    def test_a_short_vector_cannot_stand_in_for_the_held_out_set(self):
+        objective = _FixedVectorObjective([2.0, 2.0, 2.1, 2.2], [1.0, 1.1, 1.0, 1.2])
+        with self.assertRaises(ValueError):
+            challenger_beats_champion("champ", "chal", list(range(100)), objective=objective, require_calibration=False)
+
+    def test_one_finite_score_per_row_is_accepted(self):
+        rows = 40
+        rng = np.random.RandomState(0)
+        objective = _FixedVectorObjective(rng.normal(2.0, 0.1, rows), rng.normal(1.0, 0.1, rows))
+        verdict = challenger_beats_champion(
+            "champ", "chal", list(range(rows)), objective=objective, require_calibration=False
+        )
+        self.assertEqual(verdict.favored, "challenger")
+
+
+class GatePolicyDomainTest(unittest.TestCase):
+    """MXR-080-1766: policy knobs that authorize promotion must be inside their own domains."""
+
+    def setUp(self):
+        rows = 40
+        rng = np.random.RandomState(1)
+        self.data = list(range(rows))
+        self.objective = _FixedVectorObjective(rng.normal(2.0, 0.1, rows), rng.normal(1.0, 0.1, rows))
+
+    def _gate(self, **kwargs):
+        return challenger_beats_champion(
+            "champ", "chal", self.data, objective=self.objective, require_calibration=False, **kwargs
+        )
+
+    def test_an_alpha_outside_zero_one_cannot_promote(self):
+        # alpha=2 promoted unconditionally: every valid p-value is below it.
+        for bad in (2.0, 0.0, 1.0, -0.1, float("nan"), float("inf")):
+            with self.subTest(alpha=bad), self.assertRaises(ValueError):
+                self._gate(alpha=bad)
+
+    def test_a_negative_or_nan_min_effect_is_rejected(self):
+        for bad in (-1.0, float("nan"), float("inf")):
+            with self.subTest(min_effect=bad), self.assertRaises(ValueError):
+                self._gate(min_effect=bad)
+
+    def test_a_negative_or_nan_calib_tol_is_rejected(self):
+        for bad in (-1.0, float("nan"), float("inf")):
+            with self.subTest(calib_tol=bad), self.assertRaises(ValueError):
+                self._gate(calib_tol=bad)
+
+    def test_ordinary_policy_values_still_work(self):
+        self.assertEqual(self._gate(alpha=0.05, min_effect=0.0, calib_tol=1e-3).favored, "challenger")
+
+
 if __name__ == "__main__":
     unittest.main()

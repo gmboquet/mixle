@@ -47,9 +47,16 @@ class _NullObjective:
         self.n_obs = n_obs
 
     def pointwise(self, model, data):
+        # One score per row of the data actually handed in -- the gate requires that binding
+        # (MXR-080-1765), and a fixture that returns a fixed-length vector regardless of `data`
+        # would silently score a different set of rows than the one being gated. Slicing the fixed
+        # baseline keeps the values (and hence every existing expectation at the full length)
+        # identical while making the length follow `data`.
+        n = len(data)
+        base = self._base[:n]
         if model.noise_seed is None:
-            return self._base.copy()
-        return self._base + np.random.RandomState(model.noise_seed).normal(0.0, 1.0, self.n_obs)
+            return base.copy()
+        return base + np.random.RandomState(model.noise_seed).normal(0.0, 1.0, n)
 
     def scalar(self, model, data):
         return float(np.mean(self.pointwise(model, data)))

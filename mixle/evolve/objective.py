@@ -66,6 +66,25 @@ def _as_array(data: Any) -> np.ndarray:
     return np.asarray(data, dtype=float).reshape(-1)
 
 
+def _positive_int(value: Any, name: str) -> int:
+    """Validate an exact positive integer control (an ensemble size, a bin count, a row count).
+
+    ``ensemble``/``bins`` are advertised budgets: the number of predictive draws or histogram bins
+    the score is actually computed from. A zero, negative, or fractional value is not a count, and
+    letting one through means the objective silently runs a different experiment than the one its
+    signature describes.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an exact positive integer, got {value!r}")
+    try:
+        count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{name} must be an exact positive integer, got {value!r}") from None
+    if count != value or count < 1:
+        raise ValueError(f"{name} must be an exact positive integer, got {value!r}")
+    return count
+
+
 def pointwise_log_density(model: Any, data: Sequence[Any]) -> np.ndarray:
     """Per-observation ``log p(y_i)`` under ``model`` via the vectorized ``seq_log_density`` path.
 
@@ -85,10 +104,23 @@ def sample_ensemble(model: Any, n: int, m: int, *, seed: int) -> np.ndarray:
 
     The plug-in predictive is exchangeable across observations, so one ``(m,)`` draw row is broadcast
     to all ``n`` rows -- the per-observation CRPS/interval scores then differ only through ``y_i``.
+
+    The realized draw count is checked against ``m`` rather than accepted and broadcast. Nothing
+    verified it before, so a sampler that always returned two draws produced shape ``(n, 2)`` for
+    ``m=10`` -- and ``m=0`` still produced two. The resulting CRPS/interval score is then a genuinely
+    different (far noisier) estimator than the one the objective's ``ensemble`` argument advertises,
+    with nothing in the score or the verdict to say so.
     """
+    n = _positive_int(n, "n (observations to score)")
+    m = _positive_int(m, "m (ensemble draws)")
     sampler = model.sampler(seed)
-    row = np.asarray(sampler.sample(int(m)), dtype=float).reshape(-1)
-    return np.broadcast_to(row, (int(n), row.shape[0])).copy()
+    row = np.asarray(sampler.sample(m), dtype=float).reshape(-1)
+    if row.shape[0] != m:
+        raise ValueError(
+            f"{type(model).__name__}'s sampler returned {row.shape[0]} draw(s) for a requested ensemble of "
+            f"{m}; the realized ensemble must match the requested budget the score is reported against."
+        )
+    return np.broadcast_to(row, (n, m)).copy()
 
 
 @dataclass(frozen=True)
@@ -143,9 +175,10 @@ def crps_objective(*, ensemble: int = 256, seed: int = 0) -> Objective:
     """Continuous Ranked Probability Score from a sampled predictive ensemble (lower is better).
 
     Args:
-        ensemble: number of predictive draws per observation.
+        ensemble: number of predictive draws per observation (an exact positive integer).
         seed: RNG seed for the ensemble (reproducible).
     """
+    ensemble = _positive_int(ensemble, "ensemble")
 
     def pw(model: Any, data: Any) -> np.ndarray:
         y = _as_array(data)
@@ -160,9 +193,11 @@ def interval_objective(level: float = 0.9, *, ensemble: int = 256, seed: int = 0
 
     Args:
         level: central coverage of the interval (e.g. 0.9 for a 90% interval).
-        ensemble: number of predictive draws used to read off the interval endpoints.
+        ensemble: number of predictive draws used to read off the interval endpoints (an exact
+            positive integer).
         seed: RNG seed for the ensemble.
     """
+    ensemble = _positive_int(ensemble, "ensemble")
     if not 0.0 < level < 1.0:
         raise ValueError("level must be in (0, 1).")
     alpha = 1.0 - level
@@ -190,7 +225,12 @@ def calibration_objective(*, ensemble: int = 256, seed: int = 0, bins: int = 10)
     (For *classification* models the natural calibration scalar is
     :func:`mixle.inference.calibration.expected_calibration_error`; this builder targets the
     continuous-predictive case, which is the common one for the streaming/auto-select loop.)
+
+    ``ensemble`` and ``bins`` must both be exact positive integers -- they are the budget the
+    reported calibration error is computed from.
     """
+    ensemble = _positive_int(ensemble, "ensemble")
+    bins = _positive_int(bins, "bins")
 
     def pw(model: Any, data: Any) -> None:
         return None
