@@ -22,6 +22,7 @@ dependency-free leaf that any layer can import without cycles.
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -237,12 +238,17 @@ class FiniteSupport(PredicateCapability):
 
     @classmethod
     def check(cls, obj: Any) -> bool:
-        """Return whether ``obj`` reports a finite, non-negative support size."""
+        """Return whether ``obj`` reports a finite, non-negative support size.
+
+        A Boolean is not a support count even though ``bool`` subclasses ``int``: ``support_size()``
+        returning ``True`` used to certify a one-point support, so an object answering a yes/no
+        question was routed as an enumerable finite distribution.
+        """
         fn = getattr(obj, "support_size", None)
         if not callable(fn):
             return False
         n = fn()
-        return isinstance(n, int) and n >= 0
+        return isinstance(n, int) and not isinstance(n, bool) and n >= 0
 
 
 class RankableByIndex(PredicateCapability):
@@ -439,8 +445,34 @@ FACET_PRESERVING: tuple[type, ...] = (Enumerable, FiniteSupport, RankableByIndex
 # ---------------------------------------------------------------------------
 # Query surface
 # ---------------------------------------------------------------------------
+_PROTOCOL_METHODS: dict[type, tuple[str, ...]] = {}
+
+
+def _protocol_methods(capability: type) -> tuple[str, ...]:
+    """Names a ``Protocol`` declares as *methods* -- what an implementer must actually be able to call."""
+    cached = _PROTOCOL_METHODS.get(capability)
+    if cached is None:
+        names: dict[str, None] = {}
+        for klass in getattr(capability, "__mro__", ()):
+            if klass is object or klass is Protocol:
+                continue
+            for name, member in vars(klass).items():
+                if not name.startswith("_") and inspect.isfunction(member):
+                    names[name] = None
+        cached = tuple(names)
+        _PROTOCOL_METHODS[capability] = cached
+    return cached
+
+
 def supports(obj: Any, capability: type) -> bool:
-    """Return whether ``obj`` provides ``capability`` (a Protocol or a PredicateCapability)."""
+    """Return whether ``obj`` provides ``capability`` (a Protocol or a PredicateCapability).
+
+    For a ``runtime_checkable`` ``Protocol``, ``isinstance`` establishes attribute *presence* only,
+    not callable shape -- an object with ``condition = 3`` cleared ``supports(obj, Conditionable)``
+    and therefore ``require()``, and the routing failure surfaced later as a ``TypeError`` inside the
+    operation. These are authoritative dispatch declarations, so every declared protocol method must
+    at least be callable on ``obj``.
+    """
     try:
         if isinstance(capability, type) and issubclass(capability, PredicateCapability):
             if isinstance(obj, type):
@@ -448,7 +480,11 @@ def supports(obj: Any, capability: type) -> bool:
             return bool(capability.check(obj))
     except CapabilityUnavailable:
         return False
-    return isinstance(obj, capability)
+    if not isinstance(obj, capability):
+        return False
+    if not getattr(capability, "_is_protocol", False):
+        return True
+    return all(callable(getattr(obj, name, None)) for name in _protocol_methods(capability))
 
 
 def capabilities(obj: Any) -> frozenset[str]:

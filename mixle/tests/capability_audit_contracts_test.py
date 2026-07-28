@@ -93,5 +93,37 @@ class DiscoveryTest(unittest.TestCase):
         )
 
 
+class CapabilityDispatchContractTest(unittest.TestCase):
+    def test_protocol_facets_require_callable_members(self):
+        # MXR-080-1682: method-presence facets used runtime_checkable isinstance directly, which
+        # establishes attribute PRESENCE only. An object with `condition = 3` cleared
+        # supports(obj, Conditionable) and therefore require(), and the routing failure surfaced
+        # later as a TypeError inside the operation it had already been dispatched to.
+        class NotCallable:
+            condition = 3
+
+        class Callable_:
+            def condition(self, observed):
+                return observed
+
+        self.assertFalse(capability.supports(NotCallable(), capability.Conditionable))
+        with self.assertRaises(capability.CapabilityError):
+            capability.require(NotCallable(), capability.Conditionable, "condition")
+        self.assertTrue(capability.supports(Callable_(), capability.Conditionable))
+
+    def test_boolean_is_not_a_support_size(self):
+        # bool subclasses int, so support_size() -> True certified a one-point finite support.
+        class BooleanSupport:
+            def support_size(self):
+                return True
+
+        class RealSupport:
+            def support_size(self):
+                return 3
+
+        self.assertFalse(capability.supports(BooleanSupport(), capability.FiniteSupport))
+        self.assertTrue(capability.supports(RealSupport(), capability.FiniteSupport))
+
+
 if __name__ == "__main__":
     unittest.main()
