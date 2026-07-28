@@ -397,6 +397,15 @@ class ValueSpec:
             raise ValueError("only derived values may declare expression dependencies")
         if self.role in {ValueRole.FIXED, ValueRole.CONTROLLED, ValueRole.OBSERVED, ValueRole.DERIVED} and self.prior:
             raise ValueError(f"{self.role.value} values cannot declare a prior")
+        # a prior is a distribution OVER THIS QUANTITY, so it is stated in this quantity's unit: a
+        # value declared in metres used to accept a prior declared in kilograms, because units were
+        # only checked for truthiness and never reconciled along the value/prior chain.
+        if self.prior is not None and self.prior.unit != self.unit:
+            raise ValueError(
+                f"value {self.id!r} is measured in {self.unit!r} but its prior declares {self.prior.unit!r}; "
+                "prior and value must share one unit (canonicalize the strings; this is an identity "
+                "comparison, not a dimensional algebra)"
+            )
         # dependencies were only checked for non-emptiness, so a derived value could declare itself as
         # its own dependency (expression "d+1", dependencies ("d",)) and still receive a stable
         # identity despite having no well-founded evaluation order at all.
@@ -546,6 +555,59 @@ def _require_dependency_dag(values: tuple[ValueSpec, ...], value_ids: set[str]) 
         visit(value_id, ())
 
 
+def _require_one_likelihood(likelihood: LikelihoodSpec, observations: tuple[ObservationSpec, ...]) -> None:
+    """One evidence model per posterior: no observation may assert a different one for the same data.
+
+    Each ``ObservationSpec`` embeds a likelihood and ``PosteriorArtifact`` embeds a second top-level
+    one; the posterior only checked that the observation-ID sets closed, never that the two models
+    agreed. A valid artifact could therefore be constructed whose observation declared a Poisson
+    likelihood and whose posterior declared a Normal likelihood for that exact observation. The
+    observation ids may legitimately be a subset (one observation's own likelihood need not list its
+    siblings), but the model identity -- id, family, parameters, discrepancy reference -- must be the
+    same model.
+    """
+    for observation in observations:
+        own = observation.likelihood
+        mismatch = [
+            f"{name}: {theirs!r} != {ours!r}"
+            for name, theirs, ours in (
+                ("id", own.id, likelihood.id),
+                ("family", own.family, likelihood.family),
+                ("parameters", own.parameters, likelihood.parameters),
+                ("discrepancy_ref", own.discrepancy_ref, likelihood.discrepancy_ref),
+            )
+            if theirs != ours
+        ]
+        if mismatch:
+            raise ValueError(
+                f"observation {observation.id!r} declares a different likelihood than the posterior "
+                f"({'; '.join(mismatch)}); one posterior asserts exactly one evidence model per observation"
+            )
+        if observation.id not in likelihood.observation_ids:
+            raise ValueError(f"posterior likelihood does not cover observation {observation.id!r}")
+
+
+def _require_observation_units(values: tuple[ValueSpec, ...], observations: tuple[ObservationSpec, ...]) -> None:
+    """An observation of a quantity is a measurement OF that quantity, so it shares that quantity's unit.
+
+    Units used to be checked only for truthiness and never reconciled across the
+    value/prior/observation chain, so an observation declaring seconds could enter a valid posterior
+    for a metre-valued quantity. This is an identity comparison on canonical unit strings, not a
+    dimensional algebra: ``"m"`` and ``"metre"`` are different units here, and the caller is
+    responsible for canonicalizing and for converting magnitudes. Measurement uncertainty is carried
+    in the observation's unit by the same contract.
+    """
+    units = {item.id: item.unit for item in values}
+    for observation in observations:
+        declared = observation.unit
+        expected = units.get(observation.value_spec_id)
+        if declared is not None and expected is not None and declared != expected:
+            raise ValueError(
+                f"observation {observation.id!r} is stated in {declared!r} but measures value "
+                f"{observation.value_spec_id!r}, which is in {expected!r}"
+            )
+
+
 @dataclass(frozen=True)
 class PosteriorArtifact:
     id: str
@@ -577,6 +639,8 @@ class PosteriorArtifact:
         if set(self.likelihood.observation_ids) != observation_ids:
             raise ValueError("posterior likelihood must close over exactly its observations")
         _require_dependency_dag(self.values, value_ids)
+        _require_one_likelihood(self.likelihood, self.observations)
+        _require_observation_units(self.values, self.observations)
         if self.sample_digest is not None and not _SHA256.fullmatch(self.sample_digest):
             raise ValueError("posterior sample digest must be SHA-256")
         object.__setattr__(self, "summary", _canonical_mapping(self.summary, "posterior summary"))
