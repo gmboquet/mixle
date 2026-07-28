@@ -63,10 +63,7 @@ def _exact_integer_array(value: Any, *, label: str, nonnegative: bool = False) -
     raw = np.asarray(value, dtype=object)
     if raw.ndim != 1:
         raise ValueError("%s must be one-dimensional" % label)
-    checked = [
-        exact_integer(item, label=label, nonnegative=nonnegative)
-        for item in raw.tolist()
-    ]
+    checked = [exact_integer(item, label=label, nonnegative=nonnegative) for item in raw.tolist()]
     try:
         return np.asarray(checked, dtype=np.int64)
     except OverflowError as exc:
@@ -77,9 +74,7 @@ def _validate_integer_encoding(
     value: Any,
 ) -> tuple[int, np.ndarray, np.ndarray, np.ndarray, Any | None, np.ndarray]:
     if not isinstance(value, tuple) or len(value) != 5:
-        raise ValueError(
-            "integer multinomial encoding must be a (rows, indices, counts, values, lengths) tuple"
-        )
+        raise ValueError("integer multinomial encoding must be a (rows, indices, counts, values, lengths) tuple")
     rows = exact_integer(value[0], label="integer multinomial encoded row count", nonnegative=True)
     indices = _exact_integer_array(
         value[1],
@@ -119,9 +114,7 @@ def _validate_integer_statistics(
     value: Any,
 ) -> tuple[int | None, np.ndarray | None, Any | None]:
     if not isinstance(value, tuple) or len(value) != 3:
-        raise ValueError(
-            "integer multinomial sufficient statistic must be a (minimum, counts, length_stat) tuple"
-        )
+        raise ValueError("integer multinomial sufficient statistic must be a (minimum, counts, length_stat) tuple")
     if value[1] is None:
         if value[0] is not None:
             raise ValueError("empty integer multinomial counts require minimum=None")
@@ -131,12 +124,7 @@ def _validate_integer_statistics(
         counts = np.asarray(value[1], dtype=np.float64)
     except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError("integer multinomial count statistic must be numeric") from exc
-    if (
-        counts.ndim != 1
-        or counts.size == 0
-        or np.any(~np.isfinite(counts))
-        or np.any(counts < 0.0)
-    ):
+    if counts.ndim != 1 or counts.size == 0 or np.any(~np.isfinite(counts)) or np.any(counts < 0.0):
         raise ValueError("integer multinomial count statistic must be a nonempty finite non-negative vector")
     return minimum, counts.copy(), value[2]
 
@@ -692,18 +680,10 @@ class IntegerMultinomialEnumerator(DistributionEnumerator):
         for counts in compositions(n, self.dist.num_vals):
             if any(count and self.dist.p_vec[i] == 0.0 for i, count in enumerate(counts)):
                 continue
-            value = [
-                (self.dist.min_val + i, count)
-                for i, count in enumerate(counts)
-                if count
-            ]
+            value = [(self.dist.min_val + i, count) for i, count in enumerate(counts) if count]
             score = (
                 log_coefficient(counts)
-                + sum(
-                    count * self.dist.log_p_vec[i]
-                    for i, count in enumerate(counts)
-                    if count
-                )
+                + sum(count * self.dist.log_p_vec[i] for i, count in enumerate(counts) if count)
                 + float(log_length_probability)
             )
             outcomes.append((value, float(score)))
@@ -920,8 +900,10 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         active_val = val[nonzero]
         active_cnt = cnt[nonzero]
         active_idx = idx[nonzero]
-        if self.fixed_support and len(active_val) and (
-            np.any(active_val < self.min_val) or np.any(active_val > self.max_val)
+        if (
+            self.fixed_support
+            and len(active_val)
+            and (np.any(active_val < self.min_val) or np.any(active_val > self.max_val))
         ):
             raise ValueError("integer multinomial category is outside the fixed accumulator support")
         if len(active_val):
@@ -978,8 +960,10 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         active_val = val[nonzero]
         active_cnt = cnt[nonzero]
         active_idx = idx[nonzero]
-        if self.fixed_support and len(active_val) and (
-            np.any(active_val < self.min_val) or np.any(active_val > self.max_val)
+        if (
+            self.fixed_support
+            and len(active_val)
+            and (np.any(active_val < self.min_val) or np.any(active_val > self.max_val))
         ):
             raise ValueError("integer multinomial category is outside the fixed accumulator support")
         if len(active_val):
@@ -1060,8 +1044,10 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         stat_min, stat_counts, len_stat = _validate_integer_statistics(suff_stat)
-        if self.fixed_support and stat_counts is not None and (
-            stat_min < self.min_val or stat_min + len(stat_counts) - 1 > self.max_val
+        if (
+            self.fixed_support
+            and stat_counts is not None
+            and (stat_min < self.min_val or stat_min + len(stat_counts) - 1 > self.max_val)
         ):
             raise ValueError("integer multinomial statistic lies outside fixed accumulator support")
         if self.count_vec is None and stat_counts is not None:
@@ -1130,8 +1116,10 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         stat_min, stat_counts, len_stat = _validate_integer_statistics(x)
-        if self.fixed_support and stat_counts is not None and (
-            stat_min < self.min_val or stat_min + len(stat_counts) - 1 > self.max_val
+        if (
+            self.fixed_support
+            and stat_counts is not None
+            and (stat_min < self.min_val or stat_min + len(stat_counts) - 1 > self.max_val)
         ):
             raise ValueError("integer multinomial statistic lies outside fixed accumulator support")
         if self.fixed_support:
@@ -1312,12 +1300,7 @@ class IntegerMultinomialEstimator(ParameterEstimator):
                 raw_prior = np.asarray(suff_stat[1], dtype=np.float64)
             except (TypeError, ValueError, OverflowError) as exc:
                 raise ValueError("integer multinomial prior probabilities must be numeric") from exc
-            if (
-                raw_prior.ndim != 1
-                or raw_prior.size == 0
-                or np.any(~np.isfinite(raw_prior))
-                or np.any(raw_prior < 0.0)
-            ):
+            if raw_prior.ndim != 1 or raw_prior.size == 0 or np.any(~np.isfinite(raw_prior)) or np.any(raw_prior < 0.0):
                 raise ValueError(
                     "integer multinomial prior probabilities must be a finite nonempty non-negative vector"
                 )
@@ -1329,9 +1312,7 @@ class IntegerMultinomialEstimator(ParameterEstimator):
                     raw_prior,
                     label="integer multinomial prior probabilities",
                 )
-            if min_val is not None and (
-                prior_min < min_val or prior_min + len(prior_prob) - 1 > max_val
-            ):
+            if min_val is not None and (prior_min < min_val or prior_min + len(prior_prob) - 1 > max_val):
                 raise ValueError("integer multinomial prior support lies outside fixed support")
         self.suff_stat = None if prior_prob is None else (prior_min, prior_prob)
         self.pseudo_count = pseudo_count
@@ -1391,9 +1372,7 @@ class IntegerMultinomialEstimator(ParameterEstimator):
         if self.fixed_support:
             min_val = self.min_val
             max_val = self.max_val
-            if stat_counts is not None and (
-                stat_min < min_val or stat_min + len(stat_counts) - 1 > max_val
-            ):
+            if stat_counts is not None and (stat_min < min_val or stat_min + len(stat_counts) - 1 > max_val):
                 raise ValueError("observed integer multinomial support lies outside fixed estimator support")
         else:
             supports_: list[tuple[int, int]] = []
@@ -1457,12 +1436,8 @@ class IntegerMultinomialDataEncoder(DataSequenceEncoder):
         self.len_encoder = len_encoder if len_encoder is not None else NullDataEncoder()
         if (min_val is None) != (max_val is None):
             raise ValueError("integer multinomial encoder support requires both bounds")
-        self.min_val = (
-            None if min_val is None else exact_integer(min_val, label="integer multinomial encoder minimum")
-        )
-        self.max_val = (
-            None if max_val is None else exact_integer(max_val, label="integer multinomial encoder maximum")
-        )
+        self.min_val = None if min_val is None else exact_integer(min_val, label="integer multinomial encoder minimum")
+        self.max_val = None if max_val is None else exact_integer(max_val, label="integer multinomial encoder maximum")
         if self.min_val is not None and self.min_val > self.max_val:
             raise ValueError("integer multinomial encoder minimum must not exceed maximum")
 
@@ -1542,3 +1517,14 @@ class IntegerMultinomialDataEncoder(DataSequenceEncoder):
         tcnt = self.len_encoder.seq_encode(tcnt)
 
         return sz, idx, cnt, val, tcnt
+
+    def row_count(self, x: tuple[int, np.ndarray, np.ndarray, np.ndarray, Any | None]) -> int:
+        """Return the number of observations in a payload from :meth:`seq_encode`.
+
+        The base implementation infers the count from the payload's shape, which is wrong for this
+        encoder: ``idx``/``cnt``/``val`` are flattened over *(observation, category)* pairs, so the
+        inference agreed on their common length and reported one row per pair -- 5,129 rows for
+        2,000 observations. That made every ``seq_encode`` of this family fail the encoded-row
+        conservation check. ``sz`` is the observation count this encoder already computes.
+        """
+        return int(x[0])
