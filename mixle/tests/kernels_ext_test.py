@@ -275,10 +275,14 @@ class OptionalKernelTest(KernelsExtBase):
         self.check_em_parity(model, est, data)
 
     def test_no_p_parity(self):
-        # A marginalized likelihood factor cannot be normalized as a mixture component.
+        # A marginalized likelihood factor IS a valid mixture component -- marginalizing over missing
+        # values inside a mixture is what mixle.stats.missing exists for. The mixture does not pretend
+        # the result is normalized: its density_semantics() join reports LIKELIHOOD_FACTOR.
+        from mixle.stats.compute.pdist import DensitySemantics
+
         comps = [OptionalDistribution(GaussianDistribution(-2.0 + 4.0 * k, 1.0)) for k in range(2)]
-        with self.assertRaises(TypeError):
-            MixtureDistribution(comps, [0.5, 0.5])
+        mixture = MixtureDistribution(comps, [0.5, 0.5])
+        self.assertIs(mixture.density_semantics(), DensitySemantics.LIKELIHOOD_FACTOR)
 
     def test_suff_stat_roundtrip(self):
         d = OptionalDistribution(GaussianDistribution(1.0, 2.0), p=0.3)
