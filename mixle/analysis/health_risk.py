@@ -383,6 +383,7 @@ class DoseResponse:
         n = _positive_draw_count(n)
         fn = self.response_fn()
         if isinstance(dose, Posterior):
+
             def _pushforward(draws: np.ndarray) -> np.ndarray:
                 dose_draws = _validated_dose_values(draws, name="posterior dose draws")
                 if dose_draws.ndim not in (1, 2) or dose_draws.shape[0] != n:
@@ -460,6 +461,7 @@ def population_risk(
     n = _positive_draw_count(n)
     fn = dr.response_fn()
     if isinstance(exposure, Posterior):
+
         def _aggregate(draws: np.ndarray) -> np.ndarray:
             dose_draws = _validated_dose_values(draws, name="posterior exposure draws")
             if dose_draws.ndim != 2 or dose_draws.shape[0] != n or dose_draws.shape[1] == 0:
@@ -757,9 +759,7 @@ def safety_risk_surface(
     samples = np.asarray(getattr(quantity, "samples", None), dtype=float)
     expected_result_shape = (_MC_SAMPLES, n_cells)
     if samples.shape != expected_result_shape:
-        raise ValueError(
-            f"posterior safety-risk samples must have shape {expected_result_shape}, got {samples.shape}"
-        )
+        raise ValueError(f"posterior safety-risk samples must have shape {expected_result_shape}, got {samples.shape}")
     if not np.isfinite(samples).all() or not np.all((samples == 0.0) | (samples == 1.0)):
         raise ValueError("posterior safety-risk samples must be finite binary exceedance indicators")
     return _SampleDerivedQuantity(
@@ -781,13 +781,18 @@ def incident_probability(
     per-cell mean of `safety_risk_surface(...).samples`); `exposure_map` is a non-negative people-
     density/occupancy weight of the same shape.
 
+    ``exposure_map`` is on the *expected people present* scale: a cell's value is the mean occupancy
+    of that cell, so ``0`` means nobody, ``1`` means about one person on average, and larger values are
+    denser. Both models take that scale literally and return ``0`` for an unoccupied cell.
+
     Args:
         hazard: per-cell hazard probability, shape `(*grid_shape,)`, values in `[0, 1]`.
-        exposure_map: per-cell non-negative occupancy/exposure weight, same shape as `hazard`.
-        model: `"logit"` (default) combines the hazard's own log-odds with `log1p(exposure_map)` so an
-            unoccupied cell (`exposure_map == 0`) leaves the hazard probability unchanged and denser
-            occupancy monotonically raises it; `"linear"` is the simple product `hazard * exposure_map`
-            clipped to `[0, 1]`.
+        exposure_map: per-cell non-negative expected-occupancy weight, same shape as `hazard`.
+        model: `"logit"` (default) is a logistic link that multiplies the hazard's own odds by the
+            probability that anybody is actually present, `1 - exp(-exposure_map)` (the Poisson
+            occupancy probability for that mean): an unoccupied cell yields `0`, denser occupancy
+            monotonically raises the result, and it saturates at the hazard probability itself.
+            `"linear"` is the simple product `hazard * exposure_map` clipped to `[0, 1]`.
 
     Returns:
         Per-cell incident probability, same shape as `hazard`, values in `[0, 1]`.
@@ -798,6 +803,15 @@ def incident_probability(
     begin with. The narrow ``eps``-clip that remains below is purely for the logit transform's own
     numerical stability at the exact 0/1 boundary of an ALREADY-valid probability, not a substitute
     for validating the input range.
+
+    The ``"logit"`` occupancy factor used to be ``log1p(exposure_map)`` added to the log-odds
+    (MXR-080-1589). That has no zero element: ``log1p(0)`` is ``0``, so an empty cell added no
+    log-odds at all and hazard ``0.8`` at zero occupancy returned incident probability ``0.8`` --
+    flatly contradicting this function's own stated contract that an exceedance is only an incident
+    when someone is exposed. It was also unbounded above, so a dense-enough cell reported MORE
+    incidents than hazard exceedances. Multiplying the odds by an occupancy PROBABILITY fixes both:
+    zero occupancy is the zero element, and the incident probability can never exceed the hazard
+    probability it is conditioned on.
     """
     hazard_arr = np.asarray(hazard, dtype=float)
     exposure_arr = np.asarray(exposure_map, dtype=float)
@@ -819,9 +833,13 @@ def incident_probability(
     if model == "logit":
         eps = 1e-9
         p_hazard = np.clip(hazard_arr, eps, 1.0 - eps)
-        logit_hazard = np.log(p_hazard / (1.0 - p_hazard))
-        z = logit_hazard + np.log1p(exposure_arr)
-        return 1.0 / (1.0 + np.exp(-z))
+        # P(at least one person present) for a cell whose mean occupancy is exposure_map: 0 when
+        # nobody is expected, rising to 1 as the cell fills. Multiplying the hazard ODDS by it is
+        # the additive-on-the-log-odds logistic link this model is named for, written in its
+        # algebraic form so an unoccupied cell lands on exactly 0 without a log(0) intermediate.
+        occupancy = -np.expm1(-exposure_arr)
+        # denominator >= 1 - p_hazard >= eps, so this is division-safe for every valid input
+        return p_hazard * occupancy / (1.0 - p_hazard + p_hazard * occupancy)
     if model == "linear":
         return np.clip(hazard_arr * exposure_arr, 0.0, 1.0)
     raise ValueError(f"unknown incident_probability model {model!r}; expected 'logit' or 'linear'")

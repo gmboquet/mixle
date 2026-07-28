@@ -256,3 +256,50 @@ def test_deterministic_risk_accepts_valid_samples():
     risk = _DeterministicRisk(samples=np.array([[0.0, 1.0, 1.0, 0.0]]), grid_shape=(2, 2))
     lo, hi = risk.credible_interval(0.9)
     assert np.array_equal(lo, hi)
+
+
+# --------------------------------------------------------------------------------------------------
+# MXR-080-1589: the "logit" model added log1p(exposure_map) to the hazard log-odds. log1p(0) is 0, so
+# an unoccupied cell added no log-odds and the incident probability came back EQUAL to the hazard --
+# contradicting this function's stated contract that an exceedance is only an incident when someone
+# is exposed. It was also unbounded above, reporting more incidents than hazard exceedances.
+# --------------------------------------------------------------------------------------------------
+def test_zero_occupancy_means_no_incident_not_an_unchanged_hazard():
+    """Audit repro: hazard 0.8 with exposure 0 used to return incident probability 0.8, not 0."""
+    hazard = np.array([[0.8, 0.5], [0.2, 1.0]])
+    p = incident_probability(hazard, np.zeros((2, 2)))
+    np.testing.assert_allclose(p, np.zeros((2, 2)), atol=1e-8)
+    # the "linear" model has always had this zero element; both scales must now agree on it
+    np.testing.assert_allclose(
+        incident_probability(hazard, np.zeros((2, 2)), model="linear"), np.zeros((2, 2)), atol=1e-8
+    )
+
+
+def test_incident_probability_never_exceeds_the_hazard_it_is_conditioned_on():
+    """An exceedance becomes an incident only when someone is exposed, so incidents can never
+    outnumber exceedances. The old unbounded log1p(exposure) odds boost let a dense cell report an
+    incident probability well above its own hazard probability."""
+    hazard = np.array([0.1, 0.5, 0.8])
+    for exposure_level in (0.0, 0.5, 1.0, 5.0, 100.0, 1e6):
+        p = incident_probability(hazard, np.full(hazard.shape, exposure_level))
+        assert np.all(p <= hazard + 1e-9), f"exposure {exposure_level} produced {p} above hazard {hazard}"
+        assert np.all((p >= 0.0) & (p <= 1.0))
+
+
+def test_incident_probability_rises_monotonically_with_occupancy_and_saturates_at_the_hazard():
+    hazard = np.full(6, 0.8)
+    exposure = np.array([0.0, 0.25, 1.0, 4.0, 20.0, 1e6])
+    p = incident_probability(hazard, exposure)
+    assert p[0] == 0.0
+    assert np.all(np.diff(p) > 0.0)  # strictly increasing in occupancy
+    assert p[-1] == pytest.approx(0.8)  # saturates at the hazard probability, never past it
+
+
+def test_partial_occupancy_scales_incident_risk_between_the_two_extremes():
+    """Negative control: intermediate occupancy must land strictly between 'nobody there' and
+    'certainly occupied' -- the fix must not collapse the model into a hard 0/hazard switch."""
+    hazard = np.full(3, 0.6)
+    p = incident_probability(hazard, np.array([0.0, 1.0, 1e6]))
+    assert p[0] == 0.0
+    assert 0.0 < p[1] < p[2]
+    assert p[2] == pytest.approx(0.6)
