@@ -26,6 +26,7 @@ from mixle.evolve.concept_discovery import (
     run_concept_discovery_loop,
     task_signature,
 )
+from mixle.stats import GaussianDistribution, LaplaceDistribution
 
 
 def _skew_normal_corpus(n_tasks: int, *, seed: int = 0, size: int = 1000) -> list[np.ndarray]:
@@ -259,6 +260,109 @@ class ModuleCapabilityClaimTest(unittest.TestCase):
 
         self.assertEqual(len(known_families()), 4)
         self.assertIn("four", register_family.__doc__)
+
+
+class FamilyRegistrationContractTest(unittest.TestCase):
+    """MXR-080-1777: a name is only selectable once something fittable stands behind it.
+
+    The global registry used to accept an empty name and a ``None`` constructor, and silently
+    rebind an existing name -- so the loop could recommend, and try to fit, a family that does not
+    exist.
+    """
+
+    def setUp(self):
+        from mixle.evolve.concept_discovery import known_families
+
+        self.before = known_families()
+
+    def tearDown(self):
+        from mixle.evolve.concept_discovery import known_families, unregister_family
+
+        for name in known_families():
+            if name not in self.before:
+                unregister_family(name)
+
+    def test_empty_or_non_string_names_are_rejected(self):
+        from mixle.evolve.concept_discovery import register_family
+
+        for bad in ("", "   ", None, 7):
+            with self.subTest(name=bad), self.assertRaises((ValueError, TypeError)):
+                register_family(bad, lambda: GaussianDistribution(0.0, 1.0))
+
+    def test_a_non_callable_constructor_is_rejected(self):
+        from mixle.evolve.concept_discovery import register_family
+
+        with self.assertRaises(TypeError):
+            register_family("bogus", None)
+
+    def test_a_constructor_that_does_not_build_a_family_is_rejected(self):
+        from mixle.evolve.concept_discovery import register_family
+
+        with self.assertRaises(TypeError):
+            register_family("bogus", lambda: object())
+
+    def test_a_raising_constructor_is_rejected(self):
+        from mixle.evolve.concept_discovery import register_family
+
+        def boom():
+            raise RuntimeError("nope")
+
+        with self.assertRaises(ValueError):
+            register_family("bogus", boom)
+
+    def test_an_existing_name_is_not_silently_rebound(self):
+        from mixle.evolve.concept_discovery import _fit_family as fit
+        from mixle.evolve.concept_discovery import register_family
+
+        with self.assertRaises(ValueError):
+            register_family("gaussian", lambda: LaplaceDistribution(0.0, 1.0))
+        # the built-in is untouched: it still fits as a Gaussian
+        self.assertIsInstance(fit("gaussian", [0.0, 1.0, 2.0, 3.0]), GaussianDistribution)
+
+    def test_a_deliberate_replacement_is_allowed_and_reversible(self):
+        from mixle.evolve.concept_discovery import known_families, register_family, unregister_family
+
+        register_family("scratch", lambda: GaussianDistribution(0.0, 1.0))
+        self.assertIn("scratch", known_families())
+        register_family("scratch", lambda: LaplaceDistribution(0.0, 1.0), replace=True)
+        unregister_family("scratch")
+        self.assertNotIn("scratch", known_families())
+
+    def test_builtin_families_cannot_be_unregistered(self):
+        from mixle.evolve.concept_discovery import unregister_family
+
+        with self.assertRaises(ValueError):
+            unregister_family("gaussian")
+
+
+class ConceptLibraryAdmissionContractTest(unittest.TestCase):
+    """MXR-080-1777: the library may not admit, or recommend, a family that does not exist."""
+
+    def test_unregistered_base_families_are_rejected(self):
+        with self.assertRaises(KeyError):
+            ConceptLibrary(base_families=("not_a_real_family",))
+
+    def test_empty_base_families_are_rejected(self):
+        with self.assertRaises(ValueError):
+            ConceptLibrary(base_families=())
+
+    def test_admitting_an_unregistered_family_is_rejected(self):
+        library = ConceptLibrary(base_families=("gaussian",))
+        with self.assertRaises(KeyError):
+            library.admit("also_not_real", {"x": 1}, task_signature="sig", task_index=0, quality=1.0)
+        # and query() therefore cannot recommend it
+        self.assertIsNone(library.query("sig"))
+
+    def test_non_finite_admission_quality_is_rejected(self):
+        library = ConceptLibrary(base_families=("gaussian",))
+        for bad in (float("nan"), float("inf")):
+            with self.subTest(quality=bad), self.assertRaises(ValueError):
+                library.admit("laplace", {}, task_signature="sig", task_index=0, quality=bad)
+
+    def test_a_registered_family_still_admits_and_is_recommended(self):
+        library = ConceptLibrary(base_families=("gaussian",))
+        library.admit("laplace", {"why": "test"}, task_signature="sig", task_index=0, quality=3.0)
+        self.assertEqual(library.query("sig"), "laplace")
 
 
 if __name__ == "__main__":
