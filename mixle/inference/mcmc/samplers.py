@@ -856,17 +856,23 @@ def nuts(
         rm = rp = r0
         gm = gp = cur_grad  # cached endpoint gradients shared with the next doubling
         theta_new, lp_new, grad_new, n, s, j = cur, cur_lp, cur_grad, 1, 1, 0
-        alpha, n_alpha = 0.0, 1
+        alpha, n_alpha = 0.0, 0
         while s == 1 and j < max_tree_depth:
             v = -1 if rng.random_sample() < 0.5 else 1
             if v == -1:
-                tm, rm, gm, _, _, _, tpr, lpr, gpr, n_p, s_p, alpha, n_alpha = build_tree(
+                tm, rm, gm, _, _, _, tpr, lpr, gpr, n_p, s_p, a_p, na_p = build_tree(
                     tm, rm, gm, logu, v, j, eps, joint0
                 )
             else:
-                _, _, _, tp, rp, gp, tpr, lpr, gpr, n_p, s_p, alpha, n_alpha = build_tree(
+                _, _, _, tp, rp, gp, tpr, lpr, gpr, n_p, s_p, a_p, na_p = build_tree(
                     tp, rp, gp, logu, v, j, eps, joint0
                 )
+            # accept_stat must average the Metropolis probability over every leapfrog step in the
+            # trajectory, so each doubling's contribution adds to the running totals. Assigning them
+            # here instead left accept_stat describing only the final doubling, which is what the
+            # dual-averaging step-size adaptation below then chased.
+            alpha += a_p
+            n_alpha += na_p
             if s_p == 1 and rng.random_sample() < min(1.0, n_p / max(n, 1)):
                 theta_new, lp_new, grad_new = tpr, lpr, gpr  # carry the proposal's cached gradient
             n += n_p
