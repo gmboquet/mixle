@@ -153,7 +153,14 @@ class JaxEngine(ComputeEngine):
     def asarray(self, x: Any, dtype: Any = None) -> Any:
         """Convert ``x`` to a JAX array on this engine's device. Float inputs are force-cast to the
         engine dtype (float64 by default) unless ``dtype`` is given -- matching the Torch engine's
-        contract, not NumPy's."""
+        contract, not NumPy's.
+
+        Complex input is rejected when ``dtype`` is not given explicitly (MXR-080-1560), exactly as
+        :meth:`mixle.engines.torch_engine.TorchEngine.asarray` does: this engine's dtype policy has no
+        complex-precision concept, so the generic non-floating/non-Boolean fallback (``jnp.int64``)
+        would silently discard the imaginary component and collapse the real part to an integer. Pass
+        ``dtype=jnp.complex64``/``jnp.complex128`` for a genuine complex array.
+        """
         if jnp is None:
             require("jax", "jax")
         a = x if isinstance(x, jax.Array) else np.asarray(x)
@@ -163,6 +170,14 @@ class JaxEngine(ComputeEngine):
             dt = self.dtype
         elif a.dtype.kind == "b":
             dt = jnp.bool_
+        elif a.dtype.kind == "c":
+            raise ValueError(
+                f"JaxEngine.asarray received complex-valued input (dtype {a.dtype}) with no explicit "
+                "dtype= override. This engine's dtype policy has no complex-precision concept, so the "
+                "generic non-floating/non-Boolean fallback (jnp.int64) would silently discard the "
+                "imaginary component and collapse the real part to an integer. Pass "
+                "dtype=jnp.complex64 or dtype=jnp.complex128 explicitly for a genuine complex array."
+            )
         else:
             dt = jnp.int64
         return jax.device_put(jnp.asarray(a, dtype=dt), self.device)
