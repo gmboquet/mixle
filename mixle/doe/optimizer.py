@@ -29,7 +29,14 @@ import numpy as np
 from numpy.random import RandomState
 
 from mixle.doe._contracts import Acquisition
-from mixle.doe.bayesopt import BayesOptResult, _fit_surrogate, _validate_prediction, propose_batch, propose_next
+from mixle.doe.bayesopt import (
+    BayesOptResult,
+    _fit_surrogate,
+    _require_finite_scalar,
+    _validate_prediction,
+    propose_batch,
+    propose_next,
+)
 from mixle.doe.designs import Bounds, _as_bounds, _as_rng, _require_exact_positive_int, latin_hypercube
 
 # Absolute tolerance for accepting a tell()ed point that is nominally outside `bounds` by floating-
@@ -69,10 +76,21 @@ class BayesianOptimizer:
         self.bounds = _as_bounds(bounds)
         self.dim = int(self.bounds.shape[0])
         self.acq = acq
-        self.acq_kwargs = acq_kwargs
-        self.maximize = bool(maximize)
-        self.xi = float(xi)
-        self.n_candidates = int(n_candidates)
+        self.acq_kwargs = dict(acq_kwargs) if acq_kwargs is not None else None
+        if type(maximize) is not bool:
+            raise TypeError(f"maximize must be a bool, got {type(maximize).__name__}.")
+        self.maximize = maximize
+        self.xi = _require_finite_scalar(xi, "xi")
+        if self.xi < 0.0:
+            raise ValueError(f"xi must be nonnegative, got {self.xi!r}.")
+        if self.acq_kwargs is not None:
+            for parameter in ("xi", "kappa"):
+                if parameter in self.acq_kwargs:
+                    value = _require_finite_scalar(self.acq_kwargs[parameter], f"acq_kwargs[{parameter!r}]")
+                    if value < 0.0:
+                        raise ValueError(f"acq_kwargs[{parameter!r}] must be nonnegative, got {value!r}.")
+                    self.acq_kwargs[parameter] = value
+        self.n_candidates = _require_exact_positive_int(n_candidates, "n_candidates")
         self.fit_kwargs = fit_kwargs
         self.rng = _as_rng(seed)
         # A silently-clamped-to-1 n_init (the prior `max(1, int(n_init))`) hid a zero/negative/
@@ -133,14 +151,14 @@ class BayesianOptimizer:
 
     @staticmethod
     def _close(a: np.ndarray, b: np.ndarray) -> bool:
-        """Match two points for tell()'s pending/duplicate lookup, tolerant of float round-tripping.
+        """Match the exact floating-point coordinates returned by :meth:`ask`.
 
-        Plain :func:`numpy.allclose` defaults: loose enough to absorb benign round-trip noise (e.g. a
-        point serialized out to the caller's evaluation harness and back), tight enough that two
-        independently-proposed points from a continuous search space colliding by chance is not a
-        realistic concern.
+        Standard JSON/Python float round trips preserve binary64 values when using their shortest
+        round-trippable representation. An approximate relative comparison is unsafe for proposal
+        identity: at large coordinates it can conflate points thousands of units apart and resolve the
+        wrong pending ID. Exact coordinate identity therefore backs write-once accounting.
         """
-        return bool(np.allclose(a, b))
+        return bool(np.array_equal(np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64)))
 
     def _peek_init_points(self, count: int) -> list[np.ndarray]:
         """Return the next ``count`` not-yet-dispensed initial-design points, without marking them used.
@@ -235,8 +253,7 @@ class BayesianOptimizer:
         This call is atomic: if it raises (e.g. a GP proposal attempted with zero observations), no
         internal state changes, so a failed call is always safe to retry.
         """
-        if q < 1:
-            raise ValueError("q must be positive.")
+        q = _require_exact_positive_int(q, "q")
         # Exhaust the space-filling initial design first (the GP needs data before it is useful).
         # Gated on self._init_used (points already DISPENSED), not self.n_observations (points
         # already TOLD): those two diverge in the parallel/async campaign this class explicitly
