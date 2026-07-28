@@ -158,7 +158,11 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         Args:
             min_val: Minimum value of the integer categorical support.
             p_vec: Probability vector for values ``min_val`` through
-                ``min_val + len(p_vec) - 1``.
+                ``min_val + len(p_vec) - 1``. Entries must be finite and non-negative; as with
+                :class:`~mixle.stats.univariate.discrete.categorical.CategoricalDistribution.pmap`
+                the constructor deliberately does *not* require them to sum to 1, and an
+                individual entry may exceed 1.0 (an unnormalized weight vector). See the comment
+                on the validation below.
             name: Optional distribution name.
             keys: Optional key for merging sufficient statistics.
             prior (Optional): Conjugate parameter prior over the probability vector. A
@@ -168,7 +172,7 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
                 ``None`` (default) is a plain point model.
 
         Attributes:
-            p_vec: Owned probability-simplex vector.
+            p_vec: Owned copy of the weight vector (not renormalized or sum-checked).
             min_val: Minimum supported integer value.
             max_val: Maximum supported integer value.
             log_p_vec: Elementwise log probabilities.
@@ -184,14 +188,17 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             )[0]
         )
         probabilities = np.asarray(p_vec, dtype=np.float64)
-        if (
-            probabilities.ndim != 1
-            or probabilities.size == 0
-            or np.any(~np.isfinite(probabilities))
-            or np.any(probabilities < 0.0)
-            or not np.isclose(float(np.sum(probabilities)), 1.0, rtol=1.0e-12, atol=1.0e-12)
-        ):
-            raise ValueError("IntegerCategoricalDistribution requires a non-empty probability simplex.")
+        if probabilities.ndim != 1 or np.any(~np.isfinite(probabilities)) or np.any(probabilities < 0.0):
+            # A negative or non-finite "probability" silently propagates into density()/log_density()
+            # answers -- `nan < 0.0` is always False, so the old check let NaN straight through -- so
+            # reject both at the constructor like the scalar families do (CategoricalDistribution.pmap).
+            #
+            # Deliberately NOT also enforced here, exactly as in CategoricalDistribution: a sum of 1,
+            # or a non-empty vector. This class mirrors that contract, and call sites rely on it --
+            # an unnormalized weight vector is a legal construction, and enforcing a simplex here
+            # (commit 7bdc3646) broke them. Consumers that need a true simplex should check the sum
+            # themselves rather than re-adding a rejection here.
+            raise ValueError("IntegerCategoricalDistribution requires finite, non-negative probabilities.")
         with np.errstate(divide="ignore"):
             self.p_vec = probabilities.copy()
             self.min_val = min_value

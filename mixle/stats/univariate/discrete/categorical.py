@@ -33,6 +33,21 @@ from mixle.utils.special import digamma
 T = TypeVar("T")
 
 
+def _is_normalized_support(pmap: dict[Any, float], default_value: float) -> bool:
+    """Return whether ``(pmap, default_value)`` describe a proper finite probability law.
+
+    Derived from the parameters themselves so it can never disagree with them -- in particular
+    it is recomputed on deserialization rather than trusted from the persisted state, since a
+    stale ``is_normalized_probability=True`` on an unnormalized map is exactly what lets a
+    non-summing-to-1 probability vector reach ``RandomState.choice`` and crash there.
+    """
+    if not pmap or default_value != 0.0:
+        return False
+    return bool(
+        np.isclose(float(np.sum(np.asarray(list(pmap.values()), dtype=np.float64))), 1.0, rtol=1.0e-12, atol=1.0e-12)
+    )
+
+
 class CategoricalFisherView(FixedFisherView):
     """Fisher view for categorical one-hot sufficient statistics."""
 
@@ -184,20 +199,38 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
     ) -> None:
         """Create a categorical distribution over an explicit support map.
 
-        By default this class represents a finite probability law: ``pmap`` must
-        be non-empty, its values must sum to one, and ``default_value`` must be
-        zero. Set ``scoring_only=True`` to construct an explicitly unnormalized
-        fallback scorer instead. Scoring-only objects can be evaluated but cannot
-        be sampled.
+        Labels in ``pmap`` receive their configured probabilities. Labels outside
+        the support receive ``default_value``; the default of ``0.0`` gives finite
+        support and ``-inf`` log-density for unknown labels.
 
         Args:
-            pmap: Mapping from labels to finite, non-negative values. Unless
-                ``scoring_only`` is true, the mapping must be non-empty and sum
-                to one within floating-point tolerance.
+            pmap: Mapping from labels to probabilities. Values must be finite and non-negative.
+                ``density()``/``log_density()`` assume ``sum(pmap.values()) == 1`` for the
+                result to be a properly-normalized probability (labels with p = 0 may be
+                included or omitted interchangeably), but the constructor does not check or
+                enforce that sum: several existing call sites intentionally build a pmap with
+                an arbitrary, non-1-summing total -- e.g. as a cheap fixture for exercising
+                dispatch logic that never inspects the values, or to make ``default_value``
+                dominate every in-pmap probability by construction. An empty ``pmap`` is
+                likewise legal: it is the (vacuous) empty-support law, which support-enumeration
+                code constructs directly. Pass a normalized map when you need ``density()`` to
+                be meaningful; read :attr:`is_normalized_probability` to find out whether a
+                given instance actually is one.
             default_value: Probability assigned to labels outside ``pmap``. Must be finite and
-                within ``[0, 1]``. A positive fallback requires
-                ``scoring_only=True`` because an unspecified label space cannot
-                be normalized or sampled.
+                within ``[0, 1]``. When ``default_value > 0`` and ``pmap`` does not cover the
+                full label space, ``density()``/``log_density()`` become a smoothed *scoring*
+                function rather than a normalized probability measure: every distinct label
+                outside ``pmap`` receives the same flat fallback mass, so querying several
+                distinct out-of-vocabulary labels can each score positive density, and those
+                densities can sum to more than 1 over the true (potentially unbounded) label
+                space. This is inherent to using a single fallback constant for "everything
+                else" -- the same tradeoff a Laplace/Kneser-Ney-smoothed language model makes --
+                since the true unknown-label cardinality is unknowable in general, so there is
+                no way to normalize it properly, and this class makes no attempt to.
+                :class:`CategoricalSampler` reflects the same boundary from the sampling side:
+                it can only draw labels registered in ``pmap``, never a synthesized
+                "default"/unknown label, since there is no way to generatively sample from an
+                unspecified label space.
             name: Optional diagnostic name.
             keys: Optional key for merging sufficient statistics.
             prob_map: Alias for ``pmap``.
@@ -205,23 +238,30 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
                 :class:`~mixle.stats.bayes.dict_dirichlet.DictDirichletDistribution` enables the Bayesian /
                 variational machinery (``expected_log_density`` and the conjugate posterior update);
                 ``None`` (default) is a plain point model.
-            scoring_only: Permit an unnormalized map or positive fallback as an
-                evaluation-only scorer. Sampling is unavailable in this mode.
+            scoring_only: Opt-in declaration that this object is an evaluation-only likelihood
+                factor rather than a generative law. It is never *required* (see ``pmap``
+                above), but declaring it makes the object report
+                :attr:`~mixle.stats.compute.pdist.DensitySemantics.LIKELIHOOD_FACTOR`, which
+                keeps it out of generative machinery: mixtures refuse it as a component and
+                :class:`CategoricalSampler` refuses to sample it.
 
         Attributes:
             name: Optional diagnostic name.
             keys: Optional key for merging sufficient statistics.
-            pmap: Owned copy of the configured label weights.
+            pmap: Owned copy of the configured label weights (not renormalized or sum-checked
+                by the constructor).
             default_value: Probability assigned to labels outside ``pmap``.
-            scoring_only: Whether this object is evaluation-only.
-            is_normalized_probability: Whether this object is a sampleable finite law.
+            scoring_only: Whether this object was explicitly declared evaluation-only.
+            is_normalized_probability: Derived, never asserted: ``True`` only when ``pmap`` is
+                non-empty, sums to 1, ``default_value`` is 0, and ``scoring_only`` is false.
             no_default: ``True`` when outside-support labels have nonzero mass.
             log_default_value: Log of ``default_value``.
             log1p_default_value: Log normalizer for ``1 + default_value``.
 
         Raises:
-            ValueError: If the values are invalid or an unnormalized scorer is
-                requested without ``scoring_only=True``.
+            ValueError: If ``pmap`` contains a non-finite or negative value, or if
+                ``default_value`` is non-finite or outside ``[0, 1]``.
+            TypeError: If ``scoring_only`` is not a boolean.
 
         """
         pmap = coalesce_alias("pmap", pmap, "prob_map", prob_map, default=MISSING)
@@ -232,6 +272,26 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
             # the sampler's RandomState.choice), so reject it at the constructor like the scalar
             # families do.
             #
+            # Deliberately NOT also enforced here: sum(pmap.values()) == 1, a non-empty pmap, or
+            # default_value == 0. density()'s docstring assumes that sum, but several existing,
+            # intentional call sites construct a pmap that doesn't hold it -- e.g.
+            # mixle/tests/quantized_index_test.py and fused_em_mixtures_test.py build a partial
+            # pmap (such as ``{2: 0.5}``) purely as a cheap object to call
+            # .estimator()/.quantized_index() on, never inspecting the values;
+            # mixle/tests/sparse_mixture_test.py builds pmap={"a": 0.005, "b": 0.005} with
+            # default_value=0.99 specifically so default_value dominates every in-pmap
+            # probability, which a sum-to-1 rejection (or a silent renormalization, which would
+            # rescale "a"/"b" up and defeat that domination) would break; and support-enumeration
+            # code (mixle/tests/truncation_bound_test.py) constructs the empty-support
+            # CategoricalDistribution({}) to assert that a zero-item support is vacuously
+            # exhausted. A finite/non-negative check has no such legitimate counterexample: no
+            # call site anywhere in the codebase relies on constructing a NaN or negative
+            # "probability".
+            #
+            # This was briefly enforced (commit 7bdc3646) and had to be reverted: it broke every
+            # one of those call sites, including unrelated truncation-bound code. If normalization
+            # matters to a consumer, read the derived `is_normalized_probability` flag below
+            # rather than re-adding a constructor-time rejection here.
             raise ValueError("CategoricalDistribution requires finite non-negative probabilities.")
         if not np.isfinite(default_value) or default_value < 0.0 or default_value > 1.0:
             # default_value used to be silently clamped into [0, 1] for self.default_value while
@@ -243,18 +303,15 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
             raise ValueError("CategoricalDistribution requires default_value in [0, 1], not %s." % repr(default_value))
         if not isinstance(scoring_only, (bool, np.bool_)):
             raise TypeError("scoring_only must be a boolean.")
-        total = float(np.sum(probs))
-        normalized = len(probs) > 0 and default_value == 0.0 and np.isclose(total, 1.0, rtol=1.0e-12, atol=1.0e-12)
-        if not normalized and not scoring_only:
-            raise ValueError(
-                "CategoricalDistribution requires a non-empty normalized finite support; "
-                "set scoring_only=True explicitly for an unnormalized fallback scorer."
-            )
         self.name = name
         self.keys = keys
         self.pmap = dict(pmap)
         self.scoring_only = bool(scoring_only)
-        self.is_normalized_probability = normalized and not self.scoring_only
+        # Descriptive, not prescriptive: report whether this instance happens to be a proper
+        # finite law so consumers that genuinely need one (packers, exact enumeration) can check
+        # instead of assuming. Constructing a non-normalized instance stays legal -- see the
+        # comment above the finite/non-negative check.
+        self.is_normalized_probability = _is_normalized_support(self.pmap, default_value) and not self.scoring_only
         self.no_default = default_value != 0.0
         self.default_value = default_value
         self.log_default_value = float(-np.inf if default_value == 0 else math.log(default_value))
@@ -290,13 +347,19 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         state = dict(state)
         pmap = state["pmap"]
         state["pmap"] = pmap if isinstance(pmap, dict) else dict(pmap)
-        normalized = (
-            bool(state["pmap"])
-            and state.get("default_value", 0.0) == 0.0
-            and np.isclose(sum(state["pmap"].values()), 1.0, rtol=1.0e-12, atol=1.0e-12)
+        # ``scoring_only`` is an author declaration that cannot be re-derived from the numbers (a
+        # perfectly normalized map may still be declared a likelihood factor), so carry the
+        # persisted value forward -- defaulting to False for artifacts written before the flag
+        # existed. ``is_normalized_probability`` is the opposite: it is a *derived* property, so
+        # recompute it from the restored pmap instead of believing whatever the artifact claims.
+        # These were previously `setdefault` calls, which were silent no-ops because the persisted
+        # state already carries both keys -- so an unnormalized distribution round-tripped still
+        # asserting `is_normalized_probability=True`, handing the sampler a probability vector
+        # that does not sum to 1 and reopening the RandomState.choice crash that was fixed there.
+        state["scoring_only"] = bool(state.get("scoring_only", False))
+        state["is_normalized_probability"] = (
+            _is_normalized_support(state["pmap"], state.get("default_value", 0.0)) and not state["scoring_only"]
         )
-        state.setdefault("scoring_only", not normalized)
-        state.setdefault("is_normalized_probability", normalized and not state["scoring_only"])
         self.__dict__.update(state)
 
     def __str__(self) -> str:
@@ -621,20 +684,48 @@ class CategoricalSampler(DistributionSampler):
         Attributes:
             rng: Random state used for sampling.
             levels: Category labels.
-            probs: Category probabilities in ``levels`` order.
+            probs: Category probabilities in ``levels`` order, normalized to sum to 1.
             num_levels: Number of categories.
 
         Raises:
-            ValueError: If ``dist`` is not a normalized finite-support law.
+            ValueError: If ``dist`` was declared ``scoring_only`` (a likelihood factor is not a
+                generative law), or if ``dist.pmap`` is empty or every one of its values is 0.0,
+                since there is then no relative proportion of registered labels to sample from.
 
         """
         self.rng = RandomState(seed)
-        if not getattr(dist, "is_normalized_probability", False):
-            raise ValueError("CategoricalSampler requires a normalized finite-support probability distribution.")
+        if getattr(dist, "scoring_only", False):
+            # An explicitly declared scoring-only object is a likelihood factor, not a normalized
+            # generative law; there is nothing to draw from. This is the one construction the
+            # sampler refuses outright -- a merely non-1-summing pmap is handled by normalizing
+            # below, because that construction is legal by design (see CategoricalDistribution).
+            raise ValueError(
+                "CategoricalSampler requires a generative distribution, not a scoring_only "
+                "likelihood factor, which is not a normalized probability law."
+            )
         temp = list(dist.pmap.items())
         self.levels = [u[0] for u in temp]
         raw_probs = np.asarray([u[1] for u in temp], dtype=np.float64)
-        self.probs = raw_probs.tolist()
+        total = raw_probs.sum()
+        if total <= 0.0:
+            # dist.pmap values are already guaranteed finite and non-negative by
+            # CategoricalDistribution.__init__, so total <= 0.0 here only happens when pmap is
+            # empty or every entry is exactly 0.0 -- there is no relative proportion left to
+            # sample from, and np.random.RandomState.choice cannot sample from an all-zero-weight
+            # distribution either. Fail clearly here, at sampler construction, instead of letting
+            # a 0/0 division or an opaque numpy error surface later out of sample().
+            raise ValueError(
+                "CategoricalSampler requires pmap to contain at least one category with positive probability."
+            )
+        # CategoricalDistribution.pmap is deliberately allowed to not sum to 1 (see its
+        # __init__ docstring; density()/log_density() already tolerate this by dividing by
+        # (1 + default_value)), but np.random.RandomState.choice requires p to sum to exactly 1.
+        # Normalizing by pmap's own sum makes sampling work from the relative proportions of
+        # pmap's registered labels regardless, so a construction-time-legal, non-1-summing pmap
+        # no longer crashes here. This does not change what can be sampled -- draws are still
+        # only ever one of pmap's registered labels, never a synthesized "default"/unknown label
+        # (there is no way to generatively sample from an unspecified label space).
+        self.probs = (raw_probs / total).tolist()
         self.num_levels = len(self.levels)
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any | list[Any]:
@@ -1036,13 +1127,10 @@ class CategoricalEstimator(ParameterEstimator):
                 k: (suff_stat.get(k, 0) + self.suff_stat.get(k, 0) * self.pseudo_count) / adjusted_nobs for k in levels
             }
 
-        return CategoricalDistribution(
-            pmap=p_map,
-            default_value=default_value,
-            name=self.name,
-            keys=self.keys,
-            scoring_only=default_value != 0.0,
-        )
+        # Deliberately not scoring_only: a smoothed estimate with a positive default_value is a
+        # legitimate fitted model, and flagging it as a likelihood factor would silently bar every
+        # smoothed categorical from being used as a mixture component or sampled from.
+        return CategoricalDistribution(pmap=p_map, default_value=default_value, name=self.name, keys=self.keys)
 
 
 class CategoricalDataEncoder(DataSequenceEncoder):

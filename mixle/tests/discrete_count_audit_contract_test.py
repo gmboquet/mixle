@@ -196,14 +196,21 @@ class DiscreteProbabilityLawContractTest(unittest.TestCase):
         fitted = CategoricalEstimator(suff_stat={"known": 1.0}).estimate(None, {})
         self.assertEqual(fitted.pmap, {"known": 1.0})
 
-    def test_unnormalized_categorical_scoring_is_explicit_and_not_sampleable(self):
+    def test_unnormalized_categorical_constructs_but_reports_itself_unnormalized(self):
+        # An unnormalized pmap (with or without a positive fallback) is a legal construction by
+        # design -- see CategoricalDistribution.__init__ -- so the contract is that it constructs
+        # and then tells the truth about itself, not that it is rejected.
         for kwargs in (
             {"pmap": {"a": 0.5}},
             {"pmap": {"a": 0.5}, "default_value": 0.1},
+            {"pmap": {}},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
-                CategoricalDistribution(**kwargs)
+            with self.subTest(kwargs=kwargs):
+                distribution = CategoricalDistribution(**kwargs)
+                self.assertFalse(distribution.scoring_only)
+                self.assertFalse(distribution.is_normalized_probability)
 
+    def test_explicit_scoring_only_categorical_is_not_sampleable(self):
         scorer = CategoricalDistribution(
             {"a": 0.5},
             default_value=0.1,
@@ -214,15 +221,21 @@ class DiscreteProbabilityLawContractTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             scorer.sampler()
 
-    def test_integer_categorical_requires_exact_origin_and_probability_simplex(self):
+    def test_integer_categorical_requires_exact_origin_and_valid_weights(self):
         for origin, probabilities in (
             (0.5, [0.5, 0.5]),
-            (0, []),
-            (0, [0.0, 0.0]),
-            (0, [0.8, 0.8]),
+            (0, [-0.5, 1.5]),
+            (0, [float("nan"), 0.5]),
         ):
             with self.subTest(origin=origin, probabilities=probabilities), self.assertRaises(ValueError):
                 IntegerCategoricalDistribution(origin, probabilities)
+
+        # Mirroring CategoricalDistribution.pmap, an unnormalized (or empty, or all-zero) weight
+        # vector is deliberately still constructible; only finiteness/non-negativity is enforced.
+        for probabilities in ([], [0.0, 0.0], [0.8, 0.8]):
+            with self.subTest(probabilities=probabilities):
+                distribution = IntegerCategoricalDistribution(0, probabilities)
+                self.assertEqual(distribution.num_vals, len(probabilities))
 
     def test_integer_categorical_scalar_and_batch_use_exact_integrality(self):
         distribution = IntegerCategoricalDistribution(1, [0.5, 0.5])

@@ -141,7 +141,20 @@ def _migrate_stable_v0_state(tid: str, state: dict[str, Any]) -> dict[str, Any]:
     }:
         migrated["keys"] = None
     elif tid == "mixle.stats.univariate.discrete.categorical.CategoricalDistribution":
-        migrated.update(keys=None, is_normalized_probability=True, scoring_only=False)
+        # v0 artifacts predate both flags, so neither can be read off the payload. `scoring_only`
+        # is an author declaration with no v0 equivalent -- every v0 object was an ordinary
+        # distribution -- so it migrates to False. `is_normalized_probability` must NOT simply be
+        # asserted True: v0 deliberately permitted unnormalized and empty pmaps, so hard-coding
+        # the claim mislabels those artifacts and hands a non-summing-to-1 vector to the sampler.
+        # Derive it from the persisted parameters instead, matching what the constructor computes.
+        pmap = migrated.get("pmap")
+        weights = list(pmap.values()) if isinstance(pmap, dict) else [pair[1] for pair in (pmap or ())]
+        normalized = (
+            bool(weights)
+            and migrated.get("default_value", 0.0) == 0.0
+            and math.isclose(sum(weights), 1.0, rel_tol=1.0e-12, abs_tol=1.0e-12)
+        )
+        migrated.update(keys=None, is_normalized_probability=normalized, scoring_only=False)
     elif tid != "mixle.stats.latent.mixture.MixtureDistribution":
         raise SerializationError("no v0 -> v1 migration is registered for %r" % tid)
     return migrated
