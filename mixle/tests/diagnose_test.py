@@ -119,5 +119,70 @@ class DegenerateSampleSizeTest(unittest.TestCase):
         self.assertEqual(report.receipt["severity"], 0.0)
 
 
+def _single_field_anomaly_cases():
+    """Cases adverse in field[0] only -- ``either`` is nonzero but ``both`` is always zero, so there is
+    no co-anomalous evidence for a missing edge between the two fields."""
+    background = [(0.1, 0.05), (-0.2, -0.15), (0.05, 0.1), (-0.1, -0.05), (0.0, 0.0), (0.2, -0.1)]
+    failing = [(6.0, 0.02), (5.5, -0.03), (6.2, 0.01)]
+    return background, failing
+
+
+class ThresholdValidationTest(unittest.TestCase):
+    """``min_z`` and ``co_occurrence_threshold`` are cutoffs on a clipped z-score and on a rate; values
+    outside those ranges make both comparisons tautologies and prescribe a dependency that no case
+    supports, so they are rejected at the boundary instead of quietly changing the verdict."""
+
+    def test_negative_co_occurrence_threshold_is_rejected(self):
+        background, failing = _single_field_anomaly_cases()
+        with self.assertRaises(ValueError):
+            diagnose(_buggy_net(), failing, background=background, co_occurrence_threshold=-1.0)
+
+    def test_co_occurrence_threshold_above_one_is_rejected(self):
+        background, failing = _single_field_anomaly_cases()
+        with self.assertRaises(ValueError):
+            diagnose(_buggy_net(), failing, background=background, co_occurrence_threshold=1.5)
+
+    def test_negative_min_z_is_rejected(self):
+        background, failing = _single_field_anomaly_cases()
+        with self.assertRaises(ValueError):
+            diagnose(_buggy_net(), failing, background=background, min_z=-1.0)
+
+    def test_non_finite_cutoffs_are_rejected(self):
+        background, failing = _single_field_anomaly_cases()
+        with self.assertRaises(ValueError):
+            diagnose(_buggy_net(), failing, background=background, min_z=float("nan"))
+        with self.assertRaises(ValueError):
+            diagnose(_buggy_net(), failing, background=background, co_occurrence_threshold=float("nan"))
+
+    def test_in_range_cutoffs_are_still_accepted(self):
+        background, failing = _split_cases()
+        report = diagnose(_buggy_net(), failing, background=background, min_z=0.0, co_occurrence_threshold=1.0)
+        self.assertEqual(report.suggested_fix, "add_edge")
+
+
+class CoOccurrenceEvidenceTest(unittest.TestCase):
+    def test_zero_threshold_still_requires_a_co_anomalous_case(self):
+        """A rate cutoff of 0.0 means "any co-occurrence counts", not "no co-occurrence needed": with
+        every case adverse in one field only, there is no pair to explain and no edge to add."""
+        background, failing = _single_field_anomaly_cases()
+        report = diagnose(_buggy_net(), failing, background=background, co_occurrence_threshold=0.0)
+        self.assertEqual(report.dominant, "")
+        self.assertEqual(report.suggested_fix, "")
+        self.assertEqual(report.receipt["severity"], 0.0)
+
+
+class ArrayInputTest(unittest.TestCase):
+    def test_numpy_case_table_is_accepted_like_a_list_of_rows(self):
+        background, failing = _split_cases()
+        report = diagnose(_buggy_net(), np.asarray(failing), background=np.asarray(background))
+        self.assertEqual(report.suggested_fix, "add_edge")
+
+    def test_empty_numpy_case_table_reports_no_cases_instead_of_raising(self):
+        report = diagnose(_buggy_net(), np.zeros((0, 2)), background=_split_cases()[0])
+        self.assertEqual(report.dominant, "")
+        self.assertEqual(report.evidence, [])
+        self.assertEqual(report.receipt["n_cases"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
