@@ -111,7 +111,9 @@ def _simplex_vector(value: Any, label: str) -> np.ndarray:
     total = float(result.sum())
     if not np.isclose(total, 1.0, rtol=1.0e-12, atol=1.0e-12):
         raise ValueError("%s must sum to one" % label)
-    return (result / total).copy()
+    # Not dividing by total, for the reason given in _simplex_matrix: the check above already holds it
+    # to 1.0 within 1e-12, so the division only costs an ulp per entry on every rebuild.
+    return result.copy()
 
 
 def _simplex_matrix(value: Any, label: str, axis: int) -> np.ndarray:
@@ -125,7 +127,12 @@ def _simplex_matrix(value: Any, label: str, axis: int) -> np.ndarray:
     if not np.allclose(totals, 1.0, rtol=1.0e-12, atol=1.0e-12):
         direction = "columns" if axis == 0 else "rows"
         raise ValueError("%s %s must each sum to one" % (label, direction))
-    return (result / totals).copy()
+    # Deliberately NOT dividing by totals. The check above already established every total is 1.0 to
+    # within 1e-12, so the division cannot improve normalization beyond the tolerance this function
+    # declares -- but it does shift each entry by an ulp, and it does so on every construction. That
+    # made the distribution's __str__ round trip non-convergent: str -> eval -> str never reached a
+    # fixed point, because each rebuild renormalized by a total that was 1.0 only to within rounding.
+    return result.copy()
 
 
 def _canonical_observation(value: Any, num_docs: int, num_vals: int) -> tuple[int, list[tuple[int, int]], int]:
