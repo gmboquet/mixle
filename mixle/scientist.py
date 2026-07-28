@@ -37,6 +37,41 @@ _SENTENCE_REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
 _CACHE: dict[str, Any] = {}
 
 
+#: The latent space each modality encoder produces -- two SEPARATE spaces, not one shared one.
+#:
+#: :func:`encode_images` returns 512-dimensional CLIP image features; :func:`encode_texts` returns
+#: 384-dimensional embeddings from an independently trained MiniLM. There is no projection between
+#: them, no paired alignment objective, no common schema and no learned bridge, so a vector from one
+#: space carries no defined relation to a vector from the other: they cannot be compared by distance,
+#: averaged, or stacked (the dimensions do not even match). Both encoders' docstrings used to claim
+#: they encoded into "the shared scientific latent space"; they do not. Fit a separate head per space
+#: (:func:`study` takes latents from exactly one of them), and treat any cross-space claim as
+#: requiring a bridge that would have to be trained and evidenced first.
+LATENT_SPACES: dict[str, dict[str, Any]] = {
+    "image": {
+        "space_id": "clip-vit-base-patch32.image_features/v1",
+        "encoder": _CLIP_ID,
+        "revision": _CLIP_REVISION,
+        "dim": 512,
+        "aligned_with": (),
+    },
+    "text": {
+        "space_id": "all-MiniLM-L6-v2.sentence_embedding/v1",
+        "encoder": _SENTENCE_ID,
+        "revision": _SENTENCE_REVISION,
+        "dim": 384,
+        "aligned_with": (),
+    },
+}
+
+
+def latent_space(modality: str) -> dict[str, Any]:
+    """The representation contract for one modality's encoder (see :data:`LATENT_SPACES`)."""
+    if modality not in LATENT_SPACES:
+        raise KeyError(f"unknown modality {modality!r}; expected one of {sorted(LATENT_SPACES)}")
+    return dict(LATENT_SPACES[modality])
+
+
 def scientist_asset_manifest() -> dict[str, dict[str, str]]:
     """Return the immutable external-asset identities used by this module."""
     return {
@@ -130,7 +165,12 @@ def generate(prompt: str, *, max_new_tokens: int = 96, temperature: float = 0.0)
 
 @dataclass
 class StudiedModel:
-    """A certified cross-modal predictor: encoder latents -> closed-form head, with its receipts."""
+    """A certified predictor over ONE encoder's latents -> closed-form head, with its receipts.
+
+    Not cross-modal: it is fit on latents from a single space (see :data:`LATENT_SPACES`), and
+    ``provenance["latent_dim"]`` records which one it was trained in. Predicting on latents from the
+    other encoder is a category error, not a modality it also covers.
+    """
 
     head: Any  # per-class Gaussian model over latents (closed form)
     classes: list[Any]
@@ -255,7 +295,15 @@ def study(
     p_true = p_cal[np.arange(len(cal_idx)), [idx[c] for c in y[cal_idx]]]
     model.qhat = conformal_label_threshold(p_true, alpha=alpha)
     model.train_seconds = time.time() - t0
-    model.provenance = {"n_fit": len(fit_idx), "n_cal": len(cal_idx), "alpha": alpha, "seed": seed}
+    model.provenance = {
+        "n_fit": len(fit_idx),
+        "n_cal": len(cal_idx),
+        "alpha": alpha,
+        "seed": seed,
+        # which latent space this head lives in: the image and text encoders produce SEPARATE,
+        # unaligned spaces (see LATENT_SPACES), so a head is only valid for latents from its own.
+        "latent_dim": int(z.shape[1]),
+    }
     return model
 
 
@@ -450,7 +498,11 @@ class Conjecture:
 
 
 class Scientist:
-    """The laptop cross-modal scientific reasoner (see module docstring).
+    """The laptop multi-modality scientific reasoner (see module docstring).
+
+    Multi-modality, not cross-modal: it carries an image encoder and a text encoder whose latent
+    spaces are separate and unaligned (see :data:`LATENT_SPACES`); it does not relate one modality's
+    latents to the other's.
 
     Args:
         knowledge: a :class:`~mixle.substrate.Substrate` of what it may cite (built if omitted).
@@ -655,12 +707,20 @@ class Scientist:
     # -- certified perception ------------------------------------------------------------------------
     @staticmethod
     def perceive(images: Any) -> np.ndarray:
-        """Encode images into the shared scientific latent space."""
+        """Encode images into the ``"image"`` latent space: ``(n, 512)`` CLIP image features.
+
+        This is NOT the same space :meth:`read` produces, and nothing here bridges the two -- see
+        :data:`LATENT_SPACES`. Fit a head per space; do not mix their vectors.
+        """
         return encode_images(images)
 
     @staticmethod
     def read(texts: Any) -> np.ndarray:
-        """Encode texts into the shared scientific latent space."""
+        """Encode texts into the ``"text"`` latent space: ``(n, 384)`` MiniLM sentence embeddings.
+
+        This is NOT the same space :meth:`perceive` produces, and nothing here bridges the two -- see
+        :data:`LATENT_SPACES`. Fit a head per space; do not mix their vectors.
+        """
         return encode_texts(texts)
 
     @staticmethod

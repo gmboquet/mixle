@@ -319,6 +319,35 @@ def test_learn_rejects_a_non_document_item_by_position():
         Scientist().learn(["a real document", {"not": "a document"}])
 
 
+# --------------------------------------------------------------- MXR-080-1703: two latent spaces, not one
+def test_image_and_text_latent_spaces_are_declared_separate():
+    # perceive() returns 512-d CLIP image features and read() returns 384-d MiniLM embeddings from an
+    # independently trained model, with no projection, paired objective, common schema or bridge
+    # between them -- yet both docstrings claimed they encoded into "the shared scientific latent
+    # space" and StudiedModel called itself cross-modal. Their arrays cannot even be stacked.
+    from mixle.scientist import LATENT_SPACES, Scientist, StudiedModel, latent_space
+
+    image, text = latent_space("image"), latent_space("text")
+    assert image["space_id"] != text["space_id"]
+    assert image["dim"] != text["dim"]
+    assert image["encoder"] != text["encoder"]
+    assert image["aligned_with"] == () and text["aligned_with"] == ()  # nothing bridges them
+    assert set(LATENT_SPACES) == {"image", "text"}
+    with pytest.raises(KeyError):
+        latent_space("audio")
+
+    for doc in (Scientist.perceive.__doc__, Scientist.read.__doc__, StudiedModel.__doc__):
+        assert "shared scientific latent space" not in doc
+
+
+def test_study_records_which_latent_space_its_head_was_fit_in():
+    from mixle.scientist import study
+
+    z, y = _two_class_latents(dim=3)
+    model = study(z, y, alpha=0.1, cal_frac=0.25, seed=0)
+    assert model.provenance["latent_dim"] == 3
+
+
 # --------------------------------------------------------------- MXR-080-1706: one label equivalence relation
 def _int_edge_teacher(x):
     return 1
