@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from mixle.represent.api import Embedder, fit_embedder
 from mixle.represent.embed import CategoricalEmbedding, FeatureEmbedding
-from mixle.represent.generative import AutoencoderResult, fit_autoencoder
+from mixle.represent.generative import AutoencoderFitError, AutoencoderResult, fit_autoencoder
 from mixle.represent.graph import GraphEmbedding, GraphEncoder
 from mixle.represent.heterogeneous import HeterogeneousEncoder, ModalityEncoder
 from mixle.represent.learned_segment import LearnedSegmenter
@@ -38,6 +38,7 @@ from mixle.represent.segment import (
 
 __all__ = [
     "PosteriorRetriever",
+    "AutoencoderFitError",
     "AutoencoderResult",
     "ByteSegmenter",
     "CategoricalEmbedding",

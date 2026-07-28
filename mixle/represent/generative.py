@@ -21,13 +21,49 @@ from typing import Any
 
 import numpy as np
 
-from mixle.represent.embed import FeatureEmbedding
+from mixle.represent.embed import FeatureEmbedding, _positive_dimension
 from mixle.represent.quantize import VectorQuantizer
+
+
+class AutoencoderFitError(RuntimeError):
+    """Reconstruction training did not complete, so no representation is returned.
+
+    Carries the losses recorded before the failure and the epoch it happened on, so a caller can see
+    where the fit diverged instead of receiving an ``AutoencoderResult`` that looks trained.
+    """
+
+    def __init__(self, message: str, losses: list[float], epoch: int) -> None:
+        super().__init__(message)
+        self.losses = losses
+        self.epoch = epoch
+
+
+def _finite_units(units: Any) -> Any:
+    """``units`` as a rectangular, non-empty, finite ``(N, in_features)`` array.
+
+    A one-epoch fit containing NaN used to return ``losses=[nan]`` and an encoder producing
+    non-finite output, with no failed-fit state -- an artifact that could then enter the shared
+    representation space as though reconstruction training had succeeded.
+    """
+    array = np.asarray(units)
+    if array.dtype == object:
+        raise ValueError("units must be a rectangular numeric array, not a ragged/object array")
+    if array.ndim != 2:
+        raise ValueError(f"units must be a 2-D (n_units, in_features) array, got shape {array.shape}")
+    if array.shape[0] == 0 or array.shape[1] == 0:
+        raise ValueError(f"units must be non-empty in both dimensions, got shape {array.shape}")
+    if not np.isfinite(array).all():
+        raise ValueError("units must contain only finite values; a non-finite unit cannot be reconstructed")
+    return array
 
 
 @dataclass
 class AutoencoderResult:
-    """A reconstruction-trained representation with encoder, decoder, optional codebook, and loss curve."""
+    """A reconstruction-trained representation with encoder, decoder, optional codebook, and loss curve.
+
+    Only returned for a fit that ran every requested epoch to a finite loss: an untrained or diverged
+    encoder is an :class:`AutoencoderFitError`, never a result.
+    """
 
     encoder: FeatureEmbedding
     decoder: Any
@@ -61,13 +97,38 @@ def fit_autoencoder(
     decoding and the codebook is refit every ``refit_codebook_every`` epochs on
     the current embeddings. ``commitment`` weights the VQ codebook-commitment
     term.
+
+    Architecture and training controls are validated rather than truncated: ``epochs=0``, ``-2``, and
+    ``.9`` each used to return an ordinary result carrying a randomly initialized encoder and an
+    empty loss history -- an untrained representation indistinguishable from a trained one. The
+    global Torch RNG is seeded for reproducibility and restored on the way out, so fitting a
+    representation does not silently reseed the caller's other Torch randomness.
+
+    Raises:
+        ValueError: for non-finite/ragged/empty units or a non-exact-positive control.
+        AutoencoderFitError: if the loss goes non-finite -- training did not complete, so there is no
+            trained representation to return.
     """
     import torch
     import torch.nn as nn
 
-    x = torch.as_tensor(np.asarray(units), dtype=torch.float32)
+    array = _finite_units(units)
+    dim = _positive_dimension("dim", dim)
+    epochs = _positive_dimension("epochs", epochs)
+    refit_codebook_every = _positive_dimension("refit_codebook_every", refit_codebook_every)
+    lr = float(lr)
+    if not np.isfinite(lr) or lr <= 0.0:
+        raise ValueError(f"lr must be a finite positive learning rate, got {lr!r}")
+    commitment = float(commitment)
+    if not np.isfinite(commitment) or commitment < 0.0:
+        raise ValueError(f"commitment must be finite and non-negative, got {commitment!r}")
+    if isinstance(seed, bool) or not isinstance(seed, (int, np.integer)):
+        raise ValueError(f"seed must be an exact integer, got {seed!r}")
+
+    x = torch.as_tensor(array, dtype=torch.float32)
     in_features = x.shape[1]
-    torch.manual_seed(seed)
+    rng_state = torch.get_rng_state()
+    torch.manual_seed(int(seed))
 
     encoder = FeatureEmbedding(in_features, dim, hidden=hidden)
     enc = encoder.module()
@@ -81,11 +142,44 @@ def fit_autoencoder(
 
     opt = torch.optim.Adam(list(enc.parameters()) + list(decoder.parameters()), lr=lr)
     losses: list[float] = []
-    for epoch in range(int(epochs)):
+    try:
+        _train(
+            x,
+            enc,
+            decoder,
+            opt,
+            losses,
+            epochs=epochs,
+            quantizer=quantizer,
+            refit_codebook_every=refit_codebook_every,
+            commitment=commitment,
+            torch=torch,
+        )
+    finally:
+        torch.set_rng_state(rng_state)
+
+    return AutoencoderResult(encoder=encoder, decoder=decoder, quantizer=quantizer, losses=losses)
+
+
+def _train(
+    x: Any,
+    enc: Any,
+    decoder: Any,
+    opt: Any,
+    losses: list[float],
+    *,
+    epochs: int,
+    quantizer: VectorQuantizer | None,
+    refit_codebook_every: int,
+    commitment: float,
+    torch: Any,
+) -> None:
+    """Run the reconstruction loop, stopping the moment the objective stops being a number."""
+    for epoch in range(epochs):
         opt.zero_grad()
         z = enc(x)  # (N, dim)
         if quantizer is not None:
-            if quantizer.codebook is None or (epoch % max(1, refit_codebook_every) == 0):
+            if quantizer.codebook is None or (epoch % refit_codebook_every == 0):
                 quantizer.fit(z.detach().cpu().numpy())  # refit the codebook on the current embeddings
             zq = quantizer.straight_through(z)
             recon = decoder(zq)
@@ -97,8 +191,14 @@ def fit_autoencoder(
             recon = decoder(z)
             commit = torch.zeros((), dtype=z.dtype)
         loss = torch.mean((recon - x) ** 2) + commit
+        value = float(loss.detach())
+        if not np.isfinite(value):
+            raise AutoencoderFitError(
+                f"reconstruction loss became {value} at epoch {epoch}; training diverged and there is "
+                "no trained representation to return",
+                list(losses),
+                epoch,
+            )
         loss.backward()
         opt.step()
-        losses.append(float(loss.detach()))
-
-    return AutoencoderResult(encoder=encoder, decoder=decoder, quantizer=quantizer, losses=losses)
+        losses.append(value)

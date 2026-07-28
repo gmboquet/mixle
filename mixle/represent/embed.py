@@ -17,10 +17,27 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+import numpy as np
+
 # re-export the discrete embedding so the representation layer has one import surface
 from mixle.models.embedding import CategoricalEmbedding
 
 __all__ = ["CategoricalEmbedding", "FeatureEmbedding"]
+
+
+def _positive_dimension(name: str, value: Any) -> int:
+    """``value`` as an exact positive layer width.
+
+    ``int()`` truncation accepted ``0``, ``-2``, and ``.9`` as widths and built a degenerate module
+    from them instead of reporting the bad architecture, so ``bool`` and fractional/non-positive
+    values are rejected here rather than silently reinterpreted.
+    """
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise ValueError(f"{name} must be an exact positive integer, got {value!r}")
+    width = int(value)
+    if width <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {width}")
+    return width
 
 
 class FeatureEmbedding:
@@ -32,9 +49,9 @@ class FeatureEmbedding:
     """
 
     def __init__(self, in_features: int, dim: int, *, hidden: Sequence[int] = (), name: str | None = None) -> None:
-        self.in_features = int(in_features)
-        self.dim = int(dim)
-        self.hidden = tuple(int(h) for h in hidden)
+        self.in_features = _positive_dimension("in_features", in_features)
+        self.dim = _positive_dimension("dim", dim)
+        self.hidden = tuple(_positive_dimension("hidden layer width", h) for h in hidden)
         self.name = name
         self._module: Any = None
 
