@@ -8,6 +8,7 @@ useful low-cost approximation for mild nonlinearity). The back half of the UQ lo
 
 from __future__ import annotations
 
+import operator
 import warnings
 from collections.abc import Callable
 from typing import Any
@@ -17,6 +18,7 @@ import numpy as np
 __all__ = ["propagate", "register_propagator", "unscented_transform"]
 
 _PSD_EIGENVALUE_RATIO = 1e-9
+_SYMMETRY_RATIO = 1e-10
 """Relative-tolerance bound (matching ``mixle.inference.belief.GaussianBelief``'s PSD gate, and
 mirrored from ``mixle.doe.batch._safe_cholesky``'s MXR-080-0166 fix) on how negative a covariance's
 worst eigenvalue may be -- relative to its own eigenvalue scale -- before it is refused outright as not
@@ -32,18 +34,43 @@ def _require_positive_int(value: Any, name: str) -> int:
     is unsliceable``; zero raises ``IndexError: index -1 is out of bounds for axis 0 with size 0``) --
     neither names the actual problem.
     """
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a positive exact non-Boolean integer, got {value!r}.")
     try:
-        as_float = float(value)
-    except (TypeError, ValueError) as exc:
+        as_int = operator.index(value)
+    except TypeError as exc:
         raise ValueError(f"{name} must be a positive integer, got {value!r}.") from exc
-    as_int = int(as_float)
-    if as_int <= 0 or as_float != as_int:
+    if as_int <= 0:
         raise ValueError(f"{name} must be a positive integer, got {value!r}.")
-    return as_int
+    return int(as_int)
+
+
+def _validate_mean(mean: Any) -> np.ndarray:
+    array = np.asarray(mean, dtype=np.float64)
+    if array.ndim != 1 or array.size == 0:
+        raise ValueError(f"mean must be a non-empty one-dimensional array; got shape {array.shape}.")
+    if not np.all(np.isfinite(array)):
+        raise ValueError("mean is not finite (contains NaN/Inf).")
+    return array
+
+
+def _require_transform_scalar(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"unscented_transform: {name} must be a finite non-Boolean scalar, got {value!r}.")
+    array = np.asarray(value)
+    if array.ndim != 0:
+        raise ValueError(f"unscented_transform: {name} must be a finite non-Boolean scalar, got shape {array.shape}.")
+    try:
+        scalar = float(array)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"unscented_transform: {name} must be a finite non-Boolean scalar, got {value!r}.") from exc
+    if not np.isfinite(scalar):
+        raise ValueError(f"unscented_transform: {name} must be a finite non-Boolean scalar, got {value!r}.")
+    return scalar
 
 
 def _validate_covariance(cov: np.ndarray) -> tuple[np.ndarray, float]:
-    """Reject a non-finite or non-PSD covariance; return ``(symmetrized_cov, eigenvalue_scale)``.
+    """Reject a non-finite, asymmetric, or non-PSD covariance.
 
     Shared by both propagation methods (and by :func:`_safe_cholesky`) so an invalid covariance is
     refused identically regardless of which is requested. Without this, ``'unscented'`` would eventually
@@ -53,10 +80,19 @@ def _validate_covariance(cov: np.ndarray) -> tuple[np.ndarray, float]:
     never a covariance in the first place.
     """
     cov = np.asarray(cov, dtype=np.float64)
+    if cov.ndim != 2 or cov.shape[0] != cov.shape[1] or cov.shape[0] == 0:
+        raise ValueError(f"covariance must be a non-empty square matrix; got shape {cov.shape}.")
     if not np.all(np.isfinite(cov)):
         raise ValueError("covariance is not finite (contains NaN/Inf).")
-    sym = 0.5 * (cov + cov.T)  # symmetrize first: an asymmetric-but-PD input would otherwise "succeed"
-    # against a matrix that silently differs from what was passed.
+    entry_scale = max(float(np.max(np.abs(cov))), 1.0)
+    asymmetry = float(np.max(np.abs(cov - cov.T)))
+    tolerance = _SYMMETRY_RATIO * entry_scale
+    if asymmetry > tolerance:
+        raise ValueError(
+            "covariance must be symmetric; maximum mirrored-entry disagreement "
+            f"{asymmetry:.6g} exceeds roundoff tolerance {tolerance:.6g}."
+        )
+    sym = 0.5 * (cov + cov.T)
     evals = np.linalg.eigvalsh(sym)
     scale = float(np.abs(evals).max()) if evals.size else 0.0
     if evals.min() < -_PSD_EIGENVALUE_RATIO * max(scale, 1e-12):
@@ -67,6 +103,24 @@ def _validate_covariance(cov: np.ndarray) -> tuple[np.ndarray, float]:
             "for a fundamentally invalid covariance."
         )
     return sym, scale
+
+
+def _validate_output_covariance(cov: np.ndarray) -> np.ndarray:
+    """Validate an unscented result and repair only eigenvalue-scale floating-point roundoff."""
+    symmetric, scale = _validate_covariance(cov)
+    eigenvalues, eigenvectors = np.linalg.eigh(symmetric)
+    if np.any(eigenvalues < 0.0):
+        # `_validate_covariance` already rejected material negative curvature. Projecting the remaining
+        # at-most-tolerance roundoff to the closed PSD cone prevents downstream square roots from
+        # needing an undisclosed `clip`.
+        symmetric = (eigenvectors * np.maximum(eigenvalues, 0.0)) @ eigenvectors.T
+    if not np.all(np.isfinite(symmetric)):
+        raise ValueError("unscented output covariance is not finite.")
+    if np.any(np.diag(symmetric) < 0.0):
+        raise ValueError(
+            f"unscented output covariance has negative variance after roundoff repair (scale {scale:.6g})."
+        )
+    return symmetric
 
 
 def _safe_cholesky(sigma: np.ndarray) -> np.ndarray:
@@ -173,14 +227,12 @@ def propagate(
             valid (finite, PSD-within-tolerance) covariance, ``n`` is not a positive integer, any
             ``quantiles`` entry is outside ``[0, 1]``, or ``method`` is not registered.
     """
-    mean = np.atleast_1d(np.asarray(mean, dtype=float))
-    d = len(mean)
-    cov = np.eye(d) if cov is None else np.atleast_2d(np.asarray(cov, dtype=float))
-    if not np.all(np.isfinite(mean)):
-        raise ValueError("mean is not finite (contains NaN/Inf).")
+    mean = _validate_mean(mean)
+    d = mean.size
+    cov = np.eye(d) if cov is None else np.asarray(cov, dtype=float)
     if cov.shape != (d, d):
         raise ValueError(f"covariance shape {cov.shape} is incompatible with mean of length {d}; expected ({d}, {d}).")
-    _validate_covariance(cov)  # raises on non-finite/non-PSD; see _safe_cholesky for the unscented path
+    cov, _ = _validate_covariance(cov)
     n = _require_positive_int(n, "n")
     quantiles = tuple(quantiles)
     if quantiles:
@@ -208,7 +260,10 @@ def _propagate_unscented(
     seed: int,
 ) -> dict[str, Any]:
     m, c = unscented_transform(func, mean, cov)
-    std = np.sqrt(np.clip(np.diag(np.atleast_2d(c)), 0.0, None))
+    covariance = np.atleast_2d(c)
+    std = np.sqrt(np.diag(covariance))
+    if not np.all(np.isfinite(std)):
+        raise ValueError("unscented propagation produced non-finite standard deviation.")
     return {"mean": m, "std": float(std[0]) if np.ndim(m) == 0 else std}
 
 
@@ -233,12 +288,14 @@ def _propagate_montecarlo(
         )
     if not np.all(np.isfinite(y)):
         raise ValueError("model function returned non-finite (NaN/Inf) output.")
-    return {
-        "mean": y.mean(axis=0),
-        "std": y.std(axis=0),
-        "quantiles": {q: np.quantile(y, q, axis=0) for q in quantiles},
-        "samples": y,
-    }
+    with np.errstate(over="ignore", invalid="ignore"):
+        output_mean = y.mean(axis=0)
+        output_std = y.std(axis=0)
+        output_quantiles = {q: np.quantile(y, q, axis=0) for q in quantiles}
+    summaries = [np.asarray(output_mean), np.asarray(output_std), *(np.asarray(v) for v in output_quantiles.values())]
+    if any(not np.all(np.isfinite(summary)) for summary in summaries):
+        raise ValueError("Monte Carlo propagation produced non-finite summary statistics.")
+    return {"mean": output_mean, "std": output_std, "quantiles": output_quantiles, "samples": y}
 
 
 def unscented_transform(
@@ -257,22 +314,25 @@ def unscented_transform(
 
     Raises:
         ValueError: if ``mean`` is non-finite, ``cov``'s shape doesn't match ``mean``, ``cov`` is not a
-            valid covariance (see :func:`_safe_cholesky`), ``alpha``/``beta``/``kappa`` are not finite,
-            ``d + lambda <= 0``, ``func``'s return doesn't have a leading dimension of ``2d+1`` (rejected
-            explicitly, not silently reinterpreted via a total-size-only reshape), or ``func``'s return
-            is non-finite.
+            valid covariance (see :func:`_safe_cholesky`), ``alpha``/``beta``/``kappa`` are not finite
+            non-Boolean scalars, ``alpha <= 0``, ``beta < 0``, ``d + lambda <= 0``, ``func``'s return
+            doesn't have a leading dimension of ``2d+1`` (rejected explicitly, not silently
+            reinterpreted via a total-size-only reshape), or ``func``'s return or derived covariance is
+            non-finite/invalid.
     """
-    mean = np.atleast_1d(np.asarray(mean, dtype=float))
-    cov = np.atleast_2d(np.asarray(cov, dtype=float))
-    d = len(mean)
-    if not np.all(np.isfinite(mean)):
-        raise ValueError("mean is not finite (contains NaN/Inf).")
+    mean = _validate_mean(mean)
+    cov = np.asarray(cov, dtype=float)
+    d = mean.size
     if cov.shape != (d, d):
         raise ValueError(f"covariance shape {cov.shape} is incompatible with mean of length {d}; expected ({d}, {d}).")
-    if not (np.isfinite(alpha) and np.isfinite(beta) and np.isfinite(kappa)):
-        raise ValueError(
-            f"unscented transform parameters must be finite; got alpha={alpha!r}, beta={beta!r}, kappa={kappa!r}."
-        )
+    cov, _ = _validate_covariance(cov)
+    alpha = _require_transform_scalar(alpha, "alpha")
+    beta = _require_transform_scalar(beta, "beta")
+    kappa = _require_transform_scalar(kappa, "kappa")
+    if alpha <= 0.0:
+        raise ValueError(f"unscented_transform requires alpha > 0, got {alpha!r}.")
+    if beta < 0.0:
+        raise ValueError(f"unscented_transform requires beta >= 0, got {beta!r}.")
     lam = alpha**2 * (d + kappa) - d
     if not (d + lam > 0):  # `> 0` (not `<= 0`) so a NaN lambda -- e.g. from a NaN alpha/kappa slipping
         # past the finite check above -- is caught too: NaN comparisons are always False, so `<= 0` would
@@ -311,8 +371,12 @@ def unscented_transform(
         raise ValueError(f"model function must return a 1-D or 2-D array; got shape {y_raw.shape} (ndim={y_raw.ndim}).")
     if not np.all(np.isfinite(y)):
         raise ValueError("model function returned non-finite (NaN/Inf) output.")
-    y_mean = wm @ y
-    dy = y - y_mean
-    y_cov = (wc[:, None] * dy).T @ dy
+    with np.errstate(over="ignore", invalid="ignore"):
+        y_mean = wm @ y
+        dy = y - y_mean
+        y_cov = (wc[:, None] * dy).T @ dy
+    if not np.all(np.isfinite(y_mean)):
+        raise ValueError("unscented transform produced a non-finite output mean.")
+    y_cov = _validate_output_covariance(y_cov)
     out_dim = y.shape[1]
     return (y_mean[0], float(y_cov[0, 0])) if out_dim == 1 else (y_mean, y_cov)
