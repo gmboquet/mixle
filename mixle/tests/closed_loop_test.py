@@ -310,6 +310,79 @@ class _RecordingObjective:
         return self._real.scalar(model, data)
 
 
+class _ScoreFailsOnPromotion(ClosedLoopSelfEvolution):
+    """A loop whose post-gate scoring fails exactly on a step that would deploy a new champion.
+
+    The condition is written against the champion the step STARTED with, so it fires identically
+    whichever side of the champion swap the scoring happens on -- which is precisely what
+    MXR-080-1773 is about.
+    """
+
+    def step(self, batch, **kwargs):
+        self._incumbent = self.champion
+        return super().step(batch, **kwargs)
+
+    def _score(self, model, data):
+        if model is not self._incumbent:
+            raise RuntimeError("scoring the prospective champion blew up")
+        return super()._score(model, data)
+
+
+def _total_pulls(bandit) -> int:
+    return sum(int(arm["pulls"]) for ctx in bandit.report().values() for arm in ctx.values())
+
+
+class PromotionAtomicityTest(unittest.TestCase):
+    """MXR-080-1773 (Critical): a loop step must be all-or-nothing.
+
+    Genealogy was recorded and ``self.champion`` replaced BEFORE the new champion's score was
+    produced, so a scoring failure left the challenger deployed with one adoption row and one bandit
+    reward, while raising to the caller with no ``LoopStepResult`` and no history entry -- the loop's
+    durable state and its own record of what happened permanently disagreeing, with nothing to
+    reconcile them. A failed step must now change nothing at all and be retryable.
+    """
+
+    def test_a_failed_post_gate_score_deploys_nothing(self):
+        rng = np.random.RandomState(0)
+        champion = _fit_categorical(_gen_batch([0.7, 0.2, 0.1], 300, rng))
+        loop = _ScoreFailsOnPromotion(champion, objective=accuracy_objective(), seed=0, acquire_k=40)
+        stream = [_gen_batch([0.2, 0.7, 0.1], 60, rng) for _ in range(24)]
+
+        reached_a_promotion = False
+        for batch in stream:
+            before = (
+                loop.champion,
+                len(loop.genealogy.ledger.rows),
+                len(loop.history),
+                _total_pulls(loop.bandit),
+            )
+            try:
+                loop.step(batch)
+            except RuntimeError:
+                reached_a_promotion = True
+                self.assertIs(loop.champion, before[0], "a failed step left the challenger deployed")
+                self.assertEqual(len(loop.genealogy.ledger.rows), before[1], "an adoption receipt was stranded")
+                self.assertEqual(len(loop.history), before[2], "history and durable state disagree")
+                self.assertEqual(_total_pulls(loop.bandit), before[3], "the bandit was rewarded for a lost step")
+                break
+            # every step that DID return is fully recorded
+            self.assertEqual(len(loop.history), before[2] + 1)
+        self.assertTrue(reached_a_promotion, "the stream never reached a promoting step")
+
+    def test_an_ordinary_promoting_step_still_commits_everything_together(self):
+        rng = np.random.RandomState(0)
+        champion = _fit_categorical(_gen_batch([0.7, 0.2, 0.1], 300, rng))
+        loop = ClosedLoopSelfEvolution(champion, objective=accuracy_objective(), seed=0, acquire_k=40)
+        results = loop.run([_gen_batch([0.2, 0.7, 0.1], 60, rng) for _ in range(24)])
+
+        promotions = [r for r in results if r.promoted]
+        self.assertTrue(promotions, "the loop never adopted a challenger")
+        self.assertEqual(len(loop.history), len(results))  # every returned step is in history
+        self.assertEqual(len(loop.genealogy.ledger.rows), len(promotions))  # one receipt per promotion
+        self.assertIs(loop.champion, results[-1].champion)
+        self.assertIs(loop.champion, promotions[-1].champion)
+
+
 class DataRoleDisjointnessTest(unittest.TestCase):
     """Regression coverage (audit MXR-080-0042, Critical): step()'s default verify_data used to be the
     WHOLE arriving batch, which CONTAINS train_data (acquire's top-priority subset of it) -- so the gate
