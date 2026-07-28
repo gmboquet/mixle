@@ -102,6 +102,28 @@ class RecorderTest(unittest.TestCase):
             self.assertEqual(len(t2), 5)
             self.assertEqual([e.features["i"] for e in t2.events()], [0, 1, 2, 3, 4])
 
+    def test_flush_never_writes_through_a_preplaced_temp_symlink(self):
+        # MXR-080-1735: the flush always opened the fixed path "<log>.tmp" with mode "w", so a
+        # symlink pre-placed there (trivial in a shared or world-writable log directory) got the
+        # telemetry row written through it into an arbitrary external file -- and the following
+        # rename moved the symlink itself onto the log path, redirecting every later flush too.
+        with tempfile.TemporaryDirectory() as d:
+            outside = os.path.join(d, "outside.txt")
+            with open(outside, "w") as f:
+                f.write("precious\n")
+            logdir = os.path.join(d, "logs")
+            os.mkdir(logdir)
+            path = os.path.join(logdir, "events.jsonl")
+            os.symlink(outside, path + ".tmp")
+
+            t = Telemetry(path)
+            t.record("fit", features={"n": 1})
+
+            with open(outside) as f:
+                self.assertEqual(f.read(), "precious\n")  # untouched
+            self.assertFalse(os.path.islink(path))
+            self.assertEqual(len(list(Telemetry(path).events())), 1)
+
     def test_deterministic_monotonic_clock(self):
         t = Telemetry()
         a = t.record("fit", choice="x")
