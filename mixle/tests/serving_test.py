@@ -339,5 +339,100 @@ class ModelServiceBatchFallbackTest(unittest.TestCase):
         self.assertEqual(svc.activity[-1]["n_batch_unavailable"], 2)
 
 
+class _ConstantScoreModel:
+    """Scores every record in a batch with one fixed log-density (whatever the caller set last)."""
+
+    def __init__(self):
+        self.value = 0.0
+
+    def dist_to_encoder(self):
+        return _IdentityEncoder()
+
+    def seq_log_density(self, enc):
+        return np.full(len(enc), self.value, dtype=float)
+
+    def log_density(self, r):
+        return float(self.value)
+
+
+class _OutOfSupportModel:
+    """Scores a sentinel record as a genuine ``-inf`` (outside support) and everything else at -0.5."""
+
+    SENTINEL = -12345.0
+
+    def dist_to_encoder(self):
+        return _IdentityEncoder()
+
+    def seq_log_density(self, enc):
+        return np.asarray([self.log_density(r) for r in enc], dtype=float)
+
+    def log_density(self, r):
+        return float("-inf") if r == self.SENTINEL else -0.5
+
+
+class ServiceHealthWeightingTest(unittest.TestCase):
+    """MXR-080-1654: health() is a record-weighted signal and validates its event window."""
+
+    def test_mean_loglik_weights_records_not_batches(self):
+        model = _ConstantScoreModel()
+        svc = Service(model, name="g")
+        model.value = 0.0
+        svc.score([1.0])  # one record at 0.0
+        model.value = -10.0
+        svc.score([1.0] * 100)  # a hundred records at -10.0
+        h = svc.health()
+        self.assertEqual(h["records"], 101)
+        self.assertEqual(h["scored_records"], 101)
+        # the true 101-record mean is -1000/101 = -9.9009...; the old mean-of-means reported -5.0
+        self.assertAlmostEqual(h["mean_loglik"], -1000.0 / 101.0, places=9)
+
+    def test_rebatching_the_same_scores_does_not_move_health(self):
+        model = _ConstantScoreModel()
+        one_call = Service(model, name="a")
+        model.value = -2.0
+        one_call.score([1.0] * 8)
+        many_calls = Service(model, name="b")
+        for _ in range(8):
+            many_calls.score([1.0])
+        self.assertAlmostEqual(one_call.health()["mean_loglik"], many_calls.health()["mean_loglik"], places=12)
+
+    def test_unscorable_records_are_excluded_from_the_record_mean(self):
+        svc = Service(_OutOfSupportModel(), name="g")
+        svc.score([1.0, _OutOfSupportModel.SENTINEL])
+        h = svc.health()
+        self.assertEqual(h["records"], 2)
+        self.assertEqual(h["scored_records"], 1)
+        self.assertAlmostEqual(h["mean_loglik"], -0.5, places=12)
+        self.assertEqual(h["unscorable_rate"], 0.5)
+
+    def test_all_unscorable_window_reports_no_mean(self):
+        svc = Service(_OutOfSupportModel(), name="g")
+        svc.score([_OutOfSupportModel.SENTINEL] * 3)
+        h = svc.health()
+        self.assertEqual(h["scored_records"], 0)
+        self.assertIsNone(h["mean_loglik"])
+
+    def test_window_must_be_an_exact_positive_integer(self):
+        svc = Service(_ConstantScoreModel(), name="g")
+        svc.score([1.0])
+        for bad in (0, -1):
+            with self.assertRaises(ValueError):
+                svc.health(window=bad)
+        for bad in (True, 1.5, "5"):
+            with self.assertRaises(TypeError):
+                svc.health(window=bad)
+
+    def test_window_selects_the_most_recent_events(self):
+        model = _ConstantScoreModel()
+        svc = Service(model, name="g")
+        model.value = -1.0
+        svc.score([1.0])
+        model.value = -3.0
+        svc.score([1.0])
+        self.assertEqual(svc.health(window=1)["events"], 1)
+        self.assertAlmostEqual(svc.health(window=1)["mean_loglik"], -3.0, places=12)
+        self.assertAlmostEqual(svc.health(window=2)["mean_loglik"], -2.0, places=12)
+
+
 if __name__ == "__main__":
     unittest.main()

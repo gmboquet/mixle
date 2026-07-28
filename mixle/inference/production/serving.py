@@ -167,6 +167,9 @@ class Service:
 
         dt = time.time() - t0
         finite = np.isfinite(lp)
+        # Record the finite score SUM and COUNT alongside the batch mean. health() aggregates by
+        # record from these; a per-event mean alone cannot be re-weighted after the fact, so
+        # averaging means made a one-record batch count as much as a hundred-record one.
         self._log(
             {
                 "time": time.time(),
@@ -175,6 +178,8 @@ class Service:
                 "n": len(recs),
                 "duration_s": round(dt, 6),
                 "mean_loglik": float(lp[finite].mean()) if finite.any() else None,
+                "sum_loglik": float(lp[finite].sum()) if finite.any() else 0.0,
+                "n_scored": int(finite.sum()),
                 "n_unscorable": int((~finite).sum()),
                 "n_unavailable": n_unavailable,
                 "n_batch_unavailable": n_expected if outcome.degraded else 0,
@@ -211,7 +216,30 @@ class Service:
         records caused by the model being unreachable -- an outage -- rather than legitimately scored),
         and the batch-unavailable rate (records whose batch call failed and had to be retried
         per-record, whether or not that retry itself recovered a score -- always ``>=`` the unavailable
-        rate; see :meth:`score`)."""
+        rate; see :meth:`score`).
+
+        ``mean_loglik`` is the mean over RECORDS, not over events: it is the total finite log-density
+        divided by ``scored_records``, so it does not move when the same scores arrive in differently
+        sized batches. Averaging each event's own batch mean made one record with log-likelihood 0
+        followed by 100 records averaging -10 report -5.0 instead of the true -9.901, which let batch
+        shape alone manufacture or mask a degradation. Unscorable records are excluded from both the
+        numerator and ``scored_records`` (they are counted by ``unscorable_rate`` instead); an all-
+        unscorable window reports ``mean_loglik=None`` rather than a number derived from no evidence.
+
+        Args:
+            window: how many of the most recent scoring events to summarize; an exact positive
+                integer. ``0`` used to select the whole history (``[-0:]`` is a full slice) and a
+                negative value selected a surprising suffix, both silently.
+
+        Raises:
+            TypeError: if ``window`` is not an exact integer (``bool`` included).
+            ValueError: if ``window`` is not positive.
+        """
+        if isinstance(window, bool) or not isinstance(window, (int, np.integer)):
+            raise TypeError(f"window must be an exact integer number of events, got {window!r}")
+        window = int(window)
+        if window < 1:
+            raise ValueError(f"window must be a positive number of events, got {window}")
         drift_events = sum(1 for e in self.activity if e["op"] == "drift" and e.get("drift"))
         scores = [e for e in self.activity if e["op"] == "score"][-window:]
         if not scores:
@@ -220,12 +248,14 @@ class Service:
         unscor = sum(e["n_unscorable"] for e in scores)
         unavail = sum(e.get("n_unavailable", 0) for e in scores)
         batch_unavail = sum(e.get("n_batch_unavailable", 0) for e in scores)
-        lls = [e["mean_loglik"] for e in scores if e["mean_loglik"] is not None]
+        scored = sum(int(e.get("n_scored", 0)) for e in scores)
+        total_ll = sum(float(e.get("sum_loglik", 0.0)) for e in scores)
         return {
             "events": len(scores),
             "records": n,
+            "scored_records": scored,
             "records_per_s": round(n / max(sum(e["duration_s"] for e in scores), 1e-9), 1),
-            "mean_loglik": float(np.mean(lls)) if lls else None,
+            "mean_loglik": (total_ll / scored) if scored else None,
             "unscorable_rate": round(unscor / n, 6) if n else 0.0,
             "unavailable_rate": round(unavail / n, 6) if n else 0.0,
             "batch_unavailable_rate": round(batch_unavail / n, 6) if n else 0.0,
