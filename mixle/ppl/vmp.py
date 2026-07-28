@@ -288,6 +288,16 @@ class GraphResult:
             raise KeyError("variable is not a node in this graph.")
         return posterior
 
+    def _family(self, rv):
+        """Return the conjugate-family tag inferred for ``rv``, or None if it is not a node here.
+
+        The snapshot above deliberately keeps tags rather than live ``*VNode`` objects, so callers
+        that need to know which conjugate factor a latent got must ask for the tag instead of
+        type-checking a node. ``mixle.ppl.guide`` uses this to validate a declared ``Guide`` family.
+        """
+        posterior = self._posterior_of.get(id(rv))
+        return None if posterior is None else posterior[0]
+
     def posterior(self, rv):
         """Return posterior parameters for a latent handle in the fitted graph."""
         node = self._node(rv)
