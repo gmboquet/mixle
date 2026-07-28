@@ -75,6 +75,9 @@ class Integer:
     hi: int
 
     def __post_init__(self) -> None:
+        for name, bound in (("lo", self.lo), ("hi", self.hi)):
+            if isinstance(bound, (bool, np.bool_)) or not isinstance(bound, (int, np.integer)):
+                raise ValueError(f"Integer bound {name} must be an integer (got {bound!r}).")
         if not int(self.lo) < int(self.hi):
             raise ValueError(f"Integer bounds must satisfy lo < hi (got {self.lo}, {self.hi}).")
 

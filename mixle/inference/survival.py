@@ -34,10 +34,58 @@ from mixle.inference.glm import glm
 # --------------------------------------------------------------------------- nonparametric
 
 
-def _event_table(time: np.ndarray, event: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _validated_durations(time: np.ndarray, *, name: str = "time") -> np.ndarray:
+    """Return ``time`` as a non-empty 1-D array of finite, non-negative durations."""
+    values = np.asarray(time, dtype=float)
+    if values.ndim != 1 or values.shape[0] < 1:
+        raise ValueError(f"{name} must be a non-empty one-dimensional array")
+    if not np.all(np.isfinite(values)):
+        raise ValueError(f"{name} must contain only finite values")
+    if np.any(values < 0.0):
+        raise ValueError(f"{name} must contain only non-negative durations")
+    return values
+
+
+def _validated_indicators(event: np.ndarray | None, n: int, *, name: str = "event") -> np.ndarray:
+    """Return ``event`` as a 0/1 indicator array aligned with ``n`` durations."""
+    if event is None:
+        return np.ones(n, dtype=float)
+    values = np.asarray(event, dtype=float)
+    if values.ndim != 1 or values.shape[0] != n:
+        raise ValueError(f"{name} must be a one-dimensional array aligned with time")
+    if not np.all(np.isfinite(values)):
+        raise ValueError(f"{name} must contain only finite values")
+    if np.any((values != 0.0) & (values != 1.0)):
+        raise ValueError(f"{name} must contain only 0 (censored) and 1 (event)")
+    return values
+
+
+def _validated_cause_codes(event: np.ndarray, n: int, *, name: str = "event") -> np.ndarray:
+    """Return ``event`` as non-negative integer cause labels aligned with ``n`` durations."""
+    values = np.asarray(event, dtype=float)
+    if values.ndim != 1 or values.shape[0] != n:
+        raise ValueError(f"{name} must be a one-dimensional array aligned with time")
+    if not np.all(np.isfinite(values)):
+        raise ValueError(f"{name} must contain only finite values")
+    if np.any(values < 0.0) or np.any(values != np.floor(values)):
+        raise ValueError(f"{name} must contain non-negative integer cause labels (0 = censored)")
+    return values.astype(int)
+
+
+def _validated_ci_level(ci_level: float, *, name: str = "ci_level") -> float:
+    """Return ``ci_level`` as a finite confidence level strictly inside ``(0, 1)``."""
+    if isinstance(ci_level, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a finite number in (0, 1)")
+    level = float(ci_level)
+    if not np.isfinite(level) or not 0.0 < level < 1.0:
+        raise ValueError(f"{name} must be a finite number in (0, 1)")
+    return level
+
+
+def _event_table(time: np.ndarray, event: np.ndarray | None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return (distinct event times, #events at each, #at risk just before each)."""
-    time = np.asarray(time, dtype=float)
-    event = np.asarray(event, dtype=float)
+    time = _validated_durations(time)
+    event = _validated_indicators(event, time.shape[0])
     order = np.argsort(time)
     time, event = time[order], event[order]
     uniq = np.unique(time[event == 1])
@@ -58,8 +106,7 @@ def kaplan_meier(time: np.ndarray, event: np.ndarray | None = None, *, ci_level:
     Returns:
         ``{'time', 'survival', 'se', 'ci_low', 'ci_high', 'at_risk', 'n_events', 'median'}``.
     """
-    time = np.asarray(time, dtype=float)
-    event = np.ones_like(time) if event is None else np.asarray(event, dtype=float)
+    ci_level = _validated_ci_level(ci_level)
     t, d, y = _event_table(time, event)
     surv = np.cumprod(1.0 - d / y)
     # Greenwood variance of S(t)
@@ -91,8 +138,6 @@ def nelson_aalen(time: np.ndarray, event: np.ndarray | None = None) -> dict[str,
     Returns:
         ``{'time', 'cumhaz', 'se'}`` with the Poisson-type standard error of the cumulative hazard.
     """
-    time = np.asarray(time, dtype=float)
-    event = np.ones_like(time) if event is None else np.asarray(event, dtype=float)
     t, d, y = _event_table(time, event)
     cumhaz = np.cumsum(d / y)
     se = np.sqrt(np.cumsum(d / y**2))
@@ -180,12 +225,7 @@ def _concordance(
             if competitor == event_subject or subject_stratum[competitor] != strata[i]:
                 continue
             if terminal_time[competitor] > time[i]:
-                active = (
-                    (subject == competitor)
-                    & (strata == strata[i])
-                    & (start < time[i])
-                    & (time >= time[i])
-                )
+                active = (subject == competitor) & (strata == strata[i]) & (start < time[i]) & (time >= time[i])
                 active_rows = np.flatnonzero(active)
                 if active_rows.size != 1:
                     raise ValueError("counting-process rows must define exactly one active interval per subject")
@@ -281,9 +321,7 @@ def cox_ph(
         A :class:`CoxResult`.
     """
     counting_process = start is not None
-    X, time, event, start, strata, subject = _cox_inputs(
-        x, time, event, start, strata, subject, ties, max_iter, tol
-    )
+    X, time, event, start, strata, subject = _cox_inputs(x, time, event, start, strata, subject, ties, max_iter, tol)
     n, p = X.shape
 
     beta = np.zeros(p)
@@ -435,8 +473,11 @@ def to_person_period(
     Returns:
         ``{'period', 'outcome', 'subject', 'covariates'}`` (``covariates`` repeated per period if given).
     """
-    time = np.asarray(time, dtype=int)
-    event = np.asarray(event, dtype=int)
+    periods_observed = _validated_durations(time)
+    if np.any(periods_observed != np.floor(periods_observed)):
+        raise ValueError("time must contain whole numbers of observed periods")
+    event = _validated_indicators(event, periods_observed.shape[0]).astype(int)
+    time = periods_observed.astype(int)
     periods, outcomes, subjects, covs = [], [], [], []
     for i, (ti, ei) in enumerate(zip(time, event)):
         for k in range(1, ti + 1):
@@ -488,10 +529,17 @@ def aalen_johansen(time: np.ndarray, event: np.ndarray, *, causes: np.ndarray | 
     Returns:
         ``{'time', 'cif': {cause: array}, 'overall_survival'}``.
     """
-    time = np.asarray(time, dtype=float)
-    event = np.asarray(event, dtype=int)
+    time = _validated_durations(time)
+    event = _validated_cause_codes(event, time.shape[0])
     if causes is None:
         causes = np.array(sorted(c for c in np.unique(event) if c != 0))
+    else:
+        causes = _validated_cause_codes(np.ravel(np.asarray(causes)), np.size(causes), name="causes")
+        if causes.size != np.unique(causes).size:
+            raise ValueError("causes must not repeat a label")
+        unknown = sorted(set(np.unique(event).tolist()) - {0} - set(causes.tolist()))
+        if unknown:
+            raise ValueError(f"event contains cause label(s) {unknown} missing from causes")
     uniq = np.unique(time[event != 0])
     n = time.shape[0]
     surv_prev = 1.0
@@ -531,8 +579,12 @@ def aalen_additive(x: np.ndarray, time: np.ndarray, event: np.ndarray, *, interc
         (the first column is the baseline when ``intercept`` is True).
     """
     X = np.atleast_2d(np.asarray(x, dtype=float))
-    time = np.asarray(time, dtype=float)
-    event = np.asarray(event, dtype=float)
+    time = _validated_durations(time)
+    event = _validated_indicators(event, time.shape[0])
+    if X.ndim != 2 or X.shape[0] != time.shape[0] or X.shape[1] < 1:
+        raise ValueError("x must be a two-dimensional design matrix with one row per observed time")
+    if not np.all(np.isfinite(X)):
+        raise ValueError("x must contain only finite values")
     n = X.shape[0]
     if intercept:
         X = np.column_stack([np.ones(n), X])
