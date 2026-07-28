@@ -64,8 +64,18 @@ class _AFDistribution:
                 "_AFDistribution.samples must be finite; failed bootstrap draws must be filtered out "
                 "before construction, not carried through as NaN."
             )
+        # Own the draws and lock them read-only: a bootstrap distribution is evidence, and an in-place
+        # edit through the caller's array (or through `.samples` itself) would leave every interval
+        # this object reports describing draws it no longer holds.
+        samples = samples.copy()
+        samples.setflags(write=False)
         self.samples = samples
         self.prior_dominated = False
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in self.__dict__:
+            raise AttributeError(f"_AFDistribution.{name} is immutable once constructed.")
+        object.__setattr__(self, name, value)
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
         a = (1.0 - level) / 2.0
@@ -95,7 +105,7 @@ on the exposure column, most likely) -- not sampling noise a bigger draw count w
 """
 
 
-@dataclass
+@dataclass(frozen=True)
 class _InsufficientBootstrapEvidence:
     """Typed placeholder for ``provenance["af_distribution"]`` when too few bootstrap draws converged to
     support an attributable-fraction interval (below :data:`_MIN_BOOTSTRAP_DRAWS` /
@@ -114,8 +124,17 @@ class _InsufficientBootstrapEvidence:
     n_boot_valid: int
     samples: np.ndarray  # the few draws that did converge, kept for diagnostics only -- not an interval
 
+    def __post_init__(self) -> None:
+        # Frozen, with an owned read-only copy of the draws: the whole point of this record is to say
+        # "n_boot_valid of n_boot converged, here is what little there was". A caller that could append
+        # to `samples` or raise `n_boot_valid` afterwards could talk the record past the evidence floor
+        # that produced it in the first place.
+        owned = np.array(self.samples, dtype=float, copy=True)
+        owned.setflags(write=False)
+        object.__setattr__(self, "samples", owned)
 
-@dataclass
+
+@dataclass(frozen=True)
 class CohortAttribution:
     """Cox-PH hazard ratio + attributable fraction for one exposure, with intervals and provenance.
 
@@ -131,6 +150,11 @@ class CohortAttribution:
             ``af_distribution`` -- an :class:`_AFDistribution` (IC-1 ``DerivedQuantity``-shaped) when the
             bootstrap produced adequate evidence, or an :class:`_InsufficientBootstrapEvidence` when it
             did not (see :data:`_MIN_BOOTSTRAP_DRAWS`).
+
+    The record is frozen and owns its cumulative-incidence curves (read-only copies), so the point
+    estimates, the intervals and the ``provenance`` that documents how they were fitted cannot drift
+    apart after the fact: rebinding ``hazard_ratio`` without ``hr_ci`` -- or editing a ``cif`` array
+    in place through the caller's own handle -- left a record whose parts described different fits.
     """
 
     hazard_ratio: float
@@ -139,6 +163,17 @@ class CohortAttribution:
     af_ci: tuple[float, float]
     cif: dict[int, np.ndarray]
     provenance: dict
+
+    def __post_init__(self) -> None:
+        owned_cif: dict[int, np.ndarray] = {}
+        for cause, curve in self.cif.items():
+            arr = np.array(curve, dtype=float, copy=True)
+            arr.setflags(write=False)
+            owned_cif[cause] = arr
+        object.__setattr__(self, "cif", owned_cif)
+        object.__setattr__(self, "hr_ci", (float(self.hr_ci[0]), float(self.hr_ci[1])))
+        object.__setattr__(self, "af_ci", (float(self.af_ci[0]), float(self.af_ci[1])))
+        object.__setattr__(self, "provenance", dict(self.provenance))
 
 
 def _fit_lagged(x: np.ndarray, time: np.ndarray, event: np.ndarray, latency: float):
@@ -378,10 +413,7 @@ def cohort_attribution(
     z = stats.norm.ppf(0.975)
     hr_ci = (float(np.exp(beta - z * se)), float(np.exp(beta + z * se)))
     if not (
-        np.isfinite(hazard_ratio)
-        and hazard_ratio > 0.0
-        and np.all(np.isfinite(hr_ci))
-        and 0.0 < hr_ci[0] <= hr_ci[1]
+        np.isfinite(hazard_ratio) and hazard_ratio > 0.0 and np.all(np.isfinite(hr_ci)) and 0.0 < hr_ci[0] <= hr_ci[1]
     ):
         raise ValueError("Cox effect overflows the finite hazard-ratio/interval result domain.")
 
