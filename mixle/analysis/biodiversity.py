@@ -601,6 +601,11 @@ def _lost_equivalents(plan_footprint: Any, habitat: HabitatModel) -> tuple[np.nd
             ``plan_footprint``/``habitat.cell_area`` do not match ``habitat.mean``'s shape. A NaN or
             negative habitat field used to propagate silently into the no-net-loss accounting below
             (MXR-080-0073); it is now rejected here, at the one place both public functions read it from.
+            Also if the per-cell product or its sum is not representable in float64: checking only the
+            INPUTS for finiteness left ``suitability * area`` (and the reduction over it) free to overflow
+            to ``inf`` from entirely finite inputs near the float64 ceiling, which then published an
+            infinite offset requirement and an infinite priced liability from functions whose whole
+            contract is that they are validated finite accounting quantities (MXR-080-1572).
     """
     suitability = _require_finite_nonnegative(np.asarray(habitat.mean, dtype=np.float64), "habitat.mean")
     footprint = _require_binary_mask(plan_footprint, suitability.shape, "plan_footprint")
@@ -609,8 +614,12 @@ def _lost_equivalents(plan_footprint: Any, habitat: HabitatModel) -> tuple[np.nd
     )
     if area.shape != suitability.shape:
         raise ValueError(f"habitat.cell_area shape {area.shape} does not match habitat.mean shape {suitability.shape}")
-    per_cell = footprint.astype(np.float64) * suitability * area
-    return per_cell, float(per_cell.sum())
+    with np.errstate(over="ignore", invalid="ignore"):
+        per_cell = footprint.astype(np.float64) * suitability * area
+        _require_finite(per_cell, "lost habitat-hectare-equivalents (suitability * cell_area over the footprint)")
+        total = float(per_cell.sum())
+    _require_finite(total, "total lost habitat-hectare-equivalents")
+    return per_cell, total
 
 
 def habitat_offset_liability(
@@ -636,12 +645,16 @@ def habitat_offset_liability(
     Raises:
         ValueError: if ``offset_ratio``/``unit_offset_cost`` is negative or non-finite, or if
             ``_lost_equivalents`` rejects ``plan_footprint``/``habitat``. A negative ratio or cost used to
-            silently turn habitat damage into a "profit" (MXR-080-0073); both are now rejected.
+            silently turn habitat damage into a "profit" (MXR-080-0073); both are now rejected. Also if
+            the priced product itself is not representable in float64 -- finite inputs near the float64
+            ceiling used to publish an infinite liability (MXR-080-1572).
     """
     offset_ratio = float(_require_finite_nonnegative(offset_ratio, "offset_ratio"))
     unit_offset_cost = float(_require_finite_nonnegative(unit_offset_cost, "unit_offset_cost"))
     _, lost = _lost_equivalents(plan_footprint, habitat)
-    return offset_ratio * lost * unit_offset_cost
+    with np.errstate(over="ignore", invalid="ignore"):
+        liability = offset_ratio * lost * unit_offset_cost
+    return float(_require_finite(liability, "habitat offset liability (offset_ratio * lost * unit_offset_cost)"))
 
 
 def no_net_loss_constraint(
@@ -674,11 +687,16 @@ def no_net_loss_constraint(
             ``plan_footprint``/``habitat`` (NaN/negative suitability or area). A NaN or negative
             ``lost_equivalents`` used to be able to propagate into ``required_offset``, silently weakening
             or inverting a constraint that is supposed to be a hard floor (MXR-080-0073); both inputs are
-            now validated before this payload is built.
+            now validated before this payload is built. Also if ``required_offset`` itself is not
+            representable in float64 -- finite inputs near the float64 ceiling used to publish an infinite
+            bound, which is not a hard constraint but an unsatisfiable row (MXR-080-1572).
     """
     offset_ratio = float(_require_finite_nonnegative(offset_ratio, "offset_ratio"))
     per_cell, lost = _lost_equivalents(plan_footprint, habitat)
-    required = offset_ratio * lost
+    with np.errstate(over="ignore", invalid="ignore"):
+        required = offset_ratio * lost
+    # MXR-080-1572: an infinite bound is not a hard constraint, it is an unsatisfiable row.
+    required = float(_require_finite(required, "required_offset (offset_ratio * lost_equivalents)"))
     return {
         "lost_equivalents": lost,
         "per_cell_lost_equivalents": per_cell,
