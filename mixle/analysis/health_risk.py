@@ -92,6 +92,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from scipy import stats
 
+from mixle.analysis._interval import validated_level
 from mixle.inference.conformal import split_conformal
 
 if TYPE_CHECKING:
@@ -155,6 +156,19 @@ def _validated_prior_flag(quantity: Any, *, name: str) -> bool:
     return bool(flag)
 
 
+def _require_exact_bool(value: Any, name: str) -> bool:
+    """Require an actual Boolean for a policy or honesty flag -- no truthiness coercion.
+
+    ``bool("false")`` is ``True``, so a flag read from serialized configuration text could invert the
+    very policy it names: mark a result prior-dominated, enable ``treat_unmodeled_as_safe``, or
+    declare a set of alerts conformal-calibrated when they are not (MXR-080-1588). These flags gate
+    safety and honesty decisions, so a non-Boolean is a caller error rather than something to coerce.
+    """
+    if not isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be an actual Boolean (True/False), got {value!r}")
+    return bool(value)
+
+
 @dataclass(frozen=True)
 class _SampleDerivedQuantity:
     """A concrete IC-1 `DerivedQuantity`: a draw matrix + the honesty flag, CI by empirical quantile.
@@ -188,7 +202,8 @@ class _SampleDerivedQuantity:
         object.__setattr__(self, "samples", arr)
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
-        a = (1.0 - level) / 2.0
+        """Central ``level`` interval by empirical quantile (shared analysis contract; MXR-080-1580)."""
+        a = (1.0 - validated_level(level)) / 2.0
         return np.quantile(self.samples, a, axis=0), np.quantile(self.samples, 1.0 - a, axis=0)
 
 
@@ -223,6 +238,14 @@ class _DeterministicRisk:
         object.__setattr__(self, "grid_shape", tuple(int(d) for d in self.grid_shape))
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
+        """Degenerate interval: one replicate, so every level collapses onto the same point.
+
+        ``level`` is still validated against the shared analysis contract even though the answer does
+        not depend on it. Silently accepting `level=5.0` here -- while the sibling sample-based
+        carriers raised on it -- is exactly how an out-of-range level went unnoticed until it reached
+        a stochastic path (MXR-080-1580).
+        """
+        validated_level(level)
         point = self.samples[0]
         return point, point
 
@@ -591,6 +614,7 @@ def exposure_constraints(
     infeasible (violating OR, by default, unknown) option is dropped from the candidate set entirely,
     so the optimizer never has the chance to select it (see the K6 DoD).
     """
+    treat_unmodeled_as_safe = _require_exact_bool(treat_unmodeled_as_safe, "treat_unmodeled_as_safe")
     annotated: list[dict] = []
     for option in options:
         binding: list[str] = []
@@ -922,7 +946,7 @@ class ExceedanceReport:
             owned.setflags(write=False)
             object.__setattr__(self, name, owned)
         object.__setattr__(self, "false_alarm_target", float(self.false_alarm_target))
-        object.__setattr__(self, "calibrated", bool(self.calibrated))
+        object.__setattr__(self, "calibrated", _require_exact_bool(self.calibrated, "ExceedanceReport.calibrated"))
 
 
 def _causal_local_scale(x: np.ndarray, window: int) -> tuple[np.ndarray, np.ndarray]:

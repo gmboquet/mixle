@@ -43,6 +43,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
+from mixle.analysis._interval import validated_level
 from mixle.data.hashing import _canonical
 from mixle.reason.posterior_protocol import DerivedQuantity
 
@@ -434,7 +435,11 @@ class TransitionRiskResult:
         object.__setattr__(self, "provenance", dict(self.provenance))
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
-        """Per-scenario central ``level`` interval of the carbon-adjusted NPV, each shape ``(k,)``."""
+        """Per-scenario central ``level`` interval of the carbon-adjusted NPV, each shape ``(k,)``.
+
+        ``level`` goes through the shared ``mixle.analysis`` interval contract (MXR-080-1580).
+        """
+        level = validated_level(level)
         alpha = (1.0 - level) / 2.0
         lo = np.quantile(self.samples, alpha, axis=0)
         hi = np.quantile(self.samples, 1.0 - alpha, axis=0)

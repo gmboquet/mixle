@@ -90,6 +90,30 @@ def _require_observed(counts: np.ndarray, estimator: str) -> None:
         )
 
 
+_MIN_REPLICATED_SITES = 2
+"""Sampling units a replicated-incidence estimator (Chao2, ICE) needs before it can estimate anything.
+
+Both estimate *unseen* richness from how species replicate across independent units: a species seen in
+exactly one unit (``q1``) is evidence of undersampling only because it could have appeared in another.
+With a single unit there is nothing to replicate across and the estimand is not identifiable -- but the
+formulas do not blow up, they quietly degenerate. Chao2's finite-sample correction ``(m-1)/m`` becomes
+exactly zero, so ``q0 = 0``, ``se = 0``, and the interval collapses onto ``s_obs``: the least
+informative possible design used to report richness as exactly the observed count with zero
+uncertainty. ICE degenerates the same way through its ``n_sites/(n_sites-1)`` factor falling back to
+one (MXR-080-1575).
+"""
+
+
+def _require_replicated_sites(n_sites: int, estimator: str) -> None:
+    """Reject a single-unit incidence design for a replicated-incidence estimator."""
+    if n_sites < _MIN_REPLICATED_SITES:
+        raise CoverageInsufficientDataError(
+            f"{estimator} needs at least {_MIN_REPLICATED_SITES} independent sampling units to estimate "
+            f"unseen richness, got {n_sites}; with one unit there is no replication to estimate it from "
+            "and the estimator degenerates to the observed count with zero standard error."
+        )
+
+
 def _ci_level(value: float) -> float:
     if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
         raise TypeError("ci_level must be a scalar probability, not a Boolean or array.")
@@ -288,7 +312,9 @@ def chao2(incidence: np.ndarray, *, ci_level: float = 0.95) -> dict[str, float]:
 
     Args:
         incidence: finite binary ``(n_species, n_sites)`` 0/1 matrix (validated by :func:`_incidence`;
-            every entry must be exactly 0 or 1, and at least one site is required).
+            every entry must be exactly 0 or 1). At least :data:`_MIN_REPLICATED_SITES` sampling units
+            are required -- Chao2 estimates unseen richness *from* replication across units, so one
+            unit does not identify it (:class:`CoverageInsufficientDataError`).
         ci_level: confidence level for the log-normal interval.
 
     Returns:
@@ -296,6 +322,7 @@ def chao2(incidence: np.ndarray, *, ci_level: float = 0.95) -> dict[str, float]:
         are the numbers of species found in exactly one / two sites.
     """
     inc = _incidence(incidence)
+    _require_replicated_sites(int(inc.shape[1]), "chao2")
     ci_level = _ci_level(ci_level)
     site_counts = inc.sum(axis=1)
     site_counts = site_counts[site_counts > 0]
@@ -338,6 +365,11 @@ def ace(counts: np.ndarray, *, rare_threshold: int = 10) -> dict[str, float]:
 
     Returns:
         ``{'estimate', 'observed', 's_rare', 's_abund', 'c_ace'}``.
+
+    Raises:
+        CoverageInsufficientDataError: when the estimated sample coverage ``c_ace`` is zero (every
+            rare individual is a singleton) -- the ``1 / c_ace`` correction is undefined there and
+            unseen richness is unbounded, so no finite estimate is reported.
     """
     c = _abund(counts)
     _require_observed(c, "ace")
@@ -350,8 +382,22 @@ def ace(counts: np.ndarray, *, rare_threshold: int = 10) -> dict[str, float]:
     n_rare = float(_abundance_total(rare))
     f1 = float(np.sum(c == 1))
     c_ace = 1.0 - f1 / n_rare if n_rare > 0 else 1.0
-    if c_ace <= 0 or s_rare == 0:
+    if s_rare == 0:
+        # No rare species at all: every species cleared the abundance threshold, so there is no rare
+        # group to estimate unseen richness from and no correction to apply. `estimate == observed` is
+        # the right answer here, not a fallback.
         return {"estimate": s_obs, "observed": s_obs, "s_rare": s_rare, "s_abund": s_abund, "c_ace": c_ace}
+    if c_ace <= 0:
+        # Estimated sample coverage of zero -- every rare individual is a singleton, e.g. [1, 1, 1, 1].
+        # `s_rare / c_ace` and `f1 / c_ace` are undefined at that boundary, and falling back to the
+        # observed count gave the LEAST complete sample imaginable no unseen-species correction at all,
+        # reported as an ordinary estimate (MXR-080-1576). Zero coverage is unbounded evidence about
+        # unseen richness, not evidence of completeness.
+        raise CoverageInsufficientDataError(
+            "ace: estimated sample coverage is zero (every rare individual is a singleton), so unseen "
+            "richness is unbounded and the ACE correction is undefined; sample more individuals or "
+            "report the observed count explicitly as a lower bound."
+        )
     sum_ii = math.fsum(float(i) * (float(i) - 1.0) for i in rare)
     gamma2 = max((s_rare / c_ace) * sum_ii / (n_rare * (n_rare - 1.0)) - 1.0, 0.0)
     est = s_abund + s_rare / c_ace + (f1 / c_ace) * gamma2
@@ -363,13 +409,20 @@ def ice(incidence: np.ndarray, *, rare_threshold: int = 10) -> dict[str, float]:
 
     Args:
         incidence: finite binary ``(n_species, n_sites)`` 0/1 matrix (validated by :func:`_incidence`;
-            every entry must be exactly 0 or 1, and at least one site is required).
+            every entry must be exactly 0 or 1). At least :data:`_MIN_REPLICATED_SITES` sampling units
+            are required, for the same identifiability reason as :func:`chao2`.
         rare_threshold: species found in ``<= rare_threshold`` sites are treated as infrequent.
 
     Returns:
         ``{'estimate', 'observed', 's_infreq', 's_freq', 'c_ice'}``.
+
+    Raises:
+        CoverageInsufficientDataError: for a single-unit design, or when the estimated incidence
+            coverage ``c_ice`` is zero (every infrequent species seen in exactly one unit) -- the
+            correction term ``s_infreq / c_ice`` is undefined there.
     """
     inc = _incidence(incidence)
+    _require_replicated_sites(int(inc.shape[1]), "ice")
     rare_threshold = _rare_threshold(rare_threshold)
     site_counts = inc.sum(axis=1)
     site_counts = site_counts[site_counts > 0]
@@ -383,8 +436,18 @@ def ice(incidence: np.ndarray, *, rare_threshold: int = 10) -> dict[str, float]:
     q1 = float(np.sum(site_counts == 1))
     n_sites = float(inc.shape[1])
     c_ice = 1.0 - q1 / n_infreq if n_infreq > 0 else 1.0
-    if c_ice <= 0 or s_infreq == 0:
+    if s_infreq == 0:
+        # Every species is frequent: no infrequent group to correct from -- see the ACE counterpart.
         return {"estimate": s_obs, "observed": s_obs, "s_infreq": s_infreq, "s_freq": s_freq, "c_ice": c_ice}
+    if c_ice <= 0:
+        # Zero estimated incidence coverage (an identity incidence matrix: every species in exactly one
+        # unit). Same boundary as ACE's -- undefined correction, and the fallback to observed richness
+        # published the least-informative design as a complete estimate (MXR-080-1576).
+        raise CoverageInsufficientDataError(
+            "ice: estimated incidence coverage is zero (every infrequent species occurs in exactly one "
+            "sampling unit), so unseen richness is unbounded and the ICE correction is undefined; add "
+            "sampling units or report the observed count explicitly as a lower bound."
+        )
     sum_jj = math.fsum(float(j) * (float(j) - 1.0) for j in infreq)
     factor = n_sites / (n_sites - 1.0) if n_sites > 1 else 1.0
     gamma2 = max((s_infreq / c_ice) * factor * sum_jj / (n_infreq * (n_infreq - 1.0)) - 1.0, 0.0)
@@ -487,9 +550,7 @@ def rarefaction_curve(counts: np.ndarray, sizes: np.ndarray | None = None) -> di
     n = _abundance_total(c)
     if sizes is None:
         if n > 1_000_000:
-            raise ValueError(
-                "the default rarefaction grid would exceed 1,000,000 points; provide explicit sizes."
-            )
+            raise ValueError("the default rarefaction grid would exceed 1,000,000 points; provide explicit sizes.")
         sizes = np.arange(1, n + 1)
     else:
         sizes = _rarefaction_sizes(sizes, n)

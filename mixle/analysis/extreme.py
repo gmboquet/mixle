@@ -237,8 +237,7 @@ def return_level(fit: GPDFit, period: float) -> float:
     m = period * zeta
     if m < 1.0:
         raise ValueError(
-            "period is below the fitted threshold's recurrence region; "
-            f"period * exceedance_rate must be >= 1, got {m}."
+            f"period is below the fitted threshold's recurrence region; period * exceedance_rate must be >= 1, got {m}."
         )
     try:
         if abs(fit.shape) < 1e-8:
@@ -373,12 +372,23 @@ def endpoint_estimator(data: np.ndarray, k: int, *, method: str = "gpd") -> floa
 def record_times(data: np.ndarray) -> np.ndarray:
     """Indices at which a new running maximum (upper record) occurs, including the first observation.
 
+    ``data`` must be a finite one-dimensional series, like the tail estimators above. A single NaN
+    used to silently truncate the answer rather than raise: ``np.maximum.accumulate`` propagates the
+    NaN forward, every later ``x[i] > running[i-1]`` comparison against it is false, and every record
+    after the NaN disappears -- ``record_times([1, nan, 2, 3])`` returned just ``[0]``, which
+    :func:`n_records` then reported as an authoritative count of one.
+
     An empty ``data`` has no observations and so, vacuously, no records: returns an empty index array
     rather than raising.
     """
-    x = np.asarray(data, dtype=float).ravel()
+    x = np.asarray(data, dtype=float)
+    if x.ndim > 1:
+        raise ValueError(f"record_times: data must be a one-dimensional series, got shape {x.shape}.")
+    x = x.ravel()
     if x.shape[0] == 0:
         return np.nonzero(np.array([], dtype=bool))[0]
+    if not np.all(np.isfinite(x)):
+        raise ValueError("record_times: data must be finite (no NaN/Inf); records are undefined past a NaN.")
     running = np.maximum.accumulate(x)
     is_record = np.empty(x.shape[0], dtype=bool)
     is_record[0] = True

@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from scipy import optimize, stats
 
+from mixle.analysis._interval import validated_level
+
 if TYPE_CHECKING:
     from mixle.reason.posterior_protocol import DerivedQuantity, Posterior
 
@@ -48,10 +50,7 @@ class _SampleDerivedQuantity:
         object.__setattr__(self, "samples", arr)
 
     def credible_interval(self, level: float = 0.95) -> tuple[float, float]:
-        if isinstance(level, (bool, np.bool_)) or not isinstance(level, Real):
-            raise TypeError("level must be a real scalar probability.")
-        if not np.isfinite(level) or not 0.0 < level < 1.0:
-            raise ValueError("level must be finite and strictly between 0 and 1.")
+        level = validated_level(level)
         alpha = (1.0 - level) / 2.0
         lo, hi = np.quantile(self.samples, [alpha, 1.0 - alpha])
         return float(lo), float(hi)

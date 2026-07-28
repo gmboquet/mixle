@@ -47,6 +47,23 @@ def _nonnegative_integer(value: Any, *, name: str) -> int:
     return int(integer)
 
 
+def _exact_flag(obj: Any, name: str, *, context: str) -> bool:
+    """Read a Boolean policy/honesty flag off ``obj``, requiring an actual Boolean.
+
+    A missing attribute is a legitimate absent flag and reads as ``False``; a *present* one must be a
+    real Boolean. ``bool("false")`` is ``True``, so a designation or honesty flag carried through
+    serialized text could invert the statutory exclusion it names -- making a species qualify as
+    critical habitat, or marking a habitat field prior-dominated, on the strength of the string
+    (MXR-080-1588). These flags decide a legal exclusion, so a non-Boolean is a caller error.
+    """
+    value = getattr(obj, name, None)
+    if value is None:
+        return False
+    if not isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"critical_habitat_exclusion: {context} {name} must be an actual Boolean, got {value!r}")
+    return bool(value)
+
+
 def _finite_scalar(value: Any, *, name: str) -> float:
     """Validate one finite non-Boolean numeric scalar."""
     if isinstance(value, (bool, np.bool_)):
@@ -204,7 +221,7 @@ def critical_habitat_exclusion(
         field_means[identity] = habitat_mean
     assert num_cells is not None  # _species_models always yields at least one entry
 
-    qualifies = [species for species in listed if bool(getattr(species, "critical_habitat", False))]
+    qualifies = [species for species in listed if _exact_flag(species, "critical_habitat", context="listed species")]
     if not qualifies:
         return np.zeros(num_cells, dtype=bool)
 
@@ -222,7 +239,7 @@ def critical_habitat_exclusion(
             )
         model = models[identity]
         honesty = model.derived_quantity(lambda draws: draws, 2, rng)
-        if bool(getattr(honesty, "prior_dominated", False)):
+        if _exact_flag(honesty, "prior_dominated", context=f"habitat model for {identity!r}"):
             # Not enough evidence to clear any block for this species; that alone excludes everything.
             return np.ones(num_cells, dtype=bool)
         raw_base_mask = np.asarray(model.critical_habitat_mask(suitability_cut))

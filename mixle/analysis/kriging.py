@@ -77,7 +77,7 @@ def _shape(model: str, h: np.ndarray, rng: float, nu: float = 1.5) -> np.ndarray
     return np.clip(s, 0.0, 1.0)
 
 
-@dataclass
+@dataclass(frozen=True)
 class Variogram:
     """A fitted variogram model ``gamma(h) = nugget + psill * shape(h)``.
 
@@ -97,6 +97,13 @@ class Variogram:
             or a ratio that is not finite and ``> 0`` (a zero or negative ratio collapses or flips the
             minor axis, which previously produced NaN predictions and variances downstream instead of
             an error).
+
+    Frozen. Every kriging solver reads these fields directly and trusts the construction-time
+    validation below without re-checking; while the record was mutable, setting ``rng = 0``, a
+    negative sill, an unimplemented ``model``, or a collapsed anisotropy ratio *after* construction
+    bypassed the whole check and put the invalid parameter straight into the solve. Freezing keeps
+    the validated state true for the variogram's lifetime, which is what those solvers assume.
+    ``anisotropy`` is normalized to a ``(angle, ratio)`` tuple so it cannot be a mutable pair either.
     """
 
     model: str
@@ -128,6 +135,7 @@ class Variogram:
                     f"anisotropy ratio must be finite and > 0, got {ratio!r} "
                     "(a zero or negative ratio collapses or flips the minor axis)."
                 )
+            object.__setattr__(self, "anisotropy", (float(angle), float(ratio)))
 
     def gamma(self, h: np.ndarray) -> np.ndarray:
         """Evaluate the semivariogram at lag distances."""
@@ -522,9 +530,7 @@ def calibrate_variance(predicted_var: np.ndarray, residuals: np.ndarray, *, targ
     if pv.shape != r.shape:
         raise ValueError(f"predicted_var and residuals must have the same shape, got {pv.shape} and {r.shape}.")
     if pv.ndim != 1:
-        raise ValueError(
-            f"predicted_var and residuals must be one-dimensional paired samples, got shape {pv.shape}."
-        )
+        raise ValueError(f"predicted_var and residuals must be one-dimensional paired samples, got shape {pv.shape}.")
     if pv.size == 0:
         raise ValueError("predicted_var and residuals must be nonempty: calibration needs a paired held-out sample.")
     if not np.all(np.isfinite(pv)):
@@ -538,9 +544,7 @@ def calibrate_variance(predicted_var: np.ndarray, residuals: np.ndarray, *, targ
     z = float(norm.ppf(0.5 + target / 2.0))
     required_log_scale = np.full(r.shape, -np.inf, dtype=float)
     nonzero = r != 0.0
-    required_log_scale[nonzero] = (
-        2.0 * np.log(np.abs(r[nonzero])) - np.log(pv[nonzero]) - 2.0 * math.log(z)
-    )
+    required_log_scale[nonzero] = 2.0 * np.log(np.abs(r[nonzero])) - np.log(pv[nonzero]) - 2.0 * math.log(z)
     required = max(1, math.ceil(float(np.nextafter(target * r.size, -np.inf))))
     selected_log_scale = float(np.partition(required_log_scale, required - 1)[required - 1])
     if selected_log_scale == -np.inf:
