@@ -29,6 +29,32 @@ def _cifar(n_train=1500, n_test=600):
     return tr, te
 
 
+def skip_if_assets_unavailable(build):
+    """Run ``build``, turning a missing pretrained asset into a skip rather than an error.
+
+    These are ``optional``/``slow``/``integration`` tests: they need real CIFAR-10, Banking77 and
+    CLIP weights, none of which ship with the package. The module already skips when transformers or
+    datasets are absent, but the *weights* can be missing independently -- offline, behind a proxy,
+    or cached in a format the installed transformers refuses (the observed failure is
+    "openai/clip-vit-base-patch32 does not appear to have a file named model.safetensors"). That is
+    a statement about the machine, not about mixle, and it was surfacing as seven setup ERRORs that
+    are indistinguishable at a glance from real breakage. Skip on the asset failure only; anything
+    else still propagates.
+    """
+    try:
+        return build()
+    except OSError as exc:  # HuggingFace raises OSError for unfetchable/unreadable weights
+        raise unittest.SkipTest(f"pretrained asset unavailable on this machine: {exc}") from exc
+    except RuntimeError as exc:
+        # `datasets` >= 4 refuses script-based loaders ("Dataset scripts are no longer supported"),
+        # which is how Banking77 is published. Also an environment statement, but it arrives as a
+        # RuntimeError, so match the message rather than the type -- any other RuntimeError is a
+        # real failure and must still propagate.
+        if "no longer supported" not in str(exc) and "requires huggingface_hub" not in str(exc):
+            raise
+        raise unittest.SkipTest(f"dataset loader unsupported by the installed stack: {exc}") from exc
+
+
 class CertifiedPerceptionTest(unittest.TestCase):
     """CLIP image latents + a closed-form mixle head: accurate, CERTIFIED, and calibrated on real CIFAR-10."""
 
@@ -36,12 +62,15 @@ class CertifiedPerceptionTest(unittest.TestCase):
     def setUpClass(cls):
         from mixle.scientist import Scientist, encode_images
 
-        tr, te = _cifar()
-        cls.ztr = encode_images([r["img"] for r in tr])
-        cls.zte = encode_images([r["img"] for r in te])
-        cls.ytr = [r["label"] for r in tr]
-        cls.yte = np.array([r["label"] for r in te])
-        cls.model = Scientist.study(cls.ztr, cls.ytr, alpha=0.1, seed=0)
+        def build():
+            tr, te = _cifar()
+            cls.ztr = encode_images([r["img"] for r in tr])
+            cls.zte = encode_images([r["img"] for r in te])
+            cls.ytr = [r["label"] for r in tr]
+            cls.yte = np.array([r["label"] for r in te])
+            cls.model = Scientist.study(cls.ztr, cls.ytr, alpha=0.1, seed=0)
+
+        skip_if_assets_unavailable(build)
 
     def test_accuracy_is_high_and_fit_is_closed_form(self):
         acc = float((self.model.predict(self.zte) == self.yte).mean())
@@ -197,14 +226,17 @@ class EdgeDistillationTest(unittest.TestCase):
 
         from mixle.scientist import encode_texts, study
 
-        ds = load_dataset(BANKING77_ID, split="train", revision=BANKING77_REVISION)
-        te = load_dataset(BANKING77_ID, split="test", revision=BANKING77_REVISION)
-        tr = [(r["text"], r["label"]) for r in ds if r["label"] < 20][:1200]
-        ts = [(r["text"], r["label"]) for r in te if r["label"] < 20][:400]
-        cls.xtr = [t for t, _ in tr]
-        cls.xte = [t for t, _ in ts]
-        cls.yte = [lab for _, lab in ts]
-        head = study(encode_texts(cls.xtr), [lab for _, lab in tr], alpha=0.1)
+        def build():
+            ds = load_dataset(BANKING77_ID, split="train", revision=BANKING77_REVISION)
+            te = load_dataset(BANKING77_ID, split="test", revision=BANKING77_REVISION)
+            tr = [(r["text"], r["label"]) for r in ds if r["label"] < 20][:1200]
+            ts = [(r["text"], r["label"]) for r in te if r["label"] < 20][:400]
+            cls.xtr = [t for t, _ in tr]
+            cls.xte = [t for t, _ in ts]
+            cls.yte = [lab for _, lab in ts]
+            return study(encode_texts(cls.xtr), [lab for _, lab in tr], alpha=0.1)
+
+        head = skip_if_assets_unavailable(build)
         cache: dict = {}
 
         def teacher(x):
