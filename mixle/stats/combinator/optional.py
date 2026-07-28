@@ -164,7 +164,6 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
         self.log_pn = -np.inf if self.p == 1 else np.log1p(-self.p)
 
         self.missing_value = missing_value
-        self._missing_key = _sentinel_key(missing_value)
         self.missing_value_is_nan = _same_sentinel(missing_value, float("nan"))
         if supports(dist, Discrete):
             try:
@@ -182,6 +181,37 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
                 "a marginalized OptionalDistribution has no missingness parameter and cannot carry a p prior."
             )
         self.set_prior(prior)
+
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        """Return the constructor-owned state used by the safe JSON codec.
+
+        Everything else on this instance is derived in __init__ (has_p, log_p, log_pn,
+        missing_value_is_nan, the prior split) and must not be serialized: the generic object codec
+        would otherwise try to encode derived values it cannot represent and reject the whole model.
+        ``p`` round-trips as None when it was never supplied, which is what has_p records.
+        """
+        return {
+            "dist": self.dist,
+            "p": self.p if self.has_p else None,
+            "missing_value": self.missing_value,
+            "name": self.name,
+            "prior": self.get_prior()[0],
+        }
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        """Rebuild from constructor-owned state, re-deriving everything __init__ computes."""
+        required = {"dist", "p", "missing_value", "name"}
+        missing = required - set(state)
+        if missing:
+            raise ValueError("OptionalDistribution state is missing %s" % ", ".join(sorted(missing)))
+        prior = state.get("prior")
+        self.__init__(
+            state["dist"],
+            p=state["p"],
+            missing_value=state["missing_value"],
+            name=state["name"],
+            prior=None if prior is None else (prior, None),
+        )
 
     def _is_missing(self, value: Any) -> bool:
         return _same_sentinel(value, self.missing_value)
@@ -588,7 +618,6 @@ class OptionalEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         self.accumulator = accumulator
         self.weights = [0.0, 0.0]
         self.missing_value = missing_value
-        self._missing_key = _sentinel_key(missing_value)
         self.missing_value_is_nan = _same_sentinel(missing_value, float("nan"))
         self.keys = keys
         self.name = name
@@ -893,7 +922,6 @@ class OptionalDataEncoder(DataSequenceEncoder):
     def __init__(self, encoder: DataSequenceEncoder, missing_value: Any = None) -> None:
         self.encoder = encoder
         self.missing_value = missing_value
-        self._missing_key = _sentinel_key(missing_value)
         self.missing_value_is_nan = _same_sentinel(missing_value, float("nan"))
 
     def __eq__(self, other: object) -> bool:
