@@ -15,6 +15,7 @@ dollar under the same measurement protocol.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
@@ -24,14 +25,42 @@ from mixle.system.scorecard import RegressionReport, SystemScorecard, detect_reg
 __all__ = ["ImprovementOption", "MetaImprovementReport", "improve_by_regret"]
 
 
+def _finite(name: str, value: object) -> float:
+    """A finite real economic quantity, or ``ValueError``."""
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a real number, got {value!r}") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"{name} must be finite, got {value!r}")
+    return number
+
+
 @dataclass
 class ImprovementOption:
-    """Candidate improvement action with estimated cost and recoverable quality gain."""
+    """Candidate improvement action with estimated cost and recoverable quality gain.
+
+    ``cost`` must be finite and nonnegative and ``estimated_regret`` finite. Neither was checked, so
+    under ``budget=0`` an option costing ``-5`` ran and reported ``spent=-5`` (running work *created*
+    budget), and a NaN-cost option ran too, because the over-budget comparison ``spent + cost > budget``
+    is false for NaN -- the ceiling failed open -- and left ``spent=NaN`` behind.
+    """
 
     name: str
     cost: float
     run: Callable[[], None]
     estimated_regret: float  # prior estimate of recoverable scorecard-quality gain
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError(f"improvement option name must be a non-empty string, got {self.name!r}")
+        cost = _finite(f"improvement option {self.name!r} cost", self.cost)
+        if cost < 0.0:
+            raise ValueError(f"improvement option {self.name!r} cost must be nonnegative, got {self.cost!r}")
+        self.cost = cost
+        self.estimated_regret = _finite(f"improvement option {self.name!r} estimated_regret", self.estimated_regret)
+        if not callable(self.run):
+            raise ValueError(f"improvement option {self.name!r} run must be callable")
 
     @property
     def regret_per_dollar(self) -> float:
@@ -59,7 +88,26 @@ def improve_by_regret(
     *,
     budget: float,
 ) -> MetaImprovementReport:
-    """Run options by estimated gain per dollar and stop on measured regression."""
+    """Run options by estimated gain per dollar and stop on measured regression.
+
+    ``budget`` must be finite and nonnegative, and option names must be unique -- ``order``,
+    ``skipped`` and ``realized_gain_per_dollar`` are all keyed by name, so duplicates silently
+    overwrite each other's measured result.
+
+    Note what this does NOT do: ``opt.run()`` mutates the live ``system`` before any measurement, and
+    a regression detected afterwards only stops *further* options -- the regressing change stays
+    applied. Callers who need rejection to restore the previous state must run options against a
+    system they can themselves discard. ``report.stopped_on_regression`` names the round that
+    regressed so that decision can be made.
+    """
+    budget = _finite("budget", budget)
+    if budget < 0.0:
+        raise ValueError(f"budget must be nonnegative, got {budget!r}")
+    options = tuple(options)
+    names = [opt.name for opt in options]
+    if len(set(names)) != len(names):
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        raise ValueError(f"improvement option names must be unique; repeated: {duplicates}")
     ordered = sorted(options, key=lambda o: o.regret_per_dollar, reverse=True)
     report = MetaImprovementReport(scorecard_before=evaluate(system, question_set))
     current = report.scorecard_before
