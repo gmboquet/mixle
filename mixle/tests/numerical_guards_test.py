@@ -181,10 +181,12 @@ class DiagonalGaussianPseudoCountTest(unittest.TestCase):
         # diagonal case should behave identically on a diagonal covariance.
         mvg = MultivariateGaussianDistribution(mu=[10.0, 10.0], covar=[[1.0, 0.0], [0.0, 1.0]])
         dg = DiagonalGaussianDistribution(mu=[10.0, 10.0], covar=[1.0, 1.0])
+        # Same single observation at the origin, in each family's own second-moment shape: the
+        # multivariate statistic is the full sum of outer products (d, d), the diagonal one keeps
+        # only the diagonal (d,). Feeding the diagonal shape to both is what made this fail.
         sum_x = np.array([0.0, 0.0])
-        sum_xx = np.array([0.0, 0.0])
-        d_mvg = mvg.estimator(pseudo_count=1000.0).estimate(None, (sum_x, sum_xx, 1.0))
-        d_dg = dg.estimator(pseudo_count=1000.0).estimate(None, (sum_x, sum_xx, 1.0))
+        d_mvg = mvg.estimator(pseudo_count=1000.0).estimate(None, (sum_x, np.zeros((2, 2)), 1.0))
+        d_dg = dg.estimator(pseudo_count=1000.0).estimate(None, (sum_x, np.zeros(2), 1.0))
         np.testing.assert_allclose(d_dg.mu, d_mvg.mu, atol=1e-8)
 
 
