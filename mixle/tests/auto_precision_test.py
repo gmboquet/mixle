@@ -130,6 +130,21 @@ class AutoPrecisionTestCase(unittest.TestCase):
         s = _numeric_data_sample(well_conditioned + extreme_tail, sample_size=512)
         self.assertTrue(np.any(np.abs(s) > 1.0e6))  # the tail must show up in the sample
 
+    def test_numeric_sample_includes_last_observation_without_duplicates(self):
+        # MXR-080-1530: the former int(i*n/sample_size) stride missed element 512 for n=513.
+        data = np.arange(513, dtype=np.float64)
+        s = _numeric_data_sample(data, sample_size=512)
+        self.assertEqual(s.size, 512)
+        self.assertEqual(s[-1], 512.0)
+        self.assertEqual(np.unique(s).size, s.size)
+
+    def test_numeric_sample_size_is_a_global_scalar_budget(self):
+        # MXR-080-1531: one nested million-element observation must not defeat sample_size=1.
+        data = [np.arange(1_000_000, dtype=np.float64)]
+        s = _numeric_data_sample(data, sample_size=1)
+        self.assertEqual(s.size, 1)
+        self.assertEqual(s[0], 999_999.0)
+
     def test_numeric_sample_generator_is_bounded_not_fully_consumed(self):
         # Regression (MXR-080-0145): _numeric_data_sample used to call list(data) unconditionally,
         # consuming an ENTIRE one-shot generator regardless of sample_size -- exhausting/materializing

@@ -24,6 +24,52 @@ import numpy as np
 _EXP_BITS = {1: 0, 2: 1, 3: 2, 4: 2, 5: 2, 6: 3, 7: 3, 8: 4, 16: 5, 32: 8, 64: 11, 128: 15, 256: 19}
 
 
+def _require_exact_int(name: str, value: Any, *, minimum: int = 0) -> int:
+    """Return an exact integer, rejecting booleans, fractions, non-finite values, and small values."""
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError("%s must be an integer >= %d, got %r" % (name, minimum, value))
+    if isinstance(value, (int, np.integer)):
+        result = int(value)
+    elif isinstance(value, (float, np.floating)) and np.isfinite(value) and value == np.trunc(value):
+        result = int(value)
+    else:
+        raise ValueError("%s must be an integer >= %d, got %r" % (name, minimum, value))
+    if result < minimum:
+        raise ValueError("%s must be an integer >= %d, got %r" % (name, minimum, value))
+    return result
+
+
+def _require_exact_nonnegative_array(name: str, values: Any) -> np.ndarray:
+    """Validate an array of exact nonnegative integers without lossy integer coercion."""
+    arr = np.asarray(values)
+    if arr.dtype == np.bool_:
+        raise ValueError("%s must contain integers, not booleans" % name)
+    if np.issubdtype(arr.dtype, np.integer):
+        if arr.size and np.any(arr < 0):
+            raise ValueError("%s must not contain negative values" % name)
+        return arr.astype(np.uint64)
+    if np.issubdtype(arr.dtype, np.floating):
+        if arr.size and (not np.all(np.isfinite(arr)) or not np.array_equal(arr, np.trunc(arr))):
+            raise ValueError("%s must contain exact finite integers" % name)
+        if arr.size and np.any(arr < 0):
+            raise ValueError("%s must not contain negative values" % name)
+        return arr.astype(np.uint64)
+    checked = np.empty(arr.size, dtype=np.uint64)
+    for i, value in enumerate(arr.ravel()):
+        checked[i] = _require_exact_int(name, value)
+    return checked.reshape(arr.shape)
+
+
+def _require_byte_payload(packed: Any) -> np.ndarray:
+    """Return an exact one-dimensional byte payload; never truncate or wrap caller values."""
+    arr = _require_exact_nonnegative_array("packed", packed)
+    if arr.ndim != 1:
+        raise ValueError("packed must be a one-dimensional byte payload")
+    if arr.size and np.any(arr > 255):
+        raise ValueError("packed values must be bytes in [0, 255]")
+    return arr.astype(np.uint8)
+
+
 def _exp_bits_for(total_bits: int) -> int:
     if total_bits in _EXP_BITS:
         return _EXP_BITS[total_bits]
@@ -80,8 +126,8 @@ class FloatFormat(NumericFormat):
     """
 
     def __init__(self, mantissa_bits: int, exp_bits: int = 11) -> None:
-        self.mantissa_bits = int(mantissa_bits)
-        self.exp_bits = int(exp_bits)
+        self.mantissa_bits = _require_exact_int("mantissa_bits", mantissa_bits)
+        self.exp_bits = _require_exact_int("exp_bits", exp_bits)
         total_bits = 1 + self.exp_bits + self.mantissa_bits
         # "nominal_fpN": N is the IEEE-ish total bit count exp_bits/mantissa_bits would imply for a real
         # bounded float, but only mantissa_bits is actually enforced by quantize -- see the class
@@ -97,8 +143,9 @@ class FloatFormat(NumericFormat):
         numeric behavior -- ``exp_bits`` is bit-budget bookkeeping only (see the class docstring); this
         does NOT build a range-limited fpN codec.
         """
-        exp = _exp_bits_for(int(total_bits))
-        mant = max(0, int(total_bits) - 1 - exp)
+        total_bits = _require_exact_int("total_bits", total_bits, minimum=1)
+        exp = _exp_bits_for(total_bits)
+        mant = max(0, total_bits - 1 - exp)
         return cls(mantissa_bits=mant, exp_bits=exp)
 
     @property
@@ -128,7 +175,8 @@ class FixedPointFormat(NumericFormat):
     """Fixed-point: store ``round(x * 2**frac_bits)`` as an integer; real compression + a hard error bound.
 
     ``int_bits`` sets the representable magnitude ``[-2**int_bits, 2**int_bits)``; out-of-range clamps.
-    ``max_abs_error == 2**-(frac_bits+1)`` (round-to-nearest), independent of ``x``. Storage is a plain
+    ``in_range_max_abs_error == 2**-(frac_bits+1)`` bounds round-to-nearest only for values inside that
+    range. The universal ``max_abs_error`` is infinite because saturation error is unbounded. Storage is a plain
     ``int32``/``int64`` -- there is no arbitrary-width packed storage -- so the declared total width
     ``1 + int_bits + frac_bits`` cannot exceed 64 bits; wider requests raise at construction instead of
     silently overflowing the int64 cast (and falsifying ``max_abs_error``).
@@ -137,8 +185,8 @@ class FixedPointFormat(NumericFormat):
     _MAX_TOTAL_BITS = 64  # storage ceiling: this codec only ever picks int32 or int64, nothing wider
 
     def __init__(self, frac_bits: int, int_bits: int = 31) -> None:
-        self.frac_bits = int(frac_bits)
-        self.int_bits = int(int_bits)
+        self.frac_bits = _require_exact_int("frac_bits", frac_bits)
+        self.int_bits = _require_exact_int("int_bits", int_bits)
         total = 1 + self.int_bits + self.frac_bits
         if total > self._MAX_TOTAL_BITS:
             raise ValueError(
@@ -154,12 +202,19 @@ class FixedPointFormat(NumericFormat):
 
     @property
     def max_abs_error(self) -> float:  # type: ignore[override]
-        """Return the fixed-point half-step absolute error bound."""
+        """Return the universal error bound; saturation makes it unbounded."""
+        return math.inf
+
+    @property
+    def in_range_max_abs_error(self) -> float:
+        """Return the half-step error bound for inputs inside the representable range."""
         return 2.0 ** -(self.frac_bits + 1)
 
     def quantize(self, x: Any) -> np.ndarray:
         """Encode values as clipped scaled integers."""
         x = np.asarray(x, dtype=np.float64)
+        if x.size and not np.all(np.isfinite(x)):
+            raise ValueError("fixed-point inputs must be finite")
         scaled = np.round(x * self._scale)
         np.clip(scaled, -self._limit, self._limit - 1, out=scaled)
         return scaled.astype(self._store_dtype)
@@ -171,13 +226,7 @@ class FixedPointFormat(NumericFormat):
 
 def _require_positive_int(name: str, value: Any) -> int:
     """Validate a positive, exact-integer count (e.g. ``n_codes``/``iters``); returns it as ``int``."""
-    try:
-        as_int = int(value)
-    except (TypeError, ValueError):
-        raise ValueError("%s must be a positive integer, got %r" % (name, value)) from None
-    if as_int != value or as_int <= 0:
-        raise ValueError("%s must be a positive integer, got %r" % (name, value))
-    return as_int
+    return _require_exact_int(name, value, minimum=1)
 
 
 class CodebookFormat(NumericFormat):
@@ -194,12 +243,15 @@ class CodebookFormat(NumericFormat):
     """
 
     def __init__(self, codebook: Any) -> None:
-        self.codebook = np.asarray(codebook, dtype=np.float64)
+        self.codebook = np.array(codebook, dtype=np.float64, copy=True)
+        if self.codebook.ndim != 1:
+            raise ValueError("codebook must be one-dimensional")
         if self.codebook.size == 0:
             raise ValueError("codebook must be nonempty")
         if not np.all(np.isfinite(self.codebook)):
             raise ValueError("codebook entries must be finite (no NaN/Inf)")
         self.codebook.sort()  # sorted codes let quantize use searchsorted (O(n log K))
+        self.codebook.setflags(write=False)
         k = self.codebook.size
         self.name = "codebook(K=%d)" % k
         self.bits_per_value = float(max(1, math.ceil(math.log2(max(2, k)))))
@@ -216,6 +268,8 @@ class CodebookFormat(NumericFormat):
         x = np.asarray(data, dtype=np.float64).ravel()
         if x.size == 0:
             return cls(np.zeros(1))
+        if not np.all(np.isfinite(x)):
+            raise ValueError("data must contain only finite values")
         n_codes = int(min(n_codes, np.unique(x).size))
         # init at quantiles (a good 1-D start), then refine.
         centers = np.quantile(x, np.linspace(0.0, 1.0, n_codes)) if n_codes > 1 else np.array([x.mean()])
@@ -235,13 +289,18 @@ class CodebookFormat(NumericFormat):
     def quantize(self, x: Any) -> np.ndarray:
         """Map values to nearest codebook indices."""
         x = np.asarray(x, dtype=np.float64)
+        if x.size and not np.all(np.isfinite(x)):
+            raise ValueError("values to quantize must be finite")
         edges = (self.codebook[:-1] + self.codebook[1:]) / 2.0
         idx = np.searchsorted(edges, x)  # nearest code by the sorted-codebook midpoints
         return idx.astype(self._idx_dtype)
 
     def dequantize(self, q: Any) -> np.ndarray:
         """Map codebook indices back to representative values."""
-        return self.codebook[np.asarray(q, dtype=np.intp)]
+        idx = _require_exact_nonnegative_array("codebook indices", q)
+        if idx.size and np.any(idx >= self.codebook.size):
+            raise ValueError("codebook index is outside [0, %d)" % self.codebook.size)
+        return self.codebook[idx.astype(np.intp)]
 
     def _pack_bits(self) -> int:
         """Index width used by :meth:`compress`: sub-byte {1,2,4,8} widths for ``K <= 256`` (bit-packed
@@ -278,13 +337,21 @@ class CodebookFormat(NumericFormat):
     def decompress(self, packed: Any, count: int) -> np.ndarray:
         """Inverse of :meth:`compress`: unpack indices and gather the codebook back to ``float64``."""
         bits = self._pack_bits()
+        count = _require_exact_int("count", count)
         if bits <= 8:
             from mixle.engines.packing import unpack_bits
 
             idx = unpack_bits(packed, bits, count)
         else:
             dtype = np.dtype("<u2") if bits == 16 else np.dtype("<u4")
-            idx = np.frombuffer(np.asarray(packed, dtype=np.uint8).tobytes(), dtype=dtype)[:count]
+            payload = _require_byte_payload(packed)
+            itemsize = dtype.itemsize
+            if payload.size % itemsize:
+                raise ValueError("packed payload length must be aligned to %d-byte indices" % itemsize)
+            capacity = payload.size // itemsize
+            if count > capacity:
+                raise ValueError("count %d exceeds packed capacity %d" % (count, capacity))
+            idx = np.frombuffer(payload.tobytes(), dtype=dtype, count=count)
         return self.dequantize(idx)
 
 
@@ -294,6 +361,9 @@ def min_float_mantissa_bits(target_rel_error: float) -> int:
     The error-tracing primitive: given a tolerated relative error, return the minimal float precision
     that preserves it -- i.e. spend the fewest bits the accuracy budget allows.
     """
-    if target_rel_error <= 0:
+    if isinstance(target_rel_error, (bool, np.bool_)) or not np.isscalar(target_rel_error):
+        raise ValueError("target_rel_error must be a finite positive number")
+    target_rel_error = float(target_rel_error)
+    if not np.isfinite(target_rel_error) or target_rel_error <= 0:
         raise ValueError("target_rel_error must be positive")
     return max(0, math.ceil(-math.log2(target_rel_error) - 1))

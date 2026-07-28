@@ -14,6 +14,13 @@ from mixle.engines.formats import (
 
 
 class FloatFormatTest(unittest.TestCase):
+    def test_format_widths_reject_bool_fractional_negative_and_nonfinite_values(self):
+        for bad in (True, -1, 2.5, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                FloatFormat(bad)
+            with self.assertRaises(ValueError):
+                FloatFormat.fp(bad)
+
     def test_round_trip_within_relative_error_bound(self):
         rng = np.random.RandomState(0)
         x = rng.randn(5000) * 10.0 ** rng.randint(-6, 6, 5000)
@@ -106,13 +113,26 @@ class FixedPointFormatTest(unittest.TestCase):
         fmt = FixedPointFormat(frac_bits=12, int_bits=10)  # 23 bits -> int32 storage
         q = fmt.quantize(x)
         self.assertEqual(q.dtype, np.int32)
-        self.assertLessEqual(fmt.measured_max_abs_error(x), fmt.max_abs_error * 1.01)
+        self.assertLessEqual(fmt.measured_max_abs_error(x), fmt.in_range_max_abs_error * 1.01)
+        self.assertTrue(math.isinf(fmt.max_abs_error))
         self.assertGreater(fmt.compression_ratio(), 2.0)  # 64 / 23 bits
 
     def test_out_of_range_clamps(self):
         fmt = FixedPointFormat(frac_bits=4, int_bits=3)  # range ~[-8, 8)
         rt = fmt.round_trip(np.array([1000.0, -1000.0]))
         self.assertTrue(np.all(np.abs(rt) <= 8.0))
+        self.assertGreater(fmt.measured_max_abs_error([1000.0]), fmt.in_range_max_abs_error)
+
+    def test_constructor_and_nonfinite_input_contracts(self):
+        for bad in (True, -1, 1.5, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                FixedPointFormat(frac_bits=bad)
+            with self.assertRaises(ValueError):
+                FixedPointFormat(frac_bits=1, int_bits=bad)
+        fmt = FixedPointFormat(frac_bits=4, int_bits=3)
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.assertRaises(ValueError):
+                fmt.round_trip([bad])
 
     # -- MXR-080-0127: every format wider than 32 bits used int64 storage regardless of the DECLARED
     # width, so a 65-bit fixed(i32.f32) silently overflowed the int64 cast during quantize and decoded
@@ -131,7 +151,7 @@ class FixedPointFormatTest(unittest.TestCase):
         self.assertEqual(fmt.bits_per_value, 64.0)
         near_max = 2.0**31 - 1.0  # just under the documented int_bits=31 upper range
         rt = fmt.round_trip(np.array([near_max]))
-        self.assertLessEqual(abs(float(rt[0]) - near_max), fmt.max_abs_error * 1.01)
+        self.assertLessEqual(abs(float(rt[0]) - near_max), fmt.in_range_max_abs_error * 1.01)
 
     def test_widths_up_to_64_bits_are_not_rejected(self):
         # Only widths that exceed int64 storage should raise; ordinary widths -- including <=32-bit
@@ -144,6 +164,21 @@ class FixedPointFormatTest(unittest.TestCase):
 
 
 class CodebookFormatTest(unittest.TestCase):
+    def test_constructor_copies_and_freezes_one_dimensional_codebook(self):
+        original = np.array([3.0, 1.0, 2.0])
+        cb = CodebookFormat(original)
+        self.assertTrue(np.array_equal(original, [3.0, 1.0, 2.0]))
+        original[0] = 99.0
+        self.assertTrue(np.array_equal(cb.codebook, [1.0, 2.0, 3.0]))
+        self.assertFalse(cb.codebook.flags.writeable)
+        with self.assertRaises(ValueError):
+            cb.codebook[0] = 0.0
+
+    def test_constructor_rejects_scalar_and_multidimensional_codebooks(self):
+        for bad in (1.0, np.ones((2, 2))):
+            with self.assertRaises(ValueError):
+                CodebookFormat(bad)
+
     def test_fit_round_trip_error_shrinks_with_more_codes(self):
         rng = np.random.RandomState(4)
         data = np.concatenate([rng.normal(-3, 0.4, 4000), rng.normal(2, 0.6, 4000)])  # bimodal
@@ -206,6 +241,29 @@ class CodebookFormatTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 CodebookFormat(bad)
 
+    def test_dequantize_rejects_invalid_indices(self):
+        cb = CodebookFormat([1.0, 2.0, 3.0])
+        for bad in ([-1], [3], [1.5], [True]):
+            with self.assertRaises(ValueError):
+                cb.dequantize(bad)
+
+    def test_wide_decompress_validates_payload_and_count(self):
+        cb = CodebookFormat(np.linspace(-1.0, 1.0, 300))
+        packed, count = cb.compress([0.0, 0.5])
+        for bad in ([1.5, 0], [-1, 0], [256, 0], [[0, 0]]):
+            with self.assertRaises(ValueError):
+                cb.decompress(bad, 1)
+        with self.assertRaises(ValueError):
+            cb.decompress(packed[:-1], count)
+        with self.assertRaises(ValueError):
+            cb.decompress(packed, count + 1)
+
+    def test_fit_rejects_bool_counts_and_nonfinite_data(self):
+        with self.assertRaises(ValueError):
+            CodebookFormat.fit([1.0, 2.0], True)
+        with self.assertRaises(ValueError):
+            CodebookFormat.fit([1.0, float("nan")], 2)
+
     def test_duplicate_codebook_entries_are_allowed_and_round_trip_correctly(self):
         # Documented design decision (class docstring): duplicates cost a wasted index but do not break
         # nearest-code assignment or decoding -- both duplicate entries decode to the same, correct
@@ -246,8 +304,9 @@ class ErrorTracingTest(unittest.TestCase):
                 self.assertGreater(2.0**-bits, target)
 
     def test_min_float_mantissa_bits_rejects_nonpositive(self):
-        with self.assertRaises(ValueError):
-            min_float_mantissa_bits(0.0)
+        for bad in (0.0, -1.0, float("nan"), float("inf"), True):
+            with self.assertRaises(ValueError):
+                min_float_mantissa_bits(bad)
 
     def test_allocation_picks_smallest_adequate_format(self):
         # use the bound to choose the cheapest float that keeps relative error under 1e-4
