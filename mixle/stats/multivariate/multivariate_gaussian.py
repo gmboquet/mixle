@@ -1099,7 +1099,11 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             self._attach_conditioning_receipt(dist, raw_covar)
             return dist
 
-        if pc1 not in (None, 0.0):
+        # A mean pseudo-count is only usable when its prior mean was supplied; unpaired counts
+        # mean "no pseudo-observations" and fall through to the plain maximum-likelihood mean.
+        # This mirrors the univariate contract in gaussian.py -- without the prior_mu guard the
+        # branch below evaluates ``pc1 * None`` and raises TypeError.
+        if pc1 not in (None, 0.0) and self.prior_mu is not None:
             mu = (sum_x + pc1 * self.prior_mu) / (nobs + pc1)
         else:
             mu = sum_x / nobs
