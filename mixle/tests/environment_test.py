@@ -214,5 +214,55 @@ class BudgetContractTest(unittest.TestCase):
                 interact(env, _NoopBelief(), policy=_first_policy, budget=1.0, max_steps=max_steps)
 
 
+class StreamingBeliefDomainTest(unittest.TestCase):
+    """MXR-080-1665: invalid probability/prior domains cannot survive into a published bound."""
+
+    def test_credible_level_must_be_in_the_open_unit_interval(self):
+        belief = GaussianStreamingBelief()
+        for level in (-0.9, 0.0, 1.0, 1.1, float("nan"), float("inf")):
+            with self.subTest(level=level), self.assertRaisesRegex(ValueError, "credible level"):
+                belief.credible_interval(0, level=level)
+
+    def test_valid_levels_return_finite_ordered_intervals(self):
+        belief = GaussianStreamingBelief()
+        for level in (0.5, 0.8, 0.9, 0.95, 0.99, 0.123):
+            lo, hi = belief.credible_interval(0, level=level)
+            with self.subTest(level=level):
+                self.assertTrue(np.isfinite(lo) and np.isfinite(hi))
+                self.assertLessEqual(lo, hi)
+
+    def test_wider_levels_give_wider_intervals(self):
+        belief = GaussianStreamingBelief()
+        narrow = belief.credible_interval(0, level=0.5)
+        wide = belief.credible_interval(0, level=0.99)
+        self.assertGreater(wide[1] - wide[0], narrow[1] - narrow[0])
+
+    def test_negative_prior_and_pseudo_count_are_rejected_at_construction(self):
+        with self.assertRaisesRegex(ValueError, "prior_sigma2"):
+            GaussianStreamingBelief(prior_sigma2=-1.0)
+        with self.assertRaisesRegex(ValueError, "belief_pseudo_count"):
+            GaussianStreamingBelief(belief_pseudo_count=-1.0)
+        with self.assertRaisesRegex(ValueError, "min_covar"):
+            GaussianStreamingBelief(min_covar=-0.5)
+        for bad in (float("nan"), float("inf")):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "finite"):
+                GaussianStreamingBelief(prior_mu=bad)
+
+    def test_a_rejected_configuration_never_folds_in_evidence(self):
+        # the old failure mode: construction succeeded, an observation mutated the belief, and only
+        # then did the interval divide by zero (k0 + n == 0) or take sqrt of a negative variance.
+        with self.assertRaises(ValueError):
+            belief = GaussianStreamingBelief(belief_pseudo_count=-1.0)
+            belief.update({"type": "survey", "accepted": True, "cell": 0, "prospectivity": 1.0})
+            belief.credible_interval(0)
+
+    def test_zero_pseudo_count_remains_a_legal_calibration_point(self):
+        belief = GaussianStreamingBelief(belief_pseudo_count=0.0)
+        belief.update({"type": "survey", "accepted": True, "cell": 0, "prospectivity": 1.0})
+        lo, hi = belief.credible_interval(0)
+        self.assertTrue(np.isfinite(lo) and np.isfinite(hi))
+        self.assertLessEqual(lo, hi)
+
+
 if __name__ == "__main__":
     unittest.main()
