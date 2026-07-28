@@ -225,12 +225,24 @@ class GaussianProcessRegressor:
             if not return_cov:
                 return mean.detach().cpu().numpy()
             v = torch.linalg.solve_triangular(chol, kxs, upper=False)
-            cov = self.kernel(xs, xs) - v.T.matmul(v)
+            kss = self.kernel(xs, xs)
+            vtv = v.T.matmul(v)
+            cov = kss - vtv
             cov = 0.5 * (cov + cov.T)
             if not bool(torch.all(torch.isfinite(cov)).cpu().item()):
                 raise RuntimeError("Gaussian-process posterior covariance contains non-finite values")
+            # Scale the roundoff budget by the OPERANDS of Kss - V^T V, not by the difference. The
+            # error in a floating-point subtraction is bounded by eps*(|a| + |b|), and where the
+            # posterior is sharp the two terms nearly cancel -- so ||cov|| can be orders of magnitude
+            # smaller than either operand, and a result-scaled tolerance rejects eigenvalue noise that
+            # is entirely explained by the cancellation. A materially negative mode is still caught:
+            # it scales with the operands too.
             scale = (
-                max(1.0, float(torch.linalg.matrix_norm(cov, ord=float("inf")).cpu().item()))
+                max(
+                    1.0,
+                    float(torch.linalg.matrix_norm(kss, ord=float("inf")).cpu().item()),
+                    float(torch.linalg.matrix_norm(vtv, ord=float("inf")).cpu().item()),
+                )
                 if cov.numel()
                 else 1.0
             )
@@ -276,9 +288,7 @@ class GaussianProcessRegressor:
         order = np.argsort(x_sort_key, kind="stable")
         sorted_x = x_sort_key[order]
         sorted_mean = mean[order]
-        _, first, inverse, counts = np.unique(
-            sorted_x, return_index=True, return_inverse=True, return_counts=True
-        )
+        _, first, inverse, counts = np.unique(sorted_x, return_index=True, return_inverse=True, return_counts=True)
         group_mean = np.add.reduceat(sorted_mean, first) / counts
         fitted_groups = _pava(group_mean if increasing else -group_mean, weights=counts)
         if not increasing:
