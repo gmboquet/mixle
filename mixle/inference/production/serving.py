@@ -190,8 +190,17 @@ class Service:
     def _safe_logd(self, r: Any) -> DegradedResult:
         """Score one record, isolating configured availability exceptions as an explicit
         ``model_unavailable`` degradation instead of an indistinguishable ``-inf``."""
+        from mixle.stats.univariate.continuous._observation_contracts import UnscorableObservation
+
         try:
             return DegradedResult(value=float(self.model.log_density(r)), degraded=False)
+        except UnscorableObservation:
+            # The model refuses this record as outside its admissible observation space -- a fact
+            # about the data, which is exactly what `unscorable_rate` reports. It is not degraded
+            # service: the model answered, and the answer is "I cannot score this". Scoring it -inf
+            # lets the ~finite count below pick it up as unscorable without inflating the
+            # availability signal, which is reserved for the model being unreachable.
+            return DegradedResult(value=float("-inf"), degraded=False)
         except self.availability_errors as exc:
             return DegradedResult(
                 value=float("-inf"),

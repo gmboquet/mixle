@@ -41,12 +41,21 @@ def _fsync_directory(path: str) -> None:
 
 
 def _record_digest(payload: dict[str, Any]) -> str:
-    """Content digest for a version envelope, excluding its own digest field."""
+    """Content digest for a version envelope, excluding its own digest field.
+
+    The digest authenticates the *persisted* envelope, so it has to be computed over the form that
+    will be read back, not the in-memory one. ``_canonical`` deliberately tags lists and tuples
+    differently (MXR-080-1601: otherwise ``[[1, 2]]`` and ``[(1, 2)]`` collide), but JSON has only
+    arrays -- so a payload holding a tuple anywhere (``header["schema"]`` holds
+    ``("value", "Real")`` pairs for every fitted model) digested one way on write and the other way
+    on read, and every such version file failed its own integrity check on load. Normalizing through
+    JSON first makes writer and reader agree by construction rather than by coincidence.
+    """
     from mixle.data.hashing import _canonical
 
     subject = dict(payload)
     subject.pop("record_digest", None)
-    return hashlib.sha256(_canonical(subject)).hexdigest()
+    return hashlib.sha256(_canonical(json.loads(json.dumps(subject)))).hexdigest()
 
 
 def _transition_digest(metadata: dict[str, Any]) -> str:
