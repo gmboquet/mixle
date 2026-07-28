@@ -95,3 +95,22 @@ def test_route_distribution_rejects_misaligned_shapes():
         raise AssertionError("expected a ValueError for misaligned supply_nodes/demand shapes")
     except ValueError:
         pass
+
+
+def test_forecast_demand_does_not_advertise_conformal_coverage_it_cannot_establish():
+    # MXR-080-1679: the band was described as retaining nominal split-conformal coverage, but its
+    # calibration cases are successive horizons from one held-out tail -- ordered, dependent and
+    # generally non-exchangeable -- and one constant half-width is transferred to every horizon of a
+    # different model refit on the full series. The returned receipt has to say so.
+    history = _simulate_regime_series(70, seed=7)
+    f = forecast_demand(history, horizon=4, level=0.9, seed=0)
+
+    assert isinstance(f, Forecast)  # still a drop-in Forecast for route_distribution
+    receipt = f.calibration
+    assert receipt is not None
+    assert receipt.guarantee == "empirical"
+    assert receipt.calibration_origins == 1
+    assert receipt.horizon_specific is False
+    assert receipt.n_calibration >= 4
+    assert receipt.half_width > 0.0
+    assert any("exchangeable" in item for item in receipt.assumptions)
