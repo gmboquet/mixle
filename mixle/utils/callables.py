@@ -17,10 +17,18 @@ def accepts_call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> bool:
     expensive computation) and masks the real error.
 
     Some callables (certain builtins, C-extension callables, some `functools.partial` chains) do
-    not support signature introspection at all; ``inspect.signature`` raises ``ValueError`` for
-    those. This conservatively returns True in that case (assume the richer call is supported) so
-    behavior for a callable this cannot actually check falls through to attempting it, matching
-    what unconditionally trying the richer call first would have done anyway.
+    not support signature introspection at all; ``inspect.signature`` raises ``ValueError`` when no
+    signature can be provided and ``TypeError`` when the object's type is unsupported. This
+    conservatively returns True in both cases (assume the richer call is supported) so behavior for
+    a callable this cannot actually check falls through to attempting it, matching what
+    unconditionally trying the richer call first would have done anyway.
+
+    Obtaining the signature and binding to it are therefore two *separately guarded* steps. Sharing
+    one ``except TypeError`` made "this object exposes no introspectable signature" indistinguishable
+    from "this call shape is genuinely wrong", and the documented-unsupported case then reported a
+    proven mismatch: a callable accepting ``**kwargs`` (so accepting ``rng=``) whose ``__signature__``
+    raised ``TypeError`` made ``accepts_call(fn, x, rng=...)`` False, and callers silently dropped the
+    seed or context the function does in fact accept. Only ``bind()`` can prove a mismatch.
 
     Args:
         fn: The callable to check.
@@ -31,9 +39,11 @@ def accepts_call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> bool:
 
     """
     try:
-        inspect.signature(fn).bind(*args, **kwargs)
-        return True
+        signature = inspect.signature(fn)
+    except (ValueError, TypeError):
+        return True  # no introspectable signature: unknown, not a proven mismatch
+    try:
+        signature.bind(*args, **kwargs)
     except TypeError:
         return False
-    except ValueError:
-        return True
+    return True

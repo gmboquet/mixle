@@ -47,6 +47,37 @@ class AcceptsCallTestCase(unittest.TestCase):
         # without asserting on inspect internals we don't control.
         self.assertIsInstance(accepts_call(len, [1, 2, 3]), bool)
 
+    def test_unsupported_signature_metadata_is_unknown_not_a_proven_mismatch(self):
+        # MXR-080-1668: inspect.signature documents ValueError (no signature obtainable) AND
+        # TypeError (object type unsupported). Sharing one `except TypeError` with bind() made the
+        # second case report a *proven* mismatch, so callers dropped an rng/context the callable
+        # does accept. Only bind() can prove a mismatch; failed retrieval is "unknown".
+        class UnsupportedSignatureMetadata:
+            @property
+            def __signature__(self):
+                raise TypeError("signature metadata is not supported for this object")
+
+            def __call__(self, *args, **kwargs):
+                return kwargs.get("rng")
+
+        fn = UnsupportedSignatureMetadata()
+        self.assertEqual(fn(5, rng=7), 7)  # the richer call really does work
+        self.assertTrue(accepts_call(fn, 5, rng=7))
+
+    def test_signature_retrieval_valueerror_still_defaults_to_true(self):
+        class NoSignature:
+            @property
+            def __signature__(self):
+                raise ValueError("no signature available")
+
+            def __call__(self, *args, **kwargs):
+                return 1
+
+        self.assertTrue(accepts_call(NoSignature(), 5, rng=7))
+
+    def test_bind_typeerror_after_successful_retrieval_is_still_a_mismatch(self):
+        self.assertFalse(accepts_call(_without_seed, 5, rng=1))
+
 
 if __name__ == "__main__":
     unittest.main()
