@@ -403,11 +403,19 @@ class ComputeKernelTestCase(unittest.TestCase):
         np.testing.assert_allclose(scores, expected, rtol=1.0e-12, atol=1.0e-12)
 
     def test_declaration_generated_leaf_scores_are_generic_kernel_fallback(self):
-        class DeclarationOnlyBeta(BetaDistribution):
+        # The leaf must declare generated runtime scoring for "strip the backend hooks and the
+        # DECLARATION still scores it" to mean anything. Beta does not: it sets runtime_scoring=False
+        # because eta_1 = a - 1 is 0 for Beta(1, b) while T_1(x) = log(x) is -inf at x = 0, so the
+        # canonical dot form hits 0 * -inf = NaN -- the same hazard the flag documents for the
+        # categorical. With the backend hooks nulled a Beta subclass has no scorer at all, so this
+        # test used to assert a fallback that cannot exist for this family. Gaussian declares
+        # fixed_base and runtime_scoring, so nulling its hooks leaves exactly the generated path
+        # under test.
+        class DeclarationOnlyGaussian(GaussianDistribution):
             backend_seq_log_density = None
             backend_log_density_from_params = None
 
-        dist = DeclarationOnlyBeta(2.5, 3.25)
+        dist = DeclarationOnlyGaussian(-1.5, 1.0)
         enc = dist.dist_to_encoder().seq_encode(np.asarray([0.2, 0.4, 0.8]))
         engine = self.FakeTorchEngine()
 
@@ -536,7 +544,7 @@ class ComputeKernelTestCase(unittest.TestCase):
         _assert_stats_close(self, kernel.accumulate(enc, weights), legacy_acc.value())
 
     def test_declaration_generated_numba_mixture_kernel_matches_legacy(self):
-        components = [BetaDistribution(2.5, 3.25), BetaDistribution(4.0, 1.75)]
+        components = [GaussianDistribution(-1.5, 1.0), GaussianDistribution(2.5, 1.5)]
         dist = MixtureDistribution(components, [0.4, 0.6])
         est = MixtureEstimator([component.estimator() for component in components])
         data = np.asarray([0.2, 0.4, 0.8, 0.55])
@@ -558,8 +566,8 @@ class ComputeKernelTestCase(unittest.TestCase):
 
     def test_declaration_generated_numba_composite_mixture_kernel_matches_legacy(self):
         components = [
-            CompositeDistribution((BetaDistribution(2.5, 3.25), BetaDistribution(1.75, 4.0))),
-            CompositeDistribution((BetaDistribution(4.0, 1.75), BetaDistribution(3.5, 2.25))),
+            CompositeDistribution((GaussianDistribution(-1.5, 1.0), GaussianDistribution(0.5, 2.0))),
+            CompositeDistribution((GaussianDistribution(2.5, 1.5), GaussianDistribution(-3.0, 0.75))),
         ]
         dist = MixtureDistribution(components, [0.35, 0.65])
         est = MixtureEstimator(
@@ -584,8 +592,8 @@ class ComputeKernelTestCase(unittest.TestCase):
 
     def test_declaration_generated_numba_optional_mixture_kernel_matches_legacy(self):
         components = [
-            OptionalDistribution(BetaDistribution(2.5, 3.25), p=0.20, missing_value=None),
-            OptionalDistribution(BetaDistribution(4.0, 1.75), p=0.45, missing_value=None),
+            OptionalDistribution(GaussianDistribution(-1.5, 1.0), p=0.20, missing_value=None),
+            OptionalDistribution(GaussianDistribution(2.5, 1.5), p=0.45, missing_value=None),
         ]
         dist = MixtureDistribution(components, [0.35, 0.65])
         est = MixtureEstimator([component.estimator() for component in components])
@@ -608,8 +616,8 @@ class ComputeKernelTestCase(unittest.TestCase):
 
     def test_declaration_generated_numba_sequence_mixture_kernel_matches_legacy(self):
         components = [
-            SequenceDistribution(BetaDistribution(2.5, 3.25), len_dist=PoissonDistribution(1.8)),
-            SequenceDistribution(BetaDistribution(4.0, 1.75), len_dist=PoissonDistribution(2.4)),
+            SequenceDistribution(GaussianDistribution(-1.5, 1.0), len_dist=PoissonDistribution(1.8)),
+            SequenceDistribution(GaussianDistribution(2.5, 1.5), len_dist=PoissonDistribution(2.4)),
         ]
         dist = MixtureDistribution(components, [0.35, 0.65])
         est = MixtureEstimator([component.estimator() for component in components])
