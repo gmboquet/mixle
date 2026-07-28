@@ -25,8 +25,8 @@ except ImportError:
     _HAS_TORCH = False
 
 from mixle.reason.cycle_consistency import (  # noqa: E402
-    cycle_inconsistency,
     fit_cycle_transport,
+    posterior_ambiguity,
     posterior_mean_estimate,
     selective_error,
 )
@@ -34,10 +34,11 @@ from mixle.reason.cycle_consistency import (  # noqa: E402
 _N_TRAIN = 2500
 _N_TEST = 300
 _NOISE = 0.05
+_X_SCALE = 2.0
 
 
 def _sample(n, rng):
-    x = rng.normal(0, 2.0, size=(n, 1))
+    x = rng.normal(0, _X_SCALE, size=(n, 1))
     y = np.maximum(x, 0) + rng.normal(0, _NOISE, size=(n, 1))
     return x, y
 
@@ -61,13 +62,12 @@ if _HAS_TORCH:
         _est = posterior_mean_estimate(_back_sampler, _Y_TEST[_i], n_draws=20)
         _errors.append(abs(float(_est[0]) - float(_X_TEST[_i, 0])))
         _cycle_scores.append(
-            cycle_inconsistency(
-                _back_sampler,
-                _Y_TEST[_i],
-                n_draws=20,
-                forward=lambda x: np.maximum(x, 0.0),
-                scale=_NOISE,
-            )
+            # The collapse this fixture is built around lives in x, not in y: every backward draw from
+            # the collapsed region round-trips through max(x, 0) back onto the same y ~ 0, so
+            # cycle_inconsistency (closure) is LOWER there than in the recoverable region -- it answers
+            # "is the forward map right", not "is x determined". The abstention signal is the x-space
+            # draw dispersion, standardized by x's own marginal scale.
+            posterior_ambiguity(_back_sampler, _Y_TEST[_i], n_draws=20, target_scale=_X_SCALE)
         )
         _fwd_draws = np.asarray([_fwd_sampler.sample_given(_X_TEST[_i]) for _ in range(20)])
         _marginal_conf.append(float(np.var(_fwd_draws)))

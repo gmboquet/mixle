@@ -84,12 +84,19 @@ def cycle_inconsistency(
     forward: Callable[[np.ndarray], np.ndarray],
     scale: float | np.ndarray,
 ) -> float:
-    """Return scaled A -> B -> A round-trip error for one observation.
+    """Return scaled A -> B -> A round-trip inconsistency for one observation.
 
     ``sampler`` draws B conditioned on the originating A value and ``forward``
     maps each B draw back into A space. ``scale`` supplies the positive,
     unit-aware residual scale for A. A constant but wrong forward map therefore
     receives a nonzero error instead of a falsely perfect dispersion score.
+
+    This answers "is the forward map right here", NOT "is B determined here".
+    Closure error cannot see posterior ambiguity, and on a collapsing
+    observation map it is anti-correlated with it: where many B values share one
+    A value, every draw round-trips back onto that same A, so the cycle closes
+    perfectly exactly where B is least identified. Use ``posterior_ambiguity``
+    for that question.
     """
     given = _validated_vector(given_value, "given_value")
     count = _positive_count(n_draws, "n_draws")
@@ -107,11 +114,46 @@ def cycle_inconsistency(
     draws = _validated_draws(sampler.sample_given_batch(x_batch), count)
     round_trip = np.asarray([_validated_vector(forward(draw), "forward(draw)") for draw in draws])
     if round_trip.shape != (count, len(given)):
-        raise ValueError(
-            f"forward must return one vector with shape {given.shape} per draw; got {round_trip.shape}."
-        )
+        raise ValueError(f"forward must return one vector with shape {given.shape} per draw; got {round_trip.shape}.")
     standardized = (round_trip - given) / residual_scale
     return float(np.mean(np.square(standardized)))
+
+
+def posterior_ambiguity(
+    sampler: Any,
+    given_value: np.ndarray,
+    *,
+    n_draws: int = 20,
+    target_scale: float | np.ndarray,
+) -> float:
+    """Return the standardized spread of the B draws for one A observation.
+
+    A well-determined posterior yields draws that agree closely; an observation
+    in a collapsed region -- where many B values produce the same A -- yields
+    draws that disagree, without needing the true B. ``target_scale`` supplies
+    the positive, unit-aware scale for B.
+
+    This is the abstention signal, and it is deliberately NOT folded into
+    ``cycle_inconsistency``. The two answer different questions and disagree by
+    construction: on a collapsing observation map every draw round-trips back
+    onto the same A, so closure error is LOWEST exactly where B is least
+    determined. Summing them lets the anti-correlated closure term outvote the
+    spread. Use ``cycle_inconsistency`` to ask whether the forward map is right,
+    and this to ask whether B is pinned down.
+    """
+    given = _validated_vector(given_value, "given_value")
+    count = _positive_count(n_draws, "n_draws")
+    x_batch = np.repeat(given.reshape(1, -1), count, axis=0)
+    draws = _validated_draws(sampler.sample_given_batch(x_batch), count)
+
+    draw_scale = np.asarray(target_scale, dtype=np.float64)
+    try:
+        draw_scale = np.broadcast_to(draw_scale, draws.shape[1:])
+    except ValueError as exc:
+        raise ValueError(f"target_scale must be scalar or broadcast to shape {draws.shape[1:]}.") from exc
+    if not np.isfinite(draw_scale).all() or np.any(draw_scale <= 0.0):
+        raise ValueError("target_scale must contain only finite positive values.")
+    return float(np.mean(np.var(draws, axis=0) / np.square(draw_scale)))
 
 
 def posterior_mean_estimate(sampler: Any, given_value: np.ndarray, *, n_draws: int = 20) -> np.ndarray:
@@ -199,8 +241,7 @@ def joint_cycle_consistency_receipt(
 
     kl_sampler = round_trip.sampler(seed=int(rng.randint(0, 2**31 - 1)))
     kl_terms = [
-        round_trip.log_density(x) - true_marginal.log_density(x)
-        for x in (kl_sampler.sample() for _ in range(kl_count))
+        round_trip.log_density(x) - true_marginal.log_density(x) for x in (kl_sampler.sample() for _ in range(kl_count))
     ]
     kl_values = np.asarray(kl_terms, dtype=np.float64)
     if kl_values.shape != (kl_count,) or not np.isfinite(kl_values).all():
