@@ -20,14 +20,42 @@ from typing import Any
 import numpy as np
 
 
+def _positive_int(value: Any, name: str) -> int:
+    """Exact positive integer or a ``ValueError`` (a Boolean is not a count)."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
+    return int(value)
+
+
+def _require_measured(a: np.ndarray, what: str) -> np.ndarray:
+    """Reject absent / non-finite evidence instead of encoding it as an ordinary descriptor.
+
+    A missing modality has no fixed-length descriptor: zero-padding an empty trace produces exactly the
+    vector a genuinely measured all-zero trace produces, and NaN samples propagate into features that
+    downstream graph/cross-modal fusion consumes as if they were observations. There is no missingness
+    channel in this representation, so absence has to be refused at the boundary and handled by the
+    caller (drop the record, or model the modality as explicitly missing).
+    """
+    if a.size == 0:
+        raise ValueError(f"{what} requires a non-empty measurement; an absent modality has no descriptor")
+    if not np.isfinite(a).all():
+        raise ValueError(f"{what} requires finite samples; non-finite input is missing data, not evidence")
+    return a
+
+
 def image_features(img: Any, dim: int = 16, *, grid: int | None = None) -> np.ndarray:
     """A fixed ``dim`` descriptor of an image: mean intensity over a ``g x g`` grid of cells.
 
     ``img`` is ``(H, W)`` or ``(H, W, C)``; channels are averaged. The grid side ``g`` is chosen so
     ``g*g`` covers ``dim`` (then truncated/padded to exactly ``dim``), giving a coarse spatial-layout
     vector -- enough for an image field to correlate with structured fields in a discovered graph.
+
+    The image must be non-empty and finite (see :func:`_require_measured`).
     """
-    a = np.asarray(img, dtype=np.float64)
+    dim = _positive_int(dim, "dim")
+    if grid is not None:
+        grid = _positive_int(grid, "grid")
+    a = _require_measured(np.asarray(img, dtype=np.float64), "image_features")
     if a.ndim == 3:
         a = a.mean(axis=2)
     if a.ndim != 2:
@@ -42,11 +70,19 @@ def image_features(img: Any, dim: int = 16, *, grid: int | None = None) -> np.nd
 
 
 def signal_features(sig: Any, dim: int = 16, *, windows: int | None = None) -> np.ndarray:
-    """A fixed ``dim`` descriptor of a 1-D signal: (mean, energy, range) over evenly-spaced windows."""
-    a = np.asarray(sig, dtype=np.float64).ravel()
+    """A fixed ``dim`` descriptor of a 1-D signal: (mean, energy, range) over evenly-spaced windows.
+
+    The trace must be non-empty and finite (see :func:`_require_measured`): an empty signal used to
+    return the all-zero vector, which is indistinguishable from a measured zero-energy trace, and NaN
+    samples used to travel through as NaN features padded out to ``dim``.
+    """
+    dim = _positive_int(dim, "dim")
+    if windows is not None:
+        windows = _positive_int(windows, "windows")
+    a = _require_measured(np.asarray(sig, dtype=np.float64).ravel(), "signal_features")
     nwin = windows or max(1, dim // 3)
     feats: list[float] = []
-    for w in np.array_split(a, min(nwin, len(a))) if len(a) else [a]:
+    for w in np.array_split(a, min(nwin, len(a))):
         if len(w):
             feats += [float(w.mean()), float(np.mean(w * w)), float(w.max() - w.min())]
     return _fit_dim(np.asarray(feats, dtype=np.float64), dim)
@@ -66,20 +102,34 @@ def vectorize(item: Any, kind: str, *, dim: int = 16, embedder: Any = None) -> n
         item: the raw item (a string, a record, an image array, a signal array).
         kind: ``'text'`` | ``'record'`` | ``'image'`` | ``'signal'``.
         dim: output vector dimension.
-        embedder: for ``text``/``record``, a fitted :class:`~mixle.represent.Embedder` to reuse
-            (else a small one is fit on the single item -- pass one for consistency across a corpus).
+        embedder: **required** for ``text``/``record``: a fitted :class:`~mixle.represent.Embedder`
+            defining the shared coordinate system the vector lives in.
+
+    Raises:
+        ValueError: for ``text``/``record`` without an ``embedder``. There is no safe default. The
+            fallback used to fit a fresh autoencoder on four copies of the single item being
+            transformed, so every call returned coordinates from a *different* learned basis while
+            presenting them as a common fixed-length vector. Independently vectorized ``"alpha alpha"``
+            and ``"beta beta"`` came out at cosine ``+0.81``; fitting the same two items in one shared
+            corpus space gave ``-0.77``. Neither sign nor magnitude survived, so any downstream
+            correlation/graph/distance built from such vectors measured the fitting noise of
+            single-item autoencoders. Fit one space with :func:`~mixle.represent.fit_embedder` and pass
+            it here, or vectorize the whole corpus at once with :func:`vectorize_all`, which fits and
+            applies a single shared embedder.
     """
     if kind == "image":
         return image_features(item, dim)
     if kind == "signal":
         return signal_features(item, dim)
     if kind in ("text", "record"):
-        if embedder is not None:
-            return np.asarray(embedder.transform(item), dtype=np.float64)
-        from mixle.represent import fit_embedder
-
-        emb = fit_embedder([item, item, item, item], dim=dim, kind=kind, epochs=20)
-        return np.asarray(emb.transform(item), dtype=np.float64)
+        if embedder is None:
+            raise ValueError(
+                f"vectorize(kind={kind!r}) requires a fitted embedder: it defines the coordinate system the "
+                "returned vector lives in, and vectors from separately fitted spaces are not comparable. "
+                "Fit one space -- fit_embedder(corpus, dim=..., kind=...) -- and pass embedder=..., or call "
+                "vectorize_all(items, kind) to vectorize a whole corpus through a single shared embedder."
+            )
+        return np.asarray(embedder.transform(item), dtype=np.float64)
     raise ValueError(f"unknown modality {kind!r}; expected text/record/image/signal")
 
 

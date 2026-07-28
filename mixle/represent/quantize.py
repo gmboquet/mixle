@@ -18,14 +18,38 @@ from typing import Any
 import numpy as np
 
 
+def _positive_int(value: Any, name: str) -> int:
+    """Exact positive integer or a ``ValueError`` (a Boolean is not a count)."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
+    return int(value)
+
+
 class VectorQuantizer:
     """A learned codebook over ``R^dim``: nearest-centroid quantization of embedding vectors into discrete ids."""
 
     def __init__(self, num_codes: int, dim: int, *, seed: int = 0) -> None:
-        self.num_codes = int(num_codes)
-        self.dim = int(dim)
+        self.num_codes = _positive_int(num_codes, "num_codes")
+        self.dim = _positive_int(dim, "dim")
         self.seed = int(seed)
         self.codebook: np.ndarray | None = None  # (num_codes, dim)
+
+    def _as_vectors(self, vectors: Any, what: str) -> np.ndarray:
+        """``(n, dim)`` finite float view of ``vectors``, or a ``ValueError`` naming the geometry violated.
+
+        ``dim`` is the codec's declared geometry, not a hint: fitting a ``(2, 3)`` input under
+        ``VectorQuantizer(2, 2)`` used to publish a ``(2, 3)`` codebook while ``dim`` still read ``2``,
+        and a NaN sample produced a NaN codebook (and a NaN reconstruction error) that quantized every
+        later vector to an arbitrary code.
+        """
+        x = np.asarray(vectors, dtype=np.float64)
+        if x.ndim != 2 or x.shape[0] == 0:
+            raise ValueError(f"{what} requires a non-empty (n, {self.dim}) array of vectors, got shape {x.shape}")
+        if x.shape[1] != self.dim:
+            raise ValueError(f"{what} requires vectors of declared width dim={self.dim}, got width {x.shape[1]}")
+        if not np.isfinite(x).all():
+            raise ValueError(f"{what} requires finite vectors; a non-finite sample poisons the whole codebook")
+        return x
 
     def fit(self, vectors: np.ndarray, *, iters: int = 25) -> VectorQuantizer:
         """Fit the codebook by k-means (Lloyd) on ``vectors`` ``(n, dim)`` -- the vocabulary is learned, not assumed.
@@ -34,12 +58,16 @@ class VectorQuantizer:
         center per sample, and ``num_codes`` is updated in place to that actual count so it -- and every
         bounds check derived from it (``dequantize``, a caller building a one-hot over the vocabulary) --
         stays honest about the codebook's real capacity instead of quietly overstating it.
+
+        ``iters`` must be a positive integer: ``iters=0`` used to publish the random initialization
+        centers as a fitted codec, with no Lloyd step ever run.
         """
-        x = np.asarray(vectors, dtype=np.float64)
+        x = self._as_vectors(vectors, "fit")
+        iters = _positive_int(iters, "iters")
         rng = np.random.RandomState(self.seed)
         k = min(self.num_codes, len(x))
         centers = x[rng.choice(len(x), size=k, replace=False)].copy()
-        for _ in range(int(iters)):
+        for _ in range(iters):
             ids = self._assign(x, centers)
             new = np.stack([x[ids == j].mean(axis=0) if np.any(ids == j) else centers[j] for j in range(len(centers))])
             if np.allclose(new, centers):
@@ -60,13 +88,26 @@ class VectorQuantizer:
         """Nearest-code id for each vector -- the discrete token stream ``(n,)``."""
         if self.codebook is None:
             raise RuntimeError("call fit(...) before quantize(...)")
-        return self._assign(np.asarray(vectors, dtype=np.float64), self.codebook)
+        return self._assign(self._as_vectors(vectors, "quantize"), self.codebook)
 
     def dequantize(self, ids: np.ndarray) -> np.ndarray:
-        """Codebook vectors for token ids ``(n,)`` -> ``(n, dim)`` (the reconstruction / de-tokenization)."""
+        """Codebook vectors for token ids ``(n,)`` -> ``(n, dim)`` (the reconstruction / de-tokenization).
+
+        Ids must already be integral. The cast to ``int64`` used to happen *before* the range check, so a
+        fractional id such as ``0.9`` truncated to the ordinary in-range token ``0`` and decoded as if it
+        had been produced by :meth:`quantize`.
+        """
         if self.codebook is None:
             raise RuntimeError("call fit(...) before dequantize(...)")
-        ids_arr = np.asarray(ids, dtype=np.int64)
+        raw = np.asarray(ids)
+        if raw.dtype.kind == "b":
+            raise ValueError("code ids must be integers, not Booleans")
+        if raw.dtype.kind == "f":
+            if not np.isfinite(raw).all() or np.any(raw != np.rint(raw)):
+                raise ValueError("code ids must be exact integers; a fractional id is not a token")
+        elif raw.dtype.kind not in "iu":
+            raise ValueError(f"code ids must be integers, got dtype {raw.dtype}")
+        ids_arr = raw.astype(np.int64)
         bad = (ids_arr < 0) | (ids_arr >= len(self.codebook))
         if np.any(bad):
             bad_id = int(np.asarray(ids_arr[bad]).flat[0])
@@ -75,7 +116,7 @@ class VectorQuantizer:
 
     def reconstruction_error(self, vectors: np.ndarray) -> float:
         """Mean squared quantization error -- the codebook's fidelity (a codebook-size / bitrate knob)."""
-        v = np.asarray(vectors, dtype=np.float64)
+        v = self._as_vectors(vectors, "reconstruction_error")
         return float(np.mean(np.sum((v - self.dequantize(self.quantize(v))) ** 2, axis=1)))
 
     def straight_through(self, vectors: Any) -> Any:

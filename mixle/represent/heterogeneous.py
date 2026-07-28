@@ -57,18 +57,29 @@ class HeterogeneousEncoder:
         self.encoders: dict[str, ModalityEncoder] = {}
         self._modality_ids: dict[str, int] = {}
         self._modality_embedding: Any = None  # CategoricalEmbedding over modality ids, built lazily
+        self._exported_parameters: set[int] | None = None  # ids handed to an optimizer by parameters()
 
-    def register(self, modality: str, segmenter: Any, embedding: Any) -> HeterogeneousEncoder:
+    def register(self, modality: str, segmenter: Any, embedding: Any, *, rebind: bool = False) -> HeterogeneousEncoder:
         """Add a modality's ``(segmenter, embedding)``; the embedding's ``dim`` must match the shared space."""
-        return self.register_encoder(modality, ModalityEncoder(segmenter, embedding))
+        return self.register_encoder(modality, ModalityEncoder(segmenter, embedding), rebind=rebind)
 
-    def register_encoder(self, modality: str, encoder: ModalityEncoder) -> HeterogeneousEncoder:
+    def register_encoder(
+        self, modality: str, encoder: ModalityEncoder, *, rebind: bool = False
+    ) -> HeterogeneousEncoder:
         """Add a pre-built :class:`ModalityEncoder` (e.g. a ``GraphEncoder`` that owns its own segment+embed path).
 
         Re-registering an already-registered modality (same name -- e.g. swapping its encoder) leaves any
         already-learned modality-tag embedding untouched, since the modality *set* did not change. Registering a
         genuinely new modality grows the tag embedding by one row, preserving already-learned rows for the
         modalities that were already registered.
+
+        Registration is a change to the *trainable parameter set*. Once :meth:`parameters` has handed that set
+        to an optimizer, a later registration introduces parameter objects the optimizer does not own -- the
+        grown tag embedding is a new module, so its weight receives gradients but is never stepped, and the same
+        holds for the newly registered encoder's own parameters. That looked exactly like successful dynamic
+        registration while silently freezing every new and replaced tensor. Such a registration now raises unless
+        the caller passes ``rebind=True``, which performs it and invalidates the export, so the optimizer must be
+        rebuilt from a fresh :meth:`parameters` call before training resumes.
         """
         if not isinstance(modality, str) or not modality:
             raise ValueError("modality must be a non-empty string")
@@ -78,12 +89,33 @@ class HeterogeneousEncoder:
             or int(encoder.dim) != self.dim
         ):
             raise ValueError(f"modality {modality!r} dim {encoder.dim} != shared dim {self.dim}")
-        self.encoders[modality] = encoder
         is_new_modality = modality not in self._modality_ids
+        if self._exported_parameters is not None and not rebind:
+            self._reject_detached_registration(modality, encoder, is_new_modality)
+        self.encoders[modality] = encoder
         self._modality_ids.setdefault(modality, len(self._modality_ids))
         if is_new_modality and self._modality_embedding is not None:
             self._modality_embedding = self._expand_modality_embedding(self._modality_embedding)
+        if self._exported_parameters is not None:
+            self._exported_parameters = None  # the export is stale; parameters() must be called again
         return self
+
+    def _reject_detached_registration(self, modality: str, encoder: ModalityEncoder, is_new_modality: bool) -> None:
+        """Raise if this registration would add trainable state no already-built optimizer can reach."""
+        exported = self._exported_parameters or set()
+        grows_tag = is_new_modality and self._modality_embedding is not None
+        embedding = getattr(encoder, "embedding", None)
+        module = embedding.module() if embedding is not None and hasattr(embedding, "module") else None
+        adds_encoder_params = module is not None and any(id(p) not in exported for p in module.parameters())
+        if not (grows_tag or adds_encoder_params):
+            return
+        detached = "the grown modality-tag embedding" if grows_tag else f"modality {modality!r}'s own embedding"
+        raise RuntimeError(
+            f"registering {modality!r} after parameters() were handed to an optimizer would leave "
+            f"{detached} outside that optimizer: it would receive gradients but never be stepped. "
+            "Register every modality before building the optimizer, or pass rebind=True and rebuild the "
+            "optimizer from a fresh parameters() call."
+        )
 
     def _modality_embed(self) -> Any:
         if self._modality_embedding is None:
@@ -153,7 +185,11 @@ class HeterogeneousEncoder:
             return stream.cpu().numpy(), tags
 
     def parameters(self) -> list:
-        """Every trainable parameter across all modality encoders + the modality-tag embedding (for an optimizer)."""
+        """Every trainable parameter across all modality encoders + the modality-tag embedding (for an optimizer).
+
+        Calling this marks the parameter set as exported: a later :meth:`register_encoder` that would add
+        trainable state outside the optimizer built from this list is refused (see that method).
+        """
         seen, out = set(), []
         modules = [e.embedding.module() for e in self.encoders.values()] + [self._modality_embed().module()]
         for m in modules:
@@ -161,4 +197,5 @@ class HeterogeneousEncoder:
                 if id(p) not in seen:
                     seen.add(id(p))
                     out.append(p)
+        self._exported_parameters = seen
         return out
