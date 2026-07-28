@@ -43,8 +43,34 @@ class ErrorFreeTransformTest(unittest.TestCase):
                 rhs = mpmath.mpf(float(p[i])) + mpmath.mpf(float(e[i]))
                 self.assertEqual(lhs, rhs)  # a*b == p + e exactly
 
+    def test_two_prod_scales_large_finite_operands(self):
+        p, e = two_prod(np.array([1e308]), np.array([1.0]))
+        self.assertTrue(np.all(np.isfinite(p)))
+        self.assertTrue(np.all(np.isfinite(e)))
+        self.assertEqual(float(p[0]), 1e308)
+
 
 class DoubleDoubleArithmeticTest(unittest.TestCase):
+    def test_constructor_normalizes_owns_and_freezes_components(self):
+        hi = np.array([0.0])
+        lo = np.array([1e308])
+        value = DoubleDouble(hi, lo)
+        hi[0] = 7.0
+        lo[0] = 9.0
+        self.assertEqual(float(value.hi[0]), 1e308)
+        self.assertEqual(float(value.lo[0]), 0.0)
+        self.assertFalse(value.hi.flags.writeable)
+        self.assertFalse(value.lo.flags.writeable)
+        ulp = np.spacing(np.abs(value.hi))
+        self.assertTrue(np.all(np.abs(value.lo) <= 0.5 * ulp))
+
+    def test_constructor_rejects_nonfinite_or_unrepresentable_components(self):
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.assertRaises(ValueError):
+                DoubleDouble(bad)
+        with self.assertRaises(OverflowError):
+            DoubleDouble(1e308, 1e308)
+
     def test_dd_mul_matches_mpmath_to_full_precision(self):
         rng = np.random.RandomState(2)
         a = rng.randn(200)
@@ -71,6 +97,12 @@ class DoubleDoubleArithmeticTest(unittest.TestCase):
 
 
 class AccurateReductionTest(unittest.TestCase):
+    def test_large_finite_dot_remains_finite(self):
+        result = dd_dot([1e308], [1.0])
+        self.assertTrue(np.all(np.isfinite(result.hi)))
+        self.assertTrue(np.all(np.isfinite(result.lo)))
+        self.assertEqual(float(result.to_float()), 1e308)
+
     def _exact_sum(self, x):
         with mpmath.workprec(400):
             return mpmath.fsum(mpmath.mpf(float(v)) for v in x)

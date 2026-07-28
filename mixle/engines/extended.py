@@ -14,7 +14,8 @@ hot paths -- an accurate sum and dot product -- where catastrophic cancellation 
 log-sum-exp of near-equal terms) otherwise eats precision. Beyond double-double, quad-double / multi-limb
 take over (a Cython/C job); this file is the part that needs only numpy.
 
-Caveat: the Veltkamp split overflows for ``|x| > ~1e300``; mixle's log-densities are far from that.
+The Veltkamp split is power-of-two scaled for large operands, so every finite representable product
+either produces a finite error-free pair or fails closed when the exact result cannot be represented.
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ from mixle.engines._optional_extension import load_optional_extension
 
 # Veltkamp splitting factor for IEEE double (53-bit significand): 2**ceil(53/2) + 1.
 _SPLITTER = float(2**27 + 1)
+_SPLIT_SCALE = 2.0**-28
+_SPLIT_THRESHOLD = np.finfo(np.float64).max / _SPLITTER
 
 
 def two_sum(a: Any, b: Any) -> tuple[Any, Any]:
@@ -49,10 +52,13 @@ def quick_two_sum(a: Any, b: Any) -> tuple[Any, Any]:
 
 def _split(a: Any) -> tuple[Any, Any]:
     """Veltkamp split: ``a == hi + lo`` with ``hi`` holding the top ~26 bits (exact, non-overlapping)."""
-    c = _SPLITTER * a
-    abig = c - a
-    hi = c - abig
-    lo = a - hi
+    a = np.asarray(a, dtype=np.float64)
+    scale = np.where(np.abs(a) > _SPLIT_THRESHOLD, _SPLIT_SCALE, 1.0)
+    scaled = a * scale
+    c = _SPLITTER * scaled
+    abig = c - scaled
+    hi = (c - abig) / scale
+    lo = (scaled - (c - abig)) / scale
     return hi, lo
 
 
@@ -61,10 +67,21 @@ def two_prod(a: Any, b: Any) -> tuple[Any, Any]:
 
     Uses the Veltkamp split because numpy exposes no fused-multiply-add. Vectorized.
     """
-    p = a * b
+    a, b = np.broadcast_arrays(np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64))
+    if (a.size and not np.all(np.isfinite(a))) or (b.size and not np.all(np.isfinite(b))):
+        raise ValueError("two_prod requires finite inputs")
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        p = a * b
+    if p.size and not np.all(np.isfinite(p)):
+        raise OverflowError("double-double product overflowed float64")
+    if p.size and np.any((a != 0) & (b != 0) & (p == 0)):
+        raise ArithmeticError("double-double product underflow cannot be represented")
     ahi, alo = _split(a)
     bhi, blo = _split(b)
-    e = ((ahi * bhi - p) + ahi * blo + alo * bhi) + alo * blo
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        e = ((ahi * bhi - p) + ahi * blo + alo * bhi) + alo * blo
+    if e.size and not np.all(np.isfinite(e)):
+        raise ArithmeticError("double-double product transform produced a non-finite residual")
     return p, e
 
 
@@ -77,8 +94,26 @@ class DoubleDouble:
     __slots__ = ("hi", "lo")
 
     def __init__(self, hi: Any, lo: Any = 0.0) -> None:
-        self.hi = np.asarray(hi, dtype=np.float64)
-        self.lo = np.asarray(lo, dtype=np.float64) + np.zeros_like(self.hi)
+        hi_arr, lo_arr = np.broadcast_arrays(
+            np.asarray(hi, dtype=np.float64),
+            np.asarray(lo, dtype=np.float64),
+        )
+        if (hi_arr.size and not np.all(np.isfinite(hi_arr))) or (
+            lo_arr.size and not np.all(np.isfinite(lo_arr))
+        ):
+            raise ValueError("DoubleDouble components must be finite")
+        with np.errstate(over="ignore", invalid="ignore"):
+            normalized_hi, normalized_lo = two_sum(hi_arr, lo_arr)
+        if (normalized_hi.size and not np.all(np.isfinite(normalized_hi))) or (
+            normalized_lo.size and not np.all(np.isfinite(normalized_lo))
+        ):
+            raise OverflowError("DoubleDouble components cannot be normalized to a finite value")
+        owned_hi = np.array(normalized_hi, dtype=np.float64, copy=True)
+        owned_lo = np.array(normalized_lo, dtype=np.float64, copy=True)
+        owned_hi.setflags(write=False)
+        owned_lo.setflags(write=False)
+        self.hi = owned_hi
+        self.lo = owned_lo
 
     @classmethod
     def from_float(cls, x: Any) -> DoubleDouble:
@@ -119,6 +154,8 @@ def dd_sum(x: Any) -> DoubleDouble:
     is correct to ~106 bits even for catastrophically cancelling inputs that ``float64`` sums get wrong.
     """
     hi = np.asarray(x, dtype=np.float64).ravel().copy()
+    if hi.size and not np.all(np.isfinite(hi)):
+        raise ValueError("dd_sum requires finite inputs")
     if hi.size == 0:
         return DoubleDouble(0.0, 0.0)
     lo = np.zeros_like(hi)
@@ -177,6 +214,8 @@ def dd_dot(a: Any, b: Any) -> DoubleDouble:
     a = np.ascontiguousarray(np.asarray(a, dtype=np.float64).ravel())
     b = np.ascontiguousarray(np.asarray(b, dtype=np.float64).ravel())
     _require_equal_length(a, b)
+    if (a.size and not np.all(np.isfinite(a))) or (b.size and not np.all(np.isfinite(b))):
+        raise ValueError("dd_dot requires finite inputs")
     if HAS_DD_KERNELS:
         hi, lo = _dd_dot_c(a, b)
         return DoubleDouble(np.float64(hi), np.float64(lo))
