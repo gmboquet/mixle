@@ -24,10 +24,15 @@ so a caller can see the band is an empirical heuristic rather than a certified i
 time-series-valid procedure (rolling/block conformal over multiple forecast origins, with
 horizon-specific calibration retained) is what a coverage claim here would require.
 
-:func:`route_distribution` then turns that forecast into a network flow problem: the forecast mean
-is the per-node demand, ``supply_nodes - demand`` is the net supply IC-9's :func:`min_cost_flow`
-consumes directly (H1's already-solved minimum-cost network flow), giving the min-cost dispatch that
-meets the forecast at once.
+:func:`route_distribution` then turns a forecast into a network flow problem. It takes an explicit
+``demand_nodes`` mapping from forecast coordinates to physical network nodes and an explicit ``risk``
+policy, because neither is inferable: :func:`forecast_demand` produces one value per future TIME
+STEP, and a time step is not a plant/depot/customer. Routing used to require the forecast vector to
+align one-to-one with ``supply_nodes`` by position and used its length as the dimension of a spatial
+graph, so a horizon of four silently became four physical nodes -- a valid flow for an invented
+network. There is still no location-by-time demand tensor, no inventory state, no temporal transport
+arc and no lead time here: this compiles ONE period's spatial dispatch, and a genuine location x time
+network with inventory and conservation semantics remains unbuilt.
 
     >>> history = [50.0 + 10 * ((-1) ** (t // 12)) for t in range(60)]
     >>> f = forecast_demand(history, horizon=4, level=0.9, seed=0)
@@ -46,7 +51,13 @@ from mixle.inference.conformal import split_conformal
 from mixle.inference.forecast import Forecast, forecast
 from mixle.relations import Flow, min_cost_flow
 
-__all__ = ["DemandBandCalibration", "DemandForecast", "forecast_demand", "route_distribution"]
+__all__ = [
+    "RISK_POLICIES",
+    "DemandBandCalibration",
+    "DemandForecast",
+    "forecast_demand",
+    "route_distribution",
+]
 
 _N_STATES = 2  # low/high demand regimes -- matches the two-state precedent in forecast()'s own tests
 _CAL_FRAC = 0.35  # fraction of history reserved as the calibration tail
@@ -179,26 +190,94 @@ def forecast_demand(history: Any, horizon: int, *, level: float = 0.9, seed: int
     )
 
 
-def route_distribution(supply_nodes: Any, demand_forecast: Forecast, cost: Any, cap: Any) -> Flow:
+#: The dispatch risk policies :func:`route_distribution` implements, and which forecast quantity each
+#: one actually consumes. Naming one is mandatory: reading only ``Forecast.mean`` while the upstream
+#: function emphasizes a calibrated band silently discards every measure of forecast uncertainty --
+#: two forecasts with the same mean ``[0, 10]`` but upper bounds ``[0, 10]`` and ``[1000, 1000]``
+#: produced the identical cost-10 flow, though the second can represent catastrophic unmet-demand
+#: risk.
+RISK_POLICIES: dict[str, str] = {
+    # meet the point forecast exactly. An expected-value dispatch, labelled as such: it uses NO part
+    # of the forecast's band, so it implies nothing about coverage and carries no service level.
+    "expected_value": "mean",
+    # meet the forecast's upper band edge, so the dispatch remains feasible across the band the
+    # forecast actually reports. A robust dispatch at the band's own (empirical, for
+    # forecast_demand -- see DemandBandCalibration) level, not a chance constraint at a stated
+    # service level.
+    "cover_band": "hi",
+}
+
+
+def route_distribution(
+    supply_nodes: Any,
+    demand_forecast: Forecast,
+    cost: Any,
+    cap: Any,
+    *,
+    demand_nodes: Any,
+    risk: str,
+) -> Flow:
     """Route supply to meet forecast demand at minimum cost (H1/IC-9's :func:`min_cost_flow`).
 
-    ``supply_nodes`` and ``demand_forecast.mean`` align one-to-one, per node (a plant/depot/customer
-    per forecast horizon step); ``supply = supply_nodes - demand_forecast.mean`` is the net node
-    supply :func:`min_cost_flow` consumes directly under the given ``(n, n)`` arc ``cap``/``cost``.
+    Compiles ONE period's spatial dispatch: ``supply = supply_nodes - demand`` is the net node supply
+    :func:`min_cost_flow` consumes directly under the given ``(n, n)`` arc ``cap``/``cost``, where
+    ``demand`` is the forecast quantity chosen by ``risk``, scattered onto the network nodes named by
+    ``demand_nodes``.
+
+    Both keyword arguments are required, and deliberately have no default:
+
+    * ``demand_nodes`` separates temporal forecast coordinates from spatial entities. A forecast from
+      :func:`forecast_demand` is indexed by future TIME STEP; this function needs demand indexed by
+      physical node. Alignment used to be implicit and positional, with the forecast's own length
+      taken as the network's node count, so a horizon of four became four plant/depot/customer nodes
+      and the solver returned a valid flow for a network nobody described.
+    * ``risk`` names which forecast quantity is dispatched against (see :data:`RISK_POLICIES`), so an
+      expected-value dispatch is labelled as one and cannot be mistaken for having used the
+      forecast's calibrated coverage.
+
+    This is not a stochastic or multi-period program: there is no location-by-time demand tensor, no
+    inventory state, no temporal transport arc, no lead time, no shortage penalty and no chance
+    constraint. ``cover_band`` is a robust dispatch against the band the forecast reports, and that
+    band's own guarantee is whatever the forecast claims (for :func:`forecast_demand`, empirical --
+    see :class:`DemandBandCalibration`).
 
     Args:
-        supply_nodes: length-``n`` available supply per node.
+        supply_nodes: length-``n`` available supply per network node.
         demand_forecast: a :class:`Forecast` (from :func:`forecast_demand` or
-            :func:`mixle.inference.forecast.forecast`) whose ``.mean`` is length ``n``.
+            :func:`mixle.inference.forecast.forecast`).
         cost: ``(n, n)`` per-unit arc routing cost.
         cap: ``(n, n)`` arc capacity.
+        demand_nodes: one network node index per forecast coordinate, naming which node that
+            coordinate's demand belongs to. Must be unique and within ``range(n)``.
+        risk: a key of :data:`RISK_POLICIES`.
 
     Returns:
         The resolved :class:`mixle.relations.Flow` (``value`` = total routing cost, ``flow`` = arcs).
     """
+    if risk not in RISK_POLICIES:
+        raise ValueError(f"risk must be one of {sorted(RISK_POLICIES)}, got {risk!r}")
     supply_nodes = np.asarray(supply_nodes, dtype=np.float64)
-    demand = np.asarray(demand_forecast.mean, dtype=np.float64)
-    if supply_nodes.shape != demand.shape:
-        raise ValueError("supply_nodes and demand_forecast.mean must align, one entry per node")
-    supply = supply_nodes - demand
-    return min_cost_flow(cap, cost, supply)
+    if supply_nodes.ndim != 1:
+        raise ValueError("supply_nodes must be a 1-D per-node supply vector")
+    n = supply_nodes.shape[0]
+
+    forecast_demand_values = np.asarray(getattr(demand_forecast, RISK_POLICIES[risk]), dtype=np.float64)
+    if forecast_demand_values.ndim != 1:
+        raise ValueError(f"demand_forecast.{RISK_POLICIES[risk]} must be a 1-D series")
+    if not np.isfinite(forecast_demand_values).all():
+        raise ValueError(f"demand_forecast.{RISK_POLICIES[risk]} must be finite")
+
+    nodes = np.asarray(demand_nodes, dtype=np.int64)
+    if nodes.ndim != 1 or nodes.shape[0] != forecast_demand_values.shape[0]:
+        raise ValueError(
+            f"demand_nodes needs one network node per forecast coordinate: got {nodes.shape[0] if nodes.ndim == 1 else nodes.shape} "
+            f"for {forecast_demand_values.shape[0]} forecast values"
+        )
+    if nodes.size and (nodes.min() < 0 or nodes.max() >= n):
+        raise ValueError(f"demand_nodes must index the {n} network nodes in supply_nodes")
+    if len(set(nodes.tolist())) != nodes.shape[0]:
+        raise ValueError("demand_nodes must name each network node at most once")
+
+    demand = np.zeros(n, dtype=np.float64)
+    demand[nodes] = forecast_demand_values
+    return min_cost_flow(cap, cost, supply_nodes - demand)
