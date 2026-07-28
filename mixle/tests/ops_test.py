@@ -73,3 +73,49 @@ def test_enumeration_spans_distributions_and_relations():
     # the relation enumerates its solutions in best-first order
     first = next(rel.enumerator())
     assert first.objective == pytest.approx(1.5)
+
+
+# --------------------------------------------------------------- quantize's target measure
+def test_quantize_accounts_for_the_bracketed_out_tails():
+    # MXR-080-1680: the exact-CDF route computed masses only between the lo_q/hi_q quantiles and
+    # renormalized that interior to one -- the conditional distribution inside the bracket -- while
+    # the sampling fallback clipped tail draws into the edge bins. Quantizing a uniform with
+    # lo_q=.25, hi_q=.75, bits=2 returned four masses of .25 where the clipped answer is
+    # .375/.125/.125/.375. Both routes must target the same measure.
+    from mixle.stats.univariate.continuous.uniform import UniformDistribution
+
+    q = ops.quantize(UniformDistribution(0.0, 1.0), bits=2, lo_q=0.25, hi_q=0.75)
+    masses = [p for _, p in sorted(q.pmap.items())]
+    assert len(masses) == 4
+    assert masses == pytest.approx([0.375, 0.125, 0.125, 0.375], abs=1e-9)
+    assert sum(masses) == pytest.approx(1.0)
+
+    # the sampling fallback (no cdf) targets the same measure
+    class NoCdf:
+        def __init__(self, base):
+            self._base = base
+
+        def sampler(self, seed):
+            return self._base.sampler(seed)
+
+    sampled = ops.quantize(NoCdf(UniformDistribution(0.0, 1.0)), bits=2, lo_q=0.25, hi_q=0.75, n_samples=200_000)
+    sampled_masses = [p for _, p in sorted(sampled.pmap.items())]
+    assert sampled_masses == pytest.approx(masses, abs=0.01)
+
+
+def test_quantize_validates_its_controls():
+    from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
+
+    g = GaussianDistribution(0.0, 1.0)
+    for kwargs in (
+        {"bits": 0},
+        {"bits": True},
+        {"bits": 2.5},
+        {"lo_q": 0.75, "hi_q": 0.25},
+        {"lo_q": -0.1},
+        {"hi_q": 1.5},
+        {"n_samples": 0},
+        {"n_samples": True},
+    ):
+        with pytest.raises(ValueError):
+            ops.quantize(g, **kwargs)
