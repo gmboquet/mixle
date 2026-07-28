@@ -814,6 +814,33 @@ class EngineTestCase(unittest.TestCase):
         self.assertAlmostEqual(torch_sum, true_sum, places=1)
 
     @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_torch_max_tuple_axes_normalize_negatives_against_original_rank(self):
+        # Regression (MXR-080-1562): the tuple fold sorted the raw axes, so negative axes were
+        # applied against the SHRINKING rank instead of the original one. Reducing (2,3,4) over
+        # (-1,-2) returned shape (3,) / [15,19,23]; numpy's contract is shape (2,) / [11,23].
+        te = TorchEngine(device="cpu", dtype="float64")
+        raw = np.arange(24.0).reshape(2, 3, 4)
+        t = te.asarray(raw)
+        for axes in [(-1, -2), (-2, -1), (0, -1), (0, 1), (1, 2), (-3, -2, -1)]:
+            expected = np.max(raw, axis=axes)
+            got = np.asarray(te.max(t, axis=axes).cpu())
+            self.assertEqual(got.shape, expected.shape, axes)
+            np.testing.assert_allclose(got, expected, err_msg=str(axes))
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_torch_max_tuple_axes_reject_duplicates_and_out_of_range(self):
+        # Regression (MXR-080-1562): duplicate axes silently reduced two DIFFERENT dimensions
+        # ((0,0) on a (2,3,4) tensor returned shape (4,)); numpy raises instead.
+        te = TorchEngine(device="cpu", dtype="float64")
+        t = te.asarray(np.arange(24.0).reshape(2, 3, 4))
+        for axes in [(0, 0), (-1, 2), (1, -2)]:
+            with self.assertRaises(ValueError):
+                te.max(t, axis=axes)
+        for axes in [(1, 5), (0, -4)]:
+            with self.assertRaises(IndexError):
+                te.max(t, axis=axes)
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_mixed_engine_payload_fails(self):
         payload = (np.asarray([1.0]), torch.tensor([1.0]))
         with self.assertRaises(TypeError):
