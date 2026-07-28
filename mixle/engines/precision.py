@@ -124,7 +124,7 @@ def _is_gpu_engine(engine: Any) -> bool:
 
 
 def _numeric_data_sample(data: Any, sample_size: int = 512) -> np.ndarray | None:
-    """Flatten a sample of up to ``sample_size`` observations to a float array, or None if not
+    """Flatten a sample of up to ``sample_size`` scalar values to a float array, or None if not
     numeric.
 
     Handles scalars, sequences/arrays of scalars, and (nested) tuples of those -- enough to read the
@@ -153,7 +153,7 @@ def _numeric_data_sample(data: Any, sample_size: int = 512) -> np.ndarray | None
 
     Args:
         data: A representative sample of the raw observations (or an iterable of them).
-        sample_size: The maximum number of observations to inspect. Must be a positive integer.
+        sample_size: The global maximum number of scalar values to inspect. Must be a positive integer.
 
     Raises:
         ValueError: if ``sample_size`` is not a positive integer.
@@ -162,16 +162,34 @@ def _numeric_data_sample(data: Any, sample_size: int = 512) -> np.ndarray | None
         raise ValueError("sample_size must be a positive integer, got %r." % (sample_size,))
     if data is None:
         return None
-    if hasattr(data, "__len__") and hasattr(data, "__getitem__"):
-        n = len(data)
+
+    def _positions(n: int, count: int) -> list[int]:
+        """Return ``count`` increasing positions spanning both endpoints of ``range(n)``."""
+        if count >= n:
+            return list(range(n))
+        if count == 1:
+            return [n - 1]
+        # Since n >= count, this integer construction is strictly increasing, has no duplicates,
+        # and includes both endpoints.  The former int(i*n/count) construction never selected n-1.
+        return [(i * (n - 1)) // (count - 1) for i in range(count)]
+
+    def _budgets(count: int, total: int) -> list[int]:
+        """Split a scalar budget across children without exceeding it."""
+        base, extra = divmod(total, count)
+        return [base + (i < extra) for i in range(count)]
+
+    scalar = isinstance(data, (int, float, np.integer, np.floating)) and not isinstance(data, (bool, np.bool_))
+    if scalar:
+        head = [data]
+    elif hasattr(data, "__len__") and hasattr(data, "__getitem__"):
+        try:
+            n = len(data)
+        except TypeError:
+            return None
         if n == 0:
             return None
         try:
-            if n > sample_size:
-                step = n / sample_size
-                head = [data[int(i * step)] for i in range(sample_size)]
-            else:
-                head = [data[i] for i in range(n)]
+            head = [data[i] for i in _positions(n, min(n, sample_size))]
         except (KeyError, IndexError):
             # Has the sequence protocol's attributes but is not actually positionally indexable
             # (e.g. a dict, keyed by non-integer keys) -- not a supported data shape.
@@ -185,8 +203,8 @@ def _numeric_data_sample(data: Any, sample_size: int = 512) -> np.ndarray | None
             return None
     out: list[float] = []
 
-    def _collect(obj: Any) -> bool:
-        if obj is None or isinstance(obj, (str, bytes, bool)):
+    def _collect(obj: Any, budget: int) -> bool:
+        if budget <= 0 or obj is None or isinstance(obj, (str, bytes, bool, np.bool_)):
             return False
         if isinstance(obj, (int, float, np.integer, np.floating)):
             out.append(float(obj))
@@ -194,18 +212,21 @@ def _numeric_data_sample(data: Any, sample_size: int = 512) -> np.ndarray | None
         if isinstance(obj, np.ndarray):
             if obj.dtype.kind not in "fiu" or obj.size == 0:
                 return False
-            out.extend(np.asarray(obj, dtype=np.float64).ravel().tolist())
+            flat = obj.ravel()
+            selected = _positions(flat.size, min(flat.size, budget))
+            out.extend(float(flat[i]) for i in selected)
             return True
         if isinstance(obj, (list, tuple)):
             ok = False
-            for el in obj:
-                ok = _collect(el) or ok
+            positions = _positions(len(obj), min(len(obj), budget)) if obj else []
+            for pos, child_budget in zip(positions, _budgets(len(positions), budget)):
+                ok = _collect(obj[pos], child_budget) or ok
             return ok
         return False
 
     any_numeric = False
-    for obs in head:
-        any_numeric = _collect(obs) or any_numeric
+    for obs, budget in zip(head, _budgets(len(head), sample_size)):
+        any_numeric = _collect(obs, budget) or any_numeric
     if not any_numeric or not out:
         return None
     return np.asarray(out, dtype=np.float64)
