@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -431,11 +432,35 @@ class Scientist:
         self._actions: list[Any] = []
 
     # -- knowledge + capability mounting ------------------------------------------------------------
-    def learn(self, docs: Any, *, source: str = "user") -> int:
-        """Ingest documents into the citable knowledge (secrets redacted before indexing)."""
+    def learn(self, docs: str | Sequence[Any], *, source: str = "user") -> int:
+        """Ingest documents into the citable knowledge (secrets redacted before indexing).
+
+        ``docs`` is EITHER one document (a ``str``) or a collection of documents. A bare string is one
+        document: iterating it directly made every character its own knowledge item, so the ordinary
+        single-document call ``learn("hello world")`` reported 11 documents ingested and stored
+        ``["h", "e", ..., "d"]`` as separate citable items -- destroying document structure and leaving
+        later retrieval and provenance hanging off accidental character fragments.
+
+        Any other iterable is materialized once (so a one-shot generator is not consumed by the
+        redaction pass and then found empty by the ingest), and each item must be a string document;
+        anything else is rejected by position rather than silently stringified into a citable "fact".
+        Returns the number of documents ingested.
+        """
         from mixle.substrate import ingest_documents, safe_text
 
-        clean = [safe_text(str(d)) for d in docs]
+        if isinstance(docs, (str, bytes, bytearray)):
+            docs = [docs]
+        items = list(docs)
+        clean: list[str] = []
+        for i, doc in enumerate(items):
+            if isinstance(doc, (bytes, bytearray)):
+                doc = doc.decode()
+            if not isinstance(doc, str):
+                raise TypeError(
+                    f"learn() takes one document string or a collection of document strings; "
+                    f"document {i} is {type(doc).__name__}"
+                )
+            clean.append(safe_text(doc))
         return len(ingest_documents(self.knowledge, clean, source=source))
 
     def add_action(self, action: Any) -> Scientist:

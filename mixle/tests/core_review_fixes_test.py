@@ -286,6 +286,39 @@ def test_distill_to_edge_rejects_empty_or_misaligned_inputs():
         distill_to_edge(_edge_teacher, _EDGE_TRAIN, _EDGE_VAL, ["alpha"])  # val_truth shorter than val_inputs
 
 
+# --------------------------------------------------------------- MXR-080-1704: learn() one doc vs a corpus
+def test_learn_treats_one_document_string_as_one_document():
+    # Scientist.learn iterated its unconstrained `docs` argument directly, so the ordinary
+    # single-document call learn("hello world") ingested ELEVEN documents -- one per character -- and
+    # stored ["h", "e", ..., "d"] as separate citable knowledge items.
+    from mixle.scientist import Scientist
+
+    sci = Scientist()
+    assert sci.learn("hello world") == 1
+    stored = [item.text for item in sci.knowledge.all()]
+    assert stored == ["hello world"]
+
+
+def test_learn_still_accepts_a_collection_and_consumes_it_once():
+    from mixle.scientist import Scientist
+
+    docs = ["first document", "second document"]
+    sci = Scientist()
+    assert sci.learn(docs) == 2
+    assert sorted(item.text for item in sci.knowledge.all()) == sorted(docs)
+
+    from_generator = Scientist()
+    assert from_generator.learn(d for d in docs) == 2  # one-shot iterable materialized once
+    assert sorted(item.text for item in from_generator.knowledge.all()) == sorted(docs)
+
+
+def test_learn_rejects_a_non_document_item_by_position():
+    from mixle.scientist import Scientist
+
+    with pytest.raises(TypeError, match="document 1"):
+        Scientist().learn(["a real document", {"not": "a document"}])
+
+
 # --------------------------------------------------------------- C-6/C-7: registry ids and tier ordering
 def _json_task_model():
     from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
