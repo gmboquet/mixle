@@ -78,6 +78,24 @@ class AskTellMechanicsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             _ = BayesianOptimizer(self.bounds, n_init=4, seed=0).best  # no observations yet
 
+    def test_constructor_and_ask_controls_are_exact_and_finite(self):
+        for invalid in ("false", 1, np.bool_(True)):
+            with self.assertRaises(TypeError):
+                BayesianOptimizer(self.bounds, maximize=invalid)
+        for invalid in (np.nan, np.inf, -1.0):
+            with self.assertRaises(ValueError):
+                BayesianOptimizer(self.bounds, xi=invalid)
+        for invalid in (0, 2.5, True, np.bool_(True)):
+            with self.assertRaises((TypeError, ValueError)):
+                BayesianOptimizer(self.bounds, n_candidates=invalid)
+        with self.assertRaises(ValueError):
+            BayesianOptimizer(self.bounds, acq_kwargs={"kappa": np.nan})
+
+        optimizer = BayesianOptimizer(self.bounds, n_init=4, seed=0)
+        for invalid in (True, np.bool_(True), 1.5, 0):
+            with self.assertRaises((TypeError, ValueError)):
+                optimizer.ask(invalid)
+
 
 class InitialDesignBoundaryTest(unittest.TestCase):
     """Regression coverage for MXR-080-0187.
@@ -294,6 +312,18 @@ class TellValidationTest(unittest.TestCase):
         opt.tell(p, 1.0)
         self.assertEqual(opt.n_pending, 0)
         self.assertEqual(opt.n_observations, 1)
+
+    def test_large_distinct_points_resolve_their_exact_pending_ids(self):
+        bounds = [(1.0e9, 1.0e9 + 10_000.0)]
+        opt = BayesianOptimizer(bounds, n_init=2, seed=0)
+        opt._init_design = np.array([[1.0e9 + 1_000.0], [1.0e9 + 3_000.0]])
+        first = opt.ask()
+        second = opt.ask()
+        self.assertFalse(opt._close(first, second))
+        opt.tell(second, 2.0)
+        self.assertEqual(opt.n_pending, 1)
+        np.testing.assert_array_equal(opt.pending[0], first)
+        np.testing.assert_array_equal(opt.x[0], second)
 
 
 class PendingProposalTrackingTest(unittest.TestCase):
