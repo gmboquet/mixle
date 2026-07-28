@@ -106,14 +106,8 @@ def _validate_composite_weights(weights: Any, row_count: int) -> np.ndarray:
         checked = np.asarray(weights, dtype=np.float64)
     except (TypeError, ValueError, OverflowError) as exc:
         raise TypeError("composite weights must be a finite non-negative vector.") from exc
-    if (
-        checked.shape != (row_count,)
-        or np.any(~np.isfinite(checked))
-        or np.any(checked < 0.0)
-    ):
-        raise ValueError(
-            "composite weights must be a finite non-negative vector of length %d." % row_count
-        )
+    if checked.shape != (row_count,) or np.any(~np.isfinite(checked)) or np.any(checked < 0.0):
+        raise ValueError("composite weights must be a finite non-negative vector of length %d." % row_count)
     return checked
 
 
@@ -891,8 +885,7 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
         if not isinstance(x, (tuple, list, np.ndarray)) or len(x) != self.count:
             actual = len(x) if isinstance(x, (tuple, list, np.ndarray)) else type(x).__name__
             raise ValueError(
-                "composite accumulator observation must contain exactly %d fields; got %s."
-                % (self.count, actual)
+                "composite accumulator observation must contain exactly %d fields; got %s." % (self.count, actual)
             )
 
     def _validate_estimate(self, estimate: CompositeDistribution | None) -> None:
@@ -1012,9 +1005,7 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
         checked_weights = _validate_composite_weights(weights, row_count)
         self._validate_estimate(estimate)
         for i in range(self.count):
-            self.accumulators[i].seq_update(
-                x[i], checked_weights, estimate.dists[i] if estimate is not None else None
-            )
+            self.accumulators[i].seq_update(x[i], checked_weights, estimate.dists[i] if estimate is not None else None)
 
     def seq_update_engine(
         self, x: tuple[Any, ...], weights: Any, estimate: CompositeDistribution | None, engine: Any
@@ -1047,8 +1038,7 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
         if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != self.count:
             actual = len(suff_stat) if isinstance(suff_stat, (tuple, list)) else type(suff_stat).__name__
             raise ValueError(
-                "composite sufficient statistics must contain exactly %d child values; got %s."
-                % (self.count, actual)
+                "composite sufficient statistics must contain exactly %d child values; got %s." % (self.count, actual)
             )
         for i in range(0, self.count):
             self.accumulators[i].combine(suff_stat[i])
@@ -1073,8 +1063,7 @@ class CompositeAccumulator(SequenceEncodableStatisticAccumulator):
         if not isinstance(x, (tuple, list)) or len(x) != self.count:
             actual = len(x) if isinstance(x, (tuple, list)) else type(x).__name__
             raise ValueError(
-                "composite restored statistics must contain exactly %d child values; got %s."
-                % (self.count, actual)
+                "composite restored statistics must contain exactly %d child values; got %s." % (self.count, actual)
             )
         restored = [self.accumulators[i].from_value(x[i]) for i in range(self.count)]
         self.accumulators[:] = restored
@@ -1272,6 +1261,17 @@ class CompositeEstimator(ParameterEstimator):
         return CompositeDistribution(tuple(components))
 
 
+def _child_encoding_signature(encoder):
+    """A child encoder's column-layout identity, or the encoder itself when it declares none."""
+    signature = getattr(encoder, "encoding_signature", None)
+    if callable(signature):
+        try:
+            return signature()
+        except (TypeError, ValueError):
+            return encoder
+    return encoder
+
+
 class CompositeDataEncoder(DataSequenceEncoder):
     """Encoder that applies each component encoder to the corresponding tuple field."""
 
@@ -1316,6 +1316,16 @@ class CompositeDataEncoder(DataSequenceEncoder):
                 return False
 
         return True
+
+    def encoding_signature(self) -> tuple:
+        """Column-layout identity of this composite encoder: its kind plus each child's signature.
+
+        Composes so that a leaf which distinguishes "same encoder" from "same encoding" (see
+        ``BinomialDataEncoder.encoding_signature``) is not overruled by a wrapper falling back to
+        ``__eq__``. A child that does not implement it contributes itself, so equality still decides
+        for that branch.
+        """
+        return ("composite", tuple(_child_encoding_signature(e) for e in self.encoders))
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the component encoders."""

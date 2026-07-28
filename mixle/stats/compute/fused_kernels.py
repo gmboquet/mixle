@@ -1264,9 +1264,7 @@ def _distribution_group_fingerprint(dists: Sequence[Any]) -> Any:
     dist_type = type(dists[0])
     if any(type(dist) is not dist_type for dist in dists):
         names = sorted({type(dist).__name__ for dist in dists})
-        raise KernelCapabilityDeclinedError(
-            "all components must have identical structure (got mixed %s)" % names
-        )
+        raise KernelCapabilityDeclinedError("all components must have identical structure (got mixed %s)" % names)
     if dist_type not in _BUILDERS:
         raise KernelCapabilityDeclinedError("no numba kernel for distribution type %s" % dist_type.__name__)
 
@@ -1288,19 +1286,12 @@ def _distribution_group_fingerprint(dists: Sequence[Any]) -> Any:
     if dist_type is SequenceDistribution:
         if any(getattr(dist, "len_normalized", False) for dist in dists):
             raise KernelCapabilityDeclinedError("kernels do not support len_normalized SequenceDistributions")
-        has_length = [
-            dist.len_dist is not None and not isinstance(dist.len_dist, NullDistribution)
-            for dist in dists
-        ]
+        has_length = [dist.len_dist is not None and not isinstance(dist.len_dist, NullDistribution) for dist in dists]
         if any(value != has_length[0] for value in has_length):
             raise KernelCapabilityDeclinedError(
                 "SequenceDistribution components must agree on whether a length model is present"
             )
-        length_structure = (
-            _distribution_group_fingerprint([dist.len_dist for dist in dists])
-            if has_length[0]
-            else None
-        )
+        length_structure = _distribution_group_fingerprint([dist.len_dist for dist in dists]) if has_length[0] else None
         return (
             type_id,
             _distribution_group_fingerprint([dist.dist for dist in dists]),
@@ -1310,21 +1301,11 @@ def _distribution_group_fingerprint(dists: Sequence[Any]) -> Any:
 
     if dist_type is OptionalDistribution:
         first = dists[0]
-        missing = (
-            "nan"
-            if first.missing_value_is_nan
-            else _fingerprint_value(first.missing_value)
-        )
+        missing = "nan" if first.missing_value_is_nan else _fingerprint_value(first.missing_value)
         for dist in dists[1:]:
-            candidate = (
-                "nan"
-                if dist.missing_value_is_nan
-                else _fingerprint_value(dist.missing_value)
-            )
+            candidate = "nan" if dist.missing_value_is_nan else _fingerprint_value(dist.missing_value)
             if candidate != missing:
-                raise KernelCapabilityDeclinedError(
-                    "OptionalDistribution components must share the same missing value"
-                )
+                raise KernelCapabilityDeclinedError("OptionalDistribution components must share the same missing value")
         return (
             type_id,
             missing,
@@ -1362,9 +1343,7 @@ def _distribution_group_fingerprint(dists: Sequence[Any]) -> Any:
     if dist_type is DiagonalGaussianDistribution:
         dimensions = tuple(int(dist.dim) for dist in dists)
         if any(dimension != dimensions[0] for dimension in dimensions):
-            raise KernelCapabilityDeclinedError(
-                "DiagonalGaussianDistribution components must share the same dimension"
-            )
+            raise KernelCapabilityDeclinedError("DiagonalGaussianDistribution components must share the same dimension")
         return type_id, dimensions[0]
 
     return (type_id,)
@@ -1456,8 +1435,36 @@ class CompiledMixture:
 
     @staticmethod
     def _encoders_are_compatible(left, right) -> bool:
+        """Can ``right`` score the columns ``left`` already produced?
+
+        Identity of TYPE, not of name: two different classes can share a name across modules, which
+        is what the original check missed (MXR-080-0094).
+
+        Beyond that the question is narrower than "are these the same encoder". The compiled encoding
+        is produced once by ``left`` and never regenerated; the replacement model's encoder is only
+        consulted here. What has to hold is that ``right`` would have laid the columns out the same
+        way -- not that it would have accepted exactly the same inputs.
+
+        Encoder equality conflates the two, and for a data-derived encoder that is too strict: a
+        ``BinomialDataEncoder``'s ``min_val``/``max_val`` are acceptance bounds passed to
+        ``exact_integer_observations``; the emitted columns carry the *data's* own observed range. So
+        two Binomial encoders differing only in bounds produce byte-identical columns for any data
+        both accept -- yet compared unequal, which rejected the ordinary EM step that re-derives
+        ``(n, min_val)`` from the data in its M-step (kernels_ext_test's min_val-shift parity case).
+
+        An encoder that can distinguish the two says so by implementing ``encoding_signature()``,
+        returning only the part of its identity that determines column layout. Anything that does not
+        keeps full equality -- the conservative answer, and the existing behaviour.
+        """
         if type(left) is not type(right):
             return False
+        left_signature = getattr(left, "encoding_signature", None)
+        right_signature = getattr(right, "encoding_signature", None)
+        if callable(left_signature) and callable(right_signature):
+            try:
+                return bool(left_signature() == right_signature())
+            except (TypeError, ValueError):
+                return False
         try:
             return bool(left == right) and bool(right == left)
         except (TypeError, ValueError):
@@ -1484,9 +1491,7 @@ class CompiledMixture:
 
         comps = list(model.components) if self.is_mixture else [model]
         if len(comps) != self.K:
-            raise ValueError(
-                "compiled model replacement has %d components; expected %d" % (len(comps), self.K)
-            )
+            raise ValueError("compiled model replacement has %d components; expected %d" % (len(comps), self.K))
         candidate_structure = (
             "mixture" if self.is_mixture else "single",
             _distribution_group_fingerprint(comps),

@@ -1115,6 +1115,24 @@ class BinomialDataEncoder(DataSequenceEncoder):
             isinstance(other, BinomialDataEncoder) and self.min_val == other.min_val and self.max_val == other.max_val
         )
 
+    def encoding_signature(self) -> tuple:
+        """The part of this encoder's identity that determines the encoded column layout: none of it.
+
+        ``min_val``/``max_val`` are *acceptance* bounds -- :meth:`seq_encode` passes them to
+        ``exact_integer_observations`` as ``minimum``/``maximum`` and nothing else. The columns it
+        emits carry the observed range of the data itself, not the encoder's bounds, so two
+        ``BinomialDataEncoder``s differing only in bounds encode any mutually-acceptable data
+        identically.
+
+        That distinction matters to consumers that hold an already-encoded batch and need to know
+        whether a *different* encoder instance describes the same layout -- the compiled fused-kernel
+        path being the one in tree. Judging that by ``__eq__`` rejected an ordinary EM step, because
+        ``BinomialEstimator``'s M-step re-derives ``(n, min_val)`` from the data and so legitimately
+        produces an encoder with different bounds each iteration. ``__eq__`` stays strict, since
+        "same encoder" is a different (and still useful) question from "same encoding".
+        """
+        return ()
+
     def row_count(self, x: E) -> int:
         """Return the number of observations represented by the indexed payload."""
         return int(np.asarray(x[2]).shape[0])
