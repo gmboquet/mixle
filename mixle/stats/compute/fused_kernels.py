@@ -1019,6 +1019,10 @@ def _sequence_kernel(inner, len_kern, has_len):
 
 
 def _sequence_acc(inner, len_acc, has_len):
+    # stats[2] / stats[3] carry the element and length effective observation counts that
+    # SequenceEstimator.estimate needs alongside the child statistics. len_normalized is refused by
+    # _SequenceB.__init__, so an element contributes its sequence's weight once per element -- the
+    # same quantity SequenceAccumulator.seq_update adds to element_nobs on the host route.
     if has_len:
 
         @numba.njit(inline="always")
@@ -1027,6 +1031,8 @@ def _sequence_acc(inner, len_acc, has_len):
             for t in range(off[i], off[i + 1]):
                 inner(t, k, w, params[0], inner_cols, stats[0])
             len_acc(i, k, w, params[1], len_cols, stats[1])
+            stats[2][k] += w * (off[i + 1] - off[i])
+            stats[3][k] += w
 
         return acc
 
@@ -1035,6 +1041,8 @@ def _sequence_acc(inner, len_acc, has_len):
         off, inner_cols, len_cols = cols
         for t in range(off[i], off[i + 1]):
             inner(t, k, w, params[0], inner_cols, stats[0])
+        stats[2][k] += w * (off[i + 1] - off[i])
+        stats[3][k] += w
 
     return acc
 
@@ -1079,16 +1087,37 @@ class _SequenceB:
         return off, self.inner.freeze(inner_buf), self.len_b.freeze(len_buf)
 
     def make_stats(self, K):
-        return self.inner.make_stats(K), self.len_b.make_stats(K)
+        return (
+            self.inner.make_stats(K),
+            self.len_b.make_stats(K),
+            np.zeros(K, dtype=np.float64),
+            np.zeros(K, dtype=np.float64),
+        )
 
     def stats_to_ss(self, stats, k):
+        """Return the M-step input for component ``k`` -- the estimator's own statistics envelope.
+
+        This used to return a bare ``(elements, lengths)`` pair, dropping the effective observation
+        counts SequenceEstimator divides by. Its contract check rejected the pair outright, so every
+        fused-kernel fit of a model containing a sequence failed with a schema error naming a type it
+        could not have produced. Slots 2 and 3 carry the same counts the host SequenceAccumulator
+        tracks in seq_update.
+        """
+        from mixle.stats.combinator.sequence import SequenceStatistics
+
         len_ss = self.len_b.stats_to_ss(stats[1], k) if self.has_len else None
-        return self.inner.stats_to_ss(stats[0], k), len_ss
+        return SequenceStatistics(
+            1, float(stats[2][k]), float(stats[3][k]), self.inner.stats_to_ss(stats[0], k), len_ss
+        )
 
     def merge_stats(self, dst, src):
         self.inner.merge_stats(dst[0], src[0])
         if self.has_len:
             self.len_b.merge_stats(dst[1], src[1])
+        # in-place into the existing arrays: `dst[2] += ...` would rebind the tuple slot, and the
+        # stats container is a tuple.
+        np.add(dst[2], src[2], out=dst[2])
+        np.add(dst[3], src[3], out=dst[3])
 
 
 def _optional_kernel(inner):

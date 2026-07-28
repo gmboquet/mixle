@@ -2,6 +2,7 @@
   "artifact": "mixle.optional_dependency_imports/v1",
   "distribution_to_imports": {
     "Cython": ["Cython"],
+    "PyYAML": ["yaml"],
     "dask": ["dask"],
     "datasets": ["datasets"],
     "distributed": ["distributed"],
