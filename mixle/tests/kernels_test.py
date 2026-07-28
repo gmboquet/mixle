@@ -30,6 +30,7 @@ from mixle.stats import (
     SequenceEstimator,
     seq_encode,
 )
+from mixle.stats.compute.capability_decline import KernelCapabilityDeclinedError
 from mixle.stats.compute.fused_kernels import CompiledMixture, build_kernel
 
 
@@ -159,13 +160,17 @@ class KernelsTestCase(unittest.TestCase):
     # -- guards ------------------------------------------------------------
 
     def test_mixed_structure_rejected(self):
-        with self.assertRaises(ValueError):
+        # KernelCapabilityDeclinedError, not ValueError: "this kernel cannot represent that static
+        # structure" is a route-negotiation signal a factory is meant to catch and fall back on, and
+        # it is deliberately typed apart from the data errors that must never be treated as
+        # permission to change algorithms. These two assertions predate that separation.
+        with self.assertRaises(KernelCapabilityDeclinedError):
             build_kernel([GaussianDistribution(0.0, 1.0), PoissonDistribution(2.0)])
 
     def test_unsupported_type_rejected(self):
         from mixle.stats import DirichletDistribution
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(KernelCapabilityDeclinedError):
             build_kernel([DirichletDistribution([1.0, 2.0])])
 
 

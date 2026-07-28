@@ -8,7 +8,7 @@ can override code shape for performance without changing estimators.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -17,6 +17,21 @@ from mixle.engines import NUMPY_ENGINE, ComputeEngine
 from mixle.stats.compute.capability_decline import KernelCapabilityDeclinedError
 from mixle.stats.compute.mixture_evidence import normalize_mixture_log_scores
 from mixle.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
+
+
+class _SequenceComponentStats(NamedTuple):
+    """Sequence child statistics stacked over the component axis, plus their per-component counts.
+
+    Distinct from a plain tuple so :func:`_unstack_numba_component_stats` can tell a stacked sequence
+    statistic from an ordinary child container and rebuild the estimator's ``SequenceStatistics``
+    envelope when slicing it -- the counts have to survive the trip from the stacked kernel form to
+    the per-component M-step input, and a bare pair cannot carry them.
+    """
+
+    element_nobs: Any
+    length_nobs: Any
+    elements: Any
+    lengths: Any | None
 
 
 class EngineNotSupportedError(ValueError):
@@ -229,13 +244,9 @@ class GeneratedNumbaKernel(Kernel):
         estimator: ParameterEstimator | None = None,
     ) -> None:
         if not getattr(engine, "supports_numba", False):
-            raise KernelCapabilityDeclinedError(
-                "GeneratedNumbaKernel requires a numba-capable (host numpy) engine."
-            )
+            raise KernelCapabilityDeclinedError("GeneratedNumbaKernel requires a numba-capable (host numpy) engine.")
         if not _generated_numba_kernel_available(dist):
-            raise KernelCapabilityDeclinedError(
-                "%s has no declaration-generated numba scorer." % type(dist).__name__
-            )
+            raise KernelCapabilityDeclinedError("%s has no declaration-generated numba scorer." % type(dist).__name__)
         self.dist = dist
         self.engine = engine
         self.estimator = estimator
@@ -315,9 +326,7 @@ class GeneratedNumbaKernel(Kernel):
     def refresh(self, dist: SequenceEncodableProbabilityDistribution) -> None:
         """Refresh the distribution and regenerated component metadata."""
         if not _generated_numba_kernel_available(dist):
-            raise KernelCapabilityDeclinedError(
-                "%s has no declaration-generated numba scorer." % type(dist).__name__
-            )
+            raise KernelCapabilityDeclinedError("%s has no declaration-generated numba scorer." % type(dist).__name__)
         self.dist = dist
         self.components = _generated_numba_components(dist)
 
@@ -588,7 +597,19 @@ def _generated_numba_sequence_component_stats(
         length_stats = None
     else:
         length_stats = _generated_numba_component_stats(enc_nseq, ww, length_components, engine)
-    return element_stats, length_stats
+    # SequenceEstimator.estimate needs the full SequenceStatistics envelope -- the schema tag plus the
+    # element and length effective observation counts -- not just the two child statistics. Returning
+    # a bare (elements, lengths) pair dropped the counts the M-step divides by, and the estimator's
+    # own contract check rejected it outright, so every generated-numba fit of a model containing a
+    # sequence failed. Carry the same counts the host SequenceAccumulator tracks: element_weights
+    # already has len_normalized folded in, so summing it reproduces seq_update's element_nobs
+    # exactly, and ww is the per-sequence weight seq_update adds to length_nobs.
+    return _SequenceComponentStats(
+        element_weights.sum(axis=0),
+        ww.sum(axis=0),
+        element_stats,
+        length_stats,
+    )
 
 
 def _generated_numba_optional_component_scores(
@@ -632,12 +653,31 @@ def _generated_numba_optional_component_stats(
 
 
 def _unstack_numba_component_stats(stats: Any, count: int) -> tuple:
+    if isinstance(stats, _SequenceComponentStats):
+        return tuple(_sequence_component_stat_value(stats, idx) for idx in range(count))
     return tuple(tuple(_numba_component_stat_value(stat, idx) for stat in stats) for idx in range(count))
+
+
+def _sequence_component_stat_value(stats: _SequenceComponentStats, idx: int) -> Any:
+    """One component's slice of a stacked sequence statistic, as the estimator's own envelope."""
+    from mixle.stats.combinator.sequence import SequenceStatistics
+
+    return SequenceStatistics(
+        1,
+        float(np.asarray(stats.element_nobs)[idx]),
+        float(np.asarray(stats.length_nobs)[idx]),
+        _numba_component_stat_value(stats.elements, idx),
+        _numba_component_stat_value(stats.lengths, idx),
+    )
 
 
 def _numba_component_stat_value(value: Any, idx: int) -> Any:
     if value is None:
         return None
+    if isinstance(value, _SequenceComponentStats):
+        # a sequence nested inside a composite/optional parent: its children were stacked over the
+        # same component axis, so slicing it must also rebuild the estimator's envelope.
+        return _sequence_component_stat_value(value, idx)
     if isinstance(value, tuple):
         return tuple(_numba_component_stat_value(child, idx) for child in value)
     if isinstance(value, list):
