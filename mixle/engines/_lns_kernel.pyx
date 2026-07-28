@@ -33,7 +33,7 @@ cdef int64_t _INT64_MAX = 9223372036854775807  # == 2**63 - 1; fits directly as 
 
 
 cdef inline int64_t _logadd(
-    int64_t a, int64_t b, int64_t[::1] lut, int dmax, int64_t log_zero, int64_t code_min, int64_t code_max
+    int64_t a, int64_t b, const int64_t[::1] lut, int dmax, int64_t log_zero, int64_t code_min, int64_t code_max
 ) nogil:
     """Sentinel-and-overflow-safe integer Gaussian logarithm (MXR-080-0138).
 
@@ -73,7 +73,7 @@ cdef inline int64_t _logadd(
     return mx + lut[d]
 
 
-def logsumexp_rows(int64_t[:, ::1] k, int64_t[::1] lut, int dmax, int64_t log_zero, int64_t code_min, int64_t code_max):
+def logsumexp_rows(const int64_t[:, ::1] k, const int64_t[::1] lut, int dmax, int64_t log_zero, int64_t code_min, int64_t code_max):
     """Integer log-sum-exp along axis 1 via a per-row pairwise tree fold: ``(N, M)`` codes -> ``(N,)``.
 
     ``log_zero``/``code_min``/``code_max`` mirror :data:`mixle.engines.lns.LOG_ZERO_CODE` / ``CODE_MIN`` /
@@ -104,7 +104,7 @@ def logsumexp_rows(int64_t[:, ::1] k, int64_t[::1] lut, int dmax, int64_t log_ze
     return out_np
 
 
-def cross_entropy_rows(int64_t[:, ::1] k, int64_t[::1] targets, int64_t[::1] lut, int dmax):
+def cross_entropy_rows(const int64_t[:, ::1] k, const int64_t[::1] targets, const int64_t[::1] lut, int dmax):
     """Sum of per-row ``(logsumexp(k[i]) - k[i, target[i]])`` in code units -- the fused LM/classifier NLL.
 
     The tree-fold log-partition and the target-logit gather in one pass over a reused buffer, no temporaries.
