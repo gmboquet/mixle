@@ -38,15 +38,28 @@ class CalibrationReport:
     bins: int = 10
     method: str = ""
     note: str = ""
+    # Scoring validity is a required dimension of the verdict, not a detail of the mean: a NaN
+    # log-density is not a score, whereas -inf is a legitimate "this row is impossible under the
+    # model". A model whose per-row scores are unavailable cannot satisfy a calibration gate however
+    # well its CDF happens to line up with the holdout.
+    n_invalid_scores: int = 0
 
     def noise_floor(self) -> float:
         """The PIT-error a perfectly calibrated model would show at this sample size (sampling noise)."""
         return float(np.sqrt(self.bins / max(self.n, 1)))
 
+    def scoring_is_valid(self) -> bool:
+        """Whether every held-out row got a usable (finite or explicitly impossible) log-density."""
+        return self.n_invalid_scores == 0
+
     def is_calibrated(self, tol: float | None = None) -> bool:
-        """True when the PIT error is within tolerance. Default tol = 2.5x the finite-sample noise floor
-        (so genuine miscalibration, not sampling noise, is what fails). Unknown -> False, conservatively."""
-        if self.pit_error is None:
+        """True when the PIT error is within tolerance AND the model actually scored the holdout.
+
+        Default tol = 2.5x the finite-sample noise floor (so genuine miscalibration, not sampling
+        noise, is what fails). Unknown -> False, conservatively. An invalid predictive score on any
+        row -> False: the PIT histogram alone cannot certify a model whose density is unavailable.
+        """
+        if self.pit_error is None or not self.scoring_is_valid():
             return False
         threshold = 2.5 * self.noise_floor() if tol is None else float(tol)
         return self.pit_error <= threshold
@@ -57,6 +70,7 @@ class CalibrationReport:
             "n": self.n,
             "mean_log_density": round(self.mean_log_density, 6),
             "pit_error": None if self.pit_error is None else round(self.pit_error, 6),
+            "n_invalid_scores": self.n_invalid_scores,
             "method": self.method,
             "note": self.note,
         }
@@ -90,6 +104,7 @@ class CalibrationReport:
                     "n": self.n,
                     "mean_log_density": self.mean_log_density,
                     "pit_error": self.pit_error,
+                    "n_invalid_scores": self.n_invalid_scores,
                     "method": self.method,
                     "note": self.note,
                 }
@@ -124,16 +139,41 @@ def _scalar_cdf(model: Any) -> Any:
     return cdf
 
 
+def _holdout_log_densities(model: Any, rows: list) -> tuple[np.ndarray, int]:
+    """One log-density per held-out row, plus how many of them are unusable.
+
+    The predictive contract is exactly one score per row. A model returning a single score for the
+    whole holdout, or a batch of the wrong width, is a contract violation and is rejected rather than
+    broadcast into a plausible-looking mean. NaN scores are counted as invalid; ``-inf`` is NOT --
+    it is the model's legitimate statement that the row is impossible under it.
+    """
+    ll = np.atleast_1d(np.asarray(model.seq_log_density(model.dist_to_encoder().seq_encode(rows)), dtype=np.float64))
+    if ll.shape != (len(rows),):
+        raise ValueError(
+            f"model returned {ll.shape} log-densities for {len(rows)} held-out records; a calibration "
+            "check needs exactly one predictive score per row"
+        )
+    return ll, int(np.isnan(ll).sum())
+
+
 def calibration_report(model: Any, data: Any) -> CalibrationReport:
     """The calibration of ``model`` on held-out ``data`` (see module docstring).
 
     ``data`` should be data the model was not fitted on -- calibration measured on the training set is
     optimistic. Runs the PIT test when the model has a scalar predictive CDF; always reports the
     held-out mean log-density.
+
+    Scoring validity is checked first and carried in the report. The verdict used to consult only the
+    PIT histogram, so a model whose CDF was exact but whose per-row log-densities were all NaN --
+    or which returned one score for a thousand rows -- passed the gate as ``"calibrated"``. Exactly
+    one usable score per row is now required for a calibrated verdict; a cardinality mismatch raises
+    and NaN scores are counted into ``n_invalid_scores``, which forces :meth:`is_calibrated` to False.
+
+    Raises:
+        ValueError: if the model's batch scoring does not return exactly one log-density per row.
     """
     rows = list(data)
-    enc = model.dist_to_encoder().seq_encode(rows)
-    ll = np.asarray(model.seq_log_density(enc), dtype=np.float64)
+    ll, n_invalid = _holdout_log_densities(model, rows)
     mean_ll = float(ll.mean()) if ll.size else float("nan")
 
     cdf = _scalar_cdf(model)
@@ -143,6 +183,7 @@ def calibration_report(model: Any, data: Any) -> CalibrationReport:
             mean_log_density=mean_ll,
             pit_error=None,
             method="log-density",
+            n_invalid_scores=n_invalid,
             note="model has no scalar predictive CDF; PIT calibration not applicable (multivariate/latent)",
         )
 
@@ -159,10 +200,18 @@ def calibration_report(model: Any, data: Any) -> CalibrationReport:
         pit_histogram={k: (v.tolist() if hasattr(v, "tolist") else v) for k, v in hist.items()},
         bins=10,
         method="PIT",
+        n_invalid_scores=n_invalid,
     )
-    report.note = (
-        f"calibrated (PIT error {err:.3f} within the {report.noise_floor():.3f} noise floor)"
-        if report.is_calibrated()
-        else f"PIT deviates from uniform ({err:.3f} vs floor {report.noise_floor():.3f}) -- intervals are off"
-    )
+    if not report.scoring_is_valid():
+        report.note = (
+            f"predictive scoring is unavailable on {n_invalid} of {len(rows)} held-out rows "
+            f"(PIT error {err:.3f}) -- not calibrated: a uniform PIT cannot certify a model whose "
+            "own log-density is missing"
+        )
+    else:
+        report.note = (
+            f"calibrated (PIT error {err:.3f} within the {report.noise_floor():.3f} noise floor)"
+            if report.is_calibrated()
+            else f"PIT deviates from uniform ({err:.3f} vs floor {report.noise_floor():.3f}) -- intervals are off"
+        )
     return report
