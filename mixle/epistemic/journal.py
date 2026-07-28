@@ -41,7 +41,7 @@ from __future__ import annotations
 import hashlib
 import json
 import warnings
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 from mixle.epistemic.loop import EpistemicStep
@@ -168,9 +168,24 @@ def _hash_snapshot(snapshot: dict) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+_GENESIS_HASH = "0" * 64
+"""``prev_hash`` of the first record: a fixed anchor so "this is record 0" is itself attested.
+
+Without it, ``prev_hash=None`` on record 0 would be indistinguishable from "the records before me
+were removed", and truncating a journal from the front would still verify.
+"""
+
+
 @dataclass(frozen=True)
 class DecisionRecord:
-    """One journaled decision: what was believed, what was considered, what was chosen, and why."""
+    """One journaled decision: what was believed, what was considered, what was chosen, and why.
+
+    ``belief_snapshot_hash`` content-addresses ``portfolio_snapshot`` alone. ``record_hash`` covers
+    the *whole* record -- surprise, actions considered, action chosen, EIG, timestamp, rationale,
+    step index, and ``prev_hash`` -- and because it includes ``prev_hash`` it is a hash chain: the
+    hash of record ``i`` depends on every record before it, so removing, reordering, or splicing
+    records breaks the chain rather than going unnoticed.
+    """
 
     step_index: int
     belief_snapshot_hash: str
@@ -181,6 +196,35 @@ class DecisionRecord:
     action_eig: float | None = None
     timestamp: float | None = None
     rationale: str | None = None
+    prev_hash: str = _GENESIS_HASH
+    record_hash: str = ""
+
+
+def _record_payload(record: DecisionRecord) -> dict:
+    """The canonical, hashable content of ``record`` -- everything except ``record_hash`` itself.
+
+    Built field-by-field rather than with :func:`~dataclasses.asdict`, which deep-copies: a
+    hypothesis payload or chosen action can be an arbitrary object (a fitted model, say), and this
+    runs on every append and every verify.
+    """
+    return {
+        "step_index": record.step_index,
+        "belief_snapshot_hash": record.belief_snapshot_hash,
+        "portfolio_snapshot": record.portfolio_snapshot,
+        "surprise": record.surprise,
+        "action_considered": list(record.action_considered),
+        "action_chosen": record.action_chosen,
+        "action_eig": record.action_eig,
+        "timestamp": record.timestamp,
+        "rationale": record.rationale,
+        "prev_hash": record.prev_hash,
+    }
+
+
+def _hash_record(record: DecisionRecord) -> str:
+    """Content-address the complete record, over the same type-faithful encoding as the snapshot."""
+    payload = json.dumps(_tag_encode(_record_payload(record)), sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 class EpistemicJournal:
@@ -193,7 +237,19 @@ class EpistemicJournal:
     """
 
     def __init__(self, records: list[DecisionRecord] | None = None) -> None:
-        self.records: list[DecisionRecord] = list(records) if records else []
+        self._records: list[DecisionRecord] = list(records) if records else []
+
+    @property
+    def records(self) -> tuple[DecisionRecord, ...]:
+        """The journaled records, as a read-only snapshot.
+
+        The backing list used to be the public attribute, so a caller could ``clear()``, ``del``, or
+        reorder the journal in place -- an append-only decision log that anything holding a reference
+        could rewrite. Indexing, iteration, and ``len()`` are unchanged; use :meth:`append` to add.
+        (Record *content* is still reachable through the returned records, which is why
+        :meth:`verify` exists and now covers the whole record and its position in the chain.)
+        """
+        return tuple(self._records)
 
     def append(
         self,
@@ -213,7 +269,7 @@ class EpistemicJournal:
         """
         snapshot = step.portfolio_after.to_dict()
         record = DecisionRecord(
-            step_index=len(self.records),
+            step_index=len(self._records),
             belief_snapshot_hash=_hash_snapshot(snapshot),
             portfolio_snapshot=snapshot,
             surprise=step.surprise,
@@ -222,8 +278,10 @@ class EpistemicJournal:
             action_eig=step.next_action_eig,
             timestamp=timestamp,
             rationale=rationale,
+            prev_hash=self._records[-1].record_hash if self._records else _GENESIS_HASH,
         )
-        self.records.append(record)
+        record = replace(record, record_hash=_hash_record(record))
+        self._records.append(record)
         return record
 
     def replay(self, portfolio0: HypothesisPortfolio | None = None) -> list[HypothesisPortfolio]:
@@ -243,24 +301,45 @@ class EpistemicJournal:
         round trip) always returns the original in-memory payload objects unchanged, since nothing was
         ever encoded.
         """
-        trajectory = [HypothesisPortfolio.from_dict(r.portfolio_snapshot) for r in self.records]
+        trajectory = [HypothesisPortfolio.from_dict(r.portfolio_snapshot) for r in self._records]
         return ([portfolio0] + trajectory) if portfolio0 is not None else trajectory
 
     def verify(self) -> bool:
-        """Return whether every record's stored snapshot still matches its recorded content-address.
+        """Return whether the journal is intact: every record's content AND its place in the chain.
 
-        The hash is computed over the snapshot's type-faithful encoding (:func:`_tag_encode`), not a
-        lossy JSON shadow of it: for the types :func:`_tag_encode` round-trips exactly, two snapshots
-        that differ only in payload *type* (e.g. a tuple silently replaced by a list with the same
-        elements) hash differently and this correctly returns ``False``. For a payload stored as a
-        one-way ``str()`` snapshot (see the module docstring), this only proves that string is
-        unchanged, not that the original object would be recovered -- there is no stronger claim to
-        make once the exact object is gone.
+        This used to compare only ``portfolio_snapshot`` against ``belief_snapshot_hash``, so
+        everything the log exists to attest -- the surprise, the actions considered, the action
+        actually chosen, its EIG, the timestamp, the rationale, the step index -- could be rewritten
+        and this still returned ``True``. So could deleting or reordering records, since nothing tied
+        a record to its position or its predecessor.
+
+        Four things are now checked per record, in order: its ``step_index`` matches its position;
+        its ``prev_hash`` matches the previous record's ``record_hash`` (:data:`_GENESIS_HASH` for
+        the first); its snapshot still matches ``belief_snapshot_hash``; and its ``record_hash``
+        still matches the whole canonical record. Because each ``record_hash`` covers ``prev_hash``,
+        the records form a chain: altering record ``i`` invalidates every record after it, so no
+        localized edit can be made to verify.
+
+        Hashing is over the type-faithful encoding (:func:`_tag_encode`), not a lossy JSON shadow of
+        it: two snapshots differing only in payload *type* (a tuple silently replaced by an
+        equal-valued list) hash differently and correctly fail. For a payload stored as a one-way
+        ``str()`` snapshot (see the module docstring), this only proves that string is unchanged, not
+        that the original object would be recovered -- there is no stronger claim to make once the
+        exact object is gone.
         """
-        return all(_hash_snapshot(r.portfolio_snapshot) == r.belief_snapshot_hash for r in self.records)
+        expected_prev = _GENESIS_HASH
+        for index, record in enumerate(self._records):
+            if record.step_index != index or record.prev_hash != expected_prev:
+                return False
+            if _hash_snapshot(record.portfolio_snapshot) != record.belief_snapshot_hash:
+                return False
+            if _hash_record(record) != record.record_hash:
+                return False
+            expected_prev = record.record_hash
+        return True
 
     def to_json(self, **dumps_kwargs: Any) -> str:
-        return json.dumps([_tag_encode(asdict(r)) for r in self.records], **dumps_kwargs)
+        return json.dumps([_tag_encode(asdict(r)) for r in self._records], **dumps_kwargs)
 
     @classmethod
     def from_json(cls, s: str) -> EpistemicJournal:
@@ -268,10 +347,10 @@ class EpistemicJournal:
         return cls([DecisionRecord(**_tag_decode(row)) for row in rows])
 
     def __len__(self) -> int:
-        return len(self.records)
+        return len(self._records)
 
     def __iter__(self):
-        return iter(self.records)
+        return iter(self._records)
 
 
 __all__ = ["DecisionRecord", "EpistemicJournal"]

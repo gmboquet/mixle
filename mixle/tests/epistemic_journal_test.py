@@ -1,6 +1,7 @@
 """mixle.epistemic.journal: append-only, replayable decision log (Card E5)."""
 
 import unittest
+from dataclasses import replace
 
 import numpy as np
 
@@ -151,6 +152,57 @@ class PayloadTypeFidelityTest(unittest.TestCase):
         corrupted = journal.to_json().replace('"tuple"', '"totally_unknown_tag"')
         with self.assertRaises(ValueError):
             EpistemicJournal.from_json(corrupted)
+
+
+class WholeRecordIntegrityTest(unittest.TestCase):
+    """MXR-080-1746: verify() covered only the snapshot, so every decision field was unprotected."""
+
+    def _mutated(self, **changes):
+        journal = _five_steps()
+        self.assertTrue(journal.verify())
+        return EpistemicJournal([replace(journal.records[0], **changes), *journal.records[1:]])
+
+    def test_every_decision_field_is_covered_by_the_record_hash(self):
+        for field_name, value in (
+            ("surprise", 0.123),
+            ("action_chosen", "a-different-action"),
+            ("action_considered", ["fabricated"]),
+            ("action_eig", 99.0),
+            ("timestamp", 12345.0),
+            ("rationale", "a rewritten justification"),
+            ("step_index", 3),
+        ):
+            with self.subTest(field=field_name):
+                self.assertFalse(self._mutated(**{field_name: value}).verify())
+
+    def test_deleting_a_record_breaks_the_chain(self):
+        journal = _five_steps()
+        self.assertFalse(EpistemicJournal(list(journal.records[:2]) + list(journal.records[3:])).verify())
+
+    def test_reordering_records_breaks_the_chain(self):
+        records = list(_five_steps().records)
+        records[1], records[2] = records[2], records[1]
+        self.assertFalse(EpistemicJournal(records).verify())
+
+    def test_truncating_from_the_front_breaks_the_chain(self):
+        self.assertFalse(EpistemicJournal(list(_five_steps().records[1:])).verify())
+
+    def test_appending_a_forged_record_breaks_the_chain(self):
+        journal = _five_steps()
+        forged = replace(journal.records[-1], step_index=len(journal), rationale="forged")
+        self.assertFalse(EpistemicJournal([*journal.records, forged]).verify())
+
+    def test_an_intact_journal_still_verifies_across_a_json_round_trip(self):
+        journal = _five_steps()
+        self.assertTrue(journal.verify())
+        self.assertTrue(EpistemicJournal.from_json(journal.to_json()).verify())
+
+    def test_the_backing_record_list_is_not_publicly_mutable(self):
+        journal = _five_steps()
+        journal.records[:1]  # indexing/slicing still works
+        with self.assertRaises(AttributeError):
+            journal.records.clear()
+        self.assertEqual(len(journal), 5)
 
 
 if __name__ == "__main__":
