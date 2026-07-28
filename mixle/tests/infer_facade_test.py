@@ -182,5 +182,104 @@ class AdviExternalTargetTest(unittest.TestCase):
         np.testing.assert_allclose(res.scale, [1.0, 1.0], atol=0.2)
 
 
+@unittest.skipUnless(HAS_TORCH, "torch not installed")
+class AdviControlValidationTest(unittest.TestCase):
+    """MXR-080-1643: an AdviResult may not come back from a run that never optimized anything."""
+
+    @staticmethod
+    def _target(U):
+        return -0.5 * (U * U).sum(dim=1)
+
+    def _advi(self, **kw):
+        base = dict(u0=np.zeros(2), s0=np.ones(2), samples=16, mc=4, steps=3, lr=0.05, rng=0)
+        base.update(kw)
+        return infer.advi(self._target, **base)
+
+    def test_non_positive_or_fractional_counts_are_rejected(self):
+        for field in ("samples", "mc", "steps"):
+            for bad, exc in ((0, ValueError), (-1, ValueError), (True, TypeError), (2.5, TypeError)):
+                with self.subTest(field=field, bad=bad), self.assertRaises(exc):
+                    self._advi(**{field: bad})
+
+    def test_learning_rate_must_be_finite_and_positive(self):
+        for bad in (0.0, -0.1, float("nan"), float("inf")):
+            with self.subTest(lr=bad), self.assertRaisesRegex(ValueError, "lr must be"):
+                self._advi(lr=bad)
+
+    def test_alpha_domain_is_declared_and_enforced(self):
+        for bad in (float("nan"), float("inf"), -0.5):
+            with self.subTest(alpha=bad), self.assertRaisesRegex(ValueError, "alpha must be"):
+                self._advi(alpha=bad)
+        self.assertIsNotNone(self._advi(alpha=0.0))  # IWAE bound stays supported
+
+    def test_initialization_must_be_aligned_finite_and_positively_scaled(self):
+        bad_inits = [
+            (np.zeros(2), np.zeros(2)),  # zero scale -> scale 0 and objective -inf
+            (np.zeros(2), -np.ones(2)),  # negative scale -> all-NaN parameters
+            (np.zeros(2), np.ones(3)),  # misaligned
+            (np.array([0.0, np.nan]), np.ones(2)),  # non-finite mean
+            (np.zeros(2), np.array([1.0, np.inf])),  # non-finite scale
+            (np.zeros((2, 2)), np.ones((2, 2))),  # not one-dimensional
+            (np.zeros(0), np.zeros(0)),  # nothing to infer
+        ]
+        for u0, s0 in bad_inits:
+            with self.subTest(u0=u0.shape, s0=s0.shape), self.assertRaises(ValueError):
+                self._advi(u0=u0, s0=s0)
+
+    def test_a_valid_run_still_returns_finite_fitted_parameters(self):
+        res = self._advi(steps=50, samples=32)
+        self.assertEqual(res.samples.shape, (32, 2))
+        self.assertTrue(np.isfinite(res.mean).all())
+        self.assertTrue(np.all(res.scale > 0.0))
+        self.assertTrue(np.isfinite(res.objective))
+
+
+@unittest.skipUnless(HAS_TORCH, "torch not installed")
+class AdviTargetRankTest(unittest.TestCase):
+    """MXR-080-1644: the target must honour its documented ``(mc,)`` per-draw output contract."""
+
+    def _advi(self, target, **kw):
+        base = dict(u0=np.zeros(2), s0=np.ones(2), samples=8, mc=4, steps=2, lr=0.05, rng=0)
+        base.update(kw)
+        return infer.advi(target, **base)
+
+    def test_scalar_sum_over_the_whole_batch_is_rejected(self):
+        def scalar_target(U):
+            return -0.5 * (U * U).sum()  # one number for the whole Monte Carlo batch
+
+        with self.assertRaisesRegex(ValueError, "one log-density per Monte Carlo draw"):
+            self._advi(scalar_target)
+
+    def test_matrix_output_is_rejected(self):
+        def matrix_target(U):
+            return -0.5 * (U * U)  # (mc, d), not (mc,)
+
+        with self.assertRaisesRegex(ValueError, "one log-density per Monte Carlo draw"):
+            self._advi(matrix_target)
+
+    def test_broadcastable_wrong_width_output_is_rejected(self):
+        def wrong_width(U):
+            return -0.5 * (U * U).sum(dim=1)[:1]  # (1,) broadcasts against (mc,) but is not it
+
+        with self.assertRaisesRegex(ValueError, "one log-density per Monte Carlo draw"):
+            self._advi(wrong_width)
+
+    def test_detached_target_is_rejected_before_backprop(self):
+        import torch
+
+        def detached(U):
+            return torch.zeros(U.shape[0], dtype=U.dtype)  # no gradient path to the variational params
+
+        with self.assertRaisesRegex(ValueError, "detached"):
+            self._advi(detached)
+
+    def test_the_documented_shape_is_accepted(self):
+        def good(U):
+            return -0.5 * (U * U).sum(dim=1)
+
+        res = self._advi(good, steps=20)
+        self.assertEqual(res.samples.shape, (8, 2))
+
+
 if __name__ == "__main__":
     unittest.main()
