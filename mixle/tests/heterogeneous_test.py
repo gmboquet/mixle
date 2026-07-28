@@ -4,6 +4,7 @@ import math
 import unittest
 
 from mixle.engines.heterogeneous import (
+    HeterogeneousPlan,
     InfeasiblePrecisionError,
     Worker,
     WorkerAssignment,
@@ -30,9 +31,12 @@ class HeterogeneousPlanTest(unittest.TestCase):
         self.assertEqual(by["c0"].precision, "float32")  # CPU's fastest real compute precision
 
     def test_tight_accuracy_forces_high_precision_everywhere(self):
-        plan = plan_heterogeneous(self._pool(), 1_000_000, target_rel_error=1e-12, op_count=1000)
+        plan = plan_heterogeneous(
+            self._pool(), 1_000_000, target_rel_error=1e-12, op_count=1000, allow_infeasible=True
+        )
         for a in plan.assignments:
             self.assertEqual(a.precision, "float64")  # only float64 meets the budget
+            self.assertFalse(a.meets_target)  # the format score is heuristic, not a workload certificate
 
     def test_load_balances_toward_faster_workers(self):
         plan = plan_heterogeneous(self._pool(), 1_000_000, target_rel_error=None)
@@ -43,13 +47,14 @@ class HeterogeneousPlanTest(unittest.TestCase):
     def test_reduce_depth_is_logarithmic(self):
         workers = [Worker("w%d" % i, "cpu", ("float32", "float64")) for i in range(1000)]
         plan = plan_heterogeneous(workers, 10_000_000)
-        self.assertEqual(plan.reduce_depth, max(1, math.ceil(math.log2(1000) / 2)))
+        self.assertEqual(plan.reduce_depth, math.ceil(math.log2(1000) / 2))
         self.assertGreaterEqual(plan.reduce_depth, 4)  # not a single-root fan-in
 
     def test_single_worker_pool(self):
         plan = plan_heterogeneous([Worker("solo", "cpu", ("float32", "float64"))], 500)
         self.assertEqual(plan.total_rows(), 500)
         self.assertEqual(len(plan.assignments), 1)
+        self.assertEqual(plan.reduce_depth, 0)
 
     def test_empty_pool_raises(self):
         with self.assertRaises(ValueError):
@@ -78,18 +83,22 @@ class InfeasiblePrecisionTest(unittest.TestCase):
         self.assertEqual(infeasible[0].name, "w0")
         self.assertFalse(infeasible[0].meets_target)
         # Quantified: float32's unit roundoff is 2**-24 at op_count=1000 -> ~5.96e-5, far above the 1e-20 ask.
-        self.assertAlmostEqual(infeasible[0].achieved_rel_error, 1000 * 2.0**-24, places=12)
+        product = 1000 * 2.0**-24
+        self.assertAlmostEqual(infeasible[0].achieved_rel_error, product / (1.0 - product), places=12)
         self.assertGreater(infeasible[0].achieved_rel_error, 1e-20)
         # The plan is still otherwise usable -- rows are assigned normally, not zeroed out or omitted.
         self.assertEqual(plan.total_rows(), 100)
 
-    def test_achievable_target_still_produces_a_feasible_plan(self):
-        # Negative control: a target every worker CAN hit must plan normally, with no infeasibility noise.
+    def test_endpoint_score_below_target_remains_explicitly_heuristic(self):
         worker = Worker(name="w0", device="cpu", precisions=("float32", "float64"))
-        plan = plan_heterogeneous([worker], 1000, target_rel_error=1e-12, op_count=1000)
-        self.assertTrue(plan.is_feasible())
-        self.assertEqual(plan.infeasible_assignments(), ())
-        self.assertTrue(plan.assignments[0].meets_target)
+        with self.assertRaises(InfeasiblePrecisionError):
+            plan_heterogeneous([worker], 1000, target_rel_error=1e-12, op_count=1000)
+        plan = plan_heterogeneous(
+            [worker], 1000, target_rel_error=1e-12, op_count=1000, allow_infeasible=True
+        )
+        self.assertFalse(plan.is_feasible())
+        self.assertFalse(plan.assignments[0].meets_target)
+        self.assertEqual(plan.assignments[0].evidence_kind, "heuristic")
         self.assertEqual(plan.assignments[0].precision, "float64")
         self.assertIsNotNone(plan.assignments[0].achieved_rel_error)
         self.assertLessEqual(plan.assignments[0].achieved_rel_error, 1e-12)
@@ -142,10 +151,16 @@ class WorkerValidationTest(unittest.TestCase):
             Worker(name="w0", device="cpu", precisions=("float32",), base_throughput=-1.0)
 
     def test_non_finite_throughput_rejected(self):
-        for bad in (float("nan"), float("inf"), float("-inf")):
+        for bad in (float("nan"), float("inf"), float("-inf"), True):
             with self.subTest(base_throughput=bad):
                 with self.assertRaises(ValueError):
                     Worker(name="w0", device="cpu", precisions=("float32",), base_throughput=bad)
+
+    def test_worker_copies_mutable_precision_sequence(self):
+        precisions = ["float32"]
+        worker = Worker(name="w0", device="cpu", precisions=precisions)
+        precisions.append("bogus")
+        self.assertEqual(worker.precisions, ("float32",))
 
 
 class WorkerAssignmentValidationTest(unittest.TestCase):
@@ -161,10 +176,45 @@ class WorkerAssignmentValidationTest(unittest.TestCase):
             WorkerAssignment(name="w0", rows=1.5, precision="float32", effective_throughput=1.0)
 
     def test_nonpositive_or_non_finite_effective_throughput_rejected(self):
-        for bad in (0.0, -1.0, float("nan"), float("inf")):
+        for bad in (0.0, -1.0, float("nan"), float("inf"), True):
             with self.subTest(effective_throughput=bad):
                 with self.assertRaises(ValueError):
                     WorkerAssignment(name="w0", rows=10, precision="float32", effective_throughput=bad)
+
+    def test_forged_precision_boolean_or_error_evidence_is_rejected(self):
+        with self.assertRaises(ValueError):
+            WorkerAssignment(name="w", rows=1, precision="bogus", effective_throughput=1.0)
+        with self.assertRaises(ValueError):
+            WorkerAssignment(name="w", rows=1, precision="float32", effective_throughput=1.0, meets_target="false")
+        with self.assertRaises(ValueError):
+            WorkerAssignment(
+                name="w",
+                rows=1,
+                precision="float32",
+                effective_throughput=1.0,
+                meets_target=False,
+                achieved_rel_error=float("nan"),
+                evidence_kind="heuristic",
+            )
+        with self.assertRaises(ValueError):
+            WorkerAssignment(
+                name="w",
+                rows=1,
+                precision="float32",
+                effective_throughput=1.0,
+                meets_target=True,
+                achieved_rel_error=0.1,
+                evidence_kind="heuristic",
+            )
+
+    def test_plan_record_requires_assignments_and_exact_reduction_depth(self):
+        with self.assertRaises(ValueError):
+            HeterogeneousPlan((), 0)
+        assignment = WorkerAssignment("w", 1, "float32", 1.0)
+        with self.assertRaises(ValueError):
+            HeterogeneousPlan((assignment,), -1)
+        with self.assertRaises(ValueError):
+            HeterogeneousPlan((assignment,), 1)
 
 
 class PlanInputValidationTest(unittest.TestCase):
@@ -186,10 +236,29 @@ class PlanInputValidationTest(unittest.TestCase):
             plan_heterogeneous([self._worker()], 100, allowed_precisions=())
 
     def test_invalid_target_rel_error_rejected(self):
-        for bad in (-1e-6, 0.0, float("nan"), float("inf")):
+        for bad in (-1e-6, 0.0, float("nan"), float("inf"), True):
             with self.subTest(target_rel_error=bad):
                 with self.assertRaises(ValueError):
                     plan_heterogeneous([self._worker()], 100, target_rel_error=bad)
+
+    def test_allow_infeasible_requires_actual_boolean(self):
+        with self.assertRaises(ValueError):
+            plan_heterogeneous(
+                [self._worker()], 100, target_rel_error=1e-12, allow_infeasible="false"
+            )
+
+    def test_million_operation_float32_score_uses_gamma_and_remains_uncertified(self):
+        worker = Worker("w", "cpu", ("float32",))
+        plan = plan_heterogeneous(
+            [worker],
+            1,
+            target_rel_error=0.06,
+            op_count=1_000_000,
+            allow_infeasible=True,
+        )
+        estimate = plan.assignments[0].achieved_rel_error
+        self.assertGreater(estimate, 0.06)
+        self.assertFalse(plan.is_feasible())
 
     def test_well_posed_pool_still_plans_with_sensible_nonnegative_rows(self):
         # Negative control: ordinary, valid workers of differing throughput must still plan normally --
