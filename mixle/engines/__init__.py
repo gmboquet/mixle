@@ -131,12 +131,25 @@ def _resolve_registered_type(x: Any) -> tuple[type[Any], ComputeEngine] | None:
     ``np.ndarray`` subclass registered to a different engine than plain
     ``np.ndarray`` resolves to its own registration even when the generic
     ``np.ndarray`` entry was registered first.
+
+    An MRO walk alone is not enough, because a registered type may be an abstract base that its
+    concrete arrays are registered against *virtually*: ``jax.Array`` is one, and
+    ``jaxlib.xla_extension.ArrayImpl.__mro__`` is just ``(ArrayImpl, object)``, so every JAX array
+    missed the registry entirely and fell through to the NumPy default. The ``isinstance`` fallback
+    below honours virtual registration; it runs only when the MRO walk finds nothing, so real
+    subclass precedence is still decided first.
     """
     for cls in type(x).__mro__:
         engine = _ARRAY_ENGINE_REGISTRY.get(cls)
         if engine is not None:
             return cls, engine
-    return None
+    matches = [(cls, engine) for cls, engine in _ARRAY_ENGINE_REGISTRY.items() if isinstance(x, cls)]
+    if not matches:
+        return None
+    for cls, engine in matches:  # keep the most specific match, as the MRO walk would have
+        if all(other is cls or issubclass(cls, other) for other, _ in matches):
+            return cls, engine
+    return matches[0]
 
 
 def _direct_engine(x: Any) -> ComputeEngine | None:
