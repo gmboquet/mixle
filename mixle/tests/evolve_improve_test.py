@@ -162,5 +162,75 @@ class DecisionRegretTest(unittest.TestCase):
             bayes_action(object(), lambda a, d: 0.0, [1, 2])
 
 
+class _RecordedPosterior:
+    """A three-draw posterior, so loss-call counts are exact and readable."""
+
+    def __init__(self, draws=(0.0, 1.0, 2.0)):
+        self._draws = list(draws)
+
+    def samples(self, n, rng):  # noqa: ARG002 -- the fixture ignores n/rng on purpose
+        return list(self._draws)
+
+
+class _CountingLoss:
+    """A scalar loss that records how many times it was invoked (a stand-in for any stateful loss)."""
+
+    def __init__(self, vectorized=None):
+        self.calls = 0
+        if vectorized is not None:
+            self.vectorized = vectorized
+
+    def __call__(self, action, draw):
+        self.calls += 1
+        return float(np.asarray(draw, dtype=float) - action)
+
+
+class LossDispatchTest(unittest.TestCase):
+    """MXR-080-1611: the loss is invoked exactly the number of times its convention requires."""
+
+    def test_declared_scalar_loss_is_not_probed_with_the_whole_draw_array(self):
+        loss = _CountingLoss()
+        bayes_action(_RecordedPosterior(), loss, [0.0], n=3, seed=0, vectorized=False)
+        self.assertEqual(loss.calls, 3)  # one per draw, no speculative array probe
+
+    def test_loss_can_declare_its_convention_by_attribute(self):
+        loss = _CountingLoss(vectorized=False)
+        bayes_action(_RecordedPosterior(), loss, [0.0], n=3, seed=0)
+        self.assertEqual(loss.calls, 3)
+
+    def test_declared_vectorized_loss_is_invoked_once_per_action(self):
+        calls = []
+
+        def loss(action, draws):
+            calls.append(action)
+            return np.asarray(draws, dtype=float) - action
+
+        bayes_action(_RecordedPosterior(), loss, [0.0, 1.0], n=3, seed=0, vectorized=True)
+        self.assertEqual(calls, [0.0, 1.0])
+
+    def test_a_vectorized_loss_returning_the_wrong_length_is_reported_not_re_looped(self):
+        def bad_loss(action, draws):  # noqa: ARG001
+            return 0.0  # one value for three draws
+
+        with self.assertRaisesRegex(ValueError, "one loss per draw"):
+            bayes_action(_RecordedPosterior(), bad_loss, [0.0], n=3, seed=0, vectorized=True)
+
+    def test_auto_detection_probes_at_most_once_across_all_actions(self):
+        loss = _CountingLoss()
+        bayes_action(_RecordedPosterior(), loss, [0.0, 1.0, 2.0], n=3, seed=0)
+        # 3 actions x 3 draws == 9 required evaluations, plus a single shared auto-detect probe.
+        self.assertEqual(loss.calls, 10)
+
+    def test_scalar_loss_failures_name_the_action_and_draw(self):
+        def loss(action, draw):
+            if np.asarray(draw, dtype=float).size == 1 and float(draw) == 1.0:
+                raise RuntimeError("boom")
+            return 0.0
+
+        with self.assertRaises(RuntimeError) as ctx:
+            bayes_action(_RecordedPosterior(), loss, ["hold"], n=3, seed=0, vectorized=False)
+        self.assertTrue(any("draw #1 of 3" in note and "'hold'" in note for note in ctx.exception.__notes__))
+
+
 if __name__ == "__main__":
     unittest.main()
