@@ -232,5 +232,105 @@ class LossDispatchTest(unittest.TestCase):
         self.assertTrue(any("draw #1 of 3" in note and "'hold'" in note for note in ctx.exception.__notes__))
 
 
+class _ArrayPosterior:
+    """A posterior that returns a fixed loss-shaped draw array, so risk maths is checkable by hand."""
+
+    def __init__(self, draws):
+        self._draws = np.asarray(draws, dtype=float)
+
+    def samples(self, n, rng):  # noqa: ARG002 -- the fixture returns its fixed batch
+        return self._draws
+
+
+def _identity_loss(action, draws):  # noqa: ARG001
+    return np.asarray(draws, dtype=float)
+
+
+class DecisionInputContractTest(unittest.TestCase):
+    """MXR-080-1610: a decision is only reported over an exact draw count and finite losses."""
+
+    def test_a_nan_loss_is_never_reported_as_the_optimal_action(self):
+        # np.argmin([nan, 1]) returns the NaN position, so the unscorable action used to be selected
+        # and returned with an all-NaN risk profile.
+        def loss(action, draw):  # noqa: ARG001
+            return float("nan") if action == "a" else 1.0
+
+        with self.assertRaisesRegex(ValueError, "NaN"):
+            bayes_action(_ArrayPosterior(np.arange(10.0)), loss, ["a", "b"], n=10, vectorized=False)
+
+    def test_an_infinite_loss_stays_legitimate_and_simply_loses(self):
+        # +inf is how an inadmissible action is written; it must not be confused with a failed
+        # evaluation, and it can never win an argmin.
+        def loss(action, draw):  # noqa: ARG001
+            return float("inf") if action == "forbidden" else 1.0
+
+        res = bayes_action(_ArrayPosterior(np.arange(10.0)), loss, ["forbidden", "ok"], n=10, vectorized=False)
+        self.assertEqual(res["action"], "ok")
+
+    def test_fractional_and_boolean_draw_counts_are_rejected(self):
+        post = _ArrayPosterior(np.arange(10.0))
+        for bad in (2.9, True):
+            with self.assertRaises(TypeError):
+                bayes_action(post, _identity_loss, ["a"], n=bad)
+
+    def test_nonpositive_draw_counts_report_the_count_not_an_empty_quantile(self):
+        post = _ArrayPosterior(np.arange(10.0))
+        for bad in (0, -3):
+            with self.assertRaisesRegex(ValueError, "must be positive"):
+                bayes_action(post, _identity_loss, ["a"], n=bad)
+
+    def test_ragged_and_empty_posterior_sample_batches_are_rejected(self):
+        class Ragged:
+            def samples(self, n, rng):  # noqa: ARG002
+                return {"mu": np.zeros(5), "sigma": np.zeros(3)}
+
+        class Empty:
+            def samples(self, n, rng):  # noqa: ARG002
+                return []
+
+        with self.assertRaisesRegex(ValueError, "ragged"):
+            bayes_action(Ragged(), _identity_loss, ["a"], n=5)
+        with self.assertRaisesRegex(ValueError, "no draws"):
+            bayes_action(Empty(), _identity_loss, ["a"], n=5)
+
+    def test_cvar_alpha_must_be_a_real_tail_mass(self):
+        post = _ArrayPosterior(np.arange(10.0))
+        for bad in (0.0, -0.1, 1.5, float("nan")):
+            with self.assertRaisesRegex(ValueError, "cvar_alpha"):
+                bayes_action(post, _identity_loss, ["a"], n=10, cvar_alpha=bad)
+
+
+class DecisionTailRiskTest(unittest.TestCase):
+    """MXR-080-1612: CVaR averages exactly the requested tail mass, atoms included."""
+
+    def test_cvar_at_an_atom_does_not_absorb_the_whole_distribution(self):
+        # 80 zeros, ten ones, ten tens: the interpolated VaR at alpha=0.25 lands on the zero atom, and
+        # averaging every loss >= VaR used to pull all 100 samples in and report 1.1 instead of 4.4.
+        losses = np.concatenate([np.zeros(80), np.ones(10), np.full(10, 10.0)])
+        res = bayes_action(_ArrayPosterior(losses), _identity_loss, ["a"], n=100, cvar_alpha=0.25)
+        worst_25 = np.sort(losses)[-25:].mean()
+        self.assertAlmostEqual(worst_25, 4.4)
+        self.assertAlmostEqual(res["risk_profile"]["cvar"], 4.4)
+
+    def test_cvar_matches_the_plain_tail_mean_when_the_tail_is_a_whole_number_of_draws(self):
+        losses = np.arange(100.0)
+        res = bayes_action(_ArrayPosterior(losses), _identity_loss, ["a"], n=100, cvar_alpha=0.1)
+        self.assertAlmostEqual(res["risk_profile"]["cvar"], float(np.arange(90.0, 100.0).mean()))
+
+    def test_full_tail_mass_is_the_mean_and_a_sub_observation_tail_is_the_worst_draw(self):
+        losses = np.arange(100.0)
+        whole = bayes_action(_ArrayPosterior(losses), _identity_loss, ["a"], n=100, cvar_alpha=1.0)
+        self.assertAlmostEqual(whole["risk_profile"]["cvar"], float(losses.mean()))
+        sliver = bayes_action(_ArrayPosterior(losses), _identity_loss, ["a"], n=100, cvar_alpha=0.005)
+        self.assertAlmostEqual(sliver["risk_profile"]["cvar"], float(losses.max()))
+
+    def test_cvar_never_understates_the_var_it_is_reported_beside(self):
+        rng = np.random.RandomState(0)
+        losses = np.round(rng.gamma(1.5, 2.0, 500), 1)  # rounding manufactures plenty of ties/atoms
+        for alpha in (0.05, 0.1, 0.25, 0.5):
+            res = bayes_action(_ArrayPosterior(losses), _identity_loss, ["a"], n=500, cvar_alpha=alpha)
+            self.assertGreaterEqual(res["risk_profile"]["cvar"], res["risk_profile"]["var"])
+
+
 if __name__ == "__main__":
     unittest.main()
