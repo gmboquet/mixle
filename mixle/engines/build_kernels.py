@@ -23,6 +23,7 @@ malicious build into (see :func:`_private_cache_base_dir`).
 
 from __future__ import annotations
 
+import contextlib
 import importlib.machinery
 import os
 import platform
@@ -31,6 +32,11 @@ import stat
 import sys
 import sysconfig
 import tempfile
+import time
+import warnings
+
+_LOCK_STALE_SECONDS = 600.0
+"""Age past which a kernel-build lock file is treated as abandoned by a killed process."""
 
 
 def _uid_suffix() -> str:
@@ -113,6 +119,84 @@ def _private_cache_base_dir() -> str | None:
     except OSError:
         return None
     return base if _owned_privately(base, require_dir=True) else None
+
+
+@contextlib.contextmanager
+def _extension_build_lock(modname: str):
+    """Serialize concurrent builds of ONE extension across processes, or run unlocked if we cannot.
+
+    Every process compiles into the same ABI-tagged cache paths and then publishes to the same package
+    artifact, so two agents (or a CI job and a developer shell) building the same kernel at once used to
+    share Cython's intermediate tree and race on the destination. This takes an ``O_EXCL`` lock file in
+    the verified-private cache base; a stale lock from a killed process is broken after
+    :data:`_LOCK_STALE_SECONDS` so a crash cannot wedge every later build.
+
+    Failing to acquire is never fatal: the caller proceeds unlocked, exactly as before, because a build
+    that cannot lock is still better than a build that refuses to run. The atomic publish in
+    :func:`_publish_atomically` is what makes an unlocked concurrent build safe for *readers*
+    (MXR-080-1568).
+    """
+    base = _private_cache_base_dir()
+    lock_path = os.path.join(base, f".{modname}.build.lock") if base is not None else None
+    handle = None
+    if lock_path is not None:
+        for _ in range(2):
+            try:
+                handle = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                break
+            except FileExistsError:
+                try:
+                    age = time.time() - os.lstat(lock_path).st_mtime
+                except OSError:
+                    break
+                if age <= _LOCK_STALE_SECONDS:
+                    break  # someone is genuinely building; proceed unlocked rather than block a user
+                try:
+                    os.unlink(lock_path)  # stale: the holder died mid-build
+                except OSError:
+                    break
+            except OSError:
+                break
+    try:
+        yield
+    finally:
+        if handle is not None:
+            os.close(handle)
+            try:
+                os.unlink(lock_path)
+            except OSError:
+                pass
+
+
+def _publish_atomically(built_path: str, destination: str) -> None:
+    """Publish a freshly built extension to ``destination`` so no reader ever sees a partial file.
+
+    ``shutil.copy2`` straight onto the destination writes the target in place: a concurrent process
+    importing ``mixle.engines.<modname>`` during the copy can map a truncated shared library. That is
+    not hypothetical -- a half-published ``_dd_kernels`` on this branch made importing ``mixle.stats``
+    kill the interpreter outright. Copy to a unique sibling, flush it to disk, then ``os.replace``,
+    which is atomic within a filesystem: a reader sees either the old artifact or the new one, never a
+    partial. Still best-effort overall (a read-only package directory must not fail the build).
+    """
+    directory = os.path.dirname(destination) or "."
+    staging = None
+    try:
+        fd, staging = tempfile.mkstemp(prefix=f".{os.path.basename(destination)}.", dir=directory)
+        os.close(fd)
+        shutil.copy2(built_path, staging)
+        with open(staging, "rb") as fh:
+            os.fsync(fh.fileno())  # the bytes must be durable BEFORE the name points at them
+        os.chmod(staging, 0o755)
+        os.replace(staging, destination)
+        staging = None
+    except OSError:
+        pass
+    finally:
+        if staging is not None:
+            try:
+                os.unlink(staging)
+            except OSError:
+                pass
 
 
 def _matches_running_abi(filename: str, modname: str) -> bool:
@@ -202,7 +286,10 @@ def _build_kernel_extension(modname: str, pyx_filename: str, extra_compile_args:
     cmd.build_temp = os.path.join(cache_root, "_build_tmp")
     cmd.inplace = 0
     cmd.ensure_finalized()
-    cmd.run()
+    # Serialized per extension: build_temp is a shared path, so two concurrent builds of the same
+    # kernel would otherwise compile into each other's object tree (MXR-080-1568).
+    with _extension_build_lock(modname):
+        cmd.run()
 
     # The build command's own authoritative answer for where THIS extension landed -- not a glob.
     built_path = cmd.get_ext_fullpath(ext.name)
@@ -218,10 +305,7 @@ def _build_kernel_extension(modname: str, pyx_filename: str, extra_compile_args:
     # mixle.engines.extended directly (without ever going through build_kernels) still finds it the same
     # way it always has. Never required for compile_*_kernels() itself to succeed -- a read-only package
     # install must not make the BUILD fail, only this convenience copy (MXR-080-0155).
-    try:
-        shutil.copy2(built_path, os.path.join(src_dir, os.path.basename(built_path)))
-    except OSError:
-        pass
+    _publish_atomically(built_path, os.path.join(src_dir, os.path.basename(built_path)))
 
     return built_path
 
@@ -235,28 +319,46 @@ def _kernel_available(modname: str) -> bool:
     callers that go through this function (MXR-080-0155's isolated-build-destination fix). Never raises:
     an absent or untrusted cache base (see :func:`_private_cache_base_dir`) is simply treated as
     unavailable rather than surfaced as an error, matching this function's plain boolean contract.
+
+    "Never raises" now actually holds for the failure that matters (MXR-080-1569). Catching only
+    ``ImportError`` left the boolean contract broken for the most likely real-world failure: a stale or
+    ABI-incompatible ``.so`` sitting where a current one should be does not fail with ``ImportError``,
+    it fails in the dynamic loader -- ``OSError`` on POSIX, ``OSError``/``SystemError`` on Windows --
+    which aborted the availability check, and with it any package import that consulted it, instead of
+    returning ``False`` and selecting the documented pure-Python fallback. A loader failure is exactly
+    the "not available" case. An exception raised by the extension's own module-level code is a genuine
+    bug and still propagates.
     """
     import importlib
 
-    try:
-        importlib.import_module(f"mixle.engines.{modname}")
-        return True
-    except ImportError:
-        pass
-    if _private_cache_base_dir() is None:
-        return False  # absent, or exists and is not privately ours: never import from it
-    cache_dir = _kernel_cache_dir()
-    if not os.path.isdir(cache_dir):
-        return False
-    import mixle.engines as _engines_pkg
+    for attempt in ("package", "cache"):
+        if attempt == "cache":
+            if _private_cache_base_dir() is None:
+                return False  # absent, or exists and is not privately ours: never import from it
+            cache_dir = _kernel_cache_dir()
+            if not os.path.isdir(cache_dir):
+                return False
+            import mixle.engines as _engines_pkg
 
-    if cache_dir not in _engines_pkg.__path__:
-        _engines_pkg.__path__.append(cache_dir)
-    try:
-        importlib.import_module(f"mixle.engines.{modname}")
-        return True
-    except ImportError:
-        return False
+            if cache_dir not in _engines_pkg.__path__:
+                _engines_pkg.__path__.append(cache_dir)
+        try:
+            importlib.import_module(f"mixle.engines.{modname}")
+            return True
+        except ImportError:
+            continue
+        except (OSError, SystemError) as exc:
+            # A recognized dynamic-loader / ABI failure: report unavailable, but leave a breadcrumb so
+            # a broken artifact is diagnosable rather than an invisible silent downgrade.
+            warnings.warn(
+                f"mixle.engines.{modname} exists but could not be loaded ({type(exc).__name__}: {exc}); "
+                "treating the compiled kernel as unavailable and using the Python fallback. Rebuild or "
+                "remove the stale extension to restore it.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            continue
+    return False
 
 
 def compile_dd_kernels(force: bool = False) -> str:

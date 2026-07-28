@@ -27,6 +27,7 @@ import stat
 import sys
 import tempfile
 import unittest
+import warnings
 from unittest import mock
 
 from mixle.engines import build_kernels
@@ -395,6 +396,119 @@ class ReadOnlyPackageDirectoryTest(unittest.TestCase):
             spec.loader.exec_module(mod)
             hi, lo = mod.dd_sum_c(np.array([1e16, 1.0, -1e16, -1.0] * 100))
             self.assertLess(abs(float(hi) + float(lo)), 1e-6)  # true sum 0
+
+
+class AtomicPublishTest(unittest.TestCase):
+    """MXR-080-1568: publishing must never let a reader see a partially written extension."""
+
+    def test_publish_is_atomic_and_leaves_no_staging_file(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            source = os.path.join(scratch, "built.bin")
+            with open(source, "wb") as handle:
+                handle.write(b"new-artifact")
+            destination = os.path.join(scratch, "pkg", "_probe.so")
+            os.makedirs(os.path.dirname(destination))
+            with open(destination, "wb") as handle:
+                handle.write(b"old")
+
+            build_kernels._publish_atomically(source, destination)
+
+            with open(destination, "rb") as handle:
+                self.assertEqual(handle.read(), b"new-artifact")
+            # os.replace() renames over the destination, so no partial file and no staging leftover.
+            self.assertEqual(os.listdir(os.path.dirname(destination)), ["_probe.so"])
+            self.assertEqual(oct(os.stat(destination).st_mode)[-3:], "755")
+
+    def test_publish_into_an_unwritable_directory_is_silently_skipped(self):
+        # Contract from MXR-080-0155: the package-directory copy is best-effort and must never fail
+        # the build. The atomic path must preserve that, including cleaning up its own staging file.
+        with tempfile.TemporaryDirectory() as scratch:
+            source = os.path.join(scratch, "built.bin")
+            with open(source, "wb") as handle:
+                handle.write(b"x")
+            locked = os.path.join(scratch, "locked")
+            os.makedirs(locked)
+            os.chmod(locked, 0o500)
+            try:
+                build_kernels._publish_atomically(source, os.path.join(locked, "_probe.so"))
+                self.assertEqual(os.listdir(locked), [])
+            finally:
+                os.chmod(locked, 0o700)
+
+
+class BuildLockTest(unittest.TestCase):
+    """MXR-080-1568: concurrent builds of one extension share a build tree and must serialize."""
+
+    def test_lock_is_taken_and_released(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            with mock.patch.dict(os.environ, {"MIXLE_KERNEL_CACHE_DIR": scratch}):
+                lock_path = os.path.join(scratch, "._probe.build.lock")
+                with build_kernels._extension_build_lock("_probe"):
+                    self.assertTrue(os.path.exists(lock_path))
+                self.assertFalse(os.path.exists(lock_path))
+
+    def test_a_stale_lock_from_a_killed_process_is_broken(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            with mock.patch.dict(os.environ, {"MIXLE_KERNEL_CACHE_DIR": scratch}):
+                build_kernels._private_cache_base_dir()
+                lock_path = os.path.join(scratch, "._probe.build.lock")
+                with open(lock_path, "w") as handle:
+                    handle.write("")
+                stale = os.stat(lock_path).st_mtime - (build_kernels._LOCK_STALE_SECONDS + 60.0)
+                os.utime(lock_path, (stale, stale))
+                with build_kernels._extension_build_lock("_probe"):
+                    pass
+                self.assertFalse(os.path.exists(lock_path))  # broken, taken, and released
+
+    def test_a_fresh_lock_is_respected_without_blocking(self):
+        # A build that cannot lock proceeds unlocked rather than hanging: the atomic publish is what
+        # keeps concurrent builds safe for readers.
+        with tempfile.TemporaryDirectory() as scratch:
+            with mock.patch.dict(os.environ, {"MIXLE_KERNEL_CACHE_DIR": scratch}):
+                build_kernels._private_cache_base_dir()
+                lock_path = os.path.join(scratch, "._probe.build.lock")
+                with open(lock_path, "w") as handle:
+                    handle.write("")
+                with build_kernels._extension_build_lock("_probe"):
+                    pass
+                self.assertTrue(os.path.exists(lock_path))  # someone else's lock, left alone
+                os.unlink(lock_path)
+
+
+class KernelAvailableLoaderFailureTest(unittest.TestCase):
+    """MXR-080-1569: `_kernel_available` promises a plain bool; a bad .so must not break that."""
+
+    @staticmethod
+    def _available_with_import_raising(error):
+        """Call ``_kernel_available`` with only ITS import raising ``error``, capturing warnings.
+
+        The patch window is exactly the one call: patching ``importlib.import_module`` any wider
+        catches unrelated lazy imports (Cython's ``Shadow`` module imports on attribute access, which
+        ``assertWarns``'s ``sys.modules`` walk triggers) and the test stops testing this function.
+        """
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with mock.patch("importlib.import_module", side_effect=error):
+                available = build_kernels._kernel_available("_dd_kernels")
+        return available, [str(w.message) for w in caught]
+
+    def test_a_dynamic_loader_failure_reports_unavailable_with_a_warning(self):
+        # A stale/ABI-incompatible extension fails in the loader (OSError), not with ImportError.
+        # That used to escape and abort the availability check -- and any package import using it.
+        available, messages = self._available_with_import_raising(OSError("wrong ABI"))
+        self.assertFalse(available)
+        self.assertTrue(any("could not be loaded" in m and "wrong ABI" in m for m in messages), messages)
+
+    def test_an_extension_internal_bug_still_propagates(self):
+        # Negative control: a genuine bug in the extension's own module-level code is not an
+        # availability question and must stay visible.
+        with self.assertRaises(ZeroDivisionError):
+            self._available_with_import_raising(ZeroDivisionError("bug in kernel init"))
+
+    def test_a_plain_missing_extension_is_still_just_unavailable(self):
+        available, messages = self._available_with_import_raising(ImportError("no such module"))
+        self.assertFalse(available)
+        self.assertEqual(messages, [])  # an absent kernel is routine, not worth warning about
 
 
 if __name__ == "__main__":
