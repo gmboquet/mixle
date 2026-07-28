@@ -219,7 +219,15 @@ def trusted_deserialization() -> Iterator[None]:
     NeuralLeaf-family object (or anything else that persists live code/objects via pickle) executes
     that pickle's ``__reduce__``/``__setstate__`` arbitrarily, exactly like ``pickle.load`` on an
     untrusted file. Nested/re-entrant use is safe (the gate stays open until the outermost block
-    exits); safe to use across threads/async tasks via ``contextvars`` propagation.
+    exits).
+
+    The authority is deliberately NOT inherited by child work. ``contextvars`` are copied into child
+    asyncio tasks and into an explicitly copied context on another thread, so ambient propagation
+    would let a task spawned inside this block keep decoding trusted artifacts for its whole
+    lifetime -- including after the parent block exited. :class:`_TrustScope` therefore pins the
+    owning thread and task, and :func:`deserialization_is_trusted` reports ``False`` anywhere but
+    that one synchronous decode context. Open the block again in the child if it genuinely needs
+    the authority.
     """
     scope = _TrustScope()
     token = _TRUST_CODE_EXECUTION.set(scope)
