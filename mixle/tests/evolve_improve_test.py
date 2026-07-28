@@ -385,6 +385,58 @@ class LedgerIntegrityTest(unittest.TestCase):
         self.assertTrue(EvolutionLedger.from_json(led.to_json()).verify())
 
 
+class LedgerStrictJsonTest(unittest.TestCase):
+    """MXR-080-1762: receipts serialized bare NaN/Infinity tokens -- a Python extension no conforming
+    JSON parser will read -- and flattened unknown evidence objects to str() with no warning."""
+
+    def test_a_non_measurement_is_refused_where_it_enters(self):
+        led = EvolutionLedger()
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.assertRaises(ValueError):
+                led.record(operator="op", delta=bad, verdict=None, cost=1.0, parent_hash=None)
+            with self.assertRaises(ValueError):
+                led.record(operator="op", delta=0.0, verdict=None, cost=bad, parent_hash=None)
+        with self.assertRaises(ValueError):
+            led.record(operator="op", delta=0.0, verdict=None, cost=-1.0, parent_hash=None)
+        self.assertEqual(len(led), 0)
+
+    def test_a_scalar_only_verdicts_nan_p_value_survives_a_strict_round_trip(self):
+        # A scalar-only Verdict carries p_value=nan as its documented "no paired test was run"
+        # sentinel, so the ledger must be able to HOLD one -- and still emit strict JSON.
+        led = EvolutionLedger()
+        led.record(
+            operator="scalar_only",
+            delta=0.5,
+            verdict={"p_value": float("nan"), "ci": [float("-inf"), float("inf")]},
+            cost=1.0,
+            parent_hash=None,
+        )
+        payload = led.to_json()
+        self.assertNotIn("NaN,", payload)
+        self.assertNotIn("Infinity,", payload)
+        # a strict parser (allow_nan=False on the way back in) accepts the document
+        json.loads(payload, parse_constant=_no_constants)
+
+        back = EvolutionLedger.from_json(payload)
+        self.assertTrue(back.verify())
+        row = back.rows[0]
+        self.assertTrue(np.isnan(row["verdict"]["p_value"]))
+        self.assertEqual(row["verdict"]["ci"], [float("-inf"), float("inf")])
+
+    def test_an_inexactly_encodable_evidence_object_warns_instead_of_flattening_silently(self):
+        class Opaque:
+            def __str__(self):
+                return "opaque"
+
+        led = EvolutionLedger()
+        with self.assertWarns(UserWarning):
+            led.record(operator="op", delta=0.0, verdict=None, cost=0.0, parent_hash=None, meta={"x": Opaque()})
+
+
+def _no_constants(name):
+    raise ValueError(f"strict JSON parsers reject the bare token {name!r}")
+
+
 class _MutatingOperator:
     """An operator that damages the champion it is handed and then fails."""
 
