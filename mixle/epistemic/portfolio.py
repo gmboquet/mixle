@@ -20,9 +20,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from numbers import Real
 from typing import Any
 
 import numpy as np
+
+_RESAMPLE_METHODS = frozenset({"systematic", "multinomial"})
+"""Resamplers :meth:`HypothesisPortfolio.resample` implements, checked before any early return."""
 
 
 @dataclass(frozen=True)
@@ -176,7 +180,27 @@ class HypothesisPortfolio:
         ``w_open`` is untouched -- it is a reserved mass, not a particle. Resampled duplicates of the
         same source hypothesis get id-suffixed copies (``"h2"``, ``"h2#1"``, ...) so every hypothesis
         id in the returned portfolio stays unique, which :meth:`resurrect`/the journal rely on.
+
+        ``method`` and ``ess_threshold`` are validated up front, before any early return
+        (MXR-080-1759). Validating them lazily -- at the point each is first *used* -- made the
+        contract depend on the current weights: an unknown ``method`` was silently accepted whenever
+        ESS happened to clear the threshold, so the identical call raised or did not depending on
+        data. ``ess_threshold`` compares against ``ess / n``, which lies in ``(0, 1]``, so the
+        meaningful domain is ``[0, 1]`` (``0`` disables resampling, ``1`` resamples anything short of
+        uniform weights); a negative threshold silently disabled resampling, and NaN made every
+        comparison false and forced an unrequested resample on every call.
+
+        Raises:
+            ValueError: if ``method`` is not a known resampler, or ``ess_threshold`` is not a finite
+                number in ``[0, 1]``.
         """
+        if method not in _RESAMPLE_METHODS:
+            raise ValueError(f"unknown resample method {method!r}; expected one of {sorted(_RESAMPLE_METHODS)}")
+        if isinstance(ess_threshold, (bool, np.bool_)) or not isinstance(ess_threshold, Real):
+            raise ValueError(f"ess_threshold must be a real scalar in [0, 1], got {ess_threshold!r}")
+        ess_threshold = float(ess_threshold)
+        if not np.isfinite(ess_threshold) or not 0.0 <= ess_threshold <= 1.0:
+            raise ValueError(f"ess_threshold must be finite and in [0, 1], got {ess_threshold!r}")
         rng = _as_rng(rng)
         active_idx = [i for i, h in enumerate(self.hypotheses) if h.active]
         if len(active_idx) <= 1:
@@ -193,10 +217,8 @@ class HypothesisPortfolio:
         if method == "systematic":
             positions = (rng.uniform() + np.arange(n)) / n
             chosen = np.searchsorted(np.cumsum(p), positions)
-        elif method == "multinomial":
+        else:  # "multinomial" -- the only other member of _RESAMPLE_METHODS, checked on entry
             chosen = rng.choice(n, size=n, p=p)
-        else:
-            raise ValueError(f"unknown resample method {method!r}")
         new_hyps = list(self.hypotheses)
         new_weights = self.weights.copy()
         seen: dict[str, int] = {}
