@@ -10,12 +10,61 @@ for sampling. The composition-expressiveness piece: mixed inference across one m
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable
 from typing import Any
 
 import numpy as np
 
 __all__ = ["BlockGibbs", "ConjugateBlock", "MetropolisBlock"]
+
+#: Types that cannot be mutated in place, so a reference to one is already a safe snapshot.
+_IMMUTABLE = (bool, int, float, complex, str, bytes, type(None), np.number, np.bool_)
+
+
+def _snapshot(value: Any) -> Any:
+    """An independent copy of a block value, so retained samples cannot be rewritten later.
+
+    A conditional update is free to build its result in place -- reusing one preallocated buffer per
+    block is the obvious way to write a fast conjugate draw, and an in-place torch/NumPy update is
+    idiomatic. Storing the returned object directly makes every retained sample an alias of that one
+    buffer, so the "chain" ends up holding N copies of the final state and the caller's own
+    initialisation is mutated along with it. Snapshotting at the boundary keeps that legitimate
+    implementation style working instead of forbidding it.
+    """
+    if isinstance(value, _IMMUTABLE):
+        return value
+    if isinstance(value, np.ndarray):
+        return value.copy()
+    try:
+        return copy.deepcopy(value)
+    except Exception as exc:
+        raise TypeError(
+            f"BlockGibbs cannot snapshot a block value of type {type(value).__name__!r}: {exc}. "
+            "Block values must be copyable, otherwise retained samples would alias mutable state and "
+            "the chain could be rewritten in place after the fact."
+        ) from exc
+
+
+def _finite_positive_scale(value: Any) -> float:
+    """A random-walk proposal scale must be a finite, strictly positive width."""
+    try:
+        scale = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"MetropolisBlock scale must be a real number, got {value!r}") from exc
+    if not np.isfinite(scale) or scale <= 0.0:
+        raise ValueError(f"MetropolisBlock scale must be finite and positive, got {scale!r}")
+    return scale
+
+
+def _exact_int(value: Any, label: str, *, minimum: int) -> int:
+    """``value`` as an exact integer at least ``minimum`` (``bool`` and floats rejected)."""
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{label} must be an exact integer, got {value!r}")
+    count = int(value)
+    if count < minimum:
+        raise ValueError(f"{label} must be >= {minimum}, got {count!r}")
+    return count
 
 
 class ConjugateBlock:
@@ -25,6 +74,9 @@ class ConjugateBlock:
         self.name = name
         self._draw = draw
         self.kind = "conjugate"
+
+    def reset(self) -> None:
+        """Clear per-run state. A conjugate draw carries none -- present for a uniform block protocol."""
 
     def update(self, state: dict, rng: np.random.RandomState, in_burn_in: bool = True) -> Any:
         """Draw an exact full-conditional sample for this block.
@@ -46,8 +98,24 @@ class MetropolisBlock:
     def __init__(self, name: str, log_conditional: Callable[[Any, dict], float], scale: float = 0.5):
         self.name = name
         self._logp = log_conditional
-        self.scale = float(scale)
+        # A zero proposal scale proposes the current point every sweep: every "proposal" is accepted,
+        # so the block reports acceptance 1.0 -- the healthiest-looking number it can produce -- while
+        # returning a constant chain. A NaN or infinite scale is the mirror image: every proposal is
+        # rejected (NaN comparisons are false, infinite steps land at -inf density), so the chain
+        # freezes at its initialisation and reports acceptance 0.0. Neither is a hard-to-tune
+        # sampler; both are an unusable one, and both are invisible in the returned chain.
+        self.scale = self._initial_scale = _finite_positive_scale(scale)
         self.kind = "metropolis"
+        self._acc = 0
+        self._tot = 0
+
+    def reset(self) -> None:
+        """Restore the proposal scale and acceptance counters this block was constructed with.
+
+        Adaptation state is per-run: a fresh :meth:`BlockGibbs.run` must not inherit the tuning, nor
+        the cumulative acceptance rate, that a previous run happened to leave behind.
+        """
+        self.scale = self._initial_scale
         self._acc = 0
         self._tot = 0
 
@@ -82,13 +150,56 @@ class BlockGibbs:
     """Block-coordinate sampler that dispatches each block's own conditional update each sweep."""
 
     def __init__(self, blocks: list, init: dict):
-        self.blocks = blocks
-        self.init = dict(init)
+        self.blocks = list(blocks)
+        if not self.blocks:
+            raise ValueError("BlockGibbs requires at least one block")
+        names = [b.name for b in self.blocks]
+        duplicated = sorted({n for n in names if names.count(n) > 1})
+        if duplicated:
+            # Two blocks sharing a name write the same state key and append to the same chain, so one
+            # block's draws silently overwrite the other's and the returned chain interleaves two
+            # different conditionals under one label.
+            raise ValueError(f"BlockGibbs block names must be unique, got duplicates: {duplicated}")
+        missing = [n for n in names if n not in init]
+        if missing:
+            raise ValueError(f"init has no starting value for block(s) {missing}; known keys: {sorted(init)}")
+        # Snapshot at construction: the caller's dict AND its values stay theirs. Without this an
+        # in-place conditional update mutates the very initialisation the caller passed in, so a second
+        # run -- or the caller's own later inspection of it -- silently starts somewhere else.
+        self.init = {k: _snapshot(v) for k, v in dict(init).items()}
 
-    def run(self, n_samples: int = 2000, *, burn: int = 500, seed: int | None = None) -> dict[str, np.ndarray]:
-        """Run the chain; returns ``{block_name: array of post-burn-in samples}``."""
+    def run(
+        self, n_samples: int = 2000, *, burn: int = 500, seed: int | None = None, resume: bool = False
+    ) -> dict[str, np.ndarray]:
+        """Run the chain; returns ``{block_name: array of post-burn-in samples}``.
+
+        Args:
+            n_samples: number of post-burn-in draws to retain (exact positive integer).
+            burn: number of burn-in sweeps to discard, during which proposals adapt (exact >= 0).
+            seed: RNG seed. With ``resume=False`` the same seed reproduces the same chain exactly.
+            resume: ``False`` (default) starts a fresh run -- the state returns to ``init`` and every
+                block's per-run adaptation state is reset, so the run is a pure function of
+                ``(blocks, init, n_samples, burn, seed)``. ``True`` continues from whatever tuning the
+                previous run left behind, for deliberately staged runs; the chain then depends on the
+                run history and is not reproducible from the seed alone.
+
+        Raises:
+            TypeError: if ``n_samples`` or ``burn`` is not an exact integer.
+            ValueError: if ``n_samples`` is not positive or ``burn`` is negative.
+        """
+        n_samples = _exact_int(n_samples, "n_samples", minimum=1)
+        burn = _exact_int(burn, "burn", minimum=0)
+        if not resume:
+            # `run` already resets the RNG and the state; leaving each block's adapted proposal scale
+            # and acceptance counters untouched made a re-run with the same seed produce a different
+            # chain, and let the previous run's post-burn-in samples feed this run's burn-in
+            # adaptation rate. Reset makes a default run reproducible from its arguments alone.
+            for b in self.blocks:
+                reset = getattr(b, "reset", None)
+                if callable(reset):
+                    reset()
         rng = np.random.RandomState(seed)
-        state = dict(self.init)
+        state = {k: _snapshot(v) for k, v in self.init.items()}
         chains: dict[str, list] = {b.name: [] for b in self.blocks}
         for it in range(burn + n_samples):
             in_burn_in = it < burn
@@ -96,5 +207,5 @@ class BlockGibbs:
                 state[b.name] = b.update(state, rng, in_burn_in)
             if it >= burn:
                 for b in self.blocks:
-                    chains[b.name].append(state[b.name])
+                    chains[b.name].append(_snapshot(state[b.name]))
         return {k: np.array(v) for k, v in chains.items()}
