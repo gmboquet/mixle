@@ -452,7 +452,7 @@ def test_on_error_rejects_an_unknown_policy():
 
 
 def test_non_dict_summary_is_rejected():
-    with pytest.raises(TypeError, match="summarize"):
+    with pytest.raises(SequentialDesignError, match="summary_validation") as excinfo:
         sequential_design(
             _initial(),
             fit=_fit,
@@ -463,10 +463,12 @@ def test_non_dict_summary_is_rejected():
             combine=_combine,
             max_rounds=5,
         )
+    assert isinstance(excinfo.value.__cause__, TypeError)
+    assert excinfo.value.result.rounds[-1].failed_step == "summary_validation"
 
 
 def test_non_dict_decision_is_rejected():
-    with pytest.raises(TypeError, match="should_continue"):
+    with pytest.raises(SequentialDesignError, match="decision_validation") as excinfo:
         sequential_design(
             _initial(),
             fit=_fit,
@@ -477,3 +479,93 @@ def test_non_dict_decision_is_rejected():
             combine=_combine,
             max_rounds=5,
         )
+    assert isinstance(excinfo.value.__cause__, TypeError)
+    assert excinfo.value.result.rounds[-1].failed_step == "decision_validation"
+
+
+@pytest.mark.parametrize("failed_step", ["summarize", "should_continue"])
+def test_summary_and_decision_callback_failures_return_auditable_results(failed_step):
+    def boom(*args):
+        raise RuntimeError(f"{failed_step} blew up")
+
+    result = sequential_design(
+        _initial(),
+        fit=_fit,
+        summarize=boom if failed_step == "summarize" else _summarize,
+        should_continue=boom if failed_step == "should_continue" else _threshold_controller(0.15),
+        propose=_propose_next_measurement,
+        acquire=_acquire,
+        combine=_combine,
+        max_rounds=5,
+        on_error="record_and_stop",
+    )
+    assert result.stopped_reason == "callback_error"
+    assert result.rounds[-1].failed_step == failed_step
+    assert f"{failed_step} blew up" in result.rounds[-1].error
+
+
+@pytest.mark.parametrize("keep_going", ["false", 0, 1, None, np.bool_(False)])
+def test_non_boolean_decision_never_triggers_acquisition(keep_going):
+    acquisitions = []
+    result = sequential_design(
+        _initial(),
+        fit=_fit,
+        summarize=_summarize,
+        should_continue=lambda history: {"keep_going": keep_going, "reason": "invalid"},
+        propose=_propose_next_measurement,
+        acquire=lambda action: acquisitions.append(action),
+        combine=_combine,
+        max_rounds=5,
+        on_error="record_and_stop",
+    )
+    assert acquisitions == []
+    assert result.stopped_reason == "callback_error"
+    assert result.rounds[-1].failed_step == "decision_validation"
+
+
+@pytest.mark.parametrize(
+    ("callback", "bad_record", "failed_step"),
+    [
+        ("summary", {"bad": object()}, "summary_validation"),
+        ("summary", {"bad": float("nan")}, "summary_validation"),
+        ("summary", {1: "integer key"}, "summary_validation"),
+        ("decision", {"keep_going": False, "reason": "stop", "bad": object()}, "decision_validation"),
+        ("decision", {"keep_going": False, "reason": ""}, "decision_validation"),
+    ],
+)
+def test_audit_records_enforce_portable_json_and_required_decision_reason(callback, bad_record, failed_step):
+    result = sequential_design(
+        _initial(),
+        fit=_fit,
+        summarize=(lambda state, index: bad_record) if callback == "summary" else _summarize,
+        should_continue=(lambda history: bad_record)
+        if callback == "decision"
+        else _threshold_controller(0.15),
+        propose=_propose_next_measurement,
+        acquire=_acquire,
+        combine=_combine,
+        max_rounds=5,
+        on_error="record_and_stop",
+    )
+    assert result.stopped_reason == "callback_error"
+    assert result.rounds[-1].failed_step == failed_step
+
+
+def test_history_copy_failure_is_named_and_preserves_the_partial_result(monkeypatch):
+    def broken_deepcopy(value):
+        raise RuntimeError("copy failed")
+
+    monkeypatch.setattr("mixle.doe.sequential.copy.deepcopy", broken_deepcopy)
+    result = sequential_design(
+        _initial(),
+        fit=_fit,
+        summarize=_summarize,
+        should_continue=_threshold_controller(0.15),
+        propose=_propose_next_measurement,
+        acquire=_acquire,
+        combine=_combine,
+        max_rounds=5,
+        on_error="record_and_stop",
+    )
+    assert result.stopped_reason == "callback_error"
+    assert result.rounds[-1].failed_step == "decision_history"
