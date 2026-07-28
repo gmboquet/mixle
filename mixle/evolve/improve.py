@@ -5,6 +5,9 @@ split, proposes a challenger from every applicable operator on the train split, 
 against the champion on the verify split, and returns the verified challenger with the largest delta
 (ties broken toward the lower-cost operator). If nothing verifies it returns the *unchanged* champion with
 ``verified=False`` -- the anti-regression guarantee: ``improve`` can never hand back a worse model.
+Operators are third-party code, so each is handed its own deep copy of the champion rather than the
+caller's object: an operator that mutates and then raises cannot make the "unchanged champion" that
+guarantee promises be a mutated one.
 
 Every attempt is recorded to the ledger, so the run leaves a serializable trail of what was
 tried and why it won or lost.
@@ -12,6 +15,7 @@ tried and why it won or lost.
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -109,9 +113,17 @@ def improve(
         if budget is not None and spent + cost > budget:
             continue
         try:
-            if not op.applicable(model, train, ctx=ctx):
+            # Each operator gets its OWN deep copy of the champion, never the caller's object.
+            # `applicable`/`propose` are third-party code; exceptions from them are caught below, but
+            # nothing rolled back whatever they had already mutated. An operator that set an attribute
+            # on the champion and then raised made improve() return that mutated object with
+            # verified=False -- directly violating the anti-regression guarantee to hand back the
+            # UNCHANGED champion when nothing verifies. Copying also keeps operators isolated from
+            # each other and keeps the gate comparing against a pristine champion.
+            champion_view = copy.deepcopy(model)
+            if not op.applicable(champion_view, train, ctx=ctx):
                 continue
-            candidate = op.propose(model, train, ctx=ctx)
+            candidate = op.propose(champion_view, train, ctx=ctx)
         except Exception as exc:  # noqa: BLE001
             if ledger is not None:
                 ledger.record(
@@ -153,8 +165,7 @@ def improve(
             alpha=alpha,
         )
         adjusted = {
-            attempt_index: float(p_value)
-            for attempt_index, p_value in zip(finite, correction["pvals_adjusted"])
+            attempt_index: float(p_value) for attempt_index, p_value in zip(finite, correction["pvals_adjusted"])
         }
 
     best: ImprovementResult | None = None
