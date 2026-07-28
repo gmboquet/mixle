@@ -45,9 +45,14 @@ class VMPTestCase(unittest.TestCase):
         self.assertAlmostEqual(m.params["sd"], 2.0, delta=0.2)
         self.assertTrue(np.all(np.diff(m.result.elbo_trace) >= -1e-6))
 
-    def test_unsupported_model_raises(self):
-        with self.assertRaises(NotImplementedError):
+    def test_asking_for_inference_on_a_fully_specified_model_raises(self):
+        # ValueError, not NotImplementedError: `Normal(0.0, 1.0)` has no inferable parameters at
+        # all, so this is a meaningless request rather than a route vmp has yet to implement. The
+        # two are deliberately distinguished -- test_free_slot_gives_clear_error below covers a
+        # construct vmp genuinely does not support, and that one is still NotImplementedError.
+        with self.assertRaises(ValueError) as cm:
             Normal(0.0, 1.0).fit(self.data, how="vmp")  # nothing to infer
+        self.assertIn("no inferable parameters", str(cm.exception))
 
     def test_free_slot_gives_clear_error(self):
         # vmp needs priors, not the point-estimate `free`; the error must say so (not a TypeError)

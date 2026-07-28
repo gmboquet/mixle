@@ -1748,8 +1748,20 @@ def _lda_vi_fixed_point(
         residual_trace=tuple(residual_trace),
         impossible_documents=tuple(impossible_documents.tolist()),
     )
-    if not converged:
-        raise LDAConvergenceError(diagnostics)
+    # Exhausting max_gamma_iter is normal termination, not a failure. That cap exists precisely so
+    # that "a few straggler documents would otherwise chase gamma_threshold for thousands of
+    # iterations at negligible gain" (see LatentDirichletAllocation's parameter docs) -- raising
+    # here made the documented worst-case bound fatal, and aborted fits whose residual had already
+    # fallen to ~1e-8 against a 1e-8 threshold. The diagnostics above already report converged=False
+    # and the final residual honestly, which is what callers should consult.
+    #
+    # A residual that is non-finite, or that never improved on its starting value, is a different
+    # thing: the fixed point is diverging or stuck rather than sitting in its geometric tail, and no
+    # amount of extra budget helps. That still raises.
+    if not converged and residual_trace:
+        stalled = not np.isfinite(residual) or residual >= residual_trace[0]
+        if stalled:
+            raise LDAConvergenceError(diagnostics)
     if return_diagnostics:
         return responsibilities, document_gammas, diagnostics
     return responsibilities, document_gammas

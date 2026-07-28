@@ -167,13 +167,23 @@ class PPLExplainFitTestCase(unittest.TestCase):
         no_priors = Mix([Normal(-2, 1), Normal(2, 1)], [0.5, 0.5])
         self.assertFalse(no_priors._has_priors())
 
-    def test_bound_rv_without_cached_explanation_raises(self):
-        # A model reloaded from a saved artifact (or otherwise bound without going through .fit())
-        # has no stashed explanation; report that honestly rather than guessing.
+    def test_fit_explanation_survives_a_pickle_round_trip(self):
+        # The stashed record travels with the model, so a reloaded artifact still explains itself
+        # rather than losing its provenance. (This used to raise: the cache did not round-trip.)
         m = Normal(free, free).fit(list(np.random.RandomState(0).normal(size=50)))
         reloaded = pickle.loads(pickle.dumps(m))
-        with self.assertRaises(RuntimeError):
-            reloaded.explain_fit()
+        self.assertEqual(reloaded.explain_fit(), m.explain_fit())
+        self.assertEqual(reloaded.explain_fit()["route"], "em")
+
+    def test_bound_rv_without_cached_explanation_raises(self):
+        # A bound model carrying no record at all -- built directly rather than through .fit(), or
+        # written before the record was carried -- must say so rather than guess a route.
+        m = Normal(free, free).fit(list(np.random.RandomState(0).normal(size=50)))
+        stripped = pickle.loads(pickle.dumps(m))
+        stripped._cache.pop("_fit_explanation")
+        with self.assertRaises(RuntimeError) as cm:
+            stripped.explain_fit()
+        self.assertIn("no record of how this bound model was fit", str(cm.exception))
 
 
 class PPLDeterministicExpressionTestCase(unittest.TestCase):

@@ -232,10 +232,13 @@ def structured_vi(observations, guide: Guide, *, max_its: int = 300, tol: float 
     missing = [handle for identity, handle in inferred.items() if identity not in declared]
     stray = [name for identity, name in declared.items() if identity not in inferred]
     if missing or stray:
-        missing_names = [handle._name or f"<{handle._family.name}:{identity}>" for identity, handle in inferred.items() if identity not in declared]
+        missing_names = [
+            handle._name or f"<{handle._family.name}:{identity}>"
+            for identity, handle in inferred.items()
+            if identity not in declared
+        ]
         raise ValueError(
-            "guide must project every inferred latent exactly once; "
-            f"missing={missing_names}, not_in_model={stray}"
+            f"guide must project every inferred latent exactly once; missing={missing_names}, not_in_model={stray}"
         )
     for name, (handle, family) in guide._latents.items():
         expected = {"Normal": "gaussian", "Gamma": "gamma", "Dirichlet": "dirichlet"}.get(
@@ -245,8 +248,7 @@ def structured_vi(observations, guide: Guide, *, max_its: int = 300, tol: float 
             raise NotImplementedError(f"structured VI does not support latent family {handle._family.name!r}")
         if family is not None and _NODE_OF_FAMILY[family] is not _NODE_OF_FAMILY[expected]:
             raise ValueError(
-                f"guide declares q({name})={family!r}, but latent family {handle._family.name!r} "
-                f"requires {expected!r}"
+                f"guide declares q({name})={family!r}, but latent family {handle._family.name!r} requires {expected!r}"
             )
 
     g = Graph()
@@ -257,14 +259,15 @@ def structured_vi(observations, guide: Guide, *, max_its: int = 300, tol: float 
     # the projection constraint: every guide latent must be an inferred node, and (if a family was
     # declared) the model's conjugate factor for it must be that family.
     for name, (handle, family) in guide._latents.items():
-        node = res._node_of.get(id(handle))
-        if node is None:
+        # GraphResult snapshots each fitted factor as a family tag rather than holding the live
+        # *VNode, so ask it for the tag instead of type-checking a node object it no longer keeps.
+        got = res._family(handle)
+        if got is None:
             raise ValueError(
                 f"guide latent {name!r} is not an inferred latent of the model -- check that this exact "
                 "handle object appears in an observation factor (latents are matched by object identity)."
             )
-        if family is not None and not isinstance(node, _NODE_OF_FAMILY[family]):
-            got = _FAMILY_OF_NODE.get(type(node), type(node).__name__)
+        if family is not None and got != _FAMILY_OF_NODE[_NODE_OF_FAMILY[family]]:
             raise ValueError(
                 f"guide declares q({name})={family!r}, but the model's conjugate factor for it is {got!r}. "
                 "Either drop the explicit family (use the conjugate default) or give the latent a prior "

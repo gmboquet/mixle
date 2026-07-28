@@ -601,7 +601,9 @@ class Constraint:
 
     def __invert__(self):
         # Negation has no smooth penalty surface; only the hard (boolean) mode survives.
-        return Constraint(self.leaves, lambda env: ~np.asarray(self.pred(env)), f"~{self.desc}", None, False, self.reduction)
+        return Constraint(
+            self.leaves, lambda env: ~np.asarray(self.pred(env)), f"~{self.desc}", None, False, self.reduction
+        )
 
     def __bool__(self):
         raise TypeError(
@@ -635,11 +637,7 @@ class ProbabilityEstimate(float):
         z2 = 1.959963984540054**2
         denom = 1.0 + z2 / trials
         center = (value + z2 / (2.0 * trials)) / denom
-        radius = (
-            1.959963984540054
-            * math.sqrt(value * (1.0 - value) / trials + z2 / (4.0 * trials**2))
-            / denom
-        )
+        radius = 1.959963984540054 * math.sqrt(value * (1.0 - value) / trials + z2 / (4.0 * trials**2)) / denom
         obj.lower = 0.0 if hits == 0 else max(0.0, center - radius)
         obj.upper = 1.0 if hits == trials else min(1.0, center + radius)
         return obj
@@ -1154,7 +1152,9 @@ class Family:
             for p in parameters
             if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
         }
-        call_kwargs = kwargs if accepts_extra else {key: value for key, value in kwargs.items() if key in accepted_names}
+        call_kwargs = (
+            kwargs if accepts_extra else {key: value for key, value in kwargs.items() if key in accepted_names}
+        )
         # Do not catch TypeError here. A TypeError raised inside the constructor is a code/data defect,
         # not evidence that a different calling convention should be retried.
         return self.est_cls(**call_kwargs)
@@ -1245,9 +1245,7 @@ def register_composite(
     if name in _FAMILIES:
         raise ValueError(f"family {name!r} is already registered; silent replacement is forbidden.")
     if dist_cls is not None and dist_cls in _DIST_TO_COMPOSITE_READ:
-        raise ValueError(
-            f"composite distribution class {dist_cls.__name__} already has a registered parameter reader."
-        )
+        raise ValueError(f"composite distribution class {dist_cls.__name__} already has a registered parameter reader.")
     fam = CompositeFamily(name, dist_fn, est_fn, seed_fn=seed_fn, read=read, fit_fn=fit_fn, validator=validator)
     _FAMILIES[name] = fam
     if dist_cls is not None and read is not None:
@@ -1393,6 +1391,19 @@ def _inferable_parameter_dimension(rv: RandomVariable) -> int | None:
             if not isinstance(initial, np.ndarray):
                 total += k - 1
             return total
+        if name == "LDA":
+            # LDA declares only shape hyperparameters (num_topics, vocab_size, alpha) -- its actual
+            # parameters, the topic-word simplices, are created by the estimator and appear in no
+            # slot. The generic branch below therefore counted 0, which made a model with plenty to
+            # infer look fully specified: .fit() took the no-op structural shortcut and rejected
+            # max_its/rng as options a fully specified model cannot consume. Count the topics:
+            # num_topics simplices over vocab_size words, each with vocab_size - 1 free entries.
+            num_topics, vocab_size, alpha = node._args
+            total = int(num_topics) * (int(vocab_size) - 1)
+            count = slot(alpha)  # alpha is a fixed float by default, but may be declared inferable
+            if count is None:
+                return None
+            return total + count
         # Generic composites recurse into declared child models and structural/free slots only.
         total = 0
         for argument in node._args:
@@ -2004,10 +2015,7 @@ class RandomVariable:
             leaves = _expr_leaves(self)
             rng = np.random.RandomState(seed)
             k = n if n is not None else 1
-            env = {
-                leaf: np.asarray(leaf.sample(k, seed=int(rng.randint(1, 2**31))))
-                for leaf in leaves
-            }
+            env = {leaf: np.asarray(leaf.sample(k, seed=int(rng.randint(1, 2**31)))) for leaf in leaves}
             out = np.asarray(_eval_expr(self, env))
             if n is not None:
                 return out
@@ -2104,7 +2112,9 @@ class RandomVariable:
             else:
                 xv = raw.reshape(1, -1) if raw.ndim == 1 else raw
                 if xv.ndim != 2 or xv.shape[1] != width:
-                    raise ValueError(f"conditioned vector event expects shape ({width},) or (n, {width}); got {raw.shape}.")
+                    raise ValueError(
+                        f"conditioned vector event expects shape ({width},) or (n, {width}); got {raw.shape}."
+                    )
             base_lp = np.atleast_1d(base.log_prob(xv))
             mask = event.eval_rows({base: xv}, rows=xv.shape[0])
             out = np.where(mask, base_lp - logZ, -np.inf)
@@ -2163,11 +2173,7 @@ class RandomVariable:
         :meth:`plugin_log_likelihood` for their ordinary per-observation plug-in score.
         """
         r = self._result
-        if (
-            r is not None
-            and supports(r, PointwiseLogLikelihood)
-            and getattr(r, "build", None) is not None
-        ):
+        if r is not None and supports(r, PointwiseLogLikelihood) and getattr(r, "build", None) is not None:
             matrix = np.asarray(r.pointwise_log_likelihood(data), dtype=float)
             if matrix.ndim != 2 or matrix.shape[0] < 2:
                 raise ValueError("posterior pointwise log likelihood must contain at least two draw rows.")
@@ -2460,8 +2466,10 @@ class RandomVariable:
         Called on a **bound** RV (the result of ``.fit(...)``), this reports what that fit actually
         did -- ``fit()`` stashes its own answer to this question, computed while the pre-fit expression
         still carried its priors, since a bound RV's ``_args`` is always empty and cannot be re-derived
-        from. Raises if that record is unavailable (e.g. the model was reloaded from a saved artifact,
-        which does not round-trip it) -- call ``explain_fit()`` on the pre-fit expression instead.
+        from. The record travels with the model through pickling, so a reloaded artifact still
+        explains how it was fit. Raises only when no record exists at all -- a bound model built
+        directly rather than through ``.fit()``, or one written before the record was carried --
+        in which case call ``explain_fit()`` on the pre-fit expression instead.
         """
         if self._kind == "bound":
             cached = self._cache.get("_fit_explanation")
@@ -2629,9 +2637,7 @@ class RandomVariable:
             unknown = sorted(set(kw) - allowed)
             if unknown:
                 raise TypeError(f"unsupported indexed fit control(s): {', '.join(unknown)}")
-            return _stash_explanation(
-                _inf.indexed_fit(self, data, how=how, max_iter=max_its, tol=delta, **kw)
-            )
+            return _stash_explanation(_inf.indexed_fit(self, data, how=how, max_iter=max_its, tol=delta, **kw))
 
         # regression / GLM: a linear predictor (covariates) in a parameter slot
         if self._kind == "sample" and any(isinstance(a, _LinearPredictor) for a in self._args):
@@ -2705,11 +2711,7 @@ class RandomVariable:
         # nested grouped path handles it -- the model is identical, only the data layout differs.
         if self._kind == "sample":
             _gby = next(
-                (
-                    a._group_by
-                    for a in self._args
-                    if isinstance(a, RandomVariable) and a._scope == "grouped"
-                ),
+                (a._group_by for a in self._args if isinstance(a, RandomVariable) and a._scope == "grouped"),
                 None,
             )
             if _gby is not None:
