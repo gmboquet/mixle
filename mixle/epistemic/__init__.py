@@ -44,6 +44,7 @@ from mixle.epistemic.discrepancy import (
     js_divergence,
     kl_divergence,
     mmd,
+    mmd_squared,
     wasserstein_distance,
 )
 from mixle.epistemic.journal import DecisionRecord, EpistemicJournal
@@ -59,6 +60,7 @@ __all__ = [
     "js_divergence",
     "wasserstein_distance",
     "mmd",
+    "mmd_squared",
     # portfolio.py
     "Hypothesis",
     "HypothesisPortfolio",
