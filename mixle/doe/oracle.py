@@ -177,11 +177,11 @@ class OracleResult:
             )
         if self.abstained:
             if score != float("-inf"):
-                raise ValueError("An abstained OracleResult must use score=-inf as its explicit non-observation marker.")
+                raise ValueError(
+                    "An abstained OracleResult must use score=-inf as its explicit non-observation marker."
+                )
             reason = (
-                frozen_receipt.get("reason")
-                or frozen_receipt.get("degraded_reason")
-                or frozen_receipt.get("status")
+                frozen_receipt.get("reason") or frozen_receipt.get("degraded_reason") or frozen_receipt.get("status")
             )
             if type(reason) is not str or not reason.strip():
                 raise ValueError("An abstained OracleResult receipt requires a nonempty reason or status.")
@@ -379,6 +379,7 @@ class VerifiableOracle:
         dropped on the floor.
         """
         import queue
+
         result: queue.Queue = queue.Queue(maxsize=1)
         cancel_event = threading.Event()
         decision_lock = threading.Lock()
@@ -573,9 +574,7 @@ class DesignRun:
         }
         outstanding = timed_out_call_ids - late_by_call.keys()
         unresolved = {late.call_id for late in linked_late if not late.ok or late.result is None}
-        settled_late_cost = float(
-            sum(late.result.cost for late in linked_late if late.ok and late.result is not None)
-        )
+        settled_late_cost = float(sum(late.result.cost for late in linked_late if late.ok and late.result is not None))
         provisional_total = float(sum(candidate.result.cost for candidate in self._history))
         settled_total = provisional_total + settled_late_cost
         cost_status = "settled"
@@ -648,6 +647,12 @@ def optimize_under_oracle(
     from what the optimizer learns from. ``BayesianOptimizer.ask`` is explicitly designed to tolerate
     this (its initial-design dispensing is gated on points asked, not points told), so skipping ``tell``
     for an abstention does not desynchronize or corrupt the proposal model's state.
+
+    If the *entire* initial phase abstains, however, the model has no observation at all to fit an
+    acquisition step on, and ``ask`` raises rather than guessing. The adaptive phase is therefore not
+    entered in that case: the run stops and is returned with its receipts intact, so an all-abstention
+    run still yields its audit report (``status="no_verified_result"``) instead of dying inside the
+    proposal model (MXR-080-1488).
     """
     if oracle is None:
         raise ValueError(
@@ -667,6 +672,17 @@ def optimize_under_oracle(
     )
     circuit_open = False
     for phase, budget in (("initial", n_init), ("adaptive", n_iter)):
+        if phase == "adaptive" and not run.genuine_history:
+            # Every initial call abstained (a hung oracle timing out on every candidate is the
+            # motivating case), so the proposal model was never told anything and its acquisition step
+            # has no observations to fit. `BayesianOptimizer.ask` raises in exactly that state -- by
+            # design, and atomically -- once the space-filling initial design is exhausted, so entering
+            # the adaptive phase here would propagate that ValueError out of `optimize_under_oracle`
+            # and destroy the whole receipted run at precisely the moment it is most needed
+            # operationally (MXR-080-1488). Stop and return the run instead: `report()` already
+            # publishes `status="no_verified_result"` alongside the full call and cost evidence for
+            # every attempt that was actually made.
+            break
         for _ in range(budget):
             x = np.asarray(opt.ask(), dtype=np.float64)
             result = oracle(x)

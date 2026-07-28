@@ -528,6 +528,61 @@ class OracleBudgetAndCircuitBreakerTest(unittest.TestCase):
         self.assertEqual(run.history[-1].result.receipt["status"], "oracle_quarantined")
 
 
+@unittest.skipUnless(_HAS_TORCH, "requires the real BayesianOptimizer (torch) proposal model")
+class AllAbstentionRunStillReportsTest(unittest.TestCase):
+    """MXR-080-1488: an all-abstention run must still produce its audit report.
+
+    Deliberately exercises the REAL BayesianOptimizer rather than _RecordingBOStub: the defect lives in
+    the interaction between optimize_under_oracle's loop and the real ask() contract, and a stub whose
+    ask() never raises cannot reproduce it. When every initial call abstains, nothing was ever told to
+    the proposal model, so once its space-filling initial design is exhausted ask() has no observations
+    to fit an acquisition step on and raises -- which used to propagate straight out of
+    optimize_under_oracle, destroying the receipted run at exactly the moment it is most needed.
+    """
+
+    @staticmethod
+    def _always_hangs(_candidate):
+        time.sleep(2.0)
+        return OracleResult(score=999.0)  # unreachable within budget
+
+    def test_all_abstention_run_returns_its_receipts_instead_of_raising(self):
+        oracle = VerifiableOracle(name="always_hangs", tier="executable", score_fn=self._always_hangs, timeout=0.05)
+        run = optimize_under_oracle(oracle, [(-10.0, 10.0)], n_init=2, n_iter=3, seed=0)
+
+        self.assertEqual(run.genuine_history, ())
+        report = run.report()
+        self.assertEqual(report["status"], "no_verified_result")
+        self.assertIsNone(report["best_score"])
+        self.assertIsNone(report["best_x"])
+        self.assertIsNone(report["best_receipt"])
+        # Every attempt that was actually made is still receipted...
+        self.assertEqual(report["initial_calls"], 2)
+        self.assertEqual(report["abstained_calls"], 2)
+        self.assertEqual(run.candidate_attempts, 2)
+        # ...and the adaptive phase was never entered, since there was nothing to fit.
+        self.assertEqual(report["adaptive_calls"], 0)
+
+    def test_one_genuine_initial_observation_still_runs_the_adaptive_phase(self):
+        """Positive control: the stop above must trigger only on a *fully* abstaining initial phase."""
+        calls = {"n": 0}
+
+        def first_call_hangs(candidate):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                time.sleep(2.0)
+            return OracleResult(score=float(candidate[0]), receipt={"ok": True})
+
+        oracle = VerifiableOracle(name="flaky", tier="executable", score_fn=first_call_hangs, timeout=0.05)
+        run = optimize_under_oracle(oracle, [(-10.0, 10.0)], n_init=2, n_iter=2, seed=0)
+
+        report = run.report()
+        self.assertEqual(report["initial_calls"], 2)
+        self.assertEqual(report["adaptive_calls"], 2)
+        self.assertEqual(report["abstained_calls"], 1)
+        self.assertEqual(report["status"], "verified_result")
+        self.assertIsNotNone(report["best_score"])
+
+
 class DesignRunAbstentionBookkeepingTest(unittest.TestCase):
     """MXR-080-0189: DesignRun.best/report() must never surface an abstention as a genuine result,
     while scores()/history keep the full, unfiltered receipted record (kept, not hidden)."""
