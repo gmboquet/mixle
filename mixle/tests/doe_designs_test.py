@@ -221,6 +221,27 @@ class BoundsAndCountValidationTest(unittest.TestCase):
         mm = maximin_latin_hypercube(bounds, 6, seed=1, trials=5)
         self.assertEqual(mm.shape, (6, 3))
 
+    def test_extreme_finite_bounds_never_produce_nonfinite_points(self):
+        """MXR-080-1475: representable points must not be lost to overflowing span arithmetic."""
+        bounds = [(-1e308, 1e308)]
+        designs = (
+            random_design(bounds, 4, seed=1),
+            latin_hypercube(bounds, 4, seed=1),
+            maximin_latin_hypercube(bounds, 4, seed=1, trials=2),
+            sobol_design(bounds, 4, seed=1),
+            halton_design(bounds, 4, seed=1),
+            maxpro_design(bounds, 4, seed=1, restarts=1, swaps=0, maxiter=0),
+        )
+        for design in designs:
+            with self.subTest(design=design):
+                self.assertTrue(np.all(np.isfinite(design)))
+                self.assertTrue(_within_bounds(design, bounds))
+
+    def test_extreme_single_level_midpoint_is_computed_without_overflow(self):
+        design = full_factorial([(9e307, 1e308), (-1e308, 1e308)], levels=[1, 1])
+        self.assertTrue(np.all(np.isfinite(design)))
+        np.testing.assert_allclose(design[0], [9.5e307, 0.0], rtol=1e-15)
+
 
 class MaxProValidationAndFallbackTest(unittest.TestCase):
     """MXR-080-0175: maxpro_design's restart/swap/iteration/n controls and its optimizer-failure fallback."""

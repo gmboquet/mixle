@@ -45,6 +45,12 @@ class FractionalFactorialTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             fractional_factorial([(np.nan, 1.0), (-1, 1)], "a b")
 
+    def test_extreme_finite_bounds_map_to_finite_factorial_endpoints(self):
+        x = fractional_factorial([(-1e308, 1e308), (9e307, 1e308)], "a b")
+        self.assertTrue(np.all(np.isfinite(x)))
+        self.assertEqual(set(x[:, 0]), {-1e308, 1e308})
+        self.assertEqual(set(x[:, 1]), {9e307, 1e308})
+
 
 class GeneratorTokenValidationTest(unittest.TestCase):
     """MXR-080-0179: generator tokens that repeat a factor into a constant or duplicate column must
@@ -79,22 +85,70 @@ class GeneratorTokenValidationTest(unittest.TestCase):
 
 
 class GeneratorAliasStructureTest(unittest.TestCase):
-    """MXR-080-0179: the alias structure fractional_factorial builds is published, not discarded."""
+    """MXR-080-1477: publish signed defining relations and generated alias chains."""
 
     def test_matches_textbook_2_to_the_5_minus_2(self):
         # Montgomery-style 2^(5-2): D = AB, E = AC; A, B, C are the generating (base) factors.
         structure = generator_alias_structure("a b c ab ac")
-        self.assertEqual(structure, {"x3": "ab", "x4": "ac"})
+        self.assertEqual(structure["factor_labels"], {"x0": "a", "x1": "b", "x2": "c", "x3": "ab", "x4": "ac"})
+        self.assertEqual(
+            structure["defining_relations"],
+            [
+                {"sign": 1, "factors": ["x0", "x1", "x3"]},
+                {"sign": 1, "factors": ["x0", "x2", "x4"]},
+            ],
+        )
+        self.assertEqual(len(structure["defining_group"]), 4)
+        self.assertIn({"sign": 1, "factors": ["x1", "x3"]}, structure["alias_sets"]["x0"])
+        self.assertIn({"sign": 1, "factors": ["x2", "x4"]}, structure["alias_sets"]["x0"])
+        self.assertIn({"sign": 1, "factors": ["x3", "x4"]}, structure["alias_sets"]["x1:x2"])
 
     def test_matches_textbook_2_to_the_3_minus_1(self):
         # Resolution-III 2^(3-1): C = AB.
-        self.assertEqual(generator_alias_structure("a b ab"), {"x2": "ab"})
+        structure = generator_alias_structure("a b ab")
+        self.assertEqual(
+            structure["defining_relations"],
+            [{"sign": 1, "factors": ["x0", "x1", "x2"]}],
+        )
+        self.assertEqual(
+            structure["alias_sets"]["x0"],
+            [
+                {"sign": 1, "factors": ["x0"]},
+                {"sign": 1, "factors": ["x1", "x2"]},
+            ],
+        )
+        self.assertEqual(
+            structure["alias_sets"]["x0:x1"],
+            [
+                {"sign": 1, "factors": ["x2"]},
+                {"sign": 1, "factors": ["x0", "x1"]},
+            ],
+        )
 
-    def test_negated_generator_is_sign_prefixed(self):
-        self.assertEqual(generator_alias_structure("a b -ab"), {"x2": "-ab"})
+    def test_negated_generator_sign_propagates_through_aliases(self):
+        structure = generator_alias_structure("a b -ab")
+        self.assertEqual(
+            structure["defining_relations"],
+            [{"sign": -1, "factors": ["x0", "x1", "x2"]}],
+        )
+        self.assertIn({"sign": -1, "factors": ["x1", "x2"]}, structure["alias_sets"]["x0"])
 
     def test_full_factorial_has_no_aliasing(self):
-        self.assertEqual(generator_alias_structure("a b c"), {})
+        structure = generator_alias_structure("a b c")
+        self.assertEqual(structure["defining_relations"], [])
+        self.assertEqual(structure["defining_group"], [{"sign": 1, "factors": []}])
+        self.assertEqual(structure["alias_sets"]["x0"], [{"sign": 1, "factors": ["x0"]}])
+
+    def test_requested_order_controls_published_interactions(self):
+        structure = generator_alias_structure("a b ab", max_order=1)
+        self.assertEqual(set(structure["alias_sets"]), {"I", "x0", "x1", "x2"})
+        self.assertEqual(structure["alias_sets"]["x0"], [{"sign": 1, "factors": ["x0"]}])
+        with self.assertRaises(TypeError):
+            generator_alias_structure("a b ab", max_order=True)
+
+    def test_requires_named_singletons_for_unambiguous_factor_labels(self):
+        with self.assertRaises(ValueError):
+            generator_alias_structure("ab ac bc")
 
     def test_raises_the_same_way_as_fractional_factorial_for_degenerate_generators(self):
         with self.assertRaises(ValueError):
@@ -153,6 +207,12 @@ class CentralCompositeValidationTest(unittest.TestCase):
         for bad_alpha in (float("nan"), float("inf"), float("-inf"), -1.0, 0.0):
             with self.subTest(alpha=bad_alpha):
                 with self.assertRaises(ValueError):
+                    central_composite(self.bounds, alpha=bad_alpha)
+
+    def test_numeric_alpha_rejects_boolean_modes(self):
+        for bad_alpha in (True, False, np.bool_(True)):
+            with self.subTest(alpha=bad_alpha):
+                with self.assertRaises(TypeError):
                     central_composite(self.bounds, alpha=bad_alpha)
 
     def test_rotatable_axial_points_exceed_bounds_but_factorial_and_center_do_not(self):
