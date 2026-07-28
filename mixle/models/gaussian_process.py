@@ -7,6 +7,7 @@ and uncertainty helpers for examples and lightweight modeling workflows.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -228,18 +229,32 @@ class GaussianProcessRegressor:
             cov = 0.5 * (cov + cov.T)
             if not bool(torch.all(torch.isfinite(cov)).cpu().item()):
                 raise RuntimeError("Gaussian-process posterior covariance contains non-finite values")
-            scale = max(1.0, float(torch.max(torch.abs(cov)).cpu().item())) if cov.numel() else 1.0
-            tolerance = 100.0 * torch.finfo(cov.dtype).eps * max(1, cov.shape[0]) * scale
+            scale = (
+                max(1.0, float(torch.linalg.matrix_norm(cov, ord=float("inf")).cpu().item()))
+                if cov.numel()
+                else 1.0
+            )
+            eps = torch.finfo(cov.dtype).eps
+            tolerance = max(
+                100.0 * eps * max(1, cov.shape[0]) * scale,
+                math.sqrt(eps) * scale,
+            )
             diagonal = torch.diagonal(cov)
             if bool(torch.any(diagonal < -tolerance).cpu().item()):
                 raise RuntimeError("Gaussian-process posterior covariance has materially negative variance")
             if cov.numel():
-                eigenvalues = torch.linalg.eigvalsh(cov)
+                eigenvalues, eigenvectors = torch.linalg.eigh(cov)
                 if bool(torch.any(eigenvalues < -tolerance).cpu().item()):
-                    raise RuntimeError("Gaussian-process posterior covariance is not positive semidefinite")
-                cov = cov.clone()
-                diagonal = torch.diagonal(cov)
-                diagonal.copy_(torch.clamp(diagonal, min=0.0))
+                    minimum = float(torch.min(eigenvalues).cpu().item())
+                    raise RuntimeError(
+                        "Gaussian-process posterior covariance is not positive semidefinite "
+                        f"(minimum eigenvalue {minimum:.6g}, tolerance {tolerance:.6g})"
+                    )
+                # Subtraction in Kss - V.T@V can introduce tolerance-scale negative modes even though
+                # the analytical posterior is PSD. Project only those certified roundoff modes to the
+                # closed PSD cone; materially negative modes still fail above.
+                cov = (eigenvectors * torch.clamp(eigenvalues, min=0.0)) @ eigenvectors.T
+                cov = 0.5 * (cov + cov.T)
             return mean.detach().cpu().numpy(), cov.detach().cpu().numpy()
 
     def predict_monotone(self, x_train: Any, y_train: Any, x_new: Any, increasing: bool = True) -> np.ndarray:
