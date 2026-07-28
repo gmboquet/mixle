@@ -309,6 +309,11 @@ class SymbolicEngine(ComputeEngine):
     gammaln = staticmethod(lambda x: _elementwise_call("gammaln", x))
     digamma = staticmethod(lambda x: _elementwise_call("digamma", x))
     erf = staticmethod(lambda x: _elementwise_call("erf", x))
+    # numpy, torch and jax all expose these two; symbolic did not, so generating a numba kernel for any
+    # family that reaches for them failed at compile time on a bare AttributeError -- Rician needs i0e
+    # for log I0, ProjectedNormal needs erfcx. They are ordinary elementwise calls like their neighbours.
+    i0e = staticmethod(lambda x: _elementwise_call("i0e", x))
+    erfcx = staticmethod(lambda x: _elementwise_call("erfcx", x))
 
     @staticmethod
     def sum(
