@@ -62,13 +62,65 @@ _FAMILY_CONSTRUCTORS: dict[str, Callable[[], Any]] = {
     "skew_normal": lambda: SkewNormalDistribution(0.0, 1.0, 0.0),
     "gumbel": lambda: GumbelDistribution(0.0, 1.0),
 }
+_BUILTIN_FAMILIES: frozenset[str] = frozenset(_FAMILY_CONSTRUCTORS)
 
 
-def register_family(name: str, constructor: Callable[[], Any]) -> None:
+def _validated_family_constructor(name: str, constructor: Callable[[], Any]) -> Callable[[], Any]:
+    """Return ``constructor`` after proving it actually builds a fittable family named ``name``.
+
+    Registration is what makes a name selectable by the loop, so the name and the thing behind it
+    have to be real at registration time rather than at the first fit deep inside a task: an empty
+    name and a ``None`` constructor both used to register silently, and the loop would then
+    recommend and try to fit a family that does not exist.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(f"family name must be a non-empty string, got {name!r}")
+    if not callable(constructor):
+        raise TypeError(f"family {name!r} needs a zero-argument callable constructor, got {constructor!r}")
+    try:
+        prototype = constructor()
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"family {name!r}'s constructor raised {type(exc).__name__}: {exc}") from exc
+    missing = [hook for hook in ("log_density", "estimator") if not callable(getattr(prototype, hook, None))]
+    if missing:
+        raise TypeError(
+            f"family {name!r}'s constructor produced {type(prototype).__name__}, which is not a fittable "
+            f"distribution (missing {', '.join(missing)}); registration only makes an ALREADY-implemented "
+            "family selectable, it cannot define one."
+        )
+    return constructor
+
+
+def register_family(name: str, constructor: Callable[[], Any], *, replace: bool = False) -> None:
     """Register an already-implemented family's constructor so the loop can select/reuse it (beyond
     the four built in). This does not define a new family: ``constructor`` must build a working,
-    already-implemented distribution -- registration only makes an existing family selectable here."""
-    _FAMILY_CONSTRUCTORS[name] = constructor
+    already-implemented distribution -- registration only makes an existing family selectable here.
+
+    The constructor is invoked once and its prototype checked, so a name can never become selectable
+    without something fittable behind it. Replacing an already-registered name requires
+    ``replace=True``: silently rebinding a name the library may already have admitted (and recorded
+    receipts against) would retroactively change what that recorded evidence was evidence *for*.
+    """
+    validated = _validated_family_constructor(name, constructor)
+    if not replace and name in _FAMILY_CONSTRUCTORS and _FAMILY_CONSTRUCTORS[name] is not validated:
+        raise ValueError(
+            f"family {name!r} is already registered; pass replace=True to deliberately rebind it "
+            "(any admission receipt already recorded against this name refers to the old family)."
+        )
+    _FAMILY_CONSTRUCTORS[name] = validated
+
+
+def unregister_family(name: str) -> None:
+    """Remove a previously registered family, so a registration can have a scoped lifetime.
+
+    The registry is process-global; without this, a family registered by one task (or one test)
+    stays selectable by every later one. The four built-in families cannot be removed.
+    """
+    if name in _BUILTIN_FAMILIES:
+        raise ValueError(f"{name!r} is a built-in family and cannot be unregistered")
+    if name not in _FAMILY_CONSTRUCTORS:
+        raise KeyError(f"family {name!r} is not registered")
+    del _FAMILY_CONSTRUCTORS[name]
 
 
 def known_families() -> tuple[str, ...]:
@@ -135,7 +187,16 @@ class ConceptLibrary:
     """
 
     def __init__(self, base_families: Sequence[str] = ("gaussian",)) -> None:
-        self._base: tuple[str, ...] = tuple(base_families)
+        base = tuple(base_families)
+        if not base:
+            raise ValueError("a ConceptLibrary needs at least one base family")
+        unknown = [name for name in base if name not in _FAMILY_CONSTRUCTORS]
+        if unknown:
+            raise KeyError(
+                f"base families {unknown!r} are not registered; call register_family() first. "
+                f"Known families: {sorted(_FAMILY_CONSTRUCTORS)!r}"
+            )
+        self._base: tuple[str, ...] = base
         self._admitted: dict[str, dict[str, Any]] = {}
         self._design = DesignModel(signature="concept_discovery", n_constraints=0)
         self.history: list[AdmissionEvent] = []
@@ -161,7 +222,21 @@ class ConceptLibrary:
         quality: float,
     ) -> None:
         """Admit ``family`` to the library, receipted with ``evidence`` and recorded in the
-        design-prior ledger under ``task_signature`` so :meth:`query` can recommend it later."""
+        design-prior ledger under ``task_signature`` so :meth:`query` can recommend it later.
+
+        ``family`` must name a REGISTERED family, and ``quality`` must be finite. An admission is
+        the library's promise that a later :meth:`query` can hand this name back as something the
+        search can actually reach for and fit; admitting an unregistered name made ``query()``
+        recommend a family that does not exist, and a non-finite quality made the ranking that
+        picks between recorded recipes meaningless.
+        """
+        if family not in _FAMILY_CONSTRUCTORS:
+            raise KeyError(
+                f"cannot admit unregistered family {family!r}; call register_family() first. "
+                f"Known families: {sorted(_FAMILY_CONSTRUCTORS)!r}"
+            )
+        if not math.isfinite(float(quality)):
+            raise ValueError(f"admission quality must be finite, got {quality!r}")
         self._admitted[family] = dict(evidence)
         record_accepted_recipe(self._design, [0.0], quality, [], family=family, task_signature=task_signature)
         self.history.append(AdmissionEvent("admit", family, task_index, dict(evidence)))
