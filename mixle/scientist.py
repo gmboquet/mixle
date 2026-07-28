@@ -140,18 +140,25 @@ def encode_texts(texts: Any) -> np.ndarray:
 def generate(prompt: str, *, max_new_tokens: int = 96, temperature: float = 0.0) -> str:
     """One completion from the local LLM (SmolLM2-360M-Instruct) -- the 99%-local answerer."""
     model, tok, torch = _lm()
-    # current tokenizers/transformers return a BatchEncoding (dict-like: .input_ids/.attention_mask),
-    # not a raw tensor -- torch.ones_like(ids) on the whole object no longer type-checks. Use the
-    # BatchEncoding's own attention_mask (already correct and padding-aware) and its input_ids as the
-    # tensor model.generate() and the final decode-slice both need.
     enc = tok.apply_chat_template(
         [{"role": "user", "content": prompt}], return_tensors="pt", add_generation_prompt=True
     )
-    input_ids = enc.input_ids
+    # apply_chat_template's return type varies across the transformers range this package declares
+    # (>=4.40,<6): some versions hand back the id tensor itself, others a BatchEncoding (dict-like,
+    # .input_ids/.attention_mask), and return_dict= is not accepted at the low end. Assuming either
+    # one breaks the other -- assuming a raw tensor made torch.ones_like() fail on the object, and
+    # assuming a BatchEncoding raises "'Tensor' object has no attribute 'input_ids'" on 4.57. So
+    # detect. A BatchEncoding's mask is already padding-aware; a bare tensor is a single unpadded
+    # prompt, for which an all-ones mask is exactly right.
+    if hasattr(enc, "input_ids"):
+        input_ids, attention_mask = enc.input_ids, enc.attention_mask
+    else:
+        input_ids = enc
+        attention_mask = torch.ones_like(input_ids)
     with torch.no_grad():
         out = model.generate(
             input_ids,
-            attention_mask=enc.attention_mask,
+            attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
             do_sample=temperature > 0,
             **({"temperature": temperature, "top_p": 0.9} if temperature > 0 else {}),
