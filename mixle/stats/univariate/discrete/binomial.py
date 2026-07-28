@@ -1158,12 +1158,12 @@ class BinomialDataEncoder(DataSequenceEncoder):
                 reconstruct x, numpy array of x, min value of x, and max value of x.
 
         """
-        xx = exact_integer_observations(
-            x,
-            label="Binomial observations",
-            minimum=self.min_val,
-            maximum=self.max_val,
-        )
+        # Support bounds are deliberately not enforced here. Being an exact integer is a type
+        # contract -- a fractional count is not an observation of this family at all -- but being
+        # inside [min_val, max_val] is a probability question, and the answer for a count outside it
+        # is zero probability, which log_density already reports as -inf. Rejecting it at encode
+        # time made seq_log_density unable to score what the scalar path scores fine.
+        xx = exact_integer_observations(x, label="Binomial observations")
         if xx.size == 0:
             return xx, np.asarray([], dtype=np.int64), xx, 0, 0
         ux, ix = np.unique(xx, return_inverse=True)

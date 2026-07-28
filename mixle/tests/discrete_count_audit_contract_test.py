@@ -60,12 +60,26 @@ class BinomialEvidenceContractTest(unittest.TestCase):
                 self.assertEqual((fitted.n, fitted.min_val), (10, 5))
                 self.assertEqual((fitted.name, fitted.keys), ("counts", "shared"))
 
-    def test_shifted_encoder_accepts_negative_support_and_rejects_outside_it(self):
-        encoder = BinomialDistribution(0.5, 2, min_val=-2).dist_to_encoder()
+    def test_shifted_encoder_keeps_its_support_and_scores_outside_it_as_impossible(self):
+        """A shifted support is preserved through encoding, and a count outside it scores -inf.
+
+        Being an exact integer is a type contract -- a fractional or non-finite value is not an
+        observation of a count family at all -- but being inside the support is a probability
+        question. log_density has always answered it with -inf, so rejecting those counts at
+        encode time left seq_log_density unable to score what the scalar path scores fine.
+        """
+        dist = BinomialDistribution(0.5, 2, min_val=-2)
+        encoder = dist.dist_to_encoder()
         _, _, values, minimum, maximum = encoder.seq_encode([-2, -1, 0])
         np.testing.assert_array_equal(values, np.asarray([-2, -1, 0], dtype=np.int64))
         self.assertEqual((minimum, maximum), (-2, 0))
-        for invalid in (-3, 1, np.inf, 0.5):
+
+        outside = [-3, 1]
+        scored = np.asarray(dist.seq_log_density(encoder.seq_encode(outside)))
+        np.testing.assert_array_equal(np.isneginf(scored), [True, True])
+        np.testing.assert_allclose(scored, [dist.log_density(v) for v in outside])
+
+        for invalid in (np.inf, 0.5):  # not a count at all, still rejected
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 encoder.seq_encode([invalid])
 
