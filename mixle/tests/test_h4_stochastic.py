@@ -164,3 +164,107 @@ def test_cvar_epigraph_rejects_zero_scenarios():
     # coef = 1 / ((1 - alpha) * K) divides by K with no guard -- K=0 must raise, not ZeroDivisionError.
     with pytest.raises(ValueError):
         cvar_epigraph(np.zeros((0, 2)), 0.95)
+
+
+class _ConstantPosterior:
+    """A `Posterior` whose scenarios are a fixed per-item value repeated K times."""
+
+    def __init__(self, values):
+        self._values = np.asarray(values, dtype=float)
+
+    def samples(self, n: int, rng) -> np.ndarray:
+        return np.tile(self._values, (n, 1))
+
+    @property
+    def mean(self) -> np.ndarray:
+        return self._values
+
+    @property
+    def cov(self) -> np.ndarray:
+        return np.eye(self._values.size)
+
+    def credible_interval(self, level: float):
+        return self._values, self._values
+
+    def derived_quantity(self, fn, n, rng):
+        raise NotImplementedError
+
+
+def test_cvar_epigraph_rejects_non_finite_losses():
+    # MXR-080-1721: only rank and alpha were checked, so [[NaN]] produced an ordinary-looking
+    # constraint row containing NaN -- a row no solver can interpret and no caller stated.
+    for bad in (np.nan, np.inf, -np.inf):
+        with pytest.raises(ValueError):
+            cvar_epigraph(np.array([[bad]]), 0.9)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"cost": np.array([np.nan, 1.0])},
+        {"cost": np.array([np.inf, 1.0])},
+        {"cost": np.ones((2, 3))},  # a matrix must not be flattened into a 6-item vector
+        {"cost": np.zeros(0)},
+        {"price": np.nan},
+        {"price": "1.0"},
+        {"k_scenarios": 0},
+        {"k_scenarios": True},
+        {"k_scenarios": 4.5},
+    ],
+)
+def test_two_stage_plan_rejects_undefined_scenario_and_economic_inputs(kwargs):
+    # MXR-080-1721: the MILP was built from whatever came in -- non-finite prices/costs, a
+    # `.size`-flattened cost matrix, and Boolean/fractional scenario counts all reached the solver.
+    call = {"cost": np.ones(2), "price": 1.0, "k_scenarios": 3, **kwargs}
+    with pytest.raises(ValueError):
+        two_stage_stochastic_plan(
+            _ConstantPosterior(np.full(np.asarray(call["cost"]).size or 1, 5.0)),
+            call["cost"],
+            call["price"],
+            k_scenarios=call["k_scenarios"],
+            alpha=0.5,
+            rng=np.random.default_rng(0),
+        )
+
+
+def test_reported_risk_describes_the_returned_selection():
+    # MXR-080-1723: expected_value was recomputed from the rounded mask but cvar was copied out of
+    # the solver's eta/u block, so the two could describe different solutions. Both must now agree
+    # with a direct empirical computation over the returned mask.
+    posterior = _BlockGradePosterior()
+    cost = np.ones(N_BLOCKS)
+    alpha = 0.9
+    plan = two_stage_stochastic_plan(posterior, cost, PRICE, k_scenarios=50, alpha=alpha, rng=np.random.default_rng(0))
+
+    profit = (PRICE * plan.scenarios - cost[None, :]) @ plan.extract.astype(float)
+    loss = -profit
+    coef = 1.0 / ((1.0 - alpha) * loss.size)
+    direct = min(float(eta + coef * np.maximum(loss - eta, 0.0).sum()) for eta in loss)
+    assert plan.cvar == pytest.approx(direct, abs=1e-9)
+    assert plan.expected_value == pytest.approx(float(profit.mean()), abs=1e-9)
+
+
+def test_empty_selection_reports_the_risk_of_selecting_nothing():
+    # Every item is a guaranteed loser, so the plan selects nothing: the loss of an empty selection
+    # is identically zero and so is its CVaR.
+    plan = two_stage_stochastic_plan(
+        _ConstantPosterior([0.1, 0.1]),
+        np.array([10.0, 10.0]),
+        1.0,
+        k_scenarios=5,
+        alpha=0.5,
+        rng=np.random.default_rng(0),
+    )
+    assert not plan.extract.any()
+    assert plan.expected_value == pytest.approx(0.0, abs=1e-12)
+    assert plan.cvar == pytest.approx(0.0, abs=1e-12)
+
+
+def test_module_does_not_claim_recourse_decisions_it_does_not_model():
+    # MXR-080-1720: there is one shared decision vector and no scenario-indexed second-stage
+    # variables, recourse constraints or information stages anywhere in the program.
+    import mixle.stochastic_opt as mod
+
+    doc = " ".join((mod.__doc__ or "").split())
+    assert "not a two-stage stochastic program with recourse" in doc
+    assert "single-stage* sample-average risk-adjusted selection model" in doc
