@@ -74,9 +74,7 @@ def _enforce_error_tolerance(estimate: NumericalEstimate, tolerance: Any) -> Non
         raise ValueError("%s does not provide a numerical error estimate." % estimate.method)
     observed = float(np.max(np.asarray(estimate.error_estimate, dtype=np.float64), initial=0.0))
     if not np.isfinite(observed) or observed > limit:
-        raise ArithmeticError(
-            "%s error estimate %.6g exceeds tolerance %.6g." % (estimate.method, observed, limit)
-        )
+        raise ArithmeticError("%s error estimate %.6g exceeds tolerance %.6g." % (estimate.method, observed, limit))
 
 
 def _flatten_statistics(statistics: tuple[Any, ...], engine: Any) -> Any:
@@ -273,11 +271,11 @@ class ExponentialFamilyForm:
         error = np.abs(value - fine)
         if not np.all(np.isfinite(value)) or not np.all(np.isfinite(error)):
             raise FloatingPointError("finite-difference derivative or error estimate is non-finite.")
-        return NumericalEstimate(value=value, error_estimate=error, method="finite_difference", evaluations=4 * self.dim)
+        return NumericalEstimate(
+            value=value, error_estimate=error, method="finite_difference", evaluations=4 * self.dim
+        )
 
-    def monte_carlo_mean_parameters(
-        self, n_samples: int = 200000, seed: int | None = 0
-    ) -> NumericalEstimate:
+    def monte_carlo_mean_parameters(self, n_samples: int = 200000, seed: int | None = 0) -> NumericalEstimate:
         """Estimate ``E[T]`` by sampling and report its elementwise standard error."""
         count = _sample_count(n_samples)
         samples = self.distribution.sampler(seed).sample(count)
@@ -372,9 +370,16 @@ class ExponentialFamilyForm:
         if stats.shape != (count, self.dim) or not np.all(np.isfinite(stats)):
             raise ValueError("sufficient statistics must be a finite (n_samples, dim) matrix.")
         centered = stats - stats.mean(axis=0)
-        products = centered[:, :, None] * centered[:, None, :]
-        cov = products.sum(axis=0) / float(count - 1)
-        error = products.std(axis=0, ddof=1) / np.sqrt(float(count))
+        # Both the covariance and the per-entry standard error are reductions of the outer products
+        # T_i T_j, so only their first two moments are needed -- two (dim, dim) gemms. Materializing
+        # the (n_samples, dim, dim) product tensor to reduce it costs dim times the sample matrix
+        # itself: over a gigabyte at the default n_samples for a dim in the tens.
+        sum1 = centered.T @ centered
+        squared = centered * centered
+        sum2 = squared.T @ squared
+        cov = sum1 / float(count - 1)
+        variance = (sum2 - sum1 * sum1 / float(count)) / float(count - 1)
+        error = np.sqrt(np.maximum(variance, 0.0)) / np.sqrt(float(count))
         estimate = NumericalEstimate(
             value=cov,
             error_estimate=error,
@@ -467,15 +472,12 @@ class ProductExponentialFamilyForm:
             parts = tuple([row[i] for row in rows] for i in range(len(self.components)))
         if len(parts) != len(self.components):
             raise ValueError(
-                "product extractor returned %d component batches; expected %d."
-                % (len(parts), len(self.components))
+                "product extractor returned %d component batches; expected %d." % (len(parts), len(self.components))
             )
         for index, part in enumerate(parts):
             rows = self._batch_size(part, "product component batch %d" % index)
             if rows != expected_rows:
-                raise ValueError(
-                    "product component batch %d has %d rows; expected %d." % (index, rows, expected_rows)
-                )
+                raise ValueError("product component batch %d has %d rows; expected %d." % (index, rows, expected_rows))
         return parts, expected_rows
 
     @staticmethod

@@ -32,6 +32,23 @@ class ExponentialFamilyFisherTest(unittest.TestCase):
         self.assertEqual(estimate.error_estimate.shape, (1, 1))
         self.assertTrue(np.all(np.isfinite(estimate.error_estimate)))
 
+    def test_error_estimate_matches_the_explicit_outer_product_reduction(self):
+        """The covariance and its per-entry standard error are reductions of the outer products
+        T_i T_j. They are computed from two (dim, dim) moment matrices rather than by materializing
+        the (n_samples, dim, dim) product tensor, which costs dim times the sample matrix itself.
+        This pins the reduced form to the definition it replaces.
+        """
+        form = to_exponential_family(GaussianDistribution(1.0, 2.0))
+        count = 5000
+        estimate = form.estimate_fisher_information(n_samples=count, seed=11)
+
+        samples = form.distribution.sampler(11).sample(count)
+        stats = np.asarray(form.sufficient_statistics(samples), dtype=np.float64)
+        centered = stats - stats.mean(axis=0)
+        products = centered[:, :, None] * centered[:, None, :]
+        np.testing.assert_allclose(estimate.value, products.sum(axis=0) / (count - 1), rtol=1e-10)
+        np.testing.assert_allclose(estimate.error_estimate, products.std(axis=0, ddof=1) / np.sqrt(count), rtol=1e-8)
+
     def test_exponential_matches_closed_form(self):
         # ExponentialDistribution is parameterized by its mean beta, so Var[x] = beta^2.
         beta = 1.5
