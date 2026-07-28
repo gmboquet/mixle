@@ -378,5 +378,51 @@ class SamplerReproducibilityTest(unittest.TestCase):
         self.assertEqual(result.seed, 5)
 
 
+class MMDGeometryAndBandwidthTest(unittest.TestCase):
+    """MXR-080-1751: the public MMD path accepted geometry and bandwidths it cannot honour.
+
+    ``_prepare`` reshaped only rank-1 input, so a 0-d sample reached ``shape[0]`` and raised a bare
+    ``IndexError`` (an incidental crash, not a contract), while a rank-3 array was accepted and then
+    failed inside the kernel -- which reduces only the last coordinate axis. Bandwidth was checked
+    with ``bandwidth <= 0``, which NaN fails like every other comparison: a NaN bandwidth returned
+    NaN as if it were a discrepancy, and an infinite bandwidth made ``gamma`` exactly 0.0 so every
+    kernel entry became ``exp(0) == 1`` and the estimator reported an apparently exact zero -- "these
+    two sample sets are identical" -- for any two sample sets at all.
+    """
+
+    def setUp(self):
+        self.x = np.random.RandomState(0).normal(size=(20, 2))
+        self.y = np.random.RandomState(1).normal(size=(20, 2))
+
+    def test_unsupported_sample_rank_is_rejected_by_contract(self):
+        for fn in (mmd, mmd_squared):
+            with self.assertRaisesRegex(ValueError, r"\(n,\) or \(n, d\)"):
+                fn(1.0, 2.0)
+            with self.assertRaisesRegex(ValueError, r"\(n,\) or \(n, d\)"):
+                fn(self.x.reshape(5, 4, 2), self.y.reshape(5, 4, 2))
+
+    def test_nonfinite_samples_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "finite"):
+            mmd(np.full((20, 2), np.nan), self.y)
+        with self.assertRaisesRegex(ValueError, "finite"):
+            mmd(self.x, np.full((20, 2), np.inf))
+
+    def test_mismatched_coordinate_dimension_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "coordinate dimension"):
+            mmd(self.x, self.y[:, :1])
+
+    def test_nonfinite_bandwidth_is_rejected_instead_of_faking_a_verdict(self):
+        for bandwidth in (np.nan, np.inf, -np.inf, 0.0, -1.0, True):
+            with self.assertRaisesRegex(ValueError, "bandwidth"):
+                mmd(self.x, self.y, bandwidth=bandwidth)
+
+    def test_supported_geometry_is_unchanged(self):
+        # negative control: (n,) and (n, d) both still work, and identical inputs still give 0.
+        self.assertGreater(mmd(self.x, self.y), 0.0)
+        self.assertEqual(mmd(self.x, self.x), 0.0)
+        self.assertGreater(mmd(np.arange(20.0), np.arange(20.0) + 5.0), 0.0)
+        self.assertGreater(mmd(self.x, self.y, bandwidth=1.5), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
