@@ -210,10 +210,17 @@ sum = _dispatch("sum")
 
 
 def max(*args, **kwargs):
-    """Return Python scalar ``max`` or dispatch array reductions to the active engine."""
+    """Return Python scalar ``max`` or dispatch array reductions to the active engine.
+
+    Hand-written rather than built by :func:`_dispatch` only because of the scalar fast path below,
+    so ownership discovery has to match ``_dispatch``'s explicitly: a keyword operand carries backend
+    ownership exactly as a positional one does. ``max(x=tensor)`` is the same call as ``max(tensor)``
+    and must reach the same engine, and a mixed-engine call split across the two forms must still
+    reach ``engine_of``'s mixed-engine gate.
+    """
     if len(args) > 1 and not kwargs and all(isinstance(arg, Number) for arg in args):
         return builtins.max(*args)
-    engine = engine_of(args, default=_DEFAULT_ENGINE.get())
+    engine = engine_of((args, kwargs), default=_DEFAULT_ENGINE.get())
     return engine.max(*args, **kwargs)
 
 
