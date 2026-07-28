@@ -187,7 +187,10 @@ class EmptyDataAndValueErrorNarrowingTestCase(unittest.TestCase):
 
         with self.assertRaises(ValueError) as ctx:
             DiracLengthMixtureDistribution(len_dist=GaussianDistribution(0.0, 1.0), p=1.5, v=0)
-        self.assertEqual(str(ctx.exception), "p must be between (0,1].")
+        # p == 0 is a legitimate configuration -- it puts all mass on the Dirac atom at v, a
+        # normalized point mass -- so the domain is the closed [0, 1], not the old half-open
+        # (0, 1]. This case is here for the ValueError narrowing, which p=1.5 still exercises.
+        self.assertEqual(str(ctx.exception), "p must be finite and lie in [0, 1]")
 
 
 class PseudoCountScalarBroadcastTestCase(unittest.TestCase):
@@ -296,7 +299,13 @@ class HmmComponentsAliasTestCase(unittest.TestCase):
         by_components = HiddenMarkovModelDistribution(components=comps, w=[0.5, 0.5], transitions=trans)
         self.assertTrue(np.allclose(by_topics.w, by_components.w))
         self.assertTrue(np.allclose(by_topics.transitions, by_components.transitions))
-        self.assertIs(by_components.topics, comps)
+        # The model defensively copies the container so a caller mutating their own list cannot
+        # reach into the fitted model, but it must not copy the emissions themselves -- the point
+        # of the alias is that ``components=`` wires through to the very same distributions.
+        self.assertIsNot(by_components.topics, comps)
+        self.assertEqual(len(by_components.topics), len(comps))
+        for wired, supplied in zip(by_components.topics, comps):
+            self.assertIs(wired, supplied)
         seq = ["a", "b", "a"]
         self.assertAlmostEqual(by_topics.log_density(seq), by_components.log_density(seq))
 
@@ -366,6 +375,69 @@ class ParallelBackendReexportTestCase(unittest.TestCase):
         from mixle.utils.parallel.planner import register_encoded_data_backend as planner_fn
 
         self.assertIs(register_encoded_data_backend, planner_fn)
+
+
+class AnalysisFacadeExportsTestCase(unittest.TestCase):
+    """MXR-080-1593: ``mixle.analysis`` must re-export every name its submodules declare public.
+
+    The façade used to omit seven names, including result types returned by functions it *did*
+    export (``TransitionRiskResult``, ``SmithMaxStableFit``, ``VoiEstimate``) and argument protocols
+    needed to call them (``WaterBudget``, ``GaussianObservationModel``) -- so a caller could reach a
+    function through the package but not the type it hands back or the type it demands.
+    """
+
+    @staticmethod
+    def _declared_submodule_exports() -> dict:
+        """Map every ``__all__`` name declared by a ``mixle.analysis`` submodule to its module."""
+        import ast
+        import pathlib
+
+        import mixle.analysis
+
+        package_dir = pathlib.Path(mixle.analysis.__file__).parent
+        declared = {}
+        for path in sorted(package_dir.glob("*.py")):
+            if path.name == "__init__.py":
+                continue
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets
+                ):
+                    for element in getattr(node.value, "elts", ()):
+                        if isinstance(element, ast.Constant) and isinstance(element.value, str):
+                            declared.setdefault(element.value, path.name)
+        return declared
+
+    def test_every_submodule_public_name_is_reachable_from_the_package(self):
+        import mixle.analysis
+
+        declared = self._declared_submodule_exports()
+        self.assertGreater(len(declared), 50, "submodule __all__ discovery found suspiciously little")
+        missing = sorted(name for name in declared if name not in mixle.analysis.__all__)
+        self.assertEqual(missing, [], f"missing from mixle.analysis.__all__: {[(n, declared[n]) for n in missing]}")
+
+    def test_every_declared_export_actually_resolves(self):
+        import mixle.analysis
+
+        unresolved = [name for name in mixle.analysis.__all__ if not hasattr(mixle.analysis, name)]
+        self.assertEqual(unresolved, [], f"declared in __all__ but not importable: {unresolved}")
+
+    def test_result_and_argument_types_of_exported_functions_are_exported(self):
+        """The specific names MXR-080-1593 found missing, named so a regression is legible."""
+        import mixle.analysis
+
+        for name in (
+            "TransitionRiskResult",
+            "WaterBudget",
+            "SmithMaxStableFit",
+            "FrechetApproximationDiagnostic",
+            "GaussianObservationModel",
+            "VoiEstimate",
+            "voi_estimate",
+        ):
+            with self.subTest(name=name):
+                self.assertIn(name, mixle.analysis.__all__)
+                self.assertTrue(hasattr(mixle.analysis, name))
 
 
 if __name__ == "__main__":

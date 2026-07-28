@@ -23,6 +23,7 @@ from mixle.inference.block_em import run_block_em
 from mixle.inference.conditional_jit_controller import (
     ActionType,
     BanditController,
+    ControllerAction,
     ControllerState,
     DesignModelController,
 )
@@ -347,6 +348,78 @@ class LearnedVsGreedyAcceptanceTestCase(unittest.TestCase):
         )
         self.assertGreater(ratio, 0.0)
         self.assertTrue(np.all(np.diff(learned_trace) >= -1.0e-9))
+
+
+class ControllerInputValidationTest(unittest.TestCase):
+    """MXR-080-1635: impossible budgets and poisoned feedback must never enter learned history."""
+
+    def _state(self):
+        return ControllerState.from_scores(0, [], {}, {}, {}, {})
+
+    def test_unschedulable_budget_levels_are_rejected(self):
+        # (-1, 2) was only deduplicated and sorted, and the controller then emitted -1.
+        for bad in ((-1.0, 2.0), (0.0, 0.5), (0.5, 1.5), (float("nan"), 0.5), (float("inf"), 0.5)):
+            with self.assertRaises((ValueError, TypeError)):
+                BanditController(budget_levels=bad)
+
+    def test_selected_budget_is_always_schedulable(self):
+        controller = BanditController(seed=0)
+        for _ in range(20):
+            action = controller.select_action(self._state())
+            self.assertGreater(action.budget_fraction, 0.0)
+            self.assertLessEqual(action.budget_fraction, 1.0)
+
+    def test_non_positive_or_non_finite_cost_is_rejected(self):
+        controller = BanditController(seed=0)
+        state = self._state()
+        action = controller.select_action(state)
+        # cost 0 turned a unit gain into reward 1e12 -- a value no real round can ever beat.
+        for bad_cost in (0.0, -1.0, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                controller.update(state, action, 1.0, bad_cost)
+
+    def test_non_finite_gain_is_rejected_but_negative_gain_is_kept(self):
+        controller = BanditController(seed=0)
+        state = self._state()
+        action = controller.select_action(state)
+        for bad_gain in (float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                controller.update(state, action, bad_gain, 1.0)
+        controller.update(state, action, -2.0, 1.0)  # a round that made things worse is real feedback
+
+    def test_feedback_from_a_foreign_action_is_rejected(self):
+        controller = BanditController(budget_levels=(0.25, 0.5), seed=0)
+        state = self._state()
+        foreign = ControllerAction(action_type=ActionType.BUDGET_ALLOCATION, budget_fraction=0.5, payload={"arm": 99})
+        with self.assertRaises(ValueError):
+            controller.update(state, foreign, 1.0, 1.0)
+
+    def test_design_controller_rejects_reversed_and_out_of_range_bounds(self):
+        for bad in ((0.8, 0.2), (0.5, 0.5), (0.0, 1.0), (0.1, 1.5), (float("nan"), 1.0)):
+            with self.assertRaises((ValueError, TypeError)):
+                DesignModelController(bounds=bad)
+
+    def test_design_controller_rejects_a_default_outside_its_bounds(self):
+        with self.assertRaises(ValueError):
+            DesignModelController(bounds=(0.2, 0.6), default_budget=0.9)
+
+    def test_design_controller_rejects_poisoned_feedback(self):
+        controller = DesignModelController(bounds=(0.1, 1.0), default_budget=0.5)
+        state = self._state()
+        action = controller.select_action(state)
+        for gain, cost in ((1.0, 0.0), (1.0, -1.0), (float("nan"), 1.0), (1.0, float("nan"))):
+            with self.assertRaises(ValueError):
+                controller.update(state, action, gain, cost)
+        self.assertEqual(len(controller.design), 0)  # nothing contaminated the logged rows
+
+    def test_valid_controllers_and_feedback_still_work(self):
+        bandit = BanditController(budget_levels=(0.25, 0.75), seed=0)
+        state = self._state()
+        action = bandit.select_action(state)
+        bandit.update(state, action, 2.0, 4.0)
+        design = DesignModelController(bounds=(0.1, 1.0), default_budget=0.5)
+        design.update(state, design.select_action(state), 2.0, 4.0)
+        self.assertEqual(len(design.design), 1)
 
 
 if __name__ == "__main__":
