@@ -381,6 +381,14 @@ def get_gaussian_estimator(
         if ss_0 > 0.0:
             ss_1 = ss_1 / ss_0
             ss_2 = (ss_2 / ss_0) - ss_1 * ss_1
+            # A constant field has exactly zero empirical spread, and the sum-of-squares form can
+            # cancel to a small negative value even when it does not. Either way there is no scale to
+            # seed a prior from, and the estimator is right to refuse a non-positive prior variance --
+            # profiling a constant column crashed there rather than reporting the column as constant.
+            # Fall back the same way the no-data branch below does, keeping the prior pair coherent
+            # instead of handing over a degenerate one.
+            if not math.isfinite(ss_2) or ss_2 <= 0.0:
+                ss_1, ss_2 = (1.0e-6, 1.0e-6) if pseudo_count is not None else (None, None)
         elif pseudo_count is not None:
             ss_1, ss_2 = 1.0e-6, 1.0e-6
         else:
@@ -426,6 +434,14 @@ def get_lognormal_estimator(
         if ss_0 > 0.0:
             ss_1 = ss_1 / ss_0
             ss_2 = (ss_2 / ss_0) - ss_1 * ss_1
+            # A constant field has exactly zero empirical spread, and the sum-of-squares form can
+            # cancel to a small negative value even when it does not. Either way there is no scale to
+            # seed a prior from, and the estimator is right to refuse a non-positive prior variance --
+            # profiling a constant column crashed there rather than reporting the column as constant.
+            # Fall back the same way the no-data branch below does, keeping the prior pair coherent
+            # instead of handing over a degenerate one.
+            if not math.isfinite(ss_2) or ss_2 <= 0.0:
+                ss_1, ss_2 = (1.0e-6, 1.0e-6) if pseudo_count is not None else (None, None)
         elif pseudo_count is not None:
             ss_1, ss_2 = 1.0e-6, 1.0e-6
         else:

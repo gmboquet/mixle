@@ -85,19 +85,49 @@ def _split_fields(
     return keys, sources, vals
 
 
-def _record_matches(row: Any, sources: Sequence[Any]) -> bool:
-    return isinstance(row, Mapping) and set(row.keys()) == set(sources)
+def _omittable_sources(sources: Sequence[Any], children: Sequence[Any] | None) -> set[Any]:
+    """Return the sources a row may leave out.
+
+    A child that declares ``missing_value`` -- an OptionalDistribution and its estimator, accumulator
+    and encoder -- has an explicit representation for "this field was not observed". Records with a
+    heterogeneous key set are the reason that wrapper exists: ``mixle.utils.automatic`` profiles a
+    field present in only some rows and wraps exactly that field in an OptionalEstimator. Requiring
+    every configured source on every row made those profiled models impossible to fit or score, since
+    the key the profiler had already modelled as sometimes-absent was then mandatory. An omitted key
+    is handed to such a child as its own missing sentinel; a child with no sentinel still requires
+    its key.
+    """
+    if children is None:
+        return set()
+    return {source for source, child in zip(sources, children) if hasattr(child, "missing_value")}
 
 
-def _require_record(row: Any, sources: Sequence[Any], *, index: int | None = None) -> Mapping[Any, Any]:
+def _record_matches(row: Any, sources: Sequence[Any], children: Sequence[Any] | None = None) -> bool:
+    if not isinstance(row, Mapping):
+        return False
+    actual = set(row.keys())
+    expected = set(sources)
+    if not actual <= expected:
+        return False
+    return not (expected - actual) - _omittable_sources(sources, children)
+
+
+def _require_record(
+    row: Any,
+    sources: Sequence[Any],
+    children: Sequence[Any] | None = None,
+    *,
+    index: int | None = None,
+) -> Mapping[Any, Any]:
     if not isinstance(row, Mapping):
         where = "" if index is None else " at row %d" % index
         raise TypeError("record observation%s must be a mapping." % where)
     actual = set(row.keys())
     expected = set(sources)
-    if actual != expected:
-        missing = [source for source in sources if source not in actual]
-        extra = [key for key in row if key not in expected]
+    omittable = _omittable_sources(sources, children)
+    missing = [source for source in sources if source not in actual and source not in omittable]
+    extra = [key for key in row if key not in expected]
+    if missing or extra:
         where = "" if index is None else " at row %d" % index
         raise ValueError(
             "record observation%s must contain exactly the configured sources; missing=%r, extra=%r."
@@ -106,8 +136,14 @@ def _require_record(row: Any, sources: Sequence[Any], *, index: int | None = Non
     return row
 
 
-def _record_get(row: Mapping[Any, Any], source: Any) -> Any:
-    return row[source]
+def _record_get(row: Mapping[Any, Any], source: Any, child: Any = None) -> Any:
+    """Return the row's value for ``source``, or the child's missing sentinel when it is absent."""
+    try:
+        return row[source]
+    except KeyError:
+        if child is not None and hasattr(child, "missing_value"):
+            return child.missing_value
+        raise
 
 
 def _require_arity(value: Any, count: int, *, label: str) -> tuple[Any, ...]:
@@ -121,9 +157,7 @@ def _require_encoded(value: Any, count: int) -> tuple[Any, ...]:
     expected = 1 if count == 0 else count
     encoded = _require_arity(value, expected, label="encoded record")
     if count == 0 and (
-        isinstance(encoded[0], (bool, np.bool_))
-        or not isinstance(encoded[0], (int, np.integer))
-        or int(encoded[0]) < 0
+        isinstance(encoded[0], (bool, np.bool_)) or not isinstance(encoded[0], (int, np.integer)) or int(encoded[0]) < 0
     ):
         raise ValueError("an encoded empty record must contain one non-negative row count.")
     return encoded
@@ -170,11 +204,11 @@ class RecordDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: Mapping[Any, Any]) -> float:
         """Return summed child log densities for one mapping record."""
-        if not _record_matches(x, self.sources):
+        if not _record_matches(x, self.sources, self.dists):
             return -np.inf
         rv = 0.0
         for source, dist in zip(self.sources, self.dists):
-            rv += dist.log_density(_record_get(x, source))
+            rv += dist.log_density(_record_get(x, source, dist))
         return rv
 
     def seq_log_density(self, x: tuple[Any, ...]) -> np.ndarray:
@@ -345,9 +379,9 @@ class RecordDistribution(SequenceEncodableProbabilityDistribution):
         Like :meth:`CompositeDistribution.structural_fine_bucket`, but fields are addressed by
         source name rather than tuple position.
         """
-        row = _require_record(value, self.sources)
+        row = _require_record(value, self.sources, self.dists)
         return sum(
-            self.dists[i].structural_fine_bucket(_record_get(row, self.sources[i]), quantizer)
+            self.dists[i].structural_fine_bucket(_record_get(row, self.sources[i], self.dists[i]), quantizer)
             for i in range(self.count)
         )
 
@@ -492,12 +526,12 @@ class RecordAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: Mapping[Any, Any], weight: float, estimate: RecordDistribution | None) -> None:
         """Accumulate one weighted mapping record."""
-        row = _require_record(x, self.sources)
+        row = _require_record(x, self.sources, self.accumulators)
         if estimate is not None and estimate.count != self.count:
             raise ValueError("record estimate arity does not match its accumulator.")
         for i, source in enumerate(self.sources):
             child_estimate = None if estimate is None else estimate.dists[i]
-            self.accumulators[i].update(_record_get(row, source), weight, child_estimate)
+            self.accumulators[i].update(_record_get(row, source, self.accumulators[i]), weight, child_estimate)
 
     def _rng_initialize(self, rng: np.random.RandomState) -> None:
         seeds = rng.randint(2**31, size=self.count)
@@ -506,11 +540,11 @@ class RecordAccumulator(SequenceEncodableStatisticAccumulator):
 
     def initialize(self, x: Mapping[Any, Any], weight: float, rng: np.random.RandomState) -> None:
         """Randomly initialize child accumulators from one mapping record."""
-        row = _require_record(x, self.sources)
+        row = _require_record(x, self.sources, self.accumulators)
         if not self._init_rng:
             self._rng_initialize(rng)
         for i, source in enumerate(self.sources):
-            self.accumulators[i].initialize(_record_get(row, source), weight, self._acc_rng[i])
+            self.accumulators[i].initialize(_record_get(row, source, self.accumulators[i]), weight, self._acc_rng[i])
 
     def seq_update(self, x: tuple[Any, ...], weights: np.ndarray, estimate: RecordDistribution | None) -> None:
         """Accumulate encoded records with per-row weights."""
@@ -650,14 +684,35 @@ class RecordDataEncoder(DataSequenceEncoder):
         """Return complete field/source/child identity for generated-code caches."""
         return "record_encoder", self.fields, self.sources, self.encoders
 
+    def row_count(self, x: Any) -> int:
+        """Return the row count of an encoded payload, validating child alignment.
+
+        A record with no fields has nothing per-row to encode, so ``seq_encode`` stores the count
+        itself as a 1-tuple; that layout has to be read back here rather than run through the
+        per-child alignment check, which would find no children to agree on.
+        """
+        from mixle.stats.combinator.composite import _validate_composite_encoding
+
+        if len(self.fields) == 0:
+            if not isinstance(x, tuple) or len(x) != 1:
+                actual = len(x) if isinstance(x, tuple) else type(x).__name__
+                raise ValueError(f"record encoder payload for a field-less record must be a 1-tuple; got {actual}.")
+            count = x[0]
+            if isinstance(count, (bool, np.bool_)) or not isinstance(count, (int, np.integer)):
+                raise TypeError("record encoder payload for a field-less record must hold an integer row count.")
+            if int(count) < 0:
+                raise ValueError("record encoder payload reports a negative row count.")
+            return int(count)
+        return _validate_composite_encoding(x, self.encoders, label="record encoder payload")
+
     def seq_encode(self, x: Sequence[Mapping[Any, Any]]) -> tuple[Any, ...]:
         """Encode a sequence of mapping records field-by-field."""
-        rows = tuple(_require_record(row, self.sources, index=i) for i, row in enumerate(x))
+        rows = tuple(_require_record(row, self.sources, self.encoders, index=i) for i, row in enumerate(x))
         if len(self.fields) == 0:
             return (len(rows),)
         encoded = []
         for source, encoder in zip(self.sources, self.encoders):
-            encoded.append(encoder.seq_encode([_record_get(row, source) for row in rows]))
+            encoded.append(encoder.seq_encode([_record_get(row, source, encoder) for row in rows]))
         return tuple(encoded)
 
 
