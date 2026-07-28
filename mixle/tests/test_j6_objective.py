@@ -313,3 +313,91 @@ def test_priced_liabilities_and_hard_constraints_accept_legitimate_inputs():
     assert np.array_equal(constraints["no_mine_mask"], mask)
     assert np.allclose(constraints["caps"][0]["coeffs"], np.ones(N_BLOCKS))
     assert constraints["caps"][0]["bound"] == 3.0
+
+
+# --------------------------------------------------------------------------------------------------
+# MXR-080-1573: priced_liabilities validated emissions and the two callback OUTPUTS, but not the
+# `grade`/`exposure` values it fed into those opaque callbacks, and never re-checked the assembled
+# `total`/roll-ups. Invalid plan evidence could therefore vanish behind a cost model that ignores or
+# saturates its argument, and individually finite costs could overflow into an infinite liability.
+# --------------------------------------------------------------------------------------------------
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("field", ["grade", "exposure"])
+def test_priced_liabilities_rejects_invalid_plan_evidence_before_calling_cost_models(field, bad_value):
+    # audit repro: a plan with a NaN grade/exposure plus callbacks returning zeros used to produce a
+    # completely finite, ordinary-looking liability record -- the invalid source evidence disappeared.
+    plan = _plan(EMISSIONS)
+    values = np.array(plan[field], dtype=float).copy()
+    values[0] = bad_value
+    plan[field] = values
+    with pytest.raises(ValueError, match=field):
+        priced_liabilities(plan, carbon_price=1.0, health_cost=_no_cost, remediation_cost=_no_cost)
+
+
+def test_priced_liabilities_does_not_invoke_cost_models_on_invalid_evidence():
+    """The callbacks are opaque user code: they must never see a value already known to be invalid."""
+    seen: list[str] = []
+
+    def _recording(name):
+        def cost(arr: np.ndarray) -> np.ndarray:
+            seen.append(name)
+            return np.zeros_like(arr)
+
+        return cost
+
+    plan = _plan(EMISSIONS)
+    plan["grade"] = np.full(N_BLOCKS, np.nan)
+    with pytest.raises(ValueError):
+        priced_liabilities(
+            plan, carbon_price=1.0, health_cost=_recording("health"), remediation_cost=_recording("remediation")
+        )
+    assert seen == []
+
+
+def test_priced_liabilities_rejects_overflow_in_the_netted_total():
+    # three individually finite, individually valid per-block costs whose sum is not representable
+    huge = 1e308
+    plan = {"grade": np.array([1.0]), "exposure": np.array([1.0]), "emissions": np.array([huge])}
+    with pytest.raises(ValueError):
+        priced_liabilities(
+            plan,
+            carbon_price=1.0,
+            health_cost=lambda exposure: np.full_like(exposure, huge),
+            remediation_cost=lambda grade: np.full_like(grade, huge),
+        )
+
+
+def test_priced_liabilities_rejects_overflow_in_a_scalar_roll_up():
+    # every per-block total is representable; only the reduction into a roll-up overflows
+    huge = 1e308
+    n = 4
+    plan = {"grade": np.ones(n), "exposure": np.zeros(n), "emissions": np.zeros(n)}
+    with pytest.raises(ValueError):
+        priced_liabilities(
+            plan,
+            carbon_price=0.0,
+            health_cost=lambda exposure: np.zeros_like(exposure),
+            remediation_cost=lambda grade: np.full_like(grade, huge),
+        )
+
+
+def test_priced_liabilities_still_accepts_negative_grade_and_exposure_proxies():
+    """Negative control: grade/exposure are declared arbitrary geology/exposure PROXIES, so a negative
+    reading is legitimate data -- only the prices carry the non-negativity convention. The new
+    validation must check finiteness only, and must not start rejecting valid negative proxies."""
+    plan = {
+        "grade": np.array([2.0, -1.0]),
+        "exposure": np.array([3.0, -0.5]),
+        "emissions": np.array([1.0, 2.0]),
+    }
+    out = priced_liabilities(
+        plan,
+        carbon_price=4.0,
+        health_cost=lambda exposure: np.abs(exposure) * 2.0,
+        remediation_cost=lambda grade: np.abs(grade) * 3.0,
+    )
+    assert np.allclose(out["remediation"], [6.0, 3.0])
+    assert np.allclose(out["health"], [6.0, 1.0])
+    assert np.allclose(out["carbon"], [4.0, 8.0])
+    assert np.allclose(out["total"], [16.0, 12.0])
+    assert out["grand_total"] == pytest.approx(28.0)
