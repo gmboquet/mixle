@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -101,10 +102,29 @@ def _lookup(payload: object, path: str) -> Any:
     return value
 
 
+def _normalize_output(entry: dict[str, Any], stdout: str) -> str:
+    """Replace the entry's declared volatile spans before the digest is taken.
+
+    An entry whose output legitimately names the commit being reproduced cannot carry a fixed
+    stdout digest -- every commit invalidates it. Rather than drop the byte check for the whole
+    entry, the volatile spans are declared in the bundle and normalized away, so everything else
+    still has to match byte for byte. A pattern that matches nothing is an error, so a stale rule
+    fails loudly instead of quietly widening what the digest accepts.
+    """
+    normalized = stdout
+    for rule in entry["expected"].get("volatile", []):
+        if not isinstance(rule, dict) or set(rule) != {"pattern", "placeholder"}:
+            raise ValueError(f"{entry['id']}: volatile rule must contain exactly pattern and placeholder")
+        normalized, count = re.subn(rule["pattern"], rule["placeholder"], normalized)
+        if count == 0:
+            raise ValueError(f"{entry['id']}: declared volatile pattern never matched: {rule['pattern']!r}")
+    return normalized
+
+
 def _validate_output(entry: dict[str, Any], stdout: str) -> None:
     expected = entry["expected"]
     if expected.get("format") == "text":
-        actual_digest = hashlib.sha256(stdout.encode("utf-8")).hexdigest()
+        actual_digest = hashlib.sha256(_normalize_output(entry, stdout).encode("utf-8")).hexdigest()
         if actual_digest != expected.get("stdout_sha256"):
             raise ValueError(
                 f"{entry['id']}: stdout digest mismatch; expected {expected.get('stdout_sha256')}, "
