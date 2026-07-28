@@ -115,7 +115,28 @@ class Model:
         self.frontier: list[dict[str, Any]] | None = None  # candidate ranking when built by propose()
         self.certificate: Any = None  # EstimationCertificate attached by fit() -- how each block was solved
         self.calibration: Any = None  # CalibrationReport attached by fit(calibrate=...) -- UQ validation
+        # Why each evidence artifact above is or is not present. Both producing steps swallow every
+        # exception and leave their attribute at None, so an INTERNAL FAILURE used to be
+        # indistinguishable from a caller who never requested (or whose model never supported) the
+        # check: a fit whose certification raised came back with certificate=None, calibration=None and
+        # empty notes, exactly like an ordinary uncertified fit. A fit may remain usable when its
+        # evidence could not be produced, but it must not erase WHY the evidence is absent. Keyed by
+        # step name; see _record_evidence for the record shape.
+        self.evidence: dict[str, dict[str, Any]] = {}
         self._fit_info: dict[str, Any] = {}
+
+    def _record_evidence(self, step: str, status: str, *, error: BaseException | None = None, **detail: Any) -> None:
+        """Record one evidence step's typed outcome: ``attempted``/``succeeded``/``failed``/``not_applicable``.
+
+        A ``failed`` record also names the failure class and message and appends a note, so the reason
+        an evidence artifact is missing survives into ``explain()`` rather than vanishing.
+        """
+        record: dict[str, Any] = {"status": status, "error": None, "error_type": None, **detail}
+        if error is not None:
+            record["error_type"] = type(error).__name__
+            record["error"] = str(error)
+            self.notes.append(f"{step} failed: {type(error).__name__}: {error}")
+        self.evidence[step] = record
 
     # --- fit / use -------------------------------------------------------------------------------
     def fit(self, data: Any, *, restarts: Any = "auto", calibrate: float | bool = False, **optimize_kw: Any) -> Model:
@@ -131,7 +152,13 @@ class Model:
         ``calibrate`` (opt-in, default off): reserve a holdout slice (a fraction, or ``True`` for
         25%), fit on the rest, and attach a :class:`~mixle.inference.CalibrationReport` on
         ``self.calibration`` measuring calibration quality on held-out data
-        (PIT test + held-out log-density). Off by default because it costs training data."""
+        (PIT test + held-out log-density). Off by default because it costs training data.
+
+        Neither evidence step can break a fit, but neither silently disappears either: ``self.evidence``
+        carries a typed ``succeeded``/``failed``/``not_applicable`` record per step, naming the failure
+        class and message when one failed, and a failure also lands in ``notes`` (so ``explain()``
+        shows it). ``certificate=None`` alone cannot tell you whether certification was never
+        applicable or raised."""
         from mixle.inference import certify, optimize
 
         optimize_kw.setdefault("out", None)
@@ -182,17 +209,30 @@ class Model:
                 self.notes.append("saddle suspected: symmetry-broken refits did not improve — inspect the fit")
         # the estimation certificate: which method solved each block, how strong the guarantee, and
         # exactly where (if anywhere) gradient descent was unavoidable. Low-overhead inspection, computed once.
+        # A failure here still does not break the fit, but it is RECORDED (see _record_evidence): a
+        # certificate that is absent because certification raised is a different fact from one that was
+        # never asked for, and both used to look identical (certificate=None, no note).
         try:
             self.certificate = certify(self.fitted, data=fit_data)
-        except Exception:  # noqa: BLE001 - certification is a report; never let it break a fit
+        except Exception as exc:  # noqa: BLE001 - certification is a report; never let it break a fit
             self.certificate = None
+            self._record_evidence("certificate", "failed", error=exc, n_rows=len(fit_data))
+        else:
+            self._record_evidence("certificate", "succeeded", n_rows=len(fit_data))
         if cal_holdout:
             from mixle.inference import calibration_report
 
             try:
                 self.calibration = calibration_report(self.fitted, cal_holdout)
-            except Exception:  # noqa: BLE001 - a calibration report never breaks a fit
+            except Exception as exc:  # noqa: BLE001 - a calibration report never breaks a fit
                 self.calibration = None
+                self._record_evidence("calibration", "failed", error=exc, n_holdout=len(cal_holdout))
+            else:
+                self._record_evidence("calibration", "succeeded", n_holdout=len(cal_holdout))
+        else:
+            self._record_evidence(
+                "calibration", "not_applicable", n_holdout=0, reason="no calibration holdout requested"
+            )
         return self
 
     def _refit_symmetry_broken(self, data: Any, trials: int, optimize_kw: dict) -> tuple[Any, float, str]:
