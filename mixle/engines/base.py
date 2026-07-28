@@ -54,6 +54,18 @@ class ComputeEngine(ABC):
     dtype = None
     device = "cpu"
 
+    def is_concrete(self, x: Any) -> bool:
+        """Return whether ``x`` holds real values now, so host-side inspection of it is meaningful.
+
+        Every eager backend answers True. A tracing backend (JAX under ``jit``) answers False for a
+        traced value: its contents are not available in Python, so ``to_numpy`` raises and any
+        control flow branching on them is impossible by construction. Shared code that wants to run
+        an optional host-side *diagnostic* -- scanning for NaN rows to name them in an exception,
+        say -- asks first and skips the diagnostic while tracing; the engine math itself is
+        unaffected either way.
+        """
+        return True
+
     # Canonical array-op surface that backend-neutral kernels duck-type on the engine. Historically
     # only the handful of allocation ops below were ``@abstractmethod``, while kernels reached for
     # ~25 more (``log``, ``where``, ``logsumexp``, ``gammaln``, ``index_add`` ...) that each engine
@@ -115,8 +127,7 @@ class ComputeEngine(ABC):
         noncallable = tuple(op for op in cls.REQUIRED_OPS if not callable(getattr(cls, op, None)))
         if noncallable:
             raise TypeError(
-                "%s does not provide callable required compute ops: %s"
-                % (cls.__name__, ", ".join(noncallable))
+                "%s does not provide callable required compute ops: %s" % (cls.__name__, ", ".join(noncallable))
             )
 
     # Mathematical constants are part of the engine's arithmetic policy: a numeric engine returns

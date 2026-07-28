@@ -152,16 +152,23 @@ def normalize_engine_mixture_log_scores(weighted_log_scores: Any, engine: Any) -
         raise ValueError("mixture weighted log scores must have shape (rows, nonzero components).")
 
     nan_mask = engine.isnan(scores)
-    nan_rows = np.flatnonzero(np.asarray(engine.to_numpy(engine.sum(nan_mask, axis=1))) > 0)
-    if nan_rows.size:
-        raise InvalidMixtureEvidenceError(nan_rows, "component scores contain NaN")
-
     positive_infinite = engine.isinf(scores) & (scores > engine.asarray(0.0))
     positive_counts = engine.sum(positive_infinite, axis=1)
-    positive_counts_host = np.asarray(engine.to_numpy(positive_counts))
-    ambiguous_rows = np.flatnonzero(positive_counts_host > 1)
-    if ambiguous_rows.size:
-        raise InvalidMixtureEvidenceError(ambiguous_rows, "multiple components have +inf weighted score")
+    # These two checks are diagnostics: they pull counts to the host so the raised error can name the
+    # offending rows. That is only possible when the scores hold real values. Under a tracing backend
+    # (JAX inside jit) they are tracers -- to_numpy raises TracerArrayConversionError, and raising a
+    # Python exception on a traced predicate is impossible in principle, not just unimplemented. This
+    # function is the *engine-preserving* normalizer, so skip the host diagnostics while tracing and
+    # let the engine math below stand on its own; the eager path is unchanged.
+    if engine.is_concrete(scores):
+        nan_rows = np.flatnonzero(np.asarray(engine.to_numpy(engine.sum(nan_mask, axis=1))) > 0)
+        if nan_rows.size:
+            raise InvalidMixtureEvidenceError(nan_rows, "component scores contain NaN")
+
+        positive_counts_host = np.asarray(engine.to_numpy(positive_counts))
+        ambiguous_rows = np.flatnonzero(positive_counts_host > 1)
+        if ambiguous_rows.size:
+            raise InvalidMixtureEvidenceError(ambiguous_rows, "multiple components have +inf weighted score")
 
     evidence = engine.logsumexp(scores, axis=1)
     unique_positive = positive_counts > engine.asarray(0)

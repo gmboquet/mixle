@@ -209,14 +209,25 @@ class JaxEngineX64ConfigTest(unittest.TestCase):
         eng = JaxEngine(dtype="float32")
         self.assertEqual(np.asarray(eng.asarray([1.0])).dtype, np.float32)
 
-    def test_explicit_float64_request_demoted_when_ambient_x64_disabled(self):
-        # A caller asking for dtype="float64" while x64 is ambient-off still cannot get real float64
-        # out of JAX (it would silently truncate), so the engine must not claim it either.
+    def test_explicit_float64_request_refused_when_ambient_x64_disabled(self):
+        # A caller asking for dtype="float64" while x64 is ambient-off cannot get real float64 out of
+        # JAX -- it would silently truncate to float32. This used to demote to float32 and carry on;
+        # MXR-080-1559 replaced that with a refusal, because a caller who asked for float64 to hit a
+        # precision or tolerance requirement would otherwise believe the request was honored with no
+        # signal that it went unmet. Mirrors TorchEngine's fail-closed float64-on-MPS policy.
         import jax
 
         jax.config.update("jax_enable_x64", False)
-        eng = JaxEngine(dtype="float64")
-        self.assertEqual(np.asarray(eng.asarray([1.0])).dtype, np.float32)
+        with self.assertRaises(ValueError) as ctx:
+            JaxEngine(dtype="float64")
+        self.assertIn("jax_enable_x64", str(ctx.exception))  # names the ambient setting to change
+
+        # The two documented ways out both still work: enable x64...
+        jax.config.update("jax_enable_x64", True)
+        self.assertEqual(np.asarray(JaxEngine(dtype="float64").asarray([1.0])).dtype, np.float64)
+        # ...or explicitly accept the reduced precision.
+        jax.config.update("jax_enable_x64", False)
+        self.assertEqual(np.asarray(JaxEngine(dtype="float32").asarray([1.0])).dtype, np.float32)
 
 
 def _array_devices(arr):
@@ -429,18 +440,27 @@ class JitEmMixtureTest(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             jit_em_mixture(mixed, [0.0, 1.0, 2.0], max_its=2)
 
-    def test_zero_component_mixture_raises_not_implemented_not_index_error(self):
-        """The docstring promises ``NotImplementedError`` for unsupported structure, but a
-        zero-component mixture (constructible: MixtureDistribution's own validation only checks
-        len(components) == len(w), which holds vacuously at 0 == 0) used to fall through both
-        guard clauses -- `any(...)` over an empty `comps` is vacuously False -- and crash with a
-        raw `IndexError` from `comps[0]` instead."""
+    def test_zero_component_mixture_is_refused_with_a_typed_error_not_index_error(self):
+        """A zero-component mixture must never reach ``comps[0]`` and crash with a raw ``IndexError``.
+
+        Originally that was only guarded inside jit_em_mixture, because MixtureDistribution accepted
+        an empty mixture -- its validation checked len(components) == len(w), which holds vacuously
+        at 0 == 0. MixtureDistribution now rejects it outright, which is the better place: no caller
+        can build the degenerate object at all. Both guards are checked here, since jit_em_mixture
+        reads ``components`` by duck typing and so is still reachable by anything mixture-shaped.
+        """
         import mixle.stats as S
         from mixle.inference import jit_em_mixture
 
-        empty = S.MixtureDistribution([], [])
+        with self.assertRaises(ValueError):
+            S.MixtureDistribution([], [])
+
+        class _EmptyMixtureShaped:
+            components = ()
+            w = ()
+
         with self.assertRaises(NotImplementedError):
-            jit_em_mixture(empty, [0.0, 1.0, 2.0], max_its=2)
+            jit_em_mixture(_EmptyMixtureShaped(), [0.0, 1.0, 2.0], max_its=2)
 
 
 if __name__ == "__main__":

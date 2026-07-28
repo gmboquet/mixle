@@ -259,6 +259,10 @@ class JaxEngine(ComputeEngine):
             kwargs["dtype"] = self.dtype
         return jax.device_put(jnp.arange(*args, **kwargs), self.device)
 
+    def is_concrete(self, x: Any) -> bool:
+        """False while ``x`` is a jit tracer: its values do not exist yet, so to_numpy would raise."""
+        return not isinstance(x, jax.core.Tracer)
+
     def to_numpy(self, x: Any) -> np.ndarray:
         """Move a JAX array back to a host NumPy array."""
         return np.asarray(x)
