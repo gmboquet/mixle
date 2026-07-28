@@ -191,6 +191,107 @@ class LifecycleTest(unittest.TestCase):
             back = mixle.Model.load(path, trust_code=True)
             self.assertIsInstance(back.fitted, NeuralGaussian)
 
+    def test_internal_serializer_failure_never_becomes_a_pickle_artifact(self):
+        # MXR-080-1716: _write_model caught every exception across registry initialization,
+        # conversion and JSON encoding and read all of them as "this model needs pickle". An
+        # internal TypeError therefore turned an ordinary JSON-serializable model into an
+        # executable model.pkl -- a programming failure silently downgrading the artifact's
+        # security and portability contract. Only the registry's explicit unsupported-type answer
+        # may select pickle.
+        import os
+
+        import mixle
+        import mixle.utils.serialization as ser
+        from mixle.stats import CategoricalEstimator
+
+        m = mixle.Model(CategoricalEstimator()).fit(["a", "b", "a"])
+        original = ser.to_serializable
+
+        def broken(_value):
+            raise TypeError("internal serializer bug")
+
+        with tempfile.TemporaryDirectory() as d:
+            ser.to_serializable = broken
+            try:
+                with self.assertRaises(TypeError):
+                    m.deploy(d + "/cat")
+            finally:
+                ser.to_serializable = original
+            self.assertNotIn("model.pkl", os.listdir(d + "/cat"))
+
+    def test_deploy_declares_the_evidence_it_does_not_export(self):
+        # MXR-080-1717: a round trip turned a model carrying a certificate, calibration report,
+        # candidate frontier and {"n": 7} fit record into one with None, None, None and {} -- the
+        # artifact kept the prediction code and dropped everything needed to judge it, silently.
+        import json
+        import os
+
+        import mixle
+        from mixle.stats import CategoricalEstimator
+
+        m = mixle.Model(CategoricalEstimator()).fit(["a", "b", "a"])
+        m.certificate = "certificate-object"
+        m.calibration = "calibration-report"
+        m.frontier = [{"name": "recommended"}]
+        m._fit_info = {"n": 7}
+
+        with tempfile.TemporaryDirectory() as d:
+            path = m.deploy(d + "/cat")
+            with open(os.path.join(path, "manifest.json")) as f:
+                manifest = json.loads(f.read())
+            self.assertEqual(manifest["evidence_not_exported"], ["certificate", "calibration", "frontier"])
+
+            back = mixle.Model.load(path)
+            self.assertEqual(back._fit_info, {"n": 7})  # the fit record survives the round trip
+            self.assertIsNone(back.certificate)  # these do not, and the model says so
+            self.assertIsNone(back.calibration)
+            self.assertIsNone(back.frontier)
+            self.assertTrue(any("artifact export dropped" in note for note in back.notes))
+            self.assertIn("not an evidence export", mixle.Model.deploy.__doc__)
+
+    def test_redeployment_leaves_no_stale_generation_and_binds_the_model_digest(self):
+        # MXR-080-1719: the model was written straight into the final directory with no digest and
+        # no cleanup, so redeploying in a different format left a stale model.pkl beside the fresh
+        # model.json, and any later byte change to the model file was undetectable.
+        import json
+        import os
+
+        import mixle
+        import mixle.utils.serialization as ser
+        from mixle.stats import CategoricalEstimator
+        from mixle.utils.serialization import SerializationError
+
+        m = mixle.Model(CategoricalEstimator()).fit(["a", "b", "a"])
+        original = ser.to_serializable
+
+        def unsupported(_value):
+            raise SerializationError("not registry-serializable")
+
+        with tempfile.TemporaryDirectory() as d:
+            path = d + "/cat"
+            ser.to_serializable = unsupported
+            try:
+                m.deploy(path)  # generation 1: pickle
+            finally:
+                ser.to_serializable = original
+            self.assertIn("model.pkl", os.listdir(path))
+
+            m.deploy(path)  # generation 2: json -- the pickle generation must not survive it
+            self.assertEqual(sorted(os.listdir(path)), ["manifest.json", "model.json"])
+
+            with open(os.path.join(path, "manifest.json")) as f:
+                manifest = json.loads(f.read())
+            self.assertEqual(manifest["model_file"], "model.json")
+            self.assertTrue(manifest["model_sha256"].startswith("sha256:"))
+            self.assertTrue(mixle.Model.load(path).fitted is not None)
+
+            with open(os.path.join(path, "model.json")) as f:
+                payload = json.loads(f.read())
+            with open(os.path.join(path, "model.json"), "w") as f:
+                f.write(json.dumps(payload) + " ")  # one byte, still valid JSON, still decodable
+            with self.assertRaises(SerializationError):
+                mixle.Model.load(path)
+
     def test_legacy_pickle_artifact_still_loads(self):
         # Artifacts written before the JSON format (manifest without a "format" field) still load via
         # pickle -- but only when the caller explicitly trusts the source (pickle execs arbitrary code).
