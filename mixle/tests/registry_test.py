@@ -455,5 +455,56 @@ class FingerprintSelectionTest(unittest.TestCase):
                 reg.find_for([float("nan"), 0.0])
 
 
+class RegistryControlFileTest(unittest.TestCase):
+    def test_the_lock_file_is_never_followed_through_a_symlink(self):
+        # MXR-080-1683: register() opened the fixed .registry.lock path with mode "w" before applying
+        # flock, following any existing symlink and truncating its target. A lock symlink aimed at an
+        # external file was followed during an otherwise successful registration and emptied it;
+        # entry-path containment does not protect this control file.
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = os.path.join(tmp, "DO_NOT_TOUCH.txt")
+            with open(outside, "w") as f:
+                f.write("DO NOT TOUCH")
+            reg_dir = os.path.join(tmp, "registry")
+            os.makedirs(reg_dir)
+            os.symlink(outside, os.path.join(reg_dir, ".registry.lock"))
+
+            reg = Registry(reg_dir)
+            with self.assertRaises(RuntimeError):
+                reg.register(_json_task_model(), capabilities=["c"])
+
+            with open(outside) as f:
+                self.assertEqual(f.read(), "DO NOT TOUCH")  # untouched, not truncated
+
+    def test_a_failed_index_write_leaves_nothing_claimed_behind(self):
+        # MXR-080-1684: the artifact was published and its exclusive claim marker retained before the
+        # index was written, and only artifact-save failures dropped the claim. Forcing _write_index()
+        # to fail left both the artifact and .<id>.claim on disk with no index.json: the registration
+        # raised, retrying that id was rejected as already existing, and no read could discover it.
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = Registry(tmp)
+            original_write_index = reg._write_index
+            state = {"fail": True}
+
+            def failing_write_index():
+                if state["fail"]:
+                    raise OSError("disk full")
+                return original_write_index()
+
+            reg._write_index = failing_write_index
+            with self.assertRaises(OSError):
+                reg.register(_json_task_model(), capabilities=["c"], entry_id="e")
+
+            self.assertFalse(os.path.exists(os.path.join(tmp, "e")))
+            self.assertFalse(os.path.exists(os.path.join(tmp, ".e.claim")))
+            self.assertEqual(reg._entries, [])
+
+            # the rolled-back id is genuinely free again: a retry succeeds and is discoverable
+            state["fail"] = False
+            entry = reg.register(_json_task_model(), capabilities=["c"], entry_id="e")
+            self.assertEqual(entry.entry_id, "e")
+            self.assertEqual([e.entry_id for e in Registry(tmp)._entries], ["e"])
+
+
 if __name__ == "__main__":
     unittest.main()
