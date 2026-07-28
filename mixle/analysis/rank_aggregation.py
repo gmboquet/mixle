@@ -271,6 +271,14 @@ def mallows_fit(rankings: np.ndarray, *, exact_max_items: int = 8) -> dict:
     matching the observed mean Kendall distance to its expectation under the model. Larger ``theta``
     means tighter agreement (``theta -> 0`` is uniform/no-consensus).
 
+    ``theta`` is ``nan`` when fewer than two items are ranked (MXR-080-1594): with ``m < 2`` there is
+    exactly one possible ordering, so every ranking has Kendall distance zero under *every* ``theta``
+    and the likelihood is flat -- the dispersion is unidentifiable, not infinite. Reporting ``inf``
+    there (the perfect-agreement branch below) would claim maximal evidence for concentration from
+    data that carries no evidence at all. The trivial center is still returned, since it is correct.
+    ``inf`` remains the honest answer for genuine perfect agreement among two or more items, where
+    the observed zero distance really was one of many attainable outcomes.
+
     Returns:
         ``{'center', 'theta', 'mean_distance', 'consensus_distance', 'exact', 'search_mode',
         'exact_max_items'}``, preserving the Kemeny search guarantee used to obtain the center.
@@ -282,7 +290,9 @@ def mallows_fit(rankings: np.ndarray, *, exact_max_items: int = 8) -> dict:
     center = km["consensus"]
     mean_d = float(np.mean([kendall_distance(center, row) for row in r]))
     max_d = m * (m - 1) / 2
-    if mean_d <= 1e-9:
+    if m < 2:
+        theta = float("nan")  # unidentifiable: only one ordering exists, so no theta is preferred
+    elif mean_d <= 1e-9:
         theta = float("inf")
     elif mean_d >= max_d / 2:
         theta = 0.0
