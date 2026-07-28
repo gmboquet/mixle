@@ -19,8 +19,9 @@ import numpy as np
 from numpy.random import RandomState
 from scipy.stats import norm
 
+from mixle.doe.batch import _safe_cholesky
 from mixle.doe.bayesopt import _fit_surrogate, _validate_xy
-from mixle.doe.designs import Bounds, _as_bounds, _as_rng, latin_hypercube
+from mixle.doe.designs import Bounds, _as_bounds, _as_rng, _require_exact_positive_int, latin_hypercube
 
 # y_r = a - b * log(-log r) for the Gumbel; constants at r = 0.25, 0.5, 0.75.
 _C25, _C50, _C75 = float(np.log(-np.log(0.25))), float(np.log(-np.log(0.5))), float(np.log(-np.log(0.75)))
@@ -33,14 +34,7 @@ def _require_positive_int(value: Any, name: str) -> int:
     nonpositive ``n_samples`` would otherwise draw a silent empty ``y*`` sample with no error
     (MXR-080-0178). This names both as invalid instead.
     """
-    if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
-        raise ValueError(f"{name} must be a positive integer, got {value!r}.")
-    if not np.isfinite(value):
-        raise ValueError(f"{name} must be a positive integer, got {value!r}.")
-    ivalue = int(value)
-    if ivalue <= 0 or ivalue != value:
-        raise ValueError(f"{name} must be a positive integer, got {value!r}.")
-    return ivalue
+    return _require_exact_positive_int(value, name)
 
 
 def _validate_moments(mean: Any, std: Any) -> tuple[np.ndarray, np.ndarray]:
@@ -119,26 +113,44 @@ def sample_max_values(mean: Any, std: Any, n_samples: int = 64, *, seed: int | R
     rng = seed if isinstance(seed, RandomState) else RandomState(seed)
 
     def cdf_max(y: float) -> float:
-        return float(np.exp(np.sum(norm.logcdf((y - mu) / sd))))
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            standardized = (y - mu) / sd
+        if not np.all(np.isfinite(standardized)):
+            raise ValueError("MES maximum-value search produced a non-finite standardized bracket.")
+        result = float(np.exp(np.sum(norm.logcdf(standardized))))
+        if not np.isfinite(result):
+            raise ValueError("MES maximum-value CDF became non-finite.")
+        return result
 
-    lo = float((mu - 5.0 * sd).min())
-    hi = float((mu + 8.0 * sd).max())
+    with np.errstate(over="ignore", invalid="ignore"):
+        lo = float((mu - 5.0 * sd).min())
+        hi = float((mu + 8.0 * sd).max())
+    if not np.isfinite(lo) or not np.isfinite(hi) or lo > hi:
+        raise ValueError("MES maximum-value search bracket is not representable as finite float64 values.")
 
     def quantile(target: float) -> float:
         a, b = lo, hi
         for _ in range(60):
-            m = 0.5 * (a + b)
+            m = 0.5 * a + 0.5 * b
             if cdf_max(m) < target:
                 a = m
             else:
                 b = m
-        return 0.5 * (a + b)
+        result = 0.5 * a + 0.5 * b
+        if not np.isfinite(result):
+            raise ValueError("MES maximum-value quantile became non-finite.")
+        return result
 
     y25, y50, y75 = quantile(0.25), quantile(0.5), quantile(0.75)
     loc, scale = _fit_gumbel(y25, y50, y75)
+    if not np.isfinite(loc) or not np.isfinite(scale) or scale <= 0.0:
+        raise ValueError("MES Gumbel fit produced non-finite or non-positive parameters.")
     u = rng.uniform(1e-6, 1.0 - 1e-6, n)
-    ystar = _gumbel_quantile(loc, scale, u)
-    return np.maximum(ystar, mu.max())
+    with np.errstate(over="ignore", invalid="ignore"):
+        ystar = np.maximum(_gumbel_quantile(loc, scale, u), mu.max())
+    if not np.all(np.isfinite(ystar)):
+        raise ValueError("MES maximum-value samples became non-finite.")
+    return ystar
 
 
 def max_value_entropy_search(mean: Any, std: Any, max_samples: Any, *, maximize: bool = True) -> np.ndarray:
@@ -157,6 +169,8 @@ def max_value_entropy_search(mean: Any, std: Any, max_samples: Any, *, maximize:
             ``inf * 0`` in the ``gamma * pdf`` term then silently yields NaN).
     """
     mu, sd = _validate_moments(mean, std)
+    if type(maximize) is not bool:
+        raise TypeError(f"maximize must be a bool, got {type(maximize).__name__}.")
     ystar = np.asarray(max_samples, dtype=np.float64).ravel()
     if ystar.size == 0:
         raise ValueError("max_samples must contain at least one optimum-value sample (got an empty array).")
@@ -164,7 +178,10 @@ def max_value_entropy_search(mean: Any, std: Any, max_samples: Any, *, maximize:
         raise ValueError("max_samples contains non-finite values (NaN/Inf).")
     if not maximize:
         mu, ystar = -mu, -ystar
-    gamma = (ystar[None, :] - mu[:, None]) / sd[:, None]  # (n_candidates, M)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        gamma = (ystar[None, :] - mu[:, None]) / sd[:, None]  # (n_candidates, M)
+    if not np.all(np.isfinite(gamma)):
+        raise ValueError("max_value_entropy_search produced non-finite standardized optimum values.")
     cdf = np.clip(norm.cdf(gamma), 1e-12, 1.0)
     pdf = norm.pdf(gamma)
     info = gamma * pdf / (2.0 * cdf) - np.log(cdf)
@@ -193,17 +210,42 @@ def propose_mes(
     a ``(d,)`` array. ``maximize`` selects the optimization sense (default minimize, matching the rest
     of the BO layer).
     """
-    if int(n_candidates) <= 0:
-        raise ValueError("n_candidates must be positive.")
+    n_candidates = _require_exact_positive_int(n_candidates, "n_candidates")
+    max_samples = _require_exact_positive_int(max_samples, "max_samples")
+    if type(maximize) is not bool:
+        raise TypeError(f"maximize must be a bool, got {type(maximize).__name__}.")
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
     xs, ys = _validate_xy(x, y)
     gp = _fit_surrogate(xs, ys, gp, fit_kwargs)
-    cand = latin_hypercube(b, int(n_candidates), rng)
-    mean, cov = gp.predict(xs, ys, cand, return_cov=True)
-    std = np.sqrt(np.clip(np.diag(np.atleast_2d(np.asarray(cov, dtype=np.float64))), 0.0, None))
+    cand = latin_hypercube(b, n_candidates, rng)
+    if cand.shape != (n_candidates, b.shape[0]) or not np.all(np.isfinite(cand)):
+        raise ValueError(
+            f"latin_hypercube must return a finite ({n_candidates}, {b.shape[0]}) candidate matrix; "
+            f"got {cand.shape}."
+        )
+    mean_raw, cov_raw = gp.predict(xs, ys, cand, return_cov=True)
+    mean = np.asarray(mean_raw, dtype=np.float64)
+    if mean.shape == (n_candidates, 1):
+        mean = mean[:, 0]
+    elif mean.shape != (n_candidates,):
+        raise ValueError(
+            f"MES posterior mean must have shape ({n_candidates},) or ({n_candidates}, 1), got {mean.shape}."
+        )
+    if not np.all(np.isfinite(mean)):
+        raise ValueError("MES posterior mean must be finite.")
+    cov = np.asarray(cov_raw, dtype=np.float64)
+    if cov.shape != (n_candidates, n_candidates):
+        raise ValueError(
+            f"MES posterior covariance must have shape ({n_candidates}, {n_candidates}), got {cov.shape}."
+        )
+    _safe_cholesky(cov)
+    variance = np.diag(cov)
+    if np.any(variance < 0.0):
+        raise ValueError("MES posterior marginal variances must be nonnegative.")
+    std = np.sqrt(variance)
     # Convert to a maximization of g = +/- f, then run standard MES on g.
-    g_mean = np.asarray(mean, dtype=np.float64).ravel() if maximize else -np.asarray(mean, dtype=np.float64).ravel()
+    g_mean = mean if maximize else -mean
     ystar = sample_max_values(g_mean, std, max_samples, seed=int(rng.randint(2**31)))
     merit = max_value_entropy_search(g_mean, std, ystar, maximize=True)
     return cand[int(np.argmax(merit))]

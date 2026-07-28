@@ -6,7 +6,13 @@ import warnings
 
 import numpy as np
 
-from mixle.doe.entropy import _fit_gumbel, _gumbel_quantile, max_value_entropy_search, sample_max_values
+from mixle.doe.entropy import (
+    _fit_gumbel,
+    _gumbel_quantile,
+    max_value_entropy_search,
+    propose_mes,
+    sample_max_values,
+)
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
 
@@ -112,6 +118,10 @@ class MesValidationTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     sample_max_values(np.array([0.0]), np.array([1.0]), bad, seed=0)
 
+    def test_sample_max_values_rejects_unrepresentable_finite_bracket(self):
+        with self.assertRaisesRegex(ValueError, "bracket"):
+            sample_max_values(np.array([1e308]), np.array([1e308]), 10, seed=0)
+
     # -- max_value_entropy_search: posterior moments and optimum samples --
 
     def test_mes_rejects_empty_moments(self):
@@ -160,6 +170,61 @@ class MesValidationTest(unittest.TestCase):
         mes = max_value_entropy_search(mu, sd, ystar, maximize=True)
         self.assertTrue(np.all(np.isfinite(mes)))
         self.assertTrue(np.all(mes >= -1e-9))
+
+
+class MesProposalContractTest(unittest.TestCase):
+    class _StubGP:
+        def __init__(self, mean, covariance):
+            self.mean = mean
+            self.covariance = covariance
+
+        def fit(self, x, y, **kwargs):
+            return self
+
+        def predict(self, x, y, points, return_cov=True):
+            return self.mean, self.covariance
+
+    def setUp(self):
+        self.x = np.array([[-1.0], [0.0], [1.0]])
+        self.y = np.array([1.0, 0.0, 1.0])
+        self.bounds = [(-1.0, 1.0)]
+
+    def test_rejects_fractional_and_boolean_candidate_counts(self):
+        for invalid in (2.9, True, np.bool_(True)):
+            with self.assertRaises((TypeError, ValueError)):
+                propose_mes(self.x, self.y, self.bounds, n_candidates=invalid)
+
+    def test_rejects_malformed_mean_and_covariance(self):
+        invalid_posteriors = (
+            (np.zeros(3), np.eye(2)),
+            (np.zeros(2), np.array([[1.0, 0.2], [0.0, 1.0]])),
+            (np.zeros(2), np.diag([1.0, -1.0])),
+            (np.full(2, np.nan), np.eye(2)),
+        )
+        for mean, covariance in invalid_posteriors:
+            with self.assertRaises(ValueError):
+                propose_mes(
+                    self.x,
+                    self.y,
+                    self.bounds,
+                    n_candidates=2,
+                    max_samples=4,
+                    gp=self._StubGP(mean, covariance),
+                    seed=0,
+                )
+
+    def test_valid_stub_posterior_returns_one_finite_candidate(self):
+        point = propose_mes(
+            self.x,
+            self.y,
+            self.bounds,
+            n_candidates=3,
+            max_samples=8,
+            gp=self._StubGP(np.zeros(3), np.eye(3)),
+            seed=0,
+        )
+        self.assertEqual(point.shape, (1,))
+        self.assertTrue(np.all(np.isfinite(point)))
 
 
 @unittest.skipUnless(HAS_TORCH, "GP surrogate requires torch")
