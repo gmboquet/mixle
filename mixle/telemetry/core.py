@@ -8,8 +8,11 @@ for dashboards or learned policies.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
+import os
+import tempfile
 import threading
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
@@ -151,12 +154,30 @@ class Telemetry:
         # -- the on-disk log would silently keep showing the stale (e.g. "pending") value forever.
         # Write to a temp file and swap it in so a crash mid-flush can't leave a truncated log.
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.parent / (self.path.name + ".tmp")
-        with open(tmp_path, "w") as f:
-            for ev in self._buffer:
-                f.write(json.dumps(ev.as_row()) + "\n")
-        tmp_path.replace(self.path)
+        self._write_atomically("".join(json.dumps(ev.as_row()) + "\n" for ev in self._buffer))
         self._unflushed.clear()
+
+    def _write_atomically(self, text: str) -> None:
+        """Replace the log with ``text`` via a fresh private temp file in the log's own directory.
+
+        The temp file is created by :func:`tempfile.mkstemp` (a unique name, ``O_EXCL``, mode 0600)
+        rather than at the predictable ``<log>.tmp``. A fixed name is an open invitation in a shared
+        or world-writable directory: anyone able to pre-create that path as a symlink got the
+        telemetry row written *through* it into an arbitrary external file, and the subsequent
+        rename then moved the symlink itself onto the log path, permanently redirecting every later
+        flush outside the requested location. A file we alone created cannot be either.
+        """
+        fd, tmp_name = tempfile.mkstemp(dir=self.path.parent, prefix=self.path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, self.path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name)
+            raise
 
     def _load(self) -> None:
         with open(self.path) as f:
