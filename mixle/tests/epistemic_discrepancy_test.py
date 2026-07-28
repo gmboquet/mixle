@@ -10,6 +10,7 @@ from mixle.epistemic.discrepancy import (
     js_divergence,
     kl_divergence,
     mmd,
+    mmd_squared,
     wasserstein_distance,
 )
 from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
@@ -268,6 +269,113 @@ class DiscrepancyReportTest(unittest.TestCase):
         self.assertEqual(first.value, second.value)
         self.assertEqual(first.seed, 42)
         self.assertNotEqual(first.value, third.value)
+
+
+class MMDNonNegativityTest(unittest.TestCase):
+    """MXR-080-1748: the public discrepancy must not be a signed squared estimator."""
+
+    def test_identical_samples_never_give_a_negative_discrepancy(self):
+        for values in ([0.0, 1.0], [3.0], [1.0, 2.0, 3.0, 4.0]):
+            arr = np.array(values)
+            with self.subTest(values=values):
+                self.assertGreaterEqual(mmd(arr, arr), 0.0)
+
+    def test_the_squared_estimator_is_still_available_and_still_signed(self):
+        arr = np.array([0.0, 1.0])
+        self.assertLess(mmd_squared(arr, arr), 0.0)  # unbiased under the null: it scatters both ways
+        self.assertAlmostEqual(mmd(arr, arr), 0.0, places=12)
+
+    def test_mmd_is_the_clipped_root_of_the_squared_estimator(self):
+        rng = np.random.RandomState(0)
+        xs, ys = rng.normal(size=200), rng.normal(loc=3.0, size=200)
+        self.assertAlmostEqual(mmd(xs, ys), float(np.sqrt(mmd_squared(xs, ys))), places=12)
+
+    def test_report_never_publishes_a_negative_discrepancy(self):
+        arr = np.array([0.0, 1.0])
+        self.assertGreaterEqual(discrepancy_report(arr, arr, metric="mmd").value, 0.0)
+
+
+class SampleBudgetEvidenceTest(unittest.TestCase):
+    """MXR-080-1750: recorded sample budgets must describe work that actually happened."""
+
+    class _ShortSampler:
+        def __init__(self, loc=0.0):
+            self.loc = loc
+
+        def log_density(self, x):
+            return float(-0.5 * (x - self.loc) ** 2)
+
+        def sample(self, n, rng=None):
+            del n, rng
+            return np.array([self.loc, self.loc + 1.0])  # always two draws, whatever was asked
+
+    def test_a_sampler_returning_fewer_draws_than_requested_is_rejected(self):
+        with self.assertRaises(ValueError):
+            _sample(self._ShortSampler(), 10_000, np.random.RandomState(0))
+
+    def test_a_short_sampler_cannot_back_a_10000_sample_report(self):
+        with self.assertRaises(ValueError):
+            discrepancy_report(self._ShortSampler(0.0), self._ShortSampler(1.0), metric="kl_divergence", seed=0)
+
+    def test_wasserstein_refuses_unequal_empirical_measures(self):
+        class _OneDraw(self._ShortSampler):
+            def sample(self, n, rng=None):
+                del n, rng
+                return np.array([1.0])
+
+        with self.assertRaises(ValueError):
+            wasserstein_distance(self._ShortSampler(), _OneDraw(), n=2)
+
+
+class SamplerReproducibilityTest(unittest.TestCase):
+    """MXR-080-1749: a recorded seed must actually reproduce the value it is recorded on."""
+
+    class _GlobalRngDist:
+        """A direct sampler that ignores every RNG and reads NumPy's global state."""
+
+        def __init__(self, loc):
+            self.loc = loc
+
+        def log_density(self, x):
+            return float(-0.5 * (x - self.loc) ** 2)
+
+        def sample(self, n):
+            return np.random.normal(loc=self.loc, size=n)
+
+    class _ControlledDist:
+        def __init__(self, loc):
+            self.loc = loc
+
+        def log_density(self, x):
+            return float(-0.5 * (x - self.loc) ** 2)
+
+        def sample(self, n, rng=None):
+            return (rng or np.random).normal(loc=self.loc, size=n)
+
+    def test_an_uncontrolled_sampler_is_not_reported_as_reproducible(self):
+        p, q = self._GlobalRngDist(0.0), self._GlobalRngDist(1.0)
+        first = discrepancy_report(p, q, metric="kl_divergence", seed=123)
+        second = discrepancy_report(p, q, metric="kl_divergence", seed=123)
+        self.assertFalse(first.reproducible)
+        self.assertIsNone(first.seed)  # no integer is recorded that fails to reproduce the value
+        self.assertNotEqual(first.value, second.value)
+
+    def test_an_rng_aware_sampler_is_seeded_and_reproduces_exactly(self):
+        p, q = self._ControlledDist(0.0), self._ControlledDist(1.0)
+        first = discrepancy_report(p, q, metric="kl_divergence", seed=123)
+        second = discrepancy_report(p, q, metric="kl_divergence", seed=123)
+        third = discrepancy_report(p, q, metric="kl_divergence", seed=124)
+        self.assertTrue(first.reproducible)
+        self.assertEqual(first.seed, 123)
+        self.assertEqual(first.value, second.value)
+        self.assertNotEqual(first.value, third.value)
+
+    def test_the_mixle_sampler_shape_stays_reproducible(self):
+        p = GaussianDistribution(0.0, 1.0)
+        observed = np.random.RandomState(7).normal(size=20)
+        result = discrepancy_report(p, observed, metric="auto", seed=5)
+        self.assertTrue(result.reproducible)
+        self.assertEqual(result.seed, 5)
 
 
 if __name__ == "__main__":
