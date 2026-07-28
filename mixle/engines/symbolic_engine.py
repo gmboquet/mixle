@@ -550,7 +550,9 @@ def _reduce_symbolic(
     if axis is None:
         reduced_axes: tuple[int, ...] = tuple(range(ndim))
     elif isinstance(axis, tuple):
-        reduced_axes = tuple(sorted((a % ndim) if ndim else 0 for a in axis))
+        # Same normalization the reduction itself used (MXR-080-1566), so keepdims reinserts the
+        # dimensions that were actually reduced.
+        reduced_axes = tuple(sorted(_normalize_reduction_axes(axis, ndim))) if ndim else (0,) * len(axis)
     else:
         reduced_axes = ((int(axis) % ndim) if ndim else 0,)
     out = np.asarray(result, dtype=object)
@@ -559,12 +561,33 @@ def _reduce_symbolic(
     return out
 
 
+def _normalize_reduction_axes(axis: tuple, ndim: int) -> tuple[int, ...]:
+    """Resolve a tuple of reduction axes against ``ndim``, matching NumPy's own contract.
+
+    MXR-080-1566: a negative axis names a position relative to the rank it is applied at, and the
+    sequential fold in :func:`_reduce_over_axis` drops a dimension per pass -- so every axis must be
+    resolved against the ORIGINAL rank before any of them is used, or the second pass reduces a
+    different dimension than NumPy says it does. Duplicates are rejected exactly as NumPy does,
+    rather than silently reducing two different dimensions.
+    """
+    normalized: list[int] = []
+    for one_axis in axis:
+        value = int(one_axis)
+        resolved = value + ndim if value < 0 else value
+        if not 0 <= resolved < ndim:
+            raise np.exceptions.AxisError(value, ndim)
+        if resolved in normalized:
+            raise ValueError("duplicate value in 'axis'")
+        normalized.append(resolved)
+    return tuple(normalized)
+
+
 def _reduce_over_axis(arr: np.ndarray, reducer: Callable[[Any], SymbolicExpression], axis: Any = None) -> Any:
     if axis is None:
         return reducer(arr.reshape(-1))
     if isinstance(axis, tuple):
         rv = arr
-        for one_axis in sorted(axis, reverse=True):
+        for one_axis in sorted(_normalize_reduction_axes(axis, arr.ndim), reverse=True):
             rv = _reduce_over_axis(rv, reducer, axis=one_axis)
         return rv
     return np.apply_along_axis(lambda values: reducer(values), int(axis), arr)
