@@ -27,16 +27,8 @@ def _two_state_model(default_value: float = 0.0) -> HiddenMarkovModelDistributio
     """A hand-built 2-state, 3-symbol HMM with known emission/transition parameters."""
     return HiddenMarkovModelDistribution(
         topics=[
-            CategoricalDistribution(
-                pmap={0: 0.7, 1: 0.2, 2: 0.1},
-                default_value=default_value,
-                scoring_only=default_value != 0.0,
-            ),
-            CategoricalDistribution(
-                pmap={0: 0.1, 1: 0.1, 2: 0.8},
-                default_value=default_value,
-                scoring_only=default_value != 0.0,
-            ),
+            CategoricalDistribution(pmap={0: 0.7, 1: 0.2, 2: 0.1}, default_value=default_value),
+            CategoricalDistribution(pmap={0: 0.1, 1: 0.1, 2: 0.8}, default_value=default_value),
         ],
         w=[0.5, 0.5],
         transitions=[[0.9, 0.1], [0.25, 0.75]],

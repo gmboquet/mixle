@@ -34,7 +34,7 @@ class HierarchicalMixtureEngineTestCase(unittest.TestCase):
         self.est = HierarchicalMixtureEstimator(
             [GaussianEstimator(), GaussianEstimator(), GaussianEstimator()],
             num_mixtures=2,
-            len_estimator=CategoricalDistribution({2: 1.0}).estimator(),
+            len_estimator=CategoricalDistribution({2: 0.5}).estimator(),
         )
         self.engines = [("numpy", NUMPY_ENGINE)] + ([("torch", _TORCH)] if _TORCH is not None else [])
 

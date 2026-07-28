@@ -456,9 +456,7 @@ class MarginalDedupTestCase(unittest.TestCase):
 
 class ParallelTestCase(unittest.TestCase):
     def setUp(self):
-        cat = CategoricalDistribution(
-            {"a": 0.5 / 1.1, "b": 0.3 / 1.1, "c": 0.2 / 1.1, "d": 0.05 / 1.1, "e": 0.05 / 1.1}
-        )
+        cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2, "d": 0.05, "e": 0.05})
         self.seq = SequenceDistribution(cat, len_dist=GeometricDistribution(0.5))
 
     def test_parallel_quantization_is_deterministic(self):
@@ -492,9 +490,7 @@ class ParallelValidationTestCase(unittest.TestCase):
     """
 
     def setUp(self):
-        cat = CategoricalDistribution(
-            {"a": 0.5 / 1.1, "b": 0.3 / 1.1, "c": 0.2 / 1.1, "d": 0.05 / 1.1, "e": 0.05 / 1.1}
-        )
+        cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2, "d": 0.05, "e": 0.05})
         self.seq = SequenceDistribution(cat, len_dist=GeometricDistribution(0.5))
 
     def test_nonpositive_and_fractional_worker_counts_rejected(self):
@@ -625,9 +621,7 @@ class ParallelStartMethodTestCase(unittest.TestCase):
     """
 
     def setUp(self):
-        cat = CategoricalDistribution(
-            {"a": 0.5 / 1.1, "b": 0.3 / 1.1, "c": 0.2 / 1.1, "d": 0.05 / 1.1, "e": 0.05 / 1.1}
-        )
+        cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2, "d": 0.05, "e": 0.05})
         self.seq = SequenceDistribution(cat, len_dist=GeometricDistribution(0.5))
 
     def test_mp_context_defaults_to_spawn_and_validates_start_method(self):

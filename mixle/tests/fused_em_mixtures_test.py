@@ -76,7 +76,7 @@ class FusedEMMixturesTestCase(unittest.TestCase):
         est = HierarchicalMixtureEstimator(
             [GaussianEstimator(), GaussianEstimator(), GaussianEstimator()],
             num_mixtures=2,
-            len_estimator=CategoricalDistribution({2: 1.0}).estimator(),
+            len_estimator=CategoricalDistribution({2: 0.5}).estimator(),
         )
         return dist, est, dist.sampler(seed=1).sample(60)
 
