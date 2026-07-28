@@ -32,8 +32,8 @@
       "statement": "~90 distribution families with a common estimator/sampler/encoder contract",
       "grade": "E1",
       "evidence": [
-        "mixle/tests/family_catalog_test.py",
-        "mixle/tests/distribution_invariant_catalog_test.py"
+        "mixle/tests/model_catalog_test.py",
+        "mixle/tests/invariant_catalog_test.py"
       ]
     },
     {
@@ -77,7 +77,7 @@
       "statement": "Distillation into a small local model with calibrated deferral and a cost/quality receipt",
       "grade": "E1",
       "evidence": [
-        "mixle/tests/task_calibration_test.py",
+        "mixle/tests/task_calibration_contract_test.py",
         "mixle/tests/task_cascade_test.py"
       ]
     },
@@ -96,7 +96,7 @@
       "grade": "E1",
       "evidence": [
         "mixle/tests/dask_encoded_data_test.py",
-        "mixle/tests/mpi_encoded_data_test.py",
+        "mixle/tests/parallel_test.py",
         "mixle/tests/ray_encoded_data_test.py",
         "mixle/tests/spark_encoded_data_test.py"
       ]
@@ -115,7 +115,7 @@
       "statement": "Serialization round-trips and provenance / replay",
       "grade": "E1",
       "evidence": [
-        "mixle/tests/serialization_compatibility_test.py",
+        "mixle/tests/serialization_test.py",
         "mixle/tests/provenance_test.py"
       ]
     },
@@ -124,8 +124,8 @@
       "statement": "Calibrated abstention (conformal / cascade / escalation)",
       "grade": "E1",
       "evidence": [
-        "mixle/tests/conformal_coverage_test.py",
-        "mixle/tests/task_calibration_test.py"
+        "mixle/tests/conformal_test.py",
+        "mixle/tests/task_calibration_contract_test.py"
       ]
     }
   ],
