@@ -21,9 +21,11 @@ targets *relative* intensity rather than raw, effort-confounded detection counts
 
 from __future__ import annotations
 
+import hashlib
 import operator
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
@@ -95,6 +97,38 @@ def _readonly_owned_view(value: np.ndarray) -> np.ndarray:
     view = owner.view()
     view.setflags(write=False)
     return view
+
+
+def _validate_species_id(species_id: Any, *, name: str = "species_id") -> str:
+    """Validate a non-empty species identifier (MXR-080-1590).
+
+    A fitted suitability field is a statement about ONE species; without an identity on the model
+    there is nothing downstream can compare, so a field fitted for species A can be silently used to
+    impose species B's legal exclusion (MXR-080-1591). Blank/whitespace-only ids are rejected because
+    they would compare equal to each other and defeat exactly that check.
+    """
+    if not isinstance(species_id, str):
+        raise ValueError(f"{name} must be a string species identifier, got {species_id!r}.")
+    if not species_id.strip():
+        raise ValueError(f"{name} must be a non-empty species identifier.")
+    return species_id
+
+
+def _array_digest(*arrays: np.ndarray) -> str:
+    """A deterministic sha256 hex digest over one or more arrays, shape- and dtype-tagged.
+
+    Used for the fitted model's input receipts (MXR-080-1590). Tagging shape and dtype keeps two
+    different arrays that happen to share a byte buffer (e.g. the same values at different shapes)
+    from colliding.
+    """
+    digest = hashlib.sha256()
+    for array in arrays:
+        arr = np.ascontiguousarray(array)
+        digest.update(str(arr.dtype.str).encode("utf-8"))
+        digest.update(str(arr.shape).encode("utf-8"))
+        digest.update(arr.tobytes())
+        digest.update(b"|")
+    return digest.hexdigest()
 
 
 def _validate_covariance(cov: np.ndarray, p: int, *, name: str) -> np.ndarray:
@@ -178,6 +212,12 @@ class HabitatModel:
     same log-link (a delta-method / lognormal approximation), scaled by a held-out-calibrated variance
     multiplier, so every downstream consumer (N2's no-mine mask, N4's resistance raster) sees one
     calibrated field posterior.
+
+    ``species_id`` is required (MXR-080-1590): a suitability field is a statement about ONE species,
+    and a model with no identity on it cannot be checked against the species whose legal exclusion it
+    is being used to impose (MXR-080-1591) or traced back to the dataset it was fitted from.
+    ``provenance`` carries immutable input receipts (:func:`fit_sdm` fills in the occurrence,
+    background, covariate and cell-area digests) so a published field can be tied to its source data.
     """
 
     def __init__(
@@ -187,8 +227,10 @@ class HabitatModel:
         design: np.ndarray,
         cell_area: np.ndarray,
         *,
+        species_id: str,
         var_scale: float = 1.0,
         prior_dominated: bool = False,
+        provenance: dict | None = None,
     ) -> None:
         """Construct a fitted habitat-suitability posterior.
 
@@ -196,10 +238,10 @@ class HabitatModel:
             ValueError: ``beta`` is not a non-empty finite 1-D array; ``design``/``cell_area`` are not
                 finite with the shape ``beta`` implies (``design`` is ``(K, p)``, ``cell_area`` is
                 ``(K,)``), or ``cell_area`` is not strictly positive; ``beta_cov`` is not a finite,
-                symmetric, ``(p, p)`` positive-semidefinite matrix; or ``var_scale`` is not finite and
+                symmetric, ``(p, p)`` positive-semidefinite matrix; ``var_scale`` is not finite and
                 strictly positive (MXR-080-0114: posterior construction must enforce a finite,
                 shape-compatible, genuinely positive-semidefinite state rather than accept -- or silently
-                clip -- an invalid one).
+                clip -- an invalid one); or ``species_id`` is not a non-empty string (MXR-080-1590).
         """
         beta_arr = np.asarray(beta, dtype=np.float64)
         if beta_arr.ndim != 1 or beta_arr.size == 0:
@@ -227,12 +269,16 @@ class HabitatModel:
         if not (np.isfinite(var_scale_f) and var_scale_f > 0.0):
             raise ValueError(f"var_scale must be finite and strictly positive, got {var_scale!r}.")
 
+        self.species_id = _validate_species_id(species_id)
         self.beta = _readonly_owned_view(beta_arr)
         self.beta_cov = _readonly_owned_view(beta_cov_arr)
         self.design = _readonly_owned_view(design_arr)
         self.cell_area = _readonly_owned_view(cell_area_arr)
         self._var_scale = var_scale_f
         self._prior_dominated = bool(prior_dominated)
+        # Owned + immutable, like the parameter arrays above: a receipt a caller can mutate after the
+        # fact is not a receipt (MXR-080-1590).
+        self.provenance = MappingProxyType(dict(provenance or {}))
 
     def _log_lambda_moments(self) -> tuple[np.ndarray, np.ndarray]:
         """Per-cell ``(mean, calibrated variance)`` of ``log(lambda_c)`` under the beta-posterior."""
@@ -516,6 +562,7 @@ def fit_sdm(
     covariates: np.ndarray,
     cell_area: np.ndarray,
     *,
+    species_id: str,
     background: np.ndarray | None = None,
     ridge: float = 1e-3,
 ) -> HabitatModel:
@@ -531,23 +578,44 @@ def fit_sdm(
     :func:`mixle.analysis.kriging.calibrate_variance` so its credible intervals hit their nominal (90%)
     coverage.
 
+    ``species_id`` names the ONE species being modelled and is required (MXR-080-1590). Every
+    ``occurrences`` record must carry that same id: the fit used to bin every truthy detection
+    regardless of which species it belonged to, so a single fitted intensity could silently pool
+    records from unrelated species into one field that claimed to describe all of them. The id is
+    carried onto the returned model, together with immutable input digests in ``provenance``, so a
+    published scientific result can be traced back to the exact dataset it came from and so a
+    downstream legal exclusion can check the field it is applying actually belongs to the species it
+    is applying it for (MXR-080-1591).
+
     Args:
-        occurrences: presence records; each ``location``'s first component is the fractional cell index.
+        occurrences: presence records for ``species_id``; each ``location``'s first component is the
+            fractional cell index. A record for any other species is rejected, not silently pooled.
         covariates: ``(K, p - 1)`` environmental covariates per cell (an intercept column is prepended).
         cell_area: ``(K,)`` per-cell area (the Poisson offset).
+        species_id: the species this field is being fitted for.
         background: optional quadrature/background point locations (same cell-index convention as
             ``occurrences``), used to correct for uneven survey effort.
         ridge: L2 penalty strength on ``beta`` (also regularizes the Laplace covariance).
 
     Returns:
-        A fitted :class:`HabitatModel`.
+        A fitted :class:`HabitatModel` carrying ``species_id`` and input receipts in ``provenance``.
 
     Raises:
         ValueError: ``ridge`` is not finite and non-negative; ``covariates`` is not finite; ``cell_area``
             does not have exactly one finite, strictly positive entry per covariate row; any presence or
             background location is non-finite or outside the cell-index domain ``[0, K)`` (MXR-080-0111);
-            or the internal beta fit does not converge to finite coefficients (MXR-080-0113).
+            ``species_id`` is not a non-empty string or any occurrence record names a different species
+            (MXR-080-1590); or the internal beta fit does not converge to finite coefficients
+            (MXR-080-0113).
     """
+    species_id = _validate_species_id(species_id)
+    mismatched = sorted({str(o.species_id) for o in occurrences if o.species_id != species_id})
+    if mismatched:
+        raise ValueError(
+            f"fit_sdm: every occurrence must belong to the target species {species_id!r}; got record(s) "
+            f"for {mismatched}. Pooling records from different species into one intensity field is not "
+            "a species-distribution model -- filter the occurrences, or fit one model per species."
+        )
     if not (np.isfinite(ridge) and ridge >= 0.0):
         raise ValueError(f"ridge must be finite and non-negative, got {ridge!r}.")
     cov = np.atleast_2d(np.asarray(covariates, dtype=np.float64))
@@ -616,6 +684,18 @@ def fit_sdm(
         beta_cov=beta_cov,
         design=design,
         cell_area=area,
+        species_id=species_id,
         var_scale=var_scale,
         prior_dominated=prior_dominated,
+        provenance={
+            "species_id": species_id,
+            "n_presence_records": int(presence_idx.size),
+            "presence_digest": _array_digest(presence_idx),
+            "background_digest": (
+                None if background is None else _array_digest(np.asarray(background, dtype=np.float64))
+            ),
+            "covariate_digest": _array_digest(cov),
+            "cell_area_digest": _array_digest(area),
+            "ridge": float(ridge),
+        },
     )

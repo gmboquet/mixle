@@ -28,8 +28,12 @@ from mixle.analysis import apply_habitat_constraints, critical_habitat_exclusion
 from mixle.analysis.sdm import HabitatModel
 from mixle.relations import min_cost_flow
 
+_SPECIES_ID = "gopherus-agassizii"
 
-def _habitat_model(mean_targets: np.ndarray, *, prior_dominated: bool = False) -> HabitatModel:
+
+def _habitat_model(
+    mean_targets: np.ndarray, *, prior_dominated: bool = False, species_id: str = _SPECIES_ID
+) -> HabitatModel:
     """A trivial HabitatModel whose fitted intensity field is exactly ``mean_targets``: an identity
     design matrix makes ``mean = exp(design @ beta) = exp(beta)``, so ``beta = log(mean_targets)``."""
     k = mean_targets.shape[0]
@@ -38,13 +42,14 @@ def _habitat_model(mean_targets: np.ndarray, *, prior_dominated: bool = False) -
         beta_cov=np.eye(k) * 1.0e-8,
         design=np.eye(k),
         cell_area=np.ones(k),
+        species_id=species_id,
         prior_dominated=prior_dominated,
     )
 
 
-def _listed_species(*, critical_habitat: bool) -> ListedSpecies:
+def _listed_species(*, critical_habitat: bool, species_id: str = _SPECIES_ID) -> ListedSpecies:
     return ListedSpecies(
-        species_id="gopherus-agassizii",
+        species_id=species_id,
         scientific_name="Gopherus agassizii",
         listing_status="ESA_threatened",
         jurisdiction="US-FWS",
@@ -275,3 +280,81 @@ def test_critical_habitat_designation_and_species_carry_source_provenance():
 
     assert designation.species_id == listed.species_id
     assert designation.source.uri and listed.source.uri
+
+
+# --------------------------------------------------------------------------------------------------
+# MXR-080-1591: any listed record with a truthy critical-habitat flag caused the one supplied
+# HabitatModel's mask to be applied, but the model carried no species identity and the function never
+# compared one. A field fitted for species A could impose species B's statutory exclusion, and several
+# listed species all collapsed onto species A's same field.
+# --------------------------------------------------------------------------------------------------
+_OTHER_SPECIES_ID = "athene-cunicularia"
+
+
+def test_critical_habitat_exclusion_rejects_a_model_fitted_for_a_different_species():
+    """Audit repro: species B's legal exclusion must not be imposed from species A's fitted field."""
+    habitat = _habitat_model(np.array([0.1, 5.0, 0.1, 0.1]), species_id=_SPECIES_ID)
+    listed = [_listed_species(critical_habitat=True, species_id=_OTHER_SPECIES_ID)]
+
+    with pytest.raises(ValueError, match=_OTHER_SPECIES_ID):
+        critical_habitat_exclusion(habitat, listed, suitability_cut=1.0)
+
+
+def test_critical_habitat_exclusion_rejects_several_species_collapsing_onto_one_field():
+    """Two listed species with one supplied field: the second has no model of its own and must not
+    silently reuse the first species' range."""
+    habitat = _habitat_model(np.array([0.1, 5.0, 0.1, 0.1]), species_id=_SPECIES_ID)
+    listed = [
+        _listed_species(critical_habitat=True, species_id=_SPECIES_ID),
+        _listed_species(critical_habitat=True, species_id=_OTHER_SPECIES_ID),
+    ]
+
+    with pytest.raises(ValueError, match=_OTHER_SPECIES_ID):
+        critical_habitat_exclusion(habitat, listed, suitability_cut=1.0)
+
+
+def test_critical_habitat_exclusion_unions_only_matched_species_fields():
+    """An explicit species-to-model mapping unions each species' OWN range, and nothing else."""
+    tortoise = _habitat_model(np.array([0.1, 5.0, 0.1, 0.1]), species_id=_SPECIES_ID)
+    owl = _habitat_model(np.array([0.1, 0.1, 5.0, 0.1]), species_id=_OTHER_SPECIES_ID)
+    models = {_SPECIES_ID: tortoise, _OTHER_SPECIES_ID: owl}
+
+    both = critical_habitat_exclusion(
+        models,
+        [
+            _listed_species(critical_habitat=True, species_id=_SPECIES_ID),
+            _listed_species(critical_habitat=True, species_id=_OTHER_SPECIES_ID),
+        ],
+        suitability_cut=1.0,
+    )
+    np.testing.assert_array_equal(both, np.array([False, True, True, False]))
+
+    # only the owl is listed with critical habitat: the tortoise's block must NOT be excluded
+    owl_only = critical_habitat_exclusion(
+        models,
+        [
+            _listed_species(critical_habitat=False, species_id=_SPECIES_ID),
+            _listed_species(critical_habitat=True, species_id=_OTHER_SPECIES_ID),
+        ],
+        suitability_cut=1.0,
+    )
+    np.testing.assert_array_equal(owl_only, np.array([False, False, True, False]))
+
+
+def test_critical_habitat_exclusion_rejects_a_mapping_key_disagreeing_with_the_model():
+    tortoise = _habitat_model(np.array([0.1, 5.0, 0.1, 0.1]), species_id=_SPECIES_ID)
+    with pytest.raises(ValueError, match="does not match"):
+        critical_habitat_exclusion(
+            {_OTHER_SPECIES_ID: tortoise},
+            [_listed_species(critical_habitat=True, species_id=_OTHER_SPECIES_ID)],
+            suitability_cut=1.0,
+        )
+
+
+def test_critical_habitat_exclusion_matched_species_negative_control():
+    """Negative control: the ordinary matched single-model case must be completely unaffected."""
+    habitat = _habitat_model(np.array([0.1, 5.0, 0.1, 0.1]), species_id=_SPECIES_ID)
+    mask = critical_habitat_exclusion(
+        habitat, [_listed_species(critical_habitat=True, species_id=_SPECIES_ID)], suitability_cut=1.0
+    )
+    np.testing.assert_array_equal(mask, np.array([False, True, False, False]))
