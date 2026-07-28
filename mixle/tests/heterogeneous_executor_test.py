@@ -134,5 +134,91 @@ class MultiProcessExecutorTest(unittest.TestCase):
         self.assertTrue(np.allclose(sm, pm, atol=1e-9))
 
 
+class ReductionBranchTest(unittest.TestCase):
+    """MXR-080-1633: branch=1 rebuilds an equal-length level forever, hanging the public EM step."""
+
+    class _Factory:
+        class _Acc:
+            def from_value(self, v):
+                self.v = v
+                return self
+
+            def combine(self, other):
+                self.v += other
+
+            def value(self):
+                return self.v
+
+        def make(self):
+            return self._Acc()
+
+    def test_unary_branch_is_rejected_instead_of_looping_forever(self):
+        with self.assertRaises(ValueError) as ctx:
+            tree_reduce_values([1, 2, 3], self._Factory(), branch=1)
+        self.assertIn("never terminates", str(ctx.exception))
+
+    def test_non_positive_and_non_integer_branches_are_rejected(self):
+        for bad in (0, -2):
+            with self.assertRaises(ValueError):
+                tree_reduce_values([1, 2, 3], self._Factory(), branch=bad)
+        for bad in (2.5, True):
+            with self.assertRaises(TypeError):
+                tree_reduce_values([1, 2, 3], self._Factory(), branch=bad)
+
+    def test_single_payload_needs_no_reduction(self):
+        # Nothing to reduce, so an unused branch must not fail the run.
+        self.assertEqual(tree_reduce_values([7], self._Factory(), branch=1), 7)
+
+    def test_valid_branch_still_reduces(self):
+        self.assertEqual(tree_reduce_values([1, 2, 3, 4], self._Factory(), branch=2), 10)
+
+    def test_fit_rejects_a_non_positive_iteration_count(self):
+        m = _cat_mixture()
+        data = m.sampler(1).sample(50)
+        for bad in (0, -3):
+            with self.assertRaises(ValueError):
+                heterogeneous_fit(m, data, max_its=bad, n_shards=2)
+
+
+class ShardPartitionTest(unittest.TestCase):
+    """MXR-080-1634: shard sizes must be a real partition, not merely sum to len(data)."""
+
+    def setUp(self):
+        self.model = _cat_mixture()
+        self.data = self.model.sampler(1).sample(5)
+        self.est = self.model.estimator()
+
+    def test_negative_sizes_that_sum_correctly_are_rejected(self):
+        # [-2, -2, 9] sums to 5 but negative slicing makes shards [0,1,2], [], [1,2,3,4]:
+        # rows 1 and 2 are processed twice and the E-step sees seven observations for five rows.
+        with self.assertRaises(ValueError):
+            heterogeneous_em_step(self.est, self.model, self.data, shard_sizes=[-2, -2, 9])
+
+    def test_fractional_sizes_are_rejected(self):
+        with self.assertRaises(TypeError):
+            heterogeneous_em_step(self.est, self.model, self.data, shard_sizes=[2.5, 2.5])
+
+    def test_empty_shard_size_list_is_rejected(self):
+        with self.assertRaises(ValueError):
+            heterogeneous_em_step(self.est, self.model, self.data, shard_sizes=[])
+
+    def test_non_positive_shard_count_is_rejected(self):
+        for bad in (0, -1):
+            with self.assertRaises(ValueError):
+                heterogeneous_em_step(self.est, self.model, self.data, n_shards=bad)
+
+    def test_valid_partition_still_runs_and_matches_one_shard(self):
+        one = heterogeneous_em_step(self.est, self.model, self.data, n_shards=1)
+        split = heterogeneous_em_step(self.est, self.model, self.data, shard_sizes=[2, 3])
+        self.assertTrue(np.allclose(sorted(one.w), sorted(split.w), atol=1e-9))
+
+    def test_zero_row_shards_are_still_accepted(self):
+        # plan_heterogeneous validates assignment rows as NONNEGATIVE and a slow worker can round to
+        # zero rows, so shards_from_plan legitimately emits a 0. Rejecting it would break real plans.
+        one = heterogeneous_em_step(self.est, self.model, self.data, n_shards=1)
+        with_empty = heterogeneous_em_step(self.est, self.model, self.data, shard_sizes=[2, 0, 3])
+        self.assertTrue(np.allclose(sorted(one.w), sorted(with_empty.w), atol=1e-9))
+
+
 if __name__ == "__main__":
     unittest.main()
