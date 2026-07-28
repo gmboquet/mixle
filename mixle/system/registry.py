@@ -21,6 +21,8 @@ import fcntl
 import json
 import math
 import os
+import shutil
+import stat
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -35,6 +37,44 @@ __all__ = ["Registry", "RegistryEntry"]
 
 _INDEX_NAME = "index.json"
 _LOCK_NAME = ".registry.lock"
+
+
+def _open_lock(lock_path: str) -> int:
+    """Open the registry lock file without following links and without truncating anything.
+
+    ``open(lock_path, "w")`` followed the fixed ``.registry.lock`` path wherever it pointed and
+    truncated its target before ``flock`` was ever applied. A lock symlink aimed at a file outside the
+    registry was followed during an otherwise successful registration and that external file was left
+    empty; entry-path containment does not protect this control file, since it is not an entry.
+    ``O_NOFOLLOW`` refuses a symlinked final component, there is no ``O_TRUNC``, and the descriptor is
+    checked to be a regular file before any lock is taken -- fail closed, before any write.
+    """
+    flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        raise RuntimeError(
+            f"registry lock {lock_path!r} could not be opened safely ({exc.strerror}); it must be a "
+            "regular file inside the registry root, not a symlink"
+        ) from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise RuntimeError(f"registry lock {lock_path!r} is not a regular file; refusing to lock it")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _remove_artifact(path: str) -> None:
+    """Best-effort removal of every on-disk shape a registry artifact save can produce."""
+    shutil.rmtree(path, ignore_errors=True)
+    for suffix in (".npz", ".json"):
+        try:
+            os.unlink(path + suffix)
+        except OSError:
+            pass
+
 
 #: The closed set of artifact kinds this registry knows how to reload. Anything else is an unreadable
 #: record, not a task model: :meth:`Registry.load` used to treat every unrecognized kind as the default
@@ -330,8 +370,9 @@ class Registry:
         fingerprint = _validated_fingerprint(list(fingerprint) if fingerprint is not None else None, entry_id or "?")
 
         lock_path = os.path.join(self.dir, _LOCK_NAME)
-        with open(lock_path, "w") as lock_f:
-            fcntl.flock(lock_f, fcntl.LOCK_EX)
+        lock_fd = _open_lock(lock_path)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
             try:
                 # a concurrent writer (another Registry instance, or another thread/process sharing this
                 # one) may have persisted entries since this instance last read the index -- re-read it
@@ -395,10 +436,28 @@ class Registry:
                     profile=dict(profile or {}),
                     cost=float(cost),
                 )
+                previous_entries = list(self._entries)
                 self._entries.append(entry)
-                self._write_index()
+                try:
+                    self._write_index()
+                except BaseException:
+                    # Artifact, claim and index row are one generation: the artifact is only
+                    # discoverable through the index row that names it, and the claim only exists to
+                    # reserve that row's id. Failing to publish the index used to leave the artifact
+                    # and its claim behind with no index.json at all -- the registration raised, but
+                    # retrying that id was rejected as already existing while no read could discover
+                    # it. Roll the whole generation back so a retry is clean.
+                    self._entries = previous_entries
+                    _remove_artifact(path)
+                    try:
+                        os.unlink(claim_path)
+                    except OSError:
+                        pass
+                    raise
             finally:
-                fcntl.flock(lock_f, fcntl.LOCK_UN)
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
         return entry.copy()
 
     def load(self, entry_id: str) -> TaskModel | CalibratedTaskModel | Any:
