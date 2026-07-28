@@ -1078,6 +1078,31 @@ class EngineTestCase(unittest.TestCase):
         self.assertTrue(eng64.dtype_explicit)
 
     @unittest.skipUnless(HAS_JAX, "jax is not installed")
+    def test_jax_engine_rejects_explicit_float64_when_x64_is_disabled(self):
+        # Regression (MXR-080-1559): an explicit dtype="float64" was silently rewritten to float32
+        # when the ambient jax_enable_x64 was off, so a caller relying on float64 for a scientific
+        # tolerance got a float32 policy with no signal the requirement went unmet. TorchEngine
+        # already fails closed for the identical case (float64 on MPS); JAX now matches.
+        orig_x64 = bool(jax.config.jax_enable_x64)
+        self.addCleanup(jax.config.update, "jax_enable_x64", orig_x64)
+        jax.config.update("jax_enable_x64", False)
+
+        for requested in ("float64", np.dtype("float64"), np.float64):
+            with self.assertRaises(ValueError):
+                JaxEngine(dtype=requested)
+        with self.assertRaises(ValueError):
+            JaxEngine().with_precision("float64")
+
+        # the unrequested default still accommodates quietly, and float32 is honored either way
+        self.assertEqual(JaxEngine().dtype, np.dtype("float32"))
+        self.assertFalse(JaxEngine().dtype_explicit)
+        self.assertEqual(JaxEngine(dtype="float32").dtype, np.dtype("float32"))
+
+        # with x64 actually enabled the explicit request is satisfiable and must be honored
+        jax.config.update("jax_enable_x64", True)
+        self.assertEqual(JaxEngine(dtype="float64").dtype, np.dtype("float64"))
+
+    @unittest.skipUnless(HAS_JAX, "jax is not installed")
     def test_boolean_mask_with_float_jax_data_does_not_falsely_conflict(self):
         # Interaction test mirroring test_boolean_mask_with_float_data_does_not_falsely_conflict for
         # Torch: a Boolean mask array alongside explicit float32 data (the ar.where(mask, a, b) shape,

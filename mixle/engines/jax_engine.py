@@ -13,7 +13,9 @@ translation as Torch needs). Three JAX-isms are handled here:
   before touching JAX), the engine's default dtype and :attr:`accumulator_dtype` are float64 as
   before; when it is off, both fall back to float32 -- the precision JAX would silently truncate a
   float64 request to anyway -- so the engine never claims a precision the runtime cannot deliver.
-  Pass ``dtype=`` explicitly to override either way.
+  Pass ``dtype=`` explicitly to override either way, with one exception: an explicit float64 on an
+  unenabled runtime is refused rather than demoted (MXR-080-1559), since a caller who named the
+  precision is relying on it and must be told the runtime cannot supply it.
 * **device placement is explicit and validated.** ``device`` resolves to a concrete ``jax.Device`` at
   construction time (default ``"cpu"``; also accepts ``"gpu"``, ``"tpu"``, or ``"platform:index"``).
   A platform or index that does not exist in the current JAX runtime raises ``ValueError``
@@ -51,6 +53,20 @@ except ImportError:  # pragma: no cover - exercised when optional extra is absen
     jax = None
     jnp = None
     jsp = None
+
+
+def _require_bool(value: Any, name: str) -> bool:
+    """Require an actual Boolean for an execution-path feature flag (MXR-080-1563).
+
+    ``bool(value)`` is the wrong gate for a flag that selects a *compilation or numerical path*:
+    every non-empty string is truthy, so a configuration value that round-tripped through YAML/JSON/
+    an environment variable as ``"false"`` or ``"0"`` used to switch the path ON -- the exact
+    opposite of what it says. Only ``True``/``False`` (or their NumPy scalars) can mean what the flag
+    means, so anything else is refused instead of being coerced into a plausible-looking answer.
+    """
+    if not isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be a bool, got {type(value).__name__} ({value!r}).")
+    return bool(value)
 
 
 def _resolve_jax_device(device: Any) -> Any:
@@ -103,10 +119,15 @@ class JaxEngine(ComputeEngine):
         default) and accepts a platform name, a ``"platform:index"`` string, or an already-resolved
         ``jax.Device`` (see :func:`_resolve_jax_device`). ``dtype`` defaults to float64 only when the
         ambient ``jax.config.jax_enable_x64`` is already enabled by the caller; otherwise it falls
-        back to float32, since JAX would silently truncate an unenabled float64 request anyway.
+        back to float32, since JAX would silently truncate an unenabled float64 request anyway. An
+        EXPLICIT ``dtype="float64"`` on an unenabled runtime is a different matter and raises
+        ``ValueError`` (MXR-080-1559), exactly as :class:`~mixle.engines.torch_engine.TorchEngine`
+        does for float64 on MPS: an unmeetable precision requirement must not be answered with a
+        silently downgraded policy the caller has no way to notice.
         """
         if jnp is None:
             require("jax", "jax")
+        compile = _require_bool(compile, "JaxEngine compile")
         self.device = _resolve_jax_device(device)
         # jax_enable_x64 is process-wide and caller-owned (see module docstring): float64 is only
         # actually available when the caller enabled it themselves, so an unenabled runtime demotes
@@ -133,10 +154,21 @@ class JaxEngine(ComputeEngine):
         if dtype is not None:
             self.dtype = normalize_numpy_dtype(dtype)
             if self._no_f64 and self.dtype == np.float64:
-                self.dtype = np.float32
+                raise ValueError(
+                    "JaxEngine cannot provide float64 because the ambient jax_enable_x64 is off, but "
+                    "dtype=%r explicitly requested it. JAX would silently truncate every float64 array "
+                    "to float32, which cannot meet a float64 accuracy requirement -- accepting the "
+                    "request and quietly storing a float32 policy would let a caller relying on float64 "
+                    "for precision allocation or a scientific tolerance believe the request was "
+                    "honored, with no signal it went unmet. Enable it yourself before any JAX "
+                    "computation runs (jax.config.update('jax_enable_x64', True) at application "
+                    "start), or explicitly accept the reduced precision by passing dtype='float32'. "
+                    "Mirrors TorchEngine's identical fail-closed policy for float64 on MPS "
+                    "(MXR-080-1559)." % (dtype,)
+                )
         else:
             self.dtype = np.float32 if self._no_f64 else np.float64
-        self.compile_enabled = bool(compile)
+        self.compile_enabled = compile
 
     @property
     def accumulator_dtype(self) -> Any:
