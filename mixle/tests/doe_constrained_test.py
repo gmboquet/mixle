@@ -6,14 +6,17 @@
 
 import importlib.util
 import unittest
+from unittest import mock
 
 import numpy as np
 
+from mixle.doe import constrained as constrained_module
 from mixle.doe import (
     constrained_minimize,
     probability_of_feasibility,
     propose_next_constrained,
 )
+from mixle.doe.constrained import _best_feasible, _predict_std
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
 
@@ -75,6 +78,79 @@ class ProbabilityOfFeasibilityTest(unittest.TestCase):
     def test_zero_constraint_columns_raise(self):
         with self.assertRaises(ValueError):
             probability_of_feasibility(mean=np.zeros((3, 0)), std=np.zeros((3, 0)))
+
+
+class _StubGP:
+    def __init__(self, mean=None, covariance=None):
+        self.mean = mean
+        self.covariance = covariance
+
+    def predict(self, x, y, points, return_cov=True):
+        n = len(points)
+        mean = np.zeros(n) if self.mean is None else self.mean
+        covariance = np.eye(n) if self.covariance is None else self.covariance
+        return mean, covariance
+
+
+class ConstrainedEvidenceContractTest(unittest.TestCase):
+    def test_predict_std_rejects_indefinite_posterior(self):
+        covariance = np.array([[1.0, 2.0], [2.0, 1.0]])
+        with self.assertRaisesRegex(ValueError, "positive-semidefinite"):
+            _predict_std(_StubGP(covariance=covariance), np.zeros((1, 1)), np.zeros(1), np.zeros((2, 1)))
+
+    def test_natural_one_constraint_vector_is_accepted_by_proposal(self):
+        with mock.patch.object(constrained_module, "_fit_surrogate", return_value=_StubGP()):
+            point = propose_next_constrained(
+                np.array([[0.0], [1.0]]),
+                np.array([0.0, 1.0]),
+                np.array([-1.0, -1.0]),
+                [(0.0, 1.0)],
+                n_candidates=4,
+                seed=0,
+            )
+        self.assertEqual(point.shape, (1,))
+
+    def test_nonfinite_constraint_evidence_cannot_select_an_incumbent(self):
+        with self.assertRaisesRegex(ValueError, "constraint observations"):
+            _best_feasible(np.array([0.0, 1.0]), np.array([[np.nan], [1.0]]))
+
+    def test_invalid_iteration_and_candidate_budgets_are_rejected(self):
+        for invalid in (-2, 0.9, True, np.bool_(True)):
+            with self.assertRaises((TypeError, ValueError)):
+                constrained_minimize(
+                    lambda point: float(point[0]),
+                    [lambda point: float(point[0])],
+                    [(0.0, 1.0)],
+                    n_init=1,
+                    n_iter=invalid,
+                )
+        for invalid in (0, 2.5, True, np.bool_(True)):
+            with self.assertRaises((TypeError, ValueError)):
+                constrained_minimize(
+                    lambda point: float(point[0]),
+                    [lambda point: float(point[0])],
+                    [(0.0, 1.0)],
+                    n_init=1,
+                    n_iter=0,
+                    n_candidates=invalid,
+                )
+
+    def test_nonfinite_constraint_call_is_separate_failed_evidence(self):
+        result = constrained_minimize(
+            lambda point: float(point[0]),
+            [lambda _point: np.nan],
+            [(0.0, 1.0)],
+            n_init=1,
+            n_iter=0,
+            seed=0,
+        )
+        self.assertEqual(result.x.shape, (0, 1))
+        self.assertEqual(result.y.shape, (0,))
+        self.assertEqual(result.c.shape, (0, 1))
+        self.assertIsNone(result.best_x)
+        self.assertEqual(result.n_evaluations, 1)
+        self.assertEqual(len(result.failed_evaluations), 1)
+        self.assertEqual(result.stopped_reason, "objective_or_constraint_failed")
 
 
 @unittest.skipUnless(HAS_TORCH, "torch is not installed")
