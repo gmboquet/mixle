@@ -124,6 +124,35 @@ class RecorderTest(unittest.TestCase):
             self.assertFalse(os.path.islink(path))
             self.assertEqual(len(list(Telemetry(path).events())), 1)
 
+    def test_independent_writers_do_not_erase_each_others_events(self):
+        # MXR-080-1734: each recorder loaded one snapshot and later replaced the whole log with its
+        # own buffer, so with two recorders open on the same path the second flush destroyed the
+        # first's events outright.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "events.jsonl")
+            a = Telemetry(path)
+            b = Telemetry(path)
+            a.record("fit", features={"who": "A"})
+            b.record("fit", features={"who": "B"})
+            a.record("fit", features={"who": "A2"})
+
+            who = sorted(ev.features["who"] for ev in Telemetry(path).events())
+            self.assertEqual(who, ["A", "A2", "B"])
+
+    def test_adopted_external_rows_are_not_duplicated_by_later_flushes(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "events.jsonl")
+            a = Telemetry(path)
+            b = Telemetry(path)
+            b.record("fit", features={"who": "B"})
+            ev = a.record("fit", features={"who": "A"}, outcome={"status": "pending"})
+            ev.outcome["status"] = "done"
+            a.flush()
+            a.flush()
+
+            rows = [(e.features["who"], e.outcome) for e in Telemetry(path).events()]
+            self.assertEqual(sorted(rows), [("A", {"status": "done"}), ("B", {})])
+
     def test_deterministic_monotonic_clock(self):
         t = Telemetry()
         a = t.record("fit", choice="x")
