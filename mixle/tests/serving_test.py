@@ -434,5 +434,69 @@ class ServiceHealthWeightingTest(unittest.TestCase):
         self.assertAlmostEqual(svc.health(window=2)["mean_loglik"], -2.0, places=12)
 
 
+class RecordDigestRoundTripTest(unittest.TestCase):
+    """A version envelope must verify against the digest that was stored with it.
+
+    ``_record_digest`` ran over the *in-memory* payload while ``_load_payload`` reran it over the
+    JSON-parsed one. ``_canonical`` deliberately tags lists and tuples differently (MXR-080-1601:
+    otherwise ``[[1, 2]]`` and ``[(1, 2)]`` collide), but JSON has only arrays -- and a provenance
+    header carries ``schema`` as ``("value", "Real")`` pairs. Every version file written for a
+    fitted model therefore failed its own integrity check the moment it was read back, so a healthy
+    registry was indistinguishable from a tampered one.
+    """
+
+    def _fitted(self, seed=0):
+        data = np.random.RandomState(seed).normal(0.0, 1.0, 200).tolist()
+        model, _ = fit_with_provenance(data, GaussianDistribution(0, 1).estimator(), max_its=10)
+        return model
+
+    def test_a_freshly_registered_version_verifies_on_load(self):
+        with tempfile.TemporaryDirectory() as d:
+            reg = Registry(d)
+            reg.register(self._fitted(), "g")
+            # every reader path re-verifies the digest; none of them may reject an untampered file
+            self.assertIsNotNone(reg.get("g", "v1")[0])
+            self.assertEqual(reg.header("g", "v1")["model_type"], "GaussianDistribution")
+            self.assertIsInstance(reg.record_digest("g", "v1"), str)
+            self.assertIsInstance(reg.metadata("g", "v1"), dict)
+
+    def test_a_tampered_version_still_fails(self):
+        import json
+        import os
+
+        with tempfile.TemporaryDirectory() as d:
+            reg = Registry(d)
+            reg.register(self._fitted(), "g")
+            path = os.path.join(d, "g", "v1.json")
+            with open(path) as f:
+                payload = json.load(f)
+            payload["header"]["model_type"] = "SomethingElse"
+            with open(path, "w") as f:
+                json.dump(payload, f)
+            with self.assertRaisesRegex(ValueError, "integrity failure"):
+                reg.get("g", "v1")
+
+
+class UnscorableRecordIsNotAnOutageTest(unittest.TestCase):
+    """A record the model refuses is unscorable data, not an unavailable model.
+
+    ``_safe_logd`` caught only the configured availability errors, so when the scalar observation
+    contract began refusing NaN/Inf the rejection escaped ``score()`` entirely -- a single malformed
+    record in a production batch took down the whole call instead of being counted, which is what
+    ``unscorable_rate`` exists to report.
+    """
+
+    def test_nonfinite_records_are_counted_not_raised(self):
+        svc = Service(GaussianDistribution(0.0, 1.0), name="g")
+        lp = svc.score([1.0, 2.0, float("inf"), float("nan")])
+        self.assertEqual(lp.shape, (4,))
+        self.assertTrue(np.isfinite(lp[:2]).all())
+        self.assertTrue((lp[2:] == float("-inf")).all())
+        health = svc.health()
+        self.assertAlmostEqual(health["unscorable_rate"], 0.5)
+        # unscorable is not an outage: the model answered, so availability must stay clean
+        self.assertEqual(health["unavailable_rate"], 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

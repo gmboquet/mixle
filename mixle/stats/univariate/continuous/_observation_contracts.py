@@ -8,6 +8,15 @@ from typing import Any
 import numpy as np
 
 
+class UnscorableObservation(ValueError):
+    """A record a scorer refuses because it lies outside the law's admissible observation space.
+
+    Distinct from an ordinary ``ValueError`` so a caller can tell "this record is not scorable" --
+    a fact about the data, which serving reports as an unscorable record -- from "this call is
+    malformed", which is a bug. It subclasses ``ValueError`` so existing handlers keep working.
+    """
+
+
 def finite_observations(
     value: Any,
     *,
@@ -61,7 +70,7 @@ def scored_observation(value: Any, *, label: str, allow_infinite: bool = False) 
 
     result = float(value)
     if math.isnan(result):
-        raise ValueError(f"{label} rejects NaN observations.")
+        raise UnscorableObservation(f"{label} rejects NaN observations.")
     if not allow_infinite and math.isinf(result):
-        raise ValueError(f"{label} rejects infinite observations.")
+        raise UnscorableObservation(f"{label} rejects infinite observations.")
     return result
