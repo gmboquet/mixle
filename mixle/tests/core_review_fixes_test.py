@@ -319,6 +319,53 @@ def test_learn_rejects_a_non_document_item_by_position():
         Scientist().learn(["a real document", {"not": "a document"}])
 
 
+# --------------------------------------------------------------- MXR-080-1706: one label equivalence relation
+def _int_edge_teacher(x):
+    return 1
+
+
+def test_distillation_metrics_share_one_label_equivalence_relation():
+    # teacher accuracy used NumPy's raw label equality while student accuracy and agreement coerced
+    # both sides with .astype(str), so teacher label 1, student label 1 and reference label "1"
+    # reported teacher 0.0, student 1.0, agreement 1.0 and retention 0.0 -- a student that matched its
+    # teacher on every case scored as having retained nothing of it.
+    import mixle.task.edge as edge_mod
+    from mixle.scientist import distill_to_edge
+
+    def fake_distill_for_edge(teacher, train_data, val_data, device, **kw):
+        return SimpleNamespace(
+            model=_int_edge_teacher, footprint=SimpleNamespace(bytes=1, torch_free=True), family="structured"
+        )
+
+    with mock.patch.object(edge_mod, "distill_for_edge", fake_distill_for_edge):
+        art = distill_to_edge(_int_edge_teacher, _EDGE_TRAIN, _EDGE_VAL, ["1", "1"], n_init=1, n_iter=0, seed=0)
+
+    assert art.agreement == 1.0  # student and teacher both say 1
+    assert art.teacher_accuracy == art.student_accuracy  # ONE relation, not two
+    assert art.student_accuracy == 0.0  # 1 is not "1" under either metric now
+    assert np.isnan(art.retention)  # undefined, not a confident 0.0
+    assert art.provenance["label_vocabulary_disjoint"] is True
+    assert "undefined retained" in art.render()
+
+
+def test_distillation_retention_is_reported_when_the_teacher_scores():
+    import mixle.task.edge as edge_mod
+    from mixle.scientist import distill_to_edge
+
+    def fake_distill_for_edge(teacher, train_data, val_data, device, **kw):
+        return SimpleNamespace(
+            model=_edge_teacher, footprint=SimpleNamespace(bytes=1, torch_free=True), family="structured"
+        )
+
+    with mock.patch.object(edge_mod, "distill_for_edge", fake_distill_for_edge):
+        art = distill_to_edge(_edge_teacher, _EDGE_TRAIN, _EDGE_VAL, ["alpha", "beta"], n_init=1, n_iter=0, seed=0)
+
+    assert art.teacher_accuracy == 1.0
+    assert art.student_accuracy == 1.0
+    assert art.retention == 1.0
+    assert art.provenance["label_vocabulary_disjoint"] is False
+
+
 # --------------------------------------------------------------- C-6/C-7: registry ids and tier ordering
 def _json_task_model():
     from mixle.stats.univariate.discrete.categorical import CategoricalDistribution

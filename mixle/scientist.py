@@ -262,6 +262,23 @@ def study(
 # -- edge distillation: a foundation capability -> a torch-free, KB-sized artifact -------------------
 
 
+def _label_agreement(left: Any, right: Any) -> float:
+    """Fraction of positions where two equal-length label sequences hold the SAME label.
+
+    One equivalence relation -- ordinary Python equality on the label values, elementwise -- for every
+    metric an :class:`EdgeArtifact` reports. Teacher accuracy used to be NumPy's raw label equality
+    while student accuracy and agreement coerced both sides with ``.astype(str)``, so the same run
+    could report teacher accuracy 0.0 and student accuracy 1.0 against the same reference labels
+    (teacher and student label ``1``, reference label ``"1"``), giving retention 0.0 for a student that
+    matched its teacher perfectly. String coercion also silently collapses genuinely distinct labels
+    (``1`` and ``"1"``, ``1.0`` and ``True``), so it is not used anywhere here.
+    """
+    pairs = list(zip(left, right, strict=True))
+    if not pairs:
+        return 0.0
+    return sum(1 for a, b in pairs if bool(a == b)) / len(pairs)
+
+
 @dataclass
 class EdgeArtifact:
     """A capability compressed to run on a constrained device: the student + its footprint + retention."""
@@ -277,15 +294,24 @@ class EdgeArtifact:
 
     @property
     def retention(self) -> float:
-        """The share of the teacher's accuracy retained by the edge student."""
-        return self.student_accuracy / self.teacher_accuracy if self.teacher_accuracy else 0.0
+        """The share of the teacher's accuracy retained by the edge student.
+
+        ``nan`` when the teacher scored zero on the validation set: the ratio's denominator is not a
+        valid accuracy to retain a share of, and reporting ``0.0`` there is indistinguishable from a
+        student that genuinely retained nothing.
+        """
+        if self.teacher_accuracy <= 0.0:
+            return float("nan")
+        return self.student_accuracy / self.teacher_accuracy
 
     def render(self) -> str:
         """Render a compact human-readable edge-artifact receipt."""
+        retention = self.retention
+        retained = "undefined" if np.isnan(retention) else f"{retention:.0%}"
         return (
             f"edge student ({self.family}, {self.bytes} bytes, torch_free={self.torch_free}): "
             f"teacher {self.teacher_accuracy:.3f} -> student {self.student_accuracy:.3f} "
-            f"({self.retention:.0%} retained, {self.agreement:.3f} agreement)"
+            f"({retained} retained, {self.agreement:.3f} agreement)"
         )
 
 
@@ -332,10 +358,9 @@ def distill_to_edge(
             f"val_inputs and val_truth must have matching length, got {len(val_inputs)} and {len(val_truth)}."
         )
 
-    truth = np.asarray(val_truth)
     train_labels = [teacher_predict(x) for x in train_inputs]
     val_labels = [teacher_predict(x) for x in val_inputs]
-    teacher_acc = float((np.asarray(val_labels) == truth).mean())
+    teacher_acc = _label_agreement(val_labels, val_truth)
 
     res = distill_for_edge(
         None,
@@ -348,10 +373,14 @@ def distill_to_edge(
         n_iter=n_iter,
         seed=seed,
     )
-    pred = np.asarray([res.model(x) for x in val_inputs])
-    # labels may be ints or strings depending on the teacher; compare as strings to stay type-agnostic
-    student_acc = float((pred.astype(str) == truth.astype(str)).mean())
-    agreement = float((pred.astype(str) == np.asarray(val_labels).astype(str)).mean())
+    pred = [res.model(x) for x in val_inputs]
+    # ONE equivalence relation for all three metrics (see _label_agreement): teacher accuracy used
+    # NumPy's raw label equality while these two coerced both sides to strings, so the same run could
+    # report teacher 0.0 / student 1.0 / agreement 1.0 / retention 0.0 against one reference set.
+    student_acc = _label_agreement(pred, val_truth)
+    agreement = _label_agreement(pred, val_labels)
+    truth_vocabulary = {repr(v) for v in val_truth}
+    model_vocabulary = {repr(v) for v in val_labels} | {repr(v) for v in pred}
     return EdgeArtifact(
         model=res.model,
         bytes=int(res.footprint.bytes),
@@ -360,7 +389,17 @@ def distill_to_edge(
         teacher_accuracy=teacher_acc,
         student_accuracy=student_acc,
         agreement=agreement,
-        provenance={"max_bytes": max_bytes, "n_train": len(train_inputs), "seed": seed},
+        provenance={
+            "max_bytes": max_bytes,
+            "n_train": len(train_inputs),
+            "seed": seed,
+            # the label vocabularies every metric above was computed under: disjoint sets mean the
+            # reference labels and the models' labels are not the same vocabulary at all, which drives
+            # every accuracy to zero for a reason that has nothing to do with model quality.
+            "truth_labels": sorted(truth_vocabulary),
+            "model_labels": sorted(model_vocabulary),
+            "label_vocabulary_disjoint": bool(truth_vocabulary and not (truth_vocabulary & model_vocabulary)),
+        },
     )
 
 
