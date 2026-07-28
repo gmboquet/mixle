@@ -13,7 +13,7 @@ import unittest
 import numpy as np
 
 import mixle.inference as infer
-from mixle.inference.backends import available_backends, get_inference_backend, select_backend
+from mixle.inference.backends import _KIND_PREFERENCE, available_backends, get_inference_backend, select_backend
 
 HAS_NUMBA = importlib.util.find_spec("numba") is not None
 HAS_TORCH = importlib.util.find_spec("torch") is not None
@@ -109,6 +109,32 @@ class RegistryTest(unittest.TestCase):
     def test_unknown_backend_raises(self):
         with self.assertRaises(ValueError):
             get_inference_backend("does-not-exist")
+
+    def test_unknown_target_kind_is_rejected_not_routed_to_numpy(self):
+        # MXR-080-1637: a kind string the registry does not know says something about the target's
+        # calling convention; falling through to numpy ignores it and hands the target to a backend
+        # that will call it with the wrong protocol.
+        for bad in ("nonsense", "", "torch-logp"):
+            with self.assertRaises(ValueError):
+                select_backend("auto", target=bad)
+
+    def test_unavailable_target_kind_raises_instead_of_falling_back(self):
+        # MXR-080-1637: a recognized kind whose engine is not installed must report that, not silently
+        # return numpy -- a jax/torch scalar logp is not a numpy value_and_grad.
+        unavailable = [k for k, pref in _KIND_PREFERENCE.items() if not any(n in available_backends() for n in pref)]
+        if not unavailable:
+            self.skipTest("every target kind has an available backend on this host")
+        for kind in unavailable:
+            with self.assertRaises(RuntimeError):
+                select_backend("auto", target=kind)
+
+    def test_available_target_kinds_still_route(self):
+        for kind, pref in _KIND_PREFERENCE.items():
+            if any(n in available_backends() for n in pref):
+                self.assertIn(select_backend("auto", target=kind), pref)
+
+    def test_no_hint_still_defaults_to_numpy(self):
+        self.assertEqual(select_backend("auto", target=None), "numpy")
 
     def test_each_backend_declares_a_target_kind(self):
         for name in available_backends():
