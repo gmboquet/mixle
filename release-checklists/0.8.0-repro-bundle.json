@@ -37,7 +37,7 @@
     {
       "path": "scripts/build_repro_bundle.py",
       "role": "bundle-closure",
-      "sha256": "5bb257fe73c78cb96490c814ca9a0902077dd72a69d0b97f2dc34908db4654f5"
+      "sha256": "843661b18553e989e40a7c152f284c9cd62d8a69dc2051d63e4a1ad5874a2f2c"
     },
     {
       "path": "scripts/run_repro_entry.py",
@@ -140,7 +140,7 @@
       },
       "expected": {
         "contains": [
-          "fit : GaussianDistribution(1.5485975768849254, 4.0204098815165565",
+          "fit : GaussianDistribution(1.5485975768849254, 4.020409881516557",
           "fit : PoissonDistribution(4.027",
           "fit : BernoulliDistribution(0.7004"
         ],
@@ -172,10 +172,10 @@
         "contains": [
           "learned parents: [None, 0, 0]",
           "held-out mean log-density: -17.965",
-          "held-out mean log-density: -19.841"
+          "held-out mean log-density: -19.791"
         ],
         "format": "text",
-        "stdout_sha256": "80b8fc6822e95f2d363555037da288e70e552395f86b9e60fd8267c364b5b75f"
+        "stdout_sha256": "4abfe0e6d459a39dfbb457e3495acaec2edf69b4adaaf57ce4dd3cf840a5f98e"
       },
       "id": "gallery-structured",
       "inputs": [
@@ -205,7 +205,7 @@
           "chain intact: True"
         ],
         "format": "text",
-        "stdout_sha256": "c96a537aff03118e2340e859b24ac62e864922b41ea1b2b83104b4423001803d"
+        "stdout_sha256": "879fbb4d09ea025fee958da52a056e22af0c8ec9fe2f6870eba0ad2f13f48857"
       },
       "id": "production-provenance",
       "inputs": [

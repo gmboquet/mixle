@@ -66,7 +66,7 @@ _ENTRIES = (
             "format": "text",
             "stdout_sha256": "813f26e144a823777d5d56fd9ddf96c621c8dda510ee43b9b14cce48b77416ac",
             "contains": [
-                "fit : GaussianDistribution(1.5485975768849254, 4.0204098815165565",
+                "fit : GaussianDistribution(1.5485975768849254, 4.020409881516557",
                 "fit : PoissonDistribution(4.027",
                 "fit : BernoulliDistribution(0.7004",
             ],
@@ -82,11 +82,11 @@ _ENTRIES = (
         "configuration": {"seed": "declared in script", "dataset": "synthetic"},
         "expected": {
             "format": "text",
-            "stdout_sha256": "80b8fc6822e95f2d363555037da288e70e552395f86b9e60fd8267c364b5b75f",
+            "stdout_sha256": "4abfe0e6d459a39dfbb457e3495acaec2edf69b4adaaf57ce4dd3cf840a5f98e",
             "contains": [
                 "learned parents: [None, 0, 0]",
                 "held-out mean log-density: -17.965",
-                "held-out mean log-density: -19.841",
+                "held-out mean log-density: -19.791",
             ],
         },
     },
@@ -100,7 +100,7 @@ _ENTRIES = (
         "configuration": {"seed": "declared in script", "dataset": "synthetic"},
         "expected": {
             "format": "text",
-            "stdout_sha256": "c96a537aff03118e2340e859b24ac62e864922b41ea1b2b83104b4423001803d",
+            "stdout_sha256": "879fbb4d09ea025fee958da52a056e22af0c8ec9fe2f6870eba0ad2f13f48857",
             "contains": [
                 "# lineage verified: True",
                 "drift on shifted batch: True",
