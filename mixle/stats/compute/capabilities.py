@@ -59,9 +59,14 @@ class DistributionCapabilities:
             raise ValueError("engine_ready must contain non-empty engine names.")
         if len(self.engine_ready) != len(set(self.engine_ready)):
             raise ValueError("engine_ready must not contain duplicate engine names.")
-        unknown = set(self.engine_ready).difference(KNOWN_COMPUTE_ENGINES)
-        if unknown:
-            raise ValueError(f"engine_ready contains unknown engines: {sorted(unknown)!r}.")
+        # Deliberately NOT closed over KNOWN_COMPUTE_ENGINES. That frozenset names the engines mixle
+        # itself ships and verifies -- it is the right gate for composition capping (COMPOSITION_ENGINES)
+        # but the wrong gate for what a distribution may *declare*. Kernel dispatch is an advertised
+        # extension point: register_kernel_factory lets a third party add a backend, and dispatch routes
+        # on the engine's capability flags rather than its name, so adding one is supposed to need no
+        # core edit. Rejecting any name not in a hardcoded literal made that impossible -- a custom
+        # engine could be registered and dispatched to, but no distribution could say it supported one.
+        # Validate the shape of the declaration here; membership is not ours to decide.
         if self.engine_ready[0] != "numpy":
             raise ValueError("engine_ready must include 'numpy' first as the reference execution path.")
         if not isinstance(self.kernel_status, str) or self.kernel_status not in KERNEL_STATUSES:

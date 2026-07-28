@@ -76,6 +76,13 @@ class TransformStatistics(NamedTuple):
     rejected_weight: float
 
 
+#: Declared supports that are subsets of the reals, and so are covered by a transform whose input
+#: domain is ``"real"``. Membership is a containment claim about the support, not a list of families:
+#: ``unit_interval`` belongs here for exactly the reason ``unit_interval_open`` does -- [0, 1] is no
+#: less a subset of R than (0, 1) -- but was omitted, so every Beta-supported child was refused by any
+#: real-domain transform with "child support 'unit_interval' is not covered by transform input domain
+#: 'real'", a composition that is mathematically fine. ``nonnegative_real`` is the unpunctuated
+#: spelling some declarations use for ``non_negative_real``; both name the same set.
 _REAL_SUPPORTS = frozenset(
     {
         "real",
@@ -83,8 +90,11 @@ _REAL_SUPPORTS = frozenset(
         "positive",
         "positive_real",
         "non_negative_real",
+        "nonnegative_real",
         "positive_tail",
+        "unit_interval",
         "unit_interval_open",
+        "boolean",
         "bounded_integer",
         "non_negative_integer",
         "positive_integer",
@@ -233,12 +243,9 @@ def _validate_transform_child(
         raise TransformCompatibilityError(
             "non-enumerable children require Jacobian density correction under an adaptive transform contract."
         )
-    if contract.input_domain != "any" and (
-        support is None or not _support_matches(contract.input_domain, support)
-    ):
+    if contract.input_domain != "any" and (support is None or not _support_matches(contract.input_domain, support)):
         raise TransformCompatibilityError(
-            "child support %r is not covered by transform input domain %r."
-            % (support, contract.input_domain)
+            "child support %r is not covered by transform input domain %r." % (support, contract.input_domain)
         )
     return contract
 
@@ -685,9 +692,7 @@ class TransformAccumulator(SequenceEncodableStatisticAccumulator):
         ):
             raise ValueError("transform validity mask and weights must be aligned, finite, and non-negative.")
         accepted = checked * valid
-        self.accumulator.seq_update(
-            child_enc, accepted, None if estimate is None else estimate.dist
-        )
+        self.accumulator.seq_update(child_enc, accepted, None if estimate is None else estimate.dist)
         self.accepted_weight += float(accepted.sum())
         self.rejected_weight += float(checked[~valid].sum())
 
