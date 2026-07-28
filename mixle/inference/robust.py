@@ -70,6 +70,24 @@ def robust_standard_errors(cov: np.ndarray) -> np.ndarray:
     return np.sqrt(np.clip(diag, 0.0, None))
 
 
+def _parameter_count(value: object) -> int:
+    """``n_params`` as an exact nonnegative integer.
+
+    An unvalidated count silently rewrites the small-sample correction into something that is not a
+    correction: ``n_params=-1`` makes ``n/(n-k)`` *less* than one (0.75 at n=3), shrinking the reported
+    covariance, and a NaN makes ``n > k`` false so the correction is skipped altogether. Neither is a
+    degenerate design the estimator should accommodate -- a design has a whole, nonnegative number of
+    estimated parameters or the caller has made a mistake. ``bool`` is rejected with the other
+    non-integers so ``True`` cannot stand in for a one-parameter model by accident.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise ValueError(f"n_params must be an exact nonnegative integer, got {value!r}")
+    count = int(value)
+    if count < 0:
+        raise ValueError(f"n_params must be nonnegative, got {count!r}")
+    return count
+
+
 def sandwich_covariance(
     scores: np.ndarray,
     bread: np.ndarray,
@@ -96,14 +114,15 @@ def sandwich_covariance(
 
     Raises:
         ValueError: if ``clusters`` is not aligned with ``scores``, or holds fewer than 2 distinct
-            clusters (across-cluster variation is what the clustered meat is estimated from).
+            clusters (across-cluster variation is what the clustered meat is estimated from), or
+            ``n_params`` is not an exact nonnegative integer.
     """
     g = np.asarray(scores, dtype=float)
     if g.ndim == 1:
         g = g[:, None]
     n, p = g.shape
     b = np.asarray(bread, dtype=float)
-    k = p if n_params is None else n_params
+    k = p if n_params is None else _parameter_count(n_params)
 
     if clusters is None:
         meat = g.T @ g

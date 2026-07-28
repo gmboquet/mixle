@@ -202,6 +202,30 @@ class GenericSandwichTest(unittest.TestCase):
         np.testing.assert_allclose(generic, hc0)
 
 
+class ParameterCountValidationTest(unittest.TestCase):
+    """MXR-080-1621 (generic-sandwich half): a nonsense n_params must not rescale the covariance."""
+
+    def _pieces(self):
+        return np.eye(3), np.eye(3)
+
+    def test_negative_parameter_count_is_rejected(self):
+        scores, bread = self._pieces()
+        with self.assertRaises(ValueError) as ctx:
+            sandwich_covariance(scores, bread, n_params=-1)
+        self.assertIn("nonnegative", str(ctx.exception))
+
+    def test_non_integer_parameter_counts_are_rejected(self):
+        scores, bread = self._pieces()
+        for bad in (np.nan, np.inf, 1.5, True, "2"):
+            with self.assertRaises(ValueError):
+                sandwich_covariance(scores, bread, n_params=bad)
+
+    def test_valid_parameter_count_still_corrects(self):
+        scores, bread = self._pieces()
+        cov = sandwich_covariance(scores, bread, n_params=1)
+        np.testing.assert_allclose(cov, np.eye(3) * (3.0 / 2.0))
+
+
 class InvalidCovarianceStandardErrorTest(unittest.TestCase):
     """MXR-080-1619: a negative variance must not be clipped into apparent perfect precision."""
 
