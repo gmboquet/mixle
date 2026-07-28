@@ -62,7 +62,9 @@ class MorrisScreeningLevelsValidationTest(unittest.TestCase):
             morris_screening(lambda x: float(np.sum(x)), [(0, 1), (0, 1)], levels=1, trajectories=2)
 
     def test_levels_2_still_works(self):
-        report = morris_screening(lambda x: float(np.sum(x)), [(0, 1), (0, 1)], levels=2, trajectories=3)
+        # func is called with a (1, d) sample and must keep that leading axis, so it sums over the
+        # feature axis rather than collapsing to a scalar
+        report = morris_screening(lambda x: np.sum(x, axis=-1), [(0, 1), (0, 1)], levels=2, trajectories=3)
         self.assertEqual(len(report["mu_star"]), 2)
 
 
