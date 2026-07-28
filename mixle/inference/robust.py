@@ -28,10 +28,46 @@ from __future__ import annotations
 
 import numpy as np
 
+#: Relative tolerance below which a negative variance is treated as symmetric-eigendecomposition /
+#: sandwich-accumulation roundoff rather than a real result. Scaled by the largest magnitude on the
+#: diagonal, because the covariance's own scale sets what "numerically zero" means for it.
+_VARIANCE_ROUNDOFF_RTOL = 1e-10
+
 
 def robust_standard_errors(cov: np.ndarray) -> np.ndarray:
-    """Standard errors ``sqrt(diag(cov))`` from a covariance matrix."""
-    return np.sqrt(np.clip(np.diag(np.asarray(cov, dtype=float)), 0.0, None))
+    """Standard errors ``sqrt(diag(cov))`` from a covariance matrix.
+
+    A negative variance is not a small standard error -- it means the covariance estimate is not a
+    covariance. Clipping it to zero would turn an invalid, indefinite, or numerically failed estimate
+    (an unreplicated multi-way cluster meat, a bread that did not invert) into the *strongest possible*
+    claim the API can make: perfect precision. That is the one wrong answer a caller cannot detect, so
+    a materially negative variance is rejected instead.
+
+    Only roundoff-scale negatives are healed: a variance whose magnitude is within
+    ``1e-10`` of the covariance's own diagonal scale is genuine floating-point noise around an exact
+    zero (a perfectly-collinear direction, a zero-residual fit) and is floored to zero as before.
+
+    Raises:
+        ValueError: if the diagonal contains a non-finite value or a materially negative variance.
+    """
+    diag = np.diag(np.asarray(cov, dtype=float))
+    bad = np.flatnonzero(~np.isfinite(diag))
+    if bad.size:
+        raise ValueError(
+            f"covariance diagonal is non-finite at index/indices {bad.tolist()}; "
+            "robust_standard_errors cannot report a standard error for a failed covariance estimate."
+        )
+    scale = float(np.max(np.abs(diag))) if diag.size else 0.0
+    tol = _VARIANCE_ROUNDOFF_RTOL * scale
+    negative = np.flatnonzero(diag < -tol)
+    if negative.size:
+        raise ValueError(
+            f"covariance has negative variance(s) on the diagonal at index/indices {negative.tolist()} "
+            f"(most negative {float(diag[negative].min())!r}, roundoff tolerance {tol!r}); this is not a "
+            "valid covariance matrix -- an indefinite sandwich/multi-way-cluster estimate or an upstream "
+            "numerical failure. Clipping it to zero would report perfect precision for an invalid estimate."
+        )
+    return np.sqrt(np.clip(diag, 0.0, None))
 
 
 def sandwich_covariance(
@@ -57,6 +93,10 @@ def sandwich_covariance(
 
     Returns:
         The ``(p, p)`` robust covariance matrix.
+
+    Raises:
+        ValueError: if ``clusters`` is not aligned with ``scores``, or holds fewer than 2 distinct
+            clusters (across-cluster variation is what the clustered meat is estimated from).
     """
     g = np.asarray(scores, dtype=float)
     if g.ndim == 1:
@@ -70,13 +110,28 @@ def sandwich_covariance(
         corr = (n / (n - k)) if (small_sample and n > k) else 1.0
     else:
         labels = np.asarray(clusters)
+        if labels.ndim != 1 or labels.shape[0] != n:
+            raise ValueError(
+                f"clusters must be a 1-D array of {n} label(s) aligned with scores, got shape {labels.shape}."
+            )
         uniq = np.unique(labels)
-        agg = np.zeros((len(uniq), p))
+        g_n = len(uniq)
+        if g_n < 2:
+            # Cluster-robust inference estimates the meat from variation ACROSS clusters, so a single
+            # cluster leaves it unidentified -- there is nothing to average over. It does not fail
+            # loudly on its own: for an OLS score the within-cluster sum is the aggregate score, which
+            # the normal equations force to exactly zero, so the sandwich collapses to a ~1e-30 matrix
+            # that reads as near-perfect precision instead of as "not estimable".
+            raise ValueError(
+                f"cluster-robust covariance needs at least 2 distinct clusters, got {g_n} "
+                f"({uniq.tolist() if g_n else 'none'}); with one cluster the across-cluster variance "
+                "the estimator is built from is unidentified, not small."
+            )
+        agg = np.zeros((g_n, p))
         for j, c in enumerate(uniq):
             agg[j] = g[labels == c].sum(axis=0)
         meat = agg.T @ agg
-        g_n = len(uniq)
-        corr = (g_n / (g_n - 1.0)) * ((n - 1.0) / (n - k)) if (small_sample and g_n > 1 and n > k) else 1.0
+        corr = (g_n / (g_n - 1.0)) * ((n - 1.0) / (n - k)) if (small_sample and n > k) else 1.0
     return b @ (corr * meat) @ b.T
 
 
@@ -158,6 +213,10 @@ def cluster_robust_covariance(
 
     Returns:
         The ``(p, p)`` cluster-robust covariance matrix.
+
+    Raises:
+        ValueError: if ``clusters`` is an empty list of dimensions, is not aligned with ``x``, or any
+            clustering (or intersection clustering) has fewer than 2 distinct clusters.
     """
     X, e, xtx_inv = _ols_pieces(x, residuals)
     scores = X * e[:, None]
@@ -165,6 +224,14 @@ def cluster_robust_covariance(
         return sandwich_covariance(scores, xtx_inv, clusters=clusters, small_sample=small_sample)
 
     dims = [np.asarray(c) for c in clusters]
+    if not dims:
+        # An empty dimension list has no inclusion-exclusion terms at all, so the loop below never
+        # executes and the zero matrix initialised for accumulation is returned as if it were a fitted
+        # covariance -- i.e. zero standard errors from a design that declared no clustering at all.
+        raise ValueError(
+            "multi-way cluster_robust_covariance requires at least one clustering dimension; "
+            "pass a label array (one-way) or a nonempty list of label arrays (multi-way)."
+        )
     cov = np.zeros((X.shape[1], X.shape[1]))
     # inclusion-exclusion over non-empty subsets of the clustering dimensions
     from itertools import combinations

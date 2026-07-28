@@ -202,5 +202,63 @@ class GenericSandwichTest(unittest.TestCase):
         np.testing.assert_allclose(generic, hc0)
 
 
+class InvalidCovarianceStandardErrorTest(unittest.TestCase):
+    """MXR-080-1619: a negative variance must not be clipped into apparent perfect precision."""
+
+    def test_materially_negative_variance_is_rejected(self):
+        cov = np.array([[-4.0, 0.0], [0.0, 1.0]])
+        with self.assertRaises(ValueError) as ctx:
+            robust_standard_errors(cov)
+        self.assertIn("negative variance", str(ctx.exception))
+
+    def test_non_finite_variance_is_rejected(self):
+        for bad in (np.nan, np.inf):
+            with self.assertRaises(ValueError):
+                robust_standard_errors(np.array([[bad, 0.0], [0.0, 1.0]]))
+
+    def test_roundoff_scale_negative_is_still_healed_to_zero(self):
+        # A perfectly-collinear direction lands a hair below zero; that IS a zero standard error.
+        cov = np.array([[1.0, 0.0], [0.0, -1e-18]])
+        np.testing.assert_allclose(robust_standard_errors(cov), [1.0, 0.0])
+
+    def test_valid_covariance_is_unchanged(self):
+        cov = np.array([[4.0, 1.0], [1.0, 9.0]])
+        np.testing.assert_allclose(robust_standard_errors(cov), [2.0, 3.0])
+
+
+class ClusterReplicationTest(unittest.TestCase):
+    """MXR-080-1620: cluster-robust covariance is unidentified without cluster replication."""
+
+    def _fit(self, n=6):
+        rng = np.random.RandomState(11)
+        X = np.column_stack([np.ones(n), np.arange(float(n))])
+        y = X @ np.array([1.0, 2.0]) + rng.normal(0, 0.1, n)
+        _, e = _ols(X, y)
+        return X, e
+
+    def test_single_cluster_is_rejected_not_reported_as_near_zero(self):
+        X, e = self._fit()
+        with self.assertRaises(ValueError) as ctx:
+            cluster_robust_covariance(X, e, np.zeros(len(e), dtype=int))
+        self.assertIn("at least 2 distinct clusters", str(ctx.exception))
+
+    def test_empty_multiway_dimension_list_is_rejected(self):
+        X, e = self._fit()
+        with self.assertRaises(ValueError) as ctx:
+            cluster_robust_covariance(X, e, [])
+        self.assertIn("at least one clustering dimension", str(ctx.exception))
+
+    def test_misaligned_cluster_labels_are_rejected(self):
+        X, e = self._fit()
+        with self.assertRaises(ValueError):
+            cluster_robust_covariance(X, e, np.arange(len(e) + 3))
+
+    def test_two_clusters_still_estimate(self):
+        X, e = self._fit(n=8)
+        cov = cluster_robust_covariance(X, e, np.repeat([0, 1], 4))
+        self.assertEqual(cov.shape, (2, 2))
+        self.assertTrue(np.all(np.isfinite(cov)))
+
+
 if __name__ == "__main__":
     unittest.main()
