@@ -100,7 +100,15 @@ _ENTRIES = (
         "configuration": {"seed": "declared in script", "dataset": "synthetic"},
         "expected": {
             "format": "text",
-            "stdout_sha256": "879fbb4d09ea025fee958da52a056e22af0c8ec9fe2f6870eba0ad2f13f48857",
+            # The provenance line names the commit being reproduced from, so it cannot be part of a
+            # fixed digest: the recorded one was valid at 6fbb182a and wrong at every commit after.
+            "volatile": [
+                {
+                    "pattern": r"git / mixle  : (?:[0-9a-f]{7,40}|unknown) / ",
+                    "placeholder": "git / mixle  : <commit> / ",
+                }
+            ],
+            "stdout_sha256": "e6c0a968fb483c533c7a5b7c5a5fdfe107cba118c1f1e83bf476ef71d7d4da72",
             "contains": [
                 "# lineage verified: True",
                 "drift on shifted batch: True",

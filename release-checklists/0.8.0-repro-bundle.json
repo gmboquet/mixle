@@ -22,12 +22,12 @@
     {
       "path": "release-checklists/0.8.0-repro-environment.json",
       "role": "bundle-closure",
-      "sha256": "0b9a246f93019b2a23c94281b4d43c4a63775495d97ef061ad4952ace807e184"
+      "sha256": "10fe17a4ce8996c405a738a8bb87caa4ccd8f184359f4e61b8d70bae169a4545"
     },
     {
       "path": "release-checklists/0.8.0-repro-requirements.txt",
       "role": "bundle-closure",
-      "sha256": "c9b250ab0bec6e59c7eba9a96fe68410833a608167ddbc5648509702caf94fd0"
+      "sha256": "4e26350a835224009d920fa36ea79bbd667e019696caa7403bd257ab5d45ae4c"
     },
     {
       "path": "release-checklists/0.8.0-banking77-dataset.json",
@@ -37,12 +37,12 @@
     {
       "path": "scripts/build_repro_bundle.py",
       "role": "bundle-closure",
-      "sha256": "843661b18553e989e40a7c152f284c9cd62d8a69dc2051d63e4a1ad5874a2f2c"
+      "sha256": "bf0d6d1453cdefea2ee19b7b9c10b679cfe5cbf3996d7f8957aceda6240d1091"
     },
     {
       "path": "scripts/run_repro_entry.py",
       "role": "bundle-closure",
-      "sha256": "67566760a98ac67240dec5853f63b9d11596b0b66a5b768b987201574062b1d5"
+      "sha256": "c5948322297c22d781edda7a2b91b1f87e268475e3e7f44e57a9cd0dc3710a39"
     }
   ],
   "code_license": {
@@ -205,7 +205,13 @@
           "chain intact: True"
         ],
         "format": "text",
-        "stdout_sha256": "879fbb4d09ea025fee958da52a056e22af0c8ec9fe2f6870eba0ad2f13f48857"
+        "stdout_sha256": "e6c0a968fb483c533c7a5b7c5a5fdfe107cba118c1f1e83bf476ef71d7d4da72",
+        "volatile": [
+          {
+            "pattern": "git / mixle  : (?:[0-9a-f]{7,40}|unknown) / ",
+            "placeholder": "git / mixle  : <commit> / "
+          }
+        ]
       },
       "id": "production-provenance",
       "inputs": [
