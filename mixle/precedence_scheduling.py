@@ -1,8 +1,11 @@
 """Precedence-constrained selection and scheduling: maximum-weight closure and time-phased capacity scheduling.
 
 Two general combinatorial-optimization problems recur whenever items each carry a value (positive or
-negative) and a *precedence* relation: item ``b`` cannot be selected/scheduled before its predecessor
-items. Two questions sit on top of that model:
+negative) and a *precedence* relation: item ``b`` may not be taken without its predecessor items --
+in the scheduling problem, ``b`` may not be scheduled in an earlier period than any of them. (That
+is "never later than", not "strictly earlier": a predecessor and its dependent may share a period.
+:func:`schedule_activities` spells out what that does and does not guarantee.) Two questions sit on
+top of that model:
 
 * **Maximum-weight closure** (:func:`maximum_weight_closure`) -- ignoring time, which subset of items
   maximizes total value subject to precedence? Picard's construction reduces this to a single
@@ -75,8 +78,20 @@ def maximum_weight_closure(value: Any, precedence: Sequence[tuple[int, int]]) ->
     block, ore, or slope in it.
     """
     value = np.asarray(value, dtype=np.float64)
+    if not np.isfinite(value).all():
+        raise ValueError("maximum_weight_closure: every item value must be finite")
     n = value.size
     source, sink = n, n + 1
+    # The big-M has to stay finite (see above) AND stay representable. Summing float64 magnitudes
+    # overflows for large-but-perfectly-finite values -- with -1e308 and 1.5e308 the sum was inf,
+    # max_flow's cap - residual reconstruction went to NaN, min_cut's reachability BFS silently
+    # dropped the precedence arc (NaN > tol is false), and the returned mask selected a dependent
+    # without its predecessor: closure violated on finite input. A closure is invariant under a
+    # positive rescaling of every value, and halving is exact in binary floating point, so scale the
+    # whole instance down by whatever power of two makes the reduction representable.
+    peak = float(np.max(np.abs(value), initial=0.0))
+    if peak > np.finfo(np.float64).max / max(n, 1):  # sum of magnitudes is at most n * peak
+        value = np.ldexp(value, -((n - 1).bit_length() + 1))
     big_m = float(np.abs(value).sum()) + 1.0  # no min-cut ever prefers severing a precedence arc
     cap = np.zeros((n + 2, n + 2), dtype=np.float64)
     for b in range(n):
@@ -84,15 +99,23 @@ def maximum_weight_closure(value: Any, precedence: Sequence[tuple[int, int]]) ->
             cap[source, b] = value[b]
         elif value[b] < 0.0:
             cap[b, sink] = -value[b]
+    edges = []
     for b, pred in precedence:
         if not (0 <= b < n and 0 <= pred < n):
             raise ValueError(f"precedence pair {(b, pred)} references an item outside 0..{n - 1}")
         cap[b, pred] = big_m
+        edges.append((b, pred))
     _, source_side, _ = min_cut(cap, source, sink)
     mask = np.zeros(n, dtype=bool)
     for node in source_side:
         if node < n:
             mask[node] = True
+    # Post-verify the property this whole reduction exists to guarantee. A cut that leaves a
+    # dependent without its predecessor means the min-cut did not see the big-M arc it was given,
+    # and returning that mask as "the maximum-weight closure" would be a false certificate.
+    violated = [(b, pred) for b, pred in edges if mask[b] and not mask[pred]]
+    if violated:
+        raise ValueError(f"maximum_weight_closure: min-cut returned a non-closed selection at edges {violated}")
     return mask
 
 
@@ -100,7 +123,11 @@ def _cumulative_precedence_rows(
     n: int, n_periods: int, precedence: Sequence[tuple[int, int]], idx: Any
 ) -> tuple[list[np.ndarray], list[float]]:
     """Rows encoding, for every precedence pair and every period ``t``: cumulative-scheduled(b) by
-    ``t`` ``<=`` cumulative-scheduled(pred) by ``t`` -- ``pred`` can never trail ``b``."""
+    ``t`` ``<=`` cumulative-scheduled(pred) by ``t`` -- ``pred`` can never trail ``b``.
+
+    Non-strict at each boundary by design: the two may share a period. See
+    :func:`schedule_activities` for why that is the intended reading and what to do when it is not.
+    """
     rows: list[np.ndarray] = []
     rhs: list[float] = []
     for b, pred in precedence:
@@ -194,15 +221,31 @@ def schedule_activities(
 ) -> tuple[float, np.ndarray]:
     """Time-phased schedule maximizing discounted value under precedence and per-period capacity.
 
-    ``value`` is a length-``n`` array of per-item net value; ``precedence`` lists ``(b, pred)`` pairs
-    as in :func:`maximum_weight_closure`; ``capacity`` is a length-``n_periods`` array bounding how
-    many items may be scheduled in each period (one item = one unit of capacity: callers wanting
+    ``value`` is a length-``n`` array of finite per-item net value; ``precedence`` lists ``(b, pred)``
+    pairs as in :func:`maximum_weight_closure`; ``capacity`` is a length-``n_periods`` array bounding
+    how many items may be scheduled in each period (one item = one unit of capacity: callers wanting
     heterogeneous per-item resource use can pre-scale ``capacity`` or split a heavy item into unit
     sub-items). Binary ``x[b, t]`` = item ``b`` scheduled in period ``t``; precedence is enforced at
-    every period boundary (cumulative scheduling of ``pred`` can never trail ``b``'s), each item is
-    scheduled at most once (never, if it is never worth it), and the objective discounts each
-    period's value by ``(1 + discount) ** t``. Solved exactly by
+    every period boundary, each item is scheduled at most once (never, if it is never worth it), and
+    the objective discounts each period's value by ``(1 + discount) ** t``. Solved exactly by
     :func:`mixle.relations.branch_and_bound_milp`.
+
+    **Precedence here means "never later than", not "strictly earlier".** The constraint is that
+    ``pred``'s cumulative scheduling can never trail ``b``'s *at any period boundary*, so a
+    predecessor and its dependent may legitimately share a period -- with one period, capacity two,
+    values ``[1, 10]`` and ``precedence=[(1, 0)]`` both items are scheduled at period 0. That is
+    same-boundary closure, the right model when a period is an accounting bucket (a year's mining is
+    not internally ordered) and the wrong one when a period is a strict hand-off. For strict
+    "finishes before the next one starts", give each item its own period's worth of capacity, or
+    model the delay explicitly rather than reading a stronger guarantee into this one. For the same
+    reason a cyclic precedence relation is *satisfiable* rather than rejected: a two-cycle forces its
+    items into the same period, which is what mutual "never later than" constraints mean. The
+    ordering that a strict reading would call a contradiction only exists under strict semantics.
+
+    ``capacity`` entries are finite and non-negative; since items consume one unit each, a fractional
+    capacity floors (``0.5`` schedules nothing in that period). ``discount`` must be finite and
+    greater than ``-1``: at ``-1`` the discount factor divides by zero, and an infinite one silently
+    zeroes all future value rather than discounting it.
 
     ``mode`` selects the semantics, and only the caller may change them:
 
@@ -227,11 +270,28 @@ def schedule_activities(
     """
     if mode not in ("exact", "rolling"):
         raise ValueError(f"mode must be 'exact' or 'rolling', got {mode!r}")
+    # The calendar, the resource model and the discount rate define the problem; none of them was
+    # checked, so out-of-domain values became either a wrong answer or an error blaming the solver.
+    # A capacity of -1 made every schedule infeasible and reported that the always-feasible empty
+    # schedule was infeasible; a discount of -1 divided by zero and handed linprog a NaN objective;
+    # +inf silently zeroed all future value; n_periods=0 surfaced as a shape complaint from scipy.
+    if isinstance(n_periods, (bool, np.bool_)) or not isinstance(n_periods, (int, np.integer)) or n_periods < 1:
+        raise ValueError(f"n_periods must be a positive integer number of periods, got {n_periods!r}")
+    n_periods = int(n_periods)
+    if isinstance(discount, (bool, np.bool_)) or not isinstance(discount, (int, float, np.integer, np.floating)):
+        raise ValueError(f"discount must be a finite rate greater than -1, got {discount!r}")
+    discount = float(discount)
+    if not np.isfinite(discount) or discount <= -1.0:
+        raise ValueError(f"discount must be a finite rate greater than -1, got {discount!r}")
     value = np.asarray(value, dtype=np.float64)
+    if not np.isfinite(value).all():
+        raise ValueError("schedule_activities: every item value must be finite")
     capacity = np.asarray(capacity, dtype=np.float64)
     n = value.size
     if capacity.size != n_periods:
         raise ValueError(f"capacity must have length n_periods={n_periods}, got {capacity.size}")
+    if not np.isfinite(capacity).all() or (capacity < 0.0).any():
+        raise ValueError(f"capacity must be finite and non-negative in every period, got {capacity!r}")
 
     if mode == "exact":
         return _solve_schedule_window(value, precedence, capacity, n_periods, discount, period_offset=0)
