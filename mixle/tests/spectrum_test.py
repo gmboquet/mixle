@@ -336,5 +336,38 @@ class CastPrecisionSpellingTest(unittest.TestCase):
                     cast(x, bad)
 
 
+class ExactInfiniteSumTest(unittest.TestCase):
+    """A one-signed infinity determines the sum exactly, so it is not an overflow to be escalated.
+
+    The log density of a zero-probability event is -inf. Summing log densities that include one is
+    exactly -inf, which no additional precision can improve; reporting status="overflow" for it made
+    a false claim about a numerical failure and paid for an arbitrary-precision accumulator.
+    """
+
+    def test_one_signed_infinity_is_exact_and_stays_on_float64(self):
+        for values, expected in (
+            ([-1.5, -2.25, -math.inf, -0.5], -math.inf),
+            ([-math.inf, -math.inf], -math.inf),
+            ([1.0, math.inf], math.inf),
+        ):
+            with self.subTest(values=values):
+                result = accurate_sum(values)
+                self.assertEqual(result.value, expected)
+                self.assertEqual(result.status, "ok")
+                self.assertEqual(result.backend, "float64")
+                self.assertEqual(result.rel_error_bound, 0.0)
+
+    def test_indeterminate_and_invalid_inputs_are_not_resolved(self):
+        mixed = accurate_sum([math.inf, -math.inf])
+        self.assertNotEqual(mixed.status, "ok")  # +inf + -inf has no value to certify
+        with self.assertRaises(ValueError):
+            accurate_sum([1.0, math.nan])
+
+    def test_finite_inputs_are_unaffected(self):
+        result = accurate_sum([-1.5, -2.25, -0.5])
+        self.assertAlmostEqual(result.value, -4.25, places=12)
+        self.assertEqual(result.status, "ok")
+
+
 if __name__ == "__main__":
     unittest.main()
