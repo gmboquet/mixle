@@ -205,3 +205,101 @@ def test_climate_terms_rejects_invalid_or_overflowing_cost():
         climate_terms(Footprint(0.0, 0.0, 0.0, float("nan")), None, carbon_price=1.0)
     with pytest.raises(ValueError, match="overflow"):
         climate_terms(Footprint(1e308, 0.0, 0.0, 1e308), None, carbon_price=1e308)
+
+
+class _Water:
+    """Minimal `WaterBudget`-shaped stand-in with no `storage` trajectory (summary-only caller)."""
+
+    def __init__(self, shortfall_m3=0.0, demand_m3=None):
+        self.shortfall_m3 = shortfall_m3
+        if demand_m3 is not None:
+            self.demand_m3 = demand_m3
+
+
+def test_provenance_distinguishes_two_different_factor_models():
+    # Regression for MXR-080-1583: provenance recorded only the activity hash plus the constant
+    # string "caller_supplied", so the same schedule priced against two entirely different factor
+    # models -- e.g. a supplier-specific table vs a national average -- produced byte-identical
+    # provenance while reporting totals that differ by a factor of several.
+    cheap = EmissionFactors(scope1={"a": 2.0}, scope2={}, scope3={})
+    dear = EmissionFactors(scope1={"a": 9.0}, scope2={}, scope3={})
+
+    fp_cheap = emissions_footprint({"a": 3.0}, cheap)
+    fp_dear = emissions_footprint({"a": 3.0}, dear)
+
+    assert fp_cheap.total == pytest.approx(6.0)
+    assert fp_dear.total == pytest.approx(27.0)
+    assert fp_cheap.provenance["activity_content_hash"] == fp_dear.provenance["activity_content_hash"]
+    assert fp_cheap.provenance["factor_content_hash"] != fp_dear.provenance["factor_content_hash"]
+
+    # The factor hash is a well-formed content digest and is stable for an equal factor model.
+    fh = fp_cheap.provenance["factor_content_hash"]
+    assert isinstance(fh, str) and len(fh) == 64 and all(c in "0123456789abcdef" for c in fh)
+    assert (
+        emissions_footprint({"a": 3.0}, EmissionFactors(scope1={"a": 2.0}, scope2={}, scope3={})).provenance[
+            "factor_content_hash"
+        ]
+        == fh
+    )
+
+
+def test_provenance_records_sigma_and_sampling_configuration():
+    # sigma sets the credible interval, so a change to it changes the reported footprint even when
+    # the point total is identical -- it must move the factor hash. The Monte-Carlo configuration
+    # behind `ci` is recorded alongside it.
+    exact = EmissionFactors(scope1={"a": 2.0}, scope2={}, scope3={})
+    uncertain = EmissionFactors(scope1={"a": 2.0}, scope2={}, scope3={}, sigma={"a": 0.1})
+
+    fp_exact = emissions_footprint({"a": 3.0}, exact)
+    fp_uncertain = emissions_footprint({"a": 3.0}, uncertain, n=256, rng=np.random.default_rng(0))
+
+    assert fp_exact.total == pytest.approx(fp_uncertain.total)
+    assert fp_exact.provenance["factor_content_hash"] != fp_uncertain.provenance["factor_content_hash"]
+    assert fp_exact.provenance["draws"] == 0
+    assert fp_exact.provenance["uncertainty_propagated"] is False
+    assert fp_uncertain.provenance["draws"] == 256
+    assert fp_uncertain.provenance["uncertainty_propagated"] is True
+    assert fp_exact.provenance["factor_keys"] == ("a",)
+
+
+@pytest.mark.parametrize("bad", [-5.0, -1e-9])
+def test_negative_water_volumes_are_unknown_not_feasible(bad):
+    # Regression for MXR-080-1584: shortfall, demand and water_limit_m3 are physical volumes in m3
+    # and cannot be negative. A negative one used to be treated as a perfectly good finite number:
+    # a negative shortfall compared false and reported a definite "feasible", while a negative
+    # demand or limit manufactured a binding violation out of nothing. Malformed water evidence must
+    # stay UNKNOWN, never become a definite answer in either direction.
+    fp = emissions_footprint(ACTIVITY, FACTORS)
+
+    negative_shortfall = climate_terms(fp, _Water(shortfall_m3=bad), carbon_price=1.0)
+    assert negative_shortfall["water_binding"] is None
+    assert negative_shortfall["water_feasible"] is None
+    assert negative_shortfall["shortfall_time_fraction"] is None
+
+    negative_demand = climate_terms(fp, _Water(demand_m3=bad), carbon_price=1.0, water_limit_m3=100.0)
+    assert negative_demand["water_binding"] is None
+    assert negative_demand["water_feasible"] is None
+
+    negative_limit = climate_terms(fp, _Water(demand_m3=10.0), carbon_price=1.0, water_limit_m3=bad)
+    assert negative_limit["water_binding"] is None
+    assert negative_limit["water_feasible"] is None
+
+
+def test_valid_water_volumes_still_give_definite_answers():
+    # Negative control for MXR-080-1584: the nonnegativity guard must not swallow legitimate
+    # evidence -- zero is a valid volume and the ordinary binding/non-binding verdicts stand.
+    fp = emissions_footprint(ACTIVITY, FACTORS)
+
+    ok = climate_terms(fp, _Water(shortfall_m3=0.0, demand_m3=10.0), carbon_price=1.0, water_limit_m3=100.0)
+    assert ok["water_binding"] is False
+    assert ok["water_feasible"] is True
+    assert ok["shortfall_time_fraction"] == 0.0
+
+    short = climate_terms(fp, _Water(shortfall_m3=5.0), carbon_price=1.0)
+    assert short["water_binding"] is True
+    assert short["water_feasible"] is False
+    assert short["shortfall_time_fraction"] == 1.0
+
+    over = climate_terms(fp, _Water(shortfall_m3=0.0, demand_m3=250.0), carbon_price=1.0, water_limit_m3=100.0)
+    assert over["water_binding"] is True
+    assert over["water_feasible"] is False

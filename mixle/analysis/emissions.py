@@ -122,9 +122,15 @@ class Footprint:
     factors (typically kg CO2e / tCO2e). ``ci`` is the ``(lo, hi)`` 90% Monte-Carlo interval on
     ``total`` when factor uncertainties were propagated, else ``None`` (the default -- a caller that
     only needs :func:`climate_terms`' point costs can construct one without ``ci``/``provenance``).
-    ``provenance`` carries ``factor_source``, the 64-hex ``activity_content_hash`` (sha256 of the
-    canonical activity encoding, the same hashing convention IC-2 uses for field artifacts), and the
-    ``scopes`` actually included in ``total``.
+    ``provenance`` identifies *both* inputs to the ``activity x factors`` product, plus how the
+    interval was produced: ``factor_source``; the 64-hex ``activity_content_hash`` and
+    ``factor_content_hash`` (sha256 of the canonical activity / factor-model encodings, the same
+    hashing convention IC-2 uses for field artifacts); ``factor_keys`` (the union of activity keys
+    the factor model prices, for a readable diff when the two hashes disagree); the ``scopes``
+    actually included in ``total``; and ``draws`` / ``uncertainty_propagated`` describing the
+    Monte-Carlo configuration behind ``ci``. Hashing the activity alone was not enough to
+    distinguish two runs: the same schedule costed against a supplier-specific factor set and
+    against a national average is a different footprint with different provenance.
     """
 
     scope1: float
@@ -167,6 +173,25 @@ def _activity_content_hash(activity: dict[str, float]) -> str:
     a deterministic, key-order-independent encoding of the record so the same activity numbers
     always hash the same, and any change to a key or a value changes the hash)."""
     return hashlib.sha256(_canonical(dict(activity))).hexdigest()
+
+
+def _factor_content_hash(factors: EmissionFactors) -> str:
+    """sha256 hex digest of the canonical encoding of the complete factor model.
+
+    A footprint is ``activity x factors``: hashing only the activity left the other half of the
+    computation untraced, so two runs against different factor models -- a supplier-specific set
+    versus a national average, or a factor table revised between reporting periods -- produced
+    totals that differ by a factor of several and provenance dicts that were byte-identical. All
+    four fields participate (``sigma`` included: it sets the credible interval, so a change to it
+    changes the reported footprint even when the point total is untouched).
+    """
+    payload = {
+        "scope1": dict(factors.scope1),
+        "scope2": dict(factors.scope2),
+        "scope3": dict(factors.scope3),
+        "sigma": dict(factors.sigma) if factors.sigma else {},
+    }
+    return hashlib.sha256(_canonical(payload)).hexdigest()
 
 
 def _validate_unique_scopes(scopes: tuple[int, ...]) -> None:
@@ -261,9 +286,13 @@ def emissions_footprint(
     in ``ci``. Without both a positive ``n`` and a non-empty ``sigma``, ``ci`` is ``None`` -- the point
     total is still returned, just without an uncertainty band.
 
-    ``provenance`` always carries ``activity_content_hash`` (a 64-hex sha256 fingerprint of the
-    activity dict, IC-2's hashing convention) so a downstream carbon-cost or transition-risk term
-    (L3/L6) can always be traced back to the exact activity schedule it was computed from.
+    ``provenance`` always fingerprints both factors of the ``activity x factors`` product --
+    ``activity_content_hash`` AND ``factor_content_hash`` (64-hex sha256 over the canonical
+    encodings, IC-2's hashing convention) -- alongside ``factor_keys``, ``scopes``, ``draws`` and
+    ``uncertainty_propagated``. A downstream carbon-cost or transition-risk term (L3/L6) can
+    therefore be traced back to the exact activity schedule *and* the exact factor table it was
+    priced with; recording only the activity meant a footprint restated against a revised or
+    supplier-specific factor set was indistinguishable from the original by its provenance alone.
 
     ``scopes`` must not contain duplicate entries (each GHG-Protocol scope may appear at most once) --
     a duplicate raises rather than being silently summed once on the point-total path and once per
@@ -311,7 +340,11 @@ def emissions_footprint(
     provenance = {
         "factor_source": "caller_supplied",
         "activity_content_hash": _activity_content_hash(activity),
+        "factor_content_hash": _factor_content_hash(factors),
+        "factor_keys": tuple(sorted(set(factors.scope1) | set(factors.scope2) | set(factors.scope3))),
         "scopes": tuple(scopes),
+        "draws": n,
+        "uncertainty_propagated": ci is not None,
     }
 
     return Footprint(
@@ -594,8 +627,10 @@ def _shortfall_time_fraction(water: Any, shortfall_m3: float) -> float | None:
     time step) when available. Falls back to a 0/1 point read of ``shortfall_m3`` when no ``storage``
     trajectory is available (e.g. a caller-supplied summary rather than a full `WaterBudget`). Returns
     ``None`` -- an explicit "not evaluable", rather than a silently wrong number -- when the available
-    evidence is non-finite: a storage trajectory containing non-finite entries, or a non-finite
-    ``shortfall_m3`` with no trajectory to fall back on.
+    evidence is unusable: a storage trajectory containing non-finite entries, or a ``shortfall_m3``
+    that is non-finite or negative with no trajectory to fall back on. A shortfall is an unmet volume
+    in m3 and cannot be negative; reading one as ``0.0`` ("never short") would report a definite
+    all-clear off malformed evidence.
     """
     storage = getattr(water, "storage", None)
     if storage is not None:
@@ -604,7 +639,7 @@ def _shortfall_time_fraction(water: Any, shortfall_m3: float) -> float | None:
             if not np.all(np.isfinite(arr)):
                 return None
             return float(np.mean(arr <= 0.0))
-    if not np.isfinite(shortfall_m3):
+    if not np.isfinite(shortfall_m3) or shortfall_m3 < 0.0:
         return None
     return 1.0 if shortfall_m3 > 0.0 else 0.0
 
@@ -689,9 +724,12 @@ def climate_terms(
       ``shortfall_time_fraction`` are all ``None``: climate risk for that option is carbon-only, but
       the water terms are reported as "not evaluated", not silently "known feasible".
     - When ``shortfall_m3``, the water-limit demand, or ``water_limit_m3`` itself is non-finite
-      (NaN/inf), that check contributes ``None`` (unknown) rather than silently comparing false and
-      passing as non-binding. The two binding checks combine via three-valued (Kleene) OR: a confirmed
-      binding signal from either check always wins, an unknown never gets rounded down to "feasible".
+      (NaN/inf) **or negative**, that check contributes ``None`` (unknown) rather than silently
+      comparing and passing as non-binding. All three are physical volumes in m3 and cannot be
+      negative under the documented contract, so a negative one is malformed evidence rather than
+      evidence of comfortable headroom (or, for a negative demand/limit, of a violation). The two
+      binding checks combine via three-valued (Kleene) OR: a confirmed binding signal from either
+      check always wins, an unknown never gets rounded down to "feasible".
     """
     footprint_total = _finite_real_scalar(footprint.total, name="climate_terms: footprint.total")
     price = _finite_real_scalar(carbon_price, name="climate_terms: carbon_price", nonnegative=True)
@@ -709,7 +747,13 @@ def climate_terms(
 
     raw_shortfall = getattr(water, "shortfall_m3", 0.0)
     shortfall_m3 = float(raw_shortfall) if raw_shortfall is not None else 0.0
-    shortfall_known = np.isfinite(shortfall_m3)
+    # Shortfall, demand and the configured limit are physical volumes in m3 and cannot be negative
+    # under the documented contract. A negative one is malformed evidence, not evidence of anything:
+    # treating it as a finite number let a negative shortfall read as "comfortably non-binding"
+    # (feasible) and a negative demand or limit manufacture a binding violation out of nothing. Both
+    # directions are wrong, so a negative volume joins non-finite as UNKNOWN and rides the same
+    # Kleene path -- never rounded down to feasible.
+    shortfall_known = np.isfinite(shortfall_m3) and shortfall_m3 >= 0.0
     shortfall_binding: bool | None = (shortfall_m3 > 0.0) if shortfall_known else None
 
     demand_binding: bool | None = False  # no water_limit_m3 configured: this check is inapplicable, not unknown
@@ -718,7 +762,7 @@ def climate_terms(
         demand = _water_demand_m3(water)
         if demand is None:
             demand_binding = None  # a limit was configured but there is no demand evidence to check it against
-        elif not (np.isfinite(limit) and np.isfinite(demand)):
+        elif not (np.isfinite(limit) and np.isfinite(demand)) or limit < 0.0 or demand < 0.0:
             demand_binding = None
         else:
             demand_binding = demand > limit
