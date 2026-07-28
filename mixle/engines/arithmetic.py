@@ -146,7 +146,10 @@ def constant(value: Any) -> Any:
 
 def _dispatch(name):
     def fn(*args, **kwargs):
-        engine = engine_of(args, default=_DEFAULT_ENGINE.get())
+        # Keyword operands carry backend ownership just as positional operands do. Dispatching only
+        # on ``args`` sends ``asarray(x=torch_tensor)`` to NumPy and also misses mixed-engine calls
+        # split across positional/keyword forms.
+        engine = engine_of((args, kwargs), default=_DEFAULT_ENGINE.get())
         return getattr(engine, name)(*args, **kwargs)
 
     fn.__name__ = name

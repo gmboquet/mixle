@@ -98,8 +98,26 @@ if _jax is not None:
     _ARRAY_ENGINE_REGISTRY[_jax.Array] = JaxEngine()
 
 
-def register_array_type(array_type: type[Any], engine: ComputeEngine) -> None:
-    """Register an array/tensor type with its owning engine."""
+def register_array_type(array_type: type[Any], engine: ComputeEngine, *, override: bool = False) -> None:
+    """Register an array/tensor type with its owning engine.
+
+    Existing ownership cannot be replaced unless ``override=True`` is explicit. Registering ``object``
+    is forbidden because it would capture every otherwise-unregistered Python value process-wide.
+    """
+    if not isinstance(array_type, type):
+        raise TypeError(f"array_type must be an actual type, got {type(array_type).__name__}.")
+    if array_type is object:
+        raise ValueError("registering object as an array type is forbidden because it shadows every Python value.")
+    if not isinstance(engine, ComputeEngine):
+        raise TypeError(f"engine must be a ComputeEngine instance, got {type(engine).__name__}.")
+    if type(override) is not bool:
+        raise TypeError(f"override must be a bool, got {type(override).__name__}.")
+    existing = _ARRAY_ENGINE_REGISTRY.get(array_type)
+    if existing is not None and existing is not engine and not override:
+        raise ValueError(
+            f"{array_type.__module__}.{array_type.__qualname__} is already registered to {existing.name}; "
+            "pass override=True to replace it explicitly."
+        )
     _ARRAY_ENGINE_REGISTRY[array_type] = engine
 
 
@@ -206,25 +224,41 @@ def engine_of(x: Any, default: ComputeEngine = NUMPY_ENGINE) -> ComputeEngine:
     policy is an error, because silent host/device/precision mixing is almost
     always a performance or correctness bug (see :func:`_engines_compatible`).
     """
+    return _engine_of(x, default, set())
+
+
+def _engine_of(x: Any, default: ComputeEngine | None, active_containers: set[int]) -> ComputeEngine | None:
     direct = _direct_engine(x)
     if direct is not None:
         return direct
 
+    is_container = isinstance(x, (dict, list, tuple))
+    identity = id(x)
+    if is_container:
+        if identity in active_containers:
+            raise ValueError("cyclic container encountered during compute-engine discovery.")
+        active_containers.add(identity)
     found: ComputeEngine | None = None
-    for child in _child_values(x):
-        child_engine = engine_of(child, default=None)
-        if child_engine is None:
-            continue
-        if found is None:
-            found = child_engine
-        elif not _engines_compatible(found, child_engine):
-            raise TypeError("mixed compute engines in encoded payload: %s and %s" % (found.name, child_engine.name))
-        elif not getattr(found, "dtype_explicit", True) and getattr(child_engine, "dtype_explicit", True):
-            found = child_engine  # prefer the more-opinionated (explicit-precision) engine
+    try:
+        for child in _child_values(x):
+            child_engine = _engine_of(child, None, active_containers)
+            if child_engine is None:
+                continue
+            if found is None:
+                found = child_engine
+            elif not _engines_compatible(found, child_engine):
+                raise TypeError(
+                    "mixed compute engines in encoded payload: %s and %s" % (found.name, child_engine.name)
+                )
+            elif not getattr(found, "dtype_explicit", True) and getattr(child_engine, "dtype_explicit", True):
+                found = child_engine  # prefer the more-opinionated (explicit-precision) engine
+    finally:
+        if is_container:
+            active_containers.remove(identity)
     return default if found is None else found
 
 
-def _contains_engine_value(x: Any) -> bool:
+def _contains_engine_value(x: Any, _active_containers: set[int] | None = None) -> bool:
     """Return whether ``x`` is, or recursively contains, a directly engine-owned value.
 
     Used by :func:`to_numpy` to decide whether a dict/list/tuple must be
@@ -234,11 +268,17 @@ def _contains_engine_value(x: Any) -> bool:
     """
     if _direct_engine(x) is not None:
         return True
-    if isinstance(x, dict):
-        return any(_contains_engine_value(v) for v in x.values())
-    if isinstance(x, (list, tuple)):
-        return any(_contains_engine_value(v) for v in x)
-    return False
+    if not isinstance(x, (dict, list, tuple)):
+        return False
+    active_containers = set() if _active_containers is None else _active_containers
+    identity = id(x)
+    if identity in active_containers:
+        raise ValueError("cyclic container encountered while inspecting compute-engine ownership.")
+    active_containers.add(identity)
+    try:
+        return any(_contains_engine_value(value, active_containers) for value in _child_values(x))
+    finally:
+        active_containers.remove(identity)
 
 
 def to_numpy(x: Any) -> Any:

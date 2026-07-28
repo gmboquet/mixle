@@ -112,9 +112,12 @@ class ComputeEngine(ABC):
         super().__init_subclass__(**kwargs)
         if getattr(cls, "__abstractmethods__", None):
             return
-        missing = tuple(op for op in cls.REQUIRED_OPS if getattr(cls, op, None) is None)
-        if missing:
-            raise TypeError("%s does not provide required compute ops: %s" % (cls.__name__, ", ".join(missing)))
+        noncallable = tuple(op for op in cls.REQUIRED_OPS if not callable(getattr(cls, op, None)))
+        if noncallable:
+            raise TypeError(
+                "%s does not provide callable required compute ops: %s"
+                % (cls.__name__, ", ".join(noncallable))
+            )
 
     # Mathematical constants are part of the engine's arithmetic policy: a numeric engine returns
     # plain floats, but an exact/symbolic engine overrides these so that e.g. ``pi`` stays a symbolic
