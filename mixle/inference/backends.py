@@ -78,11 +78,20 @@ def select_backend(backend: str = "auto", target: str | None = None) -> str:
       engine importable, else a clear error.
     * ``"auto"`` with a ``target`` *kind* hint picks the first preferred-and-available backend for
       that kind (e.g. ``"torch_logp"`` -> torch; ``"numpy_vg"`` -> numpy, then numba). This keeps
-      the always-available numpy path the default for plain numpy targets.
-    * ``"auto"`` with no hint falls back to the first available backend, preferring ``"numpy"``
-      (the always-present, dependency-free path) when it is available.
+      the always-available numpy path the default for plain numpy targets. A declared kind is a
+      *contract*, not a preference: if no backend advertising that contract is available, this
+      raises rather than silently handing e.g. a torch/jax scalar ``logp`` to a backend that will
+      call it expecting a numpy ``value_and_grad -> (value, gradient)`` pair. The kinds are not
+      convertible across autodiff systems, so there is no correct fallback between them.
+    * ``"auto"`` with no hint (``target=None``) falls back to the first available backend,
+      preferring ``"numpy"`` (the always-present, dependency-free path) when it is available. This
+      is the genuinely undetermined case -- a numpy and an ``@njit`` ``value_and_grad`` are
+      indistinguishable plain callables -- and stays unchanged.
 
-    Raises if nothing is available or the explicit choice is unavailable.
+    Raises:
+        ValueError: if ``target`` is not one of the known target kinds.
+        RuntimeError: if nothing is available, the explicit choice is unavailable, or no available
+            backend implements the declared ``target`` kind.
     """
     avail = available_backends()
     if not avail:
@@ -93,9 +102,22 @@ def select_backend(backend: str = "auto", target: str | None = None) -> str:
             raise RuntimeError(f"inference backend {backend!r} is registered but its engine is not importable.")
         return backend
     if target is not None:
-        for name in _KIND_PREFERENCE.get(target, ()):  # target-kind precedence
+        preferred = _KIND_PREFERENCE.get(target)
+        if preferred is None:
+            # An unknown or empty kind string used to fall through to numpy, which is exactly the
+            # wrong answer: the caller told us something about the target's calling convention and we
+            # ignored it. A typo'd kind must not silently become the numpy contract.
+            raise ValueError(f"unknown target kind {target!r}; known kinds: {', '.join(sorted(_KIND_PREFERENCE))}.")
+        for name in preferred:  # target-kind precedence
             if name in avail:
                 return name
+        raise RuntimeError(
+            f"no available inference backend implements target kind {target!r} "
+            f"(it needs one of: {', '.join(preferred)}; available: {', '.join(avail)}). "
+            "Target kinds are not convertible across autodiff systems, so 'auto' will not substitute "
+            "a backend expecting a different calling convention -- install the required engine or pass "
+            "a target of a supported kind."
+        )
     if "numpy" in avail:  # dependency-free default
         return "numpy"
     return avail[0]
