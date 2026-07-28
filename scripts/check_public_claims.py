@@ -50,8 +50,7 @@ def _surface_paths(data: dict) -> list[Path]:
     return sorted(
         path
         for path in paths
-        if path.is_file()
-        and not _excluded(path.relative_to(ROOT).as_posix(), config["exclude_globs"])
+        if path.is_file() and not _excluded(path.relative_to(ROOT).as_posix(), config["exclude_globs"])
     )
 
 
@@ -86,7 +85,7 @@ def scan(data: dict) -> list[dict[str, str | int]]:
                             "not production",
                             "out of scope",
                             "avoid implying",
-                            "no \"safe to deploy\"",
+                            'no "safe to deploy"',
                             "before documenting",
                             "are **not**",
                             "should not",
@@ -124,6 +123,15 @@ def validate(data: dict) -> list[str]:
             errors.append(f"{claim['id']}: unknown evidence grade {claim['grade']!r}")
         if not claim["evidence"]:
             errors.append(f"{claim['id']}: evidence must not be empty")
+        # A claim is only as good as evidence that actually exists. Without this the inventory
+        # validated cleanly while citing test files that had never been written, which is worse
+        # than no gate at all: it reports "validated" and checks nothing. Evidence may be cited as
+        # ``path`` or ``path#anchor`` (e.g. a workflow file plus the job within it); only the path
+        # component is resolved here -- the anchor names a job/section, not a filesystem entry.
+        for evidence in claim["evidence"]:
+            evidence_path = evidence.split("#", 1)[0]
+            if not (ROOT / evidence_path).exists():
+                errors.append(f"{claim['id']}: cited evidence does not exist: {evidence}")
         position = ledger.find(claim["statement"])
         if position < 0:
             errors.append(f"{claim['id']}: statement is absent from the claim-evidence ledger")
@@ -150,8 +158,7 @@ def validate(data: dict) -> list[str]:
         key = (str(hit["path"]), str(hit["text"]))
         if key not in approved_keys:
             errors.append(
-                f"unregistered public claim at {hit['path']}:{hit['line']}: "
-                f"{hit['match']!r} in {hit['text']!r}"
+                f"unregistered public claim at {hit['path']}:{hit['line']}: {hit['match']!r} in {hit['text']!r}"
             )
     return errors
 
