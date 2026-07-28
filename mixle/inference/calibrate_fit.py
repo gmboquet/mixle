@@ -21,6 +21,11 @@ from mixle.utils.optional_deps import HAS_PANDAS, pandas, require
 
 __all__ = ["CalibrationReport", "calibration_report"]
 
+#: Minimum expected observations per PIT bin before a uniformity verdict is meaningful. The usual
+#: rule of thumb for a histogram goodness-of-fit statistic; below it the finite-sample noise floor
+#: swamps the statistic's own range.
+MIN_EXPECTED_PER_BIN = 5
+
 
 @dataclass
 class CalibrationReport:
@@ -52,16 +57,54 @@ class CalibrationReport:
         """Whether every held-out row got a usable (finite or explicitly impossible) log-density."""
         return self.n_invalid_scores == 0
 
+    def max_pit_error(self) -> float:
+        """The largest PIT error this histogram statistic can attain: all mass in one bin.
+
+        ``sum_b |freq_b - 1/bins|`` peaks at ``(1 - 1/bins) + (bins-1)/bins == 2(1 - 1/bins)`` -- 1.8
+        for the default ten bins. A tolerance at or above this bound accepts *every* possible
+        histogram, so the gate is not a test at all.
+        """
+        return 2.0 * (1.0 - 1.0 / self.bins)
+
+    def has_enough_data(self) -> bool:
+        """Whether the holdout can support a per-bin uniformity judgement at all.
+
+        The histogram statistic needs a usable expected count per bin; below ``MIN_EXPECTED_PER_BIN``
+        the noise floor ``sqrt(bins/n)`` grows until ``2.5x`` it exceeds :meth:`max_pit_error` and the
+        acceptance region becomes vacuous -- at ten bins and a single observation the threshold was
+        7.91 against a statistic that cannot exceed 1.8, so even maximally clumped PIT values were
+        reported calibrated.
+        """
+        return self.n >= MIN_EXPECTED_PER_BIN * self.bins
+
     def is_calibrated(self, tol: float | None = None) -> bool:
         """True when the PIT error is within tolerance AND the model actually scored the holdout.
 
         Default tol = 2.5x the finite-sample noise floor (so genuine miscalibration, not sampling
         noise, is what fails). Unknown -> False, conservatively. An invalid predictive score on any
         row -> False: the PIT histogram alone cannot certify a model whose density is unavailable.
+        Too little held-out data for :meth:`has_enough_data` -> False: absence of evidence is not
+        evidence of calibration.
+
+        Raises:
+            ValueError: if ``tol`` is not finite and nonnegative, or is at/above :meth:`max_pit_error`
+                (a tolerance that no histogram can exceed would approve any model).
         """
-        if self.pit_error is None or not self.scoring_is_valid():
+        if tol is not None:
+            tol = float(tol)
+            if not np.isfinite(tol) or tol < 0.0:
+                raise ValueError(f"calibration tol must be finite and nonnegative, got {tol!r}")
+            if tol >= self.max_pit_error():
+                raise ValueError(
+                    f"calibration tol {tol!r} is at or above the largest attainable PIT error "
+                    f"{self.max_pit_error()!r} for {self.bins} bins, so it would accept every possible "
+                    "model; pass a tolerance inside the statistic's range."
+                )
+        if self.pit_error is None or not self.scoring_is_valid() or not self.has_enough_data():
             return False
-        threshold = 2.5 * self.noise_floor() if tol is None else float(tol)
+        threshold = 2.5 * self.noise_floor() if tol is None else tol
+        # With has_enough_data() satisfied the default threshold is at most 2.5*sqrt(1/5) ~= 1.118,
+        # strictly inside the statistic's 1.8 range, so the default gate can never be vacuous either.
         return self.pit_error <= threshold
 
     def as_dict(self) -> dict[str, Any]:
@@ -139,6 +182,41 @@ def _scalar_cdf(model: Any) -> Any:
     return cdf
 
 
+def _is_lattice_law(cdf: Any, y: np.ndarray) -> bool:
+    """Whether the predictive CDF is a step function on the integers over the observed values.
+
+    ``F(Y)`` is uniform only for a CONTINUOUS predictive law. When the law has atoms, ``F(Y)`` can
+    only ever land on the finitely many values the atoms produce, so its histogram is clumped by
+    construction and the ordinary PIT reports a large "error" for an exactly correct model.
+
+    Detected from the CDF itself rather than from the model's type, so it works for any model that
+    exposes ``cdf``: the values must all be integers, and ``F`` must be FLAT strictly between
+    consecutive integers (``F(y-0.5) == F(y-0.25)``), which is exactly what a lattice CDF does and
+    what a continuous one does not.
+    """
+    if y.size == 0 or not np.all(np.isfinite(y)) or not np.allclose(y, np.round(y)):
+        return False
+    return bool(np.allclose(cdf(y - 0.5), cdf(y - 0.25), atol=1e-12, rtol=0.0))
+
+
+def _pit_for_law(cdf: Any, y: np.ndarray, seed: int) -> tuple[np.ndarray, str, str]:
+    """PIT values appropriate to the predictive law: randomized on a lattice, ordinary otherwise.
+
+    The randomized PIT ``u = F(y-) + V (F(y) - F(y-))``, ``V ~ U(0,1)``, is exactly Uniform(0,1)
+    under a correctly specified DISCRETE law -- it spreads each atom's probability mass evenly across
+    the interval the CDF jumps over. For an integer lattice the left limit ``F(y-)`` is ``F(y-1)``
+    exactly. The randomness is seeded and reported so the verdict is reproducible.
+    """
+    from mixle.inference.calibration import pit_values
+
+    if not _is_lattice_law(cdf, y):
+        return pit_values(y, cdf), "PIT", ""
+    lo, hi = cdf(y - 1.0), cdf(y)
+    v = np.random.RandomState(seed).uniform(size=y.shape)
+    u = np.clip(lo + v * np.maximum(hi - lo, 0.0), 0.0, 1.0)
+    return pit_values(y, u), "randomized-PIT", f" [randomized PIT for a discrete predictive law, seed={seed}]"
+
+
 def _holdout_log_densities(model: Any, rows: list) -> tuple[np.ndarray, int]:
     """One log-density per held-out row, plus how many of them are unusable.
 
@@ -156,12 +234,17 @@ def _holdout_log_densities(model: Any, rows: list) -> tuple[np.ndarray, int]:
     return ll, int(np.isnan(ll).sum())
 
 
-def calibration_report(model: Any, data: Any) -> CalibrationReport:
+def calibration_report(model: Any, data: Any, *, seed: int = 0) -> CalibrationReport:
     """The calibration of ``model`` on held-out ``data`` (see module docstring).
 
     ``data`` should be data the model was not fitted on -- calibration measured on the training set is
     optimistic. Runs the PIT test when the model has a scalar predictive CDF; always reports the
     held-out mean log-density.
+
+    A predictive law with ATOMS is handled with the randomized PIT rather than the continuous one:
+    ``F(Y)`` is uniform only for a continuous law, so routing a discrete model through the ordinary
+    PIT reports a large error for an exactly correct model. ``seed`` fixes that randomization (it is
+    recorded in ``note``) and is unused for a continuous law, whose method is unchanged.
 
     Scoring validity is checked first and carried in the report. The verdict used to consult only the
     PIT histogram, so a model whose CDF was exact but whose per-row log-densities were all NaN --
@@ -187,10 +270,10 @@ def calibration_report(model: Any, data: Any) -> CalibrationReport:
             note="model has no scalar predictive CDF; PIT calibration not applicable (multivariate/latent)",
         )
 
-    from mixle.inference.calibration import pit_calibration_error, pit_histogram, pit_values
+    from mixle.inference.calibration import pit_calibration_error, pit_histogram
 
     y = np.asarray([float(v) for v in rows], dtype=float)
-    pit = pit_values(y, cdf)
+    pit, method, method_note = _pit_for_law(cdf, y, seed)
     err = float(pit_calibration_error(pit))
     hist = pit_histogram(pit)
     report = CalibrationReport(
@@ -199,7 +282,7 @@ def calibration_report(model: Any, data: Any) -> CalibrationReport:
         pit_error=err,
         pit_histogram={k: (v.tolist() if hasattr(v, "tolist") else v) for k, v in hist.items()},
         bins=10,
-        method="PIT",
+        method=method,
         n_invalid_scores=n_invalid,
     )
     if not report.scoring_is_valid():
@@ -208,10 +291,17 @@ def calibration_report(model: Any, data: Any) -> CalibrationReport:
             f"(PIT error {err:.3f}) -- not calibrated: a uniform PIT cannot certify a model whose "
             "own log-density is missing"
         )
+    elif not report.has_enough_data():
+        report.note = (
+            f"only {len(rows)} held-out row(s) for {report.bins} PIT bins "
+            f"(need {MIN_EXPECTED_PER_BIN * report.bins}) -- not calibrated: too little data to judge "
+            "uniformity, so no verdict is claimed either way"
+        )
     else:
         report.note = (
             f"calibrated (PIT error {err:.3f} within the {report.noise_floor():.3f} noise floor)"
             if report.is_calibrated()
             else f"PIT deviates from uniform ({err:.3f} vs floor {report.noise_floor():.3f}) -- intervals are off"
         )
+    report.note += method_note
     return report

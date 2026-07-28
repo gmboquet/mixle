@@ -204,5 +204,75 @@ class ScoringValidityGateTest(unittest.TestCase):
         self.assertTrue(rep.is_calibrated())
 
 
+class DiscretePITTest(unittest.TestCase):
+    """MXR-080-1617: F(Y) is uniform only for a CONTINUOUS law; atoms need the randomized PIT."""
+
+    def test_exact_poisson_is_not_declared_uncalibrated(self):
+        model = st.PoissonDistribution(1.0)
+        draws = model.sampler(7).sample(5000)
+        rep = calibration_report(model, draws)
+        # Routed through the continuous PIT this reported error ~1.4 and "uncalibrated" for the
+        # model the data was drawn from -- the three occupied bins are the discrete CDF's support.
+        self.assertEqual(rep.method, "randomized-PIT")
+        self.assertTrue(rep.is_calibrated())
+        self.assertLess(rep.pit_error, 0.3)
+
+    def test_a_genuinely_wrong_discrete_model_still_fails(self):
+        draws = st.PoissonDistribution(1.0).sampler(7).sample(5000)
+        rep = calibration_report(st.PoissonDistribution(6.0), draws)
+        self.assertEqual(rep.method, "randomized-PIT")
+        self.assertFalse(rep.is_calibrated())
+
+    def test_continuous_models_keep_the_ordinary_pit(self):
+        model = st.GaussianDistribution(0.0, 1.0)
+        rep = calibration_report(model, model.sampler(7).sample(5000))
+        self.assertEqual(rep.method, "PIT")
+        self.assertTrue(rep.is_calibrated())
+
+    def test_randomization_is_seeded_and_reproducible(self):
+        model = st.PoissonDistribution(1.0)
+        draws = model.sampler(7).sample(2000)
+        a = calibration_report(model, draws, seed=3)
+        b = calibration_report(model, draws, seed=3)
+        self.assertEqual(a.pit_error, b.pit_error)
+        self.assertIn("seed=3", a.note)
+
+
+class CalibrationGateIsNotVacuousTest(unittest.TestCase):
+    """MXR-080-1618: the default gate must not accept every possible histogram."""
+
+    def _report(self, n):
+        model = st.GaussianDistribution(0.0, 1.0)
+        return calibration_report(model, model.sampler(7).sample(n))
+
+    def test_tiny_samples_are_not_declared_calibrated(self):
+        for n in (1, 10):
+            rep = self._report(n)
+            # threshold was 7.91 (n=1) and 2.5 (n=10) against a statistic that cannot exceed 1.8
+            self.assertFalse(rep.is_calibrated())
+            self.assertFalse(rep.has_enough_data())
+
+    def test_max_attainable_error_bounds_the_statistic(self):
+        rep = self._report(500)
+        self.assertAlmostEqual(rep.max_pit_error(), 1.8)
+        self.assertLessEqual(rep.pit_error, rep.max_pit_error())
+
+    def test_default_threshold_is_inside_the_statistics_range(self):
+        rep = self._report(500)
+        self.assertTrue(rep.has_enough_data())
+        self.assertLess(2.5 * rep.noise_floor(), rep.max_pit_error())
+
+    def test_vacuous_and_non_finite_tolerances_are_rejected(self):
+        rep = self._report(500)
+        for bad in (float("inf"), float("nan"), -1.0, 1.8, 5.0):
+            with self.assertRaises(ValueError):
+                rep.is_calibrated(tol=bad)
+
+    def test_adequate_samples_still_pass(self):
+        rep = self._report(500)
+        self.assertTrue(rep.is_calibrated())
+        self.assertTrue(rep.is_calibrated(tol=1.0))
+
+
 if __name__ == "__main__":
     unittest.main()
