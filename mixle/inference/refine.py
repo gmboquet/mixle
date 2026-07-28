@@ -20,7 +20,12 @@ from typing import Any
 
 import numpy as np
 
-from mixle.inference.bayesian_network import HeterogeneousBayesianNetwork, _LinearGaussianFactor, learn_bayesian_network
+from mixle.inference.bayesian_network import (
+    HeterogeneousBayesianNetwork,
+    _LinearGaussianFactor,
+    _MarginalFactor,
+    learn_bayesian_network,
+)
 from mixle.inference.explain import FaultReport, diagnose
 
 
@@ -29,6 +34,18 @@ def held_out_log_likelihood(model: Any, data: Sequence[tuple]) -> float:
     over held-out ``data`` -- the metric both paths below are compared on."""
     enc = model.dist_to_encoder().seq_encode(list(data))
     return float(np.sum(model.seq_log_density(enc)))
+
+
+def _is_valid_score(value: float) -> bool:
+    """Whether a held-out total is a score that can be compared at all.
+
+    NaN means scoring FAILED, not that the model is bad: every ordered comparison against NaN is
+    false, so ``after <= before`` is false and a candidate that could not be scored is reported as a
+    verified improvement. ``+inf`` is likewise not a real total. ``-inf`` is a genuine, meaningful
+    value here -- a model that assigns a held-out record zero probability -- so it stays comparable
+    and simply loses.
+    """
+    return not (np.isnan(value) or value == np.inf)
 
 
 def apply_add_edge_fix(
@@ -45,6 +62,12 @@ def apply_add_edge_fix(
     parent. Both orientations are fit and the better-fitting one on ``data`` is kept: field-index order
     (which field happens to have the smaller schema index) has no relationship to causal direction, so
     always taking ``parent, child = sorted(idx)`` risked silently adding the edge backwards.
+
+    "Add edge" means ADD. The candidate keeps the child's existing parents, its categorical encoding
+    and vector metadata, and is only built where doing so preserves the child's factor family; an
+    orientation that would instead rewrite the child's model, or that would close a cycle, is reported
+    as unsupported rather than performed under this function's name. ``None`` is returned when neither
+    orientation is a semantics-preserving edit.
     """
     if fault.suggested_fix != "add_edge":
         return None
@@ -52,16 +75,45 @@ def apply_add_edge_fix(
     if len(idx) != 2:
         return None
     cols = [[row[i] for row in data] for i in range(len(data[0]))]
+    by_child = {f.child: f for f in model.factors}
 
-    def _with_edge(parent: int, child: int) -> tuple[HeterogeneousBayesianNetwork, float]:
-        new_factor = _LinearGaussianFactor.fit(child, [parent], cols, {})
-        factors = [f for f in model.factors if f.child != child] + [new_factor]
-        net = HeterogeneousBayesianNetwork(factors)
-        return net, held_out_log_likelihood(net, data)
+    def _with_edge(parent: int, child: int) -> tuple[HeterogeneousBayesianNetwork, float] | None:
+        """The child's factor refitted with ``parent`` ADDED, or None if that is not expressible here."""
+        old = by_child.get(child)
+        if old is None:
+            return None
+        # Only the linear-Gaussian family (and a continuous root, which is the zero-parent case of it)
+        # can absorb another continuous parent without changing what the factor *is*. A GLM, a discrete
+        # conditional table, or a vector CLG child would each be silently replaced by a scalar
+        # linear-Gaussian -- a destructive model rewrite performed under the name "add edge".
+        if not isinstance(old, (_LinearGaussianFactor, _MarginalFactor)):
+            return None
+        existing = list(getattr(old, "parents", []))
+        if parent in existing or parent == child:
+            return None  # already present / self-loop: nothing to add
+        parents = existing + [parent]
+        discrete = dict(getattr(old, "discrete", {}) or {})
+        vec_dims = dict(getattr(old, "vec_dims", {}) or {})
+        try:
+            new_factor = _LinearGaussianFactor.fit(child, parents, cols, discrete, vec_dims=vec_dims)
+            net = HeterogeneousBayesianNetwork([f for f in model.factors if f.child != child] + [new_factor])
+            return net, held_out_log_likelihood(net, data)
+        except Exception:  # noqa: BLE001 -- an inexpressible candidate is rejected, not a crash
+            # Two distinct rejections land here, both meaning "this orientation is not a
+            # semantics-preserving edit", which is exactly what this function reports as None:
+            #   * The child is not actually a continuous field (a categorical root reaches
+            #     `np.asarray(col, dtype=float)` inside fit and raises on its string levels) -- turning
+            #     it into a scalar linear-Gaussian regression would be the destructive rewrite this
+            #     guard exists to prevent.
+            #   * The orientation closes a cycle, which the network constructor's topological sort
+            #     rejects. Catching it per candidate keeps one cyclic orientation from aborting the
+            #     search before the other, valid orientation has even been considered.
+            return None
 
-    net_ab, score_ab = _with_edge(idx[0], idx[1])
-    net_ba, score_ba = _with_edge(idx[1], idx[0])
-    return net_ab if score_ab >= score_ba else net_ba
+    candidates = [c for c in (_with_edge(idx[0], idx[1]), _with_edge(idx[1], idx[0])) if c is not None]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda c: c[1])[0]
 
 
 @dataclass
@@ -87,14 +139,27 @@ def directed_correction(
     score over the original model; costs 0 (unreached) if the fix isn't actionable or doesn't verify --
     a correction that does not improve held-out is a failed diagnosis, logged as such, never silently
     kept anyway.
+
+    A candidate is only "verified" against a comparison that actually happened. ``held_out`` must be
+    nonempty, and both totals must be comparable scores: a NaN (scoring failed) fails ``after <=
+    before`` just as a real improvement does, so without this check a model that could not be scored
+    at all is returned as a successful one-trial correction.
+
+    Raises:
+        ValueError: if ``held_out`` is empty -- there is nothing to verify against.
     """
+    held_out = list(held_out)
+    if not held_out:
+        raise ValueError("directed_correction needs a non-empty held-out set to verify a correction against")
     fault = diagnose(model, cases, background=background)
     fixed = apply_add_edge_fix(model, fault, data)
     before = held_out_log_likelihood(model, held_out)
     if fixed is None:
         return TrialsToTarget(n_trials=None, final_model=model, history=[before])
     after = held_out_log_likelihood(fixed, held_out)
-    if after <= before:
+    if not _is_valid_score(before) or not _is_valid_score(after) or after <= before:
+        # Unreached, keeping the original model: either the correction did not improve held-out, or
+        # one of the two scores is not a value an improvement can be established from.
         return TrialsToTarget(n_trials=None, final_model=model, history=[before, after])
     return TrialsToTarget(n_trials=1, final_model=fixed, history=[before, after])
 
