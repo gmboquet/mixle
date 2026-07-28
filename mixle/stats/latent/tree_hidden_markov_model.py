@@ -670,10 +670,13 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
             betas = np.zeros_like(pr_obs, dtype=np.float64)
             etas = np.zeros((len(xbi), num_states), dtype=np.float64)
 
-            ### Need to do upward and downward, then read back the gammas
+            #  Upward, then downward, then read back the gammas. The upward sweep alone leaves each
+            #  node conditioned on its own subtree only; the downward sweep is what makes these the
+            #  posteriors this method's docstring promises.
             numba_posteriors(
                 num_states, tz, txz, tp, tpz, tlnz, xp, xc, xl, xbi, xln, xlnl, pr_obs, p_level, a_mat, betas, etas
             )
+            numba_posteriors_downward(num_states, tz, txz, tp, tpz, xp, xc, xl, xbi, p_level, a_mat, betas, etas)
 
             #  Childless-root trees have no leaf/parent entries and never enter the kernel.
             single = np.flatnonzero(np.diff(tz) == 1)
@@ -743,6 +746,31 @@ class TreeHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution
 
                 # clamp the divisor (impossible node -> betas_sum 0 -> keep beta 0, avoid 0/0).
                 betas[p_nxt[level], :] /= np.where(betas_sum > 0.0, betas_sum, 1.0)
+
+            #  downward pass: fold each node's outside-subtree evidence into its beta, turning the
+            #  subtree-conditioned quantity into the smoothed marginal (see numba_posteriors' docstring
+            #  for the recursion). Runs shallowest-first so a parent is always a gamma before its
+            #  children read it, which makes the in-place rewrite of `betas` safe: every node is read
+            #  as a beta and written as a gamma exactly once. The root needs no correction.
+            for level in range(len(level_idx)):
+                lidx = level_idx[level]
+                xbis, xps, xcs = xbi[lidx], xp[lidx], xc[lidx]
+
+                eta_rows = etas[xbis, :]
+                # an impossible subtree leaves eta 0; contribute nothing rather than dividing by 0.
+                ratio = np.divide(betas[xps, :], eta_rows, out=np.zeros_like(eta_rows), where=eta_rows > 0.0)
+                acc = np.matmul(ratio, a_mat)
+
+                level_p = p_level[level + 1, :]
+                child = np.divide(
+                    betas[xcs, :], level_p, out=np.zeros_like(acc), where=np.broadcast_to(level_p > 0.0, acc.shape)
+                )
+                child *= acc
+
+                child_sum = np.sum(child, axis=1, keepdims=True)
+                # clamp the divisor (impossible node -> child_sum 0 -> keep the row 0, avoid 0/0).
+                child /= np.where(child_sum > 0.0, child_sum, 1.0)
+                betas[xcs, :] = child
 
             #  Return betas by observed sequence need tz
             return [betas[tz[i] : tz[i + 1], :] for i in range(len(tz) - 1)]
@@ -2541,7 +2569,13 @@ def numba_baum_welch(
 def numba_posteriors(
     num_states, tz, txz, tp, tpz, tlnz, xp, xc, xl, xbi, xln, xlnl, pr_obs, p_level, tr_mat, betas, etas
 ):
-    """Numba kernel: upward (beta) recursion writing normalized per-node state posteriors into betas."""
+    """Numba kernel: upward (beta) recursion writing subtree-conditioned state posteriors into betas.
+
+    Fills ``betas[u, j] = P(S_u = j | Y_subtree(u))`` and the child-to-parent messages
+    ``etas[e, i] = sum_j betas[c, j] * tr_mat[i, j] / p_level[level_c, j]``. These condition only on
+    a node's own subtree, so on their own they are the posterior for the root alone.
+    :func:`numba_posteriors_downward` folds in the evidence outside each subtree afterwards.
+    """
     for n in numba.prange(len(tz) - 1):
         #  Observed value slice (xs)
         s0, s1 = tz[n], tz[n + 1]
@@ -2626,6 +2660,70 @@ def numba_posteriors(
             if beta_sum > 0.0:
                 for i in range(num_states):
                     beta_mat[p, i] /= beta_sum
+
+
+@numba.njit(
+    "void(int32, int32[:], int32[:], int32[:], int32[:], int32[:], int32[:], int32[:], int32[:], "
+    "float64[:, :], float64[:,:], float64[:,:], float64[:,:])",
+    parallel=True,
+    cache=True,
+)
+def numba_posteriors_downward(num_states, tz, txz, tp, tpz, xp, xc, xl, xbi, p_level, tr_mat, betas, etas):
+    """Numba kernel: downward sweep turning subtree-conditioned betas into smoothed node marginals.
+
+    Kept as its own kernel rather than appended to :func:`numba_posteriors`: that function is a
+    large ``parallel=True`` body compiled eagerly from an explicit signature, and growing it far
+    enough to hold this sweep made numba's parallel analysis blow up at import time.
+    """
+    for n in numba.prange(len(tz) - 1):
+        s0, s1 = tz[n], tz[n + 1]
+        if s0 == s1:
+            continue
+
+        i0, i1 = txz[n], txz[n + 1]
+        if i0 == i1:
+            continue  # childless root: its beta is already its gamma
+
+        beta_mat = betas[s0:s1, :]
+        eta_mat = etas[i0:i1, :]
+
+        xps = xp[i0:i1]
+        xcs = xc[i0:i1]
+        xls = xl[i0:i1]
+        xbis = xbi[i0:i1]
+        tps = tp[tpz[n] : tpz[n + 1]]
+
+        #  Partitions run shallowest-first in tps (numba_posteriors walks them in reverse), so
+        #  iterating forward visits every parent before its children -- the order that makes the
+        #  in-place rewrite of beta_mat safe.
+        for nn in range(len(tps) - 1):
+            t0, t1 = tps[nn], tps[nn + 1]
+            p, level = xps[t0], xls[t0]
+
+            for k in range(t0, t1):
+                c = xcs[k]
+                eta_idx = xbis[k]
+
+                #  ratio_i = gamma(p)_i / eta(p, c)_i -- the parent's evidence with this child's own
+                #  upward message divided back out, so the child's subtree is not counted twice.
+                gamma_sum = 0.0
+                for j in range(num_states):
+                    acc = 0.0
+                    for i in range(num_states):
+                        eta_val = eta_mat[eta_idx, i]
+                        if eta_val > 0.0:
+                            acc += tr_mat[i, j] * beta_mat[p, i] / eta_val
+                    level_j = p_level[level, j]
+                    if level_j > 0.0:
+                        beta_mat[c, j] = beta_mat[c, j] / level_j * acc
+                    else:
+                        beta_mat[c, j] = 0.0
+                    gamma_sum += beta_mat[c, j]
+
+                # impossible node -> gamma_sum 0; leave the row at 0 rather than writing nan.
+                if gamma_sum > 0.0:
+                    for j in range(num_states):
+                        beta_mat[c, j] /= gamma_sum
 
 
 @numba.jit(
