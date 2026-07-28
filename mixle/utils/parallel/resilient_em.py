@@ -45,7 +45,7 @@ from typing import Any
 import numpy as np
 
 from mixle.utils.parallel.planner import EncodedDataHandle
-from mixle.utils.vector import require_initialized_observations, validate_initialization_probability
+from mixle.utils.vector import validate_initialization_probability, validated_initialized_observations
 
 __all__ = ["ResilientMPEncodedData", "checkpointed_fold"]
 
@@ -667,7 +667,7 @@ class ResilientMPEncodedData(EncodedDataHandle):
         self._restore_failed_workers(failed_assignments)
         payloads = _canonical_shard_payloads(groups, set(self._shard_raw))
         nobs, value = checkpointed_fold(estimator, payloads)
-        return estimator.estimate(require_initialized_observations(nobs), value)
+        return estimator.estimate(validated_initialized_observations(nobs), value)
 
     def pysp_seq_log_density_sum(self, estimate: Any) -> tuple[float, float]:
         """Total observation count and summed log density across all live workers."""

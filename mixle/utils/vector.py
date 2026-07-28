@@ -50,14 +50,31 @@ def validate_initialization_probability(p: object) -> float:
     return value
 
 
-def require_initialized_observations(nobs: object) -> float:
-    """Return a positive selected-observation count or raise typed impossible evidence."""
+def validated_initialized_observations(nobs: object) -> float:
+    """Return a finite non-negative selected-observation count, permitting zero.
+
+    Zero is a legitimate per-shard/per-restart outcome, not an error: random initialization can
+    hand a shard (or a component within one) no rows, and estimators already handle a zero count
+    through their prior/pseudo-count path. Use :func:`require_initialized_observations` instead for
+    a count aggregated across every shard, where zero really does mean no evidence anywhere.
+    """
     try:
         value = float(nobs)
     except (TypeError, ValueError) as exc:
         raise TypeError("initialized observation count must be a real scalar") from exc
     if not np.isfinite(value) or value < 0.0:
         raise ValueError("initialized observation count must be finite and non-negative")
+    return value
+
+
+def require_initialized_observations(nobs: object) -> float:
+    """Return a positive selected-observation count or raise typed impossible evidence.
+
+    Only appropriate where ``nobs`` is a total across all shards: a global zero means the
+    initialization saw no evidence at all. A single shard selecting nothing is ordinary and must go
+    through :func:`validated_initialized_observations`.
+    """
+    value = validated_initialized_observations(nobs)
     if value == 0.0:
         raise ImpossibleEvidenceError("initialization selected no observations")
     return value

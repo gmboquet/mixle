@@ -22,7 +22,7 @@ import numpy as np
 from mixle.engines import NUMPY_ENGINE, NumpyEngine, auto_precision, engine_with_precision, precision_name
 from mixle.stats import ResidentEncodedPayload, move_encoded_payload
 from mixle.stats.compute.pdist import DataSequenceEncoder
-from mixle.utils.vector import require_initialized_observations, validate_initialization_probability
+from mixle.utils.vector import validate_initialization_probability, validated_initialized_observations
 
 __all__ = [
     "CalibrationCatalog",
@@ -108,9 +108,7 @@ class DeviceSpec:
             raise ValueError("device memory_bytes must be a positive integer when supplied")
         for label, value in (("local_rank", self.local_rank), ("global_rank", self.global_rank)):
             if value is not None and (
-                isinstance(value, (bool, np.bool_))
-                or not isinstance(value, (int, np.integer))
-                or value < 0
+                isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value < 0
             ):
                 raise ValueError("%s must be a non-negative integer when supplied" % label)
 
@@ -520,9 +518,8 @@ class CalibrationRecord:
     @property
     def fully_successful(self) -> bool:
         """Return whether every declared device has successful timing evidence."""
-        return (
-            len(self.device_results) == len(self.resources.devices)
-            and all(result.success for result in self.device_results)
+        return len(self.device_results) == len(self.resources.devices) and all(
+            result.success for result in self.device_results
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -557,9 +554,7 @@ class CalibrationRecord:
             statistic_bytes=None if payload.get("statistic_bytes") is None else int(payload["statistic_bytes"]),
             timestamp=float(payload.get("timestamp", 0.0)),
             resources=Resources.from_dict(payload["resources"]),
-            device_results=tuple(
-                DeviceCalibration.from_dict(result) for result in payload.get("device_results", ())
-            ),
+            device_results=tuple(DeviceCalibration.from_dict(result) for result in payload.get("device_results", ())),
         )
 
 
@@ -1150,9 +1145,7 @@ def _torchrun_backend(data, *, estimator, model, encoder, sub_chunks, comm, root
     )
 
 
-def _lightning_backend(
-    data, *, estimator, model, encoder, sub_chunks, batch_size, shuffle, seed, num_workers, **_
-):
+def _lightning_backend(data, *, estimator, model, encoder, sub_chunks, batch_size, shuffle, seed, num_workers, **_):
     from mixle.utils.parallel.lightning_data import LightningEncodedData
 
     return LightningEncodedData(
@@ -1365,7 +1358,7 @@ class LocalEncodedData(EncodedDataHandle):
                 local_acc.seq_initialize(getattr(enc, "host_payload", enc), weights, rng_loc)
                 accumulator.combine(local_acc.value())
         _global_key_merge(accumulator)
-        return estimator.estimate(require_initialized_observations(nobs), accumulator.value())
+        return estimator.estimate(validated_initialized_observations(nobs), accumulator.value())
 
     def pysp_stream_accumulate(self, estimator: Any, model: Any) -> tuple[float, Any]:
         """Return globally tied batch sufficient statistics for streaming EM."""
@@ -1651,7 +1644,7 @@ class DaskEncodedData(EncodedDataHandle):
             for part, seed in zip(self._partitions, seeds)
         ]
         nobs, value = self._fold_stats(estimator, self.client.gather(futures))
-        return estimator.estimate(require_initialized_observations(nobs), value)
+        return estimator.estimate(validated_initialized_observations(nobs), value)
 
     def pysp_stream_accumulate(self, estimator: Any, model: Any) -> tuple[float, Any]:
         """Return dask-folded sufficient statistics for streaming EM."""
@@ -2303,9 +2296,7 @@ def _object_nbytes(x: Any, seen: set[int], path: str) -> int:
         slots.extend((declared,) if isinstance(declared, str) else declared)
     slots = [slot for slot in slots if slot not in ("__dict__", "__weakref__") and hasattr(x, slot)]
     if slots:
-        return sys.getsizeof(x) + sum(
-            _object_nbytes(getattr(x, slot), seen, "%s.%s" % (path, slot)) for slot in slots
-        )
+        return sys.getsizeof(x) + sum(_object_nbytes(getattr(x, slot), seen, "%s.%s" % (path, slot)) for slot in slots)
     if type(x).__module__ == "builtins":
         return sys.getsizeof(x)
     raise UnknownMemoryFootprintError(
