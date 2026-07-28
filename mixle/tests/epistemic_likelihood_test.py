@@ -19,6 +19,18 @@ class CallableLikelihoodTest(unittest.TestCase):
         strategy = CallableLikelihood(lambda h, o: 1.0, tier="executable")
         self.assertIsInstance(strategy, LikelihoodStrategy)
 
+    def test_out_of_domain_wrapped_output_is_rejected(self):
+        # MXR-080-1745: a wrapped function returning a negative/NaN/infinite "likelihood" used to be
+        # passed straight through, where it moved belief mass and produced out-of-range surprise.
+        for bad in (-1.0, -2.0, float("nan"), float("inf")):
+            strategy = CallableLikelihood(lambda h, o, v=bad: v, tier="executable")
+            with self.subTest(value=bad), self.assertRaises(ValueError):
+                strategy(Hypothesis("h", None), "o")
+
+    def test_zero_is_a_legitimate_wrapped_likelihood(self):
+        strategy = CallableLikelihood(lambda h, o: 0.0, tier="executable")
+        self.assertEqual(strategy(Hypothesis("h", None), "o"), 0.0)
+
     def test_unknown_tier_raises(self):
         with self.assertRaises(ValueError):
             CallableLikelihood(lambda h, o: 1.0, tier="self_graded")

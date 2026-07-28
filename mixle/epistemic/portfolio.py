@@ -38,12 +38,54 @@ def _as_rng(rng: Any) -> np.random.RandomState:
     return rng if isinstance(rng, np.random.RandomState) else np.random.RandomState(rng)
 
 
+def _checked_likelihood(value: Any, *, source: str) -> float:
+    """Validate one likelihood before it is allowed to move belief mass: finite and ``>= 0``.
+
+    A likelihood is a non-negative density/probability; nothing else has a Bayesian meaning here.
+    Exactly ``0.0`` IS legitimate and deliberately allowed -- it is the "this hypothesis assigns the
+    observation no support" case :meth:`HypothesisPortfolio.reweight` documents an explicit
+    all-mass-to-``w_open`` outcome for. A *negative* value is not: it makes the unnormalized total
+    smaller, so a portfolio fed two likelihoods of ``-1`` used to trip that same ``total <= 0`` branch
+    and report the honest "nothing explains this" outcome for what was really invalid evidence, and it
+    drives :meth:`HypothesisPortfolio.surprise_score`'s ``baseline / (baseline + weighted_lik)`` to
+    ``inf`` (at ``-1``) or negative (below ``-1``) despite that method promising ``[0, 1)``. NaN and
+    ``inf`` are equally meaningless and propagate silently. Invalid evidence must fail closed rather
+    than be reinterpreted as a valid-but-uninformative observation.
+    """
+    lik = float(value)
+    if not np.isfinite(lik) or lik < 0.0:
+        raise ValueError(
+            f"{source} returned {lik!r}; a likelihood must be a finite, non-negative number "
+            "(0.0 is allowed and means 'no support', but negative/NaN/inf evidence is refused rather "
+            "than silently reinterpreted)"
+        )
+    return lik
+
+
 class HypothesisPortfolio:
-    """A weighted, typed hypothesis set with an explicit reserved open-world mass ``w_open``."""
+    """A weighted, typed hypothesis set with an explicit reserved open-world mass ``w_open``.
+
+    ``weights`` is a private *copy* of what the constructor was given, exposed read-only: the
+    constructor's invariant checks run once, and a writable or caller-aliased array would let them be
+    undone immediately afterwards. Build a new portfolio (or use :meth:`reweight`/:meth:`prune`/
+    :meth:`resample`/:meth:`resurrect`, which all return one) to change weights; ``weights.copy()``
+    gives a writable array when a caller genuinely wants scratch space.
+    """
 
     def __init__(self, hypotheses: Sequence[Hypothesis], weights: np.ndarray, w_open: float = 0.0) -> None:
         self.hypotheses: tuple[Hypothesis, ...] = tuple(hypotheses)
-        self.weights: np.ndarray = np.asarray(weights, dtype=np.float64)
+        # `np.array(..., copy=True)` + `writeable = False`, not `np.asarray`: every check below runs
+        # once, at construction, and the class's whole contract is that a constructed portfolio
+        # SATISFIES them. `asarray` left the caller's own array aliased and the result writable, so
+        # both `caller_array[:] = ...` and `portfolio.weights[:] = ...` silently rewrote a validated
+        # belief state afterwards -- a [0.5, 0.5] portfolio became [2.0, -1.0] with w_open still 0,
+        # violating non-negativity and the sum-to-1 invariant with no check ever re-run. Copying
+        # decouples the caller's array; freezing makes the invariant hold for the object's lifetime
+        # rather than only for the instant it was checked. Every mutating method already rebuilds
+        # weights via `.copy()`/`np.zeros`/`np.append` and returns a NEW portfolio, so nothing
+        # internal writes through this array.
+        self.weights: np.ndarray = np.array(weights, dtype=np.float64)
+        self.weights.flags.writeable = False
         self.w_open: float = float(w_open)
         if self.weights.shape != (len(self.hypotheses),):
             raise ValueError(f"weights must have shape ({len(self.hypotheses)},), got {self.weights.shape}")
@@ -100,13 +142,23 @@ class HypothesisPortfolio:
         schema" signal the program plan's surprise trigger names. If every likelihood (including the
         open-world baseline) is zero, all mass moves to ``w_open`` -- the honest "nothing, including
         the reserved slot, explains this" outcome, rather than raising or producing NaNs.
+
+        Every likelihood (including the open-world one) must be finite and non-negative -- see
+        :func:`_checked_likelihood`. That all-zero branch is reserved for genuinely unsupported
+        observations; invalid evidence raises :class:`ValueError` instead of being routed through it.
         """
         active = self.active_mask()
         liks = np.zeros(len(self.hypotheses), dtype=np.float64)
         for i, h in enumerate(self.hypotheses):
             if h.active:
-                liks[i] = float(likelihood_fn(h, observation))
-        open_lik = float(open_world_likelihood(observation)) if open_world_likelihood is not None else 1.0
+                liks[i] = _checked_likelihood(
+                    likelihood_fn(h, observation), source=f"likelihood_fn for hypothesis {h.id!r}"
+                )
+        open_lik = (
+            _checked_likelihood(open_world_likelihood(observation), source="open_world_likelihood")
+            if open_world_likelihood is not None
+            else 1.0
+        )
         new_active_unnorm = self.weights[active] * liks[active] if active.any() else np.array([])
         new_open_unnorm = self.w_open * open_lik
         total = float(new_active_unnorm.sum()) + new_open_unnorm
@@ -191,6 +243,12 @@ class HypothesisPortfolio:
         observation well, close to 1 when every active hypothesis assigns it near-zero likelihood
         (program plan §3.5's "improbable under every live hypothesis" surprise condition). A heuristic
         scalar, not a calibrated probability -- callers threshold it, this method just computes it.
+
+        The ``[0, 1)`` range is only a range if every likelihood is finite and non-negative, which
+        :func:`_checked_likelihood` enforces here: ``weighted_lik`` of ``-1`` makes the denominator
+        zero and the score ``inf``, anything below ``-1`` makes it negative, NaN propagates, and ``inf``
+        collapses it to exactly ``0``. Each of those is a number outside the advertised range that a
+        caller's threshold test would nonetheless silently accept.
         """
         active = [(w, h) for w, h in zip(self.weights, self.hypotheses) if h.active]
         if not active:
@@ -198,7 +256,13 @@ class HypothesisPortfolio:
         total_w = sum(w for w, _ in active)
         if total_w <= 0:
             return 1.0
-        weighted_lik = sum(w * float(likelihood_fn(h, observation)) for w, h in active) / total_w
+        weighted_lik = (
+            sum(
+                w * _checked_likelihood(likelihood_fn(h, observation), source=f"likelihood_fn for hypothesis {h.id!r}")
+                for w, h in active
+            )
+            / total_w
+        )
         baseline = 1.0
         return float(baseline / (baseline + weighted_lik))
 

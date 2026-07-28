@@ -83,7 +83,16 @@ class DiscrepancyLikelihood:
 
 
 class CallableLikelihood:
-    """Wrap any plain ``fn(hypothesis, observation) -> float`` as a :class:`LikelihoodStrategy`."""
+    """Wrap any plain ``fn(hypothesis, observation) -> float`` as a :class:`LikelihoodStrategy`.
+
+    ``fn`` is arbitrary caller code, so its return value is checked here before it is presented as a
+    likelihood: finite and non-negative, the same contract
+    :meth:`DiscrepancyLikelihood.__call__` already enforces on its own output. ``0.0`` is legitimate
+    ("this hypothesis gives the observation no support"); a negative, NaN, or infinite value is not,
+    and downstream it does not fail loudly -- it moves belief mass and produces out-of-range surprise
+    scores that look like ordinary numbers. This wrapper is the boundary where the mistake is still
+    attributable to the function that made it.
+    """
 
     def __init__(self, fn: Callable[[Hypothesis, Any], float], *, tier: str) -> None:
         _check_tier(tier)
@@ -91,7 +100,14 @@ class CallableLikelihood:
         self.tier = tier
 
     def __call__(self, hypothesis: Hypothesis, observation: Any) -> float:
-        return float(self.fn(hypothesis, observation))
+        likelihood = float(self.fn(hypothesis, observation))
+        if not math.isfinite(likelihood) or likelihood < 0:
+            raise ValueError(
+                f"CallableLikelihood's wrapped {getattr(self.fn, '__name__', type(self.fn).__name__)!r} returned "
+                f"{likelihood!r} for hypothesis {hypothesis.id!r}; a likelihood must be finite and non-negative "
+                "(0.0 is allowed and means 'no support')."
+            )
+        return likelihood
 
 
 __all__ = ["LikelihoodStrategy", "DiscrepancyLikelihood", "CallableLikelihood"]
