@@ -185,9 +185,30 @@ class ConstraintSpec:
             raise ValueError("constraint allowed_values must be unique")
 
     def accepts(self, value: Any) -> bool:
-        values = value if isinstance(value, (tuple, list)) else (value,)
+        """Whether ``value`` (a scalar, or a non-empty vector of scalars) satisfies this constraint.
+
+        Admissibility is decided by explicit checks, never by IEEE comparison behavior: NaN used to be
+        accepted by a bounded constraint because BOTH ordered comparisons against it are false, and an
+        empty list was accepted because the validation loop ran zero times -- a vacuous container
+        certified as satisfying every bound. A bounded constraint also has no ordering to apply to a
+        Boolean or a non-numeric value (``bool`` only compares because it subclasses ``int``), so those
+        are rejected rather than silently ranked.
+        """
+        if isinstance(value, (tuple, list)):
+            if not value:
+                return False  # a vacuous container satisfies nothing; it carries no value to check
+            values: tuple[Any, ...] = tuple(value)
+        else:
+            values = (value,)
+        bounded = self.lower is not None or self.upper is not None
         for item in values:
             if self.allowed_values and item not in self.allowed_values:
+                return False
+            if not bounded:
+                continue
+            if isinstance(item, bool) or not isinstance(item, (int, float)):
+                return False
+            if not math.isfinite(item):
                 return False
             if self.lower is not None and (item < self.lower if self.lower_inclusive else item <= self.lower):
                 return False
