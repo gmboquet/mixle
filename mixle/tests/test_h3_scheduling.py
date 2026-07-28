@@ -103,3 +103,33 @@ def test_schedule_activities_can_leave_unprofitable_blocks_unmined():
 
     np.testing.assert_array_equal(period, [-1, -1, -1, -1, -1, -1])
     assert npv == 0.0
+
+
+def test_schedule_activities_never_silently_switches_to_the_myopic_heuristic():
+    # MXR-080-1681: above 400 item-period binaries schedule_activities switched, on its own, from the
+    # declared maximum-NPV problem to a myopic rolling horizon. A 50-item, 10-period instance (500
+    # binaries) with a 10-item chain -- nine predecessors worth -1, terminal item worth 100 -- came
+    # back with no schedule and NPV 0, because the first window could not see the terminal reward.
+    n_items, n_periods = 50, 10
+    value = np.zeros(n_items)
+    value[:9] = -1.0
+    value[9] = 100.0
+    precedence = [(i + 1, i) for i in range(9)]
+    capacity = np.ones(n_periods)
+    assert n_items * n_periods > 400  # the size that used to trigger the switch
+
+    npv, period = schedule_activities(value, precedence, capacity, n_periods)
+    assert npv == 91.0
+    assert period[:10].tolist() == list(range(10))  # the whole profitable chain is taken
+
+    # the heuristic is still available, but only by name, and it is the one that loses the chain
+    npv_rolling, period_rolling = schedule_activities(value, precedence, capacity, n_periods, mode="rolling")
+    assert npv_rolling < npv
+    assert period_rolling[9] == -1
+
+    try:
+        schedule_activities(value, precedence, capacity, n_periods, mode="approximate")
+    except ValueError as exc:
+        assert "mode" in str(exc)
+    else:
+        raise AssertionError("expected schedule_activities to reject an unknown mode")

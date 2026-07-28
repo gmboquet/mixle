@@ -177,9 +177,9 @@ def _solve_schedule_window(
     return float(npv), period
 
 
-# Above this many (item x period) binary variables, solve a rolling horizon instead of one MILP:
-# branch-and-bound over the full horizon is exact but its worst case is exponential in n_vars, so
-# large instances are chunked into windows that are each solved exactly and then committed.
+# Window size for the explicitly-approximate mode="rolling" horizon, in (item x period) binaries:
+# each window is a MILP solved exactly and then committed. This is a performance knob for a mode the
+# caller has to ask for by name -- it must never decide, on its own, which problem gets solved.
 _DIRECT_MILP_LIMIT = 400
 
 
@@ -190,6 +190,7 @@ def schedule_activities(
     n_periods: int,
     *,
     discount: float = 0.0,
+    mode: str = "exact",
 ) -> tuple[float, np.ndarray]:
     """Time-phased schedule maximizing discounted value under precedence and per-period capacity.
 
@@ -201,9 +202,21 @@ def schedule_activities(
     every period boundary (cumulative scheduling of ``pred`` can never trail ``b``'s), each item is
     scheduled at most once (never, if it is never worth it), and the objective discounts each
     period's value by ``(1 + discount) ** t``. Solved exactly by
-    :func:`mixle.relations.branch_and_bound_milp`; instances large enough to make the full horizon's
-    MILP impractical are solved as a rolling horizon -- windows of periods solved exactly in
-    sequence, each committing its items before the next window is built.
+    :func:`mixle.relations.branch_and_bound_milp`.
+
+    ``mode`` selects the semantics, and only the caller may change them:
+
+    * ``"exact"`` (default) always solves the declared maximum-NPV MILP over the full horizon.
+    * ``"rolling"`` is an explicitly approximate myopic rolling horizon -- windows of periods solved
+      exactly in sequence, each committing its items before the next window is built. It carries **no
+      optimality bound**: because a window cannot see reward that only arrives after it, the
+      heuristic can refuse an entire profitable dependency chain. On a 50-item, 10-period instance
+      with unit capacity and a 10-item chain (nine predecessors worth -1, terminal item worth 100) it
+      returned no schedule and NPV 0, where the full MILP takes the chain in periods 0-9 for NPV 91.
+
+    Above ``_DIRECT_MILP_LIMIT`` item-period binaries this used to switch to ``"rolling"`` on its own,
+    so an ordinary optimum-shaped result silently answered a different problem than the one declared.
+    Large instances now stay exact unless the caller opts into the approximation.
 
     Returns ``(npv, period)`` where ``period[b]`` is the 0-indexed period item ``b`` is scheduled in,
     or ``-1`` if it is never scheduled.
@@ -212,13 +225,15 @@ def schedule_activities(
     capacity, but nothing here is block- or mine-specific: it is a general precedence-constrained,
     capacity-limited scheduling MILP.
     """
+    if mode not in ("exact", "rolling"):
+        raise ValueError(f"mode must be 'exact' or 'rolling', got {mode!r}")
     value = np.asarray(value, dtype=np.float64)
     capacity = np.asarray(capacity, dtype=np.float64)
     n = value.size
     if capacity.size != n_periods:
         raise ValueError(f"capacity must have length n_periods={n_periods}, got {capacity.size}")
 
-    if n * n_periods <= _DIRECT_MILP_LIMIT:
+    if mode == "exact":
         return _solve_schedule_window(value, precedence, capacity, n_periods, discount, period_offset=0)
 
     # Rolling horizon: repeatedly solve the exact MILP over every still-unscheduled item for a small
