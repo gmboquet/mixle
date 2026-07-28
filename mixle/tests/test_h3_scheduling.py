@@ -133,3 +133,75 @@ def test_schedule_activities_never_silently_switches_to_the_myopic_heuristic():
         assert "mode" in str(exc)
     else:
         raise AssertionError("expected schedule_activities to reject an unknown mode")
+
+
+def test_closure_survives_finite_but_huge_values():
+    # MXR-080-1732: big-M was the plain float64 sum of magnitudes, which overflowed to inf on
+    # perfectly finite input. max_flow's cap - residual reconstruction then went to NaN, min_cut's
+    # reachability BFS dropped the precedence arc (NaN > tol is false), and the returned mask took
+    # the dependent without its predecessor -- a direct violation of the closure the function
+    # exists to guarantee.
+    mask = maximum_weight_closure([-1e308, 1.5e308], [(1, 0)])
+    np.testing.assert_array_equal(mask, [True, True])
+
+    # ... and the loss-making chain is still correctly refused at the same scale
+    np.testing.assert_array_equal(maximum_weight_closure([-1e308, 1.0], [(1, 0)]), [False, False])
+
+    # the ordinary-scale answer is unchanged
+    np.testing.assert_array_equal(maximum_weight_closure([-1.0, 10.0], [(1, 0)]), [True, True])
+
+
+def test_closure_rejects_non_finite_values():
+    for bad in (np.nan, np.inf, -np.inf):
+        try:
+            maximum_weight_closure([bad, 1.0], [(1, 0)])
+        except ValueError:
+            continue
+        raise AssertionError(f"expected maximum_weight_closure to reject value {bad}")
+
+
+def test_precedence_permits_a_shared_period_and_says_so():
+    # MXR-080-1730: the cumulative constraint is non-strict at each boundary, so a dependent and its
+    # predecessor can share a period. That is the intended same-boundary-closure reading; the
+    # contract must state it rather than promising "first"/"before" and delivering "never later".
+    npv, period = schedule_activities([1.0, 10.0], [(1, 0)], [2], 1)
+    assert npv == 11.0
+    np.testing.assert_array_equal(period, [0, 0])
+    assert "never later than" in (schedule_activities.__doc__ or "")
+
+    # a strict hand-off is expressed by the capacity, not read into the precedence relation
+    npv_strict, period_strict = schedule_activities([1.0, 10.0], [(1, 0)], [1, 1], 2)
+    assert npv_strict == 11.0
+    np.testing.assert_array_equal(period_strict, [0, 1])
+
+
+def test_cyclic_precedence_forces_a_shared_period():
+    # Mutual "never later than" constraints are satisfiable: they pin the items to one period.
+    npv, period = schedule_activities([1.0, 10.0], [(1, 0), (0, 1)], [2], 1)
+    assert npv == 11.0
+    np.testing.assert_array_equal(period, [0, 0])
+
+
+def test_schedule_activities_validates_calendar_capacity_and_discount():
+    # MXR-080-1731: none of these domains was checked. capacity=-1 made every schedule infeasible
+    # and then reported that the always-feasible empty schedule was infeasible; discount=-1 divided
+    # by zero into a NaN objective; +inf silently zeroed all future value; n_periods=0 surfaced as a
+    # shape complaint from scipy.
+    bad_calls = [
+        dict(value=[1.0], precedence=[], capacity=[-1.0], n_periods=1),
+        dict(value=[1.0], precedence=[], capacity=[np.inf], n_periods=1),
+        dict(value=[1.0], precedence=[], capacity=[np.nan], n_periods=1),
+        dict(value=[np.nan], precedence=[], capacity=[1.0], n_periods=1),
+        dict(value=[1.0], precedence=[], capacity=[], n_periods=0),
+        dict(value=[1.0], precedence=[], capacity=[1.0], n_periods=1.5),
+        dict(value=[1.0], precedence=[], capacity=[1.0], n_periods=True),
+        dict(value=[1.0, 2.0], precedence=[], capacity=[1.0, 1.0], n_periods=2, discount=-1.0),
+        dict(value=[1.0, 2.0], precedence=[], capacity=[1.0, 1.0], n_periods=2, discount=np.nan),
+        dict(value=[1.0, 2.0], precedence=[], capacity=[1.0, 1.0], n_periods=2, discount=np.inf),
+    ]
+    for call in bad_calls:
+        try:
+            schedule_activities(**call)
+        except ValueError:
+            continue
+        raise AssertionError(f"expected schedule_activities to reject {call}")
