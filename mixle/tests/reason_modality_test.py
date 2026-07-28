@@ -89,6 +89,55 @@ class HeterogeneousModalityGraphTest:
         assert off_model < scores["measurement"]
 
 
+class ModalityGraphEvidenceContractTest:
+    """MXR-080-1658: a graph may not silently destroy a belief nor silently drop supplied evidence."""
+
+    def _view(self, name, mu):
+        return ModalityView(name=name, dist=GaussianDistribution(mu, 1.0), symmetry_group="none")
+
+    def test_duplicate_modality_name_is_rejected_instead_of_overwriting(self):
+        graph = ModalityGraph().add(self._view("sensor", 0.0))
+        first = graph["sensor"].score(0.0)
+        try:
+            graph.add(self._view("sensor", 100.0))
+        except ValueError as exc:
+            assert "already in this graph" in str(exc)
+        else:
+            raise AssertionError("a second view under an existing name must not silently replace the first")
+        assert graph["sensor"].score(0.0) == first  # the original belief survived the rejected add
+
+    def test_explicit_replace_substitutes_the_view(self):
+        graph = ModalityGraph().add(self._view("sensor", 0.0))
+        graph.add(self._view("sensor", 100.0), replace=True)
+        assert graph["sensor"].score(100.0) > graph["sensor"].score(0.0)
+
+    def test_empty_modality_name_is_rejected(self):
+        for bad in ("", "   ", None):
+            try:
+                ModalityGraph().add(ModalityView(name=bad, dist=GaussianDistribution(0.0, 1.0)))
+            except ValueError:
+                continue
+            raise AssertionError(f"modality name {bad!r} must be rejected")
+
+    def test_unknown_observation_raises_instead_of_being_filtered_away(self):
+        graph = ModalityGraph().add(self._view("sensor", 0.0))
+        try:
+            graph.joint_score({"missing_sensor": 1.0})
+        except KeyError as exc:
+            assert "missing_sensor" in str(exc)
+        else:
+            raise AssertionError("an absent modality must not score as an empty result")
+
+    def test_mixed_query_does_not_silently_drop_the_unknown_half(self):
+        graph = ModalityGraph().add(self._view("sensor", 0.0))
+        try:
+            graph.joint_score({"sensor": 0.0, "missing_sensor": 1.0})
+        except KeyError as exc:
+            assert "missing_sensor" in str(exc)
+        else:
+            raise AssertionError("a partially-placeable query must not be answered from the surviving half")
+
+
 class StructuredBeliefVsBottleneckControlTest:
     """The Measurement Rules' shared-vector-bottleneck control, run for real and measured, not asserted."""
 

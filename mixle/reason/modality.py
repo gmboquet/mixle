@@ -59,9 +59,24 @@ class ModalityGraph:
 
     views: dict[str, ModalityView] = field(default_factory=dict)
 
-    def add(self, view: ModalityView) -> ModalityGraph:
-        """Add a modality view and return the graph for chaining."""
-        self.views[view.name] = view
+    def add(self, view: ModalityView, *, replace: bool = False) -> ModalityGraph:
+        """Add a modality view and return the graph for chaining.
+
+        A modality identity is unique inside one graph. Assigning by name alone silently destroyed
+        the previous view -- its distribution AND its notes -- so a second ``"sensor"`` belief
+        changed every later joint score with no trace. A duplicate name is rejected unless
+        ``replace=True`` makes the substitution explicit; the replaced view is returned to the
+        caller's own bookkeeping through :meth:`__getitem__` before it is dropped.
+        """
+        name = view.name
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"a modality view needs a non-empty string name, got {name!r}")
+        if name in self.views and not replace:
+            raise ValueError(
+                f"modality {name!r} is already in this graph; pass replace=True to substitute it "
+                "deliberately (silently overwriting discards the previous belief and its notes)"
+            )
+        self.views[name] = view
         return self
 
     def __getitem__(self, name: str) -> ModalityView:
@@ -75,5 +90,19 @@ class ModalityGraph:
         return sorted(self.views)
 
     def joint_score(self, observations: dict[str, Any]) -> dict[str, float]:
-        """Return per-modality ``log p(x)`` for named observations."""
-        return {name: self.views[name].score(x) for name, x in observations.items() if name in self.views}
+        """Return per-modality ``log p(x)`` for named observations.
+
+        Every observation must name a modality this graph actually holds. Filtering unknown names
+        away meant a query mentioning ``"missing_sensor"`` was answered from a *different* evidence
+        set than the caller supplied -- silently, and indistinguishably from having scored it.
+
+        Raises:
+            KeyError: if any observation names a modality that is not in the graph.
+        """
+        missing = sorted(name for name in observations if name not in self.views)
+        if missing:
+            raise KeyError(
+                f"no modality named {missing} in this graph; known modalities: {self.modalities()}. "
+                "Cross-modal scoring never drops evidence it cannot place."
+            )
+        return {name: self.views[name].score(x) for name, x in observations.items()}
