@@ -68,6 +68,32 @@ class TorchGradientTestCase(unittest.TestCase):
         self.assertAlmostEqual(val, -0.5 * ((1 - 3) ** 2 + (1 - 4) ** 2), places=10)
         np.testing.assert_allclose(grad, -(x - np.array([3.0, 4.0])), atol=1e-10)
 
+    def test_value_and_gradient_evaluate_the_target_exactly_once(self):
+        # MXR-080-1632: the contract is one forward/backward pass. A target that advances its own
+        # state per call must not be evaluated twice -- the reported value and gradient would then
+        # come from two different objectives.
+        import torch
+
+        calls = {"n": 0}
+
+        def log_target_t(t):
+            calls["n"] += 1
+            return -float(calls["n"]) * torch.sum(t**2)
+
+        vg = value_and_torch_gradient(log_target_t)
+        val, grad = vg(np.array([1.0, 1.0]))
+        self.assertEqual(calls["n"], 1)
+        # value == -c * 2 and grad == -2c * x for the SAME c; consistency check independent of c.
+        c = -val / 2.0
+        np.testing.assert_allclose(grad, -2.0 * c * np.array([1.0, 1.0]), atol=1e-10)
+
+    def test_value_and_gradient_scalar_path_agrees(self):
+        vg = value_and_torch_gradient(lambda t: -0.5 * (t - 2.0) ** 2)
+        val, grad = vg(5.0)
+        self.assertAlmostEqual(val, -4.5, places=10)
+        self.assertIsInstance(grad, float)
+        self.assertAlmostEqual(grad, -3.0, places=10)
+
     def test_nuts_samples_gaussian_with_exact_gradient(self):
         log_target_np = lambda x: -0.5 * float(np.asarray(x).reshape(-1)[0]) ** 2
         grad = torch_gradient(lambda t: -0.5 * t**2)
