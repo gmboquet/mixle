@@ -123,12 +123,26 @@ def priced_liabilities(
     nets out of revenue), and the scalar roll-ups ``"remediation_total"``/``"health_total"``/
     ``"carbon_total"``/``"grand_total"`` for reporting.
 
+    Every ``plan`` field is validated BEFORE it is handed to a cost callable (MXR-080-1573). The
+    callables are opaque user code: a model that ignores its argument, saturates, or returns a constant
+    turns a NaN grade or an infinite exposure into a perfectly ordinary finite cost, so the invalid
+    source evidence disappears and the resulting liability record carries no trace that the plan it was
+    priced from was malformed. ``grade``/``exposure`` are checked for finiteness only, not sign -- both
+    are declared as arbitrary geology/complexity and exposure proxies, so a negative value is a
+    legitimate reading; it is only the *prices* that carry the non-negativity convention.
+
+    Every assembled output is likewise validated after the fact: three individually finite per-block
+    costs near the float64 ceiling can overflow ``total``, and finite per-block totals can overflow
+    ``grand_total``'s reduction, publishing an infinite liability from a record that claims to be
+    validated (MXR-080-1573).
+
     Raises:
         ValueError: if ``carbon_price``, ``plan``'s ``emissions``, or either cost callable's return value
             is non-finite or negative -- a negative liability would net out of revenue as a profit
-            increase rather than a cost, and a NaN would propagate unguarded into the objective -- or if
-            any of ``plan``'s ``grade``/``exposure``/``emissions`` or a cost callable's return value has
-            the wrong shape.
+            increase rather than a cost, and a NaN would propagate unguarded into the objective -- if
+            ``plan``'s ``grade``/``exposure`` is non-finite, if any of ``plan``'s
+            ``grade``/``exposure``/``emissions`` or a cost callable's return value has the wrong shape,
+            or if the netted per-block ``total`` or any scalar roll-up is not representable in float64.
     """
     carbon_price = float(carbon_price)
     _require_finite_nonnegative(carbon_price, "priced_liabilities: carbon_price")
@@ -143,11 +157,16 @@ def priced_liabilities(
             "priced_liabilities: plan's grade/exposure/emissions must all be length-n_blocks 1-D arrays; "
             f"got grade {grade.shape}, exposure {exposure.shape}, emissions {emissions.shape}"
         )
+    # validated BEFORE the opaque callables see them, so invalid evidence cannot be laundered into a
+    # clean finite cost by a model that ignores or saturates its argument (MXR-080-1573)
+    _require_finite(grade, "priced_liabilities: plan's grade")
+    _require_finite(exposure, "priced_liabilities: plan's exposure")
     _require_finite_nonnegative(emissions, "priced_liabilities: plan's emissions")
 
     remediation = np.asarray(remediation_cost(grade), dtype=np.float64)
     health = np.asarray(health_cost(exposure), dtype=np.float64)
-    carbon = carbon_price * emissions
+    with np.errstate(over="ignore", invalid="ignore"):
+        carbon = carbon_price * emissions
 
     for name, arr in (("remediation_cost(grade)", remediation), ("health_cost(exposure)", health)):
         if arr.shape != (n_blocks,):
@@ -155,17 +174,25 @@ def priced_liabilities(
 
     remediation = _require_finite_nonnegative(remediation, "priced_liabilities: remediation_cost(grade)")
     health = _require_finite_nonnegative(health, "priced_liabilities: health_cost(exposure)")
+    carbon = _require_finite_nonnegative(carbon, "priced_liabilities: carbon_price * emissions")
 
-    total = remediation + health + carbon
+    with np.errstate(over="ignore", invalid="ignore"):
+        total = remediation + health + carbon
+        total = _require_finite_nonnegative(total, "priced_liabilities: total")
+        roll_ups = {
+            "remediation_total": float(remediation.sum()),
+            "health_total": float(health.sum()),
+            "carbon_total": float(carbon.sum()),
+            "grand_total": float(total.sum()),
+        }
+    for name, value in roll_ups.items():
+        _require_finite_nonnegative(value, f"priced_liabilities: {name}")
     return {
         "remediation": remediation,
         "health": health,
         "carbon": carbon,
         "total": total,
-        "remediation_total": float(remediation.sum()),
-        "health_total": float(health.sum()),
-        "carbon_total": float(carbon.sum()),
-        "grand_total": float(total.sum()),
+        **roll_ups,
     }
 
 
