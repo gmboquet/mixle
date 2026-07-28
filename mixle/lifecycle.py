@@ -25,14 +25,47 @@ and :func:`mixle.describe`. It adds no new inference -- only one place to stand.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import itertools
 import json
+import os
 import pickle
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+
+def _sha256_file(path: Path) -> str:
+    """The SHA-256 of a file's bytes, streamed, as ``sha256:<hex>``."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _write_text_atomically(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` via a private temp file in the same directory, then rename.
+
+    The manifest is what makes an artifact directory readable at all -- it names the model file,
+    its format and its digest -- so it is written last and promoted in one step. A crash partway
+    through leaves the previous manifest (or none), never a truncated one that resolves to the
+    wrong file.
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise
 
 
 def saddle_suspect(fitted: Any, data: Any, *, sample: int = 200, tol: float = 0.02) -> bool:
@@ -107,9 +140,7 @@ class Model:
         if not rows:
             raise ValueError("fit requires at least one training record")
         if restarts not in ("auto", None) and (
-            isinstance(restarts, (bool, np.bool_))
-            or not isinstance(restarts, (int, np.integer))
-            or int(restarts) < 1
+            isinstance(restarts, (bool, np.bool_)) or not isinstance(restarts, (int, np.integer)) or int(restarts) < 1
         ):
             raise ValueError(f"restarts must be 'auto', None, or a positive integer, got {restarts!r}")
 
@@ -293,35 +324,82 @@ class Model:
         serialization registry cannot represent (e.g. a torch-backed leaf) falls back to a pickle
         (``model.pkl``). The ``format`` recorded in the manifest tells :meth:`Model.load` which to read, so
         the common pure-model path never needs an unsafe pickle load.
+
+        **This is a model export, not an evidence export.** The artifact carries the fitted
+        distribution, ``notes``, and the fit record (``n``/``when``/``artifact_hash``) -- and nothing
+        else. The :class:`~mixle.inference.EstimationCertificate` on ``certificate``, the
+        :class:`~mixle.inference.CalibrationReport` on ``calibration`` and the candidate ``frontier``
+        are *not* serialized and do not survive a round trip; a deployed model comes back able to
+        predict but unable to show how it was chosen or how well it was calibrated. Whatever evidence
+        was present at deploy time is listed in the manifest's ``evidence_not_exported`` and reported
+        as a note on the loaded model, so the loss is visible rather than silent. Keep those receipts
+        alongside the artifact yourself if a consumer needs to judge the model, not just run it.
+
+        The model file is written first, then hashed, and the manifest naming it (``model_file``) and
+        binding its ``model_sha256`` is promoted atomically last. A redeployment removes the previous
+        generation's other-format model file, so an artifact directory never holds a stale
+        ``model.pkl`` next to a fresh ``model.json``, and :meth:`load` re-checks the digest before
+        deserializing anything.
         """
         d = self._require_fitted()
         out = Path(path)
         out.mkdir(parents=True, exist_ok=True)
         fmt = self._write_model(out, d)
+        model_file = "model.json" if fmt == "json" else "model.pkl"
+        # A redeploy that switches format used to leave the old generation's file in place, so the
+        # directory held two models and only the manifest said which one was real -- and a manifest
+        # lost or rolled back to a mixed state resolved to the stale one.
+        stale = out / ("model.pkl" if fmt == "json" else "model.json")
+        if stale.exists():
+            stale.unlink()
+        evidence_not_exported = [
+            name
+            for name, present in (
+                ("certificate", self.certificate is not None),
+                ("calibration", self.calibration is not None),
+                ("frontier", self.frontier is not None),
+            )
+            if present
+        ]
         manifest = {
             "family": type(d).__name__,
             "created_at": time.time(),
             "fit": self._fit_info,
             "notes": self.notes,
             "format": fmt,
+            "model_file": model_file,
+            "model_sha256": _sha256_file(out / model_file),
+            "evidence_not_exported": evidence_not_exported,
             "mixle_artifact": "lifecycle.Model/v1",
         }
-        (out / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
+        _write_text_atomically(out / "manifest.json", json.dumps(manifest, indent=2, default=str))
         return str(out)
 
     @staticmethod
     def _write_model(out: Path, d: Any) -> str:
-        """Write ``d`` as safe JSON when the registry can represent it, else pickle. Returns the format used."""
-        try:
-            from mixle.utils.serialization import ensure_pysp_serialization_registry, to_serializable
+        """Write ``d`` as safe JSON when the registry can represent it, else pickle. Returns the format used.
 
-            ensure_pysp_serialization_registry()
-            text = json.dumps(to_serializable(d))
-        except Exception:  # noqa: BLE001 - not registry-serializable (torch leaf, custom object): use pickle
+        Only the registry's explicit "this type has no JSON form" answer (:class:`SerializationError`)
+        selects the pickle path. A blanket ``except Exception`` also caught encoder bugs, registry
+        initialization failures and JSON encoding faults, so an internal ``TypeError`` silently turned
+        an ordinary JSON-serializable Gaussian into an executable ``model.pkl`` -- a programming
+        failure quietly downgrading the artifact's security and portability contract. Those errors now
+        propagate.
+        """
+        from mixle.utils.serialization import (
+            SerializationError,
+            ensure_pysp_serialization_registry,
+            to_serializable,
+        )
+
+        ensure_pysp_serialization_registry()  # a registry that cannot initialize is not "needs pickle"
+        try:
+            payload = to_serializable(d)
+        except SerializationError:  # not registry-serializable (torch leaf, custom object): use pickle
             with open(out / "model.pkl", "wb") as f:
                 pickle.dump(d, f)
             return "pickle"
-        (out / "model.json").write_text(text)
+        (out / "model.json").write_text(json.dumps(payload))
         return "json"
 
     @classmethod
@@ -342,6 +420,16 @@ class Model:
            ``trust_code=True`` -- an explicit statement that the artifact's source is trusted. Without
            it, a pickle-format artifact raises immediately, and a JSON artifact raises only if it
            actually contains an embedded module (a pure-statistical model still loads normally).
+
+        When the manifest records a ``model_sha256`` (every artifact written by this version does),
+        the named model file is hashed and checked against it *before* anything is deserialized, so a
+        model file edited, truncated or swapped after deployment is refused rather than loaded. An
+        older manifest without that field is loaded unverified, exactly as before -- there is nothing
+        to check it against.
+
+        The restored :class:`Model` carries the fitted distribution, ``notes`` and the fit record.
+        The certificate, calibration report and candidate frontier are not in the artifact at all
+        (see :meth:`deploy`); when the deploying model had any of them, a note saying so is appended.
         """
         from mixle.utils.serialization import SerializationError, trusted_deserialization
 
@@ -351,23 +439,41 @@ class Model:
         except (OSError, ValueError):
             manifest = {}
         fmt = manifest.get("format", "pickle")  # artifacts predating the format field are pickle-only
+        model_file = str(manifest.get("model_file") or ("model.json" if fmt == "json" else "model.pkl"))
+        if Path(model_file).name != model_file:
+            raise SerializationError(f"manifest model_file {model_file!r} must be a plain file name")
+        expected_digest = manifest.get("model_sha256")
+        if expected_digest is not None:
+            actual = _sha256_file(p / model_file)
+            if actual != expected_digest:
+                raise SerializationError(
+                    f"{path!r}: {model_file} does not match the digest recorded in its manifest "
+                    f"(expected {expected_digest}, found {actual}); the artifact is incomplete or altered."
+                )
         with trusted_deserialization() if trust_code else contextlib.nullcontext():
             if fmt == "json":
                 from mixle.utils.serialization import ensure_pysp_serialization_registry, from_serializable
 
                 ensure_pysp_serialization_registry()
-                fitted = from_serializable(json.loads((p / "model.json").read_text()))
+                fitted = from_serializable(json.loads((p / model_file).read_text()))
             else:
                 if not trust_code:
                     raise SerializationError(
                         f"{path!r} is a pickle-format artifact: loading it executes arbitrary code from "
                         "the file. Pass trust_code=True to Model.load() only if you trust its source."
                     )
-                with open(p / "model.pkl", "rb") as f:
+                with open(p / model_file, "rb") as f:
                     fitted = pickle.load(f)  # noqa: S301 - trust_code=True required by the caller above
         m = cls(fitted)
         m.fitted = fitted
         m.notes = list(manifest.get("notes", []))
+        m._fit_info = dict(manifest.get("fit") or {})
+        missing = manifest.get("evidence_not_exported") or []
+        if missing:
+            m.notes.append(
+                f"artifact export dropped: {', '.join(str(name) for name in missing)} "
+                "(deploy() persists the model, notes and fit record only)"
+            )
         return m
 
     # --- the analysis verbs (delegate to the inference front doors) -------------------------------
@@ -457,8 +563,7 @@ def propose(
     # every skipped candidate is still recorded in notes/frontier ("search budget reached"), so this
     # stays honest about what it did not evaluate rather than needing to be disallowed outright.
     if isinstance(max_candidates, (bool, np.bool_)) or (
-        max_candidates is not None
-        and (not isinstance(max_candidates, (int, np.integer)) or int(max_candidates) < 0)
+        max_candidates is not None and (not isinstance(max_candidates, (int, np.integer)) or int(max_candidates) < 0)
     ):
         raise ValueError(f"max_candidates must be a non-negative integer or None, got {max_candidates!r}")
     if isinstance(timeout, (bool, np.bool_)) or (
@@ -470,9 +575,7 @@ def propose(
         )
     ):
         raise ValueError(f"timeout must be a finite non-negative number of seconds or None, got {timeout!r}")
-    if isinstance(holdout, (bool, np.bool_)) or not isinstance(
-        holdout, (int, float, np.integer, np.floating)
-    ):
+    if isinstance(holdout, (bool, np.bool_)) or not isinstance(holdout, (int, float, np.integer, np.floating)):
         raise ValueError(f"holdout must be a finite number in (0, 1), got {holdout!r}")
     holdout = float(holdout)
     if not np.isfinite(holdout) or not 0.0 < holdout < 1.0:
