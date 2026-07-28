@@ -93,12 +93,13 @@ class CalibrationReportToDataFrameTest(unittest.TestCase):
     def test_no_histogram_becomes_one_row_summary_matching_fields(self):
         rep = CalibrationReport(n=100, mean_log_density=-2.3, pit_error=None, method="log-density", note="no CDF")
         df = rep.to_dataframe()
-        self.assertEqual(list(df.columns), ["n", "mean_log_density", "pit_error", "method", "note"])
-        self.assertEqual(df.shape, (1, 5))
+        self.assertEqual(list(df.columns), ["n", "mean_log_density", "pit_error", "n_invalid_scores", "method", "note"])
+        self.assertEqual(df.shape, (1, 6))
         row = df.iloc[0]
         self.assertEqual(int(row["n"]), 100)
         self.assertEqual(float(row["mean_log_density"]), -2.3)
         self.assertIsNone(row["pit_error"])
+        self.assertEqual(int(row["n_invalid_scores"]), 0)
         self.assertEqual(row["method"], "log-density")
         self.assertEqual(row["note"], "no CDF")
 
@@ -142,6 +143,65 @@ class ModelFacadeTest(unittest.TestCase):
         m = Model(st.GaussianEstimator()).fit(train)
         self.assertIsNone(m.calibration)  # opt-in: off by default, no held-out data spent
         self.assertEqual(m._fit_info["n"], 400)
+
+
+class _ExactCdfModel:
+    """A model whose predictive CDF is the exact uniform(0,1) CDF; per-row scoring is configurable."""
+
+    def __init__(self, mode):
+        self.mode = mode  # "ok" | "nan" | "single" | "impossible"
+
+    def cdf(self, y):
+        return min(max(float(y), 0.0), 1.0)
+
+    def dist_to_encoder(self):
+        return self
+
+    def seq_encode(self, rows):
+        return list(rows)
+
+    def seq_log_density(self, enc):
+        if self.mode == "nan":
+            return np.full(len(enc), np.nan, dtype=float)
+        if self.mode == "single":
+            return np.zeros(1, dtype=float)
+        if self.mode == "impossible":
+            return np.full(len(enc), -np.inf, dtype=float)
+        return np.zeros(len(enc), dtype=float)
+
+    def log_density(self, x):
+        return 0.0
+
+
+class ScoringValidityGateTest(unittest.TestCase):
+    """MXR-080-1657: a calibration verdict requires one usable predictive score per held-out row."""
+
+    HOLD = [i / 1000.0 for i in range(1000)]  # evenly spaced uniform observations
+
+    def test_all_nan_scoring_is_not_calibrated_despite_a_perfect_pit(self):
+        rep = calibration_report(_ExactCdfModel("nan"), self.HOLD)
+        self.assertLess(rep.pit_error, 0.05)  # the CDF really is exact
+        self.assertEqual(rep.n_invalid_scores, len(self.HOLD))
+        self.assertFalse(rep.scoring_is_valid())
+        self.assertFalse(rep.is_calibrated())
+        self.assertIn("unavailable", rep.note)
+
+    def test_one_score_for_every_row_is_rejected_as_a_cardinality_violation(self):
+        with self.assertRaisesRegex(ValueError, "exactly one predictive score per row"):
+            calibration_report(_ExactCdfModel("single"), self.HOLD)
+
+    def test_exact_scoring_still_passes(self):
+        rep = calibration_report(_ExactCdfModel("ok"), self.HOLD)
+        self.assertEqual(rep.n_invalid_scores, 0)
+        self.assertTrue(rep.is_calibrated())
+        self.assertIn("calibrated", rep.note)
+
+    def test_explicitly_impossible_rows_are_valid_scores_not_invalid_ones(self):
+        # -inf is the model's legitimate "this row cannot happen"; only NaN means "no score".
+        rep = calibration_report(_ExactCdfModel("impossible"), self.HOLD)
+        self.assertEqual(rep.n_invalid_scores, 0)
+        self.assertTrue(rep.scoring_is_valid())
+        self.assertTrue(rep.is_calibrated())
 
 
 if __name__ == "__main__":
