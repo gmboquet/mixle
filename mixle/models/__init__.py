@@ -37,13 +37,6 @@ from mixle.models.coarsening import (
     gaussian_kl,
     structure_project,
 )
-from mixle.models.compress import (
-    METHODS,
-    CompressedModel,
-    CompressionReceipt,
-    MethodCandidate,
-    compress,
-)
 from mixle.models.continual import ewc, fisher_diagonal, snapshot
 from mixle.models.dependence import (
     CausalSkeleton,
@@ -447,3 +440,41 @@ __all__ = [
     "stick_breaking_weights",
     "viterbi_parse",
 ]
+
+# ``mixle.models.compress`` is the one module in this catalog that reaches DOWNSTREAM: it is built on
+# mixle.task.acquire/.bandit/.distill_methods, and mixle.task's own package init pulls in mixle.doe.
+# Importing it eagerly here therefore made plain ``import mixle.models`` -- core -- unconditionally
+# drag in all of mixle.task and mixle.doe, and (via mixle.doe.calibrate -> mixle.models._kernels)
+# made ``import mixle.doe`` reach back into mixle.task the same way. That is the exact eager
+# reverse-dependency shape mixle/tests/doe_task_models_clean_import_test.py exists to keep out.
+# Binding these five names lazily (PEP 562, the pattern already used in mixle.reason and
+# mixle.stats.latent) keeps them exported from ``mixle.models`` -- ``from mixle.models import
+# compress`` still works, and they stay in ``__all__`` -- while the mixle.task import happens on
+# first use rather than at package import.
+_LAZY_EXPORTS = {
+    "METHODS": "mixle.models.compress",
+    "CompressedModel": "mixle.models.compress",
+    "CompressionReceipt": "mixle.models.compress",
+    "MethodCandidate": "mixle.models.compress",
+    "compress": "mixle.models.compress",
+}
+
+
+def __getattr__(name: str):
+    module_path = _LAZY_EXPORTS.get(name)
+    if module_path is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+
+    module = importlib.import_module(module_path)
+    # Bind every name this module owns, not just the requested one. Importing the submodule makes the
+    # import system set ``mixle.models.compress`` to the MODULE; rebinding afterwards restores the
+    # eager behaviour where that attribute is the ``compress`` function.
+    for attribute, path in _LAZY_EXPORTS.items():
+        if path == module_path:
+            globals()[attribute] = getattr(module, attribute)
+    return globals()[name]
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_LAZY_EXPORTS))
