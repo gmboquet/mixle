@@ -24,7 +24,7 @@ def _scale(unit: np.ndarray, bounds: np.ndarray) -> np.ndarray:
     return lo + unit * (hi - lo)
 
 
-def _sobol_unit(n: int, d: int, seed: int) -> np.ndarray:
+def _sobol_unit(n: int, d: int, seed: int) -> tuple[np.ndarray, str]:
     """``n`` low-discrepancy points in ``[0,1]^d`` via the shared DoE QMC engine.
 
     Reuses ``designs._qmc_unit`` (scrambled Sobol', stratified-random fallback on older scipy) so
@@ -32,10 +32,9 @@ def _sobol_unit(n: int, d: int, seed: int) -> np.ndarray:
     """
     try:
         from scipy.stats import qmc
-
-        return _qmc_unit(qmc.Sobol, d, n, True, np.random.RandomState(seed))
-    except Exception:  # pragma: no cover - qmc fallback  # noqa: BLE001
-        return np.random.RandomState(seed).random((n, d))
+    except ImportError:  # pragma: no cover - supported only for minimal installations without scipy QMC
+        return np.random.RandomState(seed).random((n, d)), "pseudorandom_fallback"
+    return _qmc_unit(qmc.Sobol, d, n, True, np.random.RandomState(seed)), "scrambled_sobol"
 
 
 def _validate_names(names: Sequence[str] | None, d: int) -> list[str]:
@@ -62,15 +61,46 @@ def _eval_model(func: Callable[[np.ndarray], np.ndarray], x: np.ndarray, *, labe
     caught immediately at the call site instead of silently corrupting a downstream variance or
     elementary-effect computation via a shape-broadcast or a propagated NaN/inf.
     """
-    y = np.asarray(func(x), dtype=float).ravel()
-    if y.shape[0] != x.shape[0]:
+    raw = np.asarray(func(x), dtype=float)
+    if raw.ndim == 1 and raw.shape[0] == x.shape[0]:
+        y = raw
+    elif raw.ndim == 2 and raw.shape == (x.shape[0], 1):
+        y = raw[:, 0]
+    else:
         raise ValueError(
-            f"{label} must return one output per input row: called with {x.shape[0]} row(s), got "
-            f"{y.shape[0]} output(s)."
+            f"{label} must return shape ({x.shape[0]},) or ({x.shape[0]}, 1), preserving the leading "
+            f"sample axis; got shape {raw.shape}."
         )
     if not np.all(np.isfinite(y)):
         raise ValueError(f"{label} returned a non-finite value (inf or nan); every model output must be finite.")
     return y
+
+
+def _require_finite_derived(value: Any, name: str) -> np.ndarray:
+    array = np.asarray(value, dtype=np.float64)
+    invalid = ~np.isfinite(array)
+    if np.any(invalid):
+        if array.ndim == 0:
+            location = ""
+        else:
+            location = f" at index {tuple(int(i) for i in np.argwhere(invalid)[0])}"
+        raise ValueError(f"{name}{location} is not representable as finite float64.")
+    return array
+
+
+def _validate_confidence(confidence: Any) -> float:
+    if isinstance(confidence, (bool, np.bool_)):
+        raise ValueError(f"confidence must be a finite scalar in (0, 1), got {confidence!r}.")
+    array = np.asarray(confidence)
+    if array.ndim != 0:
+        raise ValueError(f"confidence must be a finite scalar in (0, 1), got shape {array.shape}.")
+    try:
+        value = float(array)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"confidence must be a finite scalar in (0, 1), got {confidence!r}.") from exc
+    if not np.isfinite(value) or not 0.0 < value < 1.0:
+        raise ValueError(f"confidence must be in (0, 1), got {confidence!r}.")
+    return value
 
 
 def sobol_indices(
@@ -118,7 +148,9 @@ def sobol_indices(
         - ``'S1_ci_low'`` / ``'S1_ci_high'`` and ``'ST_ci_low'`` / ``'ST_ci_high'``: the corresponding
           percentile bootstrap confidence interval at the ``confidence`` level.
 
-        Plus ``'names'`` and ``'var'`` (the total output variance). ``S1[i]`` is the fraction of
+        Plus ``'names'``, ``'var'`` (the total output variance), and ``'sampling_method'`` (normally
+        ``'scrambled_sobol'``; ``'pseudorandom_fallback'`` only when SciPy's QMC capability is absent).
+        ``S1[i]`` is the fraction of
         output variance from input ``i`` alone; ``ST[i]`` includes all interactions involving ``i``
         (so ``ST[i] - S1[i]`` measures ``i``'s interaction strength, and ``ST[i] ~ 0`` -- relative to
         its standard error, not just numerically close -- means input ``i`` can be fixed).
@@ -126,15 +158,18 @@ def sobol_indices(
     bounds = _as_bounds(bounds)
     d = bounds.shape[0]
     n = _require_exact_positive_int(n, "n")
-    n_bootstrap = _require_exact_positive_int(n_bootstrap, "n_bootstrap")
-    if not np.isfinite(confidence) or not (0.0 < confidence < 1.0):
-        raise ValueError(f"confidence must be in (0, 1), got {confidence!r}.")
+    n_bootstrap = _require_exact_positive_int(n_bootstrap, "n_bootstrap", minimum=2)
+    confidence = _validate_confidence(confidence)
     names_out = _validate_names(names, d)
-    a_unit = _sobol_unit(n, 2 * d, seed)  # split one 2d-dimensional Sobol block into A and B (independence)
+    a_unit, sampling_method = _sobol_unit(
+        n, 2 * d, seed
+    )  # split one 2d-dimensional Sobol block into A and B
     a, b = a_unit[:, :d], a_unit[:, d:]
     ya = _eval_model(func, _scale(a, bounds), label="sobol_indices's func")
     yb = _eval_model(func, _scale(b, bounds), label="sobol_indices's func")
-    var = np.var(np.concatenate([ya, yb]))
+    with np.errstate(over="ignore", invalid="ignore"):
+        var = float(np.var(np.concatenate([ya, yb])))
+    _require_finite_derived(var, "sobol_indices output variance")
     if var <= 0:
         # Constant output: every index is exactly (not just clipped-to-) zero, with no sampling
         # uncertainty to quantify -- there is nothing left to estimate.
@@ -152,6 +187,7 @@ def sobol_indices(
             "ST_ci_high": zero.copy(),
             "names": names_out,
             "var": 0.0,
+            "sampling_method": sampling_method,
         }
     s1 = np.zeros(d)
     st = np.zeros(d)
@@ -161,8 +197,11 @@ def sobol_indices(
         ab[:, i] = b[:, i]  # A with column i taken from B
         yab = _eval_model(func, _scale(ab, bounds), label="sobol_indices's func")
         yab_all[i] = yab
-        s1[i] = np.mean(yb * (yab - ya)) / var  # Saltelli 2010 first-order estimator
-        st[i] = 0.5 * np.mean((ya - yab) ** 2) / var  # Jansen total-order estimator
+        with np.errstate(over="ignore", invalid="ignore"):
+            s1[i] = np.mean(yb * (yab - ya)) / var  # Saltelli 2010 first-order estimator
+            st[i] = 0.5 * np.mean((ya - yab) ** 2) / var  # Jansen total-order estimator
+        _require_finite_derived(s1[i], f"sobol_indices S1[{i}]")
+        _require_finite_derived(st[i], f"sobol_indices ST[{i}]")
 
     # Bootstrap standard errors and confidence intervals: resample the *already-evaluated* rows with
     # replacement and recompute S1/ST on each resample, entirely in numpy (no additional model
@@ -172,32 +211,48 @@ def sobol_indices(
     boot_rng = np.random.RandomState(boot_seed)
     idx = boot_rng.randint(0, n, size=(n_bootstrap, n))
     ya_boot, yb_boot = ya[idx], yb[idx]  # each (n_bootstrap, n)
-    var_boot = np.var(np.concatenate([ya_boot, yb_boot], axis=1), axis=1)  # (n_bootstrap,)
-    safe_var_boot = np.where(var_boot > 0, var_boot, np.nan)  # a degenerate all-tied resample -> NaN,
-    s1_boot = np.empty((n_bootstrap, d))  # excluded below by the nan-aware reductions, not divided by 0
-    st_boot = np.empty((n_bootstrap, d))
+    with np.errstate(over="ignore", invalid="ignore"):
+        var_boot = np.var(np.concatenate([ya_boot, yb_boot], axis=1), axis=1)
+    valid_bootstrap = np.isfinite(var_boot) & (var_boot > 0.0)
+    if np.count_nonzero(valid_bootstrap) < 2:
+        raise ValueError("sobol_indices has fewer than two non-degenerate finite bootstrap resamples.")
+    ya_boot = ya_boot[valid_bootstrap]
+    yb_boot = yb_boot[valid_bootstrap]
+    var_boot = var_boot[valid_bootstrap]
+    s1_boot = np.empty((var_boot.size, d))
+    st_boot = np.empty((var_boot.size, d))
     for i in range(d):
-        yab_boot = yab_all[i][idx]
-        s1_boot[:, i] = np.mean(yb_boot * (yab_boot - ya_boot), axis=1) / safe_var_boot
-        st_boot[:, i] = 0.5 * np.mean((ya_boot - yab_boot) ** 2, axis=1) / safe_var_boot
+        yab_boot = yab_all[i][idx][valid_bootstrap]
+        with np.errstate(over="ignore", invalid="ignore"):
+            s1_boot[:, i] = np.mean(yb_boot * (yab_boot - ya_boot), axis=1) / var_boot
+            st_boot[:, i] = 0.5 * np.mean((ya_boot - yab_boot) ** 2, axis=1) / var_boot
+    _require_finite_derived(s1_boot, "sobol_indices bootstrap S1")
+    _require_finite_derived(st_boot, "sobol_indices bootstrap ST")
     alpha = 1.0 - confidence
     lo_q, hi_q = 100.0 * alpha / 2.0, 100.0 * (1.0 - alpha / 2.0)
-    s1_ci = np.nanpercentile(s1_boot, [lo_q, hi_q], axis=0)  # (2, d)
-    st_ci = np.nanpercentile(st_boot, [lo_q, hi_q], axis=0)
+    s1_ci = np.percentile(s1_boot, [lo_q, hi_q], axis=0)  # (2, d)
+    st_ci = np.percentile(st_boot, [lo_q, hi_q], axis=0)
+    s1_se = np.std(s1_boot, axis=0, ddof=1)
+    st_se = np.std(st_boot, axis=0, ddof=1)
+    _require_finite_derived(s1_ci, "sobol_indices S1 confidence interval")
+    _require_finite_derived(st_ci, "sobol_indices ST confidence interval")
+    _require_finite_derived(s1_se, "sobol_indices S1 standard error")
+    _require_finite_derived(st_se, "sobol_indices ST standard error")
 
     return {
         "S1": s1,
         "ST": st,
         "S1_clipped": np.clip(s1, 0.0, 1.0),
         "ST_clipped": np.clip(st, 0.0, None),
-        "S1_standard_error": np.nanstd(s1_boot, axis=0, ddof=1),
-        "ST_standard_error": np.nanstd(st_boot, axis=0, ddof=1),
+        "S1_standard_error": s1_se,
+        "ST_standard_error": st_se,
         "S1_ci_low": s1_ci[0],
         "S1_ci_high": s1_ci[1],
         "ST_ci_low": st_ci[0],
         "ST_ci_high": st_ci[1],
         "names": names_out,
         "var": float(var),
+        "sampling_method": sampling_method,
     }
 
 
@@ -266,10 +321,16 @@ def morris_screening(
             x_next = grid[idx_next]
             y_next = _eval_model(func, _scale(x_next[None, :], bounds), label="morris_screening's func")[0]
             step = x_next[i] - x[i]  # exactly +delta or -delta -- never shrunk, never zero
-            effects[i].append((y_next - y_prev) / step)
+            with np.errstate(over="ignore", invalid="ignore"):
+                effect = (y_next - y_prev) / step
+            _require_finite_derived(effect, f"morris_screening elementary effect for dimension {i}")
+            effects[i].append(effect)
             idx, x, y_prev = idx_next, x_next, y_next
-    mu_star = np.array([np.mean(np.abs(e)) for e in effects])
-    sigma = np.array([np.std(e) for e in effects])
+    with np.errstate(over="ignore", invalid="ignore"):
+        mu_star = np.array([np.mean(np.abs(e)) for e in effects])
+        sigma = np.array([np.std(e) for e in effects])
+    _require_finite_derived(mu_star, "morris_screening mu_star")
+    _require_finite_derived(sigma, "morris_screening sigma")
     return {
         "mu_star": mu_star,
         "sigma": sigma,
@@ -285,6 +346,8 @@ def fast_indices(
     harmonics: int = 6,
     seed: int = 0,
     names: Sequence[str] | None = None,
+    n_bootstrap: int = 200,
+    confidence: float = 0.95,
 ) -> dict[str, Any]:
     """First-order sensitivity indices via Random Balance Designs FAST (RBD-FAST).
 
@@ -295,12 +358,16 @@ def fast_indices(
     ratio of that power to the total is the first-order index (with the Tarantola bias correction). Cost
     is a single batch of ``n`` evaluations, independent of dimension.
 
-    Returns ``{'S1': (d,), 'names': [...], 'var': float}``.
+    ``S1`` is the raw Tarantola-corrected finite-sample estimate. ``S1_clipped`` is a separate
+    presentation convenience. Circular moving-block bootstrap fields report the raw estimator's
+    standard error and percentile interval without additional model evaluations.
     """
     bounds = _as_bounds(bounds)
     d = bounds.shape[0]
     n = _require_exact_positive_int(n, "n")
     m = _require_exact_positive_int(harmonics, "harmonics")
+    n_bootstrap = _require_exact_positive_int(n_bootstrap, "n_bootstrap", minimum=2)
+    confidence = _validate_confidence(confidence)
     names_out = _validate_names(names, d)
     rng = np.random.RandomState(seed)
     s = np.linspace(-np.pi, np.pi, n, endpoint=False)
@@ -309,9 +376,20 @@ def fast_indices(
     x = np.column_stack([base[perms[i]] for i in range(d)])
     y = _eval_model(func, _scale(x, bounds), label="fast_indices's func")
     s1 = np.zeros(d)
-    var = float(np.var(y))
+    with np.errstate(over="ignore", invalid="ignore"):
+        var = float(np.var(y))
+    _require_finite_derived(var, "fast_indices output variance")
     if var <= 0:
-        return {"S1": s1, "names": names_out, "var": 0.0}
+        return {
+            "S1": s1,
+            "S1_clipped": s1.copy(),
+            "S1_standard_error": s1.copy(),
+            "S1_ci_low": s1.copy(),
+            "S1_ci_high": s1.copy(),
+            "names": names_out,
+            "var": 0.0,
+            "uncertainty_method": "circular_block_bootstrap",
+        }
     if 2.0 * m >= n - 1:
         # the Tarantola correction's denominator (1 - 2m/(n-1)) must stay strictly positive; once
         # 2m/(n-1) reaches or exceeds 1, the correction denominator hits zero or goes negative,
@@ -321,14 +399,51 @@ def fast_indices(
             f"fast_indices requires 2*harmonics < n-1 for a well-posed Tarantola correction "
             f"(harmonics={m}, n={n}); increase n or lower harmonics."
         )
+    correction = 2.0 * m / (n - 1)
+
+    def estimate_ordered(ordered: np.ndarray) -> float:
+        with np.errstate(over="ignore", invalid="ignore"):
+            centered = ordered - np.mean(ordered)
+        _require_finite_derived(centered, "fast_indices centered output")
+        scale = float(np.max(np.abs(centered)))
+        if scale == 0.0:
+            return 0.0
+        spectrum = np.abs(np.fft.rfft(centered / scale)) ** 2
+        _require_finite_derived(spectrum, "fast_indices spectrum")
+        total = float(spectrum[1:].sum())
+        _require_finite_derived(total, "fast_indices spectral power")
+        raw_power = float(spectrum[1 : m + 1].sum()) / total if total > 0.0 else 0.0
+        estimate = (raw_power - correction) / (1.0 - correction)
+        _require_finite_derived(estimate, "fast_indices raw S1")
+        return estimate
+
+    bootstrap = np.empty((n_bootstrap, d), dtype=np.float64)
+    block_length = max(2, int(np.sqrt(n)))
+    block_count = int(np.ceil(n / block_length))
+    bootstrap_rng = np.random.RandomState(int(np.random.SeedSequence(seed).generate_state(1)[0]))
+    offsets = np.arange(block_length)
     for i in range(d):
         yi = y[np.argsort(perms[i])]  # reorder output along input i's search-curve coordinate
-        spectrum = np.abs(np.fft.rfft(yi - yi.mean())) ** 2
-        total = float(spectrum[1:].sum())
-        raw = float(spectrum[1 : m + 1].sum()) / total if total > 0 else 0.0
-        # Tarantola (2006) bias correction: an uninformative input has expected raw ~ 2m/(n-1).
-        s1[i] = (raw - 2.0 * m / (n - 1)) / (1.0 - 2.0 * m / (n - 1))
-    return {"S1": np.clip(s1, 0.0, 1.0), "names": names_out, "var": var}
+        s1[i] = estimate_ordered(yi)
+        for replicate in range(n_bootstrap):
+            starts = bootstrap_rng.randint(0, n, size=block_count)
+            indices = ((starts[:, None] + offsets[None, :]) % n).reshape(-1)[:n]
+            bootstrap[replicate, i] = estimate_ordered(yi[indices])
+    standard_error = np.std(bootstrap, axis=0, ddof=1)
+    alpha = 1.0 - confidence
+    interval = np.percentile(bootstrap, [100.0 * alpha / 2.0, 100.0 * (1.0 - alpha / 2.0)], axis=0)
+    _require_finite_derived(standard_error, "fast_indices standard error")
+    _require_finite_derived(interval, "fast_indices confidence interval")
+    return {
+        "S1": s1,
+        "S1_clipped": np.clip(s1, 0.0, 1.0),
+        "S1_standard_error": standard_error,
+        "S1_ci_low": interval[0],
+        "S1_ci_high": interval[1],
+        "names": names_out,
+        "var": var,
+        "uncertainty_method": "circular_block_bootstrap",
+    }
 
 
 def dgsm(
@@ -354,21 +469,46 @@ def dgsm(
     bounds = _as_bounds(bounds)
     d = bounds.shape[0]
     n = _require_exact_positive_int(n, "n")
+    if isinstance(rel_step, (bool, np.bool_)):
+        raise ValueError(f"rel_step must be a finite strictly positive scalar, got {rel_step!r}.")
+    rel_step_array = np.asarray(rel_step)
+    if rel_step_array.ndim != 0:
+        raise ValueError(f"rel_step must be a finite strictly positive scalar, got shape {rel_step_array.shape}.")
+    try:
+        rel_step = float(rel_step_array)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"rel_step must be a finite strictly positive scalar, got {rel_step!r}.") from exc
+    if not np.isfinite(rel_step) or rel_step <= 0.0:
+        raise ValueError(f"rel_step must be finite and strictly positive, got {rel_step!r}.")
     names_out = _validate_names(names, d)
-    x = _scale(_sobol_unit(n, d, seed), bounds)
+    unit, sampling_method = _sobol_unit(n, d, seed)
+    x = _scale(unit, bounds)
     span = bounds[:, 1] - bounds[:, 0]
     nu = np.zeros(d)
     for i in range(d):
-        h = rel_step * span[i]
+        with np.errstate(over="ignore", invalid="ignore"):
+            h = rel_step * span[i]
+        if not np.isfinite(h) or h <= 0.0:
+            raise ValueError(f"dgsm finite-difference scale for dimension {i} is not finite and strictly positive.")
         xp = x.copy()
         xm = x.copy()
         xp[:, i] = np.minimum(x[:, i] + h, bounds[i, 1])
         xm[:, i] = np.maximum(x[:, i] - h, bounds[i, 0])
         step = xp[:, i] - xm[:, i]
+        if not np.all(np.isfinite(step)) or np.any(step <= 0.0):
+            raise ValueError(f"dgsm finite-difference stencil for dimension {i} has a nonpositive or non-finite step.")
         yp = _eval_model(func, xp, label="dgsm's func")
         ym = _eval_model(func, xm, label="dgsm's func")
-        nu[i] = float(np.mean(((yp - ym) / np.where(step > 0, step, 1.0)) ** 2))
-    weighted = span**2 * nu
-    total = float(weighted.sum())
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            derivative = (yp - ym) / step
+            nu[i] = float(np.mean(derivative**2))
+        _require_finite_derived(derivative, f"dgsm derivative for dimension {i}")
+        _require_finite_derived(nu[i], f"dgsm nu[{i}]")
+    with np.errstate(over="ignore", invalid="ignore"):
+        weighted = span**2 * nu
+        total = float(weighted.sum())
+    _require_finite_derived(weighted, "dgsm weighted importance")
+    _require_finite_derived(total, "dgsm total importance")
     importance = weighted / total if total > 0 else np.zeros(d)
-    return {"nu": nu, "importance": importance, "names": names_out}
+    _require_finite_derived(importance, "dgsm normalized importance")
+    return {"nu": nu, "importance": importance, "names": names_out, "sampling_method": sampling_method}
