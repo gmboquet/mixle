@@ -42,11 +42,40 @@ class ImprovementResult:
     parent_hash: str | None = None
 
 
+def _shared_rows(train: Sequence[Any], verify: Sequence[Any]) -> int:
+    """How many verification rows also appear in ``train``.
+
+    Observations are arbitrary records, so identity is by value where the value is hashable and by
+    equality otherwise -- an unhashable row must not silently skip the disjointness check.
+    """
+    try:
+        seen = set(train)
+    except TypeError:
+        return sum(1 for row in verify if any(row is other or row == other for other in train))
+    return sum(1 for row in verify if row in seen)
+
+
 def _split(data: Sequence[Any], holdout: float | tuple, seed: int) -> tuple[list[Any], list[Any]]:
     """Split ``data`` into (train, verify). A ``(train, verify)`` tuple is passed through verbatim."""
     if isinstance(holdout, tuple):
-        train, verify = holdout
-        return list(train), list(verify)
+        # An explicit split still has to *be* a split. Any two-tuple used to be copied verbatim, so
+        # ([1, 2], []) claimed a held-out verification with nothing held out, ([], [1]) claimed an
+        # improvement fitted on nothing, and ([1, 2], [2, 3]) verified on a row it had just trained
+        # on -- each producing an improvement receipt for an experiment that never happened.
+        if len(holdout) != 2:
+            raise ValueError(f"an explicit holdout must be a (train, verify) pair, got {len(holdout)} elements.")
+        train, verify = list(holdout[0]), list(holdout[1])
+        if not train or not verify:
+            raise ValueError(
+                f"an explicit (train, verify) holdout needs observations on both sides, "
+                f"got {len(train)} train and {len(verify)} verify."
+            )
+        shared = _shared_rows(train, verify)
+        if shared:
+            raise ValueError(
+                f"an explicit (train, verify) holdout must be disjoint; {shared} observation(s) appear on both sides."
+            )
+        return train, verify
     rows = list(data)
     n = len(rows)
     if n < 4:

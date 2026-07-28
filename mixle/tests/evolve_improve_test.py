@@ -14,6 +14,7 @@ from mixle.evolve import (
     improve,
     nll_objective,
 )
+from mixle.evolve.improve import _split
 from mixle.evolve.operators import Candidate
 from mixle.evolve.verify import Verdict
 from mixle.inference import bayes_action, posterior
@@ -472,6 +473,40 @@ class ChampionIsolationTest(unittest.TestCase):
         # Negative control: isolating operators must not break the ordinary proposal path.
         result = improve(GaussianDistribution(0.0, 1.0), self.data, objective=self.nll, seed=0)
         self.assertTrue(result.verified)
+
+
+class ExplicitHoldoutTest(unittest.TestCase):
+    """MXR-080-1781: an explicit ``(train, verify)`` holdout was copied through verbatim.
+
+    ``_split`` validated the *fraction* form carefully but passed any two-tuple straight through, so
+    ``([1, 2], [])`` claimed a held-out verification with nothing held out, ``([], [1])`` claimed an
+    improvement fitted on nothing, and ``([1, 2], [2, 3])`` verified on a row it had just trained on.
+    Each produced an improvement receipt for an experiment that never happened.
+    """
+
+    def test_empty_side_is_rejected(self):
+        for bad in (([1, 2], []), ([], [1]), ([], [])):
+            with self.assertRaisesRegex(ValueError, "observations on both sides"):
+                _split([1, 2, 3, 4], bad, 0)
+
+    def test_overlapping_sides_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "disjoint"):
+            _split([1, 2, 3], ([1, 2], [2, 3]), 0)
+
+    def test_overlap_is_caught_for_unhashable_observations(self):
+        # observations are arbitrary records; an unhashable row must not skip the disjointness check
+        with self.assertRaisesRegex(ValueError, "disjoint"):
+            _split([], ([[1], [2]], [[2], [3]]), 0)
+
+    def test_wrong_arity_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, r"\(train, verify\) pair"):
+            _split([1, 2, 3, 4], ([1], [2], [3]), 0)
+
+    def test_valid_splits_are_unchanged(self):
+        self.assertEqual(_split([1, 2, 3, 4], ([1, 2], [3, 4]), 0), ([1, 2], [3, 4]))
+        train, verify = _split([1, 2, 3, 4], 0.25, 0)
+        self.assertEqual(len(verify), 1)
+        self.assertEqual(sorted(train + verify), [1, 2, 3, 4])
 
 
 if __name__ == "__main__":

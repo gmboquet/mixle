@@ -240,16 +240,35 @@ def mmd_squared(
     if kernel != "rbf":
         raise NotImplementedError(f"mmd only implements the 'rbf' kernel, got {kernel!r}")
 
-    def _prepare(a: np.ndarray) -> np.ndarray:
+    def _prepare(a: np.ndarray, name: str) -> np.ndarray:
+        # The kernel reduces only the last coordinate axis, so the supported geometry is exactly
+        # (n,) -- one scalar sample per row -- or (n, d). A 0-d input used to reach shape[0] and
+        # raise a bare IndexError, and a rank-3 array was accepted and then failed incidentally
+        # inside the kernel; neither told the caller what shape this estimator actually takes.
         arr = np.asarray(a, dtype=np.float64)
-        return arr.reshape(-1, 1) if arr.ndim == 1 else arr
+        if arr.ndim == 0 or arr.ndim > 2:
+            raise ValueError(f"{name} must be a (n,) or (n, d) sample array, got shape {arr.shape}.")
+        arr = arr.reshape(-1, 1) if arr.ndim == 1 else arr
+        if not np.all(np.isfinite(arr)):
+            raise ValueError(f"{name} must contain only finite values.")
+        return arr
 
-    x = _prepare(samples_p)
-    y = _prepare(samples_q)
+    x = _prepare(samples_p, "samples_p")
+    y = _prepare(samples_q, "samples_q")
     if x.shape[0] == 0 or y.shape[0] == 0:
         raise ValueError("mmd requires at least one sample on each side, got %d and %d." % (x.shape[0], y.shape[0]))
-    if bandwidth is not None and bandwidth <= 0:
-        raise ValueError(f"bandwidth must be positive, got {bandwidth!r}.")
+    if x.shape[1] != y.shape[1]:
+        raise ValueError(
+            f"samples_p and samples_q must share a coordinate dimension, got {x.shape[1]} and {y.shape[1]}."
+        )
+    if bandwidth is not None:
+        # Only `bandwidth <= 0` was checked, and NaN fails every comparison: a NaN bandwidth made
+        # gamma NaN and returned NaN as if it were a discrepancy, while an infinite bandwidth made
+        # gamma exactly 0.0, so every kernel entry became exp(0) == 1 and the estimator reported an
+        # apparently exact zero -- "these samples are identical" -- for any two sample sets at all.
+        if isinstance(bandwidth, (bool, np.bool_)) or not np.isfinite(bandwidth) or bandwidth <= 0:
+            raise ValueError(f"bandwidth must be a finite positive number, got {bandwidth!r}.")
+        bandwidth = float(bandwidth)
     if bandwidth is None:
         pooled = np.vstack([x, y])
         diffs = pooled[:, None, :] - pooled[None, :, :]
