@@ -466,7 +466,14 @@ class _DependencyTreeSampler:
                 if parent is None:
                     vals[i] = fac.sampler(seed).sample(1)[0]
                 else:
-                    vals[i] = fac.sampler(seed).sample_given(self.dist._key(i, vals[parent]))
+                    # Ancestral sampling supplies the parent value, so this factor is only ever asked
+                    # for p(child | parent), never for a joint draw. ConditionalDistribution.sampler()
+                    # builds a JOINT sampler and rightly refuses a conditional carrying no distribution
+                    # over its given variable -- which is every non-root factor in a dependency tree --
+                    # so it needs its draw-given-a-value entry point instead. Other edge types (GLMEdge)
+                    # expose sample_given on their plain sampler and have no conditional_sampler.
+                    build = getattr(fac, "conditional_sampler", None) or fac.sampler
+                    vals[i] = build(seed).sample_given(self.dist._key(i, vals[parent]))
             rows.append(tuple(vals))
         return rows
 
@@ -648,11 +655,7 @@ def learn_mixture_structure(
             comps, counts = [], []
             for k in range(n_components):
                 member_idx = np.flatnonzero(assign == k)
-                fit_idx = (
-                    member_idx
-                    if len(member_idx) >= min_size
-                    else rng.choice(n, size=min_size, replace=False)
-                )
+                fit_idx = member_idx if len(member_idx) >= min_size else rng.choice(n, size=min_size, replace=False)
                 comps.append(learn([data[i] for i in fit_idx]))
                 counts.append(len(member_idx))
             weights = np.asarray(counts, dtype=np.float64)
@@ -672,9 +675,7 @@ def learn_mixture_structure(
         comps, counts = [], []
         for k in range(n_components):
             member_idx = np.flatnonzero(assign == k)
-            fit_idx = (
-                member_idx if len(member_idx) >= min_size else rng.choice(n, size=min_size, replace=False)
-            )
+            fit_idx = member_idx if len(member_idx) >= min_size else rng.choice(n, size=min_size, replace=False)
             comps.append(learn([data[i] for i in fit_idx]))
             counts.append(len(member_idx))
         weights = np.asarray(counts, dtype=np.float64) / float(n)
