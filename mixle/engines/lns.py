@@ -71,6 +71,40 @@ CODE_MAX: Final = np.int64(2**61)
 CODE_MIN: Final = np.int64(-(2**61))
 
 
+def _exact_code_array(values: Any, name: str = "codes") -> np.ndarray:
+    """Validate exact canonical LNS codes before any integer conversion or arithmetic."""
+    raw = np.asarray(values)
+    if raw.dtype == np.bool_:
+        raise ValueError(f"{name} must contain integer LNS codes, not booleans")
+    if np.issubdtype(raw.dtype, np.integer):
+        if np.issubdtype(raw.dtype, np.unsignedinteger) and raw.size and np.any(raw > CODE_MAX):
+            raise ValueError(f"{name} contains a code outside the canonical LNS range")
+        codes = raw.astype(np.int64)
+    elif np.issubdtype(raw.dtype, np.floating):
+        if raw.size and (
+            not np.all(np.isfinite(raw))
+            or not np.array_equal(raw, np.trunc(raw))
+            or np.any(raw < float(LOG_ZERO_CODE))
+            or np.any(raw > float(CODE_MAX))
+        ):
+            raise ValueError(f"{name} must contain exact finite integer LNS codes")
+        codes = raw.astype(np.int64)
+    else:
+        checked = np.empty(raw.size, dtype=np.int64)
+        for i, value in enumerate(raw.ravel()):
+            if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+                raise ValueError(f"{name} must contain exact integer LNS codes")
+            value = int(value)
+            if value != LOG_ZERO_CODE and not CODE_MIN <= value <= CODE_MAX:
+                raise ValueError(f"{name} contains a code outside the canonical LNS range")
+            checked[i] = value
+        codes = checked.reshape(raw.shape)
+    invalid = (codes != LOG_ZERO_CODE) & ((codes < CODE_MIN) | (codes > CODE_MAX))
+    if np.any(invalid):
+        raise ValueError(f"{name} contains a code outside the canonical LNS range")
+    return codes
+
+
 class LogNumberSystem:
     """Quantize log-space values to integers in units of ``step = ln(C)`` and compute on the integers."""
 
@@ -79,9 +113,14 @@ class LogNumberSystem:
     CODE_MAX = CODE_MAX
 
     def __init__(self, step: float = 1e-2) -> None:
-        if step <= 0:
-            raise ValueError("step must be positive")
-        self.step = float(step)
+        if isinstance(step, (bool, np.bool_)):
+            raise ValueError("step must be finite and positive")
+        try:
+            self.step = float(step)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("step must be finite and positive") from None
+        if not math.isfinite(self.step) or self.step <= 0:
+            raise ValueError("step must be finite and positive")
         # LUT[d] = round(log1p(exp(-d*step)) / step); the correction falls to 0, truncate where it rounds to 0.
         # log1p(exp(-d*step)) < step/2  <=>  exp(-d*step) < exp(step/2)-1  =>  d > -log(exp(step/2)-1)/step
         thresh = math.expm1(0.5 * self.step)
@@ -89,10 +128,13 @@ class LogNumberSystem:
         self.dmax = max(dmax, 1)
         d = np.arange(self.dmax + 1, dtype=np.float64)
         self.lut = np.rint(np.log1p(np.exp(-d * self.step)) / self.step).astype(np.int64)
+        self.lut.setflags(write=False)
 
     @classmethod
     def from_relative_precision(cls, rel: float) -> LogNumberSystem:
         """Build a system whose stored values are accurate to ~``rel`` relative (``step = ln(1+rel)``)."""
+        if isinstance(rel, (bool, np.bool_)) or not np.isscalar(rel) or not math.isfinite(rel) or rel <= 0:
+            raise ValueError("rel must be a finite positive scalar")
         return cls(step=math.log1p(rel))
 
     def max_logsumexp_error(self, n: int) -> float:
@@ -121,7 +163,7 @@ class LogNumberSystem:
         step`` bound was actually sized for (equivalent to this formula at ``n`` in ``{3, 4}``; already
         violated by measured error at, e.g., ``n=8`` -- see MXR-080-0139 and the regression tests).
         """
-        if n < 1:
+        if isinstance(n, (bool, np.bool_)) or not isinstance(n, (int, np.integer)) or n < 1:
             raise ValueError(f"max_logsumexp_error: n must be >= 1, got {n}")
         depth = math.ceil(math.log2(n)) if n > 1 else 0
         return (depth + 1) * self.step / 2.0
@@ -132,7 +174,8 @@ class LogNumberSystem:
         Exact ``-inf`` (the log of a true zero) maps to the reserved :data:`LOG_ZERO_CODE` sentinel --
         never through a float-to-int64 cast, whose behavior for a non-finite input this module does not
         rely on (see MXR-080-0138). NaN and ``+inf`` have no LNS code and raise. Any other value that
-        would round outside ``[CODE_MIN, CODE_MAX]`` saturates to that boundary instead of overflowing.
+        would round outside ``[CODE_MIN, CODE_MAX]`` is rejected: clipping would invalidate the
+        format's quantization-error certificate.
         """
         x = np.asarray(log_values, dtype=np.float64)
         n_nan = int(np.isnan(x).sum())
@@ -142,16 +185,21 @@ class LogNumberSystem:
         if n_posinf:
             raise ValueError(f"quantize: log_values has {n_posinf} +inf value(s), which have no LNS code")
         is_log_zero = np.isneginf(x)
-        # np.clip on an array containing -inf is well-defined (it clamps to CODE_MIN), so every lane is
-        # finite and within [CODE_MIN, CODE_MAX] before the int64 cast below -- the cast itself never has
-        # to handle a non-finite or out-of-range float, regardless of numpy version/platform cast rules.
-        clamped = np.clip(np.rint(x / self.step), float(CODE_MIN), float(CODE_MAX))
-        codes = clamped.astype(np.int64)
+        with np.errstate(over="ignore", invalid="ignore"):
+            rounded = np.rint(x / self.step)
+        ordinary = ~is_log_zero
+        invalid = ordinary & (
+            ~np.isfinite(rounded) | (rounded < float(CODE_MIN)) | (rounded > float(CODE_MAX))
+        )
+        if np.any(invalid):
+            raise OverflowError("quantize: finite log value is outside the representable LNS code range")
+        safe = np.where(is_log_zero, 0.0, rounded)
+        codes = safe.astype(np.int64)
         return np.where(is_log_zero, LOG_ZERO_CODE, codes).astype(np.int64)
 
     def dequantize(self, k: Any) -> np.ndarray:
         """Recover the float log-value ``k * step``; the reserved zero sentinel maps back to exactly ``-inf``."""
-        k = np.asarray(k, dtype=np.int64)
+        k = _exact_code_array(k)
         value = k.astype(np.float64) * self.step
         return np.where(k == LOG_ZERO_CODE, -np.inf, value)
 
@@ -164,17 +212,15 @@ class LogNumberSystem:
         (MXR-080-0138): an overflowed, wrapped-negative difference would otherwise become the LUT index
         a few lines down.
         """
-        k1 = np.asarray(k1, dtype=np.int64)
-        k2 = np.asarray(k2, dtype=np.int64)
+        k1, k2 = np.broadcast_arrays(_exact_code_array(k1, "k1"), _exact_code_array(k2, "k2"))
         is_zero1 = k1 == LOG_ZERO_CODE
         is_zero2 = k2 == LOG_ZERO_CODE
-        c1 = np.clip(k1, CODE_MIN, CODE_MAX)
-        c2 = np.clip(k2, CODE_MIN, CODE_MAX)
-        d = np.minimum(np.abs(c1 - c2), self.dmax)
-        result = np.maximum(c1, c2) + self.lut[d]
-        result = np.where(is_zero2, k1, result)
-        result = np.where(is_zero1, k2, result)
-        return result
+        safe1 = np.where(is_zero1, 0, k1)
+        safe2 = np.where(is_zero2, 0, k2)
+        d = np.minimum(np.abs(safe1 - safe2), self.dmax)
+        ordinary = np.clip(np.maximum(safe1, safe2) + self.lut[d], CODE_MIN, CODE_MAX)
+        result = np.where(is_zero2, k1, ordinary)
+        return np.where(is_zero1, k2, result).astype(np.int64)
 
     def multiply(self, k1: Any, k2: Any) -> np.ndarray:
         """Integer code for the PRODUCT of two LNS values: ``log(a*b) = log(a) + log(b)`` -> code add.
@@ -184,12 +230,11 @@ class LogNumberSystem:
         to that boundary rather than silently wrapping through int64 overflow (MXR-080-0138). Prefer this
         over raw ``k1 + k2`` for any code that might be (or derive from) a quantized true zero.
         """
-        k1 = np.asarray(k1, dtype=np.int64)
-        k2 = np.asarray(k2, dtype=np.int64)
+        k1, k2 = np.broadcast_arrays(_exact_code_array(k1, "k1"), _exact_code_array(k2, "k2"))
         is_zero = (k1 == LOG_ZERO_CODE) | (k2 == LOG_ZERO_CODE)
-        c1 = np.clip(k1, CODE_MIN, CODE_MAX)
-        c2 = np.clip(k2, CODE_MIN, CODE_MAX)
-        result = np.clip(c1 + c2, CODE_MIN, CODE_MAX)
+        safe1 = np.where(k1 == LOG_ZERO_CODE, 0, k1)
+        safe2 = np.where(k2 == LOG_ZERO_CODE, 0, k2)
+        result = np.clip(safe1 + safe2, CODE_MIN, CODE_MAX)
         return np.where(is_zero, LOG_ZERO_CODE, result)
 
     def logsumexp(self, k: Any, axis: int = -1) -> np.ndarray:
@@ -201,9 +246,23 @@ class LogNumberSystem:
         element always makes exactly ``ceil(log2(m))`` logadd hops (``m`` = reduced axis length) -- see
         :meth:`max_logsumexp_error`, which bounds the resulting error in terms of that depth.
         """
-        arr = np.asarray(k, dtype=np.int64)
+        arr = _exact_code_array(k)
+        if arr.ndim == 0:
+            raise ValueError("logsumexp input must have at least one dimension")
+        if isinstance(axis, (bool, np.bool_)) or not isinstance(axis, (int, np.integer)):
+            raise ValueError(f"axis {axis!r} is invalid for shape {arr.shape}")
+        axis = int(axis)
+        if axis < 0:
+            axis += arr.ndim
+        if not 0 <= axis < arr.ndim:
+            raise ValueError(f"axis {axis!r} is invalid for shape {arr.shape}") from None
+        if arr.shape[axis] == 0:
+            raise ValueError("logsumexp cannot reduce an empty axis")
         if _HAS_LNS_KERNEL and arr.ndim == 2 and axis in (-1, 1) and arr.shape[1] > 0:
-            return _logsumexp_rows_c(np.ascontiguousarray(arr), self.lut, self.dmax, LOG_ZERO_CODE, CODE_MIN, CODE_MAX)
+            result = _logsumexp_rows_c(
+                np.ascontiguousarray(arr), self.lut, self.dmax, LOG_ZERO_CODE, CODE_MIN, CODE_MAX
+            )
+            return _exact_code_array(result, "compiled logsumexp result")
         k = np.moveaxis(arr, axis, -1).copy()
         while k.shape[-1] > 1:
             if k.shape[-1] & 1:
@@ -223,6 +282,8 @@ class LogNumberSystem:
         that needs to store exact zeros (rather than pass them straight through ``quantize``/``dequantize``)
         should not narrow the returned dtype below int64.
         """
+        if not np.isscalar(log_range) or not math.isfinite(log_range) or log_range < 0:
+            raise ValueError("log_range must be a finite nonnegative scalar")
         kmax = log_range / self.step
         for dt in (np.int16, np.int32):
             if kmax < np.iinfo(dt).max:

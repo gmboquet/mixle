@@ -17,6 +17,16 @@ from mixle.engines.qlut import (
 
 
 class QuantizedActivationTest(unittest.TestCase):
+    def test_callback_and_direct_code_contracts(self):
+        with self.assertRaises(TypeError):
+            QuantizedFunction(3, step=0.1, lo=-1, hi=1)
+        with self.assertRaises(ValueError):
+            QuantizedFunction(lambda x: 1.0, step=0.1, lo=-1, hi=1)
+        q = QuantizedFunction(np.exp, step=0.1, lo=-1, hi=1)
+        for bad in ([1.9], [999], [True]):
+            with self.assertRaises(ValueError):
+                q.lookup(bad)
+
     def test_bounded_activations_meet_the_derivative_bound(self):
         rng = np.random.RandomState(0)
         x = rng.randn(100000) * 4  # within the saturating range
@@ -98,6 +108,8 @@ class QuantizedLogsumexpTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             quantized_logsumexp([1.0], bits=0)
         with self.assertRaises(ValueError):
+            quantized_logsumexp([1.0], bits=True)
+        with self.assertRaises(ValueError):
             quantized_logsumexp([1.0], span=-1.0)
         with self.assertRaises(ValueError):
             quantized_logsumexp([1.0, np.nan])
@@ -118,6 +130,15 @@ class QuantizedLogsumexpTest(unittest.TestCase):
         # negative control: a normal, well-formed call still works after the added validation (a lone
         # score sits exactly on the top grid point, so this is exact, not just within the grid bound)
         self.assertAlmostEqual(quantized_logsumexp([2.0], weights=[3.0]), float(np.log(3.0)) + 2.0, places=12)
+
+    def test_weight_scaling_prevents_finite_linear_overflow(self):
+        scores = [0.0, 0.0]
+        weights = [1e308, 1e308]
+        got = quantized_logsumexp(scores, weights=weights)
+        expected = float(np.log(2.0) + np.log(1e308))
+        self.assertTrue(np.isfinite(got))
+        self.assertAlmostEqual(got, expected, places=12)
+        self.assertTrue(np.isfinite(lse_error_bound(12, 24.0, scores=scores, weights=weights)))
 
 
 class LseErrorBoundTailTest(unittest.TestCase):
@@ -220,6 +241,14 @@ class HelpersTest(unittest.TestCase):
     def test_table_is_cache_resident(self):
         # a sigmoid table over [-20,20] at step 0.01 is ~32 KB -- fits L1/L2
         self.assertLess(table_bytes(0.01, -20.0, 20.0), 64 * 1024)
+
+    def test_table_bytes_rejects_invalid_grid_and_item_size(self):
+        for args in ((0.0, -1.0, 1.0), (-0.1, -1.0, 1.0), (0.1, 1.0, -1.0)):
+            with self.assertRaises(ValueError):
+                table_bytes(*args)
+        for itemsize in (0, -1, True, 1.5):
+            with self.assertRaises(ValueError):
+                table_bytes(0.1, -1.0, 1.0, itemsize=itemsize)
 
     def test_construction_validates(self):
         with self.assertRaises(ValueError):

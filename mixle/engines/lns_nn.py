@@ -40,7 +40,11 @@ def _lse_keepdims(lns: LogNumberSystem, k: np.ndarray, axis: int) -> np.ndarray:
 def log_softmax(logits: Any, lns: LogNumberSystem, axis: int = -1) -> np.ndarray:
     """Compute log-softmax through the integer log-partition."""
     k = lns.quantize(logits)
-    return (k - _lse_keepdims(lns, k, axis)).astype(np.float64) * lns.step
+    normalizer = _lse_keepdims(lns, k, axis)
+    if np.any(normalizer == LOG_ZERO_CODE):
+        raise ValueError("log_softmax is undefined for an all-impossible slice")
+    ordinary = (k - normalizer).astype(np.float64) * lns.step
+    return np.where(k == LOG_ZERO_CODE, -np.inf, ordinary)
 
 
 def softmax(logits: Any, lns: LogNumberSystem, axis: int = -1) -> np.ndarray:
@@ -53,7 +57,10 @@ def softmax(logits: Any, lns: LogNumberSystem, axis: int = -1) -> np.ndarray:
     and trades a sliver of the raw approximation's "purity" for an exactly-normalized guarantee.
     """
     p = np.exp(log_softmax(logits, lns, axis=axis))
-    return p / np.sum(p, axis=axis, keepdims=True)
+    total = np.sum(p, axis=axis, keepdims=True)
+    if np.any(~np.isfinite(total)) or np.any(total <= 0):
+        raise ArithmeticError("softmax normalization mass must be finite and positive")
+    return p / total
 
 
 def _validate_cross_entropy_targets(k: np.ndarray, targets: np.ndarray, axis: int) -> np.ndarray:

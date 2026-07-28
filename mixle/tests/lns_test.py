@@ -133,8 +133,9 @@ class LogNumberSystemTest(unittest.TestCase):
         self.assertEqual(LogNumberSystem(step=1e-4).integer_dtype(700.0), np.int32)
 
     def test_step_must_be_positive(self):
-        with self.assertRaises(ValueError):
-            LogNumberSystem(step=0.0)
+        for bad in (0.0, -1.0, float("nan"), float("inf"), True):
+            with self.assertRaises(ValueError):
+                LogNumberSystem(step=bad)
 
 
 class LogZeroSentinelTest(unittest.TestCase):
@@ -176,16 +177,12 @@ class LogZeroSentinelTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             lns.quantize(np.array([1.0, np.inf, -3.0]))
 
-    def test_quantize_saturates_out_of_range_finite_values_instead_of_overflowing(self):
-        # A finite (not -inf) but extreme log-value must NOT overflow int64 or hit the sentinel --
-        # it saturates to CODE_MAX/CODE_MIN, the "format range" saturation MXR-080-0138 calls for.
+    def test_quantize_rejects_out_of_range_values_to_preserve_error_bound(self):
         lns = LogNumberSystem(step=0.01)
-        k = lns.quantize(np.array([1e300, -1e300, 5.0]))
-        self.assertEqual(int(k[0]), LogNumberSystem.CODE_MAX)
-        self.assertEqual(int(k[1]), LogNumberSystem.CODE_MIN)
-        self.assertNotEqual(int(k[0]), LogNumberSystem.LOG_ZERO_CODE)
-        self.assertNotEqual(int(k[1]), LogNumberSystem.LOG_ZERO_CODE)
-        self.assertEqual(int(k[2]), 500)  # ordinary value untouched
+        for bad in (1e308, -1e308):
+            with self.assertRaises(OverflowError):
+                lns.quantize(np.array([bad]))
+        self.assertEqual(int(lns.quantize(5.0)), 500)
 
     def test_logadd_sentinel_is_absorbing(self):
         lns = LogNumberSystem(step=0.01)
@@ -197,6 +194,7 @@ class LogZeroSentinelTest(unittest.TestCase):
         # matches the float64 reference: logaddexp(-inf, -5) == -5, logaddexp(-inf, -inf) == -inf
         self.assertEqual(float(lns.dequantize(lns.logadd(z, x))), float(np.logaddexp(-np.inf, -5.0)))
         self.assertEqual(float(lns.dequantize(lns.logadd(z, z))), -np.inf)
+        self.assertEqual(int(lns.logadd(LogNumberSystem.CODE_MAX, LogNumberSystem.CODE_MAX)), LogNumberSystem.CODE_MAX)
 
     def test_multiply_is_exact_for_ordinary_codes_and_sentinel_is_absorbing(self):
         lns = LogNumberSystem(step=0.005)
@@ -222,67 +220,26 @@ class LogZeroSentinelTest(unittest.TestCase):
         mid = int(lns.multiply(near_max, near_min))
         self.assertEqual(mid, near_max + near_min)
 
-    def test_logadd_handles_the_exact_overflow_scenario_without_crashing_or_corrupting(self):
-        # MXR-080-0138's specific failure chain: two extreme codes (as could previously arise from
-        # casting -inf/+inf/NaN or an out-of-range log-value straight to int64) subtracted inside
-        # logadd. Pre-fix, INT64_MAX - INT64_MIN wraps (two's complement) to -1, which -- with
-        # boundscheck disabled in the compiled kernel -- becomes a raw out-of-bounds LUT read (verified
-        # directly against the compiled kernel under AddressSanitizer: a definitive
-        # heap-buffer-overflow, "READ of size 8 ... 8 bytes before" the LUT buffer). Post-fix this must
-        # produce a deterministic, in-range, non-crashing result every time.
+    def test_public_code_operations_reject_noncanonical_codes(self):
         lns = LogNumberSystem(step=0.01)
         i64 = np.iinfo(np.int64)
         z = LogNumberSystem.LOG_ZERO_CODE
-        self.assertEqual(z, i64.min)  # ground the rest of this test in that identity
+        self.assertEqual(z, i64.min)
+        for bad in (i64.max, i64.min + 1, LogNumberSystem.CODE_MAX + 1, LogNumberSystem.CODE_MIN - 1):
+            with self.assertRaises(ValueError):
+                lns.dequantize(bad)
+            with self.assertRaises(ValueError):
+                lns.logadd(z, bad)
+            with self.assertRaises(ValueError):
+                lns.multiply(0, bad)
 
-        # (a) one operand IS the exact sentinel -- e.g. (i64.max, i64.min) is precisely the pre-fix
-        # crash scenario. This hits the documented absorbing branch (MXR-080-0138: "logadd(sentinel,
-        # x) = x") and returns the other RAW operand with no arithmetic at all, so it cannot overflow.
-        absorbing_pairs = [(i64.max, z), (z, i64.max), (z, z), (i64.max - 3, z), (z, i64.min + 5)]
-        for a, b in absorbing_pairs:
-            for _ in range(50):  # deterministic: repetition should never change the outcome
-                r = int(lns.logadd(np.int64(a), np.int64(b)))
-                if a == z and b == z:
-                    expect = z
-                elif a == z:
-                    expect = int(b)
-                else:
-                    expect = int(a)
-                self.assertEqual(r, expect)
-
-        # (b) both extreme but NEITHER equal to the exact sentinel -- exercises the saturating-clamp
-        # arithmetic path (not the sentinel short-circuit), i.e. the path that computes `d = |ca - cb|`
-        # and indexes `lut[d]`: the one that must never see a negative or out-of-range `d`.
-        clamp_pairs = [(i64.max, i64.max), (i64.min + 1, i64.min + 1), (i64.max - 1, i64.min + 1)]
-        for a, b in clamp_pairs:
-            self.assertNotEqual(a, z)
-            self.assertNotEqual(b, z)
-            for _ in range(50):
-                r = int(lns.logadd(np.int64(a), np.int64(b)))
-                self.assertGreaterEqual(r, int(LogNumberSystem.CODE_MIN))
-                self.assertLessEqual(r, int(LogNumberSystem.CODE_MAX) + int(lns.lut.max()))
-
-    def test_logadd_extreme_codes_random_sweep_is_deterministic_and_crash_free(self):
-        # Broader sweep with varied extreme inputs (MXR-080-0138's regression ask): many repeated,
-        # fresh, randomly-generated extreme int64 pairs (including forced sentinels and forced
-        # boundary values) through logadd and multiply, asserting no exception and a stable,
-        # reproducible answer for the same input.
+    def test_logsumexp_rejects_empty_axis_and_validates_single_term(self):
         lns = LogNumberSystem(step=0.01)
-        rng = np.random.RandomState(42)
-        z = LogNumberSystem.LOG_ZERO_CODE
-        for t in range(3000):
-            a = rng.randint(np.iinfo(np.int64).min, np.iinfo(np.int64).max, dtype=np.int64)
-            b = rng.randint(np.iinfo(np.int64).min, np.iinfo(np.int64).max, dtype=np.int64)
-            if t % 5 == 0:
-                a = z
-            if t % 7 == 0:
-                b = z
-            r1 = int(lns.logadd(a, b))
-            r2 = int(lns.logadd(a, b))
-            self.assertEqual(r1, r2)  # deterministic across repeated calls with the same input
-            m1 = int(lns.multiply(a, b))
-            m2 = int(lns.multiply(a, b))
-            self.assertEqual(m1, m2)
+        with self.assertRaises(ValueError):
+            lns.logsumexp(np.empty((2, 0), dtype=np.int64), axis=1)
+        with self.assertRaises(ValueError):
+            lns.logsumexp(np.array([LogNumberSystem.CODE_MAX + 1]), axis=0)
+        self.assertEqual(int(lns.logsumexp(np.array([123]), axis=0)), 123)
 
     def test_logsumexp_with_embedded_zero_terms_matches_float64(self):
         # End-to-end: a full logsumexp reduction with LOG_ZERO_CODE terms scattered through several
