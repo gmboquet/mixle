@@ -60,8 +60,22 @@ def test_marginalized_optional_is_explicitly_non_generative() -> None:
     assert factor.log_density(None) == 0.0
     with pytest.raises(NonGenerativeOptionalError):
         factor.sampler(3)
+
+    # A marginalized law IS admissible as a mixture component. Marginalizing over missing values
+    # inside a mixture or an HMM is what mixle.stats.missing exists for, and mixle/tests/missing_data_test.py
+    # has exercised exactly that since the package was renamed. What makes this factor non-generative is
+    # the unspecified missingness rate, not the law it wraps; the mixture does not hide the consequence,
+    # because its semantics join reports LIKELIHOOD_FACTOR.
+    marginalized_mixture = MixtureDistribution((factor, factor), (0.5, 0.5))
+    assert marginalized_mixture.density_semantics() is DensitySemantics.LIKELIHOOD_FACTOR
+
+    # A leaf that intrinsically cannot generate has no such wrapped law and is still refused.
     with pytest.raises(TypeError, match="likelihood factors"):
-        MixtureDistribution((factor, factor), (0.5, 0.5))
+        MixtureDistribution(
+            (CategoricalDistribution({"a": 0.5}, scoring_only=True),) * 2,
+            (0.5, 0.5),
+        )
+
     composite = CompositeDistribution((factor, GaussianDistribution(0.0, 1.0)))
     assert composite.density_semantics() is DensitySemantics.LIKELIHOOD_FACTOR
 
