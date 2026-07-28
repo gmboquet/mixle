@@ -114,11 +114,7 @@ class DistributionDeclaration:
             if getattr(suff_stat, "schema_version", None) != 1:
                 raise ValueError("%s expected sequence-statistics schema version 1." % self.name)
             suff_stat = (suff_stat.elements, suff_stat.lengths)
-        if (
-            hasattr(suff_stat, "branches")
-            and hasattr(suff_stat, "default_nobs")
-            and hasattr(suff_stat, "given_nobs")
-        ):
+        if hasattr(suff_stat, "branches") and hasattr(suff_stat, "default_nobs") and hasattr(suff_stat, "given_nobs"):
             if getattr(suff_stat, "schema_version", None) != 1:
                 raise ValueError("%s expected conditional-statistics schema version 1." % self.name)
             suff_stat = (
@@ -152,10 +148,7 @@ class DistributionDeclaration:
             if getattr(suff_stat, "schema_version", None) != 1:
                 raise ValueError("%s expected integer-Markov statistics schema version 1." % self.name)
             suff_stat = (
-                {
-                    (prefix, target): count
-                    for prefix, target, count in suff_stat.transition_counts
-                },
+                {(prefix, target): count for prefix, target, count in suff_stat.transition_counts},
                 suff_stat.initial,
                 suff_stat.length,
             )
@@ -370,14 +363,12 @@ def generated_log_density_diagnostics(x: Any, encoded_symbols: Sequence[str] | N
                 raise
             except Exception as backend_exc:
                 raise GeneratedKernelCompilationError(
-                    "%s backend diagnostic trace failed: %s"
-                    % (dist_type.__name__, backend_exc)
+                    "%s backend diagnostic trace failed: %s" % (dist_type.__name__, backend_exc)
                 ) from backend_exc
             strategy = "backend_log_density_from_params"
         except Exception as exc:
             raise GeneratedKernelCompilationError(
-                "%s exponential-family diagnostic trace failed: %s"
-                % (dist_type.__name__, exc)
+                "%s exponential-family diagnostic trace failed: %s" % (dist_type.__name__, exc)
             ) from exc
     else:
         _ensure_diagnostic_backend_trace_supported(declaration)
@@ -414,16 +405,12 @@ def _ensure_diagnostic_exp_family_trace_supported(declaration: DistributionDecla
             "symbolic diagnostics cannot infer runtime-dependent sufficient-statistic geometry"
         )
     if declaration.support.endswith("_vector"):
-        raise KernelCapabilityDeclinedError(
-            "symbolic diagnostics do not infer vector observation geometry"
-        )
+        raise KernelCapabilityDeclinedError("symbolic diagnostics do not infer vector observation geometry")
 
 
 def _ensure_diagnostic_backend_trace_supported(declaration: DistributionDeclaration) -> None:
     if not _generated_backend_hook_supported(declaration.distribution_type, declaration):
-        raise KernelCapabilityDeclinedError(
-            "backend diagnostic hook is not declaration-conformant"
-        )
+        raise KernelCapabilityDeclinedError("backend diagnostic hook is not declaration-conformant")
     non_symbolic = {
         "simplex_map",
         "unit_interval_map",
@@ -431,9 +418,7 @@ def _ensure_diagnostic_backend_trace_supported(declaration: DistributionDeclarat
         "log_probability_tables",
     }
     if any(spec.constraint in non_symbolic for spec in declaration.parameters):
-        raise KernelCapabilityDeclinedError(
-            "symbolic backend diagnostics do not synthesize mapping-valued parameters"
-        )
+        raise KernelCapabilityDeclinedError("symbolic backend diagnostics do not synthesize mapping-valued parameters")
 
 
 def _numeric_parameter_array(value: Any, name: str) -> np.ndarray:
@@ -476,8 +461,10 @@ def _parameter_value_issues(spec: ParameterSpec, value: Any) -> tuple[str, ...]:
             except ValueError as exc:
                 issues.append(str(exc))
                 continue
-            if np.any(arr < 0.0) or np.any(arr > 1.0) or (
-                arr.size and not np.isclose(arr.sum(), 1.0, rtol=1.0e-7, atol=1.0e-10)
+            if (
+                np.any(arr < 0.0)
+                or np.any(arr > 1.0)
+                or (arr.size and not np.isclose(arr.sum(), 1.0, rtol=1.0e-7, atol=1.0e-10))
             ):
                 issues.append("%s[%r] must be a probability simplex." % (name, key))
         return tuple(issues)
@@ -500,12 +487,16 @@ def _parameter_value_issues(spec: ParameterSpec, value: Any) -> tuple[str, ...]:
         return ("%s must be scalar for constraint %s." % (name, constraint),)
     if constraint in ("real_vector", "positive_vector", "simplex", "simplex_vector") and arr.ndim != 1:
         return ("%s must be one-dimensional for constraint %s." % (name, constraint),)
-    if constraint in (
-        "positive_matrix",
-        "row_simplex_matrix",
-        "column_simplex_matrix",
-        "integer_matrix",
-    ) and arr.ndim != 2:
+    if (
+        constraint
+        in (
+            "positive_matrix",
+            "row_simplex_matrix",
+            "column_simplex_matrix",
+            "integer_matrix",
+        )
+        and arr.ndim != 2
+    ):
         return ("%s must be two-dimensional for constraint %s." % (name, constraint),)
     if constraint == "integer_vector" and arr.ndim != 1:
         return ("%s must be one-dimensional for constraint integer_vector." % name,)
@@ -547,9 +538,7 @@ def _parameter_value_issues(spec: ParameterSpec, value: Any) -> tuple[str, ...]:
             return ("%s must be a probability simplex." % name,)
     if constraint in ("row_simplex_matrix", "column_simplex_matrix"):
         axis = 1 if constraint == "row_simplex_matrix" else 0
-        if np.any(arr < 0.0) or np.any(
-            ~np.isclose(arr.sum(axis=axis), 1.0, rtol=1.0e-7, atol=1.0e-10)
-        ):
+        if np.any(arr < 0.0) or np.any(~np.isclose(arr.sum(axis=axis), 1.0, rtol=1.0e-7, atol=1.0e-10)):
             return ("%s must contain probability-simplex %s." % (name, "rows" if axis == 1 else "columns"),)
     if constraint in (
         "integer",
@@ -574,9 +563,7 @@ def _parameter_value_issues(spec: ParameterSpec, value: Any) -> tuple[str, ...]:
 
 def _validated_parameter_values(dist: Any, declaration: DistributionDeclaration) -> dict[str, Any]:
     if not isinstance(dist, declaration.distribution_type):
-        raise TypeError(
-            "expected %s, got %s" % (declaration.distribution_type.__name__, type(dist).__name__)
-        )
+        raise TypeError("expected %s, got %s" % (declaration.distribution_type.__name__, type(dist).__name__))
     values = {}
     issues = []
     for spec in declaration.parameters:
@@ -603,10 +590,7 @@ def _validated_parameter_values(dist: Any, declaration: DistributionDeclaration)
         if spec.constraint.startswith("less_than:") and not value < anchor:
             issues.append("%s must be less than %s." % (spec.name, anchor_name))
     if issues:
-        raise ValueError(
-            "Invalid declared parameters for %s: %s"
-            % (type(dist).__name__, "; ".join(issues))
-        )
+        raise ValueError("Invalid declared parameters for %s: %s" % (type(dist).__name__, "; ".join(issues)))
     return values
 
 
@@ -1095,11 +1079,22 @@ def generated_stacked_sufficient_statistics(
             % (dist_type.__name__, len(row_stats), len(declaration.statistics))
         )
     ww = engine.asarray(weights)
+    # _validate_generated_statistic_rows serves both this stacked path and the single-distribution
+    # generated_sufficient_statistics, and tells them apart by whether a component count was passed:
+    # with one it expects (n, k) weights, without one it expects (n,). This entry point is stacked by
+    # construction, but "__pysp_component_count__" is metadata only generated_stacked_params sets, so
+    # a hand-built params dict left the count None and had its (n, k) weights rejected as rank 2.
+    # Fall back to the weights themselves, which carry the same fact.
+    component_count = params.get("__pysp_component_count__")
+    if component_count is None:
+        weight_shape = tuple(getattr(ww, "shape", ()))
+        if len(weight_shape) == 2:
+            component_count = int(weight_shape[1])
     _validate_generated_statistic_rows(
         row_stats,
         declaration.statistics,
         ww,
-        component_count=params.get("__pysp_component_count__"),
+        component_count=component_count,
     )
     return tuple(
         _weighted_component_sum(stat, spec, ww, engine) for spec, stat in zip(declaration.statistics, row_stats)
@@ -1629,8 +1624,7 @@ def _declaration_issues(
             declaration.distribution_type, spec.name
         ):
             issues.append(
-                "%s parameter %s is not exposed by %s."
-                % (path, spec.name, declaration.distribution_type.__name__)
+                "%s parameter %s is not exposed by %s." % (path, spec.name, declaration.distribution_type.__name__)
             )
 
     stat_names = set()
@@ -1687,9 +1681,7 @@ def _declaration_issues(
         if not isinstance(spec.runtime_scoring, bool):
             issues.append("%s exponential-family runtime_scoring must be bool." % path)
         if spec.fixed_base is False and spec.base_measure_from_params is None:
-            issues.append(
-                "%s exponential-family fixed_base=False requires base_measure_from_params." % path
-            )
+            issues.append("%s exponential-family fixed_base=False requires base_measure_from_params." % path)
     if declaration.legacy_sufficient_statistics is not None and not callable(declaration.legacy_sufficient_statistics):
         issues.append("%s legacy_sufficient_statistics is not callable." % path)
     return tuple(issues)
@@ -1724,10 +1716,7 @@ def _statistic_value_issues(
             return ("%s expected a mapping." % path,)
         if spec.kind == "count_maps" and not (
             isinstance(value, Mapping)
-            or (
-                isinstance(value, (tuple, list))
-                and all(isinstance(item, Mapping) for item in value)
-            )
+            or (isinstance(value, (tuple, list)) and all(isinstance(item, Mapping) for item in value))
         ):
             return ("%s expected a mapping or sequence of mappings." % path,)
         if spec.kind in ("count_vector", "vector_moment"):
@@ -1914,10 +1903,7 @@ def _validated_generated_score(
     if len(shape) != expected_rank:
         raise ValueError("%s must have rank %d, got shape %r." % (name, expected_rank, shape))
     if component_count is not None and shape[1] != component_count:
-        raise ValueError(
-            "%s must have %d component columns, got shape %r."
-            % (name, component_count, shape)
-        )
+        raise ValueError("%s must have %d component columns, got shape %r." % (name, component_count, shape))
     if isinstance(value, np.ndarray):
         try:
             numeric = np.asarray(value, dtype=np.float64)
@@ -1984,14 +1970,10 @@ def _validate_generated_statistic_rows(
     expected_weight_rank = 2 if component_count is not None else 1
     if len(weight_shape) != expected_weight_rank:
         raise ValueError(
-            "generated statistic weights must have rank %d, got shape %r."
-            % (expected_weight_rank, weight_shape)
+            "generated statistic weights must have rank %d, got shape %r." % (expected_weight_rank, weight_shape)
         )
     if component_count is not None and weight_shape[1] != component_count:
-        raise ValueError(
-            "generated statistic weights must have %d component columns."
-            % component_count
-        )
+        raise ValueError("generated statistic weights must have %d component columns." % component_count)
     if isinstance(weights, np.ndarray):
         numeric_weights = np.asarray(weights, dtype=np.float64)
         if np.any(~np.isfinite(numeric_weights)) or np.any(numeric_weights < 0.0):
@@ -2001,10 +1983,7 @@ def _validate_generated_statistic_rows(
     for index, (stat, spec) in enumerate(zip(row_stats, specs)):
         shape = tuple(getattr(stat, "shape", ()))
         if not shape or shape[0] != row_count:
-            raise ValueError(
-                "generated %s statistic %d must have a matching row axis."
-                % (spec.kind, index)
-            )
+            raise ValueError("generated %s statistic %d must have a matching row axis." % (spec.kind, index))
         if spec.kind == "vector_moment" and len(shape) < 2:
             raise ValueError("generated vector_moment statistics require a feature axis.")
         if spec.kind == "matrix_moment" and len(shape) < 3:
@@ -2015,9 +1994,7 @@ def _validate_generated_statistic_rows(
             except (TypeError, ValueError) as exc:
                 raise ValueError("generated statistic %d must be numeric." % index) from exc
             if np.any(np.isnan(numeric_stat)) or np.any(np.isposinf(numeric_stat)):
-                raise ValueError(
-                    "generated statistic %d cannot contain NaN or positive infinity." % index
-                )
+                raise ValueError("generated statistic %d cannot contain NaN or positive infinity." % index)
 
 
 def _weighted_component_sum(stat: Any, spec: StatisticSpec, weights: Any, engine: Any) -> Any:
@@ -2080,9 +2057,7 @@ def _weighted_histogram(stat: Any, weights: Any, engine: Any) -> dict[int, float
     if vals.ndim != 1 or wts.ndim != 1:
         raise ValueError("generated histogram values and weights must be one-dimensional.")
     if vals.shape != wts.shape:
-        raise ValueError(
-            "generated histogram values and weights must have matching lengths."
-        )
+        raise ValueError("generated histogram values and weights must have matching lengths.")
     if np.any(~np.isfinite(vals)):
         raise ValueError("generated histogram values must be finite.")
     if np.any(vals != np.floor(vals)):

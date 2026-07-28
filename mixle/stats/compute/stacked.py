@@ -246,9 +246,7 @@ def estimate_component_shard_value(
 
 def tie_component_shard_values(
     estimator: ParameterEstimator,
-    shard_values: Sequence[
-        tuple[int | Sequence[int] | ComponentShardLayout, tuple[Any, tuple[Any, ...]]]
-    ],
+    shard_values: Sequence[tuple[int | Sequence[int] | ComponentShardLayout, tuple[Any, tuple[Any, ...]]]],
 ) -> tuple[tuple[int | tuple[int, ...], tuple[np.ndarray, tuple[Any, ...]]], ...]:
     """Apply mixle key tying to component-sharded mixture statistics.
 
@@ -317,8 +315,7 @@ def tie_component_shard_values(
 
     if comp_key is not None:
         keyed_accs = [
-            [layout, tuple(pooled_components[index] for index in layout.indices)]
-            for layout, accs in keyed_accs
+            [layout, tuple(pooled_components[index] for index in layout.indices)] for layout, accs in keyed_accs
         ]
 
     for _, accs in keyed_accs:
@@ -643,6 +640,23 @@ def _place_component_array(value: Any, engine: ComputeEngine, axis: int) -> Any:
     return engine.place_component_axis(value, axis=axis)
 
 
+def _scalar_like(value: Any) -> Any:
+    """Unwrap a rank-0 array to the Python scalar a legacy accumulator would have produced.
+
+    Legacy accumulators hand estimators plain Python scalars; routing the same statistic through an
+    engine tensor and ``np.asarray`` yields a rank-0 ndarray instead. Estimators can tell the
+    difference: IntegerCategoricalDistribution.estimate runs the ``min_val`` half of its
+    ``(min_val, counts)`` statistic through ``exact_integer_observations``, which rejects a rank-0
+    array outright -- and would equally reject the ``0.0`` a blanket float() cast produces, so
+    ``item()`` is what keeps an integer support integral (and a state label a str).
+    """
+    if isinstance(value, np.ndarray) and value.ndim == 0:
+        return value.item()
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
 def _engine_to_numpy(value: Any, engine: ComputeEngine) -> Any:
     if value is None:
         return None
@@ -654,7 +668,7 @@ def _engine_to_numpy(value: Any, engine: ComputeEngine) -> Any:
     if isinstance(value, list):
         return [_engine_to_numpy(child, engine) for child in value]
     try:
-        return np.asarray(engine.to_numpy(value))
+        return _scalar_like(np.asarray(engine.to_numpy(value)))
     except Exception:  # noqa: BLE001
         return value
 
@@ -686,7 +700,7 @@ def _tensor_like_to_numpy(value: Any) -> Any:
     if callable(cpu):
         value = cpu()
     try:
-        return np.asarray(value)
+        return _scalar_like(np.asarray(value))
     except Exception:  # noqa: BLE001
         return value
 
@@ -722,9 +736,19 @@ def _validate_local_stat_layout(
     expected: ComponentShardLayout,
     path: str,
 ) -> None:
-    """Validate every local statistic tensor against the count-tensor layout."""
+    """Validate every component-stacked local statistic tensor against the count-tensor layout.
+
+    Resident statistics come in the two layouts :func:`_unstack_component_stats` accepts: tensors
+    whose axis 0 *is* the component axis, and a per-component sequence whose element ``i`` holds
+    component ``i``'s own statistics with whatever shape that child distribution produces. Only the
+    first has a component axis to check here. Descending into the second and demanding that every
+    leaf lead with the component count rejects payloads that are perfectly well formed -- a
+    two-component Markov chain mixture stores a ``(4,)`` transition vector per component, and a
+    multinomial one a ``(3,)`` category vector, neither of which is two wide nor meant to be.
+    """
     if original is None:
         return
+    num_components = len(expected.indices)
     if isinstance(original, dict):
         if not isinstance(local, dict) or set(local) != set(original):
             raise ValueError("%s local statistic mapping does not match its resident structure." % path)
@@ -734,6 +758,9 @@ def _validate_local_stat_layout(
     if isinstance(original, (tuple, list)):
         if not isinstance(local, (tuple, list)) or len(local) != len(original):
             raise ValueError("%s local statistic sequence does not match its resident structure." % path)
+        # Same precedence as _unstack_component_stats: component-stacked first, per-component second.
+        if not _all_component_stacked(tuple(original), num_components) and len(original) == num_components:
+            return
         for index, (child, local_child) in enumerate(zip(original, local)):
             _validate_local_stat_layout(child, local_child, expected, "%s[%d]" % (path, index))
         return
@@ -749,15 +776,13 @@ def _validate_local_stat_layout(
     local_count = int(shape[0])
     if local_count != len(expected.indices):
         raise ValueError(
-            "%s has local component axis %d but component_counts has %d."
-            % (path, local_count, len(expected.indices))
+            "%s has local component axis %d but component_counts has %d." % (path, local_count, len(expected.indices))
         )
     if callable(getattr(original, "__create_chunk_list__", None)):
         actual = _local_component_layout(original, local_count, path)
         if actual.indices != expected.indices:
             raise ValueError(
-                "%s maps global components %s but component_counts maps %s."
-                % (path, actual.indices, expected.indices)
+                "%s maps global components %s but component_counts maps %s." % (path, actual.indices, expected.indices)
             )
 
 
@@ -787,9 +812,5 @@ def _is_component_stacked(value: Any, num_components: int) -> bool:
 
 
 def _take_component(value: Any, index: int) -> Any:
-    rv = value[index]
-    if isinstance(rv, np.ndarray) and rv.ndim == 0:
-        return float(rv)
-    if isinstance(rv, np.generic):
-        return rv.item()
+    rv = _scalar_like(value[index])
     return rv
