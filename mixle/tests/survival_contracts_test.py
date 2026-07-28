@@ -10,8 +10,13 @@ from mixle.inference.survival import (
     _cox_offset,
     _frailty_posterior,
     _gamma_frailty_variance_mstep,
+    aalen_additive,
+    aalen_johansen,
     cox_ph,
     frailty_cox,
+    kaplan_meier,
+    nelson_aalen,
+    to_person_period,
 )
 
 
@@ -143,6 +148,72 @@ class FrailtyEMContractsTest(unittest.TestCase):
         self.assertTrue(np.all(result.frailty_variance >= 0))
         self.assertEqual(result.frailty_log_mean.shape, result.frailties.shape)
         self.assertIsInstance(result.converged, bool)
+
+
+class NonparametricInputContractsTest(unittest.TestCase):
+    """MXR-080-1607: the nonparametric entry points silently recoded or discarded malformed input.
+
+    ``cox_ph`` validated its ``(time, event)`` pair, but every nonparametric surface reached
+    ``_event_table`` through a bare ``np.asarray(..., dtype=float)``. A fractional or out-of-range
+    event code compared unequal to 1 and so was dropped from the risk table as if censored, and a
+    negative time was sorted into the table as a real duration -- both produced a plausible-looking
+    survival curve estimated from data the caller never supplied.
+    """
+
+    def test_kaplan_meier_rejects_non_binary_event_codes(self):
+        for event in ([0.5, 1.0], [2, 1], [-1, 1]):
+            with self.assertRaisesRegex(ValueError, "0 \\(censored\\) and 1 \\(event\\)"):
+                kaplan_meier([1.0, 2.0], event)
+
+    def test_kaplan_meier_rejects_malformed_times(self):
+        with self.assertRaisesRegex(ValueError, "non-negative durations"):
+            kaplan_meier([-1.0, 2.0], [1, 1])
+        with self.assertRaisesRegex(ValueError, "finite"):
+            kaplan_meier([np.nan, 2.0], [1, 1])
+        with self.assertRaisesRegex(ValueError, "non-empty"):
+            kaplan_meier([], [])
+        with self.assertRaisesRegex(ValueError, "aligned with time"):
+            kaplan_meier([1.0, 2.0], [1])
+
+    def test_kaplan_meier_rejects_invalid_ci_level(self):
+        for level in (1.5, 0.0, 1.0, np.nan, True):
+            with self.assertRaisesRegex(ValueError, "ci_level"):
+                kaplan_meier([1.0, 2.0], [1, 1], ci_level=level)
+
+    def test_nelson_aalen_rejects_non_binary_event_codes(self):
+        with self.assertRaisesRegex(ValueError, "0 \\(censored\\) and 1 \\(event\\)"):
+            nelson_aalen([1.0, 2.0], [7, 1])
+
+    def test_aalen_johansen_rejects_malformed_cause_labels(self):
+        for event in ([-1, 1], [1.5, 1]):
+            with self.assertRaisesRegex(ValueError, "non-negative integer cause labels"):
+                aalen_johansen([1.0, 2.0], event)
+        with self.assertRaisesRegex(ValueError, "missing from causes"):
+            aalen_johansen([1.0, 2.0], [3, 1], causes=[1, 2])
+        with self.assertRaisesRegex(ValueError, "must not repeat"):
+            aalen_johansen([1.0, 2.0], [1, 1], causes=[1, 1])
+
+    def test_aalen_additive_rejects_misaligned_design(self):
+        with self.assertRaisesRegex(ValueError, "0 \\(censored\\) and 1 \\(event\\)"):
+            aalen_additive(np.ones((2, 1)), [1.0, 2.0], [5, 1])
+        with self.assertRaisesRegex(ValueError, "one row per observed time"):
+            aalen_additive(np.ones((3, 1)), [1.0, 2.0], [1, 1])
+
+    def test_to_person_period_rejects_fractional_and_negative_durations(self):
+        with self.assertRaisesRegex(ValueError, "whole numbers of observed periods"):
+            to_person_period([2.7, 3.0], [1, 1])
+        with self.assertRaisesRegex(ValueError, "non-negative durations"):
+            to_person_period([-2.0, 3.0], [1, 1])
+
+    def test_well_formed_inputs_are_unchanged(self):
+        km = kaplan_meier([1.0, 2.0, 3.0, 4.0], [1, 0, 1, 1])
+        np.testing.assert_allclose(km["survival"], [0.75, 0.375, 0.0])
+        self.assertEqual(km["median"], 3.0)
+        np.testing.assert_allclose(nelson_aalen([1.0, 2.0, 3.0])["cumhaz"], [1 / 3, 1 / 3 + 0.5, 1 / 3 + 0.5 + 1.0])
+        cif = aalen_johansen([1.0, 2.0, 3.0], [1, 2, 0])["cif"]
+        np.testing.assert_allclose(cif[1], [1 / 3, 1 / 3])
+        np.testing.assert_allclose(cif[2], [0.0, 1 / 3])
+        self.assertEqual(to_person_period([2, 3], [1, 0])["period"].tolist(), [1, 2, 1, 2, 3])
 
 
 if __name__ == "__main__":

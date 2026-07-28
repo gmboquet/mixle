@@ -51,6 +51,29 @@ def test_real_rejects_infinite_bounds():
     assert all(np.isfinite(n) and -5.0 <= n <= 5.0 for n in r.neighbors(0.0))
 
 
+def test_integer_rejects_non_integer_bounds():
+    # MXR-080-1775 regression: Integer.__post_init__ only compared int(lo) < int(hi), so a fractional
+    # bound truncated silently -- Integer(0.5, 3) declared an integer dimension whose stored lo was
+    # 0.5, making bounds()/sample()/encode() disagree about whether 0 was a legal level. Booleans got
+    # through the same way (True is an int), so Integer(True, 5) silently meant Integer(1, 5).
+    with pytest.raises(ValueError, match="must be an integer"):
+        Integer(0.5, 3)
+    with pytest.raises(ValueError, match="must be an integer"):
+        Integer(1, 3.5)
+    with pytest.raises(ValueError, match="must be an integer"):
+        Integer(True, 5)
+    with pytest.raises(ValueError, match="must be an integer"):
+        Integer(1, True)
+    with pytest.raises(ValueError, match="must be an integer"):
+        Integer(np.float64(1.0), 5)
+    # negative control: integer bounds -- including NumPy integer scalars -- keep working
+    for lo, hi in ((1, 5), (np.int64(1), np.int32(5)), (-3, 3)):
+        dim = Integer(lo, hi)
+        rng = np.random.RandomState(0)
+        assert all(int(lo) <= dim.sample(rng) <= int(hi) for _ in range(20))
+        assert dim.bounds() == (float(lo) - 0.5, float(hi) + 0.5)
+
+
 def test_categorical_rejects_duplicate_choices():
     # Bug regression: Categorical didn't reject duplicate choices, and its own notion of cardinality
     # disagreed depending which path asked -- encode() collapsed a duplicate to its first occurrence's
