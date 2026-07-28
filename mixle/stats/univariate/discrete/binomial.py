@@ -685,6 +685,16 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
         self.name = name
         self.max_val = max_val
         self.min_val = min_val
+        # The DECLARED acceptance bounds, fixed for the accumulator's lifetime. min_val/max_val above
+        # are the OBSERVED range (their docstrings say so: "largest integer value encountered while
+        # accumulating"), and update() widens them as data arrives. Validating against the widening
+        # values made an inferred statistic act as an acceptance gate: the first observation set the
+        # running max, and every later observation above it was refused -- so an unbounded estimator
+        # rejected the very data it exists to learn the range from, with the cutoff decided by
+        # whichever row happened to come first. Fitting Binomial(0.4, n=10) with
+        # BinomialEstimator(min_val=0) failed with "Binomial observations must be at most 4".
+        self._declared_min = min_val
+        self._declared_max = max_val
 
     def update(self, x: int, weight: float, estimate: Optional["BinomialDistribution"]) -> None:
         """Accumulates Binomial sufficient statistics for weighted single observation.
@@ -708,8 +718,8 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
             exact_integer_observations(
                 [x],
                 label="Binomial observations",
-                minimum=self.min_val,
-                maximum=self.max_val,
+                minimum=self._declared_min,
+                maximum=self._declared_max,
             )[0]
         )
         self.sum += value * weight
@@ -764,8 +774,8 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
         used_values = exact_integer_observations(
             values[used],
             label="Binomial observations with positive weight",
-            minimum=self.min_val,
-            maximum=self.max_val,
+            minimum=self._declared_min,
+            maximum=self._declared_max,
         )
         min_val = int(np.min(used_values))
         max_val = int(np.max(used_values))
@@ -802,8 +812,8 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
         used_values = exact_integer_observations(
             values[used],
             label="Binomial observations with positive weight",
-            minimum=self.min_val,
-            maximum=self.max_val,
+            minimum=self._declared_min,
+            maximum=self._declared_max,
         )
         min_val = int(np.min(used_values))
         max_val = int(np.max(used_values))
