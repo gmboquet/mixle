@@ -38,6 +38,19 @@ from mixle.utils.special import logsumexp
 NORMALIZER_GRID = 4096
 
 
+def _exact_int(value: Any) -> int | None:
+    """``value`` as a Python ``int`` when it is an exact, non-Boolean integer; ``None`` otherwise.
+
+    ``bool`` is excluded deliberately: ``True == 1`` would make it a silent alias for element 1, and a
+    ``{True: ..., 1: ...}`` group mapping would collapse to a single key without anyone noticing.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    return None
+
+
 @dataclass(frozen=True)
 class CyclicGroup:
     """Z_``order`` acting on a periodic real-valued coordinate of period ``period`` by rotation.
@@ -47,10 +60,33 @@ class CyclicGroup:
     Jacobian-preserving) transform, so composing group elements is exactly addition mod ``order``
     (:meth:`compose`), and a density fit on the embedding is unaffected by which element aligned a point into
     it (the twist is undone before scoring, not baked into the density).
+
+    ``order`` must be an exact positive integer and ``period`` a finite positive number: a zero order
+    divides by zero in the rotation law, a negative or fractional one describes no cyclic group at all,
+    and a zero/non-finite period makes every embedding NaN. ``{0, ..., order - 1}`` is the whole element
+    set, and it is checked -- an out-of-range ``k`` used to be silently wrapped into a *different*
+    element, so ``-1``, ``order``, ``order + 1`` and ``True`` all acted as undeclared aliases.
     """
 
     order: int
     period: float = 1.0
+
+    def __post_init__(self) -> None:
+        order = _exact_int(self.order)
+        if order is None or order < 1:
+            raise ValueError(f"CyclicGroup order must be an exact integer >= 1; got {self.order!r}.")
+        period = float(self.period)
+        if not np.isfinite(period) or period <= 0.0:
+            raise ValueError(f"CyclicGroup period must be finite and positive; got {self.period!r}.")
+
+    def element(self, k: Any) -> int:
+        """Validate ``k`` as a declared group element and return it as a plain ``int``."""
+        idx = _exact_int(k)
+        if idx is None or not (0 <= idx < self.order):
+            raise ValueError(
+                f"{k!r} is not an element of Z_{self.order}; elements are the integers 0..{self.order - 1}."
+            )
+        return idx
 
     def embed(self, x: Sequence[float]) -> np.ndarray:
         """The periodic coordinate's ``(cos, sin)`` embedding, shape ``(..., 2)``."""
@@ -64,15 +100,17 @@ class CyclicGroup:
 
     def act(self, embedded: np.ndarray, k: int) -> np.ndarray:
         """Rotate an ``(..., 2)`` embedding by group element ``k`` (the forward twist)."""
-        return np.asarray(embedded, dtype=np.float64) @ self._rotation(k).T
+        return np.asarray(embedded, dtype=np.float64) @ self._rotation(self.element(k)).T
 
     def inverse_act(self, embedded: np.ndarray, k: int) -> np.ndarray:
         """Undo group element ``k``'s twist -- ``act(inverse_act(v, k), k) == v``."""
-        return self.act(embedded, -k)
+        # ``-k`` is the group inverse; name it as the declared element ``(order - k) mod order`` so the
+        # rotation is requested by a real element rather than relying on ``act`` wrapping a negative one.
+        return self.act(embedded, (-self.element(k)) % self.order)
 
     def compose(self, k1: int, k2: int) -> int:
         """The group element equivalent to applying ``k1`` then ``k2`` -- addition mod ``order``."""
-        return (k1 + k2) % self.order
+        return (self.element(k1) + self.element(k2)) % self.order
 
 
 def _embedding_log_density(density: Any, embedded: np.ndarray) -> np.ndarray:
@@ -171,9 +209,12 @@ def fit_independent_mixtures(
     comparison :func:`fit_twisted_mixture` is measured against.
     """
     out: dict[int, Any] = {}
-    for k, xs in data_by_group.items():
+    for raw_k, xs in data_by_group.items():
+        # keyed by the validated element, so the returned dict is indexable by the same declared
+        # elements callers pass to :func:`independent_log_density` (and cannot carry an alias key).
+        k = group.element(raw_k)
         rows = list(group.embed(xs))
-        out[k] = _fit_density(rows, n_components=n_components, seed=seed + int(k), max_its=max_its)
+        out[k] = _fit_density(rows, n_components=n_components, seed=seed + k, max_its=max_its)
     return out
 
 
@@ -185,5 +226,6 @@ def independent_log_density(models: dict[int, Any], group: CyclicGroup, x: Seque
     has a different embedding normalizer, so without this the baseline comparison would be decided by
     normalization rather than by fit quality.
     """
-    scores = _embedding_log_density(models[k], group.embed(x))
-    return scores - log_circular_normalizer(models[k], group)
+    model = models[group.element(k)]
+    scores = _embedding_log_density(model, group.embed(x))
+    return scores - log_circular_normalizer(model, group)
