@@ -13,7 +13,10 @@ Supported sources include:
 
 Without ``label`` the result is unlabeled. Without ``verify`` every draw is
 accepted. ``max_tries`` bounds rejection sampling so an impossible verifier
-returns a clear failure instead of looping indefinitely.
+raises :class:`IncompleteSynthesisError` instead of looping indefinitely --
+a returned :class:`Dataset` therefore always holds exactly the requested number
+of verified rows. The partially built dataset travels on the exception's
+``dataset`` attribute for callers that want to inspect what did pass.
 """
 
 from __future__ import annotations
@@ -28,7 +31,13 @@ import numpy as np
 
 @dataclass
 class Dataset:
-    """A verified synthetic dataset: inputs, optional labels, and the verifier that vouched for them."""
+    """A verified synthetic dataset: inputs, optional labels, and the verifier that vouched for them.
+
+    ``inputs`` and ``labels`` stay ordinary mutable lists, but a labeled dataset must always hold exactly
+    one label per input. That alignment is checked at construction *and* again before every operation that
+    walks the rows, so a post-construction edit that leaves the two out of step is reported instead of
+    silently truncating the rows that get iterated, paired, or rechecked.
+    """
 
     inputs: list[Any]
     labels: list[Any] | None = None
@@ -37,29 +46,55 @@ class Dataset:
     n_rejected: int = 0
     provenance: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        self.require_aligned()
+
+    def require_aligned(self) -> None:
+        """Raise unless every input carries exactly one label (vacuous for an unlabeled dataset)."""
+        if self.labels is not None and len(self.labels) != len(self.inputs):
+            raise ValueError(
+                f"dataset has {len(self.inputs)} inputs but {len(self.labels)} labels; "
+                "a labeled dataset must carry exactly one label per input"
+            )
+
     def __len__(self) -> int:
         return len(self.inputs)
 
     def __iter__(self):
+        self.require_aligned()
         if self.labels is None:
             return iter(self.inputs)
-        return iter(zip(self.inputs, self.labels))
+        return iter(zip(self.inputs, self.labels, strict=True))
 
     def pairs(self) -> list[tuple[Any, Any]]:
-        """``(input, label)`` pairs -- raises if the dataset is unlabeled."""
+        """``(input, label)`` pairs -- raises if the dataset is unlabeled or misaligned."""
         if self.labels is None:
             raise ValueError("dataset is unlabeled; pass label= to synthesize() to get pairs")
-        return list(zip(self.inputs, self.labels))
+        self.require_aligned()
+        return list(zip(self.inputs, self.labels, strict=True))
 
     def recheck(self) -> bool:
         """Re-run the attached verifier over every row.
 
-        Returns True when every row still passes, or when no verifier is
-        attached.
+        Returns True when every row still passes, or when no verifier is attached. Raises if the dataset
+        is misaligned -- a partial recheck that skipped unlabeled inputs would report a pass it never made.
         """
+        self.require_aligned()
         if self.verify is None:
             return True
         return all(_check(self.verify, x, y) for x, y in _rows(self.inputs, self.labels))
+
+
+class IncompleteSynthesisError(RuntimeError):
+    """Synthesis exhausted its attempt budget before producing the requested number of verified rows.
+
+    ``dataset`` holds the rows that did pass, so a caller that genuinely wants a short dataset can take it
+    deliberately rather than receiving one that looks like the full request.
+    """
+
+    def __init__(self, message: str, dataset: Dataset) -> None:
+        super().__init__(message)
+        self.dataset = dataset
 
 
 def _rows(inputs: list, labels: list | None):
@@ -67,7 +102,7 @@ def _rows(inputs: list, labels: list | None):
         for x in inputs:
             yield x, None
     else:
-        yield from zip(inputs, labels)
+        yield from zip(inputs, labels, strict=True)
 
 
 def _check(verify: Callable[..., bool], x: Any, y: Any) -> bool:
@@ -77,6 +112,16 @@ def _check(verify: Callable[..., bool], x: Any, y: Any) -> bool:
     except (TypeError, ValueError):
         n = 1
     return bool(verify(x, y) if n >= 2 else verify(x))
+
+
+def _exact_count(value: Any, label: str) -> int:
+    """An exact non-negative integer count -- ``bool`` and fractional values are requests, not counts."""
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{label} must be an exact integer count, got {value!r}")
+    count = int(value)
+    if count < 0:
+        raise ValueError(f"{label} must be non-negative, got {count}")
+    return count
 
 
 def _draws(source: Any, n: int, real_inputs: list | None, seed: int) -> list:
@@ -127,9 +172,15 @@ def synthesize(
     (optional) accepts ``verify(x)`` or ``verify(x, label)`` and gates each row -- rejected rows are
     resampled up to ``max_tries`` total draws. The verifier is attached to the returned :class:`Dataset`
     so consumers can :meth:`~Dataset.recheck` independently.
+
+    ``n`` must be an exact non-negative integer (``bool`` is not an integer here). A returned dataset always
+    holds exactly ``n`` verified rows; if the attempt budget, an impossible verifier, a short sampler, or
+    real-input deduplication leaves it short, :class:`IncompleteSynthesisError` is raised with the partial
+    dataset attached rather than a shortfall being returned as an ordinary result.
     """
+    n = _exact_count(n, "n")
     real_inputs = source if isinstance(source, (list, tuple)) else None
-    max_tries = int(max_tries) if max_tries is not None else max(4 * n, 50)
+    max_tries = _exact_count(max_tries, "max_tries") if max_tries is not None else max(4 * n, 50)
 
     inputs: list[Any] = []
     labels: list[Any] | None = [] if label is not None else None
@@ -168,7 +219,7 @@ def synthesize(
         except Exception:  # noqa: BLE001 - the precondition check must never break synthesis
             exch = None
 
-    return Dataset(
+    dataset = Dataset(
         inputs=inputs,
         labels=labels,
         verify=verify,
@@ -176,3 +227,11 @@ def synthesize(
         n_rejected=rejected,
         provenance={"requested": n, "produced": accepted, "tried": tried, "seed": seed, "exchangeability": exch},
     )
+    if accepted != n:
+        raise IncompleteSynthesisError(
+            f"synthesize() produced {accepted} of the {n} requested verified rows after {tried} draws "
+            f"({rejected} rejected, max_tries={max_tries}); raise max_tries, loosen verify, or take the "
+            "partial rows deliberately from this error's .dataset",
+            dataset,
+        )
+    return dataset
