@@ -482,6 +482,16 @@ def jonckheere_terpstra(*samples: Any, alternative: str = "increasing") -> TestR
     More powerful than Kruskal-Wallis when the groups are expected to shift monotonically in the given
     order. ``alternative='increasing'`` / ``'decreasing'`` / ``'two-sided'``. Uses the tie-corrected
     normal approximation of the J statistic (sum of pairwise Mann-Whitney counts over ordered pairs).
+
+    The null variance is the published Jonckheere-Terpstra one (Lehmann 1975), whose leading term is
+    ``[n(n-1)(2n+5) - sum n_i(n_i-1)(2n_i+5)] / 72`` -- algebraically the same as the equivalent
+    ``[n^2(2n+3) - sum n_i^2(2n_i+3)] / 72`` form. This implementation previously used
+    ``n(n-1)(2n+3) - sum n_i(n_i-1)(2n_i+3)``, mixing the two (MXR-080-1599): a hybrid that matches
+    neither published expression and, critically, does NOT reduce to the Mann-Whitney variance for two
+    ordered groups. For two groups of five with complete separation it understated the variance as
+    21.5278 against the required ``n1*n2*(n+1)/12 = 22.9167``, reporting ``z=2.69408, p=0.003529``
+    where the rank-sum test gives ``z=2.61116, p=0.004512``. The tied branch inherited the same altered
+    base terms, including in its ``sum t_j(t_j-1)(2t_j+5)`` tie correction.
     """
     _alternative(alternative, ("increasing", "decreasing", "two-sided"))
     groups = _groups(samples)
@@ -499,18 +509,16 @@ def jonckheere_terpstra(*samples: Any, alternative: str = "increasing") -> TestR
     mu = (n**2 - sum(s**2 for s in sizes)) / 4.0
     pooled = np.concatenate(groups)
     tie = _tie_term(pooled)
-    var = (
-        n * (n - 1) * (2 * n + 3)
-        - sum(s * (s - 1) * (2 * s + 3) for s in sizes)
-        - _tie_term(pooled) * 0  # tie adjustment folded below
-    ) / 72.0
+    # Published no-tie null variance; equals n1*n2*(n+1)/12 exactly for two ordered groups, which is
+    # what pins it against the Mann-Whitney/rank-sum reference (MXR-080-1599).
+    t1 = sum(s * (s - 1) * (2 * s + 5) for s in sizes)
+    var = (n * (n - 1) * (2 * n + 5) - t1) / 72.0
     # tie-corrected variance (Lehmann); fall back to the no-tie form when there are no ties
     if tie > 0:
         _, tc = np.unique(pooled, return_counts=True)
-        t1 = sum(s * (s - 1) * (2 * s + 3) for s in sizes)
-        u1 = sum(c * (c - 1) * (2 * c + 3) for c in tc)
+        u1 = sum(c * (c - 1) * (2 * c + 5) for c in tc)
         var = (
-            (n * (n - 1) * (2 * n + 3) - t1 - u1) / 72.0
+            (n * (n - 1) * (2 * n + 5) - t1 - u1) / 72.0
             + (sum(s * (s - 1) * (s - 2) for s in sizes) * sum(c * (c - 1) * (c - 2) for c in tc))
             / (36.0 * n * (n - 1) * (n - 2))
             + (sum(s * (s - 1) for s in sizes) * sum(c * (c - 1) for c in tc)) / (8.0 * n * (n - 1))

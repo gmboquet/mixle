@@ -129,5 +129,72 @@ class BehaviorTest(unittest.TestCase):
         self.assertAlmostEqual(cliffs_delta(z, z), 0.0, places=6)  # identical -> 0 (ties)
 
 
+class JonckheereNullVarianceTest(unittest.TestCase):
+    """MXR-080-1599: the null variance must be the published Jonckheere-Terpstra one.
+
+    The implementation used ``n(n-1)(2n+3) - sum n_i(n_i-1)(2n_i+3)``, a hybrid of the two equivalent
+    published expressions (``n(n-1)(2n+5) - ...`` and ``n^2(2n+3) - ...``) that matches neither, and
+    so did not reduce to the Mann-Whitney variance for two ordered groups. These tests pin the
+    two-group case against an INDEPENDENT scipy reference rather than against a hand-copied constant.
+    """
+
+    def test_two_group_variance_equals_the_mann_whitney_variance(self):
+        # audit repro: two groups of five with complete separation
+        low = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        high = np.array([6.0, 7.0, 8.0, 9.0, 10.0])
+        result = jonckheere_terpstra(low, high, alternative="increasing")
+
+        # J is the full n1*n2 pairwise count under complete separation, so mu and z are pinned by the
+        # required variance n1*n2*(n+1)/12 = 22.9166... alone
+        self.assertAlmostEqual(result.statistic, 25.0)
+        expected_var = 5 * 5 * (10 + 1) / 12.0
+        expected_z = (25.0 - (10**2 - 5**2 - 5**2) / 4.0) / np.sqrt(expected_var)
+        self.assertAlmostEqual(result.extra["zscore"], expected_z, places=10)
+        # the pre-fix variance was 21.5278, giving z=2.69408 instead of 2.61116
+        self.assertNotAlmostEqual(result.extra["zscore"], 2.69408, places=4)
+
+    def test_two_untied_groups_match_the_rank_sum_normal_approximation(self):
+        rng = np.random.RandomState(17)
+        for _ in range(8):
+            low = rng.normal(0.0, 1.0, 6)
+            high = rng.normal(0.6, 1.0, 9)
+            got = jonckheere_terpstra(low, high, alternative="increasing")
+            expected = ss.ranksums(high, low, alternative="greater")
+            self.assertAlmostEqual(got.extra["zscore"], float(expected.statistic), places=10)
+            self.assertAlmostEqual(got.pvalue, float(expected.pvalue), places=12)
+
+    def test_two_tied_groups_match_the_tie_corrected_mann_whitney_variance(self):
+        """The tied branch shares the same base terms, so it inherited the same error. Checked against
+        the standard tie-corrected Mann-Whitney normal approximation, computed independently here
+        because scipy's own ``ranksums`` applies no tie correction at all."""
+        rng = np.random.RandomState(23)
+        for _ in range(8):
+            low = rng.randint(0, 4, 7).astype(float)
+            high = rng.randint(0, 4, 6).astype(float)
+            pooled = np.concatenate([low, high])
+            if np.unique(pooled).size == pooled.size:
+                continue  # this case must actually contain ties to be testing the tied branch
+            n1, n2 = high.size, low.size
+            n = n1 + n2
+            _, counts = np.unique(pooled, return_counts=True)
+            tie_term = sum(c**3 - c for c in counts)
+            var_u = n1 * n2 / 12.0 * ((n + 1) - tie_term / (n * (n - 1)))
+            u = ss.mannwhitneyu(high, low, alternative="greater", use_continuity=False, method="asymptotic")
+            expected_z = (float(u.statistic) - n1 * n2 / 2.0) / np.sqrt(var_u)
+
+            got = jonckheere_terpstra(low, high, alternative="increasing")
+            self.assertAlmostEqual(got.extra["zscore"], expected_z, places=10)
+
+    def test_multi_group_trend_detection_is_unaffected(self):
+        """Negative control: the corrected variance is slightly LARGER, so it can only make the test
+        more conservative -- a genuine monotone trend must still be detected and flat groups must
+        still not be."""
+        rng = np.random.RandomState(1)
+        ordered = [rng.normal(m, 1, 15) for m in (0, 1, 2, 3)]
+        flat = [rng.normal(0, 1, 15) for _ in range(4)]
+        self.assertLess(jonckheere_terpstra(*ordered, alternative="increasing").pvalue, 0.001)
+        self.assertGreater(jonckheere_terpstra(*flat).pvalue, 0.05)
+
+
 if __name__ == "__main__":
     unittest.main()
