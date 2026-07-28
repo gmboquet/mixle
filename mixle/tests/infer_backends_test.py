@@ -9,11 +9,21 @@ backend always runs.
 
 import importlib.util
 import unittest
+import warnings
 
 import numpy as np
 
 import mixle.inference as infer
-from mixle.inference.backends import _KIND_PREFERENCE, available_backends, get_inference_backend, select_backend
+from mixle.inference.backends import (
+    _INFERENCE_BACKENDS,
+    _KIND_PREFERENCE,
+    InferenceBackend,
+    available_backends,
+    backend_availability,
+    get_inference_backend,
+    register_inference_backend,
+    select_backend,
+)
 
 HAS_NUMBA = importlib.util.find_spec("numba") is not None
 HAS_TORCH = importlib.util.find_spec("torch") is not None
@@ -142,6 +152,79 @@ class RegistryTest(unittest.TestCase):
                 get_inference_backend(name).target_kind,
                 {"numpy_vg", "njit_vg", "torch_logp", "jax_logp"},
             )
+
+
+class RegistrationValidationTest(unittest.TestCase):
+    """MXR-080-1638: the registry is global dispatch state; one bad entry must not corrupt it."""
+
+    def setUp(self):
+        self._saved = dict(_INFERENCE_BACKENDS)
+        self.addCleanup(lambda: (_INFERENCE_BACKENDS.clear(), _INFERENCE_BACKENDS.update(self._saved)))
+
+    @staticmethod
+    def _backend(**over):
+        fields = {
+            "name": "probe_test",
+            "available": lambda: True,
+            "target_kind": "numpy_vg",
+            "nuts": lambda *a, **k: None,
+        }
+        fields.update(over)
+        return InferenceBackend(**fields)
+
+    def test_empty_name_is_rejected(self):
+        # An empty name registered successfully and became selectable through get_inference_backend.
+        for bad in ("", "   "):
+            with self.assertRaises(ValueError):
+                register_inference_backend(self._backend(name=bad))
+        self.assertNotIn("", _INFERENCE_BACKENDS)
+
+    def test_unknown_target_kind_is_rejected_at_registration(self):
+        # select_backend already rejects an unrecognized kind from a caller; a backend declaring one
+        # can never be selected for any target, so accepting it only hides the mistake.
+        with self.assertRaises(ValueError):
+            register_inference_backend(self._backend(target_kind="bogus_kind"))
+
+    def test_non_callable_interfaces_are_rejected(self):
+        with self.assertRaises(TypeError):
+            register_inference_backend(self._backend(available=True))
+        with self.assertRaises(TypeError):
+            register_inference_backend(self._backend(nuts="not a sampler"))
+        with self.assertRaises(TypeError):
+            register_inference_backend("not a backend")
+
+    def test_replacement_requires_an_explicit_request(self):
+        register_inference_backend(self._backend())
+        with self.assertRaises(ValueError):
+            register_inference_backend(self._backend(nuts=lambda *a, **k: "swapped"))
+        register_inference_backend(self._backend(nuts=lambda *a, **k: "swapped"), replace=True)
+        self.assertEqual(get_inference_backend("probe_test").nuts(), "swapped")
+
+    def test_one_raising_availability_probe_does_not_hide_healthy_backends(self):
+        def boom():
+            raise RuntimeError("probe exploded")
+
+        healthy = available_backends()
+        self.assertIn("numpy", healthy)
+        register_inference_backend(self._backend(name="explodes", available=boom))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            still = available_backends()
+        self.assertEqual(still, healthy)  # the whole call used to raise, hiding every healthy backend
+        self.assertEqual(select_backend("auto"), "numpy")
+        self.assertTrue(any("explodes" in str(w.message) for w in caught))
+
+    def test_probe_failure_is_reported_distinctly_from_a_false_probe(self):
+        def boom():
+            raise RuntimeError("probe exploded")
+
+        register_inference_backend(self._backend(name="explodes", available=boom))
+        register_inference_backend(self._backend(name="absent", available=lambda: False))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            status = dict((name, err) for name, _ok, err in backend_availability())
+        self.assertIsNone(status["absent"])
+        self.assertIn("RuntimeError", status["explodes"])
 
 
 class BackendParityTest(unittest.TestCase):
