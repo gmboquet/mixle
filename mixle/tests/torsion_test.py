@@ -88,6 +88,63 @@ class CyclicGroupTest(unittest.TestCase):
         np.testing.assert_allclose(np.linalg.norm(embedded, axis=-1), np.linalg.norm(rotated, axis=-1), atol=1e-9)
 
 
+class CyclicGroupValidationTest(unittest.TestCase):
+    """MXR-080-1623: Z_order only exists for an exact positive integer order over a finite positive
+    period, and its elements are exactly 0..order-1. Anything else used to construct and then either
+    divide by zero, describe a group that does not exist, or silently alias an undeclared element."""
+
+    def test_nonexistent_orders_are_rejected_at_construction(self):
+        for bad in (0, -3, 2.5, 3.0, True, None):
+            with self.assertRaises((ValueError, TypeError), msg=f"order={bad!r} constructed"):
+                CyclicGroup(order=bad, period=1.0)
+
+    def test_degenerate_periods_are_rejected_at_construction(self):
+        for bad in (0.0, -1.0, float("nan"), float("inf")):
+            with self.assertRaises(ValueError, msg=f"period={bad!r} constructed"):
+                CyclicGroup(order=3, period=bad)
+
+    def test_undeclared_elements_are_rejected_rather_than_wrapped(self):
+        group = CyclicGroup(order=3, period=1.0)
+        embedded = group.embed([0.1, 0.4])
+        for bad in (-1, 3, 4, 1.9, True):
+            with self.assertRaises(ValueError, msg=f"act accepted {bad!r}"):
+                group.act(embedded, bad)
+            with self.assertRaises(ValueError, msg=f"inverse_act accepted {bad!r}"):
+                group.inverse_act(embedded, bad)
+            with self.assertRaises(ValueError, msg=f"compose accepted {bad!r}"):
+                group.compose(bad, 0)
+            with self.assertRaises(ValueError, msg=f"compose accepted {bad!r} as second argument"):
+                group.compose(0, bad)
+
+    def test_declared_elements_still_act_exactly_as_before(self):
+        # the validation must not change the transform for any real element, including the negative
+        # ``-k`` that inverse_act used to pass straight through to the rotation.
+        group = CyclicGroup(order=5, period=360.0)
+        embedded = group.embed(np.array([10.0, 200.0, 359.0]))
+        for k in range(group.order):
+            np.testing.assert_allclose(group.inverse_act(group.act(embedded, k), k), embedded, atol=1e-12)
+        self.assertEqual(group.compose(3, 4), 2)
+        self.assertEqual(group.compose(np.int64(3), np.int64(4)), 2)  # numpy integers are exact integers
+
+    def test_fit_and_score_boundaries_reject_undeclared_group_keys(self):
+        group = CyclicGroup(order=2, period=1.0)
+        data = _tight_group_samples(group, n_per_group=20, seed=0)
+        with self.assertRaises(ValueError):
+            fit_twisted_mixture(group, {**data, 5: data[0]}, n_components=1, seed=0, max_its=5)
+        with self.assertRaises(ValueError):
+            fit_independent_mixtures(group, {**data, 5: data[0]}, n_components=1, seed=0, max_its=5)
+        models = fit_independent_mixtures(group, data, n_components=1, seed=0, max_its=5)
+        with self.assertRaises(ValueError):
+            independent_log_density(models, group, [0.25], 2)
+
+    def test_scoring_a_fitted_result_rejects_an_undeclared_element(self):
+        group = CyclicGroup(order=2, period=1.0)
+        data = _tight_group_samples(group, n_per_group=20, seed=0)
+        twisted = fit_twisted_mixture(group, data, n_components=1, seed=0, max_its=5)
+        with self.assertRaises(ValueError):
+            twisted.log_density([0.25], -1)
+
+
 class CircularNormalizationTest(unittest.TestCase):
     """MXR-080-1622: the ``(cos, sin)`` embedding is not a change of variables, so the ambient 2-D score
     is not a density on the periodic coordinate until its circular normalizer is divided out."""
