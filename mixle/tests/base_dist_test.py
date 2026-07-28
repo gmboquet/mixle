@@ -422,7 +422,36 @@ def em_fit(est, model, enc_data, step, max_its=200, delta=1.0e-7):
     return model
 
 
+#: Held-out sample size for the estimation tests' KL evaluation. Large relative to the training
+#: sizes so the Monte Carlo error of the estimate is small next to the effect being measured.
+_HELDOUT_SIZE = 2000
+#: Seed offset for the held-out draw, so it never coincides with a training seed.
+_HELDOUT_SEED_OFFSET = 10_000
+
+
+def _heldout_encoded(dist, seed):
+    """Encode a fresh sample from ``dist`` that no fit in these tests has seen."""
+    holdout = dist.sampler(seed + _HELDOUT_SEED_OFFSET).sample(size=_HELDOUT_SIZE)
+    return seq_encode(holdout, encoder=dist.dist_to_encoder())
+
+
 def estimation_test(dist):
+    """More training data must bring the fit closer to the truth, measured out of sample.
+
+    ``empirical_kl_divergence(dist, est_dist, enc)`` is a Monte Carlo estimate of
+    ``E_enc[log p_true - log p_fit]``. Evaluated on the *training* rows -- which is what this test
+    used to do -- that quantity is systematically **negative**: the fit is the (penalized) maximum
+    likelihood solution for exactly those rows, so it necessarily scores them at least as well as
+    the truth does, by roughly ``#params / (2n)``. That bias shrinks toward zero as ``n`` grows, so
+    the in-sample number *rises* with sample size while the assertion below requires it to fall --
+    the test asserted the opposite of what an in-sample estimate does. It went unnoticed because the
+    harness ran against a single distribution until per-family coverage was restored; turning it on
+    for forty families turned one latent harness defect into forty failures.
+
+    Evaluating on a held-out draw from the true distribution makes the quantity a real KL estimate:
+    non-negative in expectation, zero only when the fit matches the truth, and genuinely decreasing
+    in the training size -- which is the property this test exists to check.
+    """
 
     seeds = [1, 2, 3, 4]
     szs = [50, 150, 300]
@@ -432,6 +461,7 @@ def estimation_test(dist):
     for seed in seeds:
         kld = []
         better = []
+        heldout = _heldout_encoded(dist, seed)
         for sz in szs:
             data = dist.sampler(seed).sample(size=sz)
             est = dist.estimator()
@@ -439,7 +469,7 @@ def estimation_test(dist):
             init = initialize(data, est, rng=np.random.RandomState(1), p=1.0)
             est_dist = em_fit(est, init, enc_data, lambda e, m: estimate(data, e, m))  # noqa: B023  -- invoked synchronously within the loop iteration
 
-            emp_kld, _, _ = empirical_kl_divergence(dist, est_dist, enc_data)
+            emp_kld, _, _ = empirical_kl_divergence(dist, est_dist, heldout)
 
             if len(kld) > 0:
                 better.append(kld[-1] >= emp_kld)
@@ -471,7 +501,9 @@ def seq_estimation_test(dist):
             init = seq_initialize(enc_data, est, np.random.RandomState(1), p=1.0)
             est_dist = em_fit(est, init, enc_data, lambda e, m: seq_estimate(enc_data, e, m))  # noqa: B023  -- invoked synchronously within the loop iteration
 
-            emp_kld, _, _ = empirical_kl_divergence(dist, est_dist, enc_data)
+            # held out for the same reason as estimation_test: an in-sample KL estimate is
+            # negatively biased by construction and cannot be compared across sample sizes.
+            emp_kld, _, _ = empirical_kl_divergence(dist, est_dist, _heldout_encoded(dist, seed))
 
             if len(kld) > 0:
                 better.append(kld[-1] >= emp_kld)
