@@ -17,6 +17,14 @@ except ImportError:
 
 FAMILY_A = ["free money now", "cheap loans fast", "win cash today"]
 FAMILY_B = ["urgent wire transfer", "account suspended act now", "verify password immediately"]
+
+# resolve_from_harvest gates acceptance on Clopper-Pearson LOWER bounds for both the escalation drop
+# and the local accuracy, Bonferroni-split across the two claims. A lower bound needs samples: even a
+# perfect tier scoring n-for-n only certifies accuracy >= 0.9 at the 0.025 tail once
+# 0.025 ** (1/n) >= 0.9, i.e. n >= 35. Serving 400 requests yielded 34 evaluation rows, so a tier that
+# was in fact 34/34 correct was refused by 0.003 -- the fixture, not the model, lacked the evidence.
+# This volume leaves the evaluation split real margin rather than sitting on the boundary.
+_SERVED = 1200
 HAM = ["meeting at noon", "see you tomorrow", "project update attached", "lunch today", "thanks for the help"]
 
 
@@ -46,7 +54,7 @@ def _build_router(seed=0):
 class HarvestResolveTest(unittest.TestCase):
     def test_new_tier_measurably_drops_escalation_on_held_out_traffic(self):
         router, tier0 = _build_router(seed=0)
-        router.serve(_make(400, [FAMILY_A, FAMILY_B], random.Random(1)))
+        router.serve(_make(_SERVED, [FAMILY_A, FAMILY_B], random.Random(1)))
         before = router.report()
         self.assertGreater(before["harvested_labels"], 20)  # FAMILY_B genuinely escalates a lot
 
@@ -90,9 +98,9 @@ class HarvestResolveTest(unittest.TestCase):
         # router's harvest on success (so a repeat call on the SAME router legitimately sees less
         # data), so determinism is checked across two routers with the same harvested state instead.
         router1, _tier0a = _build_router(seed=0)
-        router1.serve(_make(400, [FAMILY_A, FAMILY_B], random.Random(1)))
+        router1.serve(_make(_SERVED, [FAMILY_A, FAMILY_B], random.Random(1)))
         router2, _tier0b = _build_router(seed=0)
-        router2.serve(_make(400, [FAMILY_A, FAMILY_B], random.Random(1)))
+        router2.serve(_make(_SERVED, [FAMILY_A, FAMILY_B], random.Random(1)))
 
         r1 = resolve_from_harvest(router1, cost_per_request=0.001, seed=0)
         r2 = resolve_from_harvest(router2, cost_per_request=0.001, seed=0)
@@ -102,7 +110,7 @@ class HarvestResolveTest(unittest.TestCase):
 
     def test_successful_resolve_clears_the_input_routers_harvest(self):
         router, _tier0 = _build_router(seed=0)
-        router.serve(_make(400, [FAMILY_A, FAMILY_B], random.Random(1)))
+        router.serve(_make(_SERVED, [FAMILY_A, FAMILY_B], random.Random(1)))
         self.assertGreater(len(router.harvested()[0]), 0)
 
         result = resolve_from_harvest(router, cost_per_request=0.001, seed=0)
@@ -113,7 +121,7 @@ class HarvestResolveTest(unittest.TestCase):
 
     def test_inserted_tier_sits_just_before_the_frontier(self):
         router, _tier0 = _build_router(seed=0)
-        router.serve(_make(400, [FAMILY_A, FAMILY_B], random.Random(1)))
+        router.serve(_make(_SERVED, [FAMILY_A, FAMILY_B], random.Random(1)))
         result = resolve_from_harvest(router, cost_per_request=0.001, name="resolved", seed=0)
         self.assertTrue(result.accepted)
         names = [t[0] for t in result.router.tiers]
