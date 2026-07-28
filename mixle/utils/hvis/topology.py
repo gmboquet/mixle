@@ -250,9 +250,7 @@ def model_fit_health(
         or min_component_points < 2
     ):
         raise ValueError("min_component_points must be an integer of at least two.")
-    if merged_sep_threshold is not None and (
-        not np.isfinite(merged_sep_threshold) or merged_sep_threshold <= 0.0
-    ):
+    if merged_sep_threshold is not None and (not np.isfinite(merged_sep_threshold) or merged_sep_threshold <= 0.0):
         raise ValueError("merged_sep_threshold must be finite and positive or None.")
     if not np.isfinite(shattered_weight) or not 0.0 <= shattered_weight <= 1.0:
         raise ValueError("shattered_weight must be a finite probability.")
@@ -381,13 +379,16 @@ def model_fit_health(
     }
 
 
+_DEFAULT_HEALTH_K = 10  # capped by the sample embedding_health actually draws; see the k branch below
+
+
 def embedding_health(
     coords: np.ndarray,
     mix_model,
     data,
     *,
     affinity="auto",
-    k: int = 10,
+    k: int | None = None,
     field_weights=None,
     evidence_cap: float | None = 1.0,
     max_rows: int = 400,
@@ -434,11 +435,22 @@ def embedding_health(
     rng = np.random.RandomState(seed)
     idx = np.arange(n) if n <= max_rows else np.sort(rng.choice(n, size=max_rows, replace=False))
     m = len(idx)
-    if isinstance(k, bool) or not isinstance(k, (int, np.integer)):
-        raise TypeError("k must be an integer.")
-    k = int(k)
-    if k < 1 or k >= m / 2.0:
-        raise ValueError("k must be positive and strictly less than half the sampled observations.")
+    if k is None:
+        # Default: fit the neighborhood to the sample THIS function drew. The caller cannot know m --
+        # it is min(n, max_rows) after the subsample above -- so a fixed default of 10 was
+        # unsatisfiable for any input under 21 rows, contradicting the contract asserted a few lines
+        # up ("requires at least three observations") and taking the whole hvis_map(health=True) call
+        # down with it. Trustworthiness/continuity only need k < m/2 to normalize; the returned
+        # receipt reports "k" beside "n_sampled", so the effective neighborhood stays visible.
+        k = min(_DEFAULT_HEALTH_K, (m - 1) // 2)
+    else:
+        # An explicitly requested k is different: answering a k=3 question with k=2 would hand back a
+        # receipt that does not measure what was asked, so say so instead.
+        if isinstance(k, bool) or not isinstance(k, (int, np.integer)):
+            raise TypeError("k must be an integer.")
+        k = int(k)
+        if k < 1 or k >= m / 2.0:
+            raise ValueError("k must be positive and strictly less than half the sampled observations.")
 
     log_s = log_affinity_block(factors, idx, idx, evidence_cap)
     np.fill_diagonal(log_s, -np.inf)
