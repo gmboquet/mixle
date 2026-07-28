@@ -40,7 +40,9 @@
         "EmissionFactors",
         "ExceedanceReport",
         "Footprint",
+        "FrechetApproximationDiagnostic",
         "GPDFit",
+        "GaussianObservationModel",
         "HabitatModel",
         "KDE",
         "LedoitWolfEstimator",
@@ -50,14 +52,18 @@
         "RiskQuantity",
         "SlopeFactor",
         "SmithMaxStable",
+        "SmithMaxStableFit",
         "SmithMaxStableSampler",
         "SpatialMixture",
         "SpeciesObservation",
+        "TransitionRiskResult",
         "VarianceCalibrationError",
         "VarianceCalibrationOutOfRange",
         "VarianceCalibrationUnidentifiable",
         "Variogram",
+        "VoiEstimate",
         "VoiStoppingDecision",
+        "WaterBudget",
         "ace",
         "apply_habitat_constraints",
         "benchmark_dose",
@@ -126,6 +132,7 @@
         "turing_coverage",
         "universal_kriging",
         "voi_dollars",
+        "voi_estimate",
         "voi_stopping_decision"
       ]
     },
@@ -380,6 +387,7 @@
         "kl_divergence",
         "martingale_violation",
         "mmd",
+        "mmd_squared",
         "step",
         "wasserstein_distance"
       ]
@@ -1426,6 +1434,7 @@
         "joint_cycle_consistency_receipt",
         "marginal_coverage",
         "model_evidence",
+        "posterior_ambiguity",
         "posterior_mean_estimate",
         "read_out",
         "reason",
@@ -1441,6 +1450,7 @@
     "mixle.represent": {
       "maturity": "provisional",
       "names": [
+        "AutoencoderFitError",
         "AutoencoderResult",
         "ByteSegmenter",
         "CategoricalEmbedding",
