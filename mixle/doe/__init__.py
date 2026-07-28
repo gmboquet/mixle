@@ -66,7 +66,7 @@ from mixle.doe.bayesopt import (
 )
 
 # analysis half (folded in from the former mixle.uq package)
-from mixle.doe.calibrate import KOCalibration, calibrate
+from mixle.doe.calibrate import CalibrationIdentifiabilityError, KOCalibration, calibrate
 from mixle.doe.constrained import (
     ConstrainedBayesOptResult,
     constrained_minimize,
@@ -233,4 +233,5 @@ __all__ = [
     "IncumbentResult",
     "calibrate",
     "KOCalibration",
+    "CalibrationIdentifiabilityError",
 ]
