@@ -263,9 +263,27 @@ class TorchEngine(ComputeEngine):
             kwargs["dim"] = kwargs.pop("axis")
         dim = kwargs.pop("dim", None)
         if isinstance(dim, (tuple, list)):
-            # torch.max reduces a single dim; fold over a tuple of axes to match numpy.
+            # torch.max reduces a single dim; fold over a tuple of axes to match numpy. Every axis is
+            # normalized against the ORIGINAL rank BEFORE sorting (MXR-080-1562): the fold drops a
+            # dimension each pass, so a still-negative axis names a different dimension on the second
+            # pass than numpy's contract says it does -- reducing a (2,3,4) tensor over (-1,-2) used to
+            # sort to [-1,-2] and return shape (3,) where numpy returns (2,). Duplicates are rejected
+            # exactly as numpy does rather than silently reducing two different dimensions.
             rv = x
-            for one_dim in sorted((int(d) for d in dim), reverse=True):
+            normalized: list[int] = []
+            for one_dim in dim:
+                axis = int(one_dim)
+                if axis < 0:
+                    axis += x.dim()
+                if not 0 <= axis < x.dim():
+                    raise IndexError(
+                        "Dimension out of range (expected to be in range of [%d, %d], but got %d)"
+                        % (-x.dim(), x.dim() - 1, int(one_dim))
+                    )
+                if axis in normalized:
+                    raise ValueError("duplicate value in 'axis'")
+                normalized.append(axis)
+            for one_dim in sorted(normalized, reverse=True):
                 rv = torch.max(rv, dim=one_dim, **kwargs)
                 rv = rv.values if isinstance(rv, tuple) else rv
             return rv
