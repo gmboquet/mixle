@@ -134,6 +134,74 @@ class RecalibratedEncodedScoringTest(unittest.TestCase):
         np.testing.assert_allclose(encoded, scalars, rtol=1e-9, atol=1e-9)
 
 
+class RecalibrationFiniteControlsTest(unittest.TestCase):
+    """MXR-080-1780: recalibration must never construct a non-finite predictive model.
+
+    ``temperature <= 0.0`` rejected only the negative half-line: NaN and infinity both compared
+    False and sailed through, and ``center`` was unchecked entirely. The affine map
+    ``y -> c + (y - c) / T`` is undefined for either, so what came out was not a distribution --
+    NaN density and NaN samples for a NaN temperature, ``-inf`` density and NaN samples for an
+    infinite one -- while presenting itself as an ordinary recalibrated model.
+    """
+
+    def setUp(self):
+        self.base = GaussianDistribution(0.0, 1.0)
+        self.data = list(np.random.RandomState(0).normal(3.0, 2.0, 120))
+
+    def test_non_finite_temperature_is_rejected(self):
+        from mixle.evolve.operators import _RecalibratedModel
+
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(temperature=bad), self.assertRaises(ValueError):
+                _RecalibratedModel(self.base, temperature=bad, center=0.0)
+
+    def test_non_positive_temperature_is_still_rejected(self):
+        from mixle.evolve.operators import _RecalibratedModel
+
+        for bad in (0.0, -1.0):
+            with self.subTest(temperature=bad), self.assertRaises(ValueError):
+                _RecalibratedModel(self.base, temperature=bad, center=0.0)
+
+    def test_non_finite_center_is_rejected(self):
+        from mixle.evolve.operators import _RecalibratedModel
+
+        for bad in (float("nan"), float("inf")):
+            with self.subTest(center=bad), self.assertRaises(ValueError):
+                _RecalibratedModel(self.base, temperature=1.0, center=bad)
+
+    def test_an_empty_grid_cannot_report_an_unevaluated_temperature(self):
+        # grid=() used to leave the initial best_t = 1.0 in place with best_err still inf, i.e. a
+        # "chosen" temperature no candidate evaluation ever produced.
+        with self.assertRaises(ValueError):
+            Recalibrate(grid=())
+
+    def test_invalid_grid_and_ensemble_controls_are_rejected_at_declaration(self):
+        for kwargs in (
+            {"grid": (float("nan"),)},
+            {"grid": (float("inf"), 1.0)},
+            {"grid": (0.0, 1.0)},
+            {"grid": (-1.0,)},
+            {"ensemble": 0},
+            {"ensemble": -8},
+            {"ensemble": True},
+        ):
+            with self.subTest(**kwargs), self.assertRaises(ValueError):
+                Recalibrate(**kwargs)
+
+    def test_a_valid_search_still_produces_a_finite_recalibrated_model(self):
+        cand = Recalibrate(seed=0).propose(self.base, self.data, ctx={"parent_hash": None})
+        self.assertTrue(np.isfinite(cand.model.temperature))
+        self.assertGreater(cand.model.temperature, 0.0)
+        self.assertTrue(np.isfinite(cand.model.center))
+        self.assertTrue(np.isfinite(cand.meta["pit_error"]))
+        self.assertIn(cand.model.temperature, [float(t) for t in Recalibrate().grid])
+        self.assertTrue(np.all(np.isfinite(np.asarray(cand.model.sampler(0).sample(16), dtype=float))))
+
+    def test_non_finite_observations_are_refused_rather_than_propagated(self):
+        with self.assertRaises(ValueError):
+            Recalibrate(seed=0).propose(self.base, [1.0, float("nan"), 2.0], ctx={"parent_hash": None})
+
+
 class MutateShrinkWeightsTest(unittest.TestCase):
     """The ``shrink`` move drops one mixture component but must renormalize the SURVIVING
     components' weights to a simplex before handing them to ``mixture(...)`` -- passing the original
