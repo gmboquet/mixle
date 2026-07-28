@@ -127,6 +127,21 @@ class JaxEngineTest(unittest.TestCase):
         grad = jax.grad(lambda x: self.je.sum(x**2))(self.je.asarray([1.0, 2.0, 3.0]))
         self.assertTrue(np.allclose(self.je.to_numpy(grad), [2.0, 4.0, 6.0]))
 
+    def test_complex_input_rejected_without_explicit_dtype(self):
+        # MXR-080-1560: the non-floating/non-Boolean fallback is jnp.int64, which would silently drop
+        # the imaginary component and truncate the real part. Same contract as TorchEngine.asarray.
+        with self.assertRaises(ValueError) as ctx:
+            self.je.asarray(np.array([1 + 2j, 3 - 4j]))
+        self.assertIn("complex", str(ctx.exception))
+        with self.assertRaises(ValueError):
+            self.je.asarray([1 + 2j])
+
+    def test_complex_input_preserved_with_explicit_dtype(self):
+        import jax.numpy as jnp
+
+        got = np.asarray(self.je.to_numpy(self.je.asarray(np.array([1 + 2j, 3 - 4j]), dtype=jnp.complex128)))
+        self.assertTrue(np.array_equal(got, np.array([1 + 2j, 3 - 4j])))
+
 
 @unittest.skipUnless(_HAS_JAX, "jax is not installed")
 class JaxEngineX64ConfigTest(unittest.TestCase):
