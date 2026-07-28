@@ -1,6 +1,7 @@
 """The precision-spectrum front door (mixle.engines.spectrum): auto-route to the cheapest accurate backend."""
 
 import unittest
+from decimal import Decimal
 from unittest import mock
 
 import numpy as np
@@ -59,6 +60,24 @@ class AccurateSumRoutingTest(unittest.TestCase):
 
 
 class AccurateSumFailClosedTest(unittest.TestCase):
+    def test_finite_overflow_is_not_certified_as_ok(self):
+        x = np.array([1e308, 1e308])
+        r = accurate_sum(x, 1e-12)
+        self.assertEqual(r.status, "overflow")
+        self.assertFalse(r.met_target)
+        self.assertTrue(np.isinf(r.value))
+        cert = sum_certificate(x)
+        self.assertEqual(cert["status"], "overflow_or_unbounded")
+        self.assertFalse(cert["certified"])
+        self.assertTrue(np.isinf(cert["rel_error_bound"]))
+
+    def test_decimal_input_is_preserved_until_high_precision_accumulation(self):
+        x = [Decimal("1.0000000000000000000000000000000001"), Decimal("-1")]
+        r = accurate_sum(x, 1e-25)
+        self.assertTrue(r.backend.startswith("mpfr"))
+        self.assertEqual(r.status, "ok")
+        self.assertAlmostEqual(r.value / 1e-34, 1.0, places=12)
+
     """MXR-080-0136: accurate_sum used to fail open (silently return an unverified value) instead of
     reporting that the requested target was not actually met, and a specific exact-cancellation shape
     crashed with an unrelated-looking OverflowError instead of either outcome."""
@@ -145,7 +164,7 @@ class AccurateSumFailClosedTest(unittest.TestCase):
             self.assertEqual(r.target_rel_error, 1e-12)
 
     def test_invalid_target_rejected(self):
-        for bad in (0.0, -1e-9, float("nan"), float("inf")):
+        for bad in (0.0, -1e-9, float("nan"), float("inf"), True):
             with self.assertRaises(ValueError):
                 accurate_sum(np.array([1.0, 2.0]), bad)
 
@@ -223,6 +242,24 @@ class CastPrecisionSpellingTest(unittest.TestCase):
                     cast(x, bad)
                 self.assertNotIn("math domain error", str(ctx.exception))
                 self.assertIn("positive", str(ctx.exception))
+
+    def test_width_rejects_boolean_fractional_and_accepts_numpy_integer(self):
+        x = np.array([1.0])
+        for bad in (True, np.bool_(False), 1.9):
+            with self.assertRaises(ValueError):
+                cast(x, bad)
+        self.assertIsInstance(cast(x, np.int64(96)), DoubleDouble)
+
+    def test_high_precision_name_matches_requested_total_width(self):
+        from mixle.engines.highprec import HighPrecisionFormat
+
+        fmt = HighPrecisionFormat(256)
+        self.assertEqual(fmt.name, "fp256")
+        self.assertEqual(fmt.total_bits, 256)
+        with self.assertRaises(ValueError):
+            HighPrecisionFormat(True)
+        with self.assertRaises(ValueError):
+            HighPrecisionFormat(1.9)
 
     def test_nonpositive_fp_string_width_rejected(self):
         x = np.array([1.0, 2.0, 3.0])

@@ -48,6 +48,16 @@ def _require() -> None:
         )
 
 
+def _require_precision_bits(bits: Any) -> int:
+    """Require an exact, positive, non-Boolean binary significand width."""
+    if isinstance(bits, (bool, np.bool_)) or not isinstance(bits, (int, np.integer)):
+        raise ValueError("precision bits must be a positive integer, got %r" % (bits,))
+    bits = int(bits)
+    if bits < 1:
+        raise ValueError("precision bits must be >= 1")
+    return bits
+
+
 def _scalar_to_hp(v: Any, bits: int) -> Any:
     """Convert one scalar to a ``bits``-bit backend-native high-precision number.
 
@@ -104,6 +114,7 @@ def hp_array(x: Any, bits: int) -> np.ndarray:
     high-precision backend, no matter how many ``bits`` were then requested.
     """
     _require()
+    bits = _require_precision_bits(bits)
     arr = np.asarray(x, dtype=object)
     flat = [_scalar_to_hp(v, bits) for v in arr.ravel()]
     return np.array(flat, dtype=object).reshape(arr.shape)
@@ -128,6 +139,7 @@ def hp_sum(x: Any, bits: int) -> float:
     :func:`mixle.engines.extended.dd_sum`. Returns the float64-rounded result.
     """
     _require()
+    bits = _require_precision_bits(bits)
     flat = np.asarray(x, dtype=object).ravel()
     if _BACKEND == "gmpy2":
         with gmpy2.context(precision=bits):
@@ -140,27 +152,31 @@ def hp_sum(x: Any, bits: int) -> float:
 
 
 class HighPrecisionFormat:
-    """An arbitrary ``bits``-mantissa float (fp128, fp256, fp512, fp1024, ...) -- MPFR-backed codec.
+    """An arbitrary total-width float (fp128, fp256, fp512, fp1024, ...) -- MPFR-backed codec.
 
-    Round-trips a float64 array losslessly (its 52 bits fit), and represents *more* than float64 when
-    fed exact/high-precision values. ``max_rel_error == 2**-bits``.
+    ``total_bits`` uses the same sign+exponent+significand unit as every ``fpN`` spelling in
+    :mod:`mixle.engines.spectrum`. The MPFR precision is derived from that total width; the public name
+    therefore always remains exactly ``fp<total_bits>``.
     """
 
-    def __init__(self, bits: int) -> None:
-        if bits < 1:
-            raise ValueError("bits must be >= 1")
-        self.bits = int(bits)
-        self.name = "fp%d" % (self.bits + 12)  # ~ exponent+sign overhead, for a readable label
-        self.mantissa_bits = self.bits
+    def __init__(self, total_bits: int) -> None:
+        from mixle.engines.formats import _exp_bits_for
+
+        self.total_bits = _require_precision_bits(total_bits)
+        self.bits = self.total_bits  # compatibility: this field now has the documented total-width unit
+        self.exp_bits = _exp_bits_for(self.total_bits)
+        self.precision_bits = self.total_bits - self.exp_bits
+        self.name = "fp%d" % self.total_bits
+        self.mantissa_bits = self.precision_bits
 
     @property
     def max_rel_error(self) -> float:
-        """Return the nominal relative error bound for the mantissa budget."""
-        return 2.0 ** -(self.bits + 1)
+        """Return MPFR round-to-nearest unit roundoff for the derived significand precision."""
+        return 2.0**-self.precision_bits
 
     def quantize(self, x: Any) -> np.ndarray:
         """Encode values with the configured high-precision mantissa."""
-        return hp_array(x, self.bits)
+        return hp_array(x, self.precision_bits)
 
     def dequantize(self, q: Any) -> np.ndarray:
         """Decode high-precision values to float64."""

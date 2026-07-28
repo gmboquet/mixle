@@ -42,6 +42,8 @@ class SumResult:
       ``_MAX_MPFR_BITS`` is not enough. ``value``/``backend`` still carry the best effort found (the
       highest-precision backend actually tried), for diagnostics only -- callers that require the
       accuracy guarantee must treat this as a failure and not use ``value``.
+    * ``"overflow"``: the exact/high-precision result cannot be represented by this API's float64
+      ``value`` field. No relative-error claim is issued.
 
     Attributes:
         value: the computed sum (best-effort, not certified, when ``status == "insufficient"``).
@@ -98,41 +100,87 @@ def accurate_sum(x: Any, target_rel_error: float = 1e-12) -> SumResult:
 
     Raises ``ValueError`` if ``target_rel_error`` is not a positive, finite number.
     """
-    if not (math.isfinite(target_rel_error) and target_rel_error > 0.0):
+    if isinstance(target_rel_error, (bool, np.bool_)) or not (
+        math.isfinite(target_rel_error) and target_rel_error > 0.0
+    ):
         raise ValueError("target_rel_error must be a positive, finite number; got %r." % (target_rel_error,))
 
-    arr = np.asarray(x, dtype=np.float64).ravel()
-    if arr.size == 0:
+    raw = np.asarray(x, dtype=object).ravel()
+    if raw.size == 0:
         return SumResult(0.0, "float64", 0.0, target_rel_error, "ok")
 
-    if float64_sum_is_accurate(arr, target_rel_error):
-        s0 = abs(float(np.sum(arr)))
-        rel0 = sum_error_bound(arr) / max(s0, _TINY)
-        return SumResult(float(np.sum(arr)), "float64", rel0, target_rel_error, "ok")
+    def _native_exact(value: Any) -> bool:
+        if isinstance(value, (bool, np.bool_)):
+            return True
+        if isinstance(value, (int, np.integer)):
+            return abs(int(value)) <= 2**53
+        if isinstance(value, (float, np.floating)):
+            return np.asarray(value).dtype.itemsize <= 8 and math.isfinite(float(value))
+        return False
 
-    dd = dd_sum(arr)
-    s_dd = abs(float(dd.to_float()))
-    abs_sum = float(np.abs(arr).sum())
+    if not all(_native_exact(value) for value in raw):
+        # Preserve Decimal/string/large-integer/backend-native evidence until the selected accumulator.
+        try:
+            approx = np.array([float(value) for value in raw], dtype=np.float64)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("sum inputs must be finite numeric values") from None
+        if np.any(np.isnan(approx)):
+            raise ValueError("sum inputs must be finite numeric values")
+        with np.errstate(over="ignore", invalid="ignore"):
+            approx_sum = abs(float(np.sum(approx)))
+            approx_abs_sum = float(np.abs(approx).sum())
+        cond = (
+            float(_FLOAT64_MAX)
+            if not math.isfinite(approx_sum) or not math.isfinite(approx_abs_sum)
+            else _condition_number(approx_abs_sum, approx_sum)
+        )
+        return _high_precision_sum(raw, cond, target_rel_error)
+
+    arr = np.asarray(raw.tolist(), dtype=np.float64)
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("sum inputs must be finite numeric values")
+    if float64_sum_is_accurate(arr, target_rel_error):
+        s0_value = float(np.sum(arr))
+        s0 = abs(s0_value)
+        rel0 = sum_error_bound(arr) / max(s0, _TINY)
+        return SumResult(s0_value, "float64", rel0, target_rel_error, "ok")
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        abs_sum = float(np.abs(arr).sum())
+    if not math.isfinite(abs_sum):
+        return _high_precision_sum(raw, float(_FLOAT64_MAX), target_rel_error)
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        dd = dd_sum(arr)
+        dd_value = float(dd.to_float())
+    if not math.isfinite(dd_value) or not np.all(np.isfinite(dd.hi)) or not np.all(np.isfinite(dd.lo)):
+        return _high_precision_sum(raw, float(_FLOAT64_MAX), target_rel_error)
+    s_dd = abs(dd_value)
     cond = _condition_number(abs_sum, s_dd)
     dd_rel_error = cond * _U_DD
     if dd_rel_error <= target_rel_error:
-        return SumResult(float(dd.to_float()), "dd", dd_rel_error, target_rel_error, "ok")
+        return SumResult(dd_value, "dd", dd_rel_error, target_rel_error, "ok")
+    result = _high_precision_sum(raw, cond, target_rel_error)
+    if result.backend == "unavailable":
+        return SumResult(dd_value, "dd", dd_rel_error, target_rel_error, "insufficient")
+    return result
 
-    # Arbitrary precision: enough mantissa bits to cover the conditioning and the target.
+
+def _high_precision_sum(raw: np.ndarray, cond: float, target_rel_error: float) -> SumResult:
+    """Accumulate preserved source scalars without a float64 conversion boundary."""
     from mixle.engines.highprec import available, hp_sum
 
-    if not available():  # gmpy2/mpmath both absent -- dd is the best available, and it was just proven
-        # insufficient above: report that honestly instead of returning it as if it met the target.
-        return SumResult(float(dd.to_float()), "dd", dd_rel_error, target_rel_error, "insufficient")
+    if not available():
+        return SumResult(math.nan, "unavailable", math.inf, target_rel_error, "insufficient")
 
-    # Clamp the *estimate* itself (not just its float->int conversion) at the cap, so a saturated
-    # (formerly infinite) `cond` can never reach a conversion that could raise OverflowError.
     bits_needed = math.log2(max(cond, 1.0)) - math.log2(target_rel_error) + 16
     if bits_needed > _MAX_MPFR_BITS:
         bits = _MAX_MPFR_BITS
     else:
         bits = max(_MIN_MPFR_BITS, int(math.ceil(bits_needed)))
-    value = hp_sum(arr, bits)
+    value = hp_sum(raw, bits)
+    if not math.isfinite(value):
+        return SumResult(value, "mpfr%d" % bits, math.inf, target_rel_error, "overflow")
     # At very large `bits` (only reachable via a saturated `cond`, i.e. exact/near-exact cancellation)
     # this product can itself underflow to a flat 0.0 rather than the true tiny positive value -- but
     # never falsely: target_rel_error is itself a positive float64, so it is never smaller than the
@@ -143,16 +191,32 @@ def accurate_sum(x: Any, target_rel_error: float = 1e-12) -> SumResult:
     return SumResult(value, "mpfr%d" % bits, mpfr_rel_error, target_rel_error, status)
 
 
-def sum_certificate(x: Any) -> dict[str, float]:
+def sum_certificate(x: Any) -> dict[str, float | str | bool]:
     """Report the certified float64 summation error and the condition number, without choosing a backend."""
     arr = np.asarray(x, dtype=np.float64).ravel()
-    s = abs(float(np.sum(arr)))
+    if arr.size and not np.all(np.isfinite(arr)):
+        raise ValueError("sum certificates require finite inputs")
+    with np.errstate(over="ignore", invalid="ignore"):
+        value = float(np.sum(arr))
+        s = abs(value)
+        abs_sum = float(np.abs(arr).sum())
     bound = sum_error_bound(arr)
+    if not math.isfinite(value) or not math.isfinite(bound) or not math.isfinite(abs_sum):
+        return {
+            "float64_value": value,
+            "abs_error_bound": math.inf,
+            "rel_error_bound": math.inf,
+            "condition_number": math.inf,
+            "status": "overflow_or_unbounded",
+            "certified": False,
+        }
     return {
-        "float64_value": float(np.sum(arr)),
+        "float64_value": value,
         "abs_error_bound": bound,
         "rel_error_bound": bound / max(s, _TINY),
-        "condition_number": float(np.abs(arr).sum()) / max(s, _TINY),
+        "condition_number": abs_sum / max(s, _TINY),
+        "status": "ok",
+        "certified": True,
     }
 
 
@@ -185,6 +249,9 @@ def _precision_bits(precision: str | int) -> int:
             ) from None
     else:
         bits = precision
+    if isinstance(bits, (bool, np.bool_)) or not isinstance(bits, (int, np.integer)):
+        raise ValueError("precision must resolve to an exact non-Boolean integer bit width")
+    bits = int(bits)
     if bits < 1:
         raise ValueError("precision must resolve to a positive bit width; %r resolved to %d bits." % (precision, bits))
     return bits
@@ -221,8 +288,12 @@ def cast(x: Any, precision: Any) -> Any:
     """
     if isinstance(precision, str) and (precision == "dd" or precision.startswith("fp")):
         return _cast_by_bits(x, _precision_bits(precision))
-    if isinstance(precision, int):
+    if isinstance(precision, (int, np.integer)) and not isinstance(precision, (bool, np.bool_)):
         return _cast_by_bits(x, _precision_bits(precision))
+    if isinstance(precision, (bool, np.bool_)):
+        raise ValueError("precision must not be Boolean")
+    if isinstance(precision, (float, np.floating)):
+        raise ValueError("numeric precision widths must be exact integers")
     return np.asarray(x, dtype=np.dtype(precision))
 
 
