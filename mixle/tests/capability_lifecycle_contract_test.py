@@ -21,7 +21,7 @@ T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
 class CapabilityLifecycleContractTest(unittest.TestCase):
     def setUp(self):
-        self.identity = CapabilityIdentity("capability.mesh.solve", "1.2.0", "sha256:abc")
+        self.identity = CapabilityIdentity("capability.mesh.solve", "1.2.0", f"sha256:{'ab' * 32}")
 
     def test_dimensions_transition_independently_and_round_trip(self):
         lifecycle = CapabilityLifecycle(self.identity, updated_at=T0)
@@ -124,6 +124,23 @@ class CapabilityLifecycleContractTest(unittest.TestCase):
                 scopes=frozenset({"run"}),
                 decided_at=T0,
             )
+
+    def test_capability_digest_must_be_a_recomputable_cryptographic_digest(self):
+        # MXR-080-1724: any non-empty text used to pass as the "integrity digest" of an artifact,
+        # so an authorization could bind to a label nothing is able to verify.
+        for bad in ("not-a-digest", "sha256:abc", "sha256:" + "z" * 64, "md5:" + "0" * 32, "0" * 63):
+            with self.assertRaises(ValueError):
+                CapabilityIdentity("capability.mesh.solve", "1.2.0", bad)
+
+        # A bare SHA-256 hex (what semantic_digest/model_hash emit) is accepted and labelled.
+        bare = CapabilityIdentity("capability.mesh.solve", "1.2.0", "AB" * 32)
+        self.assertEqual(bare.digest, f"sha256:{'ab' * 32}")
+        self.assertEqual(bare, self.identity)
+        self.assertEqual(CapabilityIdentity.from_dict(bare.as_dict()), bare)
+
+        # A purely semantic capability still needs no digest at all.
+        self.assertIsNone(CapabilityIdentity("capability.mesh.solve", "1.2.0").digest)
+        self.assertEqual(CapabilityIdentity("c", "1", f"sha3-512:{'0' * 128}").digest, f"sha3-512:{'0' * 128}")
 
     def _record(self, **overrides):
         record = {
