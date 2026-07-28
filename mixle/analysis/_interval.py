@@ -21,7 +21,9 @@ from typing import Any
 
 import numpy as np
 
-__all__ = ["validated_level"]
+# No `__all__`: this module is private (leading underscore), so it declares no public surface for
+# `mixle.analysis` to re-export. The façade-drift guard (MXR-080-1593) reads every submodule's
+# `__all__` as a public-API declaration, and an internal contract helper is not one.
 
 
 def validated_level(level: Any, *, name: str = "level") -> float:
