@@ -201,6 +201,11 @@ def propose_next_constrained(
     if np.any(feasible):
         best = float(y[idx])
         acq_vals = np.asarray(acq_fn(mean, std, best, maximize=maximize, **kw), dtype=np.float64)
+        if acq_vals.shape != (candidates.shape[0],):
+            raise ValueError(
+                "constrained acquisition must return exactly one score per candidate; "
+                f"expected ({candidates.shape[0]},), got {acq_vals.shape}."
+            )
     else:
         # No feasible point yet: drive purely by probability of feasibility.
         acq_vals = np.ones(candidates.shape[0], dtype=np.float64)
