@@ -39,8 +39,9 @@ class FactorialEffects:
         aliases: for each term, the *other* term names it is aliased with (empty list if the term is
             uniquely estimable).
         estimable_contrasts: for each alias group of two or more terms, keyed by its member term names
-            joined with ``"+"`` (in term order), the ``(effect, se)`` of the one combined quantity that
-            *is* estimable -- empty when the design has no aliasing.
+            joined by their signed defining relation (for example ``"x0-x1"`` for opposite columns),
+            the ``(effect, se)`` of the exact combined quantity that *is* estimable -- empty when the
+            design has no aliasing.
     """
 
     terms: list[str]
@@ -112,6 +113,28 @@ def _alias_groups(f: np.ndarray, tol: float = 1e-9) -> list[list[int]]:
     for i in range(p):
         groups.setdefault(find(i), []).append(i)
     return list(groups.values())
+
+
+def _alias_orientations(f: np.ndarray, group: list[int]) -> list[int]:
+    """Return each aliased column's exact +/- orientation relative to the group's first column."""
+    base = f[:, group[0]]
+    return [1 if float(base @ f[:, index]) >= 0.0 else -1 for index in group]
+
+
+def _format_signed_contrast(names: list[str], group: list[int], orientations: list[int]) -> str:
+    """Format the estimable relation in the public effects units."""
+    output_scale = 2 if any(index != 0 for index in group) else 1
+    pieces: list[str] = []
+    for position, (index, orientation) in enumerate(zip(group, orientations)):
+        effect_divisor = 1 if index == 0 else 2
+        weight = output_scale * orientation / effect_divisor
+        magnitude = abs(weight)
+        label = names[index] if magnitude == 1.0 else f"{magnitude:g}*{names[index]}"
+        if position == 0:
+            pieces.append(label if weight > 0.0 else f"-{label}")
+        else:
+            pieces.append(("+" if weight > 0.0 else "-") + label)
+    return "".join(pieces)
 
 
 def factorial_effects(design, y, *, interactions: bool = True, coded: bool = False) -> FactorialEffects:
@@ -210,12 +233,14 @@ def factorial_effects(design, y, *, interactions: bool = True, coded: bool = Fal
             if se is not None:
                 se[g[0]] = se_fit[gi]
             continue
-        base = g[0]
         value = float(coef_fit[gi])
         se_value = float(se_fit[gi]) if se_fit is not None else None
-        eff_value = value if base == 0 else 2.0 * value
-        eff_se = None if se_value is None else (se_value if base == 0 else 2.0 * se_value)
-        estimable_contrasts["+".join(names[k] for k in g)] = (eff_value, eff_se)
+        orientations = _alias_orientations(f, g)
+        output_scale = 2.0 if any(index != 0 for index in g) else 1.0
+        eff_value = output_scale * value
+        eff_se = None if se_value is None else output_scale * se_value
+        contrast_name = _format_signed_contrast(names, g, orientations)
+        estimable_contrasts[contrast_name] = (eff_value, eff_se)
 
     effects = 2.0 * coef.copy()
     effects[0] = coef[0]  # the intercept is the grand mean, not an effect
@@ -258,6 +283,11 @@ class ResponseSurface:
             at all (e.g. the exact surface ``y = x0**2 + x1``, whose gradient's second component is
             always exactly ``1``).
         residual_std: residual standard deviation when the design has spare runs (else ``None``).
+        model_rank: rank of the fitted quadratic model matrix.
+        n_parameters: number of quadratic coefficients requested.
+        degrees_of_freedom: residual degrees of freedom, ``n_runs - n_parameters``.
+        estimable: whether every requested coefficient is identified. Construction refuses a
+            non-estimable fit, so returned surfaces always report ``True``.
     """
 
     coef: np.ndarray
@@ -268,6 +298,10 @@ class ResponseSurface:
     eigenvalues: np.ndarray
     kind: str
     residual_std: float | None
+    model_rank: int
+    n_parameters: int
+    degrees_of_freedom: int
+    estimable: bool
 
     def predict(self, x) -> np.ndarray:
         """Predict the response at points ``x`` ``(m, d)`` from the fitted surface."""
@@ -293,10 +327,16 @@ def response_surface(x, y) -> ResponseSurface:
     :class:`ResponseSurface`). Fit on the *coded* design for a well-conditioned model (the classic
     central-composite / Box-Behnken workflow).
     """
-    x = np.atleast_2d(np.asarray(x, dtype=np.float64))
-    y = np.asarray(y, dtype=np.float64).ravel()
-    if x.shape[0] != y.shape[0]:
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    if x.ndim != 2 or x.shape[0] == 0 or x.shape[1] == 0:
+        raise ValueError(f"x must be a non-empty two-dimensional (n, d) design; got shape {x.shape}.")
+    if y.ndim != 1 or x.shape[0] != y.shape[0]:
         raise ValueError("x must be (n, d) with one response per row.")
+    if not np.all(np.isfinite(x)):
+        raise ValueError("x must contain only finite design evidence.")
+    if not np.all(np.isfinite(y)):
+        raise ValueError("y must contain one finite response per design row.")
     n, d = x.shape
     cols = [np.ones(n)]
     names = ["intercept"]
@@ -309,10 +349,24 @@ def response_surface(x, y) -> ResponseSurface:
     for j in range(d):
         cols.append(x[:, j] ** 2)
         names.append(f"x{j}^2")
-    f = np.column_stack(cols)
+    with np.errstate(over="ignore", invalid="ignore"):
+        f = np.column_stack(cols)
+    if not np.all(np.isfinite(f)):
+        raise ValueError("the quadratic model matrix is not representable as finite float64.")
+    model_rank = int(np.linalg.matrix_rank(f))
+    n_parameters = f.shape[1]
+    dof = n - n_parameters
+    if model_rank != n_parameters:
+        raise ValueError(
+            "full quadratic response surface is not estimable: "
+            f"model-matrix rank is {model_rank} of {n_parameters} parameters with {n} run(s)."
+        )
     coef, residual, *_ = np.linalg.lstsq(f, y, rcond=None)
-    dof = n - f.shape[1]
+    if not np.all(np.isfinite(coef)):
+        raise ValueError("quadratic response-surface coefficients are not finite.")
     rstd = float(np.sqrt(residual[0] / dof)) if residual.size and dof > 0 else None
+    if rstd is not None and not np.isfinite(rstd):
+        raise ValueError("quadratic response-surface residual standard deviation is not finite.")
 
     b = coef[1 : 1 + d].copy()
     bmat = np.zeros((d, d), dtype=np.float64)
@@ -366,6 +420,10 @@ def response_surface(x, y) -> ResponseSurface:
         eigenvalues=eig,
         kind=kind,
         residual_std=rstd,
+        model_rank=model_rank,
+        n_parameters=n_parameters,
+        degrees_of_freedom=dof,
+        estimable=True,
     )
 
 
@@ -378,7 +436,9 @@ def design_diagnostics(design, model, *, ref=None) -> dict:
       * ``d_efficiency`` -- ``det(M)**(1/p) / n``: overall coefficient-estimation precision;
       * ``a_efficiency`` -- ``p / (n * trace(M^-1))``: average coefficient variance;
       * ``g_efficiency`` -- ``p / (n * max prediction variance)`` over ``ref`` (or the design itself);
-      * ``condition_number`` of ``M`` (large => near-collinear / fragile to fit);
+      * ``condition_number`` of ``M`` (large => near-collinear / fragile to fit; ``None`` when the
+        requested model is rank-deficient), plus a finite ``effective_condition_number`` within the
+        estimable subspace and explicit ``rank`` / ``full_rank`` fields;
       * ``max_correlation`` -- the largest absolute pairwise correlation among the non-intercept model
         columns (the aliasing check; ``0`` for an orthogonal design).
 
@@ -394,12 +454,40 @@ def design_diagnostics(design, model, *, ref=None) -> dict:
     for the self-referential case (``ref=None``, or ``ref`` equal to ``design`` itself) -- a reference
     set concentrated in a lower-variance region than the design's own points (e.g. just its centre) can
     legitimately score above ``1.0``.
+
+    The raw design and every transformed model matrix must be nonempty, two-dimensional, finite, and
+    preserve the run axis. A rank-zero model is rejected. A partially estimable model reports zero
+    full-model efficiencies, ``condition_number=None``, and its finite effective condition number
+    rather than publishing NaN/Inf quality evidence.
     """
-    f = np.asarray(model(design), dtype=np.float64)
+    design_array = np.asarray(design, dtype=np.float64)
+    if design_array.ndim != 2 or design_array.shape[0] == 0 or design_array.shape[1] == 0:
+        raise ValueError(
+            f"design must be a non-empty two-dimensional (n, d) array; got shape {design_array.shape}."
+        )
+    if not np.all(np.isfinite(design_array)):
+        raise ValueError("design must contain only finite values.")
+    f = np.asarray(model(design_array), dtype=np.float64)
+    if f.ndim != 2 or f.shape[0] != design_array.shape[0] or f.shape[1] == 0:
+        raise ValueError(
+            "model(design) must be a non-empty two-dimensional matrix with one row per design run; "
+            f"got shape {f.shape} for {design_array.shape[0]} run(s)."
+        )
+    if not np.all(np.isfinite(f)):
+        raise ValueError("model(design) must contain only finite features.")
     n, p = f.shape
-    m = f.T @ f
+    with np.errstate(over="ignore", invalid="ignore"):
+        m = f.T @ f
+    if not np.all(np.isfinite(m)):
+        raise ValueError("design information matrix is not representable as finite float64.")
+    singular_values = np.linalg.svd(f, compute_uv=False)
+    rank = int(np.linalg.matrix_rank(f))
+    if rank == 0:
+        raise ValueError("model(design) has rank zero; no parameter contrast is estimable.")
+    full_rank = rank == p
     sign, logdet = np.linalg.slogdet(m)
-    d_eff = float(np.exp(logdet / p) / n) if sign > 0 else 0.0
+    with np.errstate(over="ignore", invalid="ignore"):
+        d_eff = float(np.exp(logdet / p) / n) if full_rank and sign > 0 else 0.0
 
     if ref is None:
         pts = f
@@ -409,20 +497,38 @@ def design_diagnostics(design, model, *, ref=None) -> dict:
         # did. Using it directly here previously fed e.g. a single raw feature column straight into a
         # two-column quadratic form below; numpy's einsum broadcasts a size-1 axis instead of raising a
         # shape error, so the result was silently wrong (and unboundedly so), not a crash.
-        pts = np.asarray(model(ref), dtype=np.float64)
-        if pts.ndim != 2 or pts.shape[1] != p:
+        ref_array = np.asarray(ref, dtype=np.float64)
+        if (
+            ref_array.ndim != 2
+            or ref_array.shape[0] == 0
+            or ref_array.shape[1] != design_array.shape[1]
+            or not np.all(np.isfinite(ref_array))
+        ):
+            raise ValueError(
+                "ref must be a non-empty finite two-dimensional reference design with "
+                f"{design_array.shape[1]} raw factor column(s); got shape {ref_array.shape}."
+            )
+        pts = np.asarray(model(ref_array), dtype=np.float64)
+        if pts.ndim != 2 or pts.shape[0] != ref_array.shape[0] or pts.shape[1] != p:
             width = pts.shape[1] if pts.ndim == 2 else f"{pts.ndim}-d"
             raise ValueError(
                 f"ref, once passed through `model`, has {width} feature column(s); expected {p} to "
                 "match the design's own model matrix. `ref` must be raw reference-design points (the "
                 "same kind of input as `design`), not a pre-built model matrix."
             )
+        if not np.all(np.isfinite(pts)):
+            raise ValueError("model(ref) must contain only finite features.")
 
-    try:
+    if full_rank:
         inv = np.linalg.inv(m)
-        a_eff = float(p / (n * np.trace(inv)))
-        cond = float(np.linalg.cond(m))
-        pred_var = np.clip(np.einsum("ij,jk,ik->i", pts, inv, pts), 0.0, None)
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            a_eff = float(p / (n * np.trace(inv)))
+            cond = float(np.linalg.cond(m))
+            pred_var_raw = np.einsum("ij,jk,ik->i", pts, inv, pts)
+        pred_scale = max(float(np.max(np.abs(pred_var_raw))), 1.0)
+        if np.any(pred_var_raw < -1e-10 * pred_scale):
+            raise ValueError("design diagnostics produced materially negative prediction variance.")
+        pred_var = np.maximum(pred_var_raw, 0.0)
         max_var = float(np.max(pred_var))
         if max_var <= 0.0:
             raise ValueError("prediction variance is exactly zero at every reference point; g_efficiency is undefined.")
@@ -436,29 +542,43 @@ def design_diagnostics(design, model, *, ref=None) -> dict:
                 f"g_efficiency {g_eff!r} exceeds its theoretical <=1 ceiling for a design compared "
                 "against its own points; this indicates a numerical bug, not a valid design."
             )
-    except np.linalg.LinAlgError:
+    else:
+        # A rank-deficient design cannot estimate all requested parameters, so the full-model
+        # efficiencies are exactly zero. Its ordinary condition number is infinite; expose that state
+        # explicitly and report the finite condition number within the estimable subspace separately.
         a_eff = g_eff = 0.0
-        cond = float("inf")
+        cond = None
+    effective_cond = float(singular_values[0] / singular_values[rank - 1])
     cols = f[:, 1:] if p > 1 and np.allclose(f[:, 0], 1.0) else f
     # A zero-variance column (a factor that never varies in this design, or a one-level dimension
     # passed through `model`) makes np.corrcoef produce 0/0 = NaN entries for that column, which then
     # silently propagates through max() into the returned diagnostic -- "is my design good" answered
     # with NaN instead of a meaningful score. Exclude degenerate columns from the correlation check;
     # a constant column has no correlation to report, not an undefined one.
-    varying = cols[:, np.var(cols, axis=0) > 0] if cols.shape[1] else cols
+    with np.errstate(over="ignore", invalid="ignore"):
+        column_variance = np.var(cols, axis=0) if cols.shape[1] else np.array([])
+    if not np.all(np.isfinite(column_variance)):
+        raise ValueError("design diagnostic column variances are not finite.")
+    varying = cols[:, column_variance > 0] if cols.shape[1] else cols
     if varying.shape[1] >= 2:
         corr = np.corrcoef(varying, rowvar=False)
         max_corr = float(np.max(np.abs(corr - np.eye(corr.shape[0]))))
     else:
         max_corr = 0.0
+    numeric_diagnostics = np.asarray([d_eff, a_eff, g_eff, effective_cond, max_corr], dtype=np.float64)
+    if not np.all(np.isfinite(numeric_diagnostics)):
+        raise ValueError("design diagnostics produced non-finite quality evidence.")
     return {
         "d_efficiency": d_eff,
         "a_efficiency": a_eff,
         "g_efficiency": g_eff,
         "condition_number": cond,
+        "effective_condition_number": effective_cond,
         "max_correlation": max_corr,
         "n_runs": int(n),
         "n_params": int(p),
+        "rank": rank,
+        "full_rank": full_rank,
     }
 
 
