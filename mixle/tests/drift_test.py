@@ -7,7 +7,7 @@ import numpy as np
 from mixle.inference.production import Monitor, detect_drift, fit_with_provenance, score_drift
 
 # the per-feature drift metrics are importable but demoted from the blessed production surface
-from mixle.inference.production.drift import ks_statistic, population_stability_index
+from mixle.inference.production.drift import _numeric_pair, _raw_columns, ks_statistic, population_stability_index
 from mixle.stats import GaussianDistribution
 
 
@@ -194,6 +194,47 @@ class ModelMonitorTest(unittest.TestCase):
         mon = Monitor(model, GaussianDistribution(0, 1).estimator(), ref)
         pts = mon.suggest_samples([(0.0, 1.0), (-1.0, 1.0)], n=6)
         self.assertEqual(np.asarray(pts).shape, (6, 2))
+
+
+class CategoricalVocabularyTest(unittest.TestCase):
+    """MXR-080-1639: independent per-side coding hid complete category replacement."""
+
+    def test_complete_category_replacement_is_visible(self):
+        ref, cur = ["a"] * 20, ["b"] * 20
+        rc, cc = _numeric_pair(ref, cur)
+        # Coded independently by first-seen order both sides became all-zero, so every metric was 0.
+        self.assertGreater(population_stability_index(rc, cc), 0.25)
+        self.assertGreater(ks_statistic(rc, cc), 0.9)
+
+    def test_identical_categorical_populations_show_no_drift(self):
+        rc, cc = _numeric_pair(["a", "b", "a", "b"] * 5, ["a", "b", "a", "b"] * 5)
+        np.testing.assert_allclose(rc, cc)
+        self.assertLess(ks_statistic(rc, cc), 1e-9)
+
+    def test_new_level_gets_its_own_unseen_code(self):
+        rc, cc = _numeric_pair(["a", "b"], ["a", "b", "zzz"])
+        self.assertEqual(sorted(set(rc.tolist())), [0.0, 1.0])
+        self.assertEqual(cc.tolist()[-1], 2.0)  # a level absent from the reference, not code 0
+
+    def test_shared_axis_does_not_depend_on_current_ordering(self):
+        first, _ = _numeric_pair(["a", "b"], ["b", "a"])
+        second, _ = _numeric_pair(["a", "b"], ["a", "b"])
+        np.testing.assert_allclose(first, second)
+
+    def test_numeric_columns_are_untouched(self):
+        rc, cc = _numeric_pair([1.0, 2.0], [3.0, 4.0])
+        np.testing.assert_allclose(rc, [1.0, 2.0])
+        np.testing.assert_allclose(cc, [3.0, 4.0])
+
+    def test_detect_drift_flags_a_replaced_categorical_field(self):
+        model = GaussianDistribution(0, 1)
+        rows_ref = [(0.0, "a") for _ in range(20)]
+        rows_cur = [(0.0, "b") for _ in range(20)]
+        report = detect_drift(model, [r[0] for r in rows_ref], [r[0] for r in rows_cur], per_feature=False)
+        self.assertFalse(report.drift)  # the numeric field alone genuinely has not moved
+        ref_col, cur_col = _raw_columns(rows_ref, 2), _raw_columns(rows_cur, 2)
+        rc, cc = _numeric_pair(ref_col[1], cur_col[1])
+        self.assertGreater(population_stability_index(rc, cc), 0.25)
 
 
 if __name__ == "__main__":

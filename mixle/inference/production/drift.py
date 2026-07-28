@@ -169,22 +169,36 @@ class DriftReport:
         )
 
 
-def _columns(records: Any, n_fields: int) -> list[np.ndarray]:
-    """Split tuple/scalar records into per-field 1-D arrays (best effort; non-numeric -> codes)."""
+def _raw_columns(records: Any, n_fields: int) -> list[list[Any]]:
+    """Split tuple/scalar records into per-field lists of raw (un-coded) values."""
     rows = list(records)
     if not rows:
-        return [np.array([]) for _ in range(max(n_fields, 1))]
+        return [[] for _ in range(max(n_fields, 1))]
     if not isinstance(rows[0], (tuple, list)):
-        return [_numeric(rows)]
-    return [_numeric([r[i] for r in rows]) for i in range(len(rows[0]))]
+        return [list(rows)]
+    return [[r[i] for r in rows] for i in range(len(rows[0]))]
 
 
-def _numeric(values: list[Any]) -> np.ndarray:
+def _numeric_pair(ref_values: list[Any], cur_values: list[Any]) -> tuple[np.ndarray, np.ndarray]:
+    """Encode one field's reference and current values onto a SHARED numeric axis.
+
+    Coding each side independently by first-seen order is what made complete population
+    replacement invisible: twenty reference rows of only "a" and twenty current rows of only "b"
+    each start their own code map, so both become all-zero vectors and every divergence on them is
+    exactly zero. The reference defines the vocabulary (it is the schema the model was trained on)
+    and any level the reference never saw shares one explicit "unseen" code above it, so a brand
+    new category registers as movement rather than as code 0 again.
+    """
     try:
-        return np.asarray(values, dtype=float)
-    except (TypeError, ValueError):  # categorical -> integer codes by first-seen order
+        return np.asarray(ref_values, dtype=float), np.asarray(cur_values, dtype=float)
+    except (TypeError, ValueError):
         codes: dict[Any, int] = {}
-        return np.asarray([codes.setdefault(v, len(codes)) for v in values], dtype=float)
+        for v in ref_values:  # reference-first, so codes are the training vocabulary
+            codes.setdefault(v, len(codes))
+        unseen = len(codes)  # one shared bin for every level absent from the reference
+        ref = np.asarray([codes[v] for v in ref_values], dtype=float)
+        cur = np.asarray([codes.get(v, unseen) for v in cur_values], dtype=float)
+        return ref, cur
 
 
 def detect_drift(
@@ -252,10 +266,14 @@ def detect_drift(
             names = [f.name for f in Schema.for_model(model).fields]
         except Exception:  # noqa: BLE001
             names = None
-        ref_cols = _columns(reference, len(names) if names else 1)
-        cur_cols = _columns(current, len(names) if names else 1)
-        for i, (rc, cc) in enumerate(zip(ref_cols, cur_cols)):
+        n_fields = len(names) if names else 1
+        ref_raw = _raw_columns(reference, n_fields)
+        cur_raw = _raw_columns(current, n_fields)
+        for i, (rv, cv) in enumerate(zip(ref_raw, cur_raw)):
             nm = names[i] if names and i < len(names) else f"field_{i}"
+            # One shared code axis per field, built from the reference: coding the two populations
+            # independently made a complete category replacement read as zero drift.
+            rc, cc = _numeric_pair(rv, cv)
             psi = population_stability_index(rc, cc)
             feats[nm] = {"psi": psi, "ks": ks_statistic(rc, cc)}
             if psi > psi_threshold:
