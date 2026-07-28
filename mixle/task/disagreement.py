@@ -196,6 +196,25 @@ class UnionGate:
         self.gates = gates
 
     def ood_mask(self, texts: Sequence[str]) -> np.ndarray:
-        """Return the elementwise OR of all constituent gate masks."""
-        masks = [np.asarray(g.ood_mask(texts), dtype=bool) for g in self.gates]
-        return np.logical_or.reduce(masks) if masks else np.zeros(len(texts), dtype=bool)
+        """Return the elementwise OR of all constituent gate masks.
+
+        Every constituent must return exactly one boolean per input. A gate returning a different
+        length used to fail (or, when the lengths happened to broadcast, silently succeed on a
+        recycled mask) inside the NumPy reduction rather than at the gate boundary, so an escalation
+        policy could be reported from a prefix of the claimed evidence.
+
+        Raises:
+            ValueError: if any constituent gate returns a mask that is not 1-D of length
+                ``len(texts)``.
+        """
+        items = list(texts)
+        masks = []
+        for gate in self.gates:
+            mask = np.asarray(gate.ood_mask(items), dtype=bool)
+            if mask.shape != (len(items),):
+                raise ValueError(
+                    f"gate {type(gate).__name__} returned a mask of shape {mask.shape} for "
+                    f"{len(items)} inputs; every gate must return exactly one boolean per input"
+                )
+            masks.append(mask)
+        return np.logical_or.reduce(masks) if masks else np.zeros(len(items), dtype=bool)

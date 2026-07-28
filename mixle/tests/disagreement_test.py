@@ -132,6 +132,25 @@ class DisagreementGateTest(unittest.TestCase):
         union_none = UnionGate(_NeverFlag(), _NeverFlag())
         self.assertFalse(np.any(union_none.ood_mask(["a", "b"])))
 
+    def test_union_gate_rejects_a_mask_that_is_not_one_boolean_per_input(self):
+        """MXR-080-1667: an incompatible mask fails at the gate boundary, not inside NumPy."""
+
+        class _ShortMask:
+            def ood_mask(self, texts):
+                return np.zeros(1, dtype=bool)
+
+        class _NeverFlag:
+            def ood_mask(self, texts):
+                return np.zeros(len(texts), dtype=bool)
+
+        class _MatrixMask:
+            def ood_mask(self, texts):
+                return np.zeros((len(texts), 2), dtype=bool)
+
+        for bad in (_ShortMask(), _MatrixMask()):
+            with self.assertRaisesRegex(ValueError, "one boolean per input"):
+                UnionGate(_NeverFlag(), bad).ood_mask(["a", "b", "c"])
+
     def test_gate_records_disjoint_calibration_and_rejects_misaligned_evidence(self):
         student, gate = self._fit_student_and_gate(seed=3)
         receipt = gate.calibration_receipt
