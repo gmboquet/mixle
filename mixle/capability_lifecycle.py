@@ -171,6 +171,10 @@ class AuthorizationDecision:
     revocation_reason: str = ""
 
     def __post_init__(self) -> None:
+        # Canonicalize the outcome *first*: every decision rule below (and in
+        # ``status_at``) compares enum members by identity, so a plain string
+        # would silently fall through to "granted".
+        object.__setattr__(self, "outcome", AuthorizationOutcome(self.outcome))
         if not self.decision_id.strip():
             raise ValueError("decision_id must not be empty")
         if not self.issued_by.strip():

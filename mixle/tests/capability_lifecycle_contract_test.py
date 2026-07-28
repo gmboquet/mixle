@@ -86,6 +86,45 @@ class CapabilityLifecycleContractTest(unittest.TestCase):
         self.assertEqual(revoked.status_at(T0 + timedelta(hours=1)), AuthorizationStatus.REVOKED)
         self.assertEqual(AuthorizationDecision.from_dict(revoked.as_dict()), revoked)
 
+    def test_directly_constructed_string_outcomes_are_canonicalized_not_trusted(self):
+        # MXR-080-1677: a str-valued outcome used to survive __post_init__ untouched, so the
+        # identity comparisons in status_at() fell through and reported a denial as GRANTED.
+        denied = AuthorizationDecision(
+            decision_id="auth-denied",
+            capability=self.identity,
+            outcome="denied",
+            issued_by="safety-board",
+            scopes=frozenset({"run"}),
+            decided_at=T0,
+        )
+        self.assertIs(denied.outcome, AuthorizationOutcome.DENIED)
+        self.assertEqual(denied.status_at(T0), AuthorizationStatus.DENIED)
+        self.assertFalse(denied.allows("run", at=T0))
+        self.assertEqual(denied.as_dict()["outcome"], "denied")
+        self.assertEqual(AuthorizationDecision.from_dict(denied.as_dict()), denied)
+
+        granted = AuthorizationDecision(
+            decision_id="auth-granted",
+            capability=self.identity,
+            outcome="granted",
+            issued_by="safety-board",
+            scopes=frozenset({"run"}),
+            decided_at=T0,
+        )
+        self.assertIs(granted.outcome, AuthorizationOutcome.GRANTED)
+        self.assertTrue(granted.allows("run", at=T0))
+        self.assertIsNotNone(granted.revoke(by="safety-board", at=T0 + timedelta(hours=1)).revoked_at)
+
+        with self.assertRaises(ValueError):
+            AuthorizationDecision(
+                decision_id="auth-bogus",
+                capability=self.identity,
+                outcome="probably",
+                issued_by="safety-board",
+                scopes=frozenset({"run"}),
+                decided_at=T0,
+            )
+
     def test_illegal_transitions_and_cross_identity_authorization_fail(self):
         lifecycle = CapabilityLifecycle(self.identity, updated_at=T0)
         with self.assertRaisesRegex(LifecycleTransitionError, "concept -> supported"):
