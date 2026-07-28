@@ -2932,18 +2932,27 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         log_w, log_a, term = estimate.log_w, estimate.log_transitions, estimate._terminal_mask
         weights = np.asarray(weights, dtype=np.float64)
         gamma_flat = np.zeros((tot_cnt, k))
+        # Staged locally so an impossible sequence leaves the accumulator untouched: gamma is None
+        # exactly when log_p is not finite, which is the case require_possible_log_evidence rejects.
+        init_counts = np.zeros(k)
+        trans_counts = np.zeros((k, k))
+        log_evidence = np.zeros(idx_mat.shape[0])
         for s in range(idx_mat.shape[0]):
             length = int(len_vec[s])
             if length == 0:
                 continue
             rows = idx_mat[s, :length]
             log_p, gamma, xi = terminal_forward_backward(log_w, log_a, log_b_all[rows, :], term)
+            log_evidence[s] = log_p
             if gamma is None:
                 continue
             ws = float(weights[s])
-            self.init_counts += ws * gamma[0]
+            init_counts += ws * gamma[0]
             gamma_flat[rows] += ws * gamma
-            self.trans_counts += ws * xi.sum(axis=0)
+            trans_counts += ws * xi.sum(axis=0)
+        vec.require_possible_log_evidence(log_evidence, context="HiddenMarkovAccumulator.seq_update")
+        self.init_counts += init_counts
+        self.trans_counts += trans_counts
         self.state_counts += gamma_flat.sum(axis=0)
         if self._homogeneous_emissions:
             for j in range(k):
@@ -2998,11 +3007,11 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         weights = validated_observation_weights(weights, rows, "hidden-Markov observation weights")
         if estimate.n_states != self.num_states:
             raise ValueError("hidden-Markov estimate and accumulator state counts must match")
-        vec.require_possible_log_evidence(
-            estimate.seq_log_density(x),
-            context="HiddenMarkovAccumulator.seq_update",
-        )
 
+        # Evidence is validated inside each branch, from the forward normalizers that branch already
+        # computes, before it mutates any statistic. Scoring a separate full seq_log_density here
+        # re-ran every emission model over every observation -- about a third of seq_update -- to
+        # learn what the E-step was about to compute anyway. structured_hmm._estep does the same.
         if estimate.terminal_states is not None:
             self._terminal_seq_update(x, weights, estimate)
             return
@@ -3047,20 +3056,20 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 np.exp(pr_obs, out=pr_obs)
             _zero_impossible_emission_rows(pr_obs)
 
-            # When the fused-EM fast path requests it, accumulate the per-sequence data
-            # log-likelihood from the forward normalizers (un-floored row sums + emission max),
-            # matching seq_log_density exactly. The standard path skips this entirely.
+            # The per-sequence data log-likelihood, accumulated from the forward normalizers
+            # (un-floored row sums + emission max), matching seq_log_density exactly. It is the
+            # evidence this update is conditioned on, so it is always computed: the alpha pass has
+            # the row sums in hand either way, and the fused-EM fast path reuses the same vector.
             track_ll = self._track_ll
-            ll_ret = np.zeros(num_seq) if track_ll else None
+            ll_ret = np.zeros(num_seq)
 
             # Vectorized alpha pass
             band = idx_bands[0]
             alphas_prev = alphas[band[0] : band[1], :]
             np.multiply(pr_obs[band[0] : band[1], :], w, out=alphas_prev)
             a_sum = alphas_prev.sum(axis=1, keepdims=True)
-            if track_ll:
-                with np.errstate(divide="ignore"):
-                    ll_ret[good[:, 0]] += np.log(a_sum[:, 0]) + pr_max0[band[0] : band[1], 0]
+            with np.errstate(divide="ignore"):
+                ll_ret[good[:, 0]] += np.log(a_sum[:, 0]) + pr_max0[band[0] : band[1], 0]
             a_sum[a_sum == 0] = 1.0
             alphas_prev /= a_sum
 
@@ -3071,12 +3080,18 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 np.dot(alphas_prev[has_next_loc, :], a_mat, out=alphas_next)
                 alphas_next *= pr_obs[band[0] : band[1], :]
                 a_sum = alphas_next.sum(axis=1, keepdims=True)
-                if track_ll:
-                    with np.errstate(divide="ignore"):
-                        ll_ret[good[:, i]] += np.log(a_sum[:, 0]) + pr_max0[band[0] : band[1], 0]
+                with np.errstate(divide="ignore"):
+                    ll_ret[good[:, i]] += np.log(a_sum[:, 0]) + pr_max0[band[0] : band[1], 0]
                 a_sum[a_sum == 0] = 1.0
                 alphas_next /= a_sum
                 alphas_prev = alphas_next
+
+            # An all-zero forward row leaves -inf here, as in seq_log_density; NaN means the row was
+            # impossible at every state. The beta pass below is the first thing to touch a statistic.
+            ll_ret[np.isnan(ll_ret)] = -np.inf
+            if estimate.len_dist is not None and len_enc is not None:
+                ll_ret = ll_ret + estimate.len_dist.seq_log_density(len_enc)
+            vec.require_possible_log_evidence(ll_ret, context="HiddenMarkovAccumulator.seq_update")
 
             band2 = idx_bands[-1]
             prev_beta = np.ones((band2[1] - band2[0], num_states))
@@ -3154,8 +3169,6 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             self.init_counts += alphas[band1[0] : band1[1], :].sum(axis=0)
 
             if track_ll:
-                if estimate.len_dist is not None and len_enc is not None:
-                    ll_ret = ll_ret + estimate.len_dist.seq_log_density(len_enc)
                 self._seq_ll += float(np.dot(weights, ll_ret))
 
             if self.len_accumulator is not None:
@@ -3199,17 +3212,19 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 np.exp(pr_obs, out=pr_obs)
             _zero_impossible_emission_rows(pr_obs)
 
-            # When the fused-EM fast path requests it, compute the per-sequence data log-likelihood
-            # from the already-scored emissions via the (read-only) forward kernel, reusing pr_obs so
-            # no emissions are re-scored. Done before Baum-Welch (which may overwrite pr_obs).
+            # The per-sequence data log-likelihood, from the already-scored emissions via the
+            # (read-only) forward kernel, reusing pr_obs so no emissions are re-scored. Run before
+            # Baum-Welch, which may overwrite pr_obs and is the first thing to touch a statistic.
+            ll_ret = np.zeros(seq_cnt, dtype=np.float64)
+            nb_next = np.zeros((seq_cnt, num_states), dtype=np.float64)
+            nb_buff = np.zeros((seq_cnt, num_states), dtype=np.float64)
+            pr_max_1d = np.ascontiguousarray(pr_max[:, 0])
+            numba_seq_log_density(num_states, tz, pr_obs, init_pvec, tran_mat, pr_max_1d, nb_next, nb_buff, ll_ret)
+            ll_ret[np.isnan(ll_ret)] = -np.inf
+            if estimate.len_dist is not None and len_enc is not None:
+                ll_ret = ll_ret + estimate.len_dist.seq_log_density(len_enc)
+            vec.require_possible_log_evidence(ll_ret, context="HiddenMarkovAccumulator.seq_update")
             if self._track_ll:
-                ll_ret = np.zeros(seq_cnt, dtype=np.float64)
-                nb_next = np.zeros((seq_cnt, num_states), dtype=np.float64)
-                nb_buff = np.zeros((seq_cnt, num_states), dtype=np.float64)
-                pr_max_1d = np.ascontiguousarray(pr_max[:, 0])
-                numba_seq_log_density(num_states, tz, pr_obs, init_pvec, tran_mat, pr_max_1d, nb_next, nb_buff, ll_ret)
-                if estimate.len_dist is not None and len_enc is not None:
-                    ll_ret = ll_ret + estimate.len_dist.seq_log_density(len_enc)
                 self._seq_ll += float(np.dot(weights, ll_ret))
 
             alphas = np.zeros((tot_cnt, num_states), dtype=np.float64)
