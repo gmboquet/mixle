@@ -61,6 +61,7 @@ from mixle.stats.multivariate._vector_contracts import (
     weights as observation_weights,
 )
 from mixle.utils.aliasing import MISSING, coalesce_alias
+from mixle.utils.vector import owned_backend_parameter
 
 _MAX_HEAL_EIGENVALUE_RATIO = 1e-4
 """Relative-tolerance bound on how negative ``_robust_cho_factor``'s worst eigenvalue may be before
@@ -502,8 +503,8 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         """Engine-neutral vectorized log-density for encoded data."""
         return self.backend_log_density_from_params(
             engine.asarray(x),
-            engine.asarray(self.mu.copy()),
-            engine.asarray(self.inv_covar.copy()),
+            engine.asarray(owned_backend_parameter(self.mu)),
+            engine.asarray(owned_backend_parameter(self.inv_covar)),
             engine.asarray(self.log_det),
             engine,
         )

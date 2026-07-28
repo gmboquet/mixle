@@ -53,6 +53,7 @@ from mixle.stats.matrix.wishart import (
     _validated_weight,
     _validated_weights,
 )
+from mixle.utils.vector import owned_backend_parameter
 
 _MOMENT_ATOL = 1.0e-8
 
@@ -77,6 +78,7 @@ class BinghamSamplingError(RuntimeError):
 def _bingham_norm(z: np.ndarray) -> float:
     """Return ``c(Z)`` through a scaled-Bessel one-dimensional integral."""
     z1, z2, z3 = float(z[0]), float(z[1]), float(z[2])
+
     def integrand(u: float) -> float:
         sin2 = max(0.0, 1.0 - u * u)
         argument = 0.5 * (z1 - z2) * sin2
@@ -92,15 +94,8 @@ def _bingham_norm(z: np.ndarray) -> float:
         limit=400,
     )
     result = 2.0 * math.pi * val
-    if (
-        not np.isfinite(result)
-        or result <= 0.0
-        or not np.isfinite(error)
-        or error > max(1.0e-9, 1.0e-7 * abs(val))
-    ):
-        raise ValueError(
-            "Bingham normalizer integration failed its finite error contract"
-        )
+    if not np.isfinite(result) or result <= 0.0 or not np.isfinite(error) or error > max(1.0e-9, 1.0e-7 * abs(val)):
+        raise ValueError("Bingham normalizer integration failed its finite error contract")
     return result
 
 
@@ -194,7 +189,7 @@ class BinghamDistribution(SequenceEncodableProbabilityDistribution):
     def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
         """Engine-neutral vectorized log-density for ``(N, 3)`` unit vectors."""
         checked = _unit_batch(x, 3, "Bingham backend observations")
-        p = engine.matmul(engine.asarray(checked), engine.asarray(self.m.copy()))
+        p = engine.matmul(engine.asarray(checked), engine.asarray(owned_backend_parameter(self.m)))
         return -self._log_c + engine.matmul(p * p, engine.asarray(self.z))
 
     def sampler(self, seed: int | None = None) -> "BinghamSampler":
@@ -367,9 +362,7 @@ class BinghamEstimator(ParameterEstimator):
             or np.any(~np.isfinite(res.x))
             or not np.isfinite(res.fun)
         ):
-            raise BinghamFitError(
-                "Bingham concentration optimizer failed: %s" % res.message
-            )
+            raise BinghamFitError("Bingham concentration optimizer failed: %s" % res.message)
         z = np.array([res.x[0], res.x[1], 0.0])
         result = BinghamDistribution(m, z, name=self.name, keys=self.keys)
         result.fit_metadata = {
@@ -377,9 +370,7 @@ class BinghamEstimator(ParameterEstimator):
             "solver": "Nelder-Mead",
             "iterations": int(res.nit),
             "objective": float(res.fun),
-            "identifiable_orientation": bool(
-                np.min(np.diff(np.sort(omega))) > _MOMENT_ATOL
-            ),
+            "identifiable_orientation": bool(np.min(np.diff(np.sort(omega))) > _MOMENT_ATOL),
             "repairs": (),
         }
         return result

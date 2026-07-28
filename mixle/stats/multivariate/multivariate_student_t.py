@@ -62,7 +62,7 @@ from mixle.stats.multivariate._vector_contracts import (
     weights as observation_weights,
 )
 from mixle.utils.special import gammaln
-from mixle.utils.vector import cholesky_logdet
+from mixle.utils.vector import cholesky_logdet, owned_backend_parameter
 
 _MIN_RIDGE = 1.0e-12
 
@@ -309,8 +309,8 @@ class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution)
         """Engine-neutral vectorized log-density for encoded data."""
         return self.backend_log_density_from_params(
             engine.asarray(x),
-            engine.asarray(self.mu.copy()),
-            engine.asarray(self.inv_shape.copy()),
+            engine.asarray(owned_backend_parameter(self.mu)),
+            engine.asarray(owned_backend_parameter(self.inv_shape)),
             engine.asarray(self.log_const),
             engine.asarray(self.dof),
             self.dim,
@@ -578,12 +578,15 @@ class MultivariateStudentTEstimator(ParameterEstimator):
         scatter = sum_uxx - np.outer(mu, sum_ux) - np.outer(sum_ux, mu) + sum_u * np.outer(mu, mu)
         shape = scatter / count
         shape = 0.5 * (shape + shape.T)
-        scale = max(
-            float(np.linalg.norm(sum_uxx, ord=2)),
-            float(np.linalg.norm(np.outer(mu, sum_ux), ord=2)),
-            float(np.linalg.norm(sum_u * np.outer(mu, mu), ord=2)),
-            1.0,
-        ) / count
+        scale = (
+            max(
+                float(np.linalg.norm(sum_uxx, ord=2)),
+                float(np.linalg.norm(np.outer(mu, sum_ux), ord=2)),
+                float(np.linalg.norm(sum_u * np.outer(mu, mu), ord=2)),
+                1.0,
+            )
+            / count
+        )
         minimum_eigenvalue = float(np.linalg.eigvalsh(shape)[0])
         if minimum_eigenvalue < -1.0e-6 * scale:
             raise ValueError("Student-t sufficient statistics imply a non-positive-semidefinite scale")

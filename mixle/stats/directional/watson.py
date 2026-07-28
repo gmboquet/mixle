@@ -43,6 +43,7 @@ from mixle.stats.matrix.wishart import (
     _validated_weight,
     _validated_weights,
 )
+from mixle.utils.vector import owned_backend_parameter
 
 _MOMENT_ATOL = 1.0e-8
 
@@ -66,8 +67,7 @@ class WatsonSamplingError(RuntimeError):
         self.kappa = kappa
         self.dim = dim
         super().__init__(
-            "Watson rejection sampler accepted %d of %d proposals "
-            "(kappa=%g, dim=%d)" % (accepted, proposed, kappa, dim)
+            "Watson rejection sampler accepted %d of %d proposals (kappa=%g, dim=%d)" % (accepted, proposed, kappa, dim)
         )
 
 
@@ -111,11 +111,7 @@ def _watson_log_normalizer_and_ratio(
         term = 1.0
         previous_abs = math.inf
         for order in range(1, 65):
-            term *= (
-                (first + order - 1.0)
-                * (second + order - 1.0)
-                / (order * magnitude)
-            )
+            term *= (first + order - 1.0) * (second + order - 1.0) / (order * magnitude)
             if not np.isfinite(term) or abs(term) > previous_abs:
                 break
             total += term
@@ -131,30 +127,17 @@ def _watson_log_normalizer_and_ratio(
         c = b - a
         denominator = float(hyp1f1(c, b, -kappa))
         numerator = float(hyp1f1(c + 1.0, b + 1.0, -kappa))
-        if (
-            denominator > 0.0
-            and np.isfinite(denominator)
-            and np.isfinite(numerator)
-        ):
+        if denominator > 0.0 and np.isfinite(denominator) and np.isfinite(numerator):
             log_normalizer = kappa + math.log(denominator)
             ratio = 1.0 - (c / b) * numerator / denominator
         else:
             series, derivative = asymptotic_series(c, 1.0 - a, kappa)
-            log_normalizer = (
-                kappa
-                + (a - b) * math.log(kappa)
-                + float(gammaln(b) - gammaln(a))
-                + math.log(series)
-            )
+            log_normalizer = kappa + (a - b) * math.log(kappa) + float(gammaln(b) - gammaln(a)) + math.log(series)
             ratio = 1.0 + (a - b) / kappa + derivative / series
     else:
         denominator = float(hyp1f1(a, b, kappa))
         numerator = float(hyp1f1(a + 1.0, b + 1.0, kappa))
-        if (
-            denominator > 0.0
-            and np.isfinite(denominator)
-            and np.isfinite(numerator)
-        ):
+        if denominator > 0.0 and np.isfinite(denominator) and np.isfinite(numerator):
             log_normalizer = math.log(denominator)
             ratio = (a / b) * numerator / denominator
         else:
@@ -164,18 +147,9 @@ def _watson_log_normalizer_and_ratio(
                 1.0 + a - b,
                 magnitude,
             )
-            log_normalizer = (
-                float(gammaln(b) - gammaln(b - a))
-                - a * math.log(magnitude)
-                + math.log(series)
-            )
+            log_normalizer = float(gammaln(b) - gammaln(b - a)) - a * math.log(magnitude) + math.log(series)
             ratio = a / magnitude - derivative / series
-    if (
-        not np.isfinite(log_normalizer)
-        or not np.isfinite(ratio)
-        or ratio <= 0.0
-        or ratio >= 1.0
-    ):
+    if not np.isfinite(log_normalizer) or not np.isfinite(ratio) or ratio <= 0.0 or ratio >= 1.0:
         raise ValueError("Watson Kummer evaluation violated its finite moment contract")
     return log_normalizer, ratio
 
@@ -198,17 +172,13 @@ def _solve_kappa(r: float, p: int) -> float:
         while _kummer_ratio(lo, p) > r:
             lo *= 2.0
             if lo < -1.0e12:
-                raise WatsonFitError(
-                    "Watson concentration could not be bracketed on the girdle branch"
-                )
+                raise WatsonFitError("Watson concentration could not be bracketed on the girdle branch")
     else:
         lo, hi = 0.0, 1.0
         while _kummer_ratio(hi, p) < r:
             hi *= 2.0
             if hi > 1.0e12:
-                raise WatsonFitError(
-                    "Watson concentration could not be bracketed on the bipolar branch"
-                )
+                raise WatsonFitError("Watson concentration could not be bracketed on the bipolar branch")
     try:
         result = brentq(
             lambda value: _kummer_ratio(value, p) - r,
@@ -243,9 +213,7 @@ def _validated_watson_statistics(
     except (TypeError, ValueError) as exc:
         raise TypeError("Watson count must be a real scalar") from exc
     if scatter.shape != (dim, dim) or np.any(~np.isfinite(scatter)):
-        raise ValueError(
-            "Watson scatter must be a finite %dx%d matrix" % (dim, dim)
-        )
+        raise ValueError("Watson scatter must be a finite %dx%d matrix" % (dim, dim))
     if not np.array_equal(scatter, scatter.T):
         raise ValueError("Watson scatter must be exactly symmetric")
     if not np.isfinite(count) or count < 0.0:
@@ -330,14 +298,10 @@ class WatsonDistribution(SequenceEncodableProbabilityDistribution):
         """Engine-neutral vectorized log-density for ``(N, p)`` unit vectors."""
         from mixle.engines.symbolic_engine import is_symbolic_payload
 
-        checked = (
-            x
-            if is_symbolic_payload(x)
-            else _unit_batch(x, self.dim, "Watson backend observations")
-        )
+        checked = x if is_symbolic_payload(x) else _unit_batch(x, self.dim, "Watson backend observations")
         dots = engine.matmul(
             engine.asarray(checked),
-            engine.asarray(self.mu.copy()),
+            engine.asarray(owned_backend_parameter(self.mu)),
         )
         return self._log_const + self.kappa * dots * dots
 
@@ -374,10 +338,7 @@ class WatsonSampler(DistributionSampler):
                 dist.mu,
                 dist.kappa,
             ).sampler(seed=proposal_seed)
-            log_cosh = (
-                float(np.logaddexp(dist.kappa, -dist.kappa))
-                - math.log(2.0)
-            )
+            log_cosh = float(np.logaddexp(dist.kappa, -dist.kappa)) - math.log(2.0)
             self._positive_log_bound = max(0.0, dist.kappa - log_cosh)
         self.sampling_metadata = {
             "method": "exact-rejection",
@@ -408,15 +369,8 @@ class WatsonSampler(DistributionSampler):
             signs = np.where(self.rng.uniform(size=size) < 0.5, 1.0, -1.0)
             values *= signs[:, None]
             projection = values @ self.dist.mu
-            log_cosh = (
-                np.logaddexp(kappa * projection, -kappa * projection)
-                - math.log(2.0)
-            )
-            log_acceptance = (
-                kappa * projection * projection
-                - log_cosh
-                - self._positive_log_bound
-            )
+            log_cosh = np.logaddexp(kappa * projection, -kappa * projection) - math.log(2.0)
+            log_acceptance = kappa * projection * projection - log_cosh - self._positive_log_bound
             return values, log_acceptance
         values = self._uniform_sphere(size)
         projection = values @ self.dist.mu
@@ -574,9 +528,7 @@ class WatsonEstimator(ParameterEstimator):
         s_mat = scatter / count  # mean scatter; eigenvalues in [0,1], sum to 1
         eigval, eigvec = np.linalg.eigh(s_mat)
         if eigval[0] <= _MOMENT_ATOL or eigval[-1] >= 1.0 - _MOMENT_ATOL:
-            raise WatsonFitError(
-                "Watson moments lie on a boundary with no finite concentration fit"
-            )
+            raise WatsonFitError("Watson moments lie on a boundary with no finite concentration fit")
         uniform_moment = 1.0 / p
         if float(np.max(np.abs(eigval - uniform_moment))) <= _MOMENT_ATOL:
             result = WatsonDistribution(
@@ -639,9 +591,7 @@ class WatsonDataEncoder(DataSequenceEncoder):
             except (TypeError, ValueError) as exc:
                 raise ValueError("Watson observations must be numeric") from exc
             if raw.shape == (0,):
-                raise ValueError(
-                    "cannot infer Watson dimension from an empty observation batch"
-                )
+                raise ValueError("cannot infer Watson dimension from an empty observation batch")
             if raw.ndim != 2 or raw.shape[1] < 2:
                 raise ValueError("Watson observations require dimension at least two")
             return _unit_batch(raw, raw.shape[1], "Watson observations")

@@ -51,6 +51,7 @@ from mixle.stats.matrix.wishart import (
     _validated_weight,
     _validated_weights,
 )
+from mixle.utils.vector import owned_backend_parameter
 
 _UNIT_NORM_ATOL = 1.0e-8
 _RESULTANT_ATOL = 1.0e-10
@@ -103,10 +104,7 @@ def _unit_backend_array(
     except (TypeError, ValueError) as exc:
         raise ValueError("%s must be numeric" % name) from exc
     if result.ndim not in (2, 3) or result.shape[-1] != dim:
-        raise ValueError(
-            "%s must have rank two or three with final dimension %d"
-            % (name, dim)
-        )
+        raise ValueError("%s must have rank two or three with final dimension %d" % (name, dim))
     if np.any(~np.isfinite(result)):
         raise ValueError("%s must be finite" % name)
     norms = np.linalg.norm(result, axis=-1)
@@ -140,9 +138,7 @@ def _validated_vmf_statistics(
     if vector_sum.ndim != 1 or vector_sum.size < 2:
         raise ValueError("vMF vector sum must be a vector of dimension at least two")
     if expected_dim is not None and vector_sum.shape != (expected_dim,):
-        raise ValueError(
-            "vMF vector sum must have exact shape (%d,)" % expected_dim
-        )
+        raise ValueError("vMF vector sum must have exact shape (%d,)" % expected_dim)
     if np.any(~np.isfinite(vector_sum)):
         raise ValueError("vMF vector sum must be finite")
     if count == 0.0 and np.any(vector_sum != 0.0):
@@ -157,10 +153,7 @@ def _mean_resultant_length(dim: int, kappa: float) -> float:
     if kappa == 0.0:
         return 0.0
     log_kappa = np.log(kappa)
-    result = np.exp(
-        lniv(dim / 2.0, log_kappa)
-        - lniv((dim / 2.0) - 1.0, log_kappa)
-    )
+    result = np.exp(lniv(dim / 2.0, log_kappa) - lniv((dim / 2.0) - 1.0, log_kappa))
     if not np.isfinite(result) or result < 0.0 or result >= 1.0:
         raise VonMisesFisherFitError("vMF Bessel ratio is not finite and interior")
     return float(result)
@@ -330,21 +323,15 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
         except (TypeError, ValueError) as exc:
             raise ValueError("VonMisesFisherDistribution requires numeric mu.") from exc
         if raw_mu.ndim != 1 or raw_mu.size < 2:
-            raise ValueError(
-                "VonMisesFisherDistribution requires a vector of dimension at least two."
-            )
+            raise ValueError("VonMisesFisherDistribution requires a vector of dimension at least two.")
         dim = len(raw_mu)
         checked_mu = _unit_vector(raw_mu, dim, "vMF mean direction")
         if isinstance(kappa, (bool, np.bool_)) or np.ndim(kappa) != 0:
-            raise TypeError(
-                "VonMisesFisherDistribution requires scalar concentration."
-            )
+            raise TypeError("VonMisesFisherDistribution requires scalar concentration.")
         try:
             checked_kappa = float(kappa)
         except (TypeError, ValueError) as exc:
-            raise TypeError(
-                "VonMisesFisherDistribution requires scalar concentration."
-            ) from exc
+            raise TypeError("VonMisesFisherDistribution requires scalar concentration.") from exc
         if not np.isfinite(checked_kappa) or checked_kappa < 0:
             # kappa == 0 is the legitimate uniform-density limit (handled below); only reject what a
             # bare `kappa > 0` comparison silently lets through the "else: uniform" branch as if it were
@@ -365,11 +352,7 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
         if not np.isfinite(self.log_const):
             raise ValueError("VonMisesFisherDistribution normalizer must be finite.")
         self.name = name
-        self.dim = (
-            None
-            if dim is None
-            else _validated_dimension(dim, "vMF accumulator dimension")
-        )
+        self.dim = None if dim is None else _validated_dimension(dim, "vMF accumulator dimension")
         if self.dim is not None and self.dim < 2:
             raise ValueError("vMF accumulator dimension must be at least two")
         self.mu = checked_mu
@@ -460,9 +443,7 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
             raise ValueError("q must be in [0, 1].")
         if self.kappa == 0.0:
             if qf != 1.0:
-                raise ValueError(
-                    "uniform vMF density has no probability-ordered quantile below one"
-                )
+                raise ValueError("uniform vMF density has no probability-ordered quantile below one")
             return self.mu.copy()
         k = float(self.kappa)
         a = (self.dim - 3.0) / 2.0
@@ -510,7 +491,7 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
         """Engine-neutral vectorized log-density for encoded unit-vector observations."""
         return self.backend_log_density_from_params(
             _unit_batch(x, self.dim),
-            engine.asarray(self.mu.copy()),
+            engine.asarray(owned_backend_parameter(self.mu)),
             engine.asarray(self.kappa),
             engine.asarray(self.log_const),
             engine,
@@ -558,9 +539,7 @@ class VonMisesFisherDistribution(SequenceEncodableProbabilityDistribution):
         checked_x = _unit_batch(x, dim)
         raw_weights = np.asarray(weights, dtype=np.float64)
         if raw_weights.ndim != 2 or raw_weights.shape[0] != len(checked_x):
-            raise ValueError(
-                "vMF stacked weights must have exact shape (observations, components)"
-            )
+            raise ValueError("vMF stacked weights must have exact shape (observations, components)")
         if np.any(~np.isfinite(raw_weights)) or np.any(raw_weights < 0.0):
             raise ValueError("vMF stacked weights must be finite and non-negative")
         xx = engine.asarray(checked_x)
@@ -859,11 +838,7 @@ class VonMisesFisherAccumulatorFactory(StatisticAccumulatorFactory):
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
-        self.dim = (
-            None
-            if dim is None
-            else _validated_dimension(dim, "vMF accumulator dimension")
-        )
+        self.dim = None if dim is None else _validated_dimension(dim, "vMF accumulator dimension")
         if self.dim is not None and self.dim < 2:
             raise ValueError("vMF accumulator dimension must be at least two")
         self.keys = keys
@@ -897,11 +872,7 @@ class VonMisesFisherEstimator(ParameterEstimator):
             keys (Optional[str]): Optional key for merging sufficient statistics.
 
         """
-        self.dim = (
-            None
-            if dim is None
-            else _validated_dimension(dim, "vMF estimator dimension")
-        )
+        self.dim = None if dim is None else _validated_dimension(dim, "vMF estimator dimension")
         if self.dim is not None and self.dim < 2:
             raise ValueError("vMF estimator dimension must be at least two")
         if pseudo_count is not None:
@@ -934,9 +905,7 @@ class VonMisesFisherEstimator(ParameterEstimator):
 
         count, ssum, dim = _validated_vmf_statistics(suff_stat, self.dim)
         if count == 0.0 or ssum is None or dim is None:
-            raise VonMisesFisherFitError(
-                "vMF fitting requires positive observation weight"
-            )
+            raise VonMisesFisherFitError("vMF fitting requires positive observation weight")
         ssum_norm = float(np.linalg.norm(ssum))
         if ssum_norm == 0.0:
             mu = np.ones(dim) / np.sqrt(dim)
@@ -958,9 +927,7 @@ class VonMisesFisherEstimator(ParameterEstimator):
 
         rhat = ssum_norm / count
         if rhat >= 1.0 - _RESULTANT_ATOL:
-            raise VonMisesFisherFitError(
-                "vMF resultant is on the unit boundary and has no finite concentration MLE"
-            )
+            raise VonMisesFisherFitError("vMF resultant is on the unit boundary and has no finite concentration MLE")
         mu = ssum / ssum_norm
 
         def score(kappa: float) -> float:
@@ -978,9 +945,7 @@ class VonMisesFisherEstimator(ParameterEstimator):
             upper_score = score(upper)
             bracket_iterations += 1
         if not np.isfinite(upper_score) or upper_score < 0.0:
-            raise VonMisesFisherFitError(
-                "vMF concentration fit has no certified finite bracket"
-            )
+            raise VonMisesFisherFitError("vMF concentration fit has no certified finite bracket")
         try:
             kappa, result = brentq(
                 score,
@@ -991,18 +956,10 @@ class VonMisesFisherEstimator(ParameterEstimator):
                 disp=False,
             )
         except (ValueError, RuntimeError) as exc:
-            raise VonMisesFisherFitError(
-                "vMF concentration root solver failed"
-            ) from exc
+            raise VonMisesFisherFitError("vMF concentration root solver failed") from exc
         residual = float(score(float(kappa)))
-        if (
-            not result.converged
-            or not np.isfinite(residual)
-            or abs(residual) > 1.0e-8
-        ):
-            raise VonMisesFisherFitError(
-                "vMF concentration fit lacks an optimality certificate"
-            )
+        if not result.converged or not np.isfinite(residual) or abs(residual) > 1.0e-8:
+            raise VonMisesFisherFitError("vMF concentration fit lacks an optimality certificate")
         fitted = VonMisesFisherDistribution(
             mu,
             float(kappa),
@@ -1026,11 +983,7 @@ class VonMisesFisherDataEncoder(DataSequenceEncoder):
     """Data encoder for sequences of unit-norm vector observations."""
 
     def __init__(self, dim: int | None = None) -> None:
-        self.dim = (
-            None
-            if dim is None
-            else _validated_dimension(dim, "vMF encoder dimension")
-        )
+        self.dim = None if dim is None else _validated_dimension(dim, "vMF encoder dimension")
         if self.dim is not None and self.dim < 2:
             raise ValueError("vMF encoder dimension must be at least two")
 
@@ -1048,10 +1001,7 @@ class VonMisesFisherDataEncoder(DataSequenceEncoder):
             True if other is a VonMisesFisherDataEncoder instance, else False.
 
         """
-        return (
-            isinstance(other, VonMisesFisherDataEncoder)
-            and self.dim == other.dim
-        )
+        return isinstance(other, VonMisesFisherDataEncoder) and self.dim == other.dim
 
     def seq_encode(self, x: Sequence[float] | np.ndarray) -> np.ndarray:
         """Encode a sequence of N unit-norm vectors for vectorized functions.
@@ -1069,9 +1019,7 @@ class VonMisesFisherDataEncoder(DataSequenceEncoder):
             except (TypeError, ValueError) as exc:
                 raise ValueError("vMF observations must be numeric") from exc
             if raw.shape == (0,):
-                raise ValueError(
-                    "cannot infer vMF dimension from an empty observation batch"
-                )
+                raise ValueError("cannot infer vMF dimension from an empty observation batch")
             if raw.ndim != 2 or raw.shape[1] < 2:
                 raise ValueError("vMF observations require dimension at least two")
             return _unit_batch(raw, raw.shape[1])

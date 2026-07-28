@@ -56,6 +56,7 @@ from mixle.stats.multivariate._vector_contracts import (
 )
 from mixle.utils.aliasing import MISSING, coalesce_alias
 from mixle.utils.special import digamma
+from mixle.utils.vector import owned_backend_parameter
 
 
 class DiagonalGaussianFisherView(FixedFisherView):
@@ -425,8 +426,8 @@ class DiagonalGaussianDistribution(SequenceEncodableProbabilityDistribution):
         """Engine-neutral vectorized log-density for encoded data."""
         return self.backend_log_density_from_params(
             engine.asarray(x),
-            engine.asarray(self.mu.copy()),
-            engine.asarray(self.covar.copy()),
+            engine.asarray(owned_backend_parameter(self.mu)),
+            engine.asarray(owned_backend_parameter(self.covar)),
             engine,
         )
 

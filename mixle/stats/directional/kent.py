@@ -49,6 +49,7 @@ from mixle.stats.matrix.wishart import (
     _validated_weight,
     _validated_weights,
 )
+from mixle.utils.vector import owned_backend_parameter
 
 _MOMENT_ATOL = 1.0e-8
 
@@ -72,9 +73,9 @@ class KentSamplingError(RuntimeError):
         self.kappa = kappa
         self.beta = beta
         super().__init__(
-            "Kent rejection sampler accepted %d of %d proposals "
-            "(kappa=%g, beta=%g)" % (accepted, proposed, kappa, beta)
+            "Kent rejection sampler accepted %d of %d proposals (kappa=%g, beta=%g)" % (accepted, proposed, kappa, beta)
         )
+
 
 _LOG_2PI = math.log(2.0 * math.pi)
 
@@ -170,9 +171,7 @@ class KentDistribution(SequenceEncodableProbabilityDistribution):
             checked_kappa = float(kappa)
             checked_beta = float(beta)
         except (TypeError, ValueError) as exc:
-            raise TypeError(
-                "KentDistribution kappa and beta must be real scalars."
-            ) from exc
+            raise TypeError("KentDistribution kappa and beta must be real scalars.") from exc
         if checked_kappa <= 0.0 or not np.isfinite(checked_kappa):
             raise ValueError("KentDistribution requires finite kappa > 0.")
         if not np.isfinite(checked_beta):
@@ -228,7 +227,7 @@ class KentDistribution(SequenceEncodableProbabilityDistribution):
     def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
         """Engine-neutral vectorized log-density for ``(N, 3)`` unit vectors."""
         checked = _unit_batch(x, 3, "Kent backend observations")
-        p = engine.matmul(engine.asarray(checked), engine.asarray(self.gamma.copy()))
+        p = engine.matmul(engine.asarray(checked), engine.asarray(owned_backend_parameter(self.gamma)))
         p1, p2 = p[:, 1], p[:, 2]
         return -self._log_c + self.kappa * p[:, 0] + self.beta * (p1 * p1 - p2 * p2)
 
@@ -337,9 +336,7 @@ class KentAccumulator(SequenceEncodableStatisticAccumulator):
             self.sum_x + vector_sum,
             self.sum_xx + scatter,
         )
-        self.count, self.sum_x, self.sum_xx = _validated_kent_statistics(
-            combined
-        )
+        self.count, self.sum_x, self.sum_xx = _validated_kent_statistics(combined)
         return self
 
     def value(self) -> tuple[float, np.ndarray, np.ndarray]:
@@ -398,13 +395,9 @@ class KentEstimator(ParameterEstimator):
         scatter = sum_xx / count
         r1 = float(np.linalg.norm(xbar))
         if r1 <= _MOMENT_ATOL:
-            raise KentFitError(
-                "Kent mean direction is non-identifiable at zero resultant"
-            )
+            raise KentFitError("Kent mean direction is non-identifiable at zero resultant")
         if r1 >= 1.0 - _MOMENT_ATOL:
-            raise KentFitError(
-                "Kent resultant is on a boundary with no finite concentration fit"
-            )
+            raise KentFitError("Kent resultant is on a boundary with no finite concentration fit")
         g1 = xbar / r1
 
         # build any orthonormal tangent basis {h2, h3} perpendicular to g1

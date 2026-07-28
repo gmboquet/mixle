@@ -14,6 +14,23 @@ import scipy.special
 from mixle.engines.arithmetic import *
 
 
+def owned_backend_parameter(value):
+    """Return a defensive copy of a distribution parameter for either array backend.
+
+    Backend scoring hands its own parameters to an engine and copies first so engine ops cannot
+    alias distribution state. ``.copy()`` alone assumes NumPy: under gradient fitting the parameter
+    IS a live torch tensor, which has no ``.copy()`` and raised
+    ``AttributeError: 'Tensor' object has no attribute 'copy'``. ``clone()`` is the tensor
+    equivalent AND keeps the autograd graph intact -- ``detach()`` would silently sever it and stop
+    the fit learning. For a NumPy array this is exactly the previous ``.copy()``.
+    """
+    clone = getattr(value, "clone", None)
+    if callable(clone):
+        return clone()
+    copy = getattr(value, "copy", None)
+    return copy() if callable(copy) else value
+
+
 class ImpossibleEvidenceError(ValueError):
     """Raised when log evidence has zero mass and no posterior exists."""
 
