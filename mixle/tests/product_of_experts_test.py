@@ -50,6 +50,39 @@ def test_poe_categorical_drops_labels_outside_the_support_intersection():
     assert poe.pmap["y"] == pytest.approx(1.0, abs=1e-12)
 
 
+def test_poe_zero_weight_expert_does_not_delete_support():
+    # MXR-080-1728: the support intersection was taken before any weight was consulted, so an
+    # expert raised to the exponent 0 -- mathematically the constant 1, contributing nothing --
+    # still deleted every label outside its own support. Here the pool must equal expert b.
+    a = CategoricalDistribution({"a": 1.0})
+    b = CategoricalDistribution({"a": 0.5, "b": 0.5})
+    poe = ops.product_of_experts([a, b], weights=[0.0, 1.0])
+    assert set(poe.pmap) == {"a", "b"}
+    assert poe.pmap["a"] == pytest.approx(0.5, abs=1e-12)
+    assert poe.pmap["b"] == pytest.approx(0.5, abs=1e-12)
+
+
+def test_poe_gaussian_zero_weight_expert_drops_out():
+    g1 = GaussianDistribution(0.0, 1.0)
+    g2 = GaussianDistribution(7.0, 4.0)
+    poe = ops.product_of_experts([g1, g2], weights=[1.0, 0.0])
+    assert poe.mu == pytest.approx(0.0, abs=1e-12)
+    assert poe.sigma2 == pytest.approx(1.0, abs=1e-12)
+
+
+def test_poe_rejects_an_all_zero_weighting():
+    a = CategoricalDistribution({"x": 0.6, "y": 0.4})
+    with pytest.raises(cap.CapabilityError):
+        ops.product_of_experts([a, a], weights=[0.0, 0.0])
+
+
+def test_poe_rejects_non_finite_weights():
+    a = CategoricalDistribution({"x": 0.6, "y": 0.4})
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            ops.product_of_experts([a, a], weights=[1.0, bad])
+
+
 # --------------------------------------------------------------- product_of_experts: gaussian
 def test_poe_gaussian_equals_precision_weighted_formula():
     g1 = GaussianDistribution(0.0, 1.0)
