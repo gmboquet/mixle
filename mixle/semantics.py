@@ -49,6 +49,19 @@ SEMANTICS_SCHEMA_VERSION = "1.0.0"
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
+#: The closed set of value dtypes this schema version defines. ``dtype`` used to be an arbitrary
+#: unchecked string, so a value could be certified as ``"not-a-dtype"``.
+DTYPES: frozenset[str] = frozenset({"float64", "float32", "int64", "int32", "bool", "str"})
+
+_DTYPE_TYPES: dict[str, tuple[type, ...]] = {
+    "float64": (int, float),
+    "float32": (int, float),
+    "int64": (int,),
+    "int32": (int,),
+    "bool": (bool,),
+    "str": (str,),
+}
+
 
 def _normalize(value: Any, *, semantic: bool) -> Any:
     if dataclasses.is_dataclass(value):
@@ -122,6 +135,32 @@ def _canonical_mapping(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(normalized, dict):
         raise TypeError(f"{label} must be a mapping with string keys")
     return normalized
+
+
+def _measured_shape(value: Any, label: str) -> tuple[int, ...]:
+    """The shape ``value`` actually has: ``()`` for a scalar, ``(n, ...)`` for rectangular nested lists."""
+    if not isinstance(value, (list, tuple)):
+        return ()
+    inner = {_measured_shape(item, label) for item in value}
+    if len(inner) > 1:
+        raise ValueError(f"{label} is a ragged array; a declared shape requires rectangular data")
+    return (len(value), *(inner.pop() if inner else ()))
+
+
+def _check_dtype(value: Any, dtype: str, label: str) -> None:
+    """Every leaf of ``value`` must belong to ``dtype``'s Python domain."""
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _check_dtype(item, dtype, label)
+        return
+    allowed = _DTYPE_TYPES[dtype]
+    # bool subclasses int, so it satisfies an int/float isinstance check it has no business satisfying
+    if isinstance(value, bool) and dtype != "bool":
+        raise ValueError(f"{label} holds a Boolean but declares dtype {dtype!r}")
+    if not isinstance(value, allowed):
+        raise ValueError(f"{label} holds {type(value).__name__} but declares dtype {dtype!r}")
+    if dtype in ("float64", "float32") and not math.isfinite(value):
+        raise ValueError(f"{label} holds a non-finite number")
 
 
 def _coerce_enum(value: Any, enum_cls: type[StrEnum], label: str) -> StrEnum:
@@ -343,8 +382,11 @@ class ValueSpec:
         _require_id(self.id, "value id")
         if not self.unit:
             raise ValueError("value unit is required; use '1' for dimensionless")
-        if any(not isinstance(size, int) or size <= 0 for size in self.shape):
-            raise ValueError("value shape dimensions must be positive integers")
+        if self.dtype not in DTYPES:
+            raise ValueError(f"value dtype {self.dtype!r} is not one of {sorted(DTYPES)}")
+        # `bool` subclasses `int`, so a Boolean dimension passed the old integer test as size 1
+        if any(isinstance(size, bool) or not isinstance(size, int) or size <= 0 for size in self.shape):
+            raise ValueError("value shape dimensions must be positive non-Boolean integers")
         if self.role in {ValueRole.FREE, ValueRole.LATENT} and self.prior is None:
             raise ValueError(f"{self.role.value} values require a prior")
         if self.role in {ValueRole.FIXED, ValueRole.CONTROLLED} and self.value is None:
@@ -355,6 +397,22 @@ class ValueSpec:
             raise ValueError("only derived values may declare expression dependencies")
         if self.role in {ValueRole.FIXED, ValueRole.CONTROLLED, ValueRole.OBSERVED, ValueRole.DERIVED} and self.prior:
             raise ValueError(f"{self.role.value} values cannot declare a prior")
+        # dependencies were only checked for non-emptiness, so a derived value could declare itself as
+        # its own dependency (expression "d+1", dependencies ("d",)) and still receive a stable
+        # identity despite having no well-founded evaluation order at all.
+        for dependency in self.dependencies:
+            _require_id(dependency, "value dependency")
+        if len(set(self.dependencies)) != len(self.dependencies):
+            raise ValueError("value dependencies must be unique")
+        if self.id in self.dependencies:
+            raise ValueError(f"derived value {self.id!r} depends on itself")
+        # the declared shape/dtype is a contract about the value, not a decoration beside it: a scalar
+        # used to be certified as a two-vector, and `dtype` accepted any string whatsoever.
+        if self.value is not None:
+            measured = _measured_shape(self.value, f"value {self.id!r}")
+            if measured != tuple(self.shape):
+                raise ValueError(f"value {self.id!r} has shape {measured} but declares shape {tuple(self.shape)}")
+            _check_dtype(self.value, self.dtype, f"value {self.id!r}")
         if self.constraint and self.value is not None and not self.constraint.accepts(self.value):
             raise ValueError("value violates its declared constraint")
         object.__setattr__(self, "value", _normalize(self.value, semantic=False))
@@ -457,6 +515,37 @@ class UncertaintyComponent:
         return cls(**{**value, "kind": _coerce_enum(value["kind"], UncertaintyKind, "uncertainty kind")})
 
 
+def _require_dependency_dag(values: tuple[ValueSpec, ...], value_ids: set[str]) -> None:
+    """Every derived value's dependencies must resolve inside the artifact, with no cycles.
+
+    A per-value self-dependency check is not enough: ``a`` depending on ``b`` and ``b`` on ``a`` is
+    equally ill-founded, and a dependency naming a value the artifact does not carry has no evaluation
+    order at all. Both used to construct successfully and receive a stable posterior identity.
+    """
+    edges = {item.id: tuple(item.dependencies) for item in values}
+    for value_id, dependencies in edges.items():
+        unknown = [d for d in dependencies if d not in value_ids]
+        if unknown:
+            raise ValueError(f"derived value {value_id!r} depends on values this posterior does not carry: {unknown}")
+
+    state: dict[str, int] = {}  # 0 = visiting, 1 = done
+
+    def visit(node: str, trail: tuple[str, ...]) -> None:
+        mark = state.get(node)
+        if mark == 1:
+            return
+        if mark == 0:
+            cycle = " -> ".join((*trail[trail.index(node) :], node))
+            raise ValueError(f"posterior value dependencies form a cycle: {cycle}")
+        state[node] = 0
+        for dependency in edges.get(node, ()):
+            visit(dependency, (*trail, node))
+        state[node] = 1
+
+    for value_id in edges:
+        visit(value_id, ())
+
+
 @dataclass(frozen=True)
 class PosteriorArtifact:
     id: str
@@ -487,6 +576,7 @@ class PosteriorArtifact:
             raise ValueError("posterior observation references an unknown value")
         if set(self.likelihood.observation_ids) != observation_ids:
             raise ValueError("posterior likelihood must close over exactly its observations")
+        _require_dependency_dag(self.values, value_ids)
         if self.sample_digest is not None and not _SHA256.fullmatch(self.sample_digest):
             raise ValueError("posterior sample digest must be SHA-256")
         object.__setattr__(self, "summary", _canonical_mapping(self.summary, "posterior summary"))

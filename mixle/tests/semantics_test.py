@@ -380,8 +380,74 @@ def test_an_unbounded_allowed_values_constraint_still_admits_its_own_vocabulary(
 
 
 def test_a_nan_value_cannot_pass_its_declared_constraint_into_a_value_spec():
-    with pytest.raises(ValueError, match="violates"):
+    with pytest.raises(ValueError, match="non-finite|violates"):
         ValueSpec("x", ValueRole.FIXED, "1", constraint=ConstraintSpec(lower=0, upper=1), value=float("nan"))
+    with pytest.raises(ValueError, match="violates"):
+        ValueSpec("x", ValueRole.FIXED, "1", constraint=ConstraintSpec(lower=0, upper=1), value=2.0)
+
+
+# MXR-080-1713: shape and dtype were decorations beside the value, not a contract about it.
+def test_declared_shape_and_dtype_are_enforced_against_the_value():
+    with pytest.raises(ValueError, match="declares shape"):
+        ValueSpec("x", ValueRole.FIXED, "1", dtype="float64", shape=(2,), value=1)  # a scalar as a 2-vector
+    with pytest.raises(ValueError, match="dtype"):
+        ValueSpec("x", ValueRole.FIXED, "1", dtype="not-a-dtype", value=1)
+    with pytest.raises(ValueError, match="dtype"):
+        ValueSpec("x", ValueRole.FIXED, "1", dtype="int64", value="text")
+    with pytest.raises(ValueError, match="Boolean"):
+        ValueSpec("x", ValueRole.FIXED, "1", dtype="float64", value=True)
+    with pytest.raises(ValueError, match="non-Boolean integers"):
+        ValueSpec("x", ValueRole.FIXED, "1", shape=(True,), value=[1.0])
+    with pytest.raises(ValueError, match="ragged"):
+        ValueSpec("x", ValueRole.FIXED, "1", shape=(2, 2), value=[[1.0, 2.0], [3.0]])
+
+    # negative control: values that genuinely match their declaration still construct
+    assert ValueSpec("x", ValueRole.FIXED, "1", dtype="float64", shape=(2,), value=[1.0, 2.0]).shape == (2,)
+    assert ValueSpec("x", ValueRole.FIXED, "1", dtype="float64", value=1).value == 1
+    assert ValueSpec("x", ValueRole.FIXED, "1", dtype="bool", value=True).value is True
+    assert ValueSpec("x", ValueRole.FIXED, "1", dtype="str", value="text").value == "text"
+    assert ValueSpec(
+        "x", ValueRole.FIXED, "1", dtype="float64", shape=(2, 2), value=[[1.0, 2.0], [3.0, 4.0]]
+    ).shape == (2, 2)
+
+
+# MXR-080-1711: dependencies were only checked for non-emptiness, so a derived value could depend on
+# itself, on duplicates, or on ids the artifact never carried, and still receive a stable identity.
+def test_a_derived_value_cannot_depend_on_itself_or_declare_duplicates():
+    with pytest.raises(ValueError, match="depends on itself"):
+        ValueSpec("d", ValueRole.DERIVED, "1", expression="d+1", dependencies=("d",))
+    with pytest.raises(ValueError, match="unique"):
+        ValueSpec("d", ValueRole.DERIVED, "1", expression="a+a", dependencies=("a", "a"))
+    with pytest.raises(ValueError, match="dependency"):
+        ValueSpec("d", ValueRole.DERIVED, "1", expression="a", dependencies=("not a portable id!",))
+    assert ValueSpec("d", ValueRole.DERIVED, "1", expression="a+b", dependencies=("a", "b")).dependencies == ("a", "b")
+
+
+def _fixed(value_id, **kw):
+    return ValueSpec(value_id, ValueRole.FIXED, "1", value=1.0, **kw)
+
+
+def _derived(value_id, dependencies):
+    return ValueSpec(
+        value_id, ValueRole.DERIVED, "1", expression="+".join(dependencies), dependencies=tuple(dependencies)
+    )
+
+
+def test_posterior_dependencies_must_close_and_stay_acyclic():
+    _, _, likelihood, observation = _fixture_contracts()
+    base = ValueSpec.from_record(load_reference_fixture()["value"])
+    uncertainty = (UncertaintyComponent("u", UncertaintyKind.EPISTEMIC, "variance", value=1.0),)
+
+    def build(values):
+        return PosteriorArtifact("p", values, (observation,), likelihood, "method", 1, {"mean": 1.0}, uncertainty)
+
+    with pytest.raises(ValueError, match="does not carry"):
+        build((base, _derived("d", ["nowhere"])))
+    with pytest.raises(ValueError, match="cycle"):
+        build((base, _derived("a", ["b"]), _derived("b", ["a"])))
+    # negative control: a well-founded chain is fine
+    ok = build((base, _fixed("a"), _derived("b", ["a"]), _derived("c", ["b", "a"])))
+    assert {v.id for v in ok.values} == {"source-rate", "a", "b", "c"}
 
 
 def test_a_genuinely_different_record_still_gets_a_different_identity():
