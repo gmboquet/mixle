@@ -1,6 +1,7 @@
 """Reproducible model artifacts: dataset hashing, model headers/provenance, dataset checking, and
 serialization of encoded data."""
 
+import dataclasses
 import os
 import subprocess
 import sys
@@ -132,6 +133,93 @@ class DatasetHashTest(unittest.TestCase):
         self.assertEqual(dataset_hash([1, 2], max_records=5), dataset_hash([1, 2]))
         self.assertEqual(dataset_hash([1, 2], max_records=2), dataset_hash([1, 2]))
         self.assertNotEqual(dataset_hash([1, 2, 3], max_records=0), dataset_hash([]))  # truncated-to-nothing
+
+
+class ClosedCanonicalSchemaTest(unittest.TestCase):
+    """MXR-080-1601: the canonical encoder claimed structurally different inputs cannot collide and
+    that its digests are stable, while three cases broke both halves of that claim."""
+
+    def test_lists_and_tuples_no_longer_share_one_tag(self):
+        # audit repro: both were tagged b"t", so these hashed identically
+        self.assertNotEqual(dataset_hash([[1, 2]]), dataset_hash([(1, 2)]))
+        self.assertNotEqual(_canonical([1, 2]), _canonical((1, 2)))
+        # nested, and as dict values, too
+        self.assertNotEqual(dataset_hash([{"a": [1, 2]}]), dataset_hash([{"a": (1, 2)}]))
+        self.assertNotEqual(dataset_hash([[[1], [2]]]), dataset_hash([[(1,), (2,)]]))
+        # each kind still hashes equal to itself
+        self.assertEqual(dataset_hash([[1, 2]]), dataset_hash([[1, 2]]))
+        self.assertEqual(dataset_hash([(1, 2)]), dataset_hash([(1, 2)]))
+
+    def test_sets_hash_by_content_not_by_iteration_order(self):
+        self.assertEqual(dataset_hash([{1, 2, 3}]), dataset_hash([{3, 1, 2}]))
+        self.assertEqual(dataset_hash([{"a", "b"}]), dataset_hash([frozenset({"b", "a"})]))
+        self.assertNotEqual(dataset_hash([{1, 2, 3}]), dataset_hash([{1, 2, 4}]))
+        # a set is not the list or tuple of the same elements
+        self.assertNotEqual(dataset_hash([{1, 2}]), dataset_hash([[1, 2]]))
+        self.assertNotEqual(dataset_hash([{1, 2}]), dataset_hash([(1, 2)]))
+
+    def test_set_hash_is_independent_of_the_process_hash_seed(self):
+        # The old repr() fallback ordered a set by the per-process string hash seed, so the SAME set
+        # record produced different provenance digests run to run. Only a real cross-process check can
+        # catch this: within one interpreter the seed never changes.
+        script = "from mixle.data import dataset_hash\nprint(dataset_hash([{'a', 'b', 'c', 'd', 'e', 'f'}]))\n"
+        hashes = set()
+        for seed in ("1", "2", "12345"):
+            env = dict(os.environ, PYTHONHASHSEED=seed)
+            hashes.add(
+                subprocess.run(
+                    [sys.executable, "-c", script], capture_output=True, text=True, check=True, env=env
+                ).stdout.strip()
+            )
+        self.assertEqual(len(hashes), 1, f"set record hashed differently across hash seeds: {hashes}")
+
+    def test_dataclass_records_hash_by_field_value_not_by_instance_address(self):
+        @dataclasses.dataclass
+        class Row:
+            label: str
+            weight: float
+
+        # two distinct instances holding equal values: repr() embedded the address, so these differed
+        self.assertEqual(dataset_hash([Row("a", 1.0)]), dataset_hash([Row("a", 1.0)]))
+        self.assertNotEqual(dataset_hash([Row("a", 1.0)]), dataset_hash([Row("a", 2.0)]))
+        self.assertNotEqual(dataset_hash([Row("a", 1.0)]), dataset_hash([Row("b", 1.0)]))
+
+        @dataclasses.dataclass
+        class OtherRow:
+            label: str
+            weight: float
+
+        # same field names and values, different declared type -- must not collide
+        self.assertNotEqual(dataset_hash([Row("a", 1.0)]), dataset_hash([OtherRow("a", 1.0)]))
+
+    def test_unsupported_objects_are_rejected_rather_than_hashed_by_repr(self):
+        class Plain:
+            def __init__(self, value):
+                self.value = value
+
+        with self.assertRaises(TypeError):
+            dataset_hash([Plain(1)])
+        with self.assertRaises(TypeError):
+            _canonical(Plain(1))
+        with self.assertRaises(TypeError):
+            dataset_hash([{"nested": Plain(1)}])
+
+    def test_supported_types_negative_control(self):
+        """Closing the schema must not start rejecting the ordinary record shapes it exists to hash."""
+        record = {
+            "id": 7,
+            "name": "row",
+            "flag": True,
+            "missing": None,
+            "weights": np.array([1.0, 2.0]),
+            "tags": {"a", "b"},
+            "pair": (1, "x"),
+            "items": [1, 2, 3],
+            "blob": b"\x00\x01",
+        }
+        digest = dataset_hash([record])
+        self.assertEqual(len(digest), 64)
+        self.assertEqual(digest, dataset_hash([dict(record)]))
 
 
 class CanonicalEncodingTest(unittest.TestCase):
