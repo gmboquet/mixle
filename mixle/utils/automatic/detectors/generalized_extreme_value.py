@@ -54,7 +54,16 @@ def _factory(vdict, pseudo_count, emp_suff_stat, use_bstats):
 
     fit = _fit_params(_value_array_from_vdict(vdict))
     c, loc, scale = fit if fit is not None else (0.1, 0.0, 1.0)
-    return GeneralizedExtremeValueDistribution(loc, scale, c).estimator(pseudo_count=pseudo_count)
+    distribution = GeneralizedExtremeValueDistribution(loc, scale, c)
+    # GEV regularization blends a prior pseudo-sample in raw-moment space, which needs a finite third
+    # moment (shape < 1/3) -- see GeneralizedExtremeValueDistribution.estimator. Block maxima with a
+    # heavier tail than that are a legitimate MLE result here, and the prior is simply not expressible
+    # for them, so estimate unregularized rather than crashing the profiler or substituting a
+    # light-tailed prior the data does not support. This is a structural limit, not the silently
+    # dropped pseudo_count that #84 fixed.
+    if pseudo_count is not None and distribution.shape >= 1.0 / 3.0:
+        return distribution.estimator()
+    return distribution.estimator(pseudo_count=pseudo_count)
 
 
 def _cdf(arr: np.ndarray):
