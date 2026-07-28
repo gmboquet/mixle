@@ -1319,12 +1319,16 @@ class HTSNETestCase(unittest.TestCase):
         self.assertTrue(np.allclose(la[off], expected[off], atol=1.0e-12))
 
     def test_optional_without_missing_probability_has_no_gate_field(self):
+        # Without a missingness probability the optional carries no gate field, but it remains a usable
+        # mixture component: it is a marginalized likelihood factor, not a scoring-only leaf.
+        from mixle.stats.compute.pdist import DensitySemantics
+
         components = [
             OptionalDistribution(GaussianDistribution(-2.0, 1.0), p=None),
             OptionalDistribution(GaussianDistribution(2.0, 1.0), p=None),
         ]
-        with self.assertRaises(TypeError):
-            MixtureDistribution(components, [0.5, 0.5])
+        mixture = MixtureDistribution(components, [0.5, 0.5])
+        self.assertIs(mixture.density_semantics(), DensitySemantics.LIKELIHOOD_FACTOR)
 
     def test_field_weights_validated_against_flattened_fields(self):
         from mixle.utils.hvis import balanced_factors
