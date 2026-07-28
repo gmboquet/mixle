@@ -9,9 +9,11 @@ fingerprint (records are hashed independently and combined commutatively).
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import itertools
 from collections.abc import Iterable, Mapping, Sized
+from collections.abc import Set as AbstractSet
 from copy import copy
 from typing import Any
 
@@ -29,13 +31,13 @@ def _len_prefixed(payload: bytes) -> bytes:
 
 
 def _canonical(obj: Any) -> bytes:
-    """Deterministic, self-delimiting bytes for a record component (numbers, strings, arrays, tuples, dicts, None).
+    """Deterministic, self-delimiting bytes for a record component, over a CLOSED set of types.
 
     Every case is a tag byte plus content whose length is either fixed by the tag alone (bool, None, a
     non-NaN float's 8 raw bytes) or given by an explicit prefix (:func:`_len_prefixed` for strings/bytes/
-    array fields, an 8-byte big-endian count for dict/list/tuple) -- never inferred from a bare separator
-    character. That makes every encoding self-delimiting: concatenating several ``_canonical`` outputs
-    (done both by the dict/list/tuple cases below and by ``dataset_hash``'s record loop) can always be
+    array fields, an 8-byte big-endian count for dict/list/tuple/set) -- never inferred from a bare
+    separator character. That makes every encoding self-delimiting: concatenating several ``_canonical``
+    outputs (done both by the container cases below and by ``dataset_hash``'s record loop) can always be
     split back into exactly the pieces that produced it, so two structurally different inputs can never
     land on identical bytes (short of an actual SHA-256 collision).
 
@@ -43,7 +45,26 @@ def _canonical(obj: Any) -> bytes:
     plus raw, un-length-prefixed content. A string, key, or record containing those separator bytes could
     then make one structure's join collide byte-for-byte with a different structure's join -- e.g.
     ``["X", "Y"]`` and ``["X,sY"]`` both encoded as ``b"t[sX,sY]"`` -- so distinct data could hash
-    identically. See ``mixle/tests/data/test_hashing.py`` for the regression coverage.
+    identically.
+
+    Three further defects fixed in MXR-080-1601, all of which broke the "structurally different inputs
+    cannot collide, equal content cannot differ" contract these digests are used as provenance for:
+
+    * lists and tuples shared the ``b"t"`` tag, so ``dataset_hash([[1, 2]]) == dataset_hash([(1, 2)])``.
+      They now carry distinct tags.
+    * sets had no case of their own and fell through to ``repr``, whose element order follows the
+      per-process string hash seed -- the same set record produced different digests under
+      ``PYTHONHASHSEED=1`` and ``PYTHONHASHSEED=2``. Sets now sort by their elements' own canonical
+      bytes, which is content-determined and seed-independent.
+    * every other unsupported object also fell through to ``repr``, which for an ordinary instance
+      embeds its memory address -- so two distinct instances holding the same field value hashed
+      differently, run to run. That fallback is gone: dataclass instances are encoded structurally by
+      their declared fields, and anything else raises instead of being fingerprinted by
+      process-dependent text.
+
+    Note that closing the schema changes the digest of any record containing a list (its tag moved off
+    ``b"t"``). That is unavoidable: the old encoding's whole problem is that two different structures
+    produced the same bytes, and no fix for a collision can leave both colliding values unchanged.
     """
     if obj is None:
         return b"N"
@@ -90,9 +111,36 @@ def _canonical(obj: Any) -> bytes:
         pairs = sorted(((_canonical(k), v) for k, v in obj.items()), key=lambda kv: kv[0])
         body = b"".join(k_bytes + _canonical(v) for k_bytes, v in pairs)
         return b"d" + len(pairs).to_bytes(8, "big") + body
-    if isinstance(obj, (tuple, list)):
+    if isinstance(obj, tuple):
         return b"t" + len(obj).to_bytes(8, "big") + b"".join(_canonical(v) for v in obj)
-    return b"r" + _len_prefixed(repr(obj).encode())  # last resort: stable repr
+    if isinstance(obj, list):
+        # distinct tag from tuple: sharing b"t" made [1, 2] and (1, 2) hash identically (MXR-080-1601)
+        return b"l" + len(obj).to_bytes(8, "big") + b"".join(_canonical(v) for v in obj)
+    if isinstance(obj, (set, frozenset, AbstractSet)):
+        # sorted by each element's OWN canonical bytes, not by iteration order (which follows the
+        # per-process string hash seed) and not by repr -- so an equal set hashes equally in every
+        # process. Sets are unordered, so this is the only well-defined encoding of one.
+        members = sorted(_canonical(v) for v in obj)
+        return b"e" + len(members).to_bytes(8, "big") + b"".join(members)
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        # structured records get a structural encoding keyed on their declared fields, in declaration
+        # order, qualified by their type -- never repr(), which embeds the instance's memory address.
+        field_values = [(f.name, getattr(obj, f.name)) for f in dataclasses.fields(obj)]
+        body = b"".join(_canonical(name) + _canonical(value) for name, value in field_values)
+        return (
+            b"D"
+            + _len_prefixed(f"{type(obj).__module__}.{type(obj).__qualname__}".encode())
+            + len(field_values).to_bytes(8, "big")
+            + body
+        )
+    raise TypeError(
+        f"dataset_hash/model_hash cannot canonically encode {type(obj).__module__}.{type(obj).__qualname__}. "
+        "These digests are training-data provenance, so an unsupported value is rejected rather than "
+        "fingerprinted by repr(), whose text is process-dependent for an ordinary object (it embeds the "
+        "instance's memory address) and would report a different identity for equal content on every run. "
+        "Supported: None, bool, int, float, bytes, str, numpy arrays, mappings, lists, tuples, sets, and "
+        "dataclass instances. Convert anything else to one of those first."
+    )
 
 
 def model_hash(model: Any) -> str:
