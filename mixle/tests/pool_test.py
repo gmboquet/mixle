@@ -115,6 +115,16 @@ class ConfirmRailTest(unittest.TestCase):
     def test_local_backend_needs_no_confirm(self):
         self.assertTrue(submit(PoolJob(run=lambda: 1)).ok)
 
+    def test_truthy_non_boolean_confirmation_does_not_authorize_spend(self):
+        # MXR-080-1738: the gate used ordinary truthiness, so the string "false" -- an entirely
+        # ordinary way to spell "no" across JSON/CLI/form boundaries -- confirmed billable execution.
+        for value in ("false", "0", "no", 1, [0], object()):
+            with self.subTest(confirm=value):
+                gpu = self._FakeGPU()
+                res = submit(PoolJob(run=lambda: 1, est_cost=0.5, budget=10.0), gpu, confirm=value)
+                self.assertEqual(res.status, "rejected")
+                self.assertFalse(gpu.ran)
+
 
 class BackendSettlementTest(unittest.TestCase):
     """A backend's response is third-party data: submit() settles it before the caller trusts it."""
