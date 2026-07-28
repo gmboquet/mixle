@@ -7,6 +7,7 @@ import math
 import pytest
 
 from mixle.semantics import (
+    SEMANTICS_SCHEMA_VERSION,
     CalibrationArtifact,
     CapabilityExtension,
     ConstraintSpec,
@@ -287,3 +288,75 @@ def test_logit_inverse_is_stable_for_extreme_finite_inputs():
     transform = TransformSpec(TransformKind.LOGIT)
     assert transform.inverse(-1000.0) == 0.0
     assert transform.inverse(1000.0) == 1.0
+
+
+# MXR-080-1707: every record carries schema_version but no constructor checked it, so a record
+# declaring an unsupported version was interpreted under the 1.0 rules and given a real identity.
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda v: ConstraintSpec(schema_version=v),
+        lambda v: TransformSpec(schema_version=v),
+        lambda v: PriorSpec("p", "normal", {"mu": 0}, schema_version=v),
+        lambda v: ValueSpec("x", ValueRole.FIXED, "1", value=1, schema_version=v),
+        lambda v: LikelihoodSpec("l", "normal", ("o",), schema_version=v),
+        lambda v: UncertaintyComponent("u", UncertaintyKind.EPISTEMIC, "variance", value=1.0, schema_version=v),
+        lambda v: CapabilityExtension("r", "PRJ", "in", "out", "development", schema_version=v),
+        lambda v: TraceEvent("t", 0, "read", "a" * 64, {}, "2026-07-15T00:00:00Z", schema_version=v),
+    ],
+)
+def test_unsupported_schema_versions_are_unreadable_not_current_contracts(build):
+    with pytest.raises(ValueError, match="schema_version"):
+        build("future/999")
+    build(SEMANTICS_SCHEMA_VERSION)  # the supported version still constructs
+
+
+def test_posterior_and_derived_artifacts_also_reject_unsupported_schema_versions():
+    posterior = _posterior()
+    with pytest.raises(ValueError, match="schema_version"):
+        dataclasses.replace(posterior, schema_version="future/999")
+    with pytest.raises(ValueError, match="schema_version"):
+        CalibrationArtifact("cal", "a" * 64, "coverage", {"c": 1.0}, schema_version="future/999")
+    with pytest.raises(ValueError, match="schema_version"):
+        DecisionArtifact(
+            "d", ("a", "b"), "a", {"a": 1.0, "b": 0.0}, posterior.identity, "eu", schema_version="future/999"
+        )
+    with pytest.raises(ValueError, match="schema_version"):
+        PredictiveArtifact(
+            "f",
+            posterior.identity,
+            ("x",),
+            "b" * 64,
+            (UncertaintyComponent("u", UncertaintyKind.EPISTEMIC, "variance", value=1.0),),
+            "posterior-predictive",
+            schema_version="future/999",
+        )
+
+
+# MXR-080-1708: frozen records retained caller-owned mappings BY REFERENCE, so mutating the original
+# mapping afterwards changed the same object's content digest.
+def test_a_durable_identity_does_not_change_when_the_caller_mutates_its_source_mapping():
+    parameters = {"mu": 0}
+    prior = PriorSpec("p", "normal", parameters)
+    before = prior.identity
+    assert before == "29c20eb51d65e725cf7c1a8fb85f5c375ec44e1c071979f344b6f1e622c0f133"
+
+    parameters["mu"] = 9
+    assert prior.identity == before
+    assert prior.parameters == {"mu": 0}  # the record owns its own copy
+
+    nested = {"chain": {"depth": 1}}
+    posterior = _posterior()
+    moved = dataclasses.replace(posterior, diagnostics=nested)
+    digest = moved.identity
+    nested["chain"]["depth"] = 99
+    assert moved.identity == digest
+    assert moved.diagnostics == {"chain": {"depth": 1}}
+
+
+def test_a_genuinely_different_record_still_gets_a_different_identity():
+    # negative control: freezing the digest must not make every record look identical
+    a = PriorSpec("p", "normal", {"mu": 0})
+    b = PriorSpec("p", "normal", {"mu": 9})
+    assert a.identity != b.identity
+    assert dataclasses.replace(a, family="lognormal").identity != a.identity
