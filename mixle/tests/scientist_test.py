@@ -152,11 +152,12 @@ class VerifiedReasoningTest(unittest.TestCase):
         self.assertFalse(inv.abstained)
         self.assertTrue(inv.factuality.verdicts)  # per-claim receipt exists
 
-    def test_generate_handles_the_tokenizer_batchencoding_directly(self):
-        # generate()'s LM-wrapping leaf: apply_chat_template() now returns a BatchEncoding
-        # (.input_ids/.attention_mask), not a raw tensor. This calls it directly -- independent of
-        # retrieval/factuality -- so a regression here fails on the leaf function itself rather than
-        # only surfacing indirectly through ask()/wonder().
+    def test_generate_handles_whatever_apply_chat_template_returns(self):
+        # generate()'s LM-wrapping leaf: apply_chat_template() returns a bare id tensor on some
+        # transformers versions and a BatchEncoding (.input_ids/.attention_mask) on others, and this
+        # package's pin spans both. This calls it directly -- independent of retrieval/factuality --
+        # so a regression here fails on the leaf function itself rather than only surfacing
+        # indirectly through ask()/wonder() quietly abstaining.
         from mixle.scientist import generate
 
         text = generate("Reply with just the single word: OK", max_new_tokens=8)
