@@ -41,7 +41,8 @@ those tasks land, since both already produce array-likes of that shape.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from types import MappingProxyType
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -78,6 +79,31 @@ _NONNEGATIVE_PARAMS = frozenset(
         "capex_per_tonne",
     }
 )
+
+
+def _validate_params(params: Mapping[str, Any], *, context: str) -> Mapping[str, Any]:
+    if not isinstance(params, Mapping):
+        raise TypeError(f"{context}: params must be a mapping")
+    unknown = set(params) - set(_DEFAULTS)
+    if unknown:
+        raise ValueError(
+            f"{context}: unknown parameter(s) {sorted(unknown, key=repr)!r}; "
+            f"accepted parameters are {sorted(_DEFAULTS)!r}"
+        )
+    return params
+
+
+def _require_finite_result(value: Any, name: str, *, context: str) -> np.ndarray:
+    array = np.asarray(value, dtype=np.float64)
+    invalid = ~np.isfinite(array)
+    if np.any(invalid):
+        if array.ndim == 0:
+            location = ""
+        else:
+            first = tuple(int(index) for index in np.argwhere(invalid)[0])
+            location = f" at index {first}"
+        raise ValueError(f"{context}: computed {name}{location} is not representable as finite float64")
+    return array
 
 
 def _param(params: dict, key: str, *, context: str = "cost_curve") -> float:
@@ -119,6 +145,7 @@ def cost_curve(depth: Any, grade: Any, throughput: Any, *, params: dict) -> np.n
 
     Returns the elementwise `$/t` cost, broadcast to the common shape of the three inputs.
     """
+    params = _validate_params(params, context="cost_curve")
     d = np.asarray(depth, dtype=np.float64)
     g = np.asarray(grade, dtype=np.float64)
     q = np.asarray(throughput, dtype=np.float64)
@@ -140,11 +167,15 @@ def cost_curve(depth: Any, grade: Any, throughput: Any, *, params: dict) -> np.n
         raise ValueError("cost_curve: throughput must be strictly positive")
 
     base = _param(params, "base_cost")
-    haul = _param(params, "haul_cost_per_m") * d
-    complexity = _param(params, "grade_complexity_coef") / g
-    scale = _param(params, "throughput_scale_coef") * ((q - q_star) / q_star) ** 2
-
-    return base + haul + complexity + scale
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        haul = _param(params, "haul_cost_per_m") * d
+        complexity = _param(params, "grade_complexity_coef") / g
+        scale = _param(params, "throughput_scale_coef") * ((q - q_star) / q_star) ** 2
+        total = base + haul + complexity + scale
+    _require_finite_result(haul, "haul cost", context="cost_curve")
+    _require_finite_result(complexity, "grade-complexity cost", context="cost_curve")
+    _require_finite_result(scale, "throughput-scale cost", context="cost_curve")
+    return _require_finite_result(total, "unit cost", context="cost_curve")
 
 
 def _plan_get(plan: Any, key: str, default: Any = None) -> Any:
@@ -206,9 +237,10 @@ def capex_opex(plan: Any, *, params: dict) -> tuple[float, float]:
     non-negative. A negative tonnage or a negative cost/capital term would otherwise turn modeled
     spending into modeled revenue with no error (MXR-080-0119); raises ``ValueError`` if violated.
     """
-    tonnage = np.atleast_1d(np.asarray(_plan_get(plan, "tonnage"), dtype=np.float64))
-    if tonnage.shape[0] == 0:
-        raise ValueError("capex_opex: plan 'tonnage' must have at least one period")
+    params = _validate_params(params, context="capex_opex")
+    tonnage = np.asarray(_plan_get(plan, "tonnage"), dtype=np.float64)
+    if tonnage.ndim != 1 or tonnage.size == 0:
+        raise ValueError("capex_opex: plan 'tonnage' must be a non-empty one-dimensional period vector")
     if not np.all(np.isfinite(tonnage)):
         raise ValueError("capex_opex: plan 'tonnage' must be finite")
     if np.any(tonnage < 0.0):
@@ -219,19 +251,35 @@ def capex_opex(plan: Any, *, params: dict) -> tuple[float, float]:
     throughput = _require_scalar_or_period_shape(_plan_get(plan, "throughput"), tonnage.shape, "throughput")
 
     per_period_cost = cost_curve(depth, grade, throughput, params=params)
-    opex_total = float(np.sum(tonnage * per_period_cost))
-
-    total_tonnage = float(np.sum(tonnage))
+    with np.errstate(over="ignore", invalid="ignore"):
+        period_opex = tonnage * per_period_cost
+        opex_total = float(np.sum(period_opex))
+        total_tonnage = float(np.sum(tonnage))
+    _require_finite_result(period_opex, "per-period operating cost", context="capex_opex")
+    _require_finite_result(opex_total, "total operating cost", context="capex_opex")
+    _require_finite_result(total_tonnage, "total tonnage", context="capex_opex")
     capex_total = _param(params, "capex_fixed", context="capex_opex")
-    capex_total += _param(params, "capex_per_tonne", context="capex_opex") * total_tonnage
+    with np.errstate(over="ignore", invalid="ignore"):
+        sustaining_capex = _param(params, "capex_per_tonne", context="capex_opex") * total_tonnage
+        capex_total += sustaining_capex
+    _require_finite_result(sustaining_capex, "tonnage-scaled capital", context="capex_opex")
+    _require_finite_result(capex_total, "capital before schedule", context="capex_opex")
     capex_schedule = _plan_get(plan, "capex_schedule", None)
     if capex_schedule is not None:
         capex_arr = np.asarray(capex_schedule, dtype=np.float64)
+        if capex_arr.shape != tonnage.shape:
+            raise ValueError(
+                "capex_opex: plan 'capex_schedule' must have the same one-dimensional period shape as 'tonnage'"
+            )
         if not np.all(np.isfinite(capex_arr)):
             raise ValueError("capex_opex: plan 'capex_schedule' must be finite")
         if np.any(capex_arr < 0.0):
             raise ValueError("capex_opex: plan 'capex_schedule' must be non-negative")
-        capex_total += float(np.sum(capex_arr))
+        with np.errstate(over="ignore", invalid="ignore"):
+            scheduled_capex = float(np.sum(capex_arr))
+            capex_total += scheduled_capex
+        _require_finite_result(scheduled_capex, "scheduled capital", context="capex_opex")
+        _require_finite_result(capex_total, "total capital", context="capex_opex")
 
     return capex_total, opex_total
 
@@ -250,7 +298,7 @@ class _NPVDistributionFields(NamedTuple):
     p10: float
     p50: float
     p90: float
-    sensitivity: dict
+    sensitivity: Mapping[str, float]
 
 
 class NPVDistribution(_NPVDistributionFields):
@@ -282,14 +330,44 @@ class NPVDistribution(_NPVDistributionFields):
         p10: float,
         p50: float,
         p90: float,
-        sensitivity: dict,
+        sensitivity: Mapping[str, float],
     ) -> NPVDistribution:
         arr = np.asarray(samples, dtype=float)
-        if arr.size == 0:
-            raise ValueError("NPVDistribution.samples must be non-empty.")
+        if arr.ndim != 1 or arr.size == 0:
+            raise ValueError("NPVDistribution.samples must be a non-empty one-dimensional array.")
         if not np.isfinite(arr).all():
             raise ValueError("NPVDistribution.samples must be finite (no NaN/Inf).")
-        return super().__new__(cls, samples, mean, p10, p50, p90, sensitivity)
+        provided = np.asarray([mean, p10, p50, p90], dtype=float)
+        if not np.isfinite(provided).all():
+            raise ValueError("NPVDistribution summaries must be finite.")
+        expected = np.asarray(
+            [np.mean(arr), *np.quantile(arr, [0.1, 0.5, 0.9])],
+            dtype=float,
+        )
+        if not np.allclose(provided, expected, rtol=1e-12, atol=1e-12):
+            raise ValueError(
+                "NPVDistribution summaries must agree with samples "
+                f"(expected mean/p10/p50/p90 {expected.tolist()!r})"
+            )
+        if not isinstance(sensitivity, Mapping):
+            raise TypeError("NPVDistribution.sensitivity must be a mapping.")
+        sensitivity_copy: dict[str, float] = {}
+        for key, value in sensitivity.items():
+            scalar = float(value)
+            if not np.isfinite(scalar):
+                raise ValueError(f"NPVDistribution.sensitivity[{key!r}] must be finite.")
+            sensitivity_copy[str(key)] = scalar
+        owned = np.array(arr, copy=True)
+        owned.setflags(write=False)
+        return super().__new__(
+            cls,
+            owned,
+            float(provided[0]),
+            float(provided[1]),
+            float(provided[2]),
+            float(provided[3]),
+            MappingProxyType(sensitivity_copy),
+        )
 
 
 def _unpack_schedule(schedule: Any) -> tuple[np.ndarray, np.ndarray]:
@@ -316,15 +394,14 @@ def _unpack_schedule(schedule: Any) -> tuple[np.ndarray, np.ndarray]:
             tonnage = np.asarray(schedule, dtype=np.float64)
             capex = None
 
-    tonnage = np.atleast_1d(tonnage)
-    if tonnage.shape[0] == 0:
-        raise ValueError("monte_carlo_npv: schedule 'tonnage' must have at least one period")
+    if tonnage.ndim != 1 or tonnage.size == 0:
+        raise ValueError("monte_carlo_npv: schedule 'tonnage' must be a non-empty one-dimensional period vector")
     if not np.all(np.isfinite(tonnage)):
         raise ValueError("monte_carlo_npv: schedule 'tonnage' must be finite")
     if np.any(tonnage < 0.0):
         raise ValueError("monte_carlo_npv: schedule 'tonnage' must be non-negative")
 
-    capex_arr = np.zeros_like(tonnage) if capex is None else np.atleast_1d(np.asarray(capex, dtype=np.float64))
+    capex_arr = np.zeros_like(tonnage) if capex is None else np.asarray(capex, dtype=np.float64)
     if capex_arr.shape != tonnage.shape:
         raise ValueError("monte_carlo_npv: schedule 'capex' must have the same shape as 'tonnage' (per period)")
     if not np.all(np.isfinite(capex_arr)):
@@ -437,27 +514,43 @@ def _align_price_paths(price_paths: Any, n: int, n_periods: int, rng: np.random.
     return prices[idx]
 
 
-def _cost_model_accepts_tonnage(cost_model: Callable) -> bool:
+def _cost_model_call_mode(cost_model: Callable) -> str:
+    """Select one supported positional call form by signature binding, without invoking the model."""
     try:
-        return len(inspect.signature(cost_model).parameters) >= 2
-    except (TypeError, ValueError):
-        # a builtin/C callable or anything else signature() can't introspect: assume the
-        # single-argument form rather than risk invoking `cost_model` twice on unrelated errors.
-        return False
+        signature = inspect.signature(cost_model)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("monte_carlo_npv: cost_model must expose an inspectable call signature") from exc
+
+    def binds(*args: Any) -> bool:
+        try:
+            signature.bind(*args)
+        except TypeError:
+            return False
+        return True
+
+    accepts_one = binds(0)
+    accepts_two = binds(0, 1.0)
+    if accepts_one == accepts_two:
+        description = "both supported forms are valid" if accepts_one else "neither supported form is valid"
+        raise TypeError(
+            "monte_carlo_npv: cost_model signature is ambiguous or unsupported "
+            f"({description}); declare exactly cost_model(period) or cost_model(period, tonnage)"
+        )
+    return "two" if accepts_two else "one"
 
 
-def _call_cost_model(cost_model: Callable, t: int, tonnage_t: float, *, accepts_tonnage: bool) -> float:
+def _call_cost_model(cost_model: Callable, t: int, tonnage_t: float, *, call_mode: str) -> float:
     """Call ``cost_model`` as ``cost_model(t, tonnage_t)`` if it takes two args, else ``cost_model(t)``.
 
     ``cost_model`` is opaque to this module (DR-ALG J2 writes it simply as ``opex_t(cost_model)``); a
     caller closing over :func:`cost_curve` (J4) typically needs the period's tonnage too. Arity is
-    determined once up front via ``accepts_tonnage`` (see :func:`_cost_model_accepts_tonnage`) rather
+    determined once up front via signature binding (see :func:`_cost_model_call_mode`) rather
     than by catching ``TypeError`` from the call itself -- a ``TypeError`` raised *inside*
     ``cost_model(t, tonnage_t)`` for an unrelated reason used to be misread as an arity mismatch and
     silently retried as ``cost_model(t)``, invoking ``cost_model`` a second time and masking the real
     error.
     """
-    if accepts_tonnage:
+    if call_mode == "two":
         return float(cost_model(t, tonnage_t))
     return float(cost_model(t))
 
@@ -471,8 +564,15 @@ def _npv_samples(
     discount: np.ndarray,
 ) -> np.ndarray:
     """``sum_t (tonnage_t * grade_{i,t} * price_{i,t} - opex_t - capex_t) / (1 + r) ** t``, vectorized."""
-    cashflow = tonnage[None, :] * grade_per_period * price_per_period - opex[None, :] - capex[None, :]
-    return cashflow @ discount
+    with np.errstate(over="ignore", invalid="ignore"):
+        recovered = tonnage[None, :] * grade_per_period
+        revenue = recovered * price_per_period
+        cashflow = revenue - opex[None, :] - capex[None, :]
+        discounted_npv = cashflow @ discount
+    _require_finite_result(recovered, "grade-scaled tonnage", context="monte_carlo_npv")
+    _require_finite_result(revenue, "period revenue", context="monte_carlo_npv")
+    _require_finite_result(cashflow, "period cash flow", context="monte_carlo_npv")
+    return _require_finite_result(discounted_npv, "discounted NPV", context="monte_carlo_npv")
 
 
 def _sobol_first_order_share(
@@ -507,8 +607,12 @@ def _sobol_first_order_share(
     provably holds in the population; it is not concealing an unbounded failure mode the way clipping
     the old ratio would have been.
     """
-    variance_i = max(float(np.mean(y_b * (y_ab_i - y_a))), 0.0)
+    with np.errstate(over="ignore", invalid="ignore"):
+        raw_variance = float(np.mean(y_b * (y_ab_i - y_a)))
+    _require_finite_result(raw_variance, "Sobol first-order variance", context="monte_carlo_npv")
+    variance_i = max(raw_variance, 0.0)
     share_i = min(variance_i / total_variance, 1.0) if total_variance > 0.0 else 0.0
+    _require_finite_result(share_i, "Sobol first-order share", context="monte_carlo_npv")
     return variance_i, share_i
 
 
@@ -537,8 +641,10 @@ def monte_carlo_npv(
       ``PriceForecast.paths`` passed directly -- ``(n_periods, m)``, time-major -- detected and
       transposed automatically (see :func:`_align_price_paths`). Resampled with replacement to ``n``
       rows when ``m != n``.
-    - ``cost_model``: called per period as ``cost_model(t, tonnage_t)`` (falling back to
-      ``cost_model(t)``) to get that period's deterministic ``opex_t``.
+    - ``cost_model``: declares exactly one supported positional signature, either
+      ``cost_model(t, tonnage_t)`` or ``cost_model(t)``, to get that period's deterministic
+      ``opex_t``. Signature binding selects the form before execution; an interface accepting both is
+      rejected as ambiguous rather than guessed.
     - ``schedule``: per-period ``tonnage`` (required) and ``capex`` (optional, default zero); see
       :func:`_unpack_schedule`. ``len(schedule)``'s tonnage vector fixes ``n_periods``.
     - ``discount_rate``: the DCF discount rate per period. Must be finite and strictly greater than
@@ -568,9 +674,13 @@ def monte_carlo_npv(
     """
     if not isinstance(n, (int, np.integer)) or isinstance(n, bool) or n <= 0:
         raise ValueError(f"monte_carlo_npv: n must be a positive integer, got {n!r}")
-    if not np.isfinite(discount_rate):
+    try:
+        discount_rate_value = float(discount_rate)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"monte_carlo_npv: discount_rate must be a finite scalar, got {discount_rate!r}") from exc
+    if not np.isfinite(discount_rate_value):
         raise ValueError(f"monte_carlo_npv: discount_rate must be finite, got {discount_rate!r}")
-    if discount_rate <= -1.0:
+    if discount_rate_value <= -1.0:
         raise ValueError(
             f"monte_carlo_npv: discount_rate must be > -1, got {discount_rate!r} -- at or below -1 the "
             "per-period discount factor 1 / (1 + discount_rate) ** t divides by zero or alternates sign"
@@ -583,20 +693,23 @@ def monte_carlo_npv(
 
     price_per_period = _align_price_paths(price_paths, n, n_periods, rng)
 
-    accepts_tonnage = _cost_model_accepts_tonnage(cost_model)
+    call_mode = _cost_model_call_mode(cost_model)
     opex = np.array(
-        [_call_cost_model(cost_model, t, float(tonnage[t]), accepts_tonnage=accepts_tonnage) for t in range(n_periods)]
+        [_call_cost_model(cost_model, t, float(tonnage[t]), call_mode=call_mode) for t in range(n_periods)]
     )
     if not np.all(np.isfinite(opex)):
         raise ValueError("monte_carlo_npv: cost_model must return finite opex")
     if np.any(opex < 0.0):
         raise ValueError("monte_carlo_npv: cost_model must return non-negative opex")
-    discount = 1.0 / (1.0 + float(discount_rate)) ** np.arange(n_periods, dtype=np.float64)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        discount = (1.0 + discount_rate_value) ** -np.arange(n_periods, dtype=np.float64)
+    _require_finite_result(discount, "discount factors", context="monte_carlo_npv")
 
     npv = _npv_samples(grade_per_period, price_per_period, tonnage, opex, capex, discount)
 
     mean = float(np.mean(npv))
     p10, p50, p90 = (float(q) for q in np.quantile(npv, [0.1, 0.5, 0.9]))
+    _require_finite_result([mean, p10, p50, p90], "NPV summaries", context="monte_carlo_npv")
 
     # Sensitivity: Sobol first-order variance-based indices for grade and price, via the standard
     # Saltelli/Jansen two-independent-sample estimator (see _sobol_first_order_share). Draw a SECOND,
@@ -617,7 +730,9 @@ def monte_carlo_npv(
         grade_per_period, price_b_per_period, tonnage, opex, capex, discount
     )  # price from B, grade from A
 
-    total_variance = float(np.var(y_a))
+    with np.errstate(over="ignore", invalid="ignore"):
+        total_variance = float(np.var(y_a))
+    _require_finite_result(total_variance, "total NPV variance", context="monte_carlo_npv")
     grade_variance, grade_share = _sobol_first_order_share(y_a, y_b, y_ab_grade, total_variance)
     price_variance, price_share = _sobol_first_order_share(y_a, y_b, y_ab_price, total_variance)
     sensitivity = {

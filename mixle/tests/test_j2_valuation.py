@@ -662,7 +662,7 @@ def test_sensitivity_independent_factors_negative_control():
 
 
 def _npv_distribution_kwargs(**overrides):
-    base = dict(samples=np.array([1.0, 2.0, 3.0]), mean=2.0, p10=1.0, p50=2.0, p90=3.0, sensitivity={})
+    base = dict(samples=np.array([1.0, 2.0, 3.0]), mean=2.0, p10=1.2, p50=2.0, p90=2.8, sensitivity={})
     base.update(overrides)
     return base
 
@@ -696,4 +696,4 @@ def test_npv_distribution_accepts_valid_samples():
     assert result.mean == 2.0
     assert result[0] is result.samples
     samples, mean, p10, p50, p90, sensitivity = result
-    assert mean == 2.0 and p10 == 1.0 and p50 == 2.0 and p90 == 3.0 and sensitivity == {}
+    assert mean == 2.0 and p10 == 1.2 and p50 == 2.0 and p90 == 2.8 and sensitivity == {}
