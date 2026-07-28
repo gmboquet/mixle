@@ -371,3 +371,49 @@ class MixedExtCompositeTest(KernelsExtBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EncoderCompatibilityTest(KernelsExtBase):
+    """The compiled path must accept a re-derived encoder but still reject a real mismatch.
+
+    `_validated_model` asks whether a replacement model can score columns the compiled encoding
+    already produced. Judging that by encoder EQUALITY conflated it with "is this the same encoder":
+    `BinomialEstimator`'s M-step re-derives `(n, min_val)` from the data every iteration, so an
+    ordinary EM step was rejected outright. `encoding_signature()` separates the two questions.
+    """
+
+    def setUp(self):
+        comps = [BinomialDistribution(0.3, 10, min_val=2), BinomialDistribution(0.6, 10, min_val=2)]
+        self.model = MixtureDistribution(comps, [0.5, 0.5])
+        self.data = self.model.sampler(seed=3).sample(size=80)
+
+    def test_a_bounds_shifted_replacement_is_accepted(self):
+        cm = CompiledMixture(self.model)
+        enc = cm.encode(self.data)
+        shifted = MixtureDistribution(
+            [BinomialDistribution(0.3, 12, min_val=0), BinomialDistribution(0.6, 12, min_val=0)], [0.5, 0.5]
+        )
+        # min_val/max_val are acceptance bounds, not column layout: the encoded columns carry the
+        # data's own observed range, so this replacement reads exactly the columns already produced.
+        self.assertEqual(cm.posteriors(enc, shifted).shape, (len(self.data), 2))
+
+    def test_a_genuinely_incompatible_replacement_is_still_rejected(self):
+        cm = CompiledMixture(self.model)
+        enc = cm.encode(self.data)
+        wrong_family = MixtureDistribution([GaussianDistribution(0.0, 1.0), GaussianDistribution(1.0, 1.0)], [0.5, 0.5])
+        with self.assertRaises(ValueError):
+            cm.posteriors(enc, wrong_family)
+        wrong_arity = MixtureDistribution([BinomialDistribution(0.3, 10, min_val=2)] * 3, [1 / 3] * 3)
+        with self.assertRaises(ValueError):
+            cm.posteriors(enc, wrong_arity)
+
+    def test_the_signature_composes_through_mixture_and_composite_wrappers(self):
+        # A leaf's answer must not be overruled by a wrapper falling back to __eq__.
+        tight = MixtureDistribution(
+            [BinomialDistribution(0.3, 10, min_val=2), BinomialDistribution(0.6, 10, min_val=2)], [0.5, 0.5]
+        )
+        loose = MixtureDistribution(
+            [BinomialDistribution(0.3, 12, min_val=0), BinomialDistribution(0.6, 12, min_val=0)], [0.5, 0.5]
+        )
+        self.assertNotEqual(tight.dist_to_encoder(), loose.dist_to_encoder())
+        self.assertEqual(tight.dist_to_encoder().encoding_signature(), loose.dist_to_encoder().encoding_signature())

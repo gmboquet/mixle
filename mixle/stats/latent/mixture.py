@@ -1691,6 +1691,17 @@ def _component_enc(enc_data: Any, i: int) -> Any:
     return enc_data
 
 
+def _child_encoding_signature(encoder):
+    """A child encoder's column-layout identity, or the encoder itself when it declares none."""
+    signature = getattr(encoder, "encoding_signature", None)
+    if callable(signature):
+        try:
+            return signature()
+        except (TypeError, ValueError):
+            return encoder
+    return encoder
+
+
 class MixtureDataEncoder(DataSequenceEncoder):
     """Encoder for homogeneous or heterogeneous mixture component encodings."""
 
@@ -1721,6 +1732,16 @@ class MixtureDataEncoder(DataSequenceEncoder):
         self.encoders = encoders
         self.encoder = encoders[0]
         self.homogeneous = all(e == encoders[0] for e in encoders)
+
+    def encoding_signature(self) -> tuple:
+        """Column-layout identity of this mixture encoder: its kind plus each child's signature.
+
+        Composes so that a leaf which distinguishes "same encoder" from "same encoding" (see
+        ``BinomialDataEncoder.encoding_signature``) is not overruled by a wrapper falling back to
+        ``__eq__``. A child that does not implement it contributes itself, so equality still decides
+        for that branch.
+        """
+        return ("mixture", tuple(_child_encoding_signature(e) for e in (self.encoders or (self.encoder,))))
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the encoder."""
