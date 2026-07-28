@@ -136,7 +136,7 @@ class MixtureWeightValidationTestCase(unittest.TestCase):
         # summing to 0.3 used to construct without error and the density silently integrated to 0.3
         # instead of 1.0 (numerically confirmed via seq_log_density over a fine grid during triage);
         # assertRaisesRegex (not just assertRaises) pins that the message names the real cause.
-        with self.assertRaisesRegex(ValueError, "sum to 1"):
+        with self.assertRaisesRegex(ValueError, "sum to one"):
             MixtureDistribution([GaussianDistribution(0.0, 1.0), GaussianDistribution(5.0, 1.0)], [0.1, 0.2])
 
     def test_weights_summing_to_over_one_rejected_at_construction(self):
