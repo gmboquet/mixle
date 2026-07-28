@@ -292,13 +292,76 @@ class LedoitWolfAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self):
-        """Return the accumulated ``(sum_x, sum_xx, sum_x_norm2, sum_norm4, count)`` tuple."""
-        return self.s1, self.s2, self.s3, self.s4, self.count
+        """Detached ``(sum_x, sum_xx, sum_x_norm2, sum_norm4, count)`` receipt of the current state.
+
+        The moment arrays are owned, write-locked copies rather than the accumulator's live buffers.
+        Handing out the live arrays made the receipt and the estimator the same object in both
+        directions: editing a returned ``s1`` rewrote the running estimator, and an estimator that
+        kept accumulating silently changed a receipt a caller believed it had already serialized
+        (MXR-080-1578).
+        """
+        detached = []
+        for moment in (self.s1, self.s2, self.s3):
+            if moment is None:
+                detached.append(None)
+                continue
+            owned = np.array(moment, dtype=float, copy=True)
+            owned.setflags(write=False)
+            detached.append(owned)
+        return (*detached, float(self.s4), float(self.count))
 
     def from_value(self, x) -> LedoitWolfAccumulator:
-        """Restore accumulator state from a value tuple produced by :meth:`value`."""
-        self.s1, self.s2, self.s3, self.s4, self.count = x
-        self.dim = None if x[0] is None else len(x[0])
+        """Restore accumulator state from a value tuple produced by :meth:`value`, validating it.
+
+        Restoring is an ownership boundary, not a plain assignment: the tuple may have come from
+        another process, a file, or a caller's own arithmetic. Every field is copied into arrays this
+        accumulator owns and checked for the shape and finiteness the estimator later assumes --
+        five entries, ``(d,)``/``(d, d)``/``(d,)`` moments agreeing on one ``d``, a symmetric second
+        moment, and finite nonnegative scalars. Previously the tuple was assigned straight through,
+        so mismatched shapes or a NaN restored cleanly and only surfaced as a crash or a silently
+        wrong shrinkage intensity at estimate time (MXR-080-1578).
+        """
+        try:
+            s1, s2, s3, s4, count = x
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "LedoitWolfAccumulator.from_value expects a 5-tuple (sum_x, sum_xx, sum_x_norm2, sum_norm4, count)."
+            ) from exc
+
+        if s1 is None:
+            if not (s2 is None and s3 is None):
+                raise ValueError("LedoitWolfAccumulator.from_value: an empty accumulator must have all moments None.")
+            self.s1 = self.s2 = self.s3 = None
+            self.dim = None
+        else:
+            first = np.array(s1, dtype=float, copy=True)
+            second = np.array(s2, dtype=float, copy=True)
+            third = np.array(s3, dtype=float, copy=True)
+            if first.ndim != 1 or first.size == 0:
+                raise ValueError(
+                    f"LedoitWolfAccumulator.from_value: sum_x must be a non-empty (d,) vector, got shape {first.shape}."
+                )
+            dim = first.shape[0]
+            if second.shape != (dim, dim) or third.shape != (dim,):
+                raise ValueError(
+                    "LedoitWolfAccumulator.from_value: moment shapes must agree on one dimension d; got "
+                    f"sum_x {first.shape}, sum_xx {second.shape}, sum_x_norm2 {third.shape}."
+                )
+            for moment, label in ((first, "sum_x"), (second, "sum_xx"), (third, "sum_x_norm2")):
+                if not np.all(np.isfinite(moment)):
+                    raise ValueError(f"LedoitWolfAccumulator.from_value: {label} must be finite (no NaN/Inf).")
+            if not np.allclose(second, second.T, rtol=1e-10, atol=1e-12):
+                raise ValueError("LedoitWolfAccumulator.from_value: sum_xx must be symmetric.")
+            self.s1, self.s2, self.s3 = first, second, third
+            self.dim = dim
+
+        norm4 = float(s4)
+        total = float(count)
+        for scalar, label in ((norm4, "sum_norm4"), (total, "count")):
+            if not np.isfinite(scalar) or scalar < 0.0:
+                raise ValueError(f"LedoitWolfAccumulator.from_value: {label} must be finite and nonnegative.")
+        self.s4 = norm4
+        self.count = total
         return self
 
     def acc_to_encoder(self) -> MultivariateGaussianDataEncoder:

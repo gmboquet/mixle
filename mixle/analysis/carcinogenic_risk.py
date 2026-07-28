@@ -276,7 +276,7 @@ def excess_lifetime_cancer_risk(
 
 
 def radon_wlm_risk(
-    wlm: np.ndarray | float,
+    wlm: Posterior | np.ndarray | float,
     *,
     risk_per_wlm: float = 5.38e-4,
     n: int = 2000,
@@ -293,22 +293,55 @@ def radon_wlm_risk(
     (exposure and potency are never negative).
 
     Args:
-        wlm: cumulative working-level-months, a scalar or an array of samples (already representing
-            exposure uncertainty).
+        wlm: cumulative working-level-months. An IC-1 ``Posterior`` over exposure (its own
+            ``derived_quantity`` pushforward is used, so ``prior_dominated`` propagates from the
+            exposure posterior), a plain array of exposure samples (already representing exposure
+            uncertainty), or a single deterministic scalar. Each draw must reduce to one value per
+            sample, exactly as :func:`excess_lifetime_cancer_risk` requires -- a ``(n, d>1)`` matrix
+            mixes route/receptor/time axes this function has no honest way to collapse.
         risk_per_wlm: BEIR-VI risk coefficient per WLM.
-        n: unused when ``wlm`` is an array (kept for signature symmetry / future posterior support).
-        rng: unused for the array/scalar paths (kept for signature symmetry).
+        n: number of posterior draws to take when ``wlm`` is a ``Posterior``. Must be a positive
+            exact integer. Ignored for the array/scalar paths, which carry their own sample count.
+        rng: numpy random Generator used to draw from a ``Posterior`` (a fresh default one is created
+            if omitted). Unused for the array/scalar paths, which are deterministic.
 
     Returns:
         A :class:`DerivedQuantity` of radon-attributable lung-cancer risk.
+
+    ``n``/``rng`` were previously accepted and never used at all, on any path -- a negative,
+    fractional or Boolean draw count was silently taken and discarded (MXR-080-1574). They now drive
+    the ``Posterior`` path they were reserved for, and ``n`` is validated on every path so an
+    impossible request is rejected rather than ignored.
     """
-    # n / rng are accepted for signature symmetry with excess_lifetime_cancer_risk and to leave room
-    # for a future posterior-valued wlm; the deterministic BEIR-VI formula needs neither.
-    _require_finite_nonnegative(wlm, "wlm")
     risk_per_wlm = _require_finite_nonnegative_scalar(risk_per_wlm, "risk_per_wlm")
     _require_positive_int(n, "n")
-    if isinstance(wlm, np.ndarray):
-        samples = _lnt_risk(np.atleast_1d(np.asarray(wlm, dtype=float)), risk_per_wlm)
+    generator = rng if rng is not None else np.random.default_rng()
+
+    def _apply(draws: np.ndarray) -> np.ndarray:
+        exposure = np.atleast_1d(np.asarray(draws, dtype=float))
+        if exposure.ndim > 1:
+            if exposure.ndim == 2 and exposure.shape[1] == 1:
+                exposure = exposure[:, 0]
+            else:
+                raise ValueError(
+                    "wlm must reduce to a single cumulative exposure per sample; got shape "
+                    f"{exposure.shape}, i.e. {int(np.prod(exposure.shape[1:]))} value(s) per sample. "
+                    "Aggregate to one WLM value per sample before calling radon_wlm_risk."
+                )
+        _require_finite_nonnegative(exposure, "wlm")
+        return _lnt_risk(exposure, risk_per_wlm)
+
+    if isinstance(wlm, Posterior):
+        dq = wlm.derived_quantity(_apply, n, generator)
+        samples = np.atleast_1d(np.asarray(dq.samples, dtype=float))
+        if not isinstance(dq.prior_dominated, (bool, np.bool_)):
+            raise TypeError("posterior-derived radon risk must carry a Boolean prior_dominated flag")
+        prior_dominated = bool(dq.prior_dominated)
+    elif isinstance(wlm, np.ndarray):
+        samples = _apply(wlm)
+        prior_dominated = False
     else:
-        samples = _lnt_risk(np.array([float(wlm)]), risk_per_wlm)
-    return RiskQuantity(samples=samples, prior_dominated=False)
+        samples = _apply(np.array([float(wlm)]))
+        prior_dominated = False
+
+    return RiskQuantity(samples=samples, prior_dominated=prior_dominated)
