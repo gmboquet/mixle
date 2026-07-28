@@ -8,6 +8,7 @@ nodes so generated kernels can be inspected without a separate runtime.
 
 from __future__ import annotations
 
+import functools
 import math
 from collections import Counter
 from collections.abc import Callable, Iterable
@@ -649,6 +650,13 @@ _INFIX = {
 
 
 def _clip_value(x: Any, a_min: Any, a_max: Any) -> Any:
+    if _any_vector_valued(x, a_min, a_max):
+        # MXR-080-1564: builtin max/min on an array operand force an ambiguous bool() conversion.
+        if a_min is not None:
+            x = np.maximum(x, a_min)
+        if a_max is not None:
+            x = np.minimum(x, a_max)
+        return x
     if a_min is not None:
         x = max(x, a_min)
     if a_max is not None:
@@ -660,6 +668,39 @@ def _is_vector_valued(x: Any) -> bool:
     """Return whether ``x`` is an array with at least one axis (as opposed to a Python scalar
     or a 0-d array), i.e. a value ``bool(x)`` cannot always convert unambiguously."""
     return isinstance(x, np.ndarray) and x.ndim > 0
+
+
+def _any_vector_valued(*values: Any) -> bool:
+    """Whether any evaluated operand is a genuine (ndim > 0) array."""
+    return any(_is_vector_valued(value) for value in values)
+
+
+def _array_aware(scalar_fn: Callable[..., Any], array_fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Dispatch to ``array_fn`` when any evaluated operand is a genuine array, else ``scalar_fn``.
+
+    MXR-080-1564: :meth:`SymbolicExpression.evaluate` advertises array-valued symbol bindings, but the
+    scalar ``math``/builtin implementations of these ops cannot accept one -- ``math.log`` raises
+    "only 0-dimensional arrays can be converted to Python scalars" and builtin ``max``/``min`` raise
+    the ambiguous-truth error. Only genuine ``ndim > 0`` arrays take the NumPy/SciPy path, so scalar
+    and 0-d results stay byte-identical to the pre-fix behavior (notably ``math.floor``'s ``int`` and
+    ``math.isnan``'s ``bool``, which their NumPy counterparts do not reproduce).
+    """
+
+    def evaluate(*values: Any) -> Any:
+        return array_fn(*values) if _any_vector_valued(*values) else scalar_fn(*values)
+
+    return evaluate
+
+
+def _max_of(*values: Any) -> Any:
+    """Elementwise/variadic max, array-aware (MXR-080-1564)."""
+    if _any_vector_valued(*values):
+        return functools.reduce(np.maximum, values)
+    return max(values)
+
+
+def _betaln_scalar(x: Any, y: Any) -> Any:
+    return math.lgamma(x) + math.lgamma(y) - math.lgamma(x + y)
 
 
 def _eval_and(x: Any, y: Any) -> Any:
@@ -708,20 +749,25 @@ _EVAL_OPS: dict[str, Callable[..., Any]] = {
     "and": _eval_and,
     "or": _eval_or,
     "invert": _eval_invert,
-    "log": math.log,
-    "exp": math.exp,
-    "sqrt": math.sqrt,
+    # Likewise (MXR-080-1564): the scalar `math` implementations of these ops cannot accept an
+    # array-bound symbol at all -- math.log/exp/sqrt/floor/lgamma/erf/isnan/isinf raise "only
+    # 0-dimensional arrays can be converted to Python scalars", and the builtin max/min behind
+    # `max`/`clip` raise the ambiguous-truth error -- so an array binding is routed to the
+    # NumPy/SciPy equivalent. `abs` and `digamma` already accept arrays unchanged.
+    "log": _array_aware(math.log, np.log),
+    "exp": _array_aware(math.exp, np.exp),
+    "sqrt": _array_aware(math.sqrt, np.sqrt),
     "abs": abs,
-    "floor": math.floor,
-    "max": lambda *xs: max(xs),
+    "floor": _array_aware(math.floor, np.floor),
+    "max": _max_of,
     "where": _eval_where,
     "clip": _clip_value,
-    "gammaln": math.lgamma,
+    "gammaln": _array_aware(math.lgamma, scipy.special.gammaln),
     "digamma": scipy.special.digamma,
-    "erf": math.erf,
-    "isnan": math.isnan,
-    "isinf": math.isinf,
-    "betaln": lambda x, y: math.lgamma(x) + math.lgamma(y) - math.lgamma(x + y),
+    "erf": _array_aware(math.erf, scipy.special.erf),
+    "isnan": _array_aware(math.isnan, np.isnan),
+    "isinf": _array_aware(math.isinf, np.isinf),
+    "betaln": _array_aware(_betaln_scalar, scipy.special.betaln),
     # nullary named constants
     "pi": lambda: math.pi,
     "e": lambda: math.e,
