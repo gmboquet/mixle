@@ -120,12 +120,22 @@ _Z_BY_LEVEL = {0.80: 1.2815515655446008, 0.90: 1.6448536269514722, 0.95: 1.95996
 
 
 def _z_for(level: float) -> float:
-    z = _Z_BY_LEVEL.get(level)
+    """The two-sided normal quantile for a credible ``level`` in the open interval (0, 1).
+
+    The domain is checked here rather than left to ``norm.ppf``: an out-of-domain level used to
+    produce a silently meaningless interval instead of an error -- ``level=-0.9`` gave the REVERSED
+    interval ``(3.2897, -3.2897)``, ``level=1.1`` and NaN gave ``(nan, nan)``, and ``level=0`` gave a
+    zero-width interval still described as credible.
+    """
+    value = float(level)
+    if not math.isfinite(value) or not 0.0 < value < 1.0:
+        raise ValueError(f"credible level must be finite and in the open interval (0, 1), got {level!r}")
+    z = _Z_BY_LEVEL.get(value)
     if z is not None:
         return z
     from scipy.stats import norm  # local import: keep the hot path free of the scipy dependency
 
-    return float(norm.ppf(0.5 + level / 2.0))
+    return float(norm.ppf(0.5 + value / 2.0))
 
 
 @dataclass
@@ -150,6 +160,24 @@ class GaussianStreamingBelief:
     belief_pseudo_count: float = 0.05
     _streams: dict[int, StreamingEstimator] = field(default_factory=dict, init=False, repr=False)
     _n: dict[int, int] = field(default_factory=dict, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Reject an uncertainty configuration that cannot produce a meaningful posterior bound.
+
+        Validated at construction, not at the first interval: a negative prior variance used to fail
+        only inside a later ``sqrt`` (after evidence had already mutated the belief), and
+        ``belief_pseudo_count=-1`` accepted an observation and then divided by zero while still
+        reporting an interval. ``0`` is allowed for both the pseudo-count and the variance floor --
+        the docstring above records k0=0 as a measured (undercovering) calibration point, not an
+        illegal one.
+        """
+        for name in ("prior_mu", "prior_sigma2", "min_covar", "belief_pseudo_count"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be finite, got {getattr(self, name)!r}")
+            if name != "prior_mu" and value < 0.0:
+                raise ValueError(f"{name} must be non-negative, got {getattr(self, name)!r}")
+            setattr(self, name, value)
 
     def _stream_for(self, cell: int) -> StreamingEstimator:
         stream = self._streams.get(cell)
@@ -186,7 +214,12 @@ class GaussianStreamingBelief:
         and a standard error of the mean built from a prior/sample-variance blend (see
         ``belief_pseudo_count``) over this belief's own read count -- not the raw per-cell
         sample variance alone, which is degenerate (zero, before ``min_covar`` clamps it) at a
-        single read and undercovers badly until several reads accumulate."""
+        single read and undercovers badly until several reads accumulate.
+
+        ``level`` must be finite and in the open interval (0, 1); the returned bounds are finite and
+        ordered by postcondition, so a caller never receives a reversed or NaN "credible" interval.
+        """
+        z = _z_for(level)
         n = self.n(cell)
         if n == 0:
             mu, var = self.prior_mu, self.prior_sigma2
@@ -196,8 +229,14 @@ class GaussianStreamingBelief:
             k0 = self.belief_pseudo_count
             var = (k0 * self.prior_sigma2 + n * stream.model.sigma2) / (k0 + n)
         se = math.sqrt(var / max(n, 1))
-        half = _z_for(level) * se
-        return (mu - half, mu + half)
+        half = z * se
+        lo, hi = mu - half, mu + half
+        if not (math.isfinite(lo) and math.isfinite(hi)) or lo > hi:
+            raise ValueError(
+                f"credible interval for cell {cell} is not a finite ordered interval: ({lo}, {hi}); "
+                "the belief state cannot support a posterior bound"
+            )
+        return (lo, hi)
 
 
 @dataclass
@@ -303,9 +342,7 @@ def _build_tools(
             raise
         if cost > quoted_cost:
             state["stop_reason"] = "cost_quote_exceeded"
-            raise RuntimeError(
-                f"environment reported action cost {cost} above its reserved upper bound {quoted_cost}"
-            )
+            raise RuntimeError(f"environment reported action cost {cost} above its reserved upper bound {quoted_cost}")
         state["remaining"] += quoted_cost - cost
 
         accepted = bool(obs.get("accepted", True))
