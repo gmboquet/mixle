@@ -22,7 +22,7 @@ from numpy.random import RandomState
 
 from mixle.stats.compute.pdist import DataSequenceEncoder
 from mixle.utils.parallel.planner import EncodedDataHandle, _global_key_merge, _split_range
-from mixle.utils.vector import require_initialized_observations, validate_initialization_probability
+from mixle.utils.vector import validate_initialization_probability, validated_initialized_observations
 
 
 def _resolve_encoder(estimator: Any, model: Any, encoder: DataSequenceEncoder | None) -> DataSequenceEncoder:
@@ -147,7 +147,7 @@ class RayEncodedData(EncodedDataHandle):
             nobs += weight
             accumulator.combine(value)
         _global_key_merge(accumulator)
-        return estimator.estimate(require_initialized_observations(nobs), accumulator.value())
+        return estimator.estimate(validated_initialized_observations(nobs), accumulator.value())
 
     def pysp_stream_accumulate(self, estimator: Any, model: Any) -> tuple[float, Any]:
         """Return accumulated streaming statistics for all Ray partitions."""

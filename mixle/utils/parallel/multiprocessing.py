@@ -42,7 +42,7 @@ from typing import Any
 import numpy as np
 
 from mixle.utils.parallel.planner import EncodedDataHandle
-from mixle.utils.vector import require_initialized_observations, validate_initialization_probability
+from mixle.utils.vector import validate_initialization_probability, validated_initialized_observations
 
 __all__ = ["MPEncodedData"]
 
@@ -204,8 +204,7 @@ class MPEncodedData(EncodedDataHandle):
             if remaining <= 0.0:
                 self._terminate_workers()
                 raise TimeoutError(
-                    "parallel worker %d timed out after %.3fs during %s"
-                    % (index, self.response_timeout, operation)
+                    "parallel worker %d timed out after %.3fs during %s" % (index, self.response_timeout, operation)
                 )
             try:
                 if conn.poll(min(0.05, remaining)):
@@ -220,9 +219,7 @@ class MPEncodedData(EncodedDataHandle):
             if not proc.is_alive():
                 exitcode = proc.exitcode
                 self._terminate_workers()
-                raise RuntimeError(
-                    "parallel worker %d exited during %s (exitcode=%r)" % (index, operation, exitcode)
-                )
+                raise RuntimeError("parallel worker %d exited during %s (exitcode=%r)" % (index, operation, exitcode))
         if status != "ok":
             raise RuntimeError("parallel worker failed:\n%s" % payload)
         return payload
@@ -303,7 +300,7 @@ class MPEncodedData(EncodedDataHandle):
         deadline = time.monotonic() + self.response_timeout
         payloads = [self._recv_at(index, deadline, "init") for index in range(len(self._conns))]
         nobs, value = self._fold_stats(estimator, payloads)
-        return estimator.estimate(require_initialized_observations(nobs), value)
+        return estimator.estimate(validated_initialized_observations(nobs), value)
 
     def pysp_seq_log_density_sum(self, estimate) -> tuple[float, float]:
         """Total observation count and summed log density across all workers."""
