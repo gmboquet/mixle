@@ -138,3 +138,64 @@ def test_blend_to_spec_infeasible_raises_with_iis_context():
         assert "infeasible" in str(exc).lower()
     else:
         raise AssertionError("expected blend_to_spec to raise on an unmeetable spec window")
+
+
+def test_blend_to_spec_rejects_a_zero_demand_blend():
+    # MXR-080-1674: the linearized window rows multiply every grade deviation by source tonnage, so at
+    # demand=0 every grade row reads 0 <= 0 and is vacuously satisfied. blend_to_spec returned cost 0
+    # and two zero tonnages for 0.1-0.2 grade sources against a 0.9-1.0 window -- certifying a blend
+    # whose documented grade is a ratio with a zero denominator.
+    grades = np.array([[0.1], [0.2]])
+    costs = np.array([1.0, 2.0])
+    avail = np.array([100.0, 100.0])
+
+    for demand in (0.0, -5.0, float("nan"), float("inf")):
+        try:
+            blend_to_spec(grades, costs, [0.9], [1.0], avail, demand)
+        except ValueError as exc:
+            assert "demand" in str(exc).lower()
+        else:
+            raise AssertionError(f"expected blend_to_spec to reject demand={demand}")
+
+    try:
+        blend_feasibility(grades, [0.9], [1.0], avail, 0.0)
+    except ValueError as exc:
+        assert "demand" in str(exc).lower()
+    else:
+        raise AssertionError("expected blend_feasibility to reject demand=0")
+
+
+def test_blend_to_spec_validates_physical_geometry():
+    grades = np.array([[0.5], [0.7]])
+    costs = np.array([10.0, 12.0])
+    avail = np.array([80.0, 80.0])
+
+    bad_cases = [
+        (np.array([[np.nan], [0.7]]), costs, [0.5], [0.7], avail),  # non-finite grade
+        (grades, costs, [0.7], [0.5], avail),  # reversed spec window
+        (grades, costs, [0.5, 0.6], [0.7, 0.8], avail),  # window length != n_elements
+        (grades, costs, [0.5], [0.7], np.array([80.0, -1.0])),  # negative availability
+        (grades, np.array([10.0]), [0.5], [0.7], avail),  # costs length != n_sources
+        (np.empty((0, 1)), np.array([]), [0.5], [0.7], np.array([])),  # no sources
+    ]
+    for g, c, lo, hi, av in bad_cases:
+        try:
+            blend_to_spec(g, c, lo, hi, av, 100.0)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("expected blend_to_spec to reject malformed blend geometry")
+
+
+def test_blend_to_spec_verifies_the_returned_blend_it_certifies():
+    # the happy path must still pass its own post-solve re-check of tonnage and blended grade
+    grades = np.array([[0.50], [0.55], [0.65], [0.70]])
+    costs = np.array([10.0, 12.0, 15.0, 18.0])
+    avail = np.array([1000.0, 1000.0, 1000.0, 1000.0])
+
+    cost, tonnage = blend_to_spec(grades, costs, [0.58], [0.62], avail, 1000.0)
+
+    assert np.isclose(tonnage.sum(), 1000.0, atol=1e-6)
+    blended = float(np.dot(tonnage, grades[:, 0]) / tonnage.sum())
+    assert 0.58 - 1e-6 <= blended <= 0.62 + 1e-6
+    assert cost > 0.0
