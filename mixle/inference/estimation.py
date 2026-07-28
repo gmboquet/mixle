@@ -176,9 +176,7 @@ def _maybe_structured_model(
     if best_bic >= comp_bic:
         return None, composite
     if out is not None:
-        out.write(
-            "structure: %s dependence beats independent fields (BIC %.1f < %.1f)\n" % (desc, best_bic, comp_bic)
-        )
+        out.write("structure: %s dependence beats independent fields (BIC %.1f < %.1f)\n" % (desc, best_bic, comp_bic))
     return best_model, composite
 
 
@@ -431,6 +429,48 @@ def _write_em_iter(
         out.write("Iteration %d: %s=%e, d%s=%e\n" % (i, obj_label, ll, obj_label, dll))
 
 
+def _initialize_with_support_fallback(
+    *, enc_data: Any, estimator: ParameterEstimator, rng: np.random.RandomState, p: float
+) -> SequenceEncodableProbabilityDistribution:
+    """Seed EM, falling back to the full sample when the ``p`` subsample gives an unusable start.
+
+    ``seq_initialize`` keeps each observation with probability ``p`` -- a HARD 0/1 Bernoulli mask, so
+    an unselected observation is not down-weighted, it is deleted from every component's accumulator.
+    For a discrete leaf that is not a harmless thinning: a category no draw happened to select gets
+    exactly zero mass, and the seeded model then assigns ``-inf`` to every observation carrying it.
+    At the default ``p=0.1`` on a 60-row sample with 32 distinct categorical levels, 37 of 60 rows
+    scored ``-inf``; the dataset log-likelihood is ``-inf`` and EM cannot recover, because the E-step
+    needs finite component densities to form responsibilities and the M-step therefore never sees the
+    data that would fill the missing categories. The result was a hard failure ("fused EM did not
+    produce a finite objective from its non-finite initial model") on entirely ordinary input.
+
+    The subsample is not what makes the components differ -- ``MixtureAccumulator.seq_initialize``
+    draws Dirichlet responsibilities per observation for that, and multiplies these weights in
+    afterwards. So ``p`` buys diversity nothing, costs statistical efficiency, and is the sole cause
+    of the missing-support failure. Rather than change ``p``'s documented meaning (and with it every
+    seeded initialization in the wild), this keeps the requested draw and only repairs the case where
+    it produced a model that cannot score its own training data: re-seed once from the full sample,
+    which by construction covers every observed category.
+
+    A model that assigns zero probability to the data it was initialized from is not a valid EM
+    starting point under any reading, so falling back is a strict improvement, never a silent
+    downgrade. The fallback is deterministic: it reuses ``rng``, so a given seed still yields one
+    reproducible starting model.
+    """
+    model = seq_initialize(enc_data=enc_data, estimator=estimator, rng=rng, p=p)
+    if p >= 1.0:
+        return model
+    try:
+        _, objective = seq_log_density_sum(enc_data, model)
+    except (TypeError, ValueError, AttributeError):
+        # Not every encoded handle supports a bare scoring pass here (parallel/RDD handles score
+        # through their own driver). Those keep exactly the previous behaviour.
+        return model
+    if np.isfinite(objective):
+        return model
+    return seq_initialize(enc_data=enc_data, estimator=estimator, rng=rng, p=1.0)
+
+
 def _em_loop(
     enc_data: Any,
     estimator: ParameterEstimator,
@@ -521,11 +561,7 @@ def _em_loop(
         # poison the convergence reference. A finite proposal may repair a non-finite
         # initializer; after that, finite ``ll`` follows the historical monotonicity guard.
         ll_finite = bool(np.isfinite(ll))
-        accepted = (
-            strategy_accepted
-            and ll_finite
-            and (not had_finite_baseline or (dll >= -1.0e-12) or (not monotone))
-        )
+        accepted = strategy_accepted and ll_finite and (not had_finite_baseline or (dll >= -1.0e-12) or (not monotone))
         if accepted:
             model = nxt
             current_is_finite = True
@@ -712,14 +748,11 @@ def _validate_optimize_controls(
 
     if is_bool(max_its) or not isinstance(max_its, (int, np.integer)) or int(max_its) < 1:
         raise ValueError(f"optimize(): max_its must be a positive integer, got {max_its!r}")
-    if (
-        delta is not None
-        and (
-            is_bool(delta)
-            or not isinstance(delta, (int, float, np.integer, np.floating))
-            or not np.isfinite(delta)
-            or float(delta) < 0.0
-        )
+    if delta is not None and (
+        is_bool(delta)
+        or not isinstance(delta, (int, float, np.integer, np.floating))
+        or not np.isfinite(delta)
+        or float(delta) < 0.0
     ):
         raise ValueError(f"optimize(): delta must be None or a finite non-negative number, got {delta!r}")
     if (
@@ -1229,7 +1262,7 @@ def optimize(
 
     try:
         if prev_estimate is None:
-            mm = seq_initialize(enc_data=enc_data, estimator=est, rng=rng, p=float(init_p))
+            mm = _initialize_with_support_fallback(enc_data=enc_data, estimator=est, rng=rng, p=float(init_p))
         else:
             mm = prev_estimate
 
@@ -1770,9 +1803,7 @@ class BayesianStreamingEstimator:
         return enc
 
     def _encode(self, data: Sequence[T]) -> Any:
-        encoder = (
-            _resolve_encoder(self.init_estimator) if self.model is None else self.model.dist_to_encoder()
-        )
+        encoder = _resolve_encoder(self.init_estimator) if self.model is None else self.model.dist_to_encoder()
         return seq_encode(data, encoder, num_chunks=self.num_chunks)
 
     def _encode_batch(self, data: Sequence[T] | None, enc_data: Any | None) -> Any:

@@ -58,7 +58,23 @@ def _validate_log_likelihood_matrix(ll_mat, *, shape: tuple[int, int] | None = N
     return ll
 
 
-def _posterior_from_log_joint(log_joint, *, name: str = "model evidence") -> np.ndarray:
+def _posterior_from_log_joint(
+    log_joint, *, name: str = "model evidence", uninformative_when_impossible: bool = False
+) -> np.ndarray:
+    """Row-normalize a ``(n, K)`` log-joint into a posterior over components.
+
+    A row that no component can explain is fatal by default: a JOINT evidence matrix with an
+    all-``-inf`` row describes an observation the model says cannot happen, and there is no honest
+    posterior to report for it.
+
+    ``uninformative_when_impossible`` is for the FIELD-RESTRICTED case, where the same shape means
+    something entirely different. There, an all-``-inf`` row says only that *this one field* cannot
+    explain the observation -- a categorical field seeing a value absent from the training data, say.
+    That field is then uninformative about which component the row belongs to, and a uniform
+    posterior is the correct representation of "says nothing". Raising instead let a single unseen
+    field veto the whole comparison, contradicting :func:`balanced_factors`'s documented contract
+    that no single field can veto a pair's similarity.
+    """
     joint = np.asarray(log_joint, dtype=np.float64)
     if joint.ndim != 2 or joint.shape[0] == 0 or joint.shape[1] == 0:
         raise ValueError(f"{name} must be a non-empty two-dimensional array.")
@@ -66,8 +82,11 @@ def _posterior_from_log_joint(log_joint, *, name: str = "model evidence") -> np.
         raise ValueError(f"{name} must contain only finite values or -inf.")
     possible = np.isfinite(joint).any(axis=1)
     if not np.all(possible):
-        rows = np.flatnonzero(~possible).tolist()
-        raise ImpossibleEvidenceError(f"{name} has zero probability for row(s) {rows}.")
+        if not uninformative_when_impossible:
+            rows = np.flatnonzero(~possible).tolist()
+            raise ImpossibleEvidenceError(f"{name} has zero probability for row(s) {rows}.")
+        joint = joint.copy()
+        joint[~possible, :] = 0.0  # flat log-joint -> uniform posterior after normalization
     result = joint - joint.max(axis=1, keepdims=True)
     np.exp(result, out=result)
     totals = result.sum(axis=1, keepdims=True)
@@ -363,6 +382,10 @@ def balanced_factors(mix_model, data, field_weights=None):
         z_f = _posterior_from_log_joint(
             np.asarray(l_f, dtype=np.float64) + log_w,
             name="field-restricted model evidence",
+            # A field that cannot explain a row is uninformative about it, not a veto -- see
+            # balanced_factors' contract ("no single field can veto a pair's similarity") and the
+            # uninformative_when_impossible note on _posterior_from_log_joint.
+            uninformative_when_impossible=True,
         )
 
         sq = np.sqrt(z_f)
@@ -440,9 +463,7 @@ def local_factors(mix_model, data, field_weights=None):
 
     terms = list(_field_log_density_features(comps, list(data)))
     if not terms:
-        raise AffinityCapabilityUnavailableError(
-            "affinity='local' found no scorable fields in the mixture components."
-        )
+        raise AffinityCapabilityUnavailableError("affinity='local' found no scorable fields in the mixture components.")
 
     if field_weights is None:
         field_weights = [1.0] * len(terms)
@@ -458,6 +479,10 @@ def local_factors(mix_model, data, field_weights=None):
         z_f = _posterior_from_log_joint(
             np.asarray(l_f, dtype=np.float64) + log_w,
             name="field-restricted model evidence",
+            # A field that cannot explain a row is uninformative about it, not a veto -- see
+            # balanced_factors' contract ("no single field can veto a pair's similarity") and the
+            # uninformative_when_impossible note on _posterior_from_log_joint.
+            uninformative_when_impossible=True,
         )
 
         sq = np.sqrt(z_f)
@@ -705,13 +730,9 @@ def _factor_similarity_block(factor, row_idx: np.ndarray, col_idx: np.ndarray | 
 def _factor_similarity_candidates(factor, i: int, candidates: np.ndarray) -> np.ndarray:
     candidates = np.asarray(candidates, dtype=np.int64)
     if _is_local_factor(factor):
-        return _validate_similarity(
-            _local_similarity_block(factor, np.asarray([i], dtype=np.int64), candidates)[0]
-        )
+        return _validate_similarity(_local_similarity_block(factor, np.asarray([i], dtype=np.int64), candidates)[0])
     if _is_fisher_factor(factor):
-        return _validate_similarity(
-            _fisher_similarity_block(factor, np.asarray([i], dtype=np.int64), candidates)[0]
-        )
+        return _validate_similarity(_fisher_similarity_block(factor, np.asarray([i], dtype=np.int64), candidates)[0])
 
     g, h, _ = _factor_parts(factor)
     return _validate_similarity(np.dot(h[candidates], g[i]))
