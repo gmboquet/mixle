@@ -180,6 +180,12 @@ def submit(
     (a real GPU pool) additionally requires ``confirm=True`` -- spend is never incurred implicitly.
     Every submission emits a ``pool_job`` telemetry event (features + realized outcome).
 
+    The confirm gate demands the literal Boolean ``True``, not merely a truthy value: ``confirm`` is
+    routinely threaded through JSON payloads, CLI flags and form fields, where the *string* ``"false"``
+    (or ``"0"``, or an empty-but-present marker object) is a perfectly ordinary way to spell "no" --
+    and every one of those is truthy in Python. Anything other than ``True`` therefore leaves the job
+    unconfirmed and rejected rather than silently authorizing billable execution.
+
     ``job.est_cost`` must be finite and non-negative and ``job.budget`` must be non-negative (``inf``
     allowed, meaning "no ceiling") -- raises :class:`ValueError` otherwise. Costs are a dollar estimate,
     never a credit: a NaN or negative value would defeat the comparison below rather than be caught by
@@ -209,11 +215,14 @@ def submit(
 
     if job.est_cost > job.budget:
         result = PoolResult(job.id, "rejected", reason=f"estimated cost {job.est_cost} exceeds budget {job.budget}")
-    elif getattr(backend, "billable", False) and not confirm:
+    elif getattr(backend, "billable", False) and confirm is not True:
         result = PoolResult(
             job.id,
             "rejected",
-            reason="billable backend requires confirm=True (dry-run + explicit confirm; spend is never implicit)",
+            reason=(
+                "billable backend requires the literal confirm=True (dry-run + explicit confirm; spend "
+                f"is never implicit), got {confirm!r}"
+            ),
         )
     else:
         result = _settle(job, backend.submit(job))
