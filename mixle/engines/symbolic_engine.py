@@ -47,13 +47,42 @@ class SymbolicExpression:
         return SymbolicExpression(op, tuple(_sym(arg) for arg in args))
 
     def evaluate(self, values: dict[str, Any]) -> Any:
-        """Evaluate the expression with a mapping from symbol names to values."""
+        """Evaluate the expression with a mapping from symbol names to values.
+
+        A ``where`` node with a SCALAR condition evaluates only the selected branch (MXR-080-1565);
+        see :meth:`_evaluate_where`. Every other node evaluates all of its arguments.
+        """
         if self.op == "symbol":
-            return values[self.args[0]]
+            return _normalize_binding(values[self.args[0]])
         if self.op == "const":
             return self.args[0]
+        if self.op == "where":
+            return self._evaluate_where(values)
         vals = [arg.evaluate(values) if isinstance(arg, SymbolicExpression) else arg for arg in self.args]
         return _EVAL_OPS[self.op](*vals)
+
+    def _evaluate_where(self, values: dict[str, Any]) -> Any:
+        """Evaluate a conditional, short-circuiting when the condition is scalar (MXR-080-1565).
+
+        A scalar condition already selected one branch with a plain Python ``if``, but both branches
+        had been evaluated on the way in, so an UNSELECTED branch that cannot be evaluated at these
+        bindings still raised -- ``where(cond, a, 1 / b)`` with ``b`` bound to ``0`` raised
+        ``ZeroDivisionError`` even when ``cond`` selected ``a``. Guarding an undefined case is the
+        main reason to write a conditional at all, so the unselected branch is no longer touched.
+
+        Because the unselected branch is never evaluated, a scalar-condition result carries the
+        SELECTED branch's own shape rather than broadcasting against the other branch -- the point of
+        the laziness. A vector condition keeps full ``np.where`` elementwise selection (and therefore
+        full broadcasting), which is the case that needs it.
+        """
+        cond_arg, x_arg, y_arg = self.args
+        cond = cond_arg.evaluate(values) if isinstance(cond_arg, SymbolicExpression) else cond_arg
+        if not _is_vector_valued(cond):
+            chosen = x_arg if bool(cond) else y_arg
+            return chosen.evaluate(values) if isinstance(chosen, SymbolicExpression) else chosen
+        x = x_arg.evaluate(values) if isinstance(x_arg, SymbolicExpression) else x_arg
+        y = y_arg.evaluate(values) if isinstance(y_arg, SymbolicExpression) else y_arg
+        return _eval_where(cond, x, y)
 
     def symbols(self) -> tuple[str, ...]:
         """Return sorted symbolic variable names referenced by this expression."""
@@ -710,6 +739,23 @@ def _clip_value(x: Any, a_min: Any, a_max: Any) -> Any:
     if a_max is not None:
         x = min(x, a_max)
     return x
+
+
+def _normalize_binding(value: Any) -> Any:
+    """Normalize an ``evaluate()`` symbol binding so ordinary array-likes count as vector-valued.
+
+    MXR-080-1565: :func:`_is_vector_valued` -- and therefore every elementwise-vs-scalar dispatch in
+    this module -- tests ``isinstance(value, np.ndarray)``, so a symbol bound to a plain Python list
+    took the SCALAR path. Binding a condition to ``[True, False]`` made ``where(c, [1, 2], [3, 4])``
+    collapse to ``bool([True, False])`` (truthy: a nonempty list) and return ``[1, 2]`` rather than
+    selecting elementwise. Lists and tuples are exactly the array-likes ``evaluate`` advertises
+    accepting, so they are converted once here at the binding boundary and every op downstream sees a
+    genuine array. Scalars, arrays, and anything else pass through untouched, so the scalar path stays
+    byte-identical.
+    """
+    if isinstance(value, (list, tuple)):
+        return np.asarray(value)
+    return value
 
 
 def _is_vector_valued(x: Any) -> bool:

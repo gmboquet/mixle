@@ -401,6 +401,54 @@ class EngineTestCase(unittest.TestCase):
             engine.evaluate(not_expr, {"x": np.array([True, False, True])}), [False, True, False]
         )
 
+    def test_symbolic_where_selects_elementwise_for_plain_list_bindings(self):
+        # Regression (MXR-080-1565), exact audit repro: vector detection tested only
+        # isinstance(np.ndarray), so a condition bound to an ordinary Python list took the scalar
+        # path -- bool([True, False]) is True (a nonempty list), so where(c, [1,2], [3,4])
+        # returned [1, 2] wholesale instead of selecting [1, 4] elementwise.
+        engine = SymbolicEngine()
+        c = engine.symbol("c")
+        x = engine.symbol("x")
+        y = engine.symbol("y")
+        expr = engine.where(c, x, y)
+
+        from_list = np.asarray(expr.evaluate({"c": [True, False], "x": [1, 2], "y": [3, 4]}))
+        np.testing.assert_array_equal(from_list, [1, 4])
+        from_array = np.asarray(
+            expr.evaluate({"c": np.array([True, False]), "x": np.array([1, 2]), "y": np.array([3, 4])})
+        )
+        np.testing.assert_array_equal(from_list, from_array)
+
+        # tuples are array-likes too, and the same normalization makes and/or/not elementwise
+        np.testing.assert_array_equal(
+            np.asarray(engine.logical_and(x, y).evaluate({"x": (True, False, True), "y": (True, True, False)})),
+            [True, False, False],
+        )
+        np.testing.assert_array_equal(
+            np.asarray(engine.logical_not(x).evaluate({"x": [True, False, True]})), [False, True, False]
+        )
+
+    def test_symbolic_where_does_not_evaluate_the_unselected_scalar_branch(self):
+        # Regression (MXR-080-1565): both branches were evaluated before the condition selected
+        # one, so guarding an undefined case -- the main reason to write a conditional -- did not
+        # work: the unselected 1/z branch raised ZeroDivisionError at z=0 anyway.
+        engine = SymbolicEngine()
+        c = engine.symbol("c")
+        z = engine.symbol("z")
+        guarded = engine.where(c, engine.constant(0.0), engine.constant(1.0) / z)
+
+        self.assertEqual(guarded.evaluate({"c": True, "z": 0.0}), 0.0)
+        self.assertEqual(guarded.evaluate({"c": False, "z": 4.0}), 0.25)
+        with self.assertRaises(ZeroDivisionError):
+            guarded.evaluate({"c": False, "z": 0.0})  # genuinely selected: must still raise
+
+        # a vector condition still selects elementwise (np.where semantics, both branches evaluated)
+        both = engine.where(c, z + 1.0, z - 1.0)
+        np.testing.assert_allclose(
+            np.asarray(both.evaluate({"c": np.array([True, False]), "z": np.array([10.0, 10.0])}), dtype=float),
+            [11.0, 9.0],
+        )
+
     def test_symbolic_evaluate_and_or_not_where_scalar_case_is_unaffected(self):
         # Negative control for MXR-080-0152: the scalar/0-d condition path must behave EXACTLY
         # as before the fix -- same values AND the same plain Python types, not just "close
@@ -1176,6 +1224,50 @@ class ActiveEngineConcurrencyTest(unittest.TestCase):
                     raise ValueError("boom")
             self.assertEqual(active_engine(), "outer")
         self.assertIsNone(active_engine())
+
+
+class EngineFeatureFlagTypeTest(unittest.TestCase):
+    """MXR-080-1563 -- feature flags that select an execution/compilation/numerical path must require
+    an actual Boolean.
+
+    `bool("false")` is `True`, so a flag that round-tripped through YAML/JSON/an environment variable
+    as the string `"false"` used to switch the path ON -- the exact inversion of what it says.
+    """
+
+    def test_numpy_fused_kernel_flag_rejects_non_bool(self):
+        for bad in ("false", "0", "", 0, 1, None, 1.0):
+            with self.subTest(prefer_fused=bad), self.assertRaises(TypeError):
+                NumpyEngine(prefer_fused=bad)
+
+    def test_numpy_fused_kernel_flag_accepts_bools(self):
+        self.assertFalse(NumpyEngine(prefer_fused=False).prefer_fused)
+        self.assertTrue(NumpyEngine(prefer_fused=True).prefer_fused)
+        self.assertIs(NumpyEngine(prefer_fused=np.bool_(True)).prefer_fused, True)
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_torch_compile_flag_rejects_non_bool(self):
+        for bad in ("false", "0", "", 0, 1, None, 1.0):
+            with self.subTest(compile=bad), self.assertRaises(TypeError):
+                TorchEngine(compile=bad)
+
+    @unittest.skipUnless(HAS_TORCH, "torch is not installed")
+    def test_torch_compile_flag_accepts_bools(self):
+        self.assertFalse(TorchEngine(compile=False).compile_enabled)
+        self.assertTrue(TorchEngine(compile=True).compile_enabled)
+        # with_precision re-threads the stored flag, so it must stay an accepted Boolean
+        self.assertTrue(TorchEngine(compile=True).with_precision("float32").compile_enabled)
+
+    @unittest.skipUnless(HAS_JAX, "jax is not installed")
+    def test_jax_compile_flag_rejects_non_bool(self):
+        for bad in ("false", "0", "", 0, 1, None, 1.0):
+            with self.subTest(compile=bad), self.assertRaises(TypeError):
+                JaxEngine(compile=bad)
+
+    @unittest.skipUnless(HAS_JAX, "jax is not installed")
+    def test_jax_compile_flag_accepts_bools(self):
+        self.assertFalse(JaxEngine(compile=False).compile_enabled)
+        self.assertTrue(JaxEngine(compile=True).compile_enabled)
+        self.assertTrue(JaxEngine(compile=True).with_precision("float32").compile_enabled)
 
 
 if __name__ == "__main__":
