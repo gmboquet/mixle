@@ -1369,8 +1369,10 @@ def chunked_state_posteriors(hmm: StructuredHMM, seq, *, chunk: int, overlap: in
     if overlap >= chunk:
         raise ValueError("overlap must be smaller than chunk.")
     sequence = _validated_sequences([seq], "chunked posterior data")[0]
-    require_possible_log_evidence(hmm.seq_log_density([sequence]), context="chunked_state_posteriors")
+    # seq_log_density is _forward_backward(_log_b(seq)), so guarding with it scored every emission a
+    # second time -- the line below scores them all again. Same evidence, one scoring pass.
     log_b_full = hmm._log_b(sequence)
+    require_possible_log_evidence(hmm._forward_backward(log_b_full)[5], context="chunked_state_posteriors")
     t_len = len(sequence)
     out = np.zeros((t_len, hmm.K))
     uniform = np.ones(hmm.K) / hmm.K
@@ -1420,8 +1422,8 @@ def fit_chunked(
     rollback = None
 
     def chunk_estep(args):
-        seq_index, seq, weight, ctx_lo, ctx_hi, keep_lo, keep_hi = args
-        log_b = hmm._log_b(seq)[ctx_lo:ctx_hi]
+        seq_index, seq, weight, log_b_full, ctx_lo, ctx_hi, keep_lo, keep_hi = args
+        log_b = log_b_full[ctx_lo:ctx_hi]
         pi = hmm.pi if ctx_lo == 0 else uniform
         alpha, beta, c, b, gamma, ll = hmm._forward_backward(log_b, pi=pi)
         require_possible_log_evidence(ll, context="fit_chunked")
@@ -1450,8 +1452,13 @@ def fit_chunked(
         )
 
     def run_estep():
+        # _log_b scores every emission at every position of the whole sequence, so it is computed
+        # once per sequence and sliced per chunk. Calling it inside chunk_estep re-scored the entire
+        # sequence for every chunk, making emission cost grow with the chunk count -- the very split
+        # this function exists to parallelize.
+        log_b_by_index = {int(index): hmm._log_b(seqs[index]) for index in active_indices}
         tasks = [
-            (index, seqs[index], weights[index], lo, hi, keep_lo, keep_hi)
+            (index, seqs[index], weights[index], log_b_by_index[int(index)], lo, hi, keep_lo, keep_hi)
             for index in active_indices
             for (lo, hi, keep_lo, keep_hi) in _chunk_spans(len(seqs[index]), chunk, overlap)
         ]
