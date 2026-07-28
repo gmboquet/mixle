@@ -418,8 +418,16 @@ class ClosedLoopSelfEvolution:
         2. rank them with A5's ``acquire``,
         3. pick a challenger-production operator via the per-context bandit,
         4. propose + gate the challenger (skipped if ``budget_remaining`` can't afford it),
-        5. reward the bandit with the verified (anti-regression) delta,
-        6. deploy + record a genealogy receipt iff the gate promotes.
+        5. score the model the step would deploy, while it is still only staged,
+        6. commit as one transaction iff the gate promotes: genealogy receipt, deployment, bandit
+           reward, and history entry, in that order.
+
+        Steps 5 and 6 are deliberately ordered that way. A step is all-or-nothing: either it returns
+        a :class:`LoopStepResult` that is also in ``history`` and whose champion/receipt/bandit state
+        all agree, or it raises having changed nothing at all and can simply be retried. Scoring used
+        to happen after the champion had already been swapped and its receipt written, so a scoring
+        failure stranded the loop with a deployed challenger, an adoption row, and a bandit reward
+        for a step that -- as far as its caller and its own history were concerned -- never happened.
 
         Note on ``verify`` (MXR-080-0042 -- data roles, see :mod:`mixle.evolve.population`'s module
         docstring for the fuller three-role framing this loop shares): ``train_data`` (what the
@@ -479,9 +487,11 @@ class ClosedLoopSelfEvolution:
         cost = float(getattr(operator, "cost_hint", 1.0))
         fits_budget = budget_remaining is None or cost <= budget_remaining
 
-        promoted = False
         delta = 0.0
         charged = 0.0
+        # STAGE. Nothing below this point writes durable loop state until the commit block: the
+        # promotion is held as a staged (candidate, verdict) pair instead of being deployed inline.
+        staged: tuple[Any, Any] | None = None
         try:
             if fits_budget and operator.applicable(self.champion, train_data, ctx=op_ctx):
                 candidate = operator.propose(self.champion, train_data, ctx=op_ctx)
@@ -498,21 +508,40 @@ class ClosedLoopSelfEvolution:
                 charged = cost
                 delta = float(verdict.delta) if verdict.promote else 0.0
                 if verdict.promote:
-                    self.genealogy.record_adoption(
-                        parent=self.champion,
-                        child=candidate.model,
-                        operator=op_name,
-                        gap=verdict.delta,
-                        context=ctx,
-                    )
-                    self.champion = candidate.model
-                    promoted = True
+                    staged = (candidate, verdict)
         except Exception:  # noqa: BLE001
+            staged = None
             delta = 0.0
             charged = 0.0  # a raised attempt is free too, same as skipped-by-budget/inapplicable
 
+        # Score the model this step WOULD deploy, while it is still only staged. Scoring used to run
+        # AFTER the champion had already been replaced, an adoption receipt written, and the bandit
+        # rewarded, so a scoring failure left the challenger deployed and the ledger claiming an
+        # adoption while the caller got an exception, no LoopStepResult, and no history entry -- the
+        # loop's durable state and its own record of what happened permanently disagreeing
+        # (MXR-080-1773). Doing it here makes the step all-or-nothing: if the objective cannot score
+        # the prospective champion, the exception propagates with the loop untouched -- same
+        # champion, no adoption row, no bandit reward, no history entry -- so the caller can simply
+        # retry the step.
+        prospective = staged[0].model if staged is not None else self.champion
+        score = self._score(prospective, verify_data)
+
+        # COMMIT. Durable receipt first, then deployment, then accounting and history: past this
+        # point every operation is plain bookkeeping over values already computed.
+        promoted = False
+        if staged is not None:
+            candidate, verdict = staged
+            self.genealogy.record_adoption(
+                parent=self.champion,
+                child=candidate.model,
+                operator=op_name,
+                gap=verdict.delta,
+                context=ctx,
+            )
+            self.champion = candidate.model
+            promoted = True
+
         self.bandit.reward(ctx, op_name, delta)
-        score = self._score(self.champion, verify_data)
         result = LoopStepResult(
             context=ctx,
             operator=op_name,
