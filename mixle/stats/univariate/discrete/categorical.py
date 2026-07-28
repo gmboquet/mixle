@@ -1084,8 +1084,12 @@ class CategoricalEstimator(ParameterEstimator):
                     raise ValueError("empty categorical fitting requires a prior with an explicit finite support.")
             elif self.suff_stat is not None:
                 suff_stat = {key: 0.0 for key in self.suff_stat}
-            else:
-                raise ValueError("empty categorical fitting requires explicit prior support.")
+            # With no prior and no declared support there is nothing to widen an empty count map
+            # into, but that is a state EM legitimately reaches -- a mixture/HMM component can win
+            # zero responsibility for an iteration, and every sequence in a batch can be empty. The
+            # honest result is the empty categorical (no support, everything scored at
+            # ``default_value``), not a raise: raising here aborts the whole fit over a component
+            # that would have recovered on the next iteration.
 
         if self.has_conj_prior:
             return self._estimate_conjugate(suff_stat)
