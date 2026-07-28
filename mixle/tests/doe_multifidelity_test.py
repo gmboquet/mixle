@@ -186,6 +186,119 @@ class BudgetEnforcementTest(unittest.TestCase):
                 self._obj, [(0.0, 1.0)], fidelities=(0.5, 1.0), costs=(1.0, 2.0, 3.0), n_init=1, max_cost=5.0
             )
 
+    def test_sampling_controls_are_not_truncated_or_treated_as_flags(self):
+        from mixle.doe import multi_fidelity_minimize
+
+        for kwargs in (
+            {"n_init": 0},
+            {"n_init": 1.9},
+            {"n_init": True},
+            {"n_candidates": 0.9},
+            {"n_candidates": True},
+        ):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises((TypeError, ValueError)):
+                    multi_fidelity_minimize(
+                        self._obj,
+                        [(0.0, 1.0)],
+                        fidelities=(1.0,),
+                        max_cost=2.0,
+                        **kwargs,
+                    )
+
+
+class ObservationEvidenceTest(unittest.TestCase):
+    def test_nonfinite_observation_is_charged_but_never_admitted_as_an_optimum(self):
+        from mixle.doe import multi_fidelity_minimize
+
+        result = multi_fidelity_minimize(
+            lambda x, s: float("nan"),
+            [(0.0, 1.0)],
+            fidelities=(1.0,),
+            n_init=1,
+            max_cost=1.0,
+            n_candidates=2,
+            seed=0,
+        )
+        self.assertEqual(result["stopped_reason"], "objective_failed")
+        self.assertEqual(result["cost"], 1.0)
+        self.assertEqual(result["X"].shape, (0, 2))
+        self.assertEqual(result["Y"].shape, (0,))
+        self.assertFalse(result["target_evaluated"])
+        self.assertIsNone(result["x"])
+        self.assertIsNone(result["y"])
+        self.assertEqual(len(result["failed_evaluations"]), 1)
+        self.assertEqual(result["failed_evaluations"][0]["status"], "nonfinite_observation")
+
+    def test_raised_objective_call_retains_its_cost_and_error_receipt(self):
+        from mixle.doe import multi_fidelity_minimize
+
+        def objective(x, s):
+            raise RuntimeError("simulator failed")
+
+        result = multi_fidelity_minimize(
+            objective,
+            [(0.0, 1.0)],
+            fidelities=(1.0,),
+            n_init=1,
+            max_cost=1.0,
+            n_candidates=2,
+            seed=0,
+        )
+        self.assertEqual(result["cost"], 1.0)
+        self.assertEqual(result["failed_evaluations"][0]["status"], "exception")
+        self.assertIn("simulator failed", result["error"])
+
+
+class PosteriorContractTest(unittest.TestCase):
+    def _run_with_gp(self, gp):
+        from mixle.doe import multi_fidelity_minimize
+        from mixle.doe import multifidelity as mf_module
+
+        calls = []
+        with mock.patch.object(mf_module, "_fit_surrogate", return_value=gp):
+            result = multi_fidelity_minimize(
+                lambda x, s: calls.append((x.copy(), s)) or float(np.sum(x)),
+                [(0.0, 1.0)],
+                fidelities=(1.0,),
+                n_init=1,
+                max_cost=2.0,
+                n_candidates=3,
+                seed=0,
+            )
+        return result, calls
+
+    def test_wrong_mean_cardinality_is_an_explicit_prediction_failure(self):
+        class WrongMeanGP:
+            def predict(self, x_train, y_train, points, return_cov):
+                return np.zeros(points.shape[0] + 1), np.eye(points.shape[0])
+
+        result, calls = self._run_with_gp(WrongMeanGP())
+        self.assertEqual(result["stopped_reason"], "surrogate_prediction_failed")
+        self.assertIn("posterior mean", result["error"])
+        self.assertEqual(len(calls), 1)
+
+    def test_non_psd_covariance_is_not_clipped_into_confidence(self):
+        class NegativeVarianceGP:
+            def predict(self, x_train, y_train, points, return_cov):
+                return np.zeros(points.shape[0]), -np.eye(points.shape[0])
+
+        result, calls = self._run_with_gp(NegativeVarianceGP())
+        self.assertEqual(result["stopped_reason"], "surrogate_prediction_failed")
+        self.assertIn("positive semidefinite", result["error"])
+        self.assertEqual(len(calls), 1)
+
+    def test_invalid_fidelity_posterior_cannot_trigger_an_objective_call(self):
+        class InvalidPairGP:
+            def predict(self, x_train, y_train, points, return_cov):
+                if points.shape[0] == 3:
+                    return np.zeros(3), np.eye(3)
+                return np.zeros(2), np.array([[1.0, 2.0], [2.0, 1.0]])
+
+        result, calls = self._run_with_gp(InvalidPairGP())
+        self.assertEqual(result["stopped_reason"], "surrogate_prediction_failed")
+        self.assertEqual(len(calls), 1)
+
 
 # --------------------------------------------------------------------------- MXR-080-0183
 # Every exception from surrogate fitting was caught by a bare `except Exception` and turned into a
