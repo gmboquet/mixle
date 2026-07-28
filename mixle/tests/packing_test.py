@@ -31,6 +31,18 @@ class PackBitsTest(unittest.TestCase):
             pack_bits([0, 1], 3)  # not a power-of-two byte-tiling width
         with self.assertRaises(ValueError):
             pack_bits([0, 16], 4)  # 16 does not fit in 4 bits
+        for operation in (pack_bits,):
+            with self.assertRaises((TypeError, ValueError)):
+                operation([0, 1], True)
+        with self.assertRaises((TypeError, ValueError)):
+            unpack_bits([0], True, 1)
+        with self.assertRaises((TypeError, ValueError)):
+            packed_nbytes(1, True)
+
+    def test_unpack_rejects_lossy_or_out_of_range_payload_bytes(self):
+        for bad in ([1.9], [-1], [256], [True]):
+            with self.assertRaises(ValueError):
+                unpack_bits(bad, 1, 1)
 
 
 class PackBitsCorruptionRegressionTest(unittest.TestCase):

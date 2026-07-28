@@ -57,6 +57,11 @@ class AlphabetAndDimensionValidationTest(unittest.TestCase):
     def test_out_of_alphabet_rejected_when_mixed_with_valid_values(self):
         with self.assertRaises(ValueError):
             pack_pm1(np.array([1, -1, 2, 1]))
+        # MXR-080-1537: these values are in the union, but not wholly in either binary alphabet.
+        with self.assertRaises(ValueError):
+            pack_pm1(np.array([-1, 0, 1]))
+        with self.assertRaises(ValueError):
+            binary_dot(np.array([[-1, 0, 1]]), np.array([[-1, 0, 1]]))
 
     def test_pack_ternary_out_of_alphabet_rejected(self):
         from mixle.engines.bitpacked import pack_ternary
@@ -90,6 +95,24 @@ class AlphabetAndDimensionValidationTest(unittest.TestCase):
         b = rng.choice([-1, 1], size=(12, 130)).astype(np.int8)
         ref = a.astype(np.int32) @ b.T.astype(np.int32)
         self.assertTrue(np.array_equal(ref, binary_dot(a, b)))
+
+    def test_public_rank_contract_accepts_vectors_and_matrices_only(self):
+        for bad in (np.array(1), np.ones((1, 1, 1))):
+            with self.assertRaises(ValueError):
+                pack_pm1(bad)
+            with self.assertRaises(ValueError):
+                binary_dot(bad, np.ones(1))
+
+    def test_binary_gemm_rejects_noncanonical_padding(self):
+        # MXR-080-1538 exact adversarial shape: only one bit is data, every other lane is padding.
+        with self.assertRaises(ValueError):
+            binary_gemm(np.array([[0]], dtype=np.uint64), np.array([[2**64 - 1]], dtype=np.uint64), 1)
+
+    def test_canonical_padding_keeps_short_products_in_range(self):
+        for dim in (1, 7, 9, 63, 65):
+            a = np.ones((1, dim), dtype=np.int8)
+            b = -np.ones((1, dim), dtype=np.int8)
+            self.assertEqual(int(binary_dot(a, b)[0, 0]), -dim)
 
 
 @unittest.skipUnless(HAS_BITPACKED, "compiled _bitpacked extension not built")

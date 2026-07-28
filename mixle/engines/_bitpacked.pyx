@@ -44,6 +44,19 @@ def binary_gemm(uint64_t[:, ::1] a, uint64_t[:, ::1] b, int dim):
             "binary_gemm: dim=%d implies %d packed word(s) per row, but arrays have %d"
             % (dim, expected_words, words)
         )
+    # pack_pm1 uses numpy.packbits, so valid bits lead each byte and all trailing lanes must be zero.
+    # Validate direct extension calls too: otherwise padding contributes to popcount even though the
+    # final formula substitutes the smaller true dimension.
+    a_bytes = np.asarray(a).view(np.uint8).reshape(n, -1)
+    b_bytes = np.asarray(b).view(np.uint8).reshape(m, -1)
+    used_bytes, remaining_bits = divmod(dim, 8)
+    if remaining_bits:
+        padding_mask = (1 << (8 - remaining_bits)) - 1
+        if np.any(a_bytes[:, used_bytes] & padding_mask) or np.any(b_bytes[:, used_bytes] & padding_mask):
+            raise ValueError("binary_gemm: packed input has nonzero padding bits beyond dim=%d" % dim)
+        used_bytes += 1
+    if np.any(a_bytes[:, used_bytes:]) or np.any(b_bytes[:, used_bytes:]):
+        raise ValueError("binary_gemm: packed input has nonzero padding bytes beyond dim=%d" % dim)
     out_np = np.empty((n, m), dtype=np.int32)
     cdef int32_t[:, ::1] out = out_np
     with nogil:

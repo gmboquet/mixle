@@ -73,14 +73,31 @@ def _require_exact_nonneg_int_array(values: Any, name: str) -> np.ndarray:
     return checked.reshape(arr.shape)
 
 
+def _require_width(bits: Any, operation: str) -> int:
+    bits = _require_exact_int(bits, "bits")
+    if bits not in _SUPPORTED:
+        raise ValueError("%s supports bit widths %r, got %d" % (operation, _SUPPORTED, bits))
+    return bits
+
+
+def _require_byte_array(values: Any) -> np.ndarray:
+    """Validate packed bytes before conversion so fractions never truncate and integers never wrap."""
+    raw = np.asarray(values)
+    if raw.dtype == np.bool_:
+        raise ValueError("packed must contain bytes, not booleans")
+    checked = _require_exact_nonneg_int_array(raw, "packed")
+    if checked.size and np.any(checked > 255):
+        raise ValueError("packed values must be bytes in [0, 255]")
+    return checked.astype(np.uint8).ravel()
+
+
 def pack_bits(codes: Any, bits: int) -> np.ndarray:
     """Pack unsigned ``codes`` (each ``< 2**bits``) into a ``uint8`` array, ``8//bits`` per byte.
 
     ``bits`` must be a power of two in {1, 2, 4, 8} (the widths that tile a byte exactly). Little-endian
     within each byte: code ``j`` of a group occupies bit positions ``[j*bits, (j+1)*bits)``.
     """
-    if bits not in _SUPPORTED:
-        raise ValueError("pack_bits supports bit widths %r, got %d" % (_SUPPORTED, bits))
+    bits = _require_width(bits, "pack_bits")
     c = _require_exact_nonneg_int_array(codes, "codes").ravel()
     if np.any(c >= (1 << bits)):
         raise ValueError("a code does not fit in %d bits" % bits)
@@ -105,10 +122,9 @@ def unpack_bits(packed: Any, bits: int, count: int) -> np.ndarray:
     (``arr[:-3]``), and a ``count`` beyond the payload's actual capacity is rejected rather than silently
     returning fewer values than requested.
     """
-    if bits not in _SUPPORTED:
-        raise ValueError("unpack_bits supports bit widths %r, got %d" % (_SUPPORTED, bits))
+    bits = _require_width(bits, "unpack_bits")
     count = _require_nonnegative_int(count, "count")
-    p = np.asarray(packed, dtype=np.uint8).ravel()
+    p = _require_byte_array(packed)
     per_byte = 1 if bits == 8 else 8 // bits
     capacity = p.size * per_byte
     if count > capacity:
@@ -124,8 +140,7 @@ def unpack_bits(packed: Any, bits: int, count: int) -> np.ndarray:
 
 def packed_nbytes(count: int, bits: int) -> int:
     """Number of bytes :func:`pack_bits` produces for ``count`` codes of width ``bits``."""
-    if bits not in _SUPPORTED:
-        raise ValueError("packed_nbytes supports bit widths %r, got %d" % (_SUPPORTED, bits))
+    bits = _require_width(bits, "packed_nbytes")
     count = _require_nonnegative_int(count, "count")
     per_byte = 8 // bits
     return (count + per_byte - 1) // per_byte
