@@ -34,6 +34,7 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.univariate.continuous._observation_contracts import (
     finite_observation,
     finite_observations,
+    scored_observation,
 )
 
 
@@ -66,7 +67,7 @@ class RicianDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: float) -> float:
         """Return the log-density at ``x`` (-inf for x <= 0)."""
-        xv = float(x)
+        xv = scored_observation(x, label="Rician observations")
         if xv <= 0.0:
             return -math.inf
         z = xv * self.nu / self._sig2

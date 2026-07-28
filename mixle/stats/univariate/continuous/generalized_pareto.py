@@ -36,6 +36,7 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.univariate.continuous._observation_contracts import (
     finite_observation,
     finite_observations,
+    scored_observation,
 )
 
 _XI_TOL = 1.0e-8  # |xi| below this is treated as the exponential limit
@@ -93,8 +94,9 @@ class GeneralizedParetoDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: float) -> float:
         """Return the log-density at a single observation (``-inf`` outside the support)."""
-        y = x - self.loc
-        if y < 0.0 or x > self._upper():
+        xx = scored_observation(x, label="generalized-Pareto observations")
+        y = xx - self.loc
+        if y < 0.0 or xx > self._upper():
             return -np.inf
         if abs(self.shape) < _XI_TOL:
             return -self.log_scale - y / self.scale

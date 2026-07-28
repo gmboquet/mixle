@@ -18,6 +18,7 @@ from mixle.represent import (  # noqa: E402
     LearnedSegmenter,
     WindowSegmenter,
 )
+from mixle.represent.segment import Segmenter  # noqa: E402
 
 
 def _regime_signal(seed, runs=3, run_len=40):
@@ -50,6 +51,56 @@ class LearnedSegmentTest(unittest.TestCase):
         seg = LearnedSegmenter(ByteSegmenter(), n_states=2, max_its=3, seed=0)
         seg.fit(["", ""])  # every raw segments to a zero-length byte sequence
         self.assertEqual(seg.feat, 256)
+
+    def test_plugs_into_heterogeneous_encoder(self):
+        atomic = WindowSegmenter(window=4, hop=4)
+        seg = LearnedSegmenter(atomic, n_states=2, seed=0).fit([_regime_signal(i) for i in range(6)])
+        enc = HeterogeneousEncoder(dim=8)
+        enc.register("signal", seg, FeatureEmbedding(4, 8))  # learned segmenter feeds a continuous embedding
+        stream, tags = enc.encode_numpy({"signal": _regime_signal(7)})
+        self.assertEqual(stream.shape[1], 8)  # lands in the shared space
+        self.assertGreater(stream.shape[0], 0)
+
+
+class _ExactFrameSegmenter(Segmenter):
+    """Cut a 1-D signal into exact non-overlapping frames -- and into ZERO frames when it is empty.
+
+    ``WindowSegmenter`` pads a short signal up to one full window, which is the right behaviour for
+    it but hides the empty case this test is about.
+    """
+
+    discrete = False
+
+    def __init__(self, width=4):
+        self.width = int(width)
+
+    def segment(self, raw):
+        signal = np.asarray(raw, dtype=np.float32).ravel()
+        n_frames = len(signal) // self.width
+        return signal[: n_frames * self.width].reshape(n_frames, self.width)
+
+
+class EmptyEvidenceContractTest(unittest.TestCase):
+    """MXR-080-1659: no fabricated tokens from an empty input or from an evidence-free fit."""
+
+    def test_a_zero_atom_fit_is_an_explicit_no_evidence_state(self):
+        seg = LearnedSegmenter(ByteSegmenter(), n_states=2, max_its=3, seed=0)
+        seg.fit(["", ""])
+        self.assertEqual(seg.n_fit_atoms, 0)  # the HMM saw no emissions at all
+        with self.assertRaisesRegex(RuntimeError, "zero atomic units"):
+            seg.segment("")
+        with self.assertRaisesRegex(RuntimeError, "zero atomic units"):
+            seg.segment("abc")
+
+    def test_empty_input_yields_zero_units_not_one_invented_token(self):
+        atomic = _ExactFrameSegmenter(width=4)
+        seg = LearnedSegmenter(atomic, n_states=2, seed=0).fit([_regime_signal(i) for i in range(4)])
+        self.assertGreater(seg.n_fit_atoms, 0)
+        empty = np.zeros(0, dtype=np.float32)
+        self.assertEqual(len(atomic.segment(empty)), 0)  # the atomic stream really is empty
+        tokens = seg.segment(empty)
+        self.assertEqual(tokens.shape, (0, seg.feat))  # zero units preserved, nothing invented
+        self.assertGreater(len(seg.segment(_regime_signal(50))), 0)  # a real input still segments
 
     def test_plugs_into_heterogeneous_encoder(self):
         atomic = WindowSegmenter(window=4, hop=4)

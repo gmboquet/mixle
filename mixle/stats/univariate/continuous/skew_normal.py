@@ -29,7 +29,10 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.stats.univariate.continuous._observation_contracts import finite_observations
+from mixle.stats.univariate.continuous._observation_contracts import (
+    finite_observations,
+    scored_observation,
+)
 
 _B = math.sqrt(2.0 / math.pi)
 _HALF_LOG_2PI = 0.5 * math.log(2.0 * math.pi)
@@ -68,7 +71,7 @@ class SkewNormalDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: float) -> float:
         """Return the log-density at a single observation."""
-        z = (float(x) - self.loc) / self.scale
+        z = (scored_observation(x, label="skew-normal observations") - self.loc) / self.scale
         return math.log(2.0) - self.log_scale - _HALF_LOG_2PI - 0.5 * z * z + float(log_ndtr(self.shape * z))
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:

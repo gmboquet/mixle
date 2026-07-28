@@ -62,7 +62,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 import numpy as np
 
@@ -85,6 +85,51 @@ __all__ = [
 STATE_FEATURE_DIM = 5
 
 _DEFAULT_BUDGET_LEVELS = (0.15, 0.3, 0.5, 0.7, 0.85, 1.0)
+
+
+def _budget_fraction(value: Any, label: str) -> float:
+    """A schedulable budget fraction: finite and in ``(0, 1]``.
+
+    The controller's output is a FRACTION of the round's work. Zero schedules nothing, a negative is
+    not a quantity of work at all, and above one promises more than exists -- none of these are
+    budgets a scheduler can honour, so a controller must never be able to emit one.
+    """
+    try:
+        budget = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{label} must be a real number, got {value!r}") from exc
+    if not np.isfinite(budget) or not 0.0 < budget <= 1.0:
+        raise ValueError(f"{label} must be finite and in (0, 1], got {budget!r}")
+    return budget
+
+
+def _reward(realized_gain: Any, realized_cost: Any) -> float:
+    """The gain-per-cost reward one round of feedback contributes to a controller's history.
+
+    Both quantities must be finite, and cost must be strictly positive. Clamping cost at 1e-12 --
+    which is what the divisor's ``max(cost, 1e-12)`` did -- turns a zero or negative cost into a
+    reward around 1e12 for a unit gain, a value no legitimate round can ever beat. Because both
+    controllers learn ONLINE and are explicitly designed to be reused across fits, that single
+    poisoned row permanently pins the bandit to that arm (or drags the design model's GP), and
+    nothing downstream can tell the difference between it and a genuinely excellent action.
+    Negative gain IS allowed: a round that made things worse is real, informative feedback.
+    """
+    gain = _finite(realized_gain, "realized_gain")
+    cost = _finite(realized_cost, "realized_cost")
+    if cost <= 0.0:
+        raise ValueError(f"realized_cost must be positive, got {cost!r}; a costless round has no gain-per-cost")
+    return gain / cost
+
+
+def _finite(value: Any, label: str) -> float:
+    """A finite real feedback quantity. NaN/inf would permanently contaminate learned history."""
+    try:
+        out = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{label} must be a real number, got {value!r}") from exc
+    if not np.isfinite(out):
+        raise ValueError(f"{label} must be finite, got {out!r}")
+    return out
 
 
 class ActionType(StrEnum):
@@ -264,7 +309,9 @@ class BanditController(LearnedController[ControllerState, ControllerAction]):
         ucb_c: float = 1.0,
         seed: int | None = None,
     ) -> None:
-        self.budget_levels = tuple(sorted(set(float(b) for b in budget_levels)))
+        # Deduplicating and sorting is not validating: levels (-1, 2) used to pass both checks and the
+        # controller then emitted budget_fraction -1 as a scheduling decision.
+        self.budget_levels = tuple(sorted({_budget_fraction(b, "budget_levels entry") for b in budget_levels}))
         if len(self.budget_levels) < 2:
             raise ValueError("BanditController needs at least two distinct budget_levels.")
         self.algorithm = algorithm
@@ -291,7 +338,18 @@ class BanditController(LearnedController[ControllerState, ControllerAction]):
         arm = action.payload.get("arm")
         if arm is None:
             arm = self.budget_levels.index(action.budget_fraction)
-        reward = float(realized_gain) / max(float(realized_cost), 1.0e-12)
+        if (
+            not isinstance(arm, (int, np.integer))
+            or isinstance(arm, bool)
+            or not 0 <= int(arm) < len(self.budget_levels)
+        ):
+            # An action carrying an arm index this controller does not have is feedback from some
+            # OTHER controller (or a hand-built action); crediting it would train the wrong arm.
+            raise ValueError(
+                f"action arm {arm!r} does not belong to this controller "
+                f"(it has {len(self.budget_levels)} arm(s)); feedback must come from an action it selected."
+            )
+        reward = _reward(realized_gain, realized_cost)
         with self._lock:
             self.bandit.update(int(arm), reward)
 
@@ -327,8 +385,18 @@ class DesignModelController(LearnedController[ControllerState, ControllerAction]
         design: DesignModel | None = None,
         seed: int | None = None,
     ) -> None:
-        self.bounds = (float(bounds[0]), float(bounds[1]))
-        self.default_budget = float(default_budget)
+        lo = _budget_fraction(bounds[0], "bounds lower")
+        hi = _budget_fraction(bounds[1], "bounds upper")
+        if not lo < hi:
+            # Reversed or degenerate bounds are handed straight to DesignModel.propose and to
+            # np.clip, whose behaviour with lo > hi is to collapse every proposal onto hi.
+            raise ValueError(f"bounds must be increasing, got ({lo!r}, {hi!r})")
+        self.bounds = (lo, hi)
+        self.default_budget = _budget_fraction(default_budget, "default_budget")
+        if not lo <= self.default_budget <= hi:
+            # The cold-start action is emitted before any row is logged, so a default outside the
+            # bounds means the controller's very first decision violates its own declared design space.
+            raise ValueError(f"default_budget {self.default_budget!r} must lie within bounds ({lo!r}, {hi!r})")
         self.design = (
             design
             if design is not None
@@ -349,6 +417,7 @@ class DesignModelController(LearnedController[ControllerState, ControllerAction]
     def update(
         self, state: ControllerState, action: ControllerAction, realized_gain: float, realized_cost: float
     ) -> None:
-        reward = float(realized_gain) / max(float(realized_cost), 1.0e-12)
+        budget = _budget_fraction(action.budget_fraction, "action budget_fraction")
+        reward = _reward(realized_gain, realized_cost)
         with self._lock:
-            self.design.add([action.budget_fraction], reward, [], fingerprint=list(state.as_vector()))
+            self.design.add([budget], reward, [], fingerprint=list(state.as_vector()))

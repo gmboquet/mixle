@@ -87,14 +87,37 @@ class Explanation:
         return "\n".join(lines)
 
 
+def _field_pairs(dist: Any, x: Any, *, label: str) -> list[tuple[Any, Any]]:
+    """Pair every component distribution with its field, requiring exact field cardinality.
+
+    ``zip`` truncates to the shorter side, so a record with a missing or extra field would otherwise be
+    attributed over whatever prefix happens to line up -- returning a finite total and a zero correction
+    for a record the model itself refuses to score. An explanation must never certify what the model
+    rejects, so the arity is checked here, the same way the structures themselves check it.
+    """
+    dists = list(dist.dists)
+    if isinstance(x, (str, bytes)):
+        raise TypeError(f"{label} observation must be a sequence with one field per component")
+    try:
+        fields = list(x)
+    except TypeError as exc:
+        raise TypeError(f"{label} observation must be a sequence with one field per component") from exc
+    if len(fields) != len(dists):
+        raise ValueError(f"{label} observation has {len(fields)} field(s) but this model has {len(dists)} component(s)")
+    return list(zip(dists, fields))
+
+
 def _composite_parts(dist: Any, x: Any, prefix: str = "field") -> list[tuple[str, float]]:
-    return [(f"{prefix}[{i}]", float(d.log_density(xi))) for i, (d, xi) in enumerate(zip(dist.dists, x))]
+    pairs = _field_pairs(dist, x, label="explain")
+    return [(f"{prefix}[{i}]", float(d.log_density(xi))) for i, (d, xi) in enumerate(pairs)]
 
 
 def _composite_margin_parts(dist: Any, answer: Any, runner_up: Any, prefix: str = "field") -> list[tuple[str, float]]:
+    answer_pairs = _field_pairs(dist, answer, label="explain_margin answer")
+    runner_up_pairs = _field_pairs(dist, runner_up, label="explain_margin runner_up")
     return [
         (f"{prefix}[{i}]", float(d.log_density(a_i)) - float(d.log_density(r_i)))
-        for i, (d, a_i, r_i) in enumerate(zip(dist.dists, answer, runner_up))
+        for i, ((d, a_i), (_, r_i)) in enumerate(zip(answer_pairs, runner_up_pairs))
     ]
 
 
@@ -128,10 +151,14 @@ def explain(model: Any, x: Any) -> Explanation:
             component=winner,
         )
 
-    # composite / record: one part per field, summing exactly to the total
+    # composite / record: one part per field, summing exactly to the total. The whole record is scored
+    # through the model first, so an explanation can only ever be produced for a record the model
+    # itself accepts -- the attribution is then a decomposition of that validated score, not a
+    # separate, more permissive scoring path alongside it.
     if hasattr(model, "dists"):
+        total = float(model.log_density(x))
         parts = _composite_parts(model, x)
-        return Explanation(float(sum(v for _, v in parts)), sorted(parts, key=lambda p: p[1]))
+        return Explanation(total, sorted(parts, key=lambda p: p[1]))
 
     # generic fallback: one opaque part. ``log_density`` is evaluated exactly once -- a scorer may
     # consume randomness, hit a remote service, or count its own calls, so the ledger reuses the single

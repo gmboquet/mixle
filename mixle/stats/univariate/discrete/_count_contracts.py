@@ -1,4 +1,4 @@
-"""Shared validation for exact integer observations and non-negative weights."""
+"""Shared validation for count observations, weights, and cached law parameters."""
 
 from __future__ import annotations
 
@@ -11,6 +11,48 @@ import numpy as np
 
 _INT64_MIN = np.iinfo(np.int64).min
 _INT64_MAX = np.iinfo(np.int64).max
+
+
+class CachedParameterLaw:
+    """Keep derived parameter caches consistent with the parameters they came from.
+
+    Several count families validate a parameter in ``__init__`` and then cache
+    derived quantities (logs, normalizers, gamma terms) that every scorer reads.
+    Assigning the parameter afterwards used to leave those caches stale, so the
+    sampler drew from the new parameter while scalar, sequence, and backend
+    scoring all kept using the old cache.
+
+    A subclass lists its parameters in ``_cached_parameters`` and performs the
+    validation plus the whole cache computation in ``_rebuild_parameter_caches``.
+    Constructors set the raw parameters, call the rebuild once, and then set
+    ``_parameter_caches_ready``; assigning any listed parameter afterwards re-runs
+    that same validated rebuild, so the parameters and their caches can never
+    disagree. Writes that bypass ``__setattr__`` entirely -- pickling, ``deepcopy``
+    and the inference-transaction rollback all restore ``__dict__`` directly --
+    are untouched because they replay a consistent snapshot.
+    """
+
+    _cached_parameters: tuple[str, ...] = ()
+
+    def _rebuild_parameter_caches(self) -> None:
+        """Validate this law's parameters and rebuild every derived cache."""
+        raise NotImplementedError("cached parameter laws must implement _rebuild_parameter_caches.")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Set an attribute, rebuilding derived caches when a parameter changes."""
+        if not (name in self._cached_parameters and self.__dict__.get("_parameter_caches_ready", False)):
+            object.__setattr__(self, name, value)
+            return
+        previous = self.__dict__.copy()
+        object.__setattr__(self, name, value)
+        try:
+            self._rebuild_parameter_caches()
+        except BaseException:
+            # A rejected parameter must leave the law exactly as it was rather than
+            # stranding it with a new parameter beside its old caches.
+            self.__dict__.clear()
+            self.__dict__.update(previous)
+            raise
 
 
 def exact_integer_observations(

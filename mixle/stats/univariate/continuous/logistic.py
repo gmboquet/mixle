@@ -18,6 +18,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import scored_observation
 
 
 class LogisticDistribution(SequenceEncodableProbabilityDistribution):
@@ -73,13 +74,17 @@ class LogisticDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: float) -> float:
         """Return the log-density or log-mass at a single observation."""
-        z = (x - self.loc) / self.scale
-        return -self.log_scale - z - 2.0 * float(np.logaddexp(0.0, -z))
+        xx = scored_observation(x, label="LogisticDistribution", allow_infinite=True)
+        # |z| keeps the algebraically identical branch that stays finite in both tails:
+        # -z - 2*log1p(exp(-z)) evaluates to inf - inf at z = -inf, which is the NaN the
+        # engine-neutral kernel already avoids by branching on the sign of z.
+        a = abs((xx - self.loc) / self.scale)
+        return -self.log_scale - a - 2.0 * float(np.logaddexp(0.0, -a))
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""
-        z = (x - self.loc) / self.scale
-        return -self.log_scale - z - 2.0 * np.logaddexp(0.0, -z)
+        a = np.abs((x - self.loc) / self.scale)
+        return -self.log_scale - a - 2.0 * np.logaddexp(0.0, -a)
 
     @staticmethod
     def backend_log_density_from_params(x: Any, loc: Any, scale: Any, engine: Any) -> Any:

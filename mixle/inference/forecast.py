@@ -35,12 +35,35 @@ class Forecast:
     samples: Any = field(default=None, repr=False)  # (H, n) predictive draws (scalar emissions)
 
 
+def _exact_positive_int(value: Any, name: str) -> int:
+    """An exact positive integer, or a domain ``ValueError``.
+
+    ``bool`` is excluded (``True`` is not a count), and so are floats: ``horizon`` used to be checked
+    only with ``horizon < 1``, which NaN passes (every NaN comparison is False) and which a fractional
+    value passes too -- both then failed much later inside ``range``/``np.empty`` with a bare TypeError
+    naming neither the argument nor this function.
+    """
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or int(value) < 1:
+        raise ValueError(f"{name} must be an exact positive integer, got {value!r}")
+    return int(value)
+
+
 def _filtered_state_posterior(model: Any, history: Any) -> np.ndarray:
     """``p(state_T | y_{1:T})`` via the engine forward-backward (the final smoothed step is filtered)."""
     from mixle.engines import NUMPY_ENGINE
     from mixle.stats.latent.hidden_markov import hmm_engine_forward_backward, hmm_pad_log_emissions
 
     hist = list(history)
+    if not hist:
+        # An empty history reached the forward pass and died with
+        # "IndexError: index 0 is out of bounds for axis 1 with size 0" -- an internal shape accident,
+        # not a statement about the request. There is no filtered posterior to condition on with no
+        # observations; forecasting from the prior is a different (and unrequested) computation.
+        raise ValueError(
+            "history must contain at least one observation: forecast() conditions on the filtered state "
+            "posterior p(state_T | y_1..T), which is undefined with no observations. Pass the observed "
+            "sequence, or sample from the model's prior directly if that is what you want."
+        )
     num_states = model.n_states
     pr = np.empty((len(hist), num_states), dtype=np.float64)
     enc = model.topics[0].dist_to_encoder().seq_encode(hist)
@@ -78,11 +101,28 @@ def forecast(
         n: Monte-Carlo draws per step for the emission quantiles (state marginals are exact).
         seed: reproducibility.
         keep_samples: also return the raw ``(H, n)`` predictive draws (scalar emissions only).
+
+    Raises:
+        TypeError: if ``model`` is not a fitted HMM.
+        ValueError: for a non-exact/non-positive ``horizon`` or ``n``, a ``level`` outside
+            ``(0, 1)``, or an empty ``history``.
+
+    Every control is checked up front, before any state is allocated or any draw is taken. Only the
+    horizon used to be checked, and each remaining control failed somewhere else or not at all:
+    ``level=-0.5`` produced ``lo=6.75`` above ``hi=2.25`` -- an interval whose lower endpoint exceeds
+    its upper one, silently returned as an ordinary Forecast -- while a NaN level surfaced as NumPy's
+    generic quantile error and ``n=0`` warned about an empty sample and then raised an opaque
+    IndexError partway through the loop.
     """
     if not hasattr(model, "transitions") or not hasattr(model, "topics"):
         raise TypeError("forecast() currently supports fitted HMMs (HiddenMarkovModelDistribution)")
-    if horizon < 1:
-        raise ValueError("horizon must be >= 1")
+    horizon = _exact_positive_int(horizon, "horizon")
+    n = _exact_positive_int(n, "n")
+    level = float(level)
+    if not np.isfinite(level) or not (0.0 < level < 1.0):
+        # (1 - level) / 2 is the lower tail probability; outside (0, 1) it crosses the upper one and
+        # the returned band is inverted rather than merely wide.
+        raise ValueError(f"level must be a finite central-interval mass strictly between 0 and 1, got {level!r}")
 
     rng = np.random.RandomState(seed)
     a_mat = np.asarray(model.transitions, dtype=np.float64)

@@ -33,13 +33,20 @@ class LearnedSegmenter(Segmenter):
         self.seed = int(seed)
         self.hmm: Any = None
         self.feat: int | None = None  # dimension of a pooled segment feature
+        self.n_fit_atoms: int = 0  # how many atomic units the boundary HMM was actually fitted on
 
     def fit(self, raws: Sequence[Any]) -> LearnedSegmenter:
-        """Fit the boundary HMM on example raws -- the segmentation is learned to maximize their likelihood."""
+        """Fit the boundary HMM on example raws -- the segmentation is learned to maximize their likelihood.
+
+        An all-empty batch stays non-fatal (see the ``feat`` fallback below), but it is recorded: the
+        resulting HMM saw zero emissions, so ``n_fit_atoms`` is 0 and :meth:`segment` refuses to
+        invent boundaries from it rather than returning fabricated tokens.
+        """
         import mixle.stats as st
         from mixle.inference import optimize
 
         seqs = [self.atomic.segment(r) for r in raws]
+        self.n_fit_atoms = int(sum(len(s) for s in seqs))
         if self.atomic.discrete:
             # getattr(obj, name, default) always evaluates `default` eagerly (Python has no lazy
             # default for it), so the max(...) fallback used to run even when num_categories WAS
@@ -62,12 +69,27 @@ class LearnedSegmenter(Segmenter):
         return self
 
     def segment(self, raw: Any) -> np.ndarray:
-        """Segment raw input using fitted HMM state assignments."""
+        """Segment raw input using fitted HMM state assignments.
+
+        An empty input yields ZERO tokens, not one all-zero token. Returning a fabricated unit meant
+        an empty modality handed downstream encoders a full-width feature vector backed by no atoms,
+        no state path, and no inferred boundary -- evidence that was never observed.
+
+        Raises:
+            RuntimeError: if :meth:`fit` was never called, or was called on a batch containing no
+                atomic units at all -- an HMM fitted without data cannot locate boundaries, so the
+                no-evidence state is explicit rather than silently productive.
+        """
         if self.hmm is None:
             raise RuntimeError("call fit(...) before segment(...)")
+        if self.n_fit_atoms == 0:
+            raise RuntimeError(
+                "the boundary HMM was fitted on zero atomic units, so it has learned no boundaries; "
+                "refit on raws that actually segment to atoms before calling segment(...)"
+            )
         atoms = self.atomic.segment(raw)
         if len(atoms) == 0:
-            return np.zeros((1, self.feat or 1), dtype=np.float32)
+            return np.zeros((0, self.feat or 1), dtype=np.float32)
         if self.atomic.discrete:
             obs = [int(v) for v in atoms]
         else:

@@ -5,6 +5,15 @@ rank aggregation, spatial mixtures, max-stable processes, covariance shrinkage, 
 health/exposure monitoring) that operate on data but are not ``SequenceEncodableProbabilityDistribution``
 families and are not used by any distribution. They were previously scattered under ``mixle.stats``;
 collected here so the distributions package stays focused on distribution families.
+
+This package's ``__all__`` is the union of every submodule's own declared ``__all__`` (MXR-080-1593).
+The façade previously omitted seven names -- including result types returned by exported functions
+(``TransitionRiskResult``, ``SmithMaxStableFit``, ``VoiEstimate``) and argument protocols needed to
+call them (``WaterBudget``, ``GaussianObservationModel``) -- so ``from mixle.analysis import ...``
+could reach a function but not the type it hands back or the type it demands. A submodule's
+``__all__`` is that module's declaration of its intentional stable surface; re-exporting anything less
+here makes the package a lossy view of it rather than the entry point it is documented to be.
+``mixle/tests/api_consistency_test.py`` asserts the two stay in agreement.
 """
 
 from __future__ import annotations
@@ -41,6 +50,8 @@ from mixle.analysis.developmental_risk import BMDResult, benchmark_dose, rfd_exc
 from mixle.analysis.emissions import (
     EmissionFactors,
     Footprint,
+    TransitionRiskResult,
+    WaterBudget,
     climate_terms,
     emissions_footprint,
     transition_risk,
@@ -90,7 +101,13 @@ from mixle.analysis.kriging import (
     ordinary_kriging,
     universal_kriging,
 )
-from mixle.analysis.max_stable import SmithMaxStable, SmithMaxStableSampler, fit_smith_maxstable
+from mixle.analysis.max_stable import (
+    FrechetApproximationDiagnostic,
+    SmithMaxStable,
+    SmithMaxStableFit,
+    SmithMaxStableSampler,
+    fit_smith_maxstable,
+)
 from mixle.analysis.objective import hard_constraints, priced_liabilities
 from mixle.analysis.rank_aggregation import (
     borda_count,
@@ -102,10 +119,13 @@ from mixle.analysis.rank_aggregation import (
     spearman_footrule,
 )
 from mixle.analysis.real_options import (
+    GaussianObservationModel,
     OptionValue,
+    VoiEstimate,
     VoiStoppingDecision,
     real_option_value,
     voi_dollars,
+    voi_estimate,
     voi_stopping_decision,
 )
 from mixle.analysis.sdm import HabitatModel, SpeciesObservation, fit_sdm
@@ -177,7 +197,9 @@ __all__ = [
     # spatial mixture / max-stable processes / covariance shrinkage
     "SpatialMixture",
     "SmithMaxStable",
+    "SmithMaxStableFit",
     "SmithMaxStableSampler",
+    "FrechetApproximationDiagnostic",
     "fit_smith_maxstable",
     "LedoitWolfEstimator",
     "LedoitWolfInsufficientData",
@@ -190,8 +212,10 @@ __all__ = [
     "EmissionFactors",
     "Footprint",
     "emissions_footprint",
+    "TransitionRiskResult",
     "transition_risk",
     # climate objective + risk: emissions footprint and carbon/water terms into J6/H4 (L6)
+    "WaterBudget",
     "climate_terms",
     # habitat connectivity (graph resistance on a habitat-cost raster; N4)
     "resistance_raster",
@@ -217,6 +241,9 @@ __all__ = [
     # real options & decision-under-uncertainty
     "OptionValue",
     "real_option_value",
+    "GaussianObservationModel",
+    "VoiEstimate",
+    "voi_estimate",
     "voi_dollars",
     "VoiStoppingDecision",
     "voi_stopping_decision",

@@ -33,7 +33,10 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.stats.univariate.continuous._observation_contracts import finite_observations
+from mixle.stats.univariate.continuous._observation_contracts import (
+    finite_observations,
+    scored_observation,
+)
 
 
 def _excess_kurtosis(beta: float) -> float:
@@ -103,7 +106,8 @@ class GeneralizedGaussianDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: float) -> float:
         """Return the log-density at ``x``."""
-        return self._log_norm - (abs(float(x) - self.mu) / self.alpha) ** self.beta
+        xx = scored_observation(x, label="generalized-Gaussian observations")
+        return self._log_norm - (abs(xx - self.mu) / self.alpha) ** self.beta
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Return vectorized log-density for a sequence-encoded array of observations."""

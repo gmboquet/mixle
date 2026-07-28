@@ -30,6 +30,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import scored_observation
 
 _EULER_GAMMA = 0.5772156649015328606
 _PI_SQRT6 = math.pi / math.sqrt(6.0)
@@ -105,9 +106,10 @@ class GumbelDistribution(SequenceEncodableProbabilityDistribution):
     def log_density(self, x: float) -> float:
         """Return the log-density at a single observation."""
         try:
-            xx = float(x)
+            coerced = float(x)
         except (TypeError, ValueError):
             return -np.inf
+        xx = scored_observation(coerced, label="GumbelDistribution")
         z = (xx - self.loc) / self.scale
         # exp(-z) overflows on the far-left tail (z -> -inf); math.exp raises OverflowError there, so
         # short-circuit to the correct -inf limit instead of crashing on a valid observation.
@@ -350,6 +352,9 @@ class GumbelDataEncoder(DataSequenceEncoder):
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
         """Encode observations as a floating-point array."""
         rv = np.asarray(x, dtype=np.float64)
-        if rv.size and np.any(np.isnan(rv)):
+        # "real-valued" excludes the infinities: the vectorized tail formula evaluates
+        # ``inf - inf`` at ``x = -inf`` and would hand back NaN for an observation the
+        # scalar scorer answers as the -inf limit. Refuse it on both paths instead.
+        if rv.size and np.any(~np.isfinite(rv)):
             raise ValueError("GumbelDistribution requires real-valued observations.")
         return rv

@@ -1229,8 +1229,10 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         tot_cnt = len(idx)
         seq_cnt = len(sz)
         num_states = self.n_states
+        if seq_cnt == 0:
+            # an empty batch has no sequences to smooth: a no-op result, as in seq_update/seq_log_density
+            return []
         weights = np.ones(seq_cnt, dtype=np.float64)
-        max_len = sz.max()
         tz = np.concatenate([[0], sz]).cumsum().astype(dtype=np.int32)
 
         init_pvec = self.w
@@ -3966,7 +3968,10 @@ class HiddenMarkovDataEncoder(DataSequenceEncoder):
         len_vec = [len(u) for u in x]
         len_enc = self.len_encoder.seq_encode(len_vec)
 
-        len_vec = np.asarray(len_vec)
+        # Integer dtype is pinned so an EMPTY batch still encodes usable index buffers: numpy gives an
+        # empty list dtype float64, and a float array cannot index anything, so the zero-length layout
+        # would blow up later (in seq_initialize) rather than being a valid no-op batch.
+        len_vec = np.asarray(len_vec, dtype=int)
         max_len = int(len_vec.max()) if len_vec.size else 0
         # len_cnt = np.bincount(len_vec)
 
@@ -3994,7 +3999,7 @@ class HiddenMarkovDataEncoder(DataSequenceEncoder):
 
         tot_cnt = len(seq_x)
         enc_data = self.emission_encoder.seq_encode(seq_x)
-        idx_vec = np.asarray(idx_vec)
+        idx_vec = np.asarray(idx_vec, dtype=int)
 
         xs = []
         for xx in x:

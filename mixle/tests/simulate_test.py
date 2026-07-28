@@ -6,7 +6,7 @@ import numpy as np
 
 import mixle.stats as st
 from mixle.inference import learn_bayesian_network, optimize, simulate
-from mixle.inference.simulate import Simulator
+from mixle.inference.simulate import IncompleteSimulationError, Simulator
 
 
 def _plan_spend(n, seed):
@@ -56,6 +56,53 @@ class InterventionTest(unittest.TestCase):
         sim = simulate(learn_bayesian_network(_plan_spend(200, 0)))
         with self.assertRaises(KeyError):
             sim.run(5, scenario="nope")
+
+
+class _ShortSampler:
+    """A generator that always yields one fewer record than asked for."""
+
+    def sample(self, n):
+        return [(1.0, 2.0)] * max(0, int(n) - 1)
+
+
+class _ShortModel:
+    def sampler(self, seed=0):
+        return _ShortSampler()
+
+
+class ExperimentSizeTest(unittest.TestCase):
+    """MXR-080-1651: a simulation must run the size it was asked for, or say that it did not."""
+
+    def setUp(self):
+        self.sim = simulate(_ShortModel())
+
+    def test_underproducing_generator_raises_instead_of_shrinking_the_experiment(self):
+        with self.assertRaises(IncompleteSimulationError) as ctx:
+            self.sim.run(4)
+        self.assertEqual(ctx.exception.requested, 4)
+        self.assertEqual(len(ctx.exception.records), 3)
+
+    def test_outcome_mean_does_not_summarize_a_short_run(self):
+        with self.assertRaises(IncompleteSimulationError):
+            self.sim.outcome_mean(0, n=4)
+
+    def test_zero_and_negative_draws_are_rejected_rather_than_returning_nan(self):
+        for bad in (0, -5):
+            with self.assertRaises(ValueError):
+                self.sim.run(bad)
+            with self.assertRaises(ValueError):
+                self.sim.outcome_mean(0, n=bad)
+
+    def test_fractional_and_boolean_draw_counts_are_rejected(self):
+        for bad in (2.9, True):
+            with self.assertRaises(TypeError):
+                self.sim.run(bad)
+
+    def test_exact_generator_still_runs(self):
+        model = optimize(
+            [float(x) for x in np.random.RandomState(0).normal(5, 2, 300)], st.GaussianEstimator(), out=None
+        )
+        self.assertEqual(len(simulate(model).run(7, seed=1)), 7)
 
 
 class NonGraphTest(unittest.TestCase):

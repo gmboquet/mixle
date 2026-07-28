@@ -6,9 +6,18 @@ authorized service, and a corroborated claim is not proof that an implementation
 is operational.  :class:`CapabilityLifecycle` keeps those facts together without
 collapsing them into one ambiguous status.
 
-All records are frozen, JSON-compatible value objects.  A change creates a new
-snapshot with a monotonically increasing revision, which makes transitions safe
-to persist, audit, replay, and exchange between projects.
+All records are frozen, JSON-compatible value objects carrying an explicit
+``schema_version``.  A change creates a new snapshot with a monotonically
+increasing revision, which makes transitions safe to persist, audit, replay, and
+exchange between projects.
+
+These records are unauthenticated data, never bearer credentials.  An
+:class:`AuthorizationDecision` records *that* a named principal decided
+something; it carries no signature or MAC, so nothing in the record itself
+distinguishes a decision this process issued from one an attacker wrote into the
+store.  :meth:`~AuthorizationDecision.from_dict` therefore parses untrusted
+input: whoever persists or transports these records is responsible for
+authenticating them before their contents are given any authority.
 """
 
 from __future__ import annotations
@@ -21,7 +30,10 @@ from enum import StrEnum
 from numbers import Integral
 from typing import Any
 
+SCHEMA_VERSION = "mixle.capability-lifecycle/v1"
+
 __all__ = [
+    "SCHEMA_VERSION",
     "AuthorizationDecision",
     "AuthorizationOutcome",
     "AuthorizationStatus",
@@ -37,6 +49,17 @@ __all__ = [
 
 class LifecycleTransitionError(ValueError):
     """Raised when a lifecycle transition would erase or contradict evidence."""
+
+
+def _require_schema_version(value: Mapping[str, Any], record: str) -> None:
+    """Reject a record written against a different reading of this schema.
+
+    Records persisted before the version was emitted are read as v1, which is
+    what they are; anything else is refused rather than silently reinterpreted.
+    """
+    declared = value.get("schema_version", SCHEMA_VERSION)
+    if declared != SCHEMA_VERSION:
+        raise ValueError(f"unsupported {record} schema version: {declared!r}")
 
 
 class CapabilityMaturity(StrEnum):
@@ -178,10 +201,16 @@ class CapabilityIdentity:
             object.__setattr__(self, "digest", _canonical_digest(self.digest))
 
     def as_dict(self) -> dict[str, str | None]:
-        return {"capability_id": self.capability_id, "version": self.version, "digest": self.digest}
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "capability_id": self.capability_id,
+            "version": self.version,
+            "digest": self.digest,
+        }
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> CapabilityIdentity:
+        _require_schema_version(value, "capability identity")
         return cls(
             capability_id=str(value["capability_id"]),
             version=str(value["version"]),
@@ -266,6 +295,7 @@ class AuthorizationDecision:
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": SCHEMA_VERSION,
             "decision_id": self.decision_id,
             "capability": self.capability.as_dict(),
             "outcome": self.outcome.value,
@@ -281,6 +311,8 @@ class AuthorizationDecision:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> AuthorizationDecision:
+        """Parse an *unauthenticated* record; see the module docstring."""
+        _require_schema_version(value, "authorization decision")
         return cls(
             decision_id=str(value["decision_id"]),
             capability=CapabilityIdentity.from_dict(value["capability"]),
@@ -490,6 +522,7 @@ class CapabilityLifecycle:
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": SCHEMA_VERSION,
             "capability": self.capability.as_dict(),
             "maturity": self.maturity.value,
             "operational": self.operational.value,
@@ -503,6 +536,8 @@ class CapabilityLifecycle:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> CapabilityLifecycle:
+        """Parse an *unauthenticated* record; see the module docstring."""
+        _require_schema_version(value, "capability lifecycle")
         authorization = value.get("authorization")
         return cls(
             capability=CapabilityIdentity.from_dict(value["capability"]),

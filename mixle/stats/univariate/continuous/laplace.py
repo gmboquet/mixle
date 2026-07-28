@@ -18,6 +18,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import scored_observation
 
 
 def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
@@ -77,7 +78,8 @@ class LaplaceDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: float) -> float:
         """Return the log-density or log-mass at a single observation."""
-        return self.log_const - abs(x - self.mu) / self.b
+        xx = scored_observation(x, label="LaplaceDistribution", allow_infinite=True)
+        return self.log_const - abs(xx - self.mu) / self.b
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""
