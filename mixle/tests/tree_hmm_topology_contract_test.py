@@ -225,19 +225,6 @@ class TreeHmmPosteriorContractTest(unittest.TestCase):
                 marginals[index, states[index]] += joint
         return marginals / total
 
-    # KNOWN BUG, not a flaky test. TreeHiddenMarkovModelDistribution.seq_posterior returns the
-    # UPWARD messages (betas), not the smoothed node marginals (gammas) its docstring promises.
-    # The downward pass was never implemented -- tree_hidden_markov_model.py still carries the
-    # author's own note, "Need to do upward and downward, then read back the gammas", immediately
-    # above the kernel call, and the function then returns ``betas``. Consequence: only the root is
-    # correct (its subtree is the whole tree); every other node ignores all evidence outside its own
-    # subtree. Verified exactly -- for the chain 0->1->2 with observations b,b,a, the returned rows
-    # equal ``depth_prior * own_subtree_evidence`` to 6 decimals, not the true marginals.
-    # Model FITTING is unaffected: the tree HMM E-step does not call seq_posterior. The wrong values
-    # do reach callers through mixle/ppl/core.py's responsibilities path.
-    # Remove this decorator once the downward pass lands; unittest then reports an unexpected
-    # success, which is the signal that this marker is stale.
-    @unittest.expectedFailure
     def test_seq_posterior_matches_brute_force_node_marginals(self):
         expected = [self._brute_force(tree) for tree in self.TREES]
         for use_numba in (False, True):
