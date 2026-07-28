@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 
+import mixle.telemetry as telemetry
 from mixle.telemetry import Event, Telemetry, get_default_recorder, record, set_default_recorder
 
 
@@ -34,6 +35,23 @@ class EventTest(unittest.TestCase):
             t.flush()
             reloaded = list(Telemetry(path).events())
             self.assertEqual([(e.kind, e.outcome) for e in reloaded], [("fit", {"ll": -1.0})])
+
+
+class PrivacyClaimTest(unittest.TestCase):
+    def test_package_does_not_claim_an_unenforced_privacy_property(self):
+        # MXR-080-1737: the package advertised events as "designed to avoid raw user content"
+        # while features/choice/outcome/tags accept and serialize any caller object -- no schema,
+        # allowlist, redaction, size limit or retention governs what reaches the log file. The
+        # claim now states plainly that minimization is the caller's job, not the package's.
+        doc = telemetry.__doc__ or ""
+        self.assertNotIn("designed to avoid raw user content", doc)
+        for enforced in ("no redaction", "not a property it enforces"):
+            self.assertIn(enforced, doc)
+
+    def test_arbitrary_payloads_are_stored_verbatim(self):
+        t = Telemetry()
+        ev = t.record("fit", features={"prompt": "raw text"}, choice=object, tags={"a": "b"})
+        self.assertEqual(ev.features, {"prompt": "raw text"})
 
 
 class RecorderTest(unittest.TestCase):
