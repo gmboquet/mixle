@@ -17,6 +17,24 @@ class EventTest(unittest.TestCase):
         back = Event(**ev.as_row())
         self.assertEqual((back.kind, back.choice, back.features, back.outcome), ("fit", "em", {"n": 10}, {"ll": -3.2}))
 
+    def test_mutating_a_recorded_event_into_an_invalid_state_is_refused(self):
+        # MXR-080-1733: record() hands back the live Event and every flush rewrites the whole log
+        # from the current field values, so assigning a bogus kind (or a NaN timestamp) rewrote
+        # already-persisted history as a row no reader could load back. The mutable-outcome
+        # "close the loop later" pattern stays supported; the event's identity does not.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "events.jsonl")
+            t = Telemetry(path)
+            ev = t.record("fit", features={"n": 1})
+            with self.assertRaises(ValueError):
+                ev.kind = "invented"
+            with self.assertRaises(ValueError):
+                ev.ts = float("nan")
+            ev.outcome["ll"] = -1.0  # still the documented pattern
+            t.flush()
+            reloaded = list(Telemetry(path).events())
+            self.assertEqual([(e.kind, e.outcome) for e in reloaded], [("fit", {"ll": -1.0})])
+
 
 class RecorderTest(unittest.TestCase):
     def test_record_buffer_and_filter(self):

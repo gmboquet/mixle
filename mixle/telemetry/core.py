@@ -9,6 +9,7 @@ for dashboards or learned policies.
 from __future__ import annotations
 
 import json
+import math
 import threading
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
@@ -34,7 +35,14 @@ _TIME_KEY = "_wall_time"  # tests inject a deterministic clock via record(when=.
 
 @dataclass
 class Event:
-    """One typed, timestamped decision record. Features/choice describe the decision; outcome scores it."""
+    """One typed, timestamped decision record. Features/choice describe the decision; outcome scores it.
+
+    ``outcome`` is deliberately mutable after the fact -- that is the documented "close the loop
+    later" pattern :meth:`Telemetry.record` describes. The event's *identity* is not: ``kind`` and
+    ``ts`` are re-validated on every assignment, not only at construction. Because a flush rewrites
+    the whole log from the current field values, an event mutated into an invalid state would
+    otherwise rewrite already-persisted history as something no reader can load back.
+    """
 
     kind: str
     features: dict[str, Any] = field(default_factory=dict)  # what the decision was made from
@@ -43,9 +51,13 @@ class Event:
     tags: dict[str, str] = field(default_factory=dict)  # scope/task/version labels for filtering
     ts: float = 0.0  # wall time; set by the recorder
 
-    def __post_init__(self) -> None:
-        if self.kind not in EVENT_KINDS:
-            raise ValueError(f"unknown event kind {self.kind!r}; expected one of {EVENT_KINDS}")
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "kind" and value not in EVENT_KINDS:
+            raise ValueError(f"unknown event kind {value!r}; expected one of {EVENT_KINDS}")
+        if name == "ts":
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"ts must be a finite number of seconds, got {value!r}")
+        object.__setattr__(self, name, value)
 
     def as_row(self) -> dict[str, Any]:
         """Return this event as a JSON-serializable row."""
