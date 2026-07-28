@@ -102,6 +102,56 @@ class ScalarizeTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             _scalarize(np.empty((0, 2)), weights=np.array([0.5, 0.5]), rho=0.05)
 
+    def test_negative_nonfinite_and_boolean_augmentation_is_rejected(self):
+        y = np.array([[0.0, 0.0], [1.0, 1.0]])
+        for rho in (-1.0, np.nan, np.inf, True, np.bool_(False)):
+            with self.subTest(rho=rho):
+                with self.assertRaises((TypeError, ValueError)):
+                    _scalarize(y, weights=np.array([0.5, 0.5]), rho=rho)
+
+    def test_valid_augmentation_preserves_dominance_order(self):
+        y = np.array([[0.0, 0.0], [1.0, 1.0]])
+        scalar = _scalarize(y, weights=np.array([0.5, 0.5]), rho=0.05)
+        self.assertLess(scalar[0], scalar[1])
+
+    def test_overflowing_normalization_is_rejected(self):
+        y = np.array([[-1e308, 0.0], [1e308, 1.0]])
+        with self.assertRaisesRegex(ValueError, "finite"):
+            _scalarize(y, weights=np.array([0.5, 0.5]), rho=0.05)
+
+
+class MultiMinimizeBudgetValidationTest(unittest.TestCase):
+    objectives = (lambda point: float(point[0]), lambda point: float(1.0 - point[0]))
+
+    def test_sampling_controls_are_exact_non_boolean_integers(self):
+        invalid = (
+            {"n_init": 0},
+            {"n_init": 1.9},
+            {"n_init": True},
+            {"n_iter": -1},
+            {"n_iter": 0.9},
+            {"n_iter": True},
+            {"n_candidates": 0},
+            {"n_candidates": 2.5},
+            {"n_candidates": True},
+        )
+        for kwargs in invalid:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises((TypeError, ValueError)):
+                    multi_minimize(self.objectives, [(0.0, 1.0)], **kwargs)
+
+    def test_zero_iterations_is_an_explicit_valid_budget(self):
+        result = multi_minimize(
+            self.objectives,
+            [(0.0, 1.0)],
+            n_init=2,
+            n_iter=0,
+            n_candidates=4,
+            seed=0,
+        )
+        self.assertEqual(result.x.shape, (2, 1))
+        self.assertEqual(result.y.shape, (2, 2))
+
 
 @unittest.skipUnless(HAS_TORCH, "torch is not installed")
 class MultiMinimizeTest(unittest.TestCase):

@@ -22,7 +22,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from mixle.doe.bayesopt import OptimizationResult, propose_next
-from mixle.doe.designs import Bounds, _as_bounds, _as_rng, latin_hypercube
+from mixle.doe.designs import Bounds, _as_bounds, _as_rng, _require_exact_positive_int, latin_hypercube
 
 
 @dataclass(frozen=True)
@@ -87,12 +87,30 @@ def _scalarize(y: np.ndarray, weights: np.ndarray, rho: float) -> np.ndarray:
     Raises ``ValueError`` if ``y`` is empty, does not have one column per weight, or contains a
     non-finite (NaN/Inf) value -- see :func:`_validate_objective_matrix`.
     """
-    y = _validate_objective_matrix(y, n_objectives=weights.shape[0])
+    weight_array = np.asarray(weights, dtype=np.float64)
+    if weight_array.ndim != 1 or weight_array.size == 0:
+        raise ValueError("weights must be a nonempty one-dimensional array.")
+    if not np.all(np.isfinite(weight_array)) or np.any(weight_array < 0.0) or not np.any(weight_array > 0.0):
+        raise ValueError("weights must be finite, nonnegative, and contain at least one positive value.")
+    if isinstance(rho, (bool, np.bool_)):
+        raise TypeError("rho must be a finite nonnegative real number, not bool.")
+    try:
+        augmentation = float(rho)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("rho must be a finite nonnegative real number.") from exc
+    if not np.isfinite(augmentation) or augmentation < 0.0:
+        raise ValueError("rho must be finite and nonnegative.")
+    y = _validate_objective_matrix(y, n_objectives=weight_array.shape[0])
     lo = y.min(axis=0)
-    span = np.where(y.max(axis=0) - lo > 1.0e-12, y.max(axis=0) - lo, 1.0)
-    yhat = (y - lo) / span
-    weighted = yhat * weights
-    return np.max(weighted, axis=1) + rho * np.sum(weighted, axis=1)
+    with np.errstate(over="ignore", invalid="ignore"):
+        raw_span = y.max(axis=0) - lo
+        span = np.where(raw_span > 1.0e-12, raw_span, 1.0)
+        yhat = (y - lo) / span
+        weighted = yhat * weight_array
+        scalar = np.max(weighted, axis=1) + augmentation * np.sum(weighted, axis=1)
+    if not np.all(np.isfinite(raw_span)) or not np.all(np.isfinite(scalar)):
+        raise ValueError("scalarization arithmetic must remain finite.")
+    return scalar
 
 
 def _draw_weights(m: int, rng: RandomState) -> np.ndarray:
@@ -124,8 +142,11 @@ def multi_minimize(
         raise ValueError("multi_minimize requires at least two objectives; use minimize otherwise.")
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
-    if n_init <= 0:
-        raise ValueError("n_init must be positive.")
+    n_init = _require_exact_positive_int(n_init, "n_init")
+    n_iter = _require_exact_positive_int(n_iter, "n_iter", minimum=0)
+    n_candidates = _require_exact_positive_int(n_candidates, "n_candidates")
+    # Validate the augmentation even when n_iter=0, so an invalid declared policy is never ignored.
+    _scalarize(np.zeros((1, len(objectives))), np.ones(len(objectives)), rho)
     m = len(objectives)
 
     def eval_objs(point: np.ndarray) -> list[float]:
@@ -134,7 +155,7 @@ def multi_minimize(
     x = latin_hypercube(b, n_init, rng)
     y = np.array([eval_objs(np.asarray(row, dtype=np.float64)) for row in x], dtype=np.float64)
 
-    for _ in range(int(n_iter)):
+    for _ in range(n_iter):
         weights = _draw_weights(m, rng)
         scalar = _scalarize(y, weights, rho)
         nxt = np.asarray(
