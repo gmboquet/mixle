@@ -3,6 +3,7 @@
 import unittest
 
 from mixle.system import DegradedResult, abstain_on_timeout, route_past, with_fallback
+from mixle.system.fault import NON_RECOVERABLE_FAULTS
 
 
 class WithFallbackTest(unittest.TestCase):
@@ -83,6 +84,69 @@ class RoutePastTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             route_past([boom_a, boom_b], names=["a", "b"])
+
+
+class RecoverabilityPolicyTest(unittest.TestCase):
+    """MXR-080-1693: both boundaries caught EVERY exception with no declared recoverability policy, so
+    an authorization denial and an internal programming bug took the same route as a provider outage --
+    a PermissionError came back as somebody else's successful answer, and a TypeError became an
+    ordinary fallback value with the defect never surfacing."""
+
+    def test_an_authorization_denial_is_not_a_degraded_answer(self):
+        def denied():
+            raise PermissionError("denied")
+
+        with self.assertRaises(PermissionError):
+            with_fallback(denied, lambda exc: "fallback answer", mode="teacher_down")
+        with self.assertRaises(PermissionError):
+            route_past([denied, lambda: "next tier answer"], names=["restricted", "next"])
+
+    def test_a_programming_error_is_not_a_degraded_answer(self):
+        def bug():
+            raise TypeError("unsupported operand type(s)")
+
+        with self.assertRaises(TypeError):
+            with_fallback(bug, lambda exc: "fallback answer", mode="teacher_down")
+        with self.assertRaises(TypeError):
+            route_past([bug, lambda: "next tier answer"], names=["local", "frontier"])
+
+    def test_genuine_provider_outages_still_degrade(self):
+        def down():
+            raise ConnectionError("endpoint unreachable")
+
+        result = with_fallback(down, lambda exc: "store-only answer", mode="teacher_down")
+        self.assertTrue(result.degraded)
+        self.assertEqual(result.value, "store-only answer")
+        routed = route_past([down, lambda: "frontier answer"], names=["local", "frontier"])
+        self.assertTrue(routed.degraded)
+        self.assertEqual(routed.value, "frontier answer")
+
+    def test_an_explicit_allowlist_narrows_a_route(self):
+        def down():
+            raise ConnectionError("endpoint unreachable")
+
+        with self.assertRaises(ConnectionError):
+            with_fallback(down, lambda exc: "x", mode="teacher_down", recoverable=(TimeoutError,))
+        allowed = with_fallback(down, lambda exc: "x", mode="teacher_down", recoverable=(ConnectionError,))
+        self.assertTrue(allowed.degraded)
+        with self.assertRaises(ConnectionError):
+            route_past([down, lambda: "next"], names=["a", "b"], recoverable=(TimeoutError,))
+
+    def test_every_attempted_tier_keeps_its_causal_evidence(self):
+        def down_a():
+            raise ConnectionError("a unreachable")
+
+        def down_b():
+            raise TimeoutError("b timed out")
+
+        result = route_past([down_a, down_b, lambda: "ok"], names=["a", "b", "c"])
+        self.assertEqual([name for name, _ in result.attempts], ["a", "b"])
+        self.assertIn("a unreachable", result.attempts[0][1])
+        self.assertIn("b timed out", result.attempts[1][1])
+
+    def test_the_non_recoverable_set_covers_programmer_and_policy_failures(self):
+        for cls in (TypeError, AttributeError, NameError, AssertionError, PermissionError):
+            self.assertIn(cls, NON_RECOVERABLE_FAULTS)
 
 
 if __name__ == "__main__":
