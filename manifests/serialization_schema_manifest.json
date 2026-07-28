@@ -694,7 +694,7 @@
           "state_version": 1
         },
         "mixle.stats.combinator.optional.OptionalDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -3823,7 +3823,7 @@
           "state_version": 1
         },
         "mixle.stats.combinator.optional.OptionalDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
