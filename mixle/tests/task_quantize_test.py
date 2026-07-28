@@ -59,7 +59,10 @@ class QuantizeMLPTest(unittest.TestCase):
         self.assertGreaterEqual(q_acc, fp32_acc - 0.05)  # int8 costs at most a few points
         fp_fp32 = footprint(self.fp32)
         fp_q = footprint(self.q)
-        self.assertLess(fp_q.bytes, 0.30 * fp_fp32.bytes)  # ~4x weight compression (biases stay fp32)
+        # The compression claim is about the parameter payload; ``bytes`` also carries a manifest whose
+        # size does not depend on the weight dtype, so quote the ratio from payload_bytes.
+        self.assertLess(fp_q.payload_bytes, 0.30 * fp_fp32.payload_bytes)  # ~4x (biases stay fp32)
+        self.assertLess(fp_q.bytes, fp_fp32.bytes)  # and the exported artifact really does shrink
         self.assertEqual(fp_q.ops, fp_fp32.ops)  # same MAC count, cheaper per-MAC
         self.assertTrue(fp_q.torch_free)
         self.assertFalse(fp_fp32.torch_free)
@@ -185,7 +188,9 @@ class Int4Test(unittest.TestCase):
             self.assertGreater(s, 0.0)
         fp_fp32 = footprint(self.fp32)
         fp_q4 = footprint(self.q4)
-        self.assertLess(fp_q4.bytes, 0.17 * fp_fp32.bytes)  # ~8x on weights; fp32 biases remain
+        self.assertLess(fp_q4.payload_bytes, 0.17 * fp_fp32.payload_bytes)  # ~8x on weights; fp32 biases remain
+        self.assertLess(fp_q4.payload_bytes, footprint(quantize_mlp(self.fp32, bits=8)).payload_bytes)  # 4 < 8 bits
+        self.assertLess(fp_q4.bytes, fp_fp32.bytes)  # the exported artifact shrinks too
         self.assertTrue(fp_q4.torch_free)
 
     def test_int4_fidelity_holds_on_the_rule_task(self):

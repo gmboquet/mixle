@@ -76,6 +76,14 @@ class EdgeFootprint:
 
     ``ops`` is an explicitly labeled structural estimate. ``inference_seconds``
     is measured by running the serving object's real ``batch`` path.
+
+    ``bytes`` is what you flash to the device: weights *and* the manifest,
+    adapter spec, labels and metadata. ``payload_bytes`` is the parameter
+    payload alone (weights, biases, per-layer scales), which is the quantity a
+    compression ratio is about -- at small model sizes the constant-size
+    manifest dominates ``bytes``, so a 4x/8x weight claim is only checkable
+    against ``payload_bytes``. Gate deployment on ``bytes``; quote compression
+    from ``payload_bytes``.
     """
 
     bytes: int
@@ -84,10 +92,17 @@ class EdgeFootprint:
     inference_seconds: float | None = None
     artifact_digest: str | None = None
     ops_kind: str = "structural_estimate"
+    payload_bytes: int | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.bytes, bool) or not isinstance(self.bytes, Integral) or self.bytes < 0:
             raise ValueError("footprint bytes must be a non-negative integer")
+        if self.payload_bytes is not None and (
+            isinstance(self.payload_bytes, bool)
+            or not isinstance(self.payload_bytes, Integral)
+            or self.payload_bytes < 0
+        ):
+            raise ValueError("footprint payload_bytes must be a non-negative integer or None")
         if isinstance(self.ops, bool) or not isinstance(self.ops, Integral) or self.ops < 0:
             raise ValueError("footprint ops must be a non-negative integer")
         if not isinstance(self.torch_free, bool):
@@ -196,6 +211,22 @@ def _torch_macs_and_params(module: Any) -> tuple[int, int]:
     return macs, params
 
 
+def _torch_parameter_bytes(module: Any) -> int:
+    """Parameter payload bytes of a torch module, at each tensor's real dtype width."""
+    return int(sum(int(p.numel()) * int(p.element_size()) for p in module.parameters()))
+
+
+def _serialized_model_bytes(model: Any) -> int | None:
+    """Payload bytes of a pure-mixle (JSON) student, or ``None`` if it does not serialize."""
+    from mixle.utils.serialization import ensure_pysp_serialization_registry, to_serializable
+
+    ensure_pysp_serialization_registry()
+    try:
+        return len(json.dumps(to_serializable(model)).encode())
+    except (TypeError, ValueError):
+        return None
+
+
 def _exported_artifact_measurement(student: TaskModel) -> tuple[int, str]:
     """Save the exact serving artifact and hash every path/content byte."""
     with tempfile.TemporaryDirectory(prefix="mixle-edge-artifact-") as directory:
@@ -226,8 +257,11 @@ def footprint(
 
     The artifact byte count comes from :meth:`TaskModel.save`, so weights use
     their actual dtype and the manifest, adapter, labels, configuration, and
-    metadata are included. ``ops`` remains a structural estimate and is never
-    sufficient by itself for a hard latency gate.
+    metadata are included. ``payload_bytes`` reports the parameter payload on
+    its own, because the manifest is a near-constant cost that swamps the
+    weights on small students -- an int4 student whose weights are 8x smaller
+    than fp32 still exports a comparable manifest. ``ops`` remains a structural
+    estimate and is never sufficient by itself for a hard latency gate.
     """
     if not isinstance(student, TaskModel):
         raise TypeError("student must be a TaskModel")
@@ -241,6 +275,7 @@ def footprint(
             torch_free=False,
             inference_seconds=seconds,
             artifact_digest=artifact_digest,
+            payload_bytes=_torch_parameter_bytes(student.model),
         )
     if student.payload == "arrays":
         return EdgeFootprint(
@@ -249,6 +284,7 @@ def footprint(
             torch_free=True,
             inference_seconds=seconds,
             artifact_digest=artifact_digest,
+            payload_bytes=int(student.model.nbytes()) if hasattr(student.model, "nbytes") else None,
         )
     adapter = student.adapter
     n_labels = len(getattr(adapter, "labels", [])) or 1
@@ -262,6 +298,7 @@ def footprint(
         torch_free=True,
         inference_seconds=seconds,
         artifact_digest=artifact_digest,
+        payload_bytes=_serialized_model_bytes(student.model),
     )
 
 
