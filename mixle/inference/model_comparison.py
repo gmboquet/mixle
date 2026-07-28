@@ -67,6 +67,39 @@ def _validate_paired(a: np.ndarray, b: np.ndarray, *, min_n: int = 2) -> None:
         raise ValueError("paired arrays must be finite (no NaN/Inf).")
 
 
+def _validated_ci_level(ci_level: float) -> float:
+    """``ci_level`` as a confidence level strictly inside ``(0, 1)``.
+
+    An unvalidated level runs straight into ``stats.t.ppf(0.5 + ci_level / 2, ...)``, which reports no
+    error of its own: a negative level returns a *negative* critical value and so an inverted
+    ``[+inf, -inf]`` interval that contains nothing, a level above one or NaN returns NaN endpoints, and
+    both then flow into the ``p < 1 - ci_level`` decision that names a favored model. The interval and
+    the verdict look ordinary in the returned dict, so nothing downstream can tell they are unusable.
+    """
+    if isinstance(ci_level, (bool, np.bool_)):
+        raise ValueError("ci_level must be a finite number in (0, 1).")
+    level = float(ci_level)
+    if not np.isfinite(level) or not 0.0 < level < 1.0:
+        raise ValueError(f"ci_level must be a finite number in (0, 1), got {ci_level!r}.")
+    return level
+
+
+def _validated_parameter_count(k: int, name: str) -> int:
+    """``k`` as a non-negative integer parameter count.
+
+    ``_complexity_correction`` subtracts ``k_a - k_b`` (or its BIC-scaled form) from the log-likelihood
+    ratio without checking either count. A NaN count made the whole test NaN while still naming a
+    favored model, an infinite count drove the statistic to -inf and ``p_value`` to exactly 0.0, and a
+    *negative* count added complexity to the ratio -- manufacturing a highly significant advantage for
+    whichever model was credited with fewer than zero parameters.
+    """
+    if isinstance(k, (bool, np.bool_)) or not isinstance(k, (int, np.integer)):
+        raise ValueError(f"{name} must be a non-negative integer parameter count, got {k!r}.")
+    if k < 0:
+        raise ValueError(f"{name} must be a non-negative integer parameter count, got {k!r}.")
+    return int(k)
+
+
 def paired_score_difference(
     scores_a: np.ndarray,
     scores_b: np.ndarray,
@@ -89,6 +122,7 @@ def paired_score_difference(
         variance paired difference (every observation agrees exactly) is maximally significant when
         the shared value is nonzero, not an automatic tie -- see the ``se == 0`` handling below.
     """
+    ci_level = _validated_ci_level(ci_level)
     a = _as_paired_series(scores_a, "scores_a")
     b = _as_paired_series(scores_b, "scores_b")
     _validate_paired(a, b)
@@ -128,8 +162,12 @@ def paired_score_difference(
 
 
 def _complexity_correction(correction: str, k_a: int, k_b: int, n: int) -> float:
+    if correction not in {"none", "aic", "bic"}:
+        raise ValueError("correction must be 'none', 'aic', or 'bic'.")
     if correction == "none":
         return 0.0
+    k_a = _validated_parameter_count(k_a, "k_a")
+    k_b = _validated_parameter_count(k_b, "k_b")
     if correction == "aic":
         return float(k_a - k_b)
     if correction == "bic":
