@@ -1106,6 +1106,15 @@ class CategoricalEstimator(ParameterEstimator):
         else:
             default_value = 0.0
 
+        if self.suff_stat is None and not suff_stat:
+            # Nothing observed and no prior support: there are no levels to give mass to, so any
+            # answer here would be invented. A pseudo-count cannot rescue it either -- it has
+            # nothing to spread over, which is where this used to surface as a ZeroDivisionError.
+            raise ValueError(
+                "cannot fit a categorical from an empty batch without an explicit support; "
+                "pass suff_stat to declare the levels"
+            )
+
         if self.pseudo_count is None and self.suff_stat is None:
             nobs_loc = stats_sum
 
