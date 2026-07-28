@@ -8,7 +8,10 @@ submitter locally.
 The included :class:`LocalBackend` runs jobs in-process and is useful for tests
 or systems without a remote pool. Billable backends must require explicit
 confirmation, and jobs whose estimated cost exceeds their budget are rejected
-before execution.
+before execution. A backend is third-party code, so its response is not taken on
+trust either: :func:`submit` settles it against the job it was given (identity,
+status vocabulary, finite economics, realized cost within budget) before the
+caller ever sees ``ok == True``.
 """
 
 from __future__ import annotations
@@ -38,12 +41,21 @@ class PoolJob:
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
 
 
+POOL_STATUSES = frozenset({"done", "rejected", "error"})
+"""The closed status vocabulary a :class:`PoolResult` may use.
+
+:func:`submit` refuses anything outside this set rather than letting an unrecognized status ride
+through: :attr:`PoolResult.ok` only tests equality with ``"done"``, so an unknown status would read as
+"not ok" while carrying none of the error handling a real failure gets.
+"""
+
+
 @dataclass
 class PoolResult:
     """The outcome of a pool job: the artifact that round-trips home, plus realized cost/timing."""
 
     job_id: str
-    status: str  # 'done' | 'rejected' | 'error'
+    status: str  # one of POOL_STATUSES: 'done' | 'rejected' | 'error'
     artifact: Any = None
     cost: float = 0.0
     duration_s: float = 0.0
@@ -95,6 +107,66 @@ class LocalBackend:
         return time.perf_counter()
 
 
+def _is_finite_nonneg(value: Any) -> bool:
+    """Whether ``value`` is a real number that is finite and ``>= 0`` (non-numbers are simply not)."""
+    try:
+        return bool(math.isfinite(value)) and value >= 0
+    except TypeError:
+        return False
+
+
+def _settle(job: PoolJob, result: Any) -> PoolResult:
+    """Check a backend's response against ``job`` before the submitter is allowed to trust it.
+
+    A :class:`Backend` is third-party code: it can be buggy, out of date, or (for a remote pool)
+    answering across a network where responses can be misrouted. Without this check ``submit()``
+    returned whatever came back, so a response naming a *different* job, carrying an unrecognized
+    status, reporting a NaN duration, or billing far past the ceiling the submitter set was handed
+    to the caller as an ordinary successful result with ``ok == True``.
+
+    Any violation is converted into an ``"error"`` result for *this* job rather than raised: a bad
+    response is an outcome of the submission, the same way a job that raised is (see
+    :meth:`LocalBackend.submit`), and the caller's ``.ok`` check is then the single place that decides
+    whether the artifact may be used. The realized ``cost`` is preserved on the budget-overrun path
+    specifically -- that spend really happened and still needs to be reconciled and telemetered, even
+    though the artifact it produced must not be consumed as though the ceiling had held.
+
+    Note the ordering this can and cannot promise: ``est_cost <= budget`` is checked *before*
+    dispatch, so an over-estimate never runs at all, but the realized-cost check below necessarily
+    happens after the backend already did the work. Preventing over-spend (rather than detecting it)
+    requires a ceiling the backend itself enforces -- an authorization reserved before dispatch and
+    cancelled when it is exhausted -- which is a property of the backend protocol, not something this
+    in-process wrapper can supply on a backend's behalf.
+    """
+    if not isinstance(result, PoolResult):
+        return PoolResult(job.id, "error", reason=f"backend returned {type(result).__name__}, not a PoolResult")
+    if result.job_id != job.id:
+        return PoolResult(
+            job.id, "error", reason=f"backend returned a result for job {result.job_id!r}, not {job.id!r}"
+        )
+    if result.status not in POOL_STATUSES:
+        return PoolResult(
+            job.id,
+            "error",
+            reason=f"backend returned unknown status {result.status!r}, expected one of {sorted(POOL_STATUSES)}",
+        )
+    if not _is_finite_nonneg(result.cost):
+        return PoolResult(job.id, "error", reason=f"backend reported a non-finite or negative cost: {result.cost!r}")
+    if not _is_finite_nonneg(result.duration_s):
+        return PoolResult(
+            job.id, "error", reason=f"backend reported a non-finite or negative duration_s: {result.duration_s!r}"
+        )
+    if result.cost > job.budget:
+        return PoolResult(
+            job.id,
+            "error",
+            cost=result.cost,
+            duration_s=result.duration_s,
+            reason=f"realized cost {result.cost} exceeds budget {job.budget}",
+        )
+    return result
+
+
 def submit(
     job: PoolJob,
     backend: Backend | None = None,
@@ -114,6 +186,19 @@ def submit(
     it (NaN compares false against everything, so ``est_cost > budget`` silently passes; a negative
     value can "refund" budget that was never spent), so both are rejected outright rather than routed
     through the ordinary rejected-:class:`PoolResult` path.
+
+    The backend's *response* is checked too, by :func:`_settle`: it must be a :class:`PoolResult` for
+    this exact job, with a status in :data:`POOL_STATUSES` and a finite non-negative ``cost`` and
+    ``duration_s`` that settles within ``job.budget``. A response failing any of those is returned as
+    an ``"error"`` result instead of being passed through, so ``.ok`` is never true for work whose
+    identity or economics do not check out.
+
+    Submission is NOT idempotent and deliberately keeps no durable job state: submitting the same
+    :class:`PoolJob` twice runs it twice, even when its ``id`` is a caller-supplied constant rather
+    than the default fresh UUID (``id`` is a correlation handle for telemetry and settlement, not a
+    deduplication key). A caller whose work is irreversible or billable -- and any orchestrator that
+    retries after a crash or a lost response -- must therefore carry its own idempotency key and
+    committed-result lookup; that needs durable storage, and this library layer does no I/O.
     """
     if not math.isfinite(job.est_cost) or job.est_cost < 0:
         raise ValueError(f"est_cost must be finite and non-negative, got {job.est_cost!r}")
@@ -131,7 +216,7 @@ def submit(
             reason="billable backend requires confirm=True (dry-run + explicit confirm; spend is never implicit)",
         )
     else:
-        result = backend.submit(job)
+        result = _settle(job, backend.submit(job))
 
     _emit(telemetry, job, backend, result)
     return result

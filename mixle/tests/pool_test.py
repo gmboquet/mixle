@@ -116,6 +116,76 @@ class ConfirmRailTest(unittest.TestCase):
         self.assertTrue(submit(PoolJob(run=lambda: 1)).ok)
 
 
+class BackendSettlementTest(unittest.TestCase):
+    """A backend's response is third-party data: submit() settles it before the caller trusts it."""
+
+    class _Backend:
+        billable = False
+
+        def __init__(self, result):
+            self._result = result
+
+        def submit(self, job):
+            return self._result(job) if callable(self._result) else self._result
+
+    def test_realized_cost_over_budget_is_not_a_successful_result(self):
+        # MXR-080-1739: only est_cost was ever compared with budget, so a backend could bill any
+        # amount it liked for an under-estimated job and the overrun was accepted unchanged.
+        job = PoolJob(run=lambda: 1, est_cost=0.5, budget=1.0)
+        res = submit(job, self._Backend(lambda j: PoolResult(j.id, "done", artifact=1, cost=999.0)))
+        self.assertFalse(res.ok)
+        self.assertEqual(res.status, "error")
+        self.assertIn("exceeds budget", res.reason)
+        self.assertEqual(res.cost, 999.0)  # the spend really happened; it stays reconcilable
+
+    def test_realized_cost_exactly_at_budget_settles(self):
+        job = PoolJob(run=lambda: 1, est_cost=0.5, budget=1.0)
+        res = submit(job, self._Backend(lambda j: PoolResult(j.id, "done", artifact=1, cost=1.0)))
+        self.assertTrue(res.ok)
+
+    def test_result_for_a_different_job_is_rejected(self):
+        # MXR-080-1740: submit() returned whatever the backend supplied, including a result whose
+        # job_id named an entirely different job.
+        job = PoolJob(run=lambda: 1, est_cost=0.5, budget=1.0, id="real-job")
+        res = submit(job, self._Backend(PoolResult("wrong-job", "done", artifact="x")))
+        self.assertFalse(res.ok)
+        self.assertEqual(res.job_id, "real-job")
+        self.assertIn("wrong-job", res.reason)
+
+    def test_unknown_status_is_rejected(self):
+        job = PoolJob(run=lambda: 1)
+        res = submit(job, self._Backend(lambda j: PoolResult(j.id, "finished", artifact="x")))
+        self.assertEqual(res.status, "error")
+        self.assertIn("unknown status", res.reason)
+
+    def test_non_finite_duration_is_rejected(self):
+        job = PoolJob(run=lambda: 1)
+        res = submit(job, self._Backend(lambda j: PoolResult(j.id, "done", duration_s=float("nan"))))
+        self.assertEqual(res.status, "error")
+        self.assertIn("duration_s", res.reason)
+
+    def test_negative_cost_is_rejected(self):
+        # A negative realized cost is a credit for work that was never refunded.
+        job = PoolJob(run=lambda: 1)
+        res = submit(job, self._Backend(lambda j: PoolResult(j.id, "done", cost=-5.0)))
+        self.assertEqual(res.status, "error")
+        self.assertIn("cost", res.reason)
+
+    def test_non_poolresult_response_is_rejected(self):
+        res = submit(PoolJob(run=lambda: 1), self._Backend({"status": "done"}))
+        self.assertEqual(res.status, "error")
+        self.assertIn("not a PoolResult", res.reason)
+
+    def test_settlement_failure_is_still_telemetered(self):
+        tel = Telemetry()
+        job = PoolJob(run=lambda: 1, est_cost=0.5, budget=1.0)
+        submit(job, self._Backend(lambda j: PoolResult(j.id, "done", cost=999.0)), telemetry=tel)
+        events = list(tel.events(kind="pool_job"))
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].choice, "error")
+        self.assertEqual(events[0].outcome["cost"], 999.0)
+
+
 class TelemetryTest(unittest.TestCase):
     def test_every_submission_emits_a_pool_job_event(self):
         tel = Telemetry()
