@@ -1,6 +1,7 @@
 """Multiple-testing correction and evidence combination (mixle.inference.multiple_testing)."""
 
 import unittest
+from decimal import Decimal, localcontext
 
 import numpy as np
 
@@ -195,6 +196,61 @@ class StoufferWeightValidationTest(unittest.TestCase):
     def test_positive_weights_still_work(self):
         res = stouffer_combine(self.P3, weights=np.array([2.0, 3.0, 1.5]))
         self.assertTrue(np.isfinite(res["z"]))
+        self.assertTrue(0.0 <= res["pvalue"] <= 1.0)
+
+
+class TippettSubEpsilonTest(unittest.TestCase):
+    """MXR-080-1604: ``1 - (1 - min_p) ** k`` rounds the evidence away before exponentiating.
+
+    Below the float64 epsilon the subtraction returns exactly 1.0, so a finite nonzero minimum
+    p-value combined to exactly 0.0 -- impossible, and unboundedly overconfident. The stable form is
+    ``-expm1(k * log1p(-min_p))``. Expected values are computed here in exact decimal arithmetic, not
+    copied from the implementation.
+    """
+
+    @staticmethod
+    def _exact(min_p: str, k: int) -> Decimal:
+        # `1 - min_p` needs enough significant digits to hold min_p's exponent, and the k-th power
+        # needs k times that -- exactly the headroom float64 does not have, which is the whole point.
+        with localcontext() as ctx:
+            ctx.prec = 2000
+            return Decimal(1) - (Decimal(1) - Decimal(min_p)) ** k
+
+    def test_sub_epsilon_minimum_does_not_collapse_to_zero(self):
+        for min_p_text in ("1e-17", "1e-20", "1e-100", "1e-300"):
+            with self.subTest(min_p=min_p_text):
+                min_p = float(min_p_text)
+                got = tippett_combine(np.array([min_p, 0.9]))["pvalue"]
+                self.assertGreater(got, 0.0, "a finite nonzero p-value cannot combine to exactly 0")
+                expected = float(self._exact(min_p_text, 2))
+                self.assertAlmostEqual(got / expected, 1.0, places=12)
+
+    def test_epsilon_scale_minimum_is_not_inflated_to_two_epsilons(self):
+        # 1e-16 used to come back as 2.220446049250313e-16 (two machine epsilons) instead of ~2e-16
+        got = tippett_combine(np.array([1e-16, 0.9]))["pvalue"]
+        expected = float(self._exact("1e-16", 2))
+        self.assertAlmostEqual(got / expected, 1.0, places=12)
+        self.assertNotEqual(got, 2.220446049250313e-16)
+
+    def test_smallest_subnormal_minimum_still_survives(self):
+        got = tippett_combine(np.array([5e-324, 0.9]))["pvalue"]
+        self.assertGreater(got, 0.0)
+
+    def test_scales_with_the_number_of_tests(self):
+        """For a tiny min_p the combined value is ~k * min_p, so k must actually enter the result."""
+        for k in (2, 5, 20):
+            with self.subTest(k=k):
+                pvals = np.array([1e-30] + [0.9] * (k - 1))
+                got = tippett_combine(pvals)["pvalue"]
+                self.assertAlmostEqual(got / (k * 1e-30), 1.0, places=12)
+
+    def test_endpoints_and_ordinary_values_are_exact(self):
+        self.assertEqual(tippett_combine(np.array([0.0, 0.5]))["pvalue"], 0.0)
+        self.assertEqual(tippett_combine(np.array([1.0, 1.0]))["pvalue"], 1.0)
+        # negative control: the ordinary, well-conditioned case is unchanged
+        res = tippett_combine(np.array([0.01, 0.5, 0.8]))
+        self.assertAlmostEqual(res["min_p"], 0.01)
+        self.assertAlmostEqual(res["pvalue"], 1 - (1 - 0.01) ** 3)
         self.assertTrue(0.0 <= res["pvalue"] <= 1.0)
 
 

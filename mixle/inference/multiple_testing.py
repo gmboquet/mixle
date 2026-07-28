@@ -242,12 +242,23 @@ def tippett_combine(pvals: np.ndarray) -> dict[str, float]:
 
     Most powerful when a single strong signal exists among the tests.
 
+    Evaluated as ``-expm1(k * log1p(-min_p))`` rather than literally (MXR-080-1604). Forming
+    ``1 - min_p`` first rounds the evidence away before it is ever exponentiated: below the float64
+    epsilon the subtraction returns exactly ``1.0``, so a minimum p-value of ``1e-17``, ``1e-20`` or
+    ``1e-100`` combined to exactly ``0.0`` -- an impossible result for finite nonzero inputs, and one
+    that overstates certainty without bound. Even ``1e-16`` was inflated to ``2.220446049250313e-16``
+    (two epsilons) instead of the correct ``2e-16``. The stable form is accurate all the way down to
+    the smallest subnormal.
+
     Returns:
         ``{'min_p', 'pvalue'}``.
     """
     p = _prep(pvals)
     min_p = float(p.min())
-    return {"min_p": min_p, "pvalue": float(1.0 - (1.0 - min_p) ** p.size)}
+    if min_p >= 1.0:
+        # log1p(-1) is -inf; the limit is 1, so return it directly rather than through the -inf path
+        return {"min_p": min_p, "pvalue": 1.0}
+    return {"min_p": min_p, "pvalue": float(-np.expm1(p.size * np.log1p(-min_p)))}
 
 
 __all__ = [
