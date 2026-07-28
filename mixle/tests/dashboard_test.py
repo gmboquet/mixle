@@ -40,6 +40,35 @@ class DashboardTest(unittest.TestCase):
         d = dashboard(Telemetry())
         self.assertEqual(d["n_events"], 0)
         self.assertEqual(d["cost_total"], 0.0)
+        self.assertEqual(d["latency_total"], 0.0)
+
+    def test_dollars_and_seconds_are_never_added_together(self):
+        # MXR-080-1736: one accumulator took the first of cost/latency/spent, so a $1 cost and a
+        # 2-second latency folded into the meaningless number 3 -- and an event carrying both had
+        # its latency silently discarded.
+        t = Telemetry()
+        t.record("route", choice="a", outcome={"cost": 1.0})
+        t.record("route", choice="a", outcome={"latency": 2.0})
+        t.record("route", choice="a", outcome={"cost": 4.0, "latency": 8.0})
+        d = dashboard(t)
+        self.assertEqual(d["cost_total"], 5.0)
+        self.assertEqual(d["n_costed"], 2)
+        self.assertEqual(d["latency_total"], 10.0)
+        self.assertEqual(d["n_latency"], 2)
+
+    def test_unaggregatable_amounts_are_counted_not_summed(self):
+        # MXR-080-1736: a single NaN produced an ordinary-looking dashboard with cost_total=NaN,
+        # and cost=True counted as one dollar.
+        t = Telemetry()
+        t.record("route", choice="a", outcome={"cost": float("nan")})
+        t.record("route", choice="a", outcome={"cost": float("inf")})
+        t.record("route", choice="a", outcome={"cost": True})
+        t.record("route", choice="a", outcome={"cost": -5.0})
+        t.record("route", choice="a", outcome={"cost": 3.0})
+        d = dashboard(t)
+        self.assertEqual(d["cost_total"], 3.0)
+        self.assertEqual(d["n_costed"], 1)
+        self.assertEqual(d["n_unaggregatable"], 4)
 
 
 if __name__ == "__main__":
