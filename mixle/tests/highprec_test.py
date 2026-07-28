@@ -24,7 +24,8 @@ class ArbitraryPrecisionTest(unittest.TestCase):
         for bits in (128, 256, 512, 1024, 4096):
             fmt = HighPrecisionFormat(bits)
             self.assertEqual(fmt.bits, bits)
-            self.assertEqual(fmt.max_rel_error, 2.0 ** -(bits + 1))
+            self.assertEqual(fmt.name, "fp%d" % bits)
+            self.assertEqual(fmt.max_rel_error, 2.0**-fmt.precision_bits)
 
     def test_round_trip_of_float64_is_lossless(self):
         rng = np.random.RandomState(0)

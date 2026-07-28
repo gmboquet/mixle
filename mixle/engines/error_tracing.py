@@ -22,6 +22,7 @@ multiplication relies on.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -218,18 +219,26 @@ def sum_error_bound(x: Any) -> float:
     no extra compute is justified.
     """
     x = np.asarray(x, dtype=np.float64).ravel()
+    if x.size and not np.all(np.isfinite(x)):
+        raise ValueError("sum error bounds require finite input values")
     if x.size < 2:
         return 0.0
     u = 2.0**-53
     k = x.size - 1
     gamma = (k * u) / (1.0 - k * u) if k * u < 1.0 else np.inf
-    return float(gamma * np.abs(x).sum())
+    with np.errstate(over="ignore", invalid="ignore"):
+        bound = gamma * np.abs(x).sum()
+    return float(bound) if np.isfinite(bound) else math.inf
 
 
 def sum_enclosure(x: Any) -> Interval:
     """Return an outward-rounded interval enclosing the true ``sum(x)``."""
-    s = np.float64(np.sum(np.asarray(x, dtype=np.float64)))
+    values = np.asarray(x, dtype=np.float64)
+    with np.errstate(over="ignore", invalid="ignore"):
+        s = np.float64(np.sum(values))
     b = np.float64(sum_error_bound(x))
+    if not np.isfinite(s) or not np.isfinite(b):
+        return Interval(-np.inf, np.inf)
     return Interval(_down(s - b), _up(s + b))
 
 
@@ -238,6 +247,14 @@ def float64_sum_is_accurate(x: Any, target_rel_error: float = 1e-12) -> bool:
 
     Reads the certified bound relative to the magnitude of the result -- precision allocation in one call.
     """
-    s = abs(float(np.sum(np.asarray(x, dtype=np.float64))))
+    if isinstance(target_rel_error, (bool, np.bool_)) or not math.isfinite(target_rel_error) or target_rel_error <= 0:
+        raise ValueError("target_rel_error must be a finite positive number")
+    values = np.asarray(x, dtype=np.float64)
+    if values.size and not np.all(np.isfinite(values)):
+        raise ValueError("summation accuracy requires finite input values")
+    with np.errstate(over="ignore", invalid="ignore"):
+        s = abs(float(np.sum(values)))
     bound = sum_error_bound(x)
+    if not math.isfinite(s) or not math.isfinite(bound):
+        return False
     return bound <= target_rel_error * max(s, np.finfo(np.float64).tiny)
