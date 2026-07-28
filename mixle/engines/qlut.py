@@ -14,39 +14,87 @@ so the table need only cover the curved region. Measured 1.5-8x faster than the 
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from typing import Any
 
 import numpy as np
 
 
+def _validate_grid(step: Any, lo: Any, hi: Any) -> tuple[float, int, int]:
+    """Validate a finite ordered grid and return its normalized step/code endpoints."""
+    if isinstance(step, (bool, np.bool_)):
+        raise ValueError("step must be a finite positive number")
+    try:
+        step = float(step)
+        lo = float(lo)
+        hi = float(hi)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("step/lo/hi must be finite real numbers") from None
+    if not np.isfinite(step) or step <= 0:
+        raise ValueError(f"step must be finite and positive, got {step}")
+    if not np.isfinite(lo) or not np.isfinite(hi):
+        raise ValueError(f"lo/hi must be finite, got lo={lo}, hi={hi}")
+    if hi <= lo:
+        raise ValueError(f"need hi > lo, got lo={lo}, hi={hi}")
+    lo_code = int(round(lo / step))
+    hi_code = int(round(hi / step))
+    if hi_code - lo_code < 1:
+        raise ValueError(
+            f"step={step} is too coarse for span [{lo}, {hi}]: rounds to a single code "
+            "(need at least two grid entries)"
+        )
+    return step, lo_code, hi_code
+
+
+def _exact_integer_array(values: Any, name: str) -> np.ndarray:
+    raw = np.asarray(values)
+    if raw.dtype == np.bool_:
+        raise ValueError(f"{name} must contain integer codes, not booleans")
+    if np.issubdtype(raw.dtype, np.integer):
+        if np.issubdtype(raw.dtype, np.unsignedinteger) and raw.size and np.any(raw > np.iinfo(np.int64).max):
+            raise ValueError(f"{name} contains a value outside int64 range")
+        return raw.astype(np.int64)
+    if np.issubdtype(raw.dtype, np.floating):
+        if raw.size and (
+            not np.all(np.isfinite(raw))
+            or not np.array_equal(raw, np.trunc(raw))
+            or np.any(raw < np.iinfo(np.int64).min)
+            or np.any(raw >= 2**63)
+        ):
+            raise ValueError(f"{name} must contain exact finite integer codes")
+        return raw.astype(np.int64)
+    checked = np.empty(raw.size, dtype=np.int64)
+    for i, value in enumerate(raw.ravel()):
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+            raise ValueError(f"{name} must contain exact integer codes")
+        if not np.iinfo(np.int64).min <= int(value) <= np.iinfo(np.int64).max:
+            raise ValueError(f"{name} contains a value outside int64 range")
+        checked[i] = int(value)
+    return checked.reshape(raw.shape)
+
+
 class QuantizedFunction:
     """A scalar function tabulated over quantized inputs; ``f(x) ≈ table[round(x/step)]`` with linear tails."""
 
     def __init__(self, func: Callable[[np.ndarray], np.ndarray], step: float, lo: float, hi: float) -> None:
-        if not np.isfinite(step) or step <= 0:
-            raise ValueError(f"step must be finite and positive, got {step}")
-        if not np.isfinite(lo) or not np.isfinite(hi):
-            raise ValueError(f"lo/hi must be finite, got lo={lo}, hi={hi}")
-        if hi <= lo:
-            raise ValueError(f"need hi > lo, got lo={lo}, hi={hi}")
+        if not callable(func):
+            raise TypeError("func must be callable")
+        step, lo_code, hi_code = _validate_grid(step, lo, hi)
         self.func = func
-        self.step = float(step)
-        self.lo_code = int(round(lo / step))
-        self.hi_code = int(round(hi / step))
-        if self.hi_code - self.lo_code < 1:
-            # lo/hi are valid floats but round to the SAME code at this step -- the grid degenerates to
-            # one entry, and the boundary-slope construction below needs a second one to exist.
-            raise ValueError(
-                f"step={step} is too coarse for span [{lo}, {hi}]: rounds to a single code "
-                "(need at least two grid entries)"
-            )
+        self.step = step
+        self.lo_code = lo_code
+        self.hi_code = hi_code
         self.lo = self.lo_code * self.step
         self.hi = self.hi_code * self.step
         codes = np.arange(self.lo_code, self.hi_code + 1, dtype=np.int64)
-        table = np.ascontiguousarray(func(codes * self.step), dtype=np.float64)
+        values = np.asarray(func(codes * self.step))
+        if values.shape != codes.shape:
+            raise ValueError(f"func must return one value per grid code: expected shape {codes.shape}, got {values.shape}")
+        table = np.ascontiguousarray(values, dtype=np.float64)
         if not np.isfinite(table).all():
             raise ValueError("func produced non-finite values over the tabulated range")
+        table.setflags(write=False)
         self.table = table
         # boundary slopes for linear extrapolation of unbounded functions outside the table
         self.slope_lo = float((self.table[1] - self.table[0]) / self.step)
@@ -55,6 +103,8 @@ class QuantizedFunction:
     def __call__(self, x: Any) -> np.ndarray:
         """Evaluate via integer code gather (with linear tails); no transcendental runs in range."""
         x = np.asarray(x, dtype=np.float64)
+        if x.size and not np.all(np.isfinite(x)):
+            raise ValueError("lookup inputs must be finite")
         q = np.rint(x / self.step).astype(np.int64)
         idx = np.clip(q, self.lo_code, self.hi_code) - self.lo_code
         out = self.table[idx]
@@ -68,7 +118,10 @@ class QuantizedFunction:
 
     def lookup(self, code: Any) -> np.ndarray:
         """Gather directly from integer codes already in the quantized domain (the pure-integer path)."""
-        idx = np.clip(np.asarray(code, dtype=np.int64), self.lo_code, self.hi_code) - self.lo_code
+        codes = _exact_integer_array(code, "code")
+        if codes.size and (np.any(codes < self.lo_code) or np.any(codes > self.hi_code)):
+            raise ValueError(f"code must be inside [{self.lo_code}, {self.hi_code}]")
+        idx = codes - self.lo_code
         return self.table[idx]
 
     def max_abs_error(self, x: Any) -> float:
@@ -118,6 +171,8 @@ def quantized_exp(log_step: float = 0.01, lo_log: float = -30.0) -> QuantizedFun
 
 
 def _validate_bits_span(bits: int, span: float) -> None:
+    if isinstance(bits, (bool, np.bool_)) or not isinstance(bits, (int, np.integer)):
+        raise ValueError(f"bits must be an exact non-Boolean integer, got {bits!r}")
     if bits < 1 or bits > 24:
         raise ValueError(f"need 1 <= bits <= 24, got {bits}")
     if not np.isfinite(span) or span <= 0:
@@ -155,7 +210,7 @@ def _prepare_scores_weights(scores: Any, weights: Any) -> tuple[np.ndarray, np.n
 
 def _lse_histogram(
     scores: np.ndarray, w: np.ndarray | None, bits: int, span: float
-) -> tuple[float, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[float, np.ndarray, np.ndarray, np.ndarray, float]:
     """The integer histogram + exp table :func:`quantized_logsumexp` evaluates, plus which entries clipped.
 
     ``scores``/``w`` must already be validated and masked (see :func:`_prepare_scores_weights`) and
@@ -169,9 +224,11 @@ def _lse_histogram(
     raw = np.rint((scores - m) / delta).astype(np.int64) + levels - 1
     clipped = raw < 0
     idx = np.clip(raw, 0, levels - 1)
-    hist = np.bincount(idx, weights=w, minlength=levels)
+    weight_scale = float(np.max(w)) if w is not None else 1.0
+    normalized_weights = w / weight_scale if w is not None and weight_scale > 0.0 else w
+    hist = np.bincount(idx, weights=normalized_weights, minlength=levels)
     table = np.exp((np.arange(levels) - (levels - 1)) * delta)
-    return m, hist, table, clipped
+    return m, hist, table, clipped, weight_scale
 
 
 def quantized_logsumexp(scores: Any, *, bits: int = 12, span: float = 24.0, weights: Any = None) -> float:
@@ -199,8 +256,14 @@ def quantized_logsumexp(scores: Any, *, bits: int = 12, span: float = 24.0, weig
     scores, w = _prepare_scores_weights(scores, weights)
     if scores.size == 0 or (w is not None and not w.any()):
         return float("-inf")
-    m, hist, table, _clipped = _lse_histogram(scores, w, bits, span)
-    return float(np.log(float(hist @ table)) + m)
+    m, hist, table, _clipped, weight_scale = _lse_histogram(scores, w, bits, span)
+    mass = float(hist @ table)
+    if not math.isfinite(mass) or mass <= 0.0 or not math.isfinite(weight_scale) or weight_scale <= 0.0:
+        raise ArithmeticError("quantized log-sum-exp accumulation produced invalid mass")
+    value = float(np.log(mass) + m + np.log(weight_scale))
+    if not math.isfinite(value):
+        raise ArithmeticError("quantized log-sum-exp result is not finite")
+    return value
 
 
 def lse_error_bound(bits: int, span: float, *, scores: Any = None, weights: Any = None) -> float:
@@ -236,9 +299,11 @@ def lse_error_bound(bits: int, span: float, *, scores: Any = None, weights: Any 
     scores, w = _prepare_scores_weights(scores, weights)
     if scores.size == 0 or (w is not None and not w.any()):
         return 0.0  # quantized_logsumexp returns exactly -inf here too: no rounding occurs
-    _m, hist, table, clipped = _lse_histogram(scores, w, bits, span)
+    _m, hist, table, clipped, weight_scale = _lse_histogram(scores, w, bits, span)
     total_mass = float(hist @ table)
-    clipped_weight = float(w[clipped].sum()) if w is not None else float(clipped.sum())
+    clipped_weight = (
+        float((w[clipped] / weight_scale).sum()) if w is not None and weight_scale > 0.0 else float(clipped.sum())
+    )
     clipped_mass = clipped_weight * float(table[0])
     in_span_mass = max(0.0, total_mass - clipped_mass)
     if in_span_mass > 0.0:
@@ -261,7 +326,10 @@ def error_bound(sup_abs_derivative: float, step: float) -> float:
 
 def table_bytes(step: float, lo: float, hi: float, itemsize: int = 8) -> int:
     """Bytes a table spanning ``[lo, hi]`` at ``step`` occupies (cache-residency check)."""
-    return (int(round(hi / step)) - int(round(lo / step)) + 1) * itemsize
+    _step, lo_code, hi_code = _validate_grid(step, lo, hi)
+    if isinstance(itemsize, (bool, np.bool_)) or not isinstance(itemsize, (int, np.integer)) or itemsize <= 0:
+        raise ValueError("itemsize must be a positive exact non-Boolean integer")
+    return (hi_code - lo_code + 1) * int(itemsize)
 
 
 def step_for_tolerance(tol: float, sup_abs_derivative: float) -> float:

@@ -17,6 +17,18 @@ sp = pytest.importorskip("scipy.special")
 
 
 class SoftmaxCrossEntropyTest(unittest.TestCase):
+    def test_impossible_logits_preserve_sentinel_semantics(self):
+        lns = LogNumberSystem(step=0.005)
+        with self.assertRaises(ValueError):
+            log_softmax([-np.inf, -np.inf], lns)
+        with self.assertRaises(ValueError):
+            softmax([-np.inf, -np.inf], lns)
+        got = log_softmax([-np.inf, 0.0], lns)
+        self.assertEqual(got[0], -np.inf)
+        self.assertAlmostEqual(got[1], 0.0, places=12)
+        p = softmax([-np.inf, 0.0], lns)
+        np.testing.assert_array_equal(p, [0.0, 1.0])
+
     def test_log_softmax_matches_float64(self):
         lns = LogNumberSystem(step=0.005)
         rng = np.random.RandomState(0)
