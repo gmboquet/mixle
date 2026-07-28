@@ -109,9 +109,22 @@ class Query:
 
 
 def _complete(teacher: LLM | Callable[..., str], prompt: str) -> str:
-    if hasattr(teacher, "complete"):
-        return teacher.complete(prompt)
-    return teacher(prompt)
+    """Call the teacher and hold it to the string answer contract it promises.
+
+    The provider boundary is untrusted: a teacher returning ``None`` or a dict used to be charged as a
+    successful frontier call, reported ``status="answered"``, harvested, promoted by :meth:`System.improve`
+    and then served from the captured cache forever. In the ``None`` case the public return was
+    indistinguishable from a refusal or a failure unless every caller also read the receipt. An answer
+    that does not satisfy the contract is a failed call, and ``ValueError`` (a failing dependency,
+    not a defect in this process) routes it into exactly the same ``teacher_down`` store-fallback /
+    ``status="failed"`` path a teacher that raises already takes.
+    """
+    reply = teacher.complete(prompt) if hasattr(teacher, "complete") else teacher(prompt)
+    if not isinstance(reply, str):
+        raise ValueError(f"teacher must return a string answer, got {type(reply).__name__}")
+    if not reply.strip():
+        raise ValueError("teacher returned an empty answer")
+    return reply
 
 
 # System.improve()'s cost model: one flat unit per (query, reply) pair promoted from the harvest into
@@ -251,12 +264,26 @@ class System:
         substrate item rather than requiring optional knowledge-substrate
         components.
 
-        If the store write raises, this falls back to ``store_down`` degraded
-        mode. The model output is acknowledged but not accumulated, and the
-        report is flagged with ``degraded_mode="store_down"``.
+        Every route writes under :attr:`SystemConfig.scope`, and the effective scope is named on the
+        report. The belief path used to call ``assimilate()`` without its ``scope`` argument, so it
+        defaulted to ``"local"`` no matter how the system was configured -- a system configured for
+        ``"tenant-A"`` ingested two claims and got back two apparently successful ``BeliefItem``s whose
+        scope, and whose stored substrate scope, were both ``"local"``. The import-fallback path *did*
+        use ``config.scope``, so which boundary a write landed in depended on whether an optional
+        module happened to be importable.
+
+        If the store write raises before anything is committed, this falls back to ``store_down``
+        degraded mode: the model output is acknowledged but not accumulated, and the report is flagged
+        with ``degraded_mode="store_down"``.
+
+        Claims are assimilated one at a time and there is no transaction, so a failure partway through
+        leaves the earlier claims stored. That case is reported as ``status="partial_accumulation"``
+        with the exact committed items, not as ``degraded_no_accumulation``: denying durable state
+        invites a retry that duplicates the committed evidence, or reasoning from a receipt that says
+        nothing was written when something was.
         """
         if self.config.store is None:
-            return {"status": "no_store", "assimilated": False}
+            return {"status": "no_store", "assimilated": False, "scope": self.config.scope}
 
         def _write() -> dict[str, Any]:
             try:
@@ -264,11 +291,29 @@ class System:
             except ImportError:
                 return self._ingest_fallback(model_output, source=source)
             claims = harvest_knowledge(model_output, source=source)
-            items = [assimilate(self.config.store, claim, []) for claim in claims]
-            return {"status": "ok", "n_claims": len(claims), "items": items}
+            items: list[Any] = []
+            for claim in claims:
+                try:
+                    items.append(assimilate(self.config.store, claim, [], scope=self.config.scope))
+                except Exception as exc:  # noqa: BLE001 -- partial commits are reported, not degraded away
+                    if not items:
+                        raise  # nothing committed yet: an ordinary store_down degradation
+                    return {
+                        "status": "partial_accumulation",
+                        "assimilated": True,
+                        "n_claims": len(claims),
+                        "n_committed": len(items),
+                        "items": items,
+                        "committed_ids": [getattr(item, "id", None) for item in items],
+                        "failed_claim_index": len(items),
+                        "reason": str(exc),
+                        "degraded_mode": "store_down",
+                        "scope": self.config.scope,
+                    }
+            return {"status": "ok", "n_claims": len(claims), "items": items, "scope": self.config.scope}
 
         def _store_down_fallback(exc: Exception) -> dict[str, Any]:
-            return {"status": "degraded_no_accumulation", "assimilated": False}
+            return {"status": "degraded_no_accumulation", "assimilated": False, "scope": self.config.scope}
 
         result = with_fallback(_write, _store_down_fallback, mode="store_down")
         return {**result.value, **result.to_receipt_fields()} if result.degraded else result.value
@@ -284,7 +329,7 @@ class System:
             tags=["model_assertion", "unassimilated"],
         )
         self.config.store.put(item)
-        return {"status": "ok_fallback", "assimilated": False, "item_id": item.id}
+        return {"status": "ok_fallback", "assimilated": False, "item_id": item.id, "scope": self.config.scope}
 
     def improve(self, budget: int) -> dict[str, Any]:
         """Promote harvested (query, reply) pairs from :meth:`answer` into the captured cache, up to

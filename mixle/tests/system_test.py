@@ -467,5 +467,84 @@ class SystemConfigFromEnvTest(unittest.TestCase):
         self.assertIn("MIXLE_TEACHER_BASE_URL", str(ctx.exception))
 
 
+class IngestBoundaryTest(unittest.TestCase):
+    def test_ingestion_stays_inside_the_configured_knowledge_scope(self):
+        # MXR-080-1687: the belief path called assimilate() without its scope argument, so it wrote
+        # under "local" no matter how the system was configured -- while the import-fallback path did
+        # use config.scope, making the boundary depend on optional-module availability.
+        substrate = Substrate()
+        system = System(SystemConfig(teacher=lambda p: "unused", store=substrate, scope="tenant-A"))
+
+        report = system.ingest("the sky is blue. water is wet.", source={"model": "teacher-v1"})
+
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["scope"], "tenant-A")
+        self.assertTrue(report["items"])  # the assertion below is only meaningful with real items
+        for item in report["items"]:
+            self.assertEqual(item.scope, "tenant-A")  # was "local" regardless of config.scope
+
+    def test_a_partial_write_is_reported_as_partial_not_as_no_accumulation(self):
+        # MXR-080-1688: claims are assimilated one at a time with no transaction. When a later put()
+        # raised, with_fallback() converted the whole operation to
+        # status="degraded_no_accumulation", assimilated=False, even though earlier claims were
+        # already stored -- inviting a retry that duplicates the committed evidence.
+        substrate = Substrate()
+        real_put = substrate.put
+        state = {"calls": 0}
+
+        def flaky_put(item):
+            state["calls"] += 1
+            if state["calls"] >= 2:
+                raise RuntimeError("store unavailable")
+            return real_put(item)
+
+        substrate.put = flaky_put
+        system = System(SystemConfig(teacher=lambda p: "unused", store=substrate, scope="tenant-A"))
+
+        report = system.ingest("the sky is blue. water is wet. fire is hot.", source={"model": "t"})
+
+        self.assertEqual(report["status"], "partial_accumulation")
+        self.assertTrue(report["assimilated"])
+        self.assertGreaterEqual(report["n_committed"], 1)
+        self.assertEqual(len(report["committed_ids"]), report["n_committed"])
+        self.assertLess(report["n_committed"], report["n_claims"])
+        self.assertEqual(report["degraded_mode"], "store_down")
+
+    def test_a_failure_before_any_commit_is_still_an_honest_no_accumulation(self):
+        # negative control: when nothing was written, degraded_no_accumulation remains correct.
+        substrate = Substrate()
+        substrate.put = lambda item: (_ for _ in ()).throw(RuntimeError("store unavailable"))
+        system = System(SystemConfig(teacher=lambda p: "unused", store=substrate, scope="tenant-A"))
+
+        report = system.ingest("the sky is blue. water is wet.", source={"model": "t"})
+
+        self.assertEqual(report["status"], "degraded_no_accumulation")
+        self.assertFalse(report["assimilated"])
+
+
+class TeacherAnswerContractTest(unittest.TestCase):
+    def test_invalid_teacher_output_is_never_a_durable_answered_capability(self):
+        # MXR-080-1689: teachers returning None or a dict were charged as successful frontier calls,
+        # reported status="answered", harvested, promoted by improve() and then served from the
+        # captured cache forever. In the None case the public return was indistinguishable from a
+        # refusal or a failure unless every caller also read the receipt.
+        for bad in (None, {"answer": "x"}, "", "   "):
+            with self.subTest(reply=bad):
+                system = System(SystemConfig(teacher=lambda p, _bad=bad: _bad))
+                reply, receipt = system.answer(Query("q"), budget=5)
+                self.assertIsNone(reply)
+                self.assertEqual(receipt["status"], "failed")
+                self.assertEqual(system.total_spend.total_units(), 0.0)
+                promoted = system.improve(budget=5)
+                self.assertEqual(promoted["n_captured"], 0)
+                self.assertIsNone(system.answer(Query("q"), budget=5)[0])
+
+    def test_a_valid_teacher_answer_still_flows_through_unchanged(self):
+        system = System(SystemConfig(teacher=lambda p: "a real answer"))
+        reply, receipt = system.answer(Query("q"), budget=5)
+        self.assertEqual(reply, "a real answer")
+        self.assertEqual(receipt["status"], "answered")
+
+
 if __name__ == "__main__":
     unittest.main()
