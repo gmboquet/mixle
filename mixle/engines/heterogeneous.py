@@ -74,6 +74,12 @@ class Worker:
     base_throughput: float = 1.0
 
     def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("worker name must be a nonempty string")
+        if isinstance(self.precisions, (str, bytes)):
+            raise ValueError("worker precisions must be a nonempty sequence of precision names")
+        canonical_precisions = tuple(self.precisions)
+        object.__setattr__(self, "precisions", canonical_precisions)
         if self.device not in _KNOWN_DEVICES:
             raise ValueError(
                 "worker %r has unknown device %r; expected one of %s" % (self.name, self.device, sorted(_KNOWN_DEVICES))
@@ -91,10 +97,16 @@ class Worker:
                     sorted(p for d, p in _THROUGHPUT if d == self.device),
                 )
             )
-        if not math.isfinite(self.base_throughput) or self.base_throughput <= 0:
+        if (
+            isinstance(self.base_throughput, bool)
+            or not isinstance(self.base_throughput, (int, float))
+            or not math.isfinite(self.base_throughput)
+            or self.base_throughput <= 0
+        ):
             raise ValueError(
                 "worker %r base_throughput must be finite and positive, got %r" % (self.name, self.base_throughput)
             )
+        object.__setattr__(self, "base_throughput", float(self.base_throughput))
 
 
 @dataclass(frozen=True)
@@ -114,14 +126,37 @@ class WorkerAssignment:
     effective_throughput: float
     meets_target: bool = True
     achieved_rel_error: float | None = None
+    evidence_kind: str = "unconstrained"
 
     def __post_init__(self) -> None:
         # Output-side sanity check, independent of plan_heterogeneous's own input validation: a
         # WorkerAssignment can never represent a negative/fractional row count or a non-positive
         # effective throughput, regardless of how it was constructed (MXR-080-0134).
         _require_nonneg_int(self.rows, "rows")
-        if not math.isfinite(self.effective_throughput) or self.effective_throughput <= 0:
+        if self.precision not in {precision for _, precision in _THROUGHPUT}:
+            raise ValueError("precision %r is not a modeled heterogeneous precision" % self.precision)
+        if not isinstance(self.meets_target, bool):
+            raise ValueError("meets_target must be an actual Boolean")
+        if (
+            isinstance(self.effective_throughput, bool)
+            or not isinstance(self.effective_throughput, (int, float))
+            or not math.isfinite(self.effective_throughput)
+            or self.effective_throughput <= 0
+        ):
             raise ValueError("effective_throughput must be finite and positive, got %r" % (self.effective_throughput,))
+        if self.achieved_rel_error is not None and (
+            isinstance(self.achieved_rel_error, bool)
+            or not math.isfinite(self.achieved_rel_error)
+            or self.achieved_rel_error < 0
+        ):
+            raise ValueError("achieved_rel_error must be None or a finite nonnegative heuristic estimate")
+        if self.evidence_kind not in {"unconstrained", "heuristic"}:
+            raise ValueError("evidence_kind must be 'unconstrained' or 'heuristic'")
+        if self.evidence_kind == "unconstrained":
+            if not self.meets_target or self.achieved_rel_error is not None:
+                raise ValueError("unconstrained assignments must meet_target=True and carry no error estimate")
+        elif self.meets_target:
+            raise ValueError("a heuristic estimate cannot certify meets_target=True")
 
 
 @dataclass(frozen=True)
@@ -130,6 +165,21 @@ class HeterogeneousPlan:
 
     assignments: tuple[WorkerAssignment, ...]
     reduce_depth: int
+
+    def __post_init__(self) -> None:
+        canonical = tuple(self.assignments)
+        if not canonical:
+            raise ValueError("HeterogeneousPlan requires at least one assignment")
+        if not all(isinstance(assignment, WorkerAssignment) for assignment in canonical):
+            raise ValueError("assignments must contain only WorkerAssignment records")
+        object.__setattr__(self, "assignments", canonical)
+        _require_nonneg_int(self.reduce_depth, "reduce_depth")
+        expected_depth = 0 if len(canonical) == 1 else math.ceil(math.log2(len(canonical)) / 2)
+        if self.reduce_depth != expected_depth:
+            raise ValueError(
+                "reduce_depth must match the planner's worker-reduction tree (%d for %d workers)"
+                % (expected_depth, len(canonical))
+            )
 
     def total_rows(self) -> int:
         """Return total rows assigned across workers."""
@@ -150,18 +200,19 @@ class HeterogeneousPlan:
         return tuple(a for a in self.assignments if not a.meets_target)
 
 
-def _achieved_rel_error(precision: str, op_count: int) -> float | None:
-    """The quantified relative-error bound ``precision`` actually achieves at ``op_count`` ops, or
-    ``None`` when the format's roundoff isn't modeled (e.g. ``fp8``, whose error is codec-dependent
-    rather than a fixed-mantissa roundoff)."""
+def _estimated_rel_error(precision: str, op_count: int) -> float | None:
+    """A gamma-n roundoff heuristic used only to rank formats; never an accuracy certificate."""
     u = UNIT_ROUNDOFF.get(precision)
-    return None if u is None else op_count * u
+    if u is None:
+        return None
+    product = op_count * u
+    return product / (1.0 - product) if product < 1.0 else math.inf
 
 
 def _meets_budget(precision: str, op_count: int, target_rel_error: float | None) -> bool:
     if target_rel_error is None:
         return True
-    achieved = _achieved_rel_error(precision, op_count)
+    achieved = _estimated_rel_error(precision, op_count)
     return achieved is not None and achieved <= target_rel_error  # roundoff accumulates ~op_count * u (relative)
 
 
@@ -193,19 +244,19 @@ def _best_precision(
         return _PrecisionChoice(
             precision=fallback,
             meets_target=False,
-            achieved_rel_error=_achieved_rel_error(fallback, op_count),
+            achieved_rel_error=_estimated_rel_error(fallback, op_count),
             reason="worker %r supports none of the allowed precisions %s (worker supports %s)"
             % (worker.name, allowed, worker.precisions),
         )
     candidates = [p for p in supported if _meets_budget(p, op_count, target_rel_error)]
     if candidates:
         best = max(candidates, key=lambda p: _THROUGHPUT[(worker.device, p)])
-        return _PrecisionChoice(best, True, _achieved_rel_error(best, op_count))
+        return _PrecisionChoice(best, True, _estimated_rel_error(best, op_count))
     # Nothing supported+allowed meets the budget: report the MOST ACCURATE option, i.e. the tightest bound
     # actually achievable, so an infeasible-plan caller sees "how close can you get" rather than an
     # arbitrary (possibly much worse) substitute.
     best = min(supported, key=lambda p: UNIT_ROUNDOFF.get(p, math.inf))
-    achieved = _achieved_rel_error(best, op_count)
+    achieved = _estimated_rel_error(best, op_count)
     return _PrecisionChoice(
         precision=best,
         meets_target=False,
@@ -244,11 +295,23 @@ def plan_heterogeneous(
     """
     if not workers:
         raise ValueError("need at least one worker")
+    if not all(isinstance(worker, Worker) for worker in workers):
+        raise ValueError("workers must contain only Worker records")
     _require_nonneg_int(n_rows, "n_rows")
     _require_nonneg_int(op_count, "op_count")
+    if not isinstance(allow_infeasible, bool):
+        raise ValueError("allow_infeasible must be an actual Boolean")
+    if isinstance(allowed_precisions, (str, bytes)):
+        raise ValueError("allowed_precisions must be a sequence, not a string")
+    allowed_precisions = tuple(allowed_precisions)
     if not allowed_precisions:
         raise ValueError("allowed_precisions must be nonempty")
-    if target_rel_error is not None and (not math.isfinite(target_rel_error) or target_rel_error <= 0):
+    if target_rel_error is not None and (
+        isinstance(target_rel_error, bool)
+        or not isinstance(target_rel_error, (int, float))
+        or not math.isfinite(target_rel_error)
+        or target_rel_error <= 0
+    ):
         raise ValueError("target_rel_error must be None or a finite positive number, got %r" % (target_rel_error,))
 
     chosen = []
@@ -258,13 +321,25 @@ def plan_heterogeneous(
         chosen.append((w, choice, eff))
 
     if not allow_infeasible:
-        infeasible = [choice for _, choice, _ in chosen if not choice.meets_target]
+        # This planner has no operation graph, magnitude/conditioning evidence, reduction order, or
+        # communication topology certificate. Its gamma-n score can rank options but cannot prove a
+        # scientific target, even when the score is below that target.
+        infeasible = [choice for _, choice, _ in chosen if target_rel_error is not None or not choice.meets_target]
         if infeasible:
             raise InfeasiblePrecisionError(
                 "plan_heterogeneous: target_rel_error=%r is not achievable for %d of %d worker(s): %s. "
                 "Pass allow_infeasible=True to receive a best-effort HeterogeneousPlan instead (then "
                 "check plan.is_feasible() and plan.infeasible_assignments())."
-                % (target_rel_error, len(infeasible), len(chosen), "; ".join(c.reason for c in infeasible))
+                % (
+                    target_rel_error,
+                    len(infeasible),
+                    len(chosen),
+                    "; ".join(
+                        c.reason
+                        or "format score is below the target, but no workload-specific error certificate was supplied"
+                        for c in infeasible
+                    ),
+                )
             )
 
     # Every eff is finite and strictly positive here: Worker.__post_init__ enforces base_throughput > 0
@@ -288,10 +363,11 @@ def plan_heterogeneous(
                 rows=rows,
                 precision=choice.precision,
                 effective_throughput=eff,
-                meets_target=choice.meets_target,
-                achieved_rel_error=choice.achieved_rel_error,
+                meets_target=target_rel_error is None,
+                achieved_rel_error=None if target_rel_error is None else choice.achieved_rel_error,
+                evidence_kind="unconstrained" if target_rel_error is None else "heuristic",
             )
         )
 
-    depth = max(1, math.ceil(math.log2(max(2, len(workers))) / 2))
+    depth = 0 if len(workers) == 1 else math.ceil(math.log2(len(workers)) / 2)
     return HeterogeneousPlan(assignments=tuple(assignments), reduce_depth=depth)
