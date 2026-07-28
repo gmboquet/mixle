@@ -8,18 +8,25 @@ import pytest
 from mixle.analysis.habitat_constraints import apply_habitat_constraints, critical_habitat_exclusion
 from mixle.analysis.sdm import HabitatModel
 
+_SPECIES = "spotted-owl"
+
 
 def _habitat(mean: np.ndarray) -> HabitatModel:
+    # `species_id` is required: critical_habitat_exclusion matches each listed record to its OWN
+    # fitted field by id and refuses to borrow another species' range (MXR-080-1591), so a model
+    # without an identity cannot participate in a statutory exclusion at all.
     return HabitatModel(
         beta=np.log(mean),
         beta_cov=np.eye(mean.size) * 1.0e-8,
         design=np.eye(mean.size),
         cell_area=np.ones(mean.size),
+        species_id=_SPECIES,
     )
 
 
 def _listed() -> list[SimpleNamespace]:
-    return [SimpleNamespace(critical_habitat=True)]
+    # `critical_habitat` must be an actual Boolean, not merely truthy (MXR-080-1588).
+    return [SimpleNamespace(critical_habitat=True, species_id=_SPECIES)]
 
 
 def _network() -> dict[str, np.ndarray]:
@@ -48,7 +55,7 @@ def test_exclusion_rejects_invalid_suitability_cut(suitability_cut):
 
 
 def test_exclusion_requires_one_dimensional_habitat_mean():
-    malformed = SimpleNamespace(mean=np.ones((2, 1)))
+    malformed = SimpleNamespace(mean=np.ones((2, 1)), species_id=_SPECIES)
     with pytest.raises(ValueError, match="habitat.mean"):
         critical_habitat_exclusion(malformed, _listed(), suitability_cut=1.0)
 
