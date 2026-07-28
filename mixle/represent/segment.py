@@ -44,29 +44,42 @@ class ByteSegmenter(Segmenter):
             try:
                 data = memoryview(raw).tobytes()
             except TypeError:
-                raise TypeError(
-                    f"ByteSegmenter accepts str or a bytes-like buffer, got {type(raw).__name__}"
-                ) from None
+                raise TypeError(f"ByteSegmenter accepts str or a bytes-like buffer, got {type(raw).__name__}") from None
         return np.frombuffer(data, dtype=np.uint8).astype(np.int64)
 
 
 class ElementSegmenter(Segmenter):
     """A sequence of hashable symbols (chars, amino acids, k-mers, categories) -> ``(n,)`` ids via a fixed alphabet.
 
-    Given ``alphabet`` (the ordered symbols), each element maps to its index; unknown symbols map to ``0``. The
-    natural decomposition for proteins/genomes/any categorical sequence, and for characters (``alphabet=list(...)``).
+    Given ``alphabet`` (the ordered symbols), each element maps to its index. Out-of-vocabulary symbols map to
+    :attr:`unknown_id`, a state reserved *past* the declared alphabet (``len(alphabet)``), so ``num_categories`` is
+    ``len(alphabet) + 1``. Unknown symbols used to collapse onto id ``0``, which is already the first declared real
+    category -- an unseen residue/character/class then became positive evidence for a genuinely observed symbol.
+    The alphabet must also be unique: a repeated entry used to overwrite its own index while still inflating
+    ``num_categories``, leaving an id no symbol could ever produce.
+
+    The natural decomposition for proteins/genomes/any categorical sequence, and for characters
+    (``alphabet=list(...)``).
     """
 
     discrete = True
 
     def __init__(self, alphabet: list[Any]) -> None:
         self.alphabet = list(alphabet)
-        self.index = {s: i for i, s in enumerate(self.alphabet)}
-        self.num_categories = len(self.alphabet)
+        self.index: dict[Any, int] = {}
+        for i, symbol in enumerate(self.alphabet):
+            if symbol in self.index:
+                raise ValueError(
+                    f"ElementSegmenter requires a unique alphabet; {symbol!r} appears at both index "
+                    f"{self.index[symbol]} and {i}."
+                )
+            self.index[symbol] = i
+        self.unknown_id = len(self.alphabet)
+        self.num_categories = len(self.alphabet) + 1  # + the reserved out-of-vocabulary state
 
     def segment(self, raw: Any) -> np.ndarray:
-        """Map sequence elements through the fixed alphabet index."""
-        return np.asarray([self.index.get(s, 0) for s in raw], dtype=np.int64)
+        """Map sequence elements through the fixed alphabet index, unknowns to the reserved :attr:`unknown_id`."""
+        return np.asarray([self.index.get(s, self.unknown_id) for s in raw], dtype=np.int64)
 
 
 class PatchSegmenter(Segmenter):
