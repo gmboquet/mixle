@@ -114,7 +114,9 @@ def test_no_net_loss_constraint_payload_and_row_semantics():
     assert payload["lost_equivalents"] == pytest.approx(expected_lost)
     assert payload["required_offset"] == pytest.approx(offset_ratio * expected_lost)
     assert payload["per_cell_lost_equivalents"].shape == (N_BLOCKS,)
-    assert payload["sense"] == ">="
+    # MXR-080-1570: the row is emitted ALREADY normalized into <= form, so its label must say so.
+    # Labelling the normalized row ">=" made every downstream assembler negate it a second time.
+    assert payload["sense"] == "<="
     assert payload["variable"] == "offsets_created"
 
     # coeffs @ [offsets_created] <= bound must encode offsets_created >= required_offset
@@ -124,6 +126,35 @@ def test_no_net_loss_constraint_payload_and_row_semantics():
     assert bool(coeffs @ np.array([feasible_offsets]) <= bound + 1e-9)
     if required > 1e-6:
         assert not bool(coeffs @ np.array([infeasible_offsets]) <= bound + 1e-9)
+
+
+def test_no_net_loss_row_survives_the_j6_assembler_as_a_floor_not_a_ceiling():
+    """Regression (MXR-080-1570): exercise the payload through the SAME assembler production uses.
+
+    The pre-fix payload carried an already-normalized ``<=`` row labelled ``sense=">="``, so
+    ``hard_constraints`` (and ``risk_adjusted_plan``, which normalizes identically) negated it a second
+    time and turned the no-net-loss FLOOR into the CEILING ``offsets_created <= required_offset``:
+    buying zero offsets became feasible and buying more than the bare minimum became infeasible. The
+    older assertions above evaluated the RAW coefficients while separately asserting the contradictory
+    ``">="`` label, so they passed without ever exercising this integration.
+    """
+    from mixle.analysis.objective import hard_constraints
+
+    habitat = _habitat(_SUITABILITY, _AREA)
+    footprint = np.array([True, True, False, False, False, False, False, False])
+    payload = no_net_loss_constraint(footprint, habitat, offset_ratio=2.0)
+    required = payload["required_offset"]
+    assert required > 1e-6  # the case has to actually require something for this to mean anything
+
+    cap = hard_constraints(caps=[payload])["caps"][0]
+
+    def feasible(offsets_created: float) -> bool:
+        return bool(cap["coeffs"] @ np.array([offsets_created]) <= cap["bound"] + 1e-9)
+
+    assert not feasible(0.0)  # zero offsets must NOT satisfy a no-net-loss requirement
+    assert not feasible(required * 0.5)  # nor may falling short of it
+    assert feasible(required)  # meeting it exactly must be feasible
+    assert feasible(required * 2.0)  # and buying MORE offsets must never be forbidden
 
 
 def test_no_net_loss_constraint_zero_footprint_requires_nothing():

@@ -160,6 +160,7 @@ def _require_valid_terminals(sources: Sequence[int], sinks: Sequence[int], n: in
     Returns the de-duplicated, sorted node-index lists (a node repeated within one side is harmless --
     it is the same physical cell -- but must not appear on both sides).
     """
+
     def exact(values: Sequence[int], label: str) -> list[int]:
         indices: set[int] = set()
         for value in values:
@@ -289,14 +290,10 @@ def _conductance_edges(resistance: np.ndarray) -> tuple[int, list[tuple[int, int
             cost = _edge_cost(flat, node, nb)
             if np.isfinite(cost) and cost > 0.0:
                 if cost < 1.0 / np.finfo(np.float64).max:
-                    raise ValueError(
-                        f"resistance between cells {node} and {nb} implies unrepresentable conductance"
-                    )
+                    raise ValueError(f"resistance between cells {node} and {nb} implies unrepresentable conductance")
                 conductance = 1.0 / cost
                 if not np.isfinite(conductance):
-                    raise ValueError(
-                        f"resistance between cells {node} and {nb} implies unrepresentable conductance"
-                    )
+                    raise ValueError(f"resistance between cells {node} and {nb} implies unrepresentable conductance")
                 edges.append((node, nb, conductance))
     return n, edges
 
@@ -492,9 +489,7 @@ def _sparse_max_flow(
         while excess[node] > tolerance:
             arc_index = int(current[node])
             if arc_index >= len(graph[node]):
-                residual_heights = [
-                    int(height[arc.target]) for arc in graph[node] if arc.capacity > tolerance
-                ]
+                residual_heights = [int(height[arc.target]) for arc in graph[node] if arc.capacity > tolerance]
                 if not residual_heights:
                     break
                 height[node] = min(residual_heights) + 1
@@ -665,6 +660,15 @@ def no_net_loss_constraint(
     (and the ``offsets_created`` column it references) into the wider extraction/offset-purchase decision
     space is H4/J6's job -- this module never edits their MILP variable indexing, only hands them the row.
 
+    Because that row is emitted ALREADY normalized into the ``<=`` convention, its ``"sense"`` label is
+    ``"<="`` -- the label describes the row that is actually here, not the inequality the row expresses
+    about ``offsets_created``. It used to read ``">="`` (MXR-080-1570), which made the payload internally
+    contradictory: :func:`mixle.analysis.objective.hard_constraints` and
+    :func:`mixle.stochastic_opt.risk_adjusted_plan` both trust the label and negate a ``">="`` row into
+    ``<=`` form, so a second negation turned the no-net-loss FLOOR into the CEILING
+    ``offsets_created <= required_offset`` -- permitting zero offsets and forbidding any offset purchase
+    above the bare minimum, i.e. exactly the opposite of a no-net-loss guarantee.
+
     Raises:
         ValueError: if ``offset_ratio`` is negative or non-finite, or if ``_lost_equivalents`` rejects
             ``plan_footprint``/``habitat`` (NaN/negative suitability or area). A NaN or negative
@@ -680,7 +684,9 @@ def no_net_loss_constraint(
         "per_cell_lost_equivalents": per_cell,
         "required_offset": required,
         "variable": "offsets_created",
+        # already-normalized <= row (see docstring): labelling it ">=" made every downstream assembler
+        # negate it a second time and invert the constraint (MXR-080-1570).
         "coeffs": np.array([-1.0]),
         "bound": -required,
-        "sense": ">=",
+        "sense": "<=",
     }
