@@ -71,6 +71,23 @@ class ProposeBudgetTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             mixle.propose(_records(), timeout=-1.0)
 
+    def test_non_finite_timeout_is_rejected(self):
+        # MXR-080-1718: a NaN budget passed validation and then disabled every comparison against it
+        # (NaN compares false against everything), so "stop starting candidates after N seconds"
+        # silently became "no budget at all" -- the one budget value that fails open.
+        for bad in (float("nan"), float("inf")):
+            with self.subTest(timeout=bad):
+                with self.assertRaises(ValueError):
+                    mixle.propose(_records(), timeout=bad)
+
+    def test_timeout_gates_candidate_starts_not_work_already_running(self):
+        # MXR-080-1718 also read the timeout as an execution deadline. It is not one, and does not
+        # claim to be: the elapsed check runs before each candidate is started, and a candidate
+        # already fitting is never interrupted (nothing in the estimation stack is cancellable).
+        # Pin the documented wording so the contract cannot drift into implying a hard deadline.
+        doc = " ".join((mixle.propose.__doc__ or "").split())
+        self.assertIn("stop starting new candidate fits once this many wall-clock seconds have elapsed", doc)
+
     def test_out_of_range_holdout_is_rejected(self):
         for bad in (-0.5, 0.0, 1.0, 1.5):
             with self.assertRaises(ValueError):
