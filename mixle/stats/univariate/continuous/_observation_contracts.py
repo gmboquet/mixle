@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -38,3 +39,29 @@ def finite_observation(
     """Return one finite scalar observation within optional bounds."""
     result = finite_observations([value], label=label, minimum=minimum, maximum=maximum)
     return float(result[0])
+
+
+def scored_observation(value: Any, *, label: str, allow_infinite: bool = False) -> float:
+    """Return one scalar observation admitted by a scalar scorer's input policy.
+
+    A scalar scorer and its encoder must admit the same observations, otherwise a
+    caller sees a plausible score where a batch of the same data is refused. Every
+    continuous encoder rejects NaN, so NaN is rejected here as well: it is malformed
+    evidence rather than a point carrying zero density.
+
+    ``allow_infinite`` selects between the two per-law encoder policies. Families whose
+    encoder is :func:`finite_observations` reject infinities too and leave it ``False``;
+    families whose encoder documents "finite or infinite real-valued observations"
+    (Exponential, Gumbel, Laplace, Logistic, Uniform) pass ``True`` so an infinity keeps
+    scoring as the zero-density limit it already scores as through the encoded path.
+
+    The float coercion itself is intentionally permissive, matching the ``np.asarray``
+    coercion the encoders apply; only the finiteness policy is enforced here.
+    """
+
+    result = float(value)
+    if math.isnan(result):
+        raise ValueError(f"{label} rejects NaN observations.")
+    if not allow_infinite and math.isinf(result):
+        raise ValueError(f"{label} rejects infinite observations.")
+    return result

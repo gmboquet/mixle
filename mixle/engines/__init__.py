@@ -20,7 +20,7 @@ from mixle.engines.base import ComputeEngine
 from mixle.engines.error_tracing import Interval, float64_sum_is_accurate, sum_error_bound
 from mixle.engines.extended import DoubleDouble, dd_dot, dd_sum
 from mixle.engines.formats import CodebookFormat, FixedPointFormat, FloatFormat
-from mixle.engines.jax_engine import JaxEngine
+from mixle.engines.jax_engine import JaxEngine, jax_array_placement
 from mixle.engines.jax_engine import jax as _jax
 from mixle.engines.numpy_engine import FUSED_NUMPY_ENGINE, NUMPY_ENGINE, NumpyEngine
 from mixle.engines.precision import (
@@ -177,7 +177,11 @@ def _direct_engine(x: Any) -> ComputeEngine | None:
         # to the engine's default float policy for those instead of failing discovery. Mirrors the
         # torch.Tensor/DTensor branches above (MXR-080-0122).
         dt = x.dtype if np.issubdtype(x.dtype, np.floating) else None
-        return JaxEngine(dtype=dt)
+        # ...and, like those branches, carry the array's ACTUAL placement rather than letting the
+        # constructor resolve its default CPU device: without it every JAX array claimed CPU
+        # ownership however it was really placed, so _engines_compatible's device comparison could
+        # not distinguish a GPU/TPU array from a host one (MXR-080-1561).
+        return JaxEngine(device=jax_array_placement(x), dtype=dt)
     return engine
 
 
@@ -247,9 +251,7 @@ def _engine_of(x: Any, default: ComputeEngine | None, active_containers: set[int
             if found is None:
                 found = child_engine
             elif not _engines_compatible(found, child_engine):
-                raise TypeError(
-                    "mixed compute engines in encoded payload: %s and %s" % (found.name, child_engine.name)
-                )
+                raise TypeError("mixed compute engines in encoded payload: %s and %s" % (found.name, child_engine.name))
             elif not getattr(found, "dtype_explicit", True) and getattr(child_engine, "dtype_explicit", True):
                 found = child_engine  # prefer the more-opinionated (explicit-precision) engine
     finally:

@@ -8,6 +8,12 @@ scenarios.
 Non-graph models simulate from their baseline distribution. Interventions
 require the causal structure exposed by
 :class:`~mixle.inference.HeterogeneousBayesianNetwork`.
+
+Every draw count is an exact positive integer and every run returns exactly that
+many records: a Monte Carlo precision claim, an effect comparison, or a receipt
+that says ``n`` trials were run is only worth what the realized sample size is,
+so an underproducing generator raises :class:`IncompleteSimulationError` rather
+than silently shrinking the experiment.
 """
 
 from __future__ import annotations
@@ -16,6 +22,33 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
+
+
+class IncompleteSimulationError(RuntimeError):
+    """A generator produced a different number of records than the experiment requested.
+
+    ``records`` holds what it did produce and ``requested`` the size that was asked for, so a caller can
+    decide what to do with a short run instead of summarizing it as though it were the full one.
+    """
+
+    def __init__(self, message: str, records: list[Any], requested: int) -> None:
+        super().__init__(message)
+        self.records = records
+        self.requested = requested
+
+
+def _exact_draws(n: Any) -> int:
+    """``n`` as an exact positive integer draw count.
+
+    ``bool`` is rejected on purpose (``True`` would run a one-trial experiment), as are fractional counts
+    (``int(2.9)`` silently ran two) and non-positive ones (a zero-trial run summarizes to ``nan``).
+    """
+    if isinstance(n, bool) or not isinstance(n, (int, np.integer)):
+        raise TypeError(f"number of draws must be an exact integer, got {n!r}")
+    count = int(n)
+    if count < 1:
+        raise ValueError(f"number of draws must be positive, got {count}")
+    return count
 
 
 @dataclass
@@ -44,7 +77,13 @@ class Simulator:
     def run(
         self, n: int = 100, *, scenario: str | None = None, interventions: dict[int, Any] | None = None, seed: int = 0
     ) -> list[Any]:
-        """Generate ``n`` synthetic records under the baseline, a registered ``scenario``, or ad-hoc ``interventions``."""
+        """Generate exactly ``n`` synthetic records under the baseline, a registered ``scenario``, or ad-hoc
+        ``interventions``.
+
+        ``n`` must be an exact positive integer. Raises :class:`IncompleteSimulationError` if the underlying
+        generator yields a different number of records than requested.
+        """
+        draws = _exact_draws(n)
         iv = dict(interventions or {})
         if scenario is not None:
             if scenario not in self.scenarios:
@@ -56,13 +95,25 @@ class Simulator:
             from mixle.inference.causal import do
 
             gen = do(self.model, iv)
-            return list(gen.sample(int(n), seed=seed)) if _accepts_seed(gen.sample) else list(gen.sample(int(n)))
-        sampler = self.model.sampler(seed=seed)
-        out = sampler.sample(int(n))
-        return list(out) if not isinstance(out, list) else out
+            out = gen.sample(draws, seed=seed) if _accepts_seed(gen.sample) else gen.sample(draws)
+        else:
+            out = self.model.sampler(seed=seed).sample(draws)
+        rows = out if isinstance(out, list) else list(out)
+        if len(rows) != draws:
+            raise IncompleteSimulationError(
+                f"simulation requested {draws} records but the generator produced {len(rows)}; "
+                "an experiment size cannot be reported as run when it was not",
+                rows,
+                draws,
+            )
+        return rows
 
     def outcome_mean(self, field_index: int, *, scenario: str | None = None, n: int = 2000, seed: int = 0) -> float:
-        """The mean of a numeric field under a scenario -- the quantity to compare across conditions."""
+        """The mean of a numeric field over exactly ``n`` draws -- the quantity to compare across conditions.
+
+        The run is size-checked first (see :meth:`run`), so the returned mean is always over ``n``
+        observations rather than over however many the generator happened to yield.
+        """
         rows = self.run(n, scenario=scenario, seed=seed)
         return float(np.mean([float(r[field_index]) for r in rows]))
 

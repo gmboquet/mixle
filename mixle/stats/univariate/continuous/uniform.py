@@ -18,6 +18,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import scored_observation
 
 
 class UniformDistribution(SequenceEncodableProbabilityDistribution):
@@ -70,7 +71,8 @@ class UniformDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: float) -> float:
         """Return the log-density or log-mass at a single observation."""
-        return self.log_density_value if self.low <= x <= self.high else -np.inf
+        xx = scored_observation(x, label="UniformDistribution", allow_infinite=True)
+        return self.log_density_value if self.low <= xx <= self.high else -np.inf
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""

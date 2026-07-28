@@ -105,13 +105,46 @@ def _rows(inputs: list, labels: list | None):
         yield from zip(inputs, labels, strict=True)
 
 
-def _check(verify: Callable[..., bool], x: Any, y: Any) -> bool:
-    """Call the verifier with whichever arity it wants: ``verify(x)`` or ``verify(x, y)``."""
+_PROBE = object()  # a placeholder for signature binding; never reaches the callable
+
+
+def _accepts(fn: Callable[..., Any], n_args: int) -> bool | None:
+    """Whether ``fn`` accepts ``n_args`` positional arguments -- ``None`` when it has no signature.
+
+    Decided by :meth:`inspect.Signature.bind`, which resolves parameter *kind*: a keyword-only or
+    ``**kwargs`` parameter is not a positional slot, so counting ``parameters`` overstates the arity and
+    picks a call shape the callable rejects. Binding is a pure signature operation -- it never calls
+    ``fn``, so a source or verifier is not invoked speculatively just to discover its shape.
+    """
     try:
-        n = len(inspect.signature(verify).parameters)
+        signature = inspect.signature(fn)
     except (TypeError, ValueError):
-        n = 1
-    return bool(verify(x, y) if n >= 2 else verify(x))
+        return None
+    try:
+        signature.bind(*(_PROBE,) * n_args)
+    except TypeError:
+        return False
+    return True
+
+
+def _positional_arity(fn: Callable[..., Any], candidates: tuple[int, ...], role: str) -> int:
+    """The first arity in ``candidates`` (richest first) that ``fn`` can be called with."""
+    for n in candidates:
+        accepts = _accepts(fn, n)
+        if accepts is None:
+            # A builtin or C-implemented callable exposes no signature. Fall back to the minimum
+            # documented contract rather than guessing a richer one that would raise at call time.
+            return candidates[-1]
+        if accepts:
+            return n
+    shapes = " or ".join(f"{role}({', '.join(['_'] * n) or ''})" for n in candidates)
+    raise TypeError(f"{role} {fn!r} accepts none of the supported call shapes: {shapes}.")
+
+
+def _check(verify: Callable[..., bool], x: Any, y: Any) -> bool:
+    """Call the verifier with whichever arity it wants: ``verify(x, y)`` or ``verify(x)``."""
+    n = _positional_arity(verify, (2, 1), "verify")
+    return bool(verify(x, y) if n == 2 else verify(x))
 
 
 def _exact_count(value: Any, label: str) -> int:
@@ -128,11 +161,7 @@ def _draws(source: Any, n: int, real_inputs: list | None, seed: int) -> list:
     """Produce ``n`` candidate inputs from a model / real-input list / callable source."""
     if callable(source) and not hasattr(source, "sampler"):
         rng = np.random.RandomState(seed)
-        wants_rng = False
-        try:
-            wants_rng = len(inspect.signature(source).parameters) >= 1
-        except (TypeError, ValueError):
-            pass
+        wants_rng = _positional_arity(source, (1, 0), "source") == 1
         return [source(rng) if wants_rng else source() for _ in range(n)]
 
     if real_inputs is not None:

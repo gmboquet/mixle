@@ -33,7 +33,10 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.stats.univariate.continuous._observation_contracts import finite_observations
+from mixle.stats.univariate.continuous._observation_contracts import (
+    finite_observations,
+    scored_observation,
+)
 
 _XI_TOL = 1.0e-8  # |xi| below this is treated as the Gumbel limit
 _EULER = 0.5772156649015329
@@ -94,7 +97,7 @@ class GeneralizedExtremeValueDistribution(SequenceEncodableProbabilityDistributi
 
     def log_density(self, x: float) -> float:
         """Return the log-density at a single observation (``-inf`` outside the support)."""
-        z = (x - self.loc) / self.scale
+        z = (scored_observation(x, label="GEV observations") - self.loc) / self.scale
         if abs(self.shape) < _XI_TOL:
             return -self.log_scale - z - math.exp(-z)
         s = 1.0 + self.shape * z

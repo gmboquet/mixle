@@ -26,7 +26,10 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.univariate.continuous.beta import BetaDistribution
-from mixle.stats.univariate.discrete._count_contracts import exact_integer_observations
+from mixle.stats.univariate.discrete._count_contracts import (
+    CachedParameterLaw,
+    exact_integer_observations,
+)
 from mixle.utils.special import digamma
 
 
@@ -35,7 +38,7 @@ def _fisher_mean_var(dist):
     return 1.0 / p, (1.0 - p) / (p * p)
 
 
-class GeometricDistribution(SequenceEncodableProbabilityDistribution):
+class GeometricDistribution(CachedParameterLaw, SequenceEncodableProbabilityDistribution):
     """Geometric distribution on ``{1, 2, ...}`` with success probability ``p``."""
 
     @classmethod
@@ -125,14 +128,23 @@ class GeometricDistribution(SequenceEncodableProbabilityDistribution):
             name: Optional distribution name.
             keys: Optional key for merging sufficient statistics.
         """
-        if p <= 0.0 or p > 1.0 or not np.isfinite(p):
-            raise ValueError("GeometricDistribution requires p in (0, 1].")
-        self.p = float(p)
-        self.log_p = np.log(self.p)
-        self.log_1p = np.log1p(-self.p)
+        object.__setattr__(self, "p", p)
+        self._rebuild_parameter_caches()
+        self._parameter_caches_ready = True
         self.name = name
         self.keys = keys
         self.set_prior(prior)
+
+    _cached_parameters = ("p",)
+
+    def _rebuild_parameter_caches(self) -> None:
+        """Validate ``p`` and rebuild ``log_p`` and ``log_1p`` in one atomic step."""
+        p = self.p
+        if p <= 0.0 or p > 1.0 or not np.isfinite(p):
+            raise ValueError("GeometricDistribution requires p in (0, 1].")
+        object.__setattr__(self, "p", float(p))
+        object.__setattr__(self, "log_p", np.log(self.p))
+        object.__setattr__(self, "log_1p", np.log1p(-self.p))
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the geometric distribution."""

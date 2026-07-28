@@ -32,6 +32,7 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.univariate.continuous._observation_contracts import (
     finite_observation,
     finite_observations,
+    scored_observation,
 )
 
 
@@ -64,7 +65,7 @@ class NakagamiDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: float) -> float:
         """Return the log-density at ``x``, including the exact limit at zero."""
-        xv = float(x)
+        xv = scored_observation(x, label="Nakagami observations")
         if xv < 0.0:
             return -math.inf
         if xv == 0.0:

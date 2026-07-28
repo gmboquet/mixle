@@ -129,3 +129,50 @@ def test_a_non_scalar_step_does_not_corrupt_a_later_scalar_step():
     # steps 2/3 continue the alternation -- confirms it's not a one-off, order-dependent fluke
     assert f.lo[2] is None and isinstance(f.mean[2], list)
     assert isinstance(f.mean[3], float) and f.lo[3] is not None and f.hi[3] is not None
+
+
+def _one_state_hmm():
+    return HiddenMarkovModelDistribution([GaussianDistribution(4.5, 1.0)], [1.0], [[1.0]])
+
+
+def test_level_outside_the_unit_interval_is_rejected_not_returned_as_an_inverted_band():
+    # MXR-080-1608: only the horizon was checked. level=-0.5 makes the lower tail probability
+    # (1-level)/2 = 0.75 cross the upper one (0.25), so the "90% band" came back with lo above hi --
+    # returned as an ordinary Forecast, with `level` echoed back as if it meant something.
+    m = _one_state_hmm()
+    for bad in (-0.5, 0.0, 1.0, 1.5, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="level"):
+            forecast(m, [4.5, 4.5], horizon=1, level=bad, n=200)
+
+
+def test_draw_count_must_be_an_exact_positive_integer():
+    # n=0 first warned about an empty-slice mean and then raised an opaque IndexError partway
+    # through the loop; a fractional n silently produced a forecast off a coerced draw count.
+    m = _one_state_hmm()
+    for bad in (0, -3, 2.5, True, float("nan")):
+        with pytest.raises(ValueError, match="n must be"):
+            forecast(m, [4.5, 4.5], horizon=1, n=bad)
+
+
+def test_horizon_must_be_an_exact_positive_integer():
+    # `horizon < 1` is False for NaN (every NaN comparison is) and for 2.5, both of which then died
+    # inside range()/np.empty with a bare TypeError naming neither the argument nor forecast().
+    m = _one_state_hmm()
+    for bad in (0, -1, 2.5, True, float("nan")):
+        with pytest.raises(ValueError, match="horizon must be"):
+            forecast(m, [4.5, 4.5], horizon=bad, n=200)
+
+
+def test_empty_history_is_a_domain_error_not_an_internal_index_error():
+    # An otherwise valid HMM with an empty history failed inside the forward pass with
+    # "IndexError: index 0 is out of bounds for axis 1 with size 0".
+    m = _one_state_hmm()
+    with pytest.raises(ValueError, match="history"):
+        forecast(m, [], horizon=2, n=200)
+
+
+def test_valid_controls_still_produce_an_ordered_band():
+    m = _one_state_hmm()
+    f = forecast(m, [4.5, 4.5], horizon=3, level=0.9, n=2000, seed=0)
+    assert f.mean.shape == (3,)
+    assert bool((f.lo <= f.hi).all())

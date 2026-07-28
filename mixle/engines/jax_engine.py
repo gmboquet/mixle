@@ -106,6 +106,35 @@ def _resolve_jax_device(device: Any) -> Any:
     return available[idx]
 
 
+def jax_array_placement(x: Any) -> Any:
+    """The placement a concrete JAX array actually has, for engine discovery (MXR-080-1561).
+
+    ``mixle.engines.engine_of`` builds a :class:`JaxEngine` from a bare array. Passing no ``device``
+    made every JAX array -- wherever it really lived -- resolve to the default CPU device, so a GPU or
+    TPU array's ownership was relabeled as CPU and ``_engines_compatible``'s placement check (which
+    compares ``str(engine.device)``) could not tell two different devices apart. Recover the array's
+    own placement instead.
+
+    Returns whatever JAX reports: a single ``jax.Device`` for an ordinary array, or a ``Sharding`` for
+    a distributed one (both are accepted by ``jax.device_put``, and both stringify distinguishably).
+    ``None`` -- meaning "could not determine", so the caller keeps the previous default -- is returned
+    only when the object exposes neither accessor, which keeps discovery working against JAX versions
+    that name them differently rather than making placement a hard dependency.
+    """
+    try:
+        placement = getattr(x, "device", None)
+        if callable(placement):  # jax < 0.4.27 exposed `.device()` as a method, not a property
+            placement = placement()
+        if placement is None:
+            devices = getattr(x, "devices", None)
+            resolved = tuple(devices()) if callable(devices) else ()
+            # more than one device is a sharding this accessor cannot name; fall back to the default
+            placement = resolved[0] if len(resolved) == 1 else None
+    except (AttributeError, RuntimeError, TypeError, ValueError):  # pragma: no cover - version dependent
+        return None
+    return placement
+
+
 class JaxEngine(ComputeEngine):
     """JAX array engine: XLA-compiled ops, float64, optional ``jax.jit`` compilation, GPU/TPU via JAX."""
 

@@ -64,12 +64,26 @@ class DoubleDoubleArithmeticTest(unittest.TestCase):
         ulp = np.spacing(np.abs(value.hi))
         self.assertTrue(np.all(np.abs(value.lo) <= 0.5 * ulp))
 
-    def test_constructor_rejects_nonfinite_or_unrepresentable_components(self):
-        for bad in (float("nan"), float("inf"), float("-inf")):
-            with self.assertRaises(ValueError):
-                DoubleDouble(bad)
-        with self.assertRaises(OverflowError):
+    def test_constructor_rejects_nan_and_unrepresentable_components(self):
+        with self.assertRaises(ValueError):
+            DoubleDouble(float("nan"))
+        with self.assertRaises(ValueError):  # +inf and -inf together is indeterminate, not an infinity
+            DoubleDouble(float("inf"), float("-inf"))
+        with self.assertRaises(OverflowError):  # finite operands whose *sum* leaves float64's range
             DoubleDouble(1e308, 1e308)
+
+    def test_constructor_carries_infinities_exactly(self):
+        # An infinity that was already in the input is an exactly representable float64 value with no
+        # rounding error to carry -- and -inf specifically is the log-density of a zero-probability
+        # event, which the EM reductions in this module have to be able to represent.
+        for value in (float("inf"), float("-inf")):
+            dd = DoubleDouble(value)
+            self.assertEqual(float(dd.to_float()), value)
+            self.assertEqual(float(dd.lo), 0.0)
+        mixed = DoubleDouble(np.array([1.0, -np.inf, 3.0]), np.array([1e-20, 0.0, 1e-20]))
+        np.testing.assert_array_equal(mixed.hi, np.array([1.0, -np.inf, 3.0]))
+        self.assertEqual(float(mixed.lo[1]), 0.0)  # the infinite entry carries a zero residual...
+        self.assertEqual(float(mixed.lo[0]), 1e-20)  # ...without disturbing its finite neighbours
 
     def test_dd_mul_matches_mpmath_to_full_precision(self):
         rng = np.random.RandomState(2)
@@ -200,6 +214,93 @@ class DdDotValidationTest(unittest.TestCase):
                 r = dd_dot(np.array([1.0, 2.0, 3.0]), np.array([4.0, 5.0, 6.0]))
         stub.assert_called_once()
         self.assertEqual(float(r.to_float()), 32.0)
+
+
+class ReductionInputDomainTest(unittest.TestCase):
+    """The reductions' accepted input domain must match the one mixle's EM hot paths actually produce.
+
+    The module docstring says these exist for "log-sum-exp" in EM -- which is exactly where ``-inf``
+    (the log-density of a zero-probability event) and products that underflow to zero show up. Guards
+    that reject those reject the workload, and guards that live in only one of the two dd_dot dispatch
+    arms let the compiled and pure-numpy paths accept different inputs.
+    """
+
+    # Always exercise the pure-numpy fallback; add the compiled arm when one is actually built.
+    _DISPATCH = (False,) + ((True,) if HAS_DD_KERNELS else ())
+
+    def test_dd_sum_carries_a_zero_probability_log_density(self):
+        self.assertEqual(float(dd_sum([-np.inf, 1.0, 2.0]).to_float()), -np.inf)
+        self.assertEqual(float(dd_sum(np.full(4, -np.inf)).to_float()), -np.inf)
+        self.assertEqual(float(dd_sum([np.inf, 1.0]).to_float()), np.inf)
+
+    def test_dd_sum_still_fails_closed_where_there_is_no_sum(self):
+        with self.assertRaises(ValueError):  # NaN has no sum
+            dd_sum([np.nan, 1.0])
+        with self.assertRaises(ValueError):  # +inf - inf is indeterminate, not an infinity
+            dd_sum([np.inf, -np.inf])
+
+    def test_finite_dd_sum_is_untouched_by_the_infinite_short_circuit(self):
+        # Negative control: the short-circuit must not perturb the ordinary path's accuracy.
+        rng = np.random.RandomState(11)
+        x = rng.randn(4000) * 10.0 ** rng.randint(-12, 12, 4000)
+        with mpmath.workprec(400):
+            exact = mpmath.fsum(mpmath.mpf(float(v)) for v in x)
+        self.assertLess(abs(float(dd_sum(x).to_float()) - float(exact)), abs(float(exact)) * 1e-15 + 1e-300)
+
+    def test_one_underflowing_element_does_not_kill_the_dot_product(self):
+        # The audit's exact repro. 1e-200 * 1e-200 rounds to zero -- it is worth less than one smallest
+        # subnormal against the other term -- so the dot is 1.0, on both dispatch paths.
+        for available in self._DISPATCH:
+            with self.subTest(compiled=available):
+                with mock.patch("mixle.engines.extended.HAS_DD_KERNELS", available):
+                    self.assertEqual(float(dd_dot([1e-200, 1.0], [1e-200, 1.0]).to_float()), 1.0)
+
+    def test_two_prod_alone_still_fails_closed_on_underflow(self):
+        # A lone product has nothing to be negligible against: (0, 0) does not reproduce a*b, so the
+        # error-free transform must still refuse. Only the *reduction* gets to call it negligible.
+        with self.assertRaises(ArithmeticError):
+            two_prod(np.array([1e-200]), np.array([1e-200]))
+
+    def test_both_dispatch_paths_reject_the_same_inputs(self):
+        cases = {
+            "mismatched length": ((np.array([4.0]), np.array([1.0, 2.0, 3.0])), ValueError),
+            "non-finite operand": ((np.array([np.inf, 1.0]), np.array([1.0, 1.0])), ValueError),
+            "overflowing element": ((np.array([1e300, -1e300]), np.array([1e300, 1e300])), OverflowError),
+        }
+        for label, (args, expected) in cases.items():
+            for available in self._DISPATCH:
+                with self.subTest(case=label, compiled=available):
+                    with mock.patch("mixle.engines.extended.HAS_DD_KERNELS", available):
+                        with self.assertRaises(expected):
+                            dd_dot(*args)
+
+
+class DoubleDoubleCostModelTest(unittest.TestCase):
+    """The constructor is on the hot path -- every ``__add__`` and ``__mul__`` builds one -- so its
+    validation must not walk the data more times than it needs to. It used to make four full finiteness
+    passes (both inputs, then both normalized outputs) plus two defensive copies of arrays ``two_sum``
+    had just allocated. One pass over the normalized leading component subsumes all four: ``hi + lo`` is
+    non-finite whenever either input is, or the sum overflows.
+    """
+
+    def test_hot_path_makes_a_single_finiteness_pass(self):
+        hi = np.random.RandomState(0).randn(1000)
+        lo = np.zeros_like(hi)
+        with mock.patch("numpy.isfinite", wraps=np.isfinite) as spy:
+            DoubleDouble(hi, lo)
+        self.assertEqual(spy.call_count, 1)
+
+    def test_components_stay_owned_and_frozen_without_defensive_copies(self):
+        # Dropping the copies must not reintroduce aliasing: two_sum allocates its own results, so the
+        # value cannot be perturbed by a later write to the arrays it was built from.
+        hi = np.array([1.0, 2.0])
+        lo = np.array([1e-18, 2e-18])
+        value = DoubleDouble(hi, lo)
+        hi[:] = 99.0
+        lo[:] = 99.0
+        np.testing.assert_array_equal(value.hi, np.array([1.0, 2.0]))
+        self.assertFalse(value.hi.flags.writeable)
+        self.assertFalse(value.lo.flags.writeable)
 
 
 class SpeedVsOracleTest(unittest.TestCase):

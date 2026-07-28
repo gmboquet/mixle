@@ -18,7 +18,10 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.stats.univariate.continuous._observation_contracts import finite_observations
+from mixle.stats.univariate.continuous._observation_contracts import (
+    finite_observations,
+    scored_observation,
+)
 from mixle.utils.special import gammaln
 
 
@@ -88,7 +91,7 @@ class StudentTDistribution(SequenceEncodableProbabilityDistribution):
 
     def log_density(self, x: float) -> float:
         """Return the log-density or log-mass at a single observation."""
-        z = (x - self.loc) / self.scale
+        z = (scored_observation(x, label="Student-t observations") - self.loc) / self.scale
         return self.log_const - 0.5 * (self.df + 1.0) * math.log1p((z * z) / self.df)
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:

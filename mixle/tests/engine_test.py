@@ -1077,6 +1077,58 @@ class EngineTestCase(unittest.TestCase):
         self.assertEqual(eng64.dtype, np.dtype("float64"))
         self.assertTrue(eng64.dtype_explicit)
 
+    def test_jax_array_placement_reads_every_accessor_jax_versions_expose(self):
+        # Regression (MXR-080-1561): engine discovery built JaxEngine(dtype=...) with no device, so
+        # every JAX array resolved to the default CPU device regardless of where it really lived.
+        # This half needs no jax installed -- placement recovery is plain attribute access, and it
+        # must cope with the property (jax >= 0.4.27), the older method, and the devices() set.
+        from mixle.engines.jax_engine import jax_array_placement
+
+        class _Modern:
+            device = "gpu:1"
+
+        class _Legacy:
+            def device(self):
+                return "gpu:0"
+
+        class _DevicesOnly:
+            device = None
+
+            def devices(self):
+                return {"tpu:3"}
+
+        class _Sharded:
+            device = None
+
+            def devices(self):
+                return {"gpu:0", "gpu:1"}  # a sharding, not one device
+
+        class _NoAccessor:
+            pass
+
+        self.assertEqual(jax_array_placement(_Modern()), "gpu:1")
+        self.assertEqual(jax_array_placement(_Legacy()), "gpu:0")
+        self.assertEqual(jax_array_placement(_DevicesOnly()), "tpu:3")
+        # unknown placement falls back to the constructor default rather than guessing one device
+        self.assertIsNone(jax_array_placement(_Sharded()))
+        self.assertIsNone(jax_array_placement(_NoAccessor()))
+
+    @unittest.skipUnless(HAS_JAX, "jax is not installed")
+    def test_engine_of_jax_array_preserves_its_actual_device(self):
+        # Regression (MXR-080-1561): _direct_engine dropped the array's placement, so a GPU/TPU
+        # array was relabeled as the default CPU device and _engines_compatible (which compares
+        # str(engine.device)) could not tell two placements apart.
+        devices = jax.devices()
+        for device in devices:
+            arr = jax.device_put(jnp.array([1.0, 2.0], dtype=jnp.float32), device)
+            self.assertEqual(str(engine_of(arr).device), str(device))
+        if len(devices) < 2:
+            self.skipTest("only one JAX device available; no cross-device conflict to detect")
+        a = jax.device_put(jnp.array([1.0], dtype=jnp.float32), devices[0])
+        b = jax.device_put(jnp.array([1.0], dtype=jnp.float32), devices[1])
+        with self.assertRaises(TypeError):
+            engine_of((a, b))
+
     @unittest.skipUnless(HAS_JAX, "jax is not installed")
     def test_jax_engine_rejects_explicit_float64_when_x64_is_disabled(self):
         # Regression (MXR-080-1559): an explicit dtype="float64" was silently rewritten to float32

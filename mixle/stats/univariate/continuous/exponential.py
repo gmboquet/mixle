@@ -24,6 +24,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import scored_observation
 from mixle.stats.univariate.continuous.gamma import GammaDistribution
 from mixle.utils.special import digamma
 
@@ -203,10 +204,11 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
             Log-density evaluated at x.
 
         """
-        if x < 0:
+        xx = scored_observation(x, label="ExponentialDistribution", allow_infinite=True)
+        if xx < 0:
             return -inf
         else:
-            return -x / self.beta - self.log_beta
+            return -xx / self.beta - self.log_beta
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Vectorized evaluation of log-density at sequence encoded input x.

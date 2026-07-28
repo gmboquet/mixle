@@ -30,6 +30,7 @@ from mixle.stats.univariate.continuous._gaussian_contracts import (
     scalar_estimator_configuration,
     scalar_gaussian_moments,
 )
+from mixle.stats.univariate.continuous._observation_contracts import scored_observation
 from mixle.utils.special import digamma
 
 
@@ -265,9 +266,10 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
             Log-density at observation x.
 
         """
-        if x <= 0.0:
+        xx = scored_observation(x, label="LogGaussianDistribution")
+        if xx <= 0.0:
             return -np.inf
-        y = np.log(x)
+        y = np.log(xx)
         return self.log_const - 0.5 * (y - self.mu) ** 2 / self.sigma2 - y
 
     def seq_ld_lambda(self) -> list[Callable]:
@@ -724,7 +726,9 @@ class LogGaussianEstimator(ParameterEstimator):
 
         pc1, pc2 = self.pseudo_count
         prior_mean, prior_variance = self.suff_stat
-        if pc1 not in (None, 0.0):
+        # A mean pseudo-count is only usable when its prior mean was supplied; unpaired counts
+        # mean "no pseudo-observations" and fall through to the plain maximum-likelihood mean.
+        if pc1 not in (None, 0.0) and prior_mean is not None:
             mu = (log_x + pc1 * prior_mean) / (count + pc1)
         elif count > 0.0:
             mu = log_x / count

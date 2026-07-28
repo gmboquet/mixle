@@ -4,6 +4,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 
 from mixle.capability_lifecycle import (
+    SCHEMA_VERSION,
     AuthorizationDecision,
     AuthorizationOutcome,
     AuthorizationStatus,
@@ -124,6 +125,35 @@ class CapabilityLifecycleContractTest(unittest.TestCase):
                 scopes=frozenset({"run"}),
                 decided_at=T0,
             )
+
+    def test_records_declare_a_schema_version_and_refuse_a_foreign_one(self):
+        # MXR-080-1726: no record carried a schema version, so a foreign reading of the same
+        # JSON was indistinguishable from a native one.
+        decision = AuthorizationDecision(
+            decision_id="auth-1",
+            capability=self.identity,
+            outcome=AuthorizationOutcome.GRANTED,
+            issued_by="safety-board",
+            scopes=frozenset({"sandbox"}),
+            decided_at=T0,
+        )
+        lifecycle = CapabilityLifecycle(self.identity, authorization=decision, updated_at=T0)
+        for record in (self.identity.as_dict(), decision.as_dict(), lifecycle.as_dict()):
+            self.assertEqual(record["schema_version"], SCHEMA_VERSION)
+
+        loaders = (
+            (CapabilityIdentity.from_dict, self.identity.as_dict()),
+            (AuthorizationDecision.from_dict, decision.as_dict()),
+            (CapabilityLifecycle.from_dict, lifecycle.as_dict()),
+        )
+        for load, record in loaders:
+            foreign = dict(record)
+            foreign["schema_version"] = "mixle.capability-lifecycle/v99"
+            with self.assertRaisesRegex(ValueError, "unsupported"):
+                load(foreign)
+            # Records persisted before the version was emitted still read as v1.
+            legacy = {key: item for key, item in record.items() if key != "schema_version"}
+            self.assertIsNotNone(load(legacy))
 
     def test_capability_digest_must_be_a_recomputable_cryptographic_digest(self):
         # MXR-080-1724: any non-empty text used to pass as the "integrity digest" of an artifact,

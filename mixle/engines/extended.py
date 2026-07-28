@@ -62,20 +62,17 @@ def _split(a: Any) -> tuple[Any, Any]:
     return hi, lo
 
 
-def two_prod(a: Any, b: Any) -> tuple[Any, Any]:
-    """Error-free transformation of a product: ``(p, e)`` with ``a * b == p + e`` exactly (Dekker).
+def _product_and_residual(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Elementwise ``(p, e)`` with ``a * b == p + e`` exactly, for already-validated finite operands.
 
-    Uses the Veltkamp split because numpy exposes no fused-multiply-add. Vectorized.
+    Overflow fails closed here because an exact product past ``float64``'s range cannot be represented
+    in *any* pair of doubles. Underflow deliberately is not decided here: whether a product that rounds
+    to zero matters depends on what the caller does with it (see :func:`two_prod` versus :func:`dd_dot`).
     """
-    a, b = np.broadcast_arrays(np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64))
-    if (a.size and not np.all(np.isfinite(a))) or (b.size and not np.all(np.isfinite(b))):
-        raise ValueError("two_prod requires finite inputs")
     with np.errstate(over="ignore", under="ignore", invalid="ignore"):
         p = a * b
     if p.size and not np.all(np.isfinite(p)):
         raise OverflowError("double-double product overflowed float64")
-    if p.size and np.any((a != 0) & (b != 0) & (p == 0)):
-        raise ArithmeticError("double-double product underflow cannot be represented")
     ahi, alo = _split(a)
     bhi, blo = _split(b)
     with np.errstate(over="ignore", under="ignore", invalid="ignore"):
@@ -85,31 +82,73 @@ def two_prod(a: Any, b: Any) -> tuple[Any, Any]:
     return p, e
 
 
+def two_prod(a: Any, b: Any) -> tuple[Any, Any]:
+    """Error-free transformation of a product: ``(p, e)`` with ``a * b == p + e`` exactly (Dekker).
+
+    Uses the Veltkamp split because numpy exposes no fused-multiply-add. Vectorized.
+
+    A product of two non-zero operands that underflows all the way to zero fails closed: this
+    transform's contract is that ``p + e`` reproduces ``a * b`` exactly, and ``(0, 0)`` does not. A
+    *reduction* over many such products is a different question -- see :func:`dd_dot`.
+    """
+    a, b = np.broadcast_arrays(np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64))
+    if (a.size and not np.all(np.isfinite(a))) or (b.size and not np.all(np.isfinite(b))):
+        raise ValueError("two_prod requires finite inputs")
+    p, e = _product_and_residual(a, b)
+    if p.size and np.any((a != 0) & (b != 0) & (p == 0)):
+        raise ArithmeticError("double-double product underflow cannot be represented")
+    return p, e
+
+
+def _resolve_nonfinite(
+    hi_arr: np.ndarray, lo_arr: np.ndarray, s: np.ndarray, e: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Classify a normalization whose leading component came out non-finite, and either return the
+    representable ``(hi, lo)`` or fail closed. Off the hot path: reached only when the single finiteness
+    check in :meth:`DoubleDouble.__init__` has already tripped.
+
+    An infinity that was *already* in the input is a legitimate exactly-representable ``float64`` value
+    -- it is the log-density of a zero-probability event, the very thing this module's reductions exist
+    to carry through log-sum-exp -- and it pairs with a zero rounding error. An infinity that appeared
+    during normalization is an overflow of finite operands, and a NaN (including ``+inf`` paired with
+    ``-inf``) is not a number at all; both of those still fail closed.
+    """
+    if np.any(np.isnan(s)):
+        raise ValueError("DoubleDouble components must not be NaN, and +inf cannot be paired with -inf")
+    infinite = np.isinf(s)
+    if np.any(infinite & ~(np.isinf(hi_arr) | np.isinf(lo_arr))):
+        raise OverflowError("DoubleDouble components cannot be normalized to a finite value")
+    return np.array(s, dtype=np.float64), np.where(infinite, 0.0, e).astype(np.float64, copy=False)
+
+
 class DoubleDouble:
     """An (almost) ~106-bit float as two non-overlapping ``float64`` arrays ``hi + lo``.
 
-    Scalars or numpy arrays; operations broadcast. The invariant is ``|lo| <= 0.5 * ulp(hi)``.
+    Scalars or numpy arrays; operations broadcast. The invariant is ``|lo| <= 0.5 * ulp(hi)``. A
+    component may be ``+inf`` or ``-inf`` -- exactly representable in ``float64``, carried with
+    ``lo == 0`` -- but never NaN, and never an overflow of finite operands.
     """
 
     __slots__ = ("hi", "lo")
 
     def __init__(self, hi: Any, lo: Any = 0.0) -> None:
-        hi_arr, lo_arr = np.broadcast_arrays(
-            np.asarray(hi, dtype=np.float64),
-            np.asarray(lo, dtype=np.float64),
-        )
-        if (hi_arr.size and not np.all(np.isfinite(hi_arr))) or (
-            lo_arr.size and not np.all(np.isfinite(lo_arr))
-        ):
-            raise ValueError("DoubleDouble components must be finite")
+        # One finiteness pass, on the normalized leading component only. That single check subsumes the
+        # four this used to run (two over the inputs, two over the outputs): ``s = hi + lo`` is
+        # non-finite whenever either input is non-finite *or* the sum overflows, and TwoSum's residual
+        # is provably representable whenever its inputs and its sum are all finite. Everything else is
+        # deferred to _resolve_nonfinite, which only runs when that check trips -- this constructor is
+        # on the hot path, called by every __add__ and __mul__.
+        hi_arr = np.asarray(hi, dtype=np.float64)
+        lo_arr = np.asarray(lo, dtype=np.float64)
         with np.errstate(over="ignore", invalid="ignore"):
-            normalized_hi, normalized_lo = two_sum(hi_arr, lo_arr)
-        if (normalized_hi.size and not np.all(np.isfinite(normalized_hi))) or (
-            normalized_lo.size and not np.all(np.isfinite(normalized_lo))
-        ):
-            raise OverflowError("DoubleDouble components cannot be normalized to a finite value")
-        owned_hi = np.array(normalized_hi, dtype=np.float64, copy=True)
-        owned_lo = np.array(normalized_lo, dtype=np.float64, copy=True)
+            s, e = two_sum(hi_arr, lo_arr)
+        # two_sum allocates both of its results, so they are already this object's own storage rather
+        # than a view onto the caller's arrays; asarray here only re-wraps the 0-d scalar case, and no
+        # defensive copy is needed to keep a later mutation of the caller's array out of this value.
+        owned_hi = np.asarray(s, dtype=np.float64)
+        owned_lo = np.asarray(e, dtype=np.float64)
+        if owned_hi.size and not np.all(np.isfinite(owned_hi)):
+            owned_hi, owned_lo = _resolve_nonfinite(hi_arr, lo_arr, owned_hi, owned_lo)
         owned_hi.setflags(write=False)
         owned_lo.setflags(write=False)
         self.hi = owned_hi
@@ -145,6 +184,23 @@ class DoubleDouble:
         return "DoubleDouble(hi=%r, lo=%r)" % (self.hi, self.lo)
 
 
+def _infinite_sum(x: np.ndarray) -> DoubleDouble:
+    """The sum of an input containing an infinity -- or a hard failure when there is no such sum.
+
+    ``-inf`` is the log-density of a zero-probability event, and this module exists for mixle's EM hot
+    paths (log-sum-exp), which is precisely where it shows up; rejecting it rejected the inputs the
+    reduction was written to serve. The sum of a set containing ``-inf`` and no ``+inf`` *is* ``-inf``:
+    an exactly representable ``float64`` with a zero rounding error, not an error condition. NaN has no
+    sum, and ``+inf`` together with ``-inf`` is genuinely indeterminate; both still fail closed.
+    """
+    if np.any(np.isnan(x)):
+        raise ValueError("dd_sum requires inputs free of NaN")
+    positive = bool(np.any(np.isposinf(x)))
+    if positive and bool(np.any(np.isneginf(x))):
+        raise ValueError("dd_sum cannot sum both +inf and -inf: the result is indeterminate")
+    return DoubleDouble(np.float64(np.inf if positive else -np.inf), np.float64(0.0))
+
+
 def dd_sum(x: Any) -> DoubleDouble:
     """Accurate sum of a ``float64`` array in double-double precision -- vectorized, no Python loop
     over elements.
@@ -152,12 +208,17 @@ def dd_sum(x: Any) -> DoubleDouble:
     Pairwise tree reduction with an error-free :func:`two_sum` combine at every node: ``O(n)`` work in
     ``O(log n)`` vectorized passes, accumulating the rounding error into the ``lo`` component. The result
     is correct to ~106 bits even for catastrophically cancelling inputs that ``float64`` sums get wrong.
+
+    An infinite term short-circuits to the IEEE answer (``-inf`` for a zero-probability log-density)
+    instead of raising; NaN, and ``+inf`` mixed with ``-inf``, still fail closed -- see
+    :func:`_infinite_sum`.
     """
-    hi = np.asarray(x, dtype=np.float64).ravel().copy()
-    if hi.size and not np.all(np.isfinite(hi)):
-        raise ValueError("dd_sum requires finite inputs")
+    hi = np.asarray(x, dtype=np.float64).ravel()
     if hi.size == 0:
         return DoubleDouble(0.0, 0.0)
+    if not np.all(np.isfinite(hi)):
+        return _infinite_sum(hi)
+    hi = hi.copy()
     lo = np.zeros_like(hi)
     while hi.size > 1:
         if hi.size % 2 == 1:  # carry the odd tail element unchanged into the next level
@@ -203,13 +264,20 @@ def dd_dot(a: Any, b: Any) -> DoubleDouble:
     """Accurate dot product ``sum(a_i * b_i)`` in double-double precision.
 
     Uses the compiled hardware-FMA kernel when available (one ``fma`` per element, ~3x faster than the
-    pure-numpy Veltkamp-split path and bit-for-bit identical); otherwise each product is split error-free
-    by :func:`two_prod` and the products + errors are summed by :func:`dd_sum`. Defeats the cancellation
-    that wrecks a naive ``float64`` dot.
+    pure-numpy Veltkamp-split path, and exactly as accurate -- each product's error is exact either way,
+    though the two paths accumulate in different orders, sequential versus pairwise tree, so their
+    results agree to double-double precision rather than bit for bit). Otherwise each product is split
+    error-free by :func:`_product_and_residual` and the products + errors are summed by :func:`dd_sum`.
+    Defeats the cancellation that wrecks a naive ``float64`` dot.
 
-    Raises ``ValueError`` if ``a`` and ``b`` don't have the same flattened length (see
-    :func:`_require_equal_length`) -- checked once up front so it applies identically regardless of which
-    implementation ends up running.
+    Every check that decides whether an *input* is acceptable is made once, before dispatch, so the two
+    implementations cannot drift apart on what they accept: equal length (see
+    :func:`_require_equal_length`, ``ValueError``), finite operands (``ValueError``), and a result that
+    is representable at all (``OverflowError``). A single product that underflows to zero is *not* one
+    of them: it contributes less than one smallest-subnormal to the sum, so it is summed as the zero it
+    rounds to rather than failing the whole reduction -- ``dd_dot([1e-200, 1.0], [1e-200, 1.0])`` is
+    ``1.0``, which is the right answer, not an error. (:func:`two_prod` on its own still fails closed
+    there, because a lone product has nothing to be negligible against.)
     """
     a = np.ascontiguousarray(np.asarray(a, dtype=np.float64).ravel())
     b = np.ascontiguousarray(np.asarray(b, dtype=np.float64).ravel())
@@ -217,7 +285,14 @@ def dd_dot(a: Any, b: Any) -> DoubleDouble:
     if (a.size and not np.all(np.isfinite(a))) or (b.size and not np.all(np.isfinite(b))):
         raise ValueError("dd_dot requires finite inputs")
     if HAS_DD_KERNELS:
-        hi, lo = _dd_dot_c(a, b)
-        return DoubleDouble(np.float64(hi), np.float64(lo))
-    p, e = two_prod(a, b)
-    return dd_sum(np.concatenate([p, e]))
+        raw_hi, raw_lo = _dd_dot_c(a, b)
+        hi, lo = np.float64(raw_hi), np.float64(raw_lo)
+    else:
+        p, e = _product_and_residual(a, b)
+        total = dd_sum(np.concatenate([p, e]))
+        hi, lo = total.hi, total.lo
+    if not (np.all(np.isfinite(hi)) and np.all(np.isfinite(lo))):
+        # The numpy path fails closed inside the error-free transform; the compiled kernel's
+        # accumulator carries the same failure out as a non-finite (hi, lo). Same outcome either way.
+        raise OverflowError("double-double dot product overflowed float64")
+    return DoubleDouble(hi, lo)
