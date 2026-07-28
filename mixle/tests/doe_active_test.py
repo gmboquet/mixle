@@ -158,6 +158,12 @@ class LinearEigValidationTest(unittest.TestCase):
         self.assertTrue(np.isfinite(value))
         self.assertGreaterEqual(value, 0.0)
 
+    def test_rejects_nonfinite_or_overflowing_model_matrix(self):
+        with self.assertRaisesRegex(ValueError, "model_matrix"):
+            expected_information_gain_linear([[np.nan]], noise=1.0)
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            expected_information_gain_linear([[1e308]], noise=1.0)
+
     def test_small_p_large_n_matches_manual_computation_with_a_non_diagonal_prior_cov(self):
         # Regression guard for the fix itself: Sigma0 @ (F^T F) is not symmetric in general (unlike
         # F Sigma0 F^T is), so naively Cholesky-factoring it would silently read only one triangle and
@@ -253,6 +259,30 @@ class NmcEigValidationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             expected_information_gain_nmc(self._good_sampler, bad_loglik, self._simulate, n_outer=3, n_inner=6, seed=0)
 
+    def test_rejects_transposed_inner_likelihood_batch(self):
+        def transposed_loglik(thetas, y):
+            values = self._loglik(thetas, y)
+            return values if len(values) == 1 else values[None, :]
+
+        with self.assertRaisesRegex(ValueError, "shape"):
+            expected_information_gain_nmc(
+                self._good_sampler, transposed_loglik, self._simulate, n_outer=2, n_inner=4, seed=0
+            )
+
+    def test_rejects_finite_likelihoods_whose_difference_overflows(self):
+        calls = 0
+
+        def extreme_loglik(thetas, y):
+            nonlocal calls
+            calls += 1
+            value = 1e308 if calls % 2 == 1 else -1e308
+            return np.full(len(thetas), value)
+
+        with self.assertRaisesRegex(ValueError, "term"):
+            expected_information_gain_nmc(
+                self._good_sampler, extreme_loglik, self._simulate, n_outer=2, n_inner=3, seed=0
+            )
+
     def test_rejects_non_finite_true_log_density(self):
         def nan_loglik(thetas, y):
             thetas = np.atleast_2d(thetas)
@@ -312,14 +342,14 @@ class NmcEigValidationTest(unittest.TestCase):
         point = expected_information_gain_nmc(prior, loglik, sim, n_outer=4000, n_inner=4000, seed=0)
         self.assertEqual(point, est.value)
 
-    def test_single_outer_replicate_reports_nan_standard_error_not_a_crash(self):
+    def test_single_outer_replicate_reports_unavailable_uncertainty_not_nan(self):
         est = expected_information_gain_nmc_estimate(
             self._good_sampler, self._loglik, self._simulate, n_outer=1, n_inner=4, seed=0
         )
         self.assertTrue(np.isfinite(est.value))
-        self.assertTrue(np.isnan(est.standard_error))
-        self.assertTrue(np.isnan(est.ci_low))
-        self.assertTrue(np.isnan(est.ci_high))
+        self.assertIsNone(est.standard_error)
+        self.assertIsNone(est.ci_low)
+        self.assertIsNone(est.ci_high)
 
 
 @unittest.skipUnless(HAS_TORCH, "GP surrogate requires torch")
@@ -384,6 +414,21 @@ class ActiveLearningBudgetValidationTest(unittest.TestCase):
         # 3 dims -> default n_init = 2*3 = 6, which must itself fit within max_evals.
         with self.assertRaises(ValueError):
             active_learning_design(lambda x: float(np.sum(x)), [(-1.0, 1.0)] * 3, max_evals=4, seed=0)
+
+    def test_nonfinite_objective_is_failed_evidence_not_a_design_response(self):
+        for invalid in (np.nan, np.inf, -np.inf):
+            result = active_learning_design(
+                lambda _x, value=invalid: value,
+                [(-1.0, 1.0)],
+                n_init=1,
+                max_evals=1,
+                seed=0,
+            )
+            self.assertEqual(result["X"].shape, (0, 1))
+            self.assertEqual(result["Y"].shape, (0,))
+            self.assertEqual(result["n_evaluations"], 1)
+            self.assertEqual(len(result["failed_evaluations"]), 1)
+            self.assertEqual(result["stopped_reason"], "objective_failed")
 
     def test_propose_active_learning_rejects_fractional_n_candidates(self):
         rng = np.random.RandomState(0)
@@ -468,6 +513,22 @@ class AlcAlmScoresValidationTest(unittest.TestCase):
         gp = _StubGP(np.empty((0, 0)))
         with self.assertRaises(ValueError):
             alm_scores(gp, None, None, np.empty((0, 1)))
+
+    def test_alm_rejects_wrong_shape_negative_and_asymmetric_covariance(self):
+        malformed = (
+            np.eye(3),
+            np.diag([1.0, -1.0]),
+            np.array([[1.0, 0.2], [0.0, 1.0]]),
+        )
+        for covariance in malformed:
+            with self.assertRaises(ValueError):
+                alm_scores(_StubGP(covariance), None, None, np.zeros((2, 1)))
+
+    def test_alc_rejects_negative_candidate_variance(self):
+        covariance = np.eye(3)
+        covariance[2, 2] = -1.0
+        with self.assertRaisesRegex(ValueError, "positive-semidefinite"):
+            alc_scores(_StubGP(covariance), None, None, np.zeros((1, 1)), np.zeros((2, 1)))
 
     def test_alc_scores_rejects_non_finite_merits(self):
         n_ref, n_cand = 2, 3

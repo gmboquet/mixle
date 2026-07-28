@@ -59,13 +59,64 @@ def _reject_if_not_psd(eigvals: np.ndarray, p: int) -> None:
         raise ValueError(f"prior_cov must be positive-semidefinite; smallest eigenvalue is {eigvals[0]:.6g}.")
 
 
+def _validated_posterior(
+    gp: Any,
+    x: np.ndarray,
+    y: np.ndarray,
+    points: np.ndarray,
+    *,
+    label: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return a certified finite posterior mean and covariance for exactly ``points``."""
+    mean_raw, cov_raw = gp.predict(x, y, points, return_cov=True)
+    n = points.shape[0]
+    mean = np.asarray(mean_raw, dtype=np.float64)
+    if mean.shape == (n, 1):
+        mean = mean[:, 0]
+    elif mean.shape != (n,):
+        raise ValueError(f"{label} posterior mean must have shape ({n},) or ({n}, 1), got {mean.shape}.")
+    if not np.all(np.isfinite(mean)):
+        raise ValueError(f"{label} posterior mean must be finite.")
+    cov = np.asarray(cov_raw, dtype=np.float64)
+    if cov.shape != (n, n):
+        raise ValueError(f"{label} posterior covariance must have shape ({n}, {n}), got {cov.shape}.")
+    if not np.all(np.isfinite(cov)):
+        raise ValueError(f"{label} posterior covariance must be finite.")
+    scale = max(float(np.linalg.norm(cov, ord=np.inf)), np.finfo(np.float64).tiny)
+    tolerance = 64.0 * np.finfo(np.float64).eps * scale * max(n, 1)
+    asymmetry = float(np.linalg.norm(cov - cov.T, ord=np.inf))
+    if asymmetry > tolerance:
+        raise ValueError(
+            f"{label} posterior covariance must be symmetric within {tolerance:.6g}; "
+            f"asymmetry is {asymmetry:.6g}."
+        )
+    cov = 0.5 * (cov + cov.T)
+    eigvals = np.linalg.eigvalsh(cov)
+    if eigvals[0] < -tolerance:
+        raise ValueError(
+            f"{label} posterior covariance must be positive-semidefinite; "
+            f"smallest eigenvalue is {eigvals[0]:.6g}."
+        )
+    if eigvals[0] < 0.0:
+        eigvecs = np.linalg.eigh(cov)[1]
+        cov = (eigvecs * np.clip(eigvals, 0.0, None)) @ eigvecs.T
+    return mean, cov
+
+
+def _as_point_set(values: Any, name: str) -> np.ndarray:
+    points = np.asarray(values, dtype=np.float64)
+    if points.ndim != 2 or points.shape[0] == 0 or points.shape[1] == 0:
+        raise ValueError(f"{name} must be a non-empty 2-D array, got shape {points.shape}.")
+    if not np.all(np.isfinite(points)):
+        raise ValueError(f"{name} must contain only finite values.")
+    return points
+
+
 def alm_scores(gp: Any, x: np.ndarray, y: np.ndarray, candidates: np.ndarray) -> np.ndarray:
     """Active Learning MacKay scores: the GP posterior predictive variance at each candidate."""
-    candidates = np.asarray(candidates)
-    if candidates.shape[0] == 0:
-        raise ValueError("alm_scores requires a nonempty candidates set.")
-    _, cov = gp.predict(x, y, candidates, return_cov=True)
-    scores = np.clip(np.diag(np.atleast_2d(np.asarray(cov, dtype=np.float64))), 0.0, None)
+    candidates = _as_point_set(candidates, "candidates")
+    _, cov = _validated_posterior(gp, x, y, candidates, label="ALM")
+    scores = np.maximum(np.diag(cov), 0.0)
     if not np.all(np.isfinite(scores)):
         raise ValueError("alm_scores produced non-finite merits; check the surrogate's covariance prediction.")
     return scores
@@ -78,23 +129,21 @@ def alc_scores(gp: Any, x: np.ndarray, y: np.ndarray, candidates: np.ndarray, re
     ``cov_post(r, c)^2 / var_post(c)``; this returns the sum over the reference set (the negative change
     in integrated MSE), so the maximizer is the most globally informative next point.
     """
-    candidates = np.asarray(candidates)
-    reference = np.asarray(reference)
-    if reference.shape[0] == 0:
+    candidates = _as_point_set(candidates, "candidates")
+    reference = _as_point_set(reference, "reference")
+    if candidates.shape[1] != reference.shape[1]:
         raise ValueError(
-            "alc_scores requires a nonempty reference set (an empty reference collapses every merit to "
-            "zero -- an integral over nothing -- making the subsequent argmax pick an arbitrary "
-            "candidate instead of an informative one)."
+            f"candidates and reference must have the same width, got {candidates.shape[1]} and {reference.shape[1]}."
         )
-    if candidates.shape[0] == 0:
-        raise ValueError("alc_scores requires a nonempty candidates set.")
     pts = np.vstack([reference, candidates])
     nr = reference.shape[0]
-    _, cov = gp.predict(x, y, pts, return_cov=True)
-    cov = np.atleast_2d(np.asarray(cov, dtype=np.float64))
+    _, cov = _validated_posterior(gp, x, y, pts, label="ALC")
     cov_rc = cov[:nr, nr:]  # (n_ref, n_cand) posterior cov between reference and candidates
-    var_c = np.clip(np.diag(cov)[nr:], 1e-12, None)
-    scores = np.asarray((cov_rc**2).sum(axis=0) / var_c)
+    var_c = np.maximum(np.diag(cov)[nr:], 0.0)
+    scores = np.zeros(candidates.shape[0], dtype=np.float64)
+    informative = var_c > 0.0
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        scores[informative] = (cov_rc[:, informative] ** 2).sum(axis=0) / var_c[informative]
     if not np.all(np.isfinite(scores)):
         raise ValueError("alc_scores produced non-finite merits; check the surrogate's covariance prediction.")
     return scores
@@ -168,13 +217,54 @@ def active_learning_design(
             "evaluate over budget. Pass an explicit n_init <= max_evals (n_init defaults to "
             "2 * len(bounds) when omitted, which must also fit within max_evals)."
         )
-    x_all = latin_hypercube(b, n_init, rng)
-    y_all = np.array([float(objective(np.asarray(p, dtype=np.float64))) for p in x_all], dtype=np.float64)
-    while y_all.shape[0] < max_evals:
+    x_rows: list[np.ndarray] = []
+    y_values: list[float] = []
+    failed_evaluations: list[dict[str, Any]] = []
+    n_evaluations = 0
+
+    def evaluate(point: np.ndarray) -> float | None:
+        nonlocal n_evaluations
+        candidate = np.array(point, dtype=np.float64, copy=True)
+        n_evaluations += 1
+        value = float(objective(candidate.copy()))
+        if not np.isfinite(value):
+            failed_evaluations.append(
+                {
+                    "evaluation": n_evaluations,
+                    "x": candidate,
+                    "status": "nonfinite_observation",
+                    "observation": value,
+                }
+            )
+            return None
+        return value
+
+    def result(stopped_reason: str) -> dict[str, Any]:
+        return {
+            "X": np.asarray(x_rows, dtype=np.float64).reshape(-1, d),
+            "Y": np.asarray(y_values, dtype=np.float64),
+            "n_evaluations": n_evaluations,
+            "failed_evaluations": tuple(failed_evaluations),
+            "stopped_reason": stopped_reason,
+        }
+
+    for point in latin_hypercube(b, n_init, rng):
+        value = evaluate(point)
+        if value is None:
+            return result("objective_failed")
+        x_rows.append(np.array(point, dtype=np.float64, copy=True))
+        y_values.append(value)
+
+    while n_evaluations < max_evals:
+        x_all = np.asarray(x_rows, dtype=np.float64)
+        y_all = np.asarray(y_values, dtype=np.float64)
         xn = propose_active_learning(x_all, y_all, b, method=method, seed=rng, fit_kwargs=fit_kwargs)
-        x_all = np.vstack([x_all, xn])
-        y_all = np.append(y_all, float(objective(np.asarray(xn, dtype=np.float64))))
-    return {"X": x_all, "Y": y_all}
+        value = evaluate(xn)
+        if value is None:
+            return result("objective_failed")
+        x_rows.append(np.array(xn, dtype=np.float64, copy=True))
+        y_values.append(value)
+    return result("budget_exhausted")
 
 
 def expected_information_gain_linear(
@@ -215,7 +305,11 @@ def expected_information_gain_linear(
     f = np.asarray(model_matrix, dtype=np.float64)
     if f.ndim != 2:
         raise ValueError(f"model_matrix must be a 2-D (n, p) array, got shape {f.shape}.")
+    if not np.all(np.isfinite(f)):
+        raise ValueError("model_matrix must contain only finite values.")
     n, p = f.shape
+    if isinstance(noise, (bool, np.bool_)):
+        raise TypeError("noise must be a finite positive real number, got bool.")
     noise = float(noise)
     if not np.isfinite(noise) or noise <= 0.0:
         raise ValueError(f"noise must be finite and strictly positive, got {noise!r}.")
@@ -229,24 +323,47 @@ def expected_information_gain_linear(
             )
         if not np.all(np.isfinite(sigma0)):
             raise ValueError("prior_cov must be finite.")
-        if not np.allclose(sigma0, sigma0.T):
-            raise ValueError("prior_cov must be symmetric (it is a covariance matrix).")
+        covariance_scale = (
+            max(float(np.linalg.norm(sigma0, ord=np.inf)), np.finfo(np.float64).tiny)
+            if sigma0.size
+            else np.finfo(np.float64).tiny
+        )
+        covariance_tolerance = 64.0 * np.finfo(np.float64).eps * covariance_scale * max(p, 1)
+        if float(np.linalg.norm(sigma0 - sigma0.T, ord=np.inf)) > covariance_tolerance:
+            raise ValueError("prior_cov must be symmetric within floating-point roundoff.")
+        sigma0 = 0.5 * (sigma0 + sigma0.T)
 
-    if n <= p:
-        # F Sigma0 F^T is symmetric regardless of Sigma0's own factorization, so only Sigma0's
-        # eigenvalues are needed here -- never its eigenvectors, which matters because this is exactly
-        # the large-p regime this branch exists to avoid p-scale work in.
-        if p > 0:
-            _reject_if_not_psd(np.linalg.eigvalsh(sigma0), p)
-        m = np.eye(n) + (f @ sigma0 @ f.T) / (noise**2)
-    else:
-        if p > 0:
-            eigvals, eigvecs = np.linalg.eigh(sigma0)
-            _reject_if_not_psd(eigvals, p)
-            sigma0_half = (eigvecs * np.sqrt(np.clip(eigvals, 0.0, None))) @ eigvecs.T
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore", under="ignore"):
+        inv_noise_sq = np.square(1.0 / noise)
+        if not np.isfinite(inv_noise_sq):
+            raise ValueError("noise is too small to form finite information evidence.")
+        if n <= p:
+            # F Sigma0 F^T is symmetric regardless of Sigma0's own factorization, so only Sigma0's
+            # eigenvalues are needed here -- never its eigenvectors, which matters because this is exactly
+            # the large-p regime this branch exists to avoid p-scale work in.
+            if p > 0:
+                _reject_if_not_psd(np.linalg.eigvalsh(sigma0), p)
+            m = np.eye(n) + (f @ sigma0 @ f.T) * inv_noise_sq
         else:
-            sigma0_half = sigma0
-        m = np.eye(p) + (sigma0_half @ (f.T @ f) @ sigma0_half) / (noise**2)
+            if p > 0:
+                eigvals, eigvecs = np.linalg.eigh(sigma0)
+                _reject_if_not_psd(eigvals, p)
+                sigma0_half = (eigvecs * np.sqrt(np.clip(eigvals, 0.0, None))) @ eigvecs.T
+            else:
+                sigma0_half = sigma0
+            m = np.eye(p) + (sigma0_half @ (f.T @ f) @ sigma0_half) * inv_noise_sq
+
+    if not np.all(np.isfinite(m)):
+        raise ValueError("linear information matrix became non-finite from the supplied finite inputs.")
+    matrix_scale = (
+        max(float(np.linalg.norm(m, ord=np.inf)), np.finfo(np.float64).tiny)
+        if m.size
+        else np.finfo(np.float64).tiny
+    )
+    matrix_tolerance = 64.0 * np.finfo(np.float64).eps * matrix_scale * max(m.shape[0], 1)
+    if m.size and float(np.linalg.norm(m - m.T, ord=np.inf)) > matrix_tolerance:
+        raise ValueError("linear information matrix is not symmetric within floating-point roundoff.")
+    m = 0.5 * (m + m.T)
 
     try:
         chol = np.linalg.cholesky(m)
@@ -256,8 +373,16 @@ def expected_information_gain_linear(
             "noise > 0 and prior_cov is positive-semidefinite -- check model_matrix for non-finite or "
             "extreme entries."
         ) from exc
-    logdet = 2.0 * float(np.sum(np.log(np.diag(chol))))
-    return 0.5 * logdet
+    if not np.all(np.isfinite(chol)) or np.any(np.diag(chol) <= 0.0):
+        raise ValueError("linear information Cholesky factor is not finite and strictly positive.")
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        logdet = 2.0 * float(np.sum(np.log(np.diag(chol))))
+        result = 0.5 * logdet
+    if not np.isfinite(result):
+        raise ValueError("expected information gain became non-finite.")
+    if result < -64.0 * np.finfo(np.float64).eps * max(abs(result), 1.0):
+        raise ValueError(f"expected information gain must be non-negative, got {result!r}.")
+    return max(result, 0.0)
 
 
 class ExpectedInformationGainEstimate(NamedTuple):
@@ -266,7 +391,7 @@ class ExpectedInformationGainEstimate(NamedTuple):
     ``value`` is the point estimate: the mean, over ``n_outer`` independent outer replicates, of
     ``log p(y_i|theta_i) - log E_theta'[p(y_i|theta')]`` (Ryan 2003). ``standard_error`` is the Monte
     Carlo standard error of that mean (the outer replicates' sample standard deviation / ``sqrt(n_outer)``;
-    ``nan`` when ``n_outer == 1``, since a single replicate carries no information about its own spread).
+    ``None`` when ``n_outer == 1``, since a single replicate carries no information about its own spread).
     ``ci_low``/``ci_high`` are an approximate two-sided 95% confidence interval (``value +- 1.96 *
     standard_error``) -- a normal approximation to the outer average that does not capture the *inner*
     estimate's own (asymptotically vanishing, but nonzero at finite ``n_inner``) bias; increase
@@ -275,9 +400,9 @@ class ExpectedInformationGainEstimate(NamedTuple):
     """
 
     value: float
-    standard_error: float
-    ci_low: float
-    ci_high: float
+    standard_error: float | None
+    ci_low: float | None
+    ci_high: float | None
     n_outer: int
     n_inner: int
 
@@ -330,11 +455,11 @@ def expected_information_gain_nmc_estimate(
         if not np.all(np.isfinite(y_i)):
             raise ValueError(f"simulate returned a non-finite observation at outer draw {i}.")
 
-        ll_true_arr = np.atleast_1d(np.asarray(log_likelihood(theta_i[None, :], y_i), dtype=np.float64))
-        if ll_true_arr.size != 1:
+        ll_true_arr = np.asarray(log_likelihood(theta_i[None, :], y_i), dtype=np.float64)
+        if ll_true_arr.shape != (1,):
             raise ValueError(
-                "log_likelihood(theta[None, :], y) must return exactly 1 log-density, got "
-                f"{ll_true_arr.size} (outer draw {i})."
+                "log_likelihood(theta[None, :], y) must return shape (1,), got "
+                f"{ll_true_arr.shape} (outer draw {i})."
             )
         ll_true = float(ll_true_arr[0])
         if not np.isfinite(ll_true):
@@ -349,24 +474,54 @@ def expected_information_gain_nmc_estimate(
         if not np.all(np.isfinite(thetas_inner)):
             raise ValueError(f"prior_sampler returned non-finite inner draws at outer draw {i}.")
 
-        ll_inner = np.asarray(log_likelihood(thetas_inner, y_i), dtype=np.float64).ravel()
-        if ll_inner.size != n_inner:
+        ll_inner = np.asarray(log_likelihood(thetas_inner, y_i), dtype=np.float64)
+        if ll_inner.shape != (n_inner,):
             raise ValueError(
-                f"log_likelihood(thetas, y) must return exactly {n_inner} log-densities (one per inner "
-                f"draw), got {ll_inner.size} (outer draw {i})."
+                f"log_likelihood(thetas, y) must return shape ({n_inner},) (one density per inner "
+                f"draw), got {ll_inner.shape} (outer draw {i})."
             )
         if not np.all(np.isfinite(ll_inner)):
             raise ValueError(f"log_likelihood returned non-finite log-densities at outer draw {i}.")
 
         log_evidence = float(np.logaddexp.reduce(ll_inner) - np.log(n_inner))
-        terms[i] = ll_true - log_evidence
+        if not np.isfinite(log_evidence):
+            raise ValueError(f"derived log evidence is non-finite at outer draw {i}.")
+        with np.errstate(over="ignore", invalid="ignore"):
+            term = ll_true - log_evidence
+        if not np.isfinite(term):
+            raise ValueError(f"derived information-gain term is non-finite at outer draw {i}.")
+        terms[i] = term
 
-    value = float(np.sum(terms) / n_outer)
-    standard_error = float(np.std(terms, ddof=1) / np.sqrt(n_outer)) if n_outer > 1 else float("nan")
-    if np.isfinite(standard_error):
-        ci_low, ci_high = value - _EIG_CI95_Z * standard_error, value + _EIG_CI95_Z * standard_error
+    scale = float(np.max(np.abs(terms)))
+    if scale == 0.0:
+        value = 0.0
     else:
-        ci_low, ci_high = float("nan"), float("nan")
+        value = float(scale * np.mean(terms / scale))
+    if not np.isfinite(value):
+        raise ValueError("nested-Monte-Carlo expected information gain is non-finite.")
+    if n_outer > 1:
+        deviations = terms - value
+        deviation_scale = float(np.max(np.abs(deviations)))
+        if deviation_scale == 0.0:
+            standard_error = 0.0
+        else:
+            with np.errstate(over="ignore", invalid="ignore"):
+                standard_error = float(
+                    deviation_scale
+                    * np.sqrt(np.sum(np.square(deviations / deviation_scale)) / (n_outer - 1))
+                    / np.sqrt(n_outer)
+                )
+        if not np.isfinite(standard_error):
+            raise ValueError("nested-Monte-Carlo standard error is non-finite.")
+        with np.errstate(over="ignore", invalid="ignore"):
+            ci_low = value - _EIG_CI95_Z * standard_error
+            ci_high = value + _EIG_CI95_Z * standard_error
+        if not np.isfinite(ci_low) or not np.isfinite(ci_high):
+            raise ValueError("nested-Monte-Carlo confidence interval is non-finite.")
+    else:
+        standard_error = None
+        ci_low = None
+        ci_high = None
     return ExpectedInformationGainEstimate(
         value=value,
         standard_error=standard_error,
