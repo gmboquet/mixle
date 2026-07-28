@@ -30,7 +30,14 @@ INIT_ALPHA = np.array([2.0, 1.5, 3.0])
 ROW_ALPHAS = [np.array([1.0, 4.0, 2.0]), np.array([3.0, 1.0, 1.5]), np.array([2.0, 2.0, 2.0])]
 
 INIT_COUNTS = np.array([5.0, 2.0, 3.0])
-TRANS_COUNTS = np.array([[4.0, 2.0, 1.0], [0.0, 6.0, 3.0], [2.0, 1.0, 5.0]])
+# A coherent HMM sufficient statistic: occupancy of a state is the mass that starts there plus the
+# mass that transitions into it, so state_counts == init_counts + column sums of trans_counts, and
+# state_counts.sum() == init_counts.sum() + trans_counts.sum(). The estimator enforces that identity.
+# Column sums here are [10, 13, 12], giving [5, 2, 3] + [10, 13, 12] == [15, 15, 15]; the row sums
+# [12, 11, 12] fall short of the occupancies by 10 in total, which is the mass ending a sequence and
+# matches the 10 sequences in init_counts. The zero entry is retained to keep a zero-count
+# transition in the Dirichlet-posterior assertions.
+TRANS_COUNTS = np.array([[4.0, 5.0, 3.0], [0.0, 6.0, 5.0], [6.0, 2.0, 4.0]])
 STATE_COUNTS = np.array([15.0, 15.0, 15.0])
 
 W = np.array([0.2, 0.3, 0.5])
