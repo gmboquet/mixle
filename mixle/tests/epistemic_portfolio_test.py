@@ -132,6 +132,62 @@ class SurpriseScoreTest(unittest.TestCase):
         self.assertLess(central, 0.8)
 
 
+class WeightImmutabilityTest(unittest.TestCase):
+    """MXR-080-1744: constructor checks run once, so validated weights must not stay writable."""
+
+    def test_public_weights_cannot_be_mutated_in_place(self):
+        portfolio = HypothesisPortfolio([Hypothesis("a", None), Hypothesis("b", None)], np.array([0.5, 0.5]))
+        with self.assertRaises(ValueError):
+            portfolio.weights[:] = [2.0, -1.0]
+        self.assertTrue(np.allclose(portfolio.weights, [0.5, 0.5]))
+
+    def test_mutating_the_callers_array_does_not_change_the_portfolio(self):
+        weights = np.array([0.5, 0.5])
+        portfolio = HypothesisPortfolio([Hypothesis("a", None), Hypothesis("b", None)], weights)
+        weights[:] = [2.0, -1.0]
+        self.assertTrue(np.allclose(portfolio.weights, [0.5, 0.5]))
+        self.assertAlmostEqual(float(portfolio.weights.sum()) + portfolio.w_open, 1.0, places=12)
+
+    def test_derived_portfolios_are_still_constructible_and_frozen(self):
+        # Every mutating method rebuilds weights, so freezing must not break the update path.
+        portfolio = _toy_portfolio(w_open=0.05).reweight(2.0, _gaussian_likelihood).prune(min_weight=0.01)
+        self.assertFalse(portfolio.weights.flags.writeable)
+        self.assertAlmostEqual(float(portfolio.weights.sum()) + portfolio.w_open, 1.0, places=10)
+        self.assertTrue(portfolio.weights.copy().flags.writeable)  # scratch copies still work
+
+
+class LikelihoodDomainTest(unittest.TestCase):
+    """MXR-080-1745: invalid likelihoods must fail closed, not become plausible belief/surprise."""
+
+    def test_negative_likelihood_is_not_reinterpreted_as_no_support(self):
+        portfolio = HypothesisPortfolio([Hypothesis("a", None), Hypothesis("b", None)], np.array([0.5, 0.5]))
+        with self.assertRaises(ValueError):
+            portfolio.reweight("o", lambda h, o: -1.0)
+
+    def test_negative_open_world_likelihood_is_rejected(self):
+        portfolio = _toy_portfolio(w_open=0.1)
+        with self.assertRaises(ValueError):
+            portfolio.reweight(1.0, _gaussian_likelihood, open_world_likelihood=lambda o: -1.0)
+
+    def test_zero_likelihood_remains_legitimate(self):
+        # The documented all-mass-to-w_open outcome must survive the new validation.
+        result = _toy_portfolio(w_open=0.1).reweight(1e9, lambda h, o: 0.0, open_world_likelihood=lambda o: 0.0)
+        self.assertEqual(result.w_open, 1.0)
+
+    def test_surprise_score_refuses_out_of_range_producing_likelihoods(self):
+        portfolio = _toy_portfolio()
+        for bad in (-1.0, -2.0, float("nan"), float("inf")):
+            with self.subTest(likelihood=bad), self.assertRaises(ValueError):
+                portfolio.surprise_score("o", lambda h, o, v=bad: v)
+
+    def test_surprise_score_stays_in_range_for_valid_likelihoods(self):
+        portfolio = _toy_portfolio()
+        for good in (0.0, 1e-12, 1.0, 1e6):
+            score = portfolio.surprise_score("o", lambda h, o, v=good: v)
+            self.assertGreaterEqual(score, 0.0)
+            self.assertLess(score, 1.0 + 1e-12)
+
+
 class SerializationRoundTripTest(unittest.TestCase):
     def test_to_dict_from_dict_round_trips_exactly(self):
         portfolio = _toy_portfolio(w_open=0.1).prune(min_weight=0.5)
