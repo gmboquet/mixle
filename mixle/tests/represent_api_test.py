@@ -1,5 +1,7 @@
 """fit_embedder / Embedder: one-call embeddings + retrieval over raw heterogeneous data."""
 
+import json
+import pathlib
 import tempfile
 import unittest
 
@@ -195,6 +197,104 @@ class EmbedderCorpusOwnershipTest(unittest.TestCase):
     def test_corpus_vectors_stay_unit_normalized(self):
         norms = np.linalg.norm(self.emb.corpus_vectors, axis=1)
         np.testing.assert_allclose(norms, np.ones_like(norms), atol=1e-5)
+
+
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class EmbedderArtifactManifestTest(unittest.TestCase):
+    """MXR-080-1786: the manifest must describe AND protect the artifact it ships with.
+
+    Save used to write a pickle and a separate manifest non-atomically with no digest, and load
+    ignored the manifest completely, so stale, swapped, partially written or tampered state loaded
+    happily under an unrelated description.
+    """
+
+    def _fit(self, dim=4, seed=0, n=12):
+        from mixle.represent import fit_embedder
+
+        return fit_embedder(_records(n, seed=seed), dim=dim, epochs=5, seed=seed)
+
+    def _envelope(self, path):
+        from mixle.represent.api import _ARTIFACT_NAME
+
+        return pathlib.Path(path) / _ARTIFACT_NAME
+
+    def test_round_trip_preserves_the_fitted_state(self):
+        from mixle.represent import Embedder
+
+        with tempfile.TemporaryDirectory() as d:
+            emb = self._fit()
+            back = Embedder.load(emb.save(d + "/emb"), trust_code=True)
+            self.assertEqual(back.kind, emb.kind)
+            np.testing.assert_allclose(back.corpus_vectors, emb.corpus_vectors, atol=1e-6)
+
+    def test_a_swapped_body_cannot_load_under_another_manifest(self):
+        from mixle.represent import Embedder
+
+        with tempfile.TemporaryDirectory() as d:
+            four = self._fit(dim=4, seed=0).save(d + "/a")
+            six = self._fit(dim=6, seed=1).save(d + "/b")
+            # graft b's whole envelope body under a's manifest line
+            a_bytes = self._envelope(four).read_bytes()
+            b_bytes = self._envelope(six).read_bytes()
+            head = a_bytes[: a_bytes.index(b"\n", len(b"MIXLEEMB2\n")) + 1]
+            tail = b_bytes[b_bytes.index(b"\n", len(b"MIXLEEMB2\n")) + 1 :]
+            self._envelope(four).write_bytes(head + tail)
+            with self.assertRaises(ValueError):
+                Embedder.load(four, trust_code=True)
+
+    def test_a_tampered_manifest_field_is_rejected(self):
+        from mixle.represent import Embedder
+
+        with tempfile.TemporaryDirectory() as d:
+            path = self._fit(dim=4).save(d + "/emb")
+            raw = self._envelope(path).read_bytes()
+            self._envelope(path).write_bytes(raw.replace(b'"dim":4', b'"dim":8', 1))
+            with self.assertRaises(ValueError):
+                Embedder.load(path, trust_code=True)
+
+    def test_a_truncated_artifact_is_rejected_before_unpickling(self):
+        from mixle.represent import Embedder
+
+        with tempfile.TemporaryDirectory() as d:
+            path = self._fit().save(d + "/emb")
+            env = self._envelope(path)
+            env.write_bytes(env.read_bytes()[:-32])
+            with self.assertRaises(ValueError):
+                Embedder.load(path, trust_code=True)
+
+    def test_a_foreign_payload_under_a_valid_digest_is_rejected(self):
+        import pickle
+
+        from mixle.represent import Embedder
+        from mixle.represent.api import _ARTIFACT_ID, _ARTIFACT_MAGIC, _envelope_digest
+
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d) / "emb"
+            root.mkdir()
+            body = pickle.dumps({"featurizer": None, "result": None, "kind": "nope", "corpus_vectors": "not an array"})
+            manifest = {"mixle_artifact": _ARTIFACT_ID, "kind": "record", "dim": 4, "n_corpus": 12, "created_at": 0.0}
+            meta = {"digest": _envelope_digest(manifest, body), **manifest}
+            self._envelope(root).write_bytes(
+                _ARTIFACT_MAGIC + json.dumps(meta, sort_keys=True, separators=(",", ":")).encode() + b"\n" + body
+            )
+            with self.assertRaises(ValueError):
+                Embedder.load(root, trust_code=True)
+
+    def test_a_legacy_unbound_artifact_is_named_not_silently_loaded(self):
+        from mixle.represent import Embedder
+
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d) / "emb"
+            root.mkdir()
+            (root / "embedder.pkl").write_bytes(b"anything")
+            (root / "manifest.json").write_text('{"mixle_artifact": "represent.Embedder/v1"}')
+            with self.assertRaisesRegex(ValueError, "legacy"):
+                Embedder.load(root, trust_code=True)
+
+    def test_save_leaves_no_partial_artifact_behind(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(self._fit().save(d + "/emb"))
+            self.assertEqual([p.name for p in path.iterdir()], ["embedder.mixle"])
 
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
