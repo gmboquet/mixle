@@ -450,6 +450,51 @@ def test_posterior_dependencies_must_close_and_stay_acyclic():
     assert {v.id for v in ok.values} == {"source-rate", "a", "b", "c"}
 
 
+# MXR-080-1710: each ObservationSpec embeds a likelihood and PosteriorArtifact embeds a second
+# top-level one; only the observation-ID set was checked to close, never that the two models agreed.
+def test_a_posterior_cannot_assert_two_contradictory_likelihoods_for_one_observation():
+    _, value, likelihood, observation = _fixture_contracts()
+    uncertainty = (UncertaintyComponent("u", UncertaintyKind.EPISTEMIC, "variance", value=1.0),)
+    poisson = dataclasses.replace(likelihood, family="poisson")
+    contradicting = dataclasses.replace(observation, likelihood=poisson)
+
+    with pytest.raises(ValueError, match="different likelihood"):
+        PosteriorArtifact("p", (value,), (contradicting,), likelihood, "method", 1, {"mean": 1.0}, uncertainty)
+    # parameters and the discrepancy reference are part of the evidence model too
+    with pytest.raises(ValueError, match="different likelihood"):
+        PosteriorArtifact(
+            "p",
+            (value,),
+            (dataclasses.replace(observation, likelihood=dataclasses.replace(likelihood, parameters={"sigma": 9.0})),),
+            likelihood,
+            "method",
+            1,
+            {"mean": 1.0},
+            uncertainty,
+        )
+    # negative control: the fixture's own consistent pair still builds
+    assert _posterior().likelihood.family == "normal"
+
+
+# MXR-080-1712: units were checked only for truthiness and never reconciled along the
+# value/prior/observation chain.
+def test_a_prior_must_be_stated_in_its_values_unit():
+    kilograms = PriorSpec("p", "normal", {"mu": 0.0}, unit="kg")
+    with pytest.raises(ValueError, match="prior declares"):
+        ValueSpec("length", ValueRole.FREE, "m", prior=kilograms)
+    metres = PriorSpec("p", "normal", {"mu": 0.0}, unit="m")
+    assert ValueSpec("length", ValueRole.FREE, "m", prior=metres).prior.unit == "m"
+
+
+def test_an_observation_must_measure_its_value_in_that_values_unit():
+    _, value, likelihood, observation = _fixture_contracts()
+    uncertainty = (UncertaintyComponent("u", UncertaintyKind.EPISTEMIC, "variance", value=1.0),)
+    seconds = dataclasses.replace(observation, unit="s")  # the value is kg/s
+    with pytest.raises(ValueError, match="stated in 's'"):
+        PosteriorArtifact("p", (value,), (seconds,), likelihood, "method", 1, {"mean": 1.0}, uncertainty)
+    assert _posterior().observations[0].unit == "kg/s"  # the matching pair still builds
+
+
 def test_a_genuinely_different_record_still_gets_a_different_identity():
     # negative control: freezing the digest must not make every record look identical
     a = PriorSpec("p", "normal", {"mu": 0})
