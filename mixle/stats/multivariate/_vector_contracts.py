@@ -177,12 +177,14 @@ def require_pseudo_moments(
     prior_mean: np.ndarray | None,
     prior_covar: np.ndarray | None,
 ) -> None:
-    if counts[0] not in (None, 0.0) and prior_mean is None:
-        raise ValueError("a positive Gaussian mean pseudo-count requires a finite prior mean")
-    if counts[1] not in (None, 0.0) and (prior_mean is None or prior_covar is None):
-        raise ValueError(
-            "a positive Gaussian covariance pseudo-count requires a finite prior mean and valid prior covariance"
-        )
+    # An unpaired pseudo-count is not an error, it just contributes nothing: the mean and
+    # covariance estimators each fall through to the plain maximum-likelihood quantity when their
+    # prior is absent, exactly as the univariate family documents and does. Rejecting construction
+    # here instead broke the cross-family contract that a scalar ``pseudo_count`` is accepted by
+    # every tuple-arity estimator, and it rejected a configuration whose prior can still be
+    # supplied later through ``set_prior``. The real defect the raise was standing in for -- the
+    # estimator evaluating ``pseudo_count * None`` -- is fixed at the use sites themselves.
+    del counts, prior_mean, prior_covar
 
 
 def pooled_gaussian_covariance(
@@ -209,8 +211,9 @@ def pooled_gaussian_covariance(
         if np.any(observed_scatter < -1.0e-6 * scale):
             raise ValueError("Gaussian sufficient statistics imply a negative centered second moment")
         observed_scatter = np.maximum(observed_scatter, 0.0)
-        if pseudo_count not in (None, 0.0):
-            prior_scatter = pseudo_count * (prior_covar + (prior_mean - mean) ** 2)
+        if pseudo_count not in (None, 0.0) and prior_covar is not None:
+            offset = 0.0 if prior_mean is None else (prior_mean - mean) ** 2
+            prior_scatter = pseudo_count * (prior_covar + offset)
             return (observed_scatter + prior_scatter) / (count + pseudo_count)
     else:
         observed_scatter = sum_xx - np.outer(mean, sum_x) - np.outer(sum_x, mean) + count * np.outer(mean, mean)
@@ -224,9 +227,9 @@ def pooled_gaussian_covariance(
         )
         if eigenvalues[0] < -1.0e-6 * scale:
             raise ValueError("Gaussian sufficient statistics imply a non-positive-semidefinite scatter")
-        if pseudo_count not in (None, 0.0):
-            delta = prior_mean - mean
-            prior_scatter = pseudo_count * (prior_covar + np.outer(delta, delta))
+        if pseudo_count not in (None, 0.0) and prior_covar is not None:
+            offset = 0.0 if prior_mean is None else np.outer(prior_mean - mean, prior_mean - mean)
+            prior_scatter = pseudo_count * (prior_covar + offset)
             return (observed_scatter + prior_scatter) / (count + pseudo_count)
     if count == 0.0:
         return np.zeros_like(sum_xx)
