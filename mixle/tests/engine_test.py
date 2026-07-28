@@ -148,6 +148,24 @@ class EngineTestCase(unittest.TestCase):
             np.sum(np.arange(24, dtype=float).reshape(2, 3, 4), axis=(0, 2), keepdims=True),
         )
 
+    def test_symbolic_cumsum_rejects_unsupported_arguments_instead_of_dropping_them(self):
+        # Regression (MXR-080-1567): cumsum was a lambda taking *args/**kwargs and forwarding only
+        # `axis`, so dtype=, out=, and any unknown argument were silently discarded.
+        engine = SymbolicEngine()
+        arr = engine.asarray([[1.0, 2.0], [3.0, 4.0]])
+        with self.assertRaises(NotImplementedError):
+            engine.cumsum(arr, dtype=np.float32)
+        with self.assertRaises(NotImplementedError):
+            engine.cumsum(arr, out=np.empty(4))
+        with self.assertRaises(TypeError):
+            engine.cumsum(arr, bogus_argument=1)
+        # the supported arguments still behave exactly as np.cumsum defines them
+        raw = np.asarray([[1.0, 2.0], [3.0, 4.0]])
+        flat = engine.cumsum(arr)
+        np.testing.assert_allclose(self._eval_all(engine, flat), np.cumsum(raw))
+        by_axis = engine.cumsum(arr, axis=1)
+        np.testing.assert_allclose(self._eval_all(engine, by_axis), np.cumsum(raw, axis=1))
+
     def test_symbolic_tuple_reduction_normalizes_negative_axes_against_original_rank(self):
         # Regression (MXR-080-1566): the tuple fold sorted the RAW axes and reduced them
         # sequentially, so a negative axis resolved against the already-shrunken rank. Reducing

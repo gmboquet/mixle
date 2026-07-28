@@ -415,11 +415,36 @@ class SymbolicEngine(ComputeEngine):
     isinf = staticmethod(lambda x: _elementwise_call("isinf", x))
     dot = staticmethod(lambda x, y: np.dot(_sym_array(x), _sym_array(y)))
     matmul = staticmethod(lambda x, y: np.matmul(_sym_array(x), _sym_array(y)))
-    cumsum = staticmethod(lambda x, axis=None, *args, **kwargs: np.cumsum(_sym_array(x), axis=axis))
     bincount = staticmethod(lambda x, *args, **kwargs: SymbolicExpression.call("bincount", x))
     unique = staticmethod(lambda x, *args, **kwargs: SymbolicExpression.call("unique", x))
     searchsorted = staticmethod(lambda x, y, *args, **kwargs: SymbolicExpression.call("searchsorted", x, y))
     betaln = staticmethod(lambda x, y: _elementwise_call("betaln", x, y))
+
+    @staticmethod
+    def cumsum(x: Any, axis: Any = None, dtype: Any = None, out: Any = None) -> Any:
+        """Return a symbolic cumulative sum over ``axis``, matching NumPy's ``cumsum`` contract.
+
+        ``axis`` behaves exactly as ``np.cumsum`` defines it (``None`` flattens first). ``dtype`` has
+        no symbolic analogue -- an expression node carries no numeric storage to cast into, the same
+        reason :meth:`sum` rejects it -- and ``out`` cannot be honored either, because the result is a
+        freshly built object array of expression nodes rather than a buffer that can be written into.
+        Both are therefore rejected rather than silently discarded (MXR-080-1567: the previous
+        implementation was a lambda that swallowed ``dtype``, ``out``, and any other argument into
+        unused ``*args``/``**kwargs`` and passed only ``axis`` through, so a caller asking for a
+        float32 accumulation or an output buffer got neither and no signal). An unexpected keyword now
+        raises ``TypeError`` from ordinary signature binding, as the other engines' ``cumsum`` does.
+        """
+        if dtype is not None:
+            raise NotImplementedError(
+                "the symbolic engine does not support dtype casting in cumsum (got dtype=%r); "
+                "a symbolic expression carries no numeric dtype to cast into." % (dtype,)
+            )
+        if out is not None:
+            raise NotImplementedError(
+                "the symbolic engine does not support cumsum(out=...) (got out=%r); the result is a "
+                "newly built object array of expression nodes, not a writable numeric buffer." % (out,)
+            )
+        return np.cumsum(_sym_array(x), axis=axis)
 
     def index_add(self, out: Any, index: Any, values: Any) -> Any:
         """Return a symbolic index-add operation node."""
