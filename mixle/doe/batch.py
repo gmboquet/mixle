@@ -26,8 +26,8 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
-from mixle.doe.bayesopt import _fit_surrogate, _validate_xy
-from mixle.doe.designs import Bounds, _as_bounds, _as_rng, latin_hypercube
+from mixle.doe.bayesopt import _fit_surrogate, _require_finite_scalar, _validate_xy
+from mixle.doe.designs import Bounds, _as_bounds, _as_rng, _require_exact_positive_int, latin_hypercube
 
 _PSD_EIGENVALUE_RATIO = 1e-9
 """Relative-tolerance bound (matching ``mixle.inference.belief.GaussianBelief``'s PSD gate) on how
@@ -44,14 +44,7 @@ def _require_positive_int(value: Any, name: str) -> int:
     ``int(value)`` alone silently truncates (``2.7`` becomes ``2``, no error); this instead requires the
     float and int forms to agree, so a fractional count is named as invalid rather than quietly rounded.
     """
-    try:
-        as_float = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{name} must be a positive integer, got {value!r}.") from exc
-    as_int = int(as_float)
-    if as_int <= 0 or as_float != as_int:
-        raise ValueError(f"{name} must be a positive integer, got {value!r}.")
-    return as_int
+    return _require_exact_positive_int(value, name)
 
 
 def _safe_cholesky(sigma: np.ndarray) -> np.ndarray:
@@ -79,11 +72,24 @@ def _safe_cholesky(sigma: np.ndarray) -> np.ndarray:
             full jitter budget is exhausted.
     """
     sigma = np.asarray(sigma, dtype=np.float64)
+    if sigma.ndim != 2 or sigma.shape[0] == 0 or sigma.shape[0] != sigma.shape[1]:
+        raise ValueError(f"covariance must be a non-empty square matrix, got shape {sigma.shape}.")
     if not np.all(np.isfinite(sigma)):
         raise ValueError("covariance is not finite (contains NaN/Inf); cannot sample the joint posterior.")
     q = sigma.shape[0]
-    sym = 0.5 * (sigma + sigma.T)  # symmetrize first: cholesky only reads one triangle, so an asymmetric-
-    # but-PD input would otherwise "succeed" against a matrix that silently differs from what was passed.
+    matrix_scale = max(float(np.linalg.norm(sigma, ord=np.inf)), np.finfo(np.float64).tiny)
+    symmetry_tolerance = 64.0 * np.finfo(np.float64).eps * matrix_scale
+    asymmetry = float(np.linalg.norm(sigma - sigma.T, ord=np.inf))
+    if asymmetry > symmetry_tolerance:
+        raise ValueError(
+            "covariance is not symmetric within floating-point roundoff "
+            f"(asymmetry {asymmetry:.6g} > tolerance {symmetry_tolerance:.6g}); refusing to replace "
+            "the requested joint posterior with a different symmetrized matrix."
+        )
+    # Normalize only symmetry-scale floating-point noise after explicitly certifying it. Cholesky reads
+    # one triangle, so passing even an accepted roundoff-level mismatch through unchanged would make
+    # the effective matrix depend on which triangle the implementation happens to inspect.
+    sym = 0.5 * (sigma + sigma.T)
     evals = np.linalg.eigvalsh(sym)
     scale = float(np.abs(evals).max())
     if evals.min() < -_PSD_EIGENVALUE_RATIO * scale:
@@ -101,10 +107,15 @@ def _safe_cholesky(sigma: np.ndarray) -> np.ndarray:
         except np.linalg.LinAlgError:
             continue
         if jit > 0.0:
+            relative_jitter = (
+                f"{jit / scale:.3g} of the eigenvalue scale {scale:.3g}"
+                if scale > 0.0
+                else "absolute jitter for zero covariance scale"
+            )
             warnings.warn(
                 "joint posterior covariance was numerically singular under a direct Cholesky "
-                f"factorization; healed with diagonal jitter={jit:.3g} ({jit / scale:.3g} of the "
-                f"eigenvalue scale {scale:.3g}) after {attempt} failed attempt(s). The dependence "
+                f"factorization; healed with diagonal jitter={jit:.3g} ({relative_jitter}) "
+                f"after {attempt} failed attempt(s). The dependence "
                 "structure is unchanged -- only the numerical conditioning was adjusted.",
                 RuntimeWarning,
                 stacklevel=2,
@@ -143,15 +154,26 @@ def monte_carlo_qei(
         raise ValueError(f"cov must be a ({q}, {q}) matrix matching mean's length {q}; got shape {sigma.shape}.")
     if not np.all(np.isfinite(mu)):
         raise ValueError("mean contains non-finite values (NaN/Inf); cannot compute q-EI.")
+    best = _require_finite_scalar(best, "best")
+    if type(maximize) is not bool:
+        raise TypeError(f"maximize must be a bool, got {type(maximize).__name__}.")
     n_samples = _require_positive_int(samples, "samples")
     rng = seed if isinstance(seed, RandomState) else RandomState(seed)
     chol = _safe_cholesky(sigma)
-    draws = mu[None, :] + rng.standard_normal((n_samples, q)) @ chol.T
-    if maximize:
-        improvement = np.maximum(draws.max(axis=1) - best, 0.0)
-    else:
-        improvement = np.maximum(best - draws.min(axis=1), 0.0)
-    return float(improvement.mean())
+    with np.errstate(over="ignore", invalid="ignore"):
+        draws = mu[None, :] + rng.standard_normal((n_samples, q)) @ chol.T
+        if not np.all(np.isfinite(draws)):
+            raise ValueError("joint posterior draws became non-finite; q-EI is not valid acquisition evidence.")
+        if maximize:
+            improvement = np.maximum(draws.max(axis=1) - best, 0.0)
+        else:
+            improvement = np.maximum(best - draws.min(axis=1), 0.0)
+    if not np.all(np.isfinite(improvement)):
+        raise ValueError("q-EI improvement arithmetic became non-finite.")
+    result = float(improvement.mean())
+    if not np.isfinite(result):
+        raise ValueError("mean q-EI is non-finite.")
+    return result
 
 
 def propose_qei_batch(
@@ -183,6 +205,10 @@ def propose_qei_batch(
     q = _require_positive_int(q, "q")
     n_candidates = _require_positive_int(n_candidates, "n_candidates")
     mc_samples = _require_positive_int(mc_samples, "mc_samples")
+    if q > n_candidates:
+        raise ValueError(f"propose_qei_batch requires q <= n_candidates (q={q}, n_candidates={n_candidates}).")
+    if type(maximize) is not bool:
+        raise TypeError(f"maximize must be a bool, got {type(maximize).__name__}.")
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
     xs, ys = _validate_xy(x, y)
@@ -197,17 +223,21 @@ def propose_qei_batch(
     candidates = latin_hypercube(b, n_candidates, rng)
     if candidates.shape[0] != n_candidates:
         raise ValueError(f"latin_hypercube returned {candidates.shape[0]} candidates, expected {n_candidates}.")
+    if np.unique(candidates, axis=0).shape[0] < q:
+        raise ValueError(f"candidate set contains fewer than q={q} distinct points.")
     mc_seed = int(rng.randint(2**31))  # common random numbers across candidates and steps
     batch: list[np.ndarray] = []
+    available = np.ones(n_candidates, dtype=bool)
     for step in range(q):
-        best_c, best_val = None, -np.inf
-        for c in candidates:
+        best_index, best_val = None, -np.inf
+        for candidate_index in np.flatnonzero(available):
+            c = candidates[candidate_index]
             pts = np.vstack([*batch, c]) if batch else c[None, :]
             mean, cov = gp.predict(xs, ys, pts, return_cov=True)
             val = monte_carlo_qei(mean, cov, best, maximize=maximize, samples=mc_samples, seed=mc_seed)
-            if val > best_val:  # NaN val never wins: comparisons against NaN are always False
-                best_val, best_c = val, c
-        if best_c is None:
+            if val > best_val:
+                best_val, best_index = val, int(candidate_index)
+        if best_index is None:
             # every candidate's q-EI merit was non-finite (NaN) -- e.g. a NaN incumbent from a NaN in y,
             # or a degenerate GP posterior. Silently falling through would append None -> np.asarray(None,
             # dtype=float64) is a 0-d NaN array, corrupting every subsequent step's np.vstack. Name it.
@@ -216,8 +246,16 @@ def propose_qei_batch(
                 f"{n_candidates} candidates scored non-finite (NaN) -- check the GP posterior mean/"
                 "covariance and the observed y for non-finite values."
             )
+        best_c = candidates[best_index]
         batch.append(np.asarray(best_c, dtype=np.float64))
-    return np.asarray(batch)
+        # Exclude both the selected row and any exact duplicate rows a custom candidate generator might
+        # have supplied. Every returned row is therefore a distinct experiment, not merely a distinct
+        # array index.
+        available &= np.any(candidates != best_c, axis=1)
+    result = np.asarray(batch, dtype=np.float64)
+    if result.shape != (q, b.shape[0]) or np.unique(result, axis=0).shape[0] != q:
+        raise RuntimeError("q-EI batch construction did not produce exactly q distinct points.")
+    return result
 
 
 def propose_local_penalization(
