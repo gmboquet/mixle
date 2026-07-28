@@ -14,7 +14,23 @@ from mixle.inference.torsion import (
     fit_independent_mixtures,
     fit_twisted_mixture,
     independent_log_density,
+    log_circular_normalizer,
 )
+
+
+def _integrate_over_period(log_density_fn, group, nodes=20001):
+    xs = np.linspace(0.0, group.period, nodes)
+    trapezoid = getattr(np, "trapezoid", None) or np.trapz
+    return float(trapezoid(np.exp(log_density_fn(xs)), xs))
+
+
+def _tight_group_samples(group, *, n_per_group=40, seed=0):
+    rng = np.random.RandomState(seed)
+    step = group.period / group.order
+    return {
+        k: (rng.normal(0.2 * group.period + k * step, 0.03 * group.period, size=n_per_group) % group.period)
+        for k in range(group.order)
+    }
 
 
 def _cluster_angles_deg():
@@ -70,6 +86,49 @@ class CyclicGroupTest(unittest.TestCase):
         embedded = group.embed(np.array([10.0, 200.0, 359.0]))
         rotated = group.act(embedded, 3)
         np.testing.assert_allclose(np.linalg.norm(embedded, axis=-1), np.linalg.norm(rotated, axis=-1), atol=1e-9)
+
+
+class CircularNormalizationTest(unittest.TestCase):
+    """MXR-080-1622: the ``(cos, sin)`` embedding is not a change of variables, so the ambient 2-D score
+    is not a density on the periodic coordinate until its circular normalizer is divided out."""
+
+    def setUp(self):
+        self.group = CyclicGroup(order=4, period=1.0)
+        train = _tight_group_samples(self.group, n_per_group=40, seed=0)
+        self.twisted = fit_twisted_mixture(self.group, train, n_components=2, seed=0, max_its=60)
+        self.independent = fit_independent_mixtures(self.group, train, n_components=2, seed=0, max_its=60)
+
+    def test_twisted_log_density_integrates_to_one_over_the_period(self):
+        for k in range(self.group.order):
+            total = _integrate_over_period(lambda xs, k=k: self.twisted.log_density(xs, k), self.group)
+            self.assertAlmostEqual(total, 1.0, places=4, msg=f"twisted density does not normalize for k={k}")
+
+    def test_independent_log_density_integrates_to_one_over_the_period(self):
+        for k in range(self.group.order):
+            total = _integrate_over_period(
+                lambda xs, k=k: independent_log_density(self.independent, self.group, xs, k), self.group
+            )
+            self.assertAlmostEqual(total, 1.0, places=4, msg=f"independent density does not normalize for k={k}")
+
+    def test_the_two_routes_carry_different_raw_normalizers(self):
+        # Why normalization is load-bearing rather than cosmetic: the shared base density and each
+        # independent fit sit at different ambient scales, so an unnormalized comparison of the two
+        # is decided partly by normalization instead of by fit quality.
+        twisted_z = self.twisted.log_normalizer()
+        independent_z = [log_circular_normalizer(self.independent[k], self.group) for k in range(self.group.order)]
+        self.assertTrue(any(abs(z - twisted_z) > 1e-3 for z in independent_z))
+
+    def test_normalizer_is_group_element_invariant(self):
+        # inverse_act(embed(x), k) == embed(x - k*period/order); integrating over a full period is
+        # invariant to that shift, so ONE cached normalizer is correct for every k.
+        grid = np.arange(2048, dtype=np.float64) * (self.group.period / 2048)
+        base = self.twisted.log_normalizer()
+        for k in range(self.group.order):
+            aligned = self.group.inverse_act(self.group.embed(grid), k)
+            enc = self.twisted.base_density.dist_to_encoder().seq_encode([row for row in aligned])
+            log_q = np.asarray(self.twisted.base_density.seq_log_density(enc), dtype=np.float64)
+            shifted = float(np.log(np.mean(np.exp(log_q))) + np.log(self.group.period))
+            self.assertAlmostEqual(shifted, base, places=6)
 
 
 class TwistedMixtureEfficiencyTest(unittest.TestCase):
