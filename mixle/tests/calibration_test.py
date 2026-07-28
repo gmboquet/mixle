@@ -5,7 +5,7 @@ import unittest.mock
 
 import numpy as np
 
-from mixle.doe import calibrate
+from mixle.doe import CalibrationIdentifiabilityError, KOCalibration, calibrate
 from mixle.doe.calibrate import _NOISE_VAR_FLOOR, _iid_gaussian_neg_ll  # white-box: MXR-080-0171
 
 
@@ -200,6 +200,68 @@ class CalibrationValidationTest(unittest.TestCase):
         x, y = _fit(lambda x: 0.6 * np.exp(-((x - 3) ** 2) / 0.3), noise=0.05)
         ko = calibrate(_sim, x, y, theta0=[0.0, 0.0])
         np.testing.assert_allclose(ko.theta, TRUE, atol=0.25)
+
+
+class CalibrationStateAndIdentifiabilityTest(unittest.TestCase):
+    def test_fitted_arrays_are_detached_and_public_views_cannot_rewrite_state(self):
+        theta = np.array([1.0])
+        x = np.array([0.0, 1.0, 2.0])
+        y = theta[0] + x + np.array([0.1, -0.1, 0.05])
+
+        def simulator(points, parameters):
+            return parameters[0] + np.asarray(points)
+
+        result = KOCalibration(theta, 1.0, 0.5, 0.1, simulator, x, y, theta_standard_error=[0.2])
+        before = result.predict(np.array([0.5, 1.5]))
+        theta[:] = 99.0
+        x[:] = 99.0
+        y[:] = 99.0
+        public_theta = result.theta
+        public_theta[:] = -99.0
+        public_se = result.theta_standard_error
+        public_se[:] = -99.0
+        np.testing.assert_allclose(result.predict(np.array([0.5, 1.5])), before)
+        np.testing.assert_array_equal(result.theta, [1.0])
+        np.testing.assert_array_equal(result.theta_standard_error, [0.2])
+
+    def test_prediction_uses_the_same_floored_noise_covariance_as_fitting(self):
+        x = np.array([0.0, 0.0])
+        y = np.array([1.0, 2.0])
+
+        def simulator(points, parameters):
+            return np.full(np.asarray(points).shape[0], parameters[0])
+
+        result = KOCalibration([1.0], 1.0, 1.0, 0.0, simulator, x, y)
+        prediction = result.predict(np.array([0.0]))
+        covariance = np.ones((2, 2)) + _NOISE_VAR_FLOOR * np.eye(2)
+        expected = 1.0 + np.ones((1, 2)) @ np.linalg.solve(covariance, y - 1.0)
+        self.assertTrue(np.all(np.isfinite(prediction)))
+        np.testing.assert_allclose(prediction, expected, rtol=1e-7, atol=1e-7)
+        self.assertEqual(result.effective_noise_variance, _NOISE_VAR_FLOOR)
+
+    def test_constant_parameter_direction_is_rejected_with_exposed_null_space(self):
+        x = np.linspace(0.0, 1.0, 12)
+        y = 2.0 + 3.0 * x
+
+        def partially_constant(points, parameters):
+            return parameters[0] + 3.0 * np.asarray(points)  # parameters[1] has no effect
+
+        with self.assertRaises(CalibrationIdentifiabilityError) as context:
+            calibrate(partially_constant, x, y, theta0=[0.0, 0.0], discrepancy=False)
+        error = context.exception
+        self.assertEqual(error.rank, 1)
+        self.assertEqual(error.n_parameters, 2)
+        self.assertEqual(error.non_identifiable_directions.shape, (1, 2))
+        self.assertGreater(abs(error.non_identifiable_directions[0, 1]), 0.99)
+
+    def test_well_identified_result_publishes_sensitivity_evidence(self):
+        x, y = _fit(lambda values: np.zeros_like(values), noise=0.05)
+        result = calibrate(_sim, x, y, theta0=[0.0, 0.0], discrepancy=False)
+        self.assertTrue(result.identifiable)
+        self.assertEqual(result.sensitivity_rank, 2)
+        self.assertEqual(result.sensitivity_singular_values.shape, (2,))
+        self.assertTrue(np.all(np.isfinite(result.sensitivity_singular_values)))
+        self.assertTrue(np.isfinite(result.sensitivity_condition_number))
 
 
 if __name__ == "__main__":

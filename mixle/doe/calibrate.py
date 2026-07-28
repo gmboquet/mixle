@@ -16,7 +16,7 @@ from scipy.optimize import minimize
 
 from mixle.models._kernels import stationary_kernel
 
-__all__ = ["calibrate", "KOCalibration"]
+__all__ = ["calibrate", "CalibrationIdentifiabilityError", "KOCalibration"]
 
 _NOISE_VAR_FLOOR = 1e-8  # one positive-variance floor, shared by every likelihood term (MXR-080-0171)
 _CI95_Z = 1.959963984540054  # two-sided 95% normal-approximation multiplier
@@ -88,6 +88,67 @@ def _numerical_hessian(f: Callable[[np.ndarray], float], x0: np.ndarray) -> np.n
     return hess
 
 
+class CalibrationIdentifiabilityError(ValueError):
+    """Raised when simulator sensitivity cannot identify every calibration-parameter direction."""
+
+    def __init__(
+        self,
+        *,
+        rank: int,
+        n_parameters: int,
+        singular_values: np.ndarray,
+        non_identifiable_directions: np.ndarray,
+    ) -> None:
+        super().__init__(
+            f"simulator sensitivity rank is {rank} for {n_parameters} theta parameters; "
+            f"{n_parameters - rank} parameter direction(s) are not locally identifiable."
+        )
+        self.rank = rank
+        self.n_parameters = n_parameters
+        self.singular_values = np.asarray(singular_values, dtype=float).copy()
+        self.non_identifiable_directions = np.asarray(non_identifiable_directions, dtype=float).copy()
+
+
+def _sensitivity_diagnostics(
+    simulator: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    x: np.ndarray,
+    theta: np.ndarray,
+    expected_shape: tuple[int, ...],
+) -> tuple[int, np.ndarray, np.ndarray, float]:
+    """Finite-difference local simulator sensitivity rank in relative parameter coordinates."""
+    n_parameters = theta.size
+    parameter_scale = np.maximum(np.abs(theta), 1.0)
+    step = parameter_scale * 1e-4
+    jacobian = np.empty((int(np.prod(expected_shape)), n_parameters), dtype=float)
+    for index in range(n_parameters):
+        plus = theta.copy()
+        minus = theta.copy()
+        plus[index] += step[index]
+        minus[index] -= step[index]
+        y_plus = np.asarray(simulator(x, plus), dtype=float)
+        y_minus = np.asarray(simulator(x, minus), dtype=float)
+        if y_plus.shape != expected_shape or y_minus.shape != expected_shape:
+            raise ValueError(
+                "simulator output shape changed during identifiability probing; "
+                f"expected {expected_shape}, got {y_plus.shape} and {y_minus.shape}."
+            )
+        if not np.all(np.isfinite(y_plus)) or not np.all(np.isfinite(y_minus)):
+            raise ValueError("simulator returned non-finite values during identifiability probing.")
+        jacobian[:, index] = ((y_plus - y_minus) / (2.0 * step[index])).reshape(-1)
+    relative_jacobian = jacobian * parameter_scale[None, :]
+    _, singular_values, right_vectors = np.linalg.svd(relative_jacobian, full_matrices=True)
+    largest = float(singular_values[0]) if singular_values.size else 0.0
+    tolerance = np.sqrt(np.finfo(float).eps) * max(1.0, largest)
+    rank = int(np.sum(singular_values > tolerance))
+    non_identifiable = right_vectors[rank:, :]
+    condition_number = (
+        float(singular_values[0] / singular_values[-1])
+        if rank == n_parameters and singular_values[-1] > 0.0
+        else float("inf")
+    )
+    return rank, singular_values, non_identifiable, condition_number
+
+
 class KOCalibration:
     """Result of :func:`calibrate`: a POINT MLE of the fitted parameters (not a posterior), the
     discrepancy GP, and a calibrated predictor.
@@ -101,31 +162,154 @@ class KOCalibration:
     correlation, or a non-quadratic likelihood near the optimum) -- not a substitute for a real
     posterior when that matters. All three are arrays of ``nan`` when the Hessian at the optimum is
     not numerically invertible (or not positive-definite), which the point estimate itself does not
-    depend on and remains usable.
+    depend on. ``sensitivity_rank``, ``sensitivity_singular_values``, and
+    ``sensitivity_condition_number`` certify local structural identifiability; a rank-deficient fit
+    raises :class:`CalibrationIdentifiabilityError` instead of returning an arbitrary point.
+
+    All fitted arrays are privately copied and frozen. Array properties return detached copies, so
+    neither caller-owned inputs nor a returned view can retroactively change the fitted residual,
+    interval, or predictor.
     """
 
-    def __init__(self, theta, ls, amp, noise, simulator, x, y, theta_standard_error=None):
-        self.theta = theta
-        self.lengthscale, self.amplitude, self.noise = ls, amp, noise
-        self._sim, self._x, self._y = simulator, x, y
-        self._resid = y - simulator(x, theta)  # discrepancy + noise at the fitted theta
-        self.theta_standard_error = (
-            np.asarray(theta_standard_error, dtype=float)
+    def __init__(
+        self,
+        theta,
+        ls,
+        amp,
+        noise,
+        simulator,
+        x,
+        y,
+        theta_standard_error=None,
+        *,
+        sensitivity_rank: int | None = None,
+        sensitivity_singular_values: np.ndarray | None = None,
+        sensitivity_condition_number: float | None = None,
+    ):
+        theta_array = np.asarray(theta, dtype=float).copy()
+        x_array = np.asarray(x, dtype=float).copy()
+        y_array = np.asarray(y, dtype=float).copy()
+        if theta_array.ndim != 1 or theta_array.size == 0 or not np.all(np.isfinite(theta_array)):
+            raise ValueError("theta must be a nonempty finite one-dimensional array.")
+        if not np.all(np.isfinite(x_array)) or not np.all(np.isfinite(y_array)):
+            raise ValueError("fitted x and y state must be finite.")
+        fitted = np.asarray(simulator(x_array, theta_array), dtype=float)
+        if fitted.shape != y_array.shape or not np.all(np.isfinite(fitted)):
+            raise ValueError("simulator output at fitted theta must be finite and match y.")
+        self.lengthscale = float(ls)
+        self.amplitude = float(amp)
+        self.noise = float(noise)
+        if (
+            not np.isfinite(self.lengthscale)
+            or self.lengthscale <= 0.0
+            or not np.isfinite(self.amplitude)
+            or self.amplitude < 0.0
+            or not np.isfinite(self.noise)
+            or self.noise < 0.0
+        ):
+            raise ValueError("lengthscale must be positive and amplitude/noise must be finite and nonnegative.")
+        self._sim = simulator
+        self._theta = theta_array
+        self._x = x_array
+        self._y = y_array
+        self._resid = y_array - fitted
+        self._theta_standard_error = (
+            np.asarray(theta_standard_error, dtype=float).copy()
             if theta_standard_error is not None
-            else np.full(len(theta), np.nan)
+            else np.full(theta_array.size, np.nan)
         )
-        self.theta_ci_low = theta - _CI95_Z * self.theta_standard_error
-        self.theta_ci_high = theta + _CI95_Z * self.theta_standard_error
+        if self._theta_standard_error.shape != theta_array.shape:
+            raise ValueError("theta_standard_error must have one entry per theta parameter.")
+        self._theta_ci_low = theta_array - _CI95_Z * self._theta_standard_error
+        self._theta_ci_high = theta_array + _CI95_Z * self._theta_standard_error
+        self.effective_noise_variance = self.noise**2 + _NOISE_VAR_FLOOR
+        covariance = (
+            np.zeros((len(x_array), len(x_array)), dtype=float)
+            if self.amplitude == 0.0
+            else _rbf(x_array, x_array, self.lengthscale, self.amplitude)
+        )
+        covariance = covariance + self.effective_noise_variance * np.eye(len(x_array))
+        self._training_cholesky = np.linalg.cholesky(covariance)
+        for array in (
+            self._theta,
+            self._x,
+            self._y,
+            self._resid,
+            self._theta_standard_error,
+            self._theta_ci_low,
+            self._theta_ci_high,
+            self._training_cholesky,
+        ):
+            array.setflags(write=False)
+        if sensitivity_rank is None:
+            (
+                sensitivity_rank,
+                computed_singular_values,
+                non_identifiable,
+                computed_condition,
+            ) = _sensitivity_diagnostics(simulator, x_array, theta_array, y_array.shape)
+            if sensitivity_rank < theta_array.size:
+                raise CalibrationIdentifiabilityError(
+                    rank=sensitivity_rank,
+                    n_parameters=theta_array.size,
+                    singular_values=computed_singular_values,
+                    non_identifiable_directions=non_identifiable,
+                )
+            sensitivity_singular_values = computed_singular_values
+            sensitivity_condition_number = computed_condition
+        self.sensitivity_rank = int(sensitivity_rank)
+        singular_values = (
+            np.full(theta_array.size, np.nan)
+            if sensitivity_singular_values is None
+            else np.asarray(sensitivity_singular_values, dtype=float)
+        )
+        self._sensitivity_singular_values = singular_values.copy()
+        self._sensitivity_singular_values.setflags(write=False)
+        self.sensitivity_condition_number = (
+            float("nan") if sensitivity_condition_number is None else float(sensitivity_condition_number)
+        )
+        self.identifiable = self.sensitivity_rank == theta_array.size
+
+    @property
+    def theta(self) -> np.ndarray:
+        """Detached fitted parameter vector."""
+        return self._theta.copy()
+
+    @property
+    def theta_standard_error(self) -> np.ndarray:
+        return self._theta_standard_error.copy()
+
+    @property
+    def theta_ci_low(self) -> np.ndarray:
+        return self._theta_ci_low.copy()
+
+    @property
+    def theta_ci_high(self) -> np.ndarray:
+        return self._theta_ci_high.copy()
+
+    @property
+    def sensitivity_singular_values(self) -> np.ndarray:
+        return self._sensitivity_singular_values.copy()
 
     def predict(self, x_new: np.ndarray, *, with_discrepancy: bool = True) -> np.ndarray:
         """Calibrated prediction at ``x_new``: simulator at the fitted ``theta``, plus the GP discrepancy
         (the bias-corrected estimate of reality) unless ``with_discrepancy=False`` (the pure simulator)."""
-        eta = self._sim(x_new, self.theta)
+        x_new = np.asarray(x_new, dtype=float)
+        if not np.all(np.isfinite(x_new)):
+            raise ValueError("x_new must be finite.")
+        eta = np.asarray(self._sim(x_new, self._theta), dtype=float)
+        expected_rows = len(np.atleast_1d(x_new))
+        if eta.shape != (expected_rows,) or not np.all(np.isfinite(eta)):
+            raise ValueError(f"simulator(x_new, theta) must return a finite ({expected_rows},) vector.")
         if not with_discrepancy:
-            return eta
-        k = _rbf(self._x, self._x, self.lengthscale, self.amplitude) + self.noise**2 * np.eye(len(self._x))
-        ks = _rbf(np.atleast_1d(x_new), self._x, self.lengthscale, self.amplitude)
-        return eta + ks @ np.linalg.solve(k, self._resid)
+            return eta.copy()
+        ks = (
+            np.zeros((expected_rows, len(self._x)), dtype=float)
+            if self.amplitude == 0.0
+            else _rbf(np.atleast_1d(x_new), self._x, self.lengthscale, self.amplitude)
+        )
+        alpha = np.linalg.solve(self._training_cholesky.T, np.linalg.solve(self._training_cholesky, self._resid))
+        return eta + ks @ alpha
 
 
 def calibrate(
@@ -156,7 +340,8 @@ def calibrate(
         x, y: field inputs and observations. ``x`` and ``y`` must have the same number of rows, and
             ``x``, ``y``, ``theta0``, and ``simulator(x, theta0)`` must all be finite.
         theta0: initial calibration parameters (its length sets the parameter count). There must be
-            more observations than free ``theta`` parameters, or ``theta`` is not identifiable.
+            more observations than free ``theta`` parameters, and the fitted simulator sensitivity
+            matrix must have full parameter-column rank.
         discrepancy: include the GP discrepancy term (the Kennedy-O'Hagan model).
         discrepancy_lengthscale: fixed GP correlation length; ``None`` (default) uses 10% of the
             input domain. If given explicitly it must be positive -- unlike ``None``, ``0`` is
@@ -172,7 +357,8 @@ def calibrate(
         ValueError: on an ``x``/``y`` row-count mismatch, non-finite ``x``/``y``/``theta0``/
             ``simulator(x, theta0)``, a ``simulator(x, theta0)`` shape that does not match ``y``, a
             non-positive ``discrepancy_lengthscale`` or ``max_iter``, fewer observations than
-            ``theta`` parameters, or if the optimizer fails to converge to a finite objective.
+            ``theta`` parameters, rank-deficient simulator sensitivity, or if the optimizer fails to
+            converge to a finite objective.
     """
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float).ravel()
@@ -277,4 +463,31 @@ def calibrate(
         amp, noise = np.exp(res.x[nth : nth + 2])
     else:
         ls, amp, noise = 1.0, 0.0, np.exp(res.x[nth])
-    return KOCalibration(theta, ls, amp, noise, simulator, x, y, theta_standard_error=theta_se)
+    if not np.all(np.isfinite([ls, amp, noise])):
+        raise ValueError("calibration optimizer returned non-finite covariance parameters.")
+    sensitivity_rank, singular_values, non_identifiable, sensitivity_condition = _sensitivity_diagnostics(
+        simulator,
+        x,
+        theta,
+        y.shape,
+    )
+    if sensitivity_rank < nth:
+        raise CalibrationIdentifiabilityError(
+            rank=sensitivity_rank,
+            n_parameters=nth,
+            singular_values=singular_values,
+            non_identifiable_directions=non_identifiable,
+        )
+    return KOCalibration(
+        theta,
+        ls,
+        amp,
+        noise,
+        simulator,
+        x,
+        y,
+        theta_standard_error=theta_se,
+        sensitivity_rank=sensitivity_rank,
+        sensitivity_singular_values=singular_values,
+        sensitivity_condition_number=sensitivity_condition,
+    )

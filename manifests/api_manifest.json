@@ -183,6 +183,7 @@
         "BayesOptResult",
         "BayesianOptimizer",
         "Bounds",
+        "CalibrationIdentifiabilityError",
         "ConstrainedBayesOptResult",
         "DesignCandidate",
         "DesignRun",
