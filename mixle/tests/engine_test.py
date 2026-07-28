@@ -148,6 +148,35 @@ class EngineTestCase(unittest.TestCase):
             np.sum(np.arange(24, dtype=float).reshape(2, 3, 4), axis=(0, 2), keepdims=True),
         )
 
+    def test_symbolic_tuple_reduction_normalizes_negative_axes_against_original_rank(self):
+        # Regression (MXR-080-1566): the tuple fold sorted the RAW axes and reduced them
+        # sequentially, so a negative axis resolved against the already-shrunken rank. Reducing
+        # (2,3,4) over (-1,-2) returned shape (3,) / [15,19,23] instead of numpy's (2,) / [11,23].
+        engine = SymbolicEngine()
+        raw = np.arange(24, dtype=float).reshape(2, 3, 4)
+        arr = engine.asarray(raw)
+        for axes in [(-1, -2), (-2, -1), (0, -1), (0, 2), (-3, -2, -1)]:
+            expected = np.max(raw, axis=axes)
+            got = np.asarray(engine.max(arr, axis=axes))
+            self.assertEqual(got.shape, expected.shape, axes)
+            np.testing.assert_allclose(self._eval_all(engine, got), expected, err_msg=str(axes))
+        # keepdims must reinsert the same axes the reduction actually removed.
+        kept = engine.sum(arr, axis=(-1, -3), keepdims=True)
+        self.assertEqual(np.asarray(kept).shape, (1, 3, 1))
+        np.testing.assert_allclose(self._eval_all(engine, kept), np.sum(raw, axis=(-1, -3), keepdims=True))
+
+    def test_symbolic_tuple_reduction_rejects_duplicate_and_out_of_range_axes(self):
+        # Regression (MXR-080-1566): duplicate axes were accepted and reduced two DIFFERENT
+        # dimensions ((0,0) on a (2,3,4) array returned shape (4,)); numpy raises instead.
+        engine = SymbolicEngine()
+        arr = engine.asarray(np.arange(24, dtype=float).reshape(2, 3, 4))
+        for axes in [(0, 0), (-1, 2), (1, -2)]:
+            with self.assertRaises(ValueError):
+                engine.sum(arr, axis=axes)
+        for axes in [(1, 5), (0, -4)]:
+            with self.assertRaises(np.exceptions.AxisError):
+                engine.sum(arr, axis=axes)
+
     def test_symbolic_max_and_logsumexp_keepdims_retains_reduced_axes(self):
         # Regression (MXR-080-0150): keepdims was silently ignored identically for max and
         # logsumexp, not just sum.
