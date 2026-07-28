@@ -119,3 +119,28 @@ def test_quantize_validates_its_controls():
     ):
         with pytest.raises(ValueError):
             ops.quantize(g, **kwargs)
+
+
+def test_mixture_refuses_an_empty_or_misaligned_expert_list():
+    """MXR-080-1729: the façade computed the default weight `1 / len(dists)` before checking that a
+    component existed, so `mixture([])` surfaced an incidental ZeroDivisionError from its own
+    arithmetic instead of the declared contract error, and weight-length mismatches were deferred to
+    the component layer."""
+    from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
+
+    with pytest.raises(cap.CapabilityError):
+        ops.mixture([])
+    with pytest.raises(cap.CapabilityError):
+        ops.mixture(iter([]))
+    with pytest.raises(ValueError):
+        ops.mixture([GaussianDistribution(0, 1), GaussianDistribution(3, 1)], [1.0])
+
+
+def test_mixture_materializes_a_one_shot_iterator_once():
+    """The weight default is derived from the materialized list, so a generator is not consumed by
+    the length check and then found empty by the constructor."""
+    from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
+
+    m = ops.mixture(GaussianDistribution(i, 1.0) for i in range(3))
+    assert mixle.supports(m, cap.LatentStructured)
+    assert len(m.components) == 3

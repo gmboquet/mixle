@@ -120,12 +120,32 @@ def marginalize(dist: Any, keep: Any):
 
 
 def mixture(dists: Any, w: Any = None):
-    """Weighted mixture of ``dists`` — a latent-variable model (``LatentStructured``)."""
+    """Weighted mixture of ``dists`` — a latent-variable model (``LatentStructured``).
+
+    Capability signature: ``Distributions -> LatentStructured``. ``dists`` is materialized once (a
+    one-shot iterator is consumed exactly once, not walked again for the weight count), must contain
+    at least one component, and ``w`` — when given — must supply exactly one weight per component.
+
+    Raises:
+        CapabilityError: if ``dists`` is empty. A mixture of nothing is not a distribution, and the
+            default uniform weight ``1 / len(dists)`` used to compute it before anything checked,
+            so ``mixture([])`` reported an incidental ``ZeroDivisionError`` from the façade's own
+            arithmetic rather than the contract error this boundary declares (compare
+            :func:`product_of_experts`, which already refuses an empty expert list here).
+        ValueError: if ``w`` has a different length than ``dists`` — caught at the façade, where the
+            caller's own two arguments are still in view, rather than inside the component layer.
+    """
     from mixle.stats.latent.mixture import MixtureDistribution
 
     dists = list(dists)
+    if not dists:
+        raise CapabilityError("mixture needs at least one component distribution.")
     if w is None:
         w = [1.0 / len(dists)] * len(dists)
+    else:
+        w = list(w)
+        if len(w) != len(dists):
+            raise ValueError(f"mixture: len(w) must match len(dists) ({len(w)} != {len(dists)}).")
     return MixtureDistribution(dists, w)
 
 
