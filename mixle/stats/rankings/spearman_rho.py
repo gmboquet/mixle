@@ -238,9 +238,18 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
 
     @staticmethod
     def backend_log_density_from_params(x: Any, sigma: Any, rho: Any, log_const: Any, engine: Any) -> Any:
-        """Score item orderings after explicit conversion to rank vectors."""
+        """Score item orderings after explicit conversion to rank vectors.
+
+        Callers arrive under two shape conventions. ``backend_seq_log_density`` passes the natural
+        ones -- ranks ``(n, d)`` against a single ``sigma`` ``(d,)``. The generated scorer in
+        :mod:`mixle.stats.compute.declarations` pre-aligns both sides instead: data picks up a
+        component axis (``(n, 1, d)``) and every parameter a leading row axis (``(1, k, d)``), so the
+        two already broadcast. Inserting a component axis unconditionally, as this did, double-counts
+        it on that path and returns an ``(n, 1, k)`` score where the contract is ``(n, k)``. Only add
+        the axis when the ranks really are still two-dimensional.
+        """
         ranks = _backend_rank_vectors(x, int(sigma.shape[-1]), engine)
-        if len(sigma.shape) > 1:
+        if len(sigma.shape) > 1 and len(ranks.shape) == 2:
             ranks = ranks[:, None, :]
         diff = ranks - sigma
         return -rho * engine.sum(diff * diff, axis=-1) - log_const
