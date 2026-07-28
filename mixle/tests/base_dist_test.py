@@ -424,7 +424,15 @@ def em_fit(est, model, enc_data, step, max_its=200, delta=1.0e-7):
 
 #: Held-out sample size for the estimation tests' KL evaluation. Large relative to the training
 #: sizes so the Monte Carlo error of the estimate is small next to the effect being measured.
-_HELDOUT_SIZE = 2000
+#: Held-out draw size. This is a Monte Carlo estimate of a KL divergence, so its own standard error
+#: has to be small next to the differences estimation_test compares across training sizes -- and at
+#: 2000 it was not. Measured on OptionalDistribution with a near-exact fit (n=4000, lambda 4.690 vs a
+#: true 4.7, p 0.0908 vs a true 0.1), ten independent held-out draws gave sd 0.00099 with a range of
+#: -0.00097 to +0.00253: a noise floor the same size as the KL values being compared, and negative
+#: often enough to make a nonnegative quantity look negative. At 20000 the same measurement gives sd
+#: 0.00014 and a minimum of +0.00027 -- reliably positive, and small enough that a real decrease in
+#: KL is visible above it. The extra cost is ~0.2s per ten draws.
+_HELDOUT_SIZE = 20_000
 #: Seed offset for the held-out draw, so it never coincides with a training seed.
 _HELDOUT_SEED_OFFSET = 10_000
 
@@ -433,6 +441,30 @@ def _heldout_encoded(dist, seed):
     """Encode a fresh sample from ``dist`` that no fit in these tests has seen."""
     holdout = dist.sampler(seed + _HELDOUT_SEED_OFFSET).sample(size=_HELDOUT_SIZE)
     return seq_encode(holdout, encoder=dist.dist_to_encoder())
+
+
+def _heldout_kl(truth, fitted, heldout):
+    """Held-out KL of ``fitted`` against ``truth``, treating zero-probability rows honestly.
+
+    ``empirical_kl_divergence`` averages only over rows both models score finitely, and returns the
+    per-model invalid counts precisely so the caller can decide what they mean. Discarding them is
+    what made this comparison unsound: an underfit model assigns zero probability to held-out events
+    that genuinely occur, those rows are exactly the ones contributing +inf to the divergence, and
+    dropping them leaves an average over the subset the fit happens to explain. That reads as a small
+    -- often negative -- KL for the worst fits, so the sequence this test walks was not ordered by fit
+    quality at all. IntegerMarkovChain at n=50 scored -0.198 while assigning zero probability to 7414
+    of 20000 held-out rows.
+
+    A fit that cannot explain observations drawn from the truth has infinite divergence from it, so
+    that is what this returns. The truth failing to score its own draw is a harness fault, not a
+    result, and raises.
+    """
+    kl, truth_invalid, fitted_invalid = empirical_kl_divergence(truth, fitted, heldout)
+    if truth_invalid:
+        raise AssertionError(
+            "the true distribution scored %d held-out rows drawn from itself as invalid" % truth_invalid
+        )
+    return float("inf") if fitted_invalid else kl
 
 
 def estimation_test(dist):
@@ -469,7 +501,7 @@ def estimation_test(dist):
             init = initialize(data, est, rng=np.random.RandomState(1), p=1.0)
             est_dist = em_fit(est, init, enc_data, lambda e, m: estimate(data, e, m))  # noqa: B023  -- invoked synchronously within the loop iteration
 
-            emp_kld, _, _ = empirical_kl_divergence(dist, est_dist, heldout)
+            emp_kld = _heldout_kl(dist, est_dist, heldout)
 
             if len(kld) > 0:
                 better.append(kld[-1] >= emp_kld)
@@ -503,7 +535,7 @@ def seq_estimation_test(dist):
 
             # held out for the same reason as estimation_test: an in-sample KL estimate is
             # negatively biased by construction and cannot be compared across sample sizes.
-            emp_kld, _, _ = empirical_kl_divergence(dist, est_dist, _heldout_encoded(dist, seed))
+            emp_kld = _heldout_kl(dist, est_dist, _heldout_encoded(dist, seed))
 
             if len(kld) > 0:
                 better.append(kld[-1] >= emp_kld)
