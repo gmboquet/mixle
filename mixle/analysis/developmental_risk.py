@@ -118,9 +118,7 @@ class BMDResult:
             if not (np.isnan(bmd) and np.isnan(bmdl) and np.isnan(bmd_se)):
                 raise ValueError("an unidentifiable BMDResult requires bmd, bmdl, and bmd_se to be NaN.")
         elif not (np.isfinite(bmd) and bmd > 0.0 and np.isnan(bmdl) and np.isnan(bmd_se)):
-            raise ValueError(
-                "a bmdl_unavailable BMDResult requires a finite positive bmd and NaN bmdl/bmd_se."
-            )
+            raise ValueError("a bmdl_unavailable BMDResult requires a finite positive bmd and NaN bmdl/bmd_se.")
 
         coef = np.asarray(self._coef, dtype=float)
         if coef.shape != (_N_PARAMS,) or not np.all(np.isfinite(coef)):
@@ -164,6 +162,33 @@ def _neg_log_likelihood(
 _MAX_DOSE_SEARCH_MULTIPLE = 1e4  # bounded upper-bracket expansion; see _solve_bmd
 
 
+def _benchmark_target(background: float, bmr: float, risk: str) -> float | None:
+    """The response level the BMD is defined to reach, or ``None`` when it is not a probability.
+
+    ``"extra"`` risk measures ``bmr`` as a fraction of the background-to-certainty headroom, so
+    ``background + bmr * (1 - background)`` is below one for any ``background < 1``. ``"added"``
+    risk adds ``bmr`` outright, so ``background + bmr`` can exceed one -- and the fitted background
+    is estimated from the data, not chosen by the caller, so an ``added`` request that looked
+    perfectly reasonable when it was made (say ``bmr=0.10``) becomes unattainable as soon as the
+    curve fits a background above ``0.90``.
+
+    That case used to be clipped to ``1 - 1e-9`` and solved anyway (MXR-080-1579), which reported a
+    converged BMD for a benchmark response the caller never asked for: backgrounds of ``0.95``,
+    ``0.99`` and ``0.999`` at ``bmr=0.10`` all returned the identical dose, because all three had
+    been silently replaced by the same substituted target. Returning ``None`` instead lets the
+    caller report the honest ``unidentifiable`` result rather than solving a different question.
+    """
+    if risk == "extra":
+        target = background + bmr * (1.0 - background)
+    elif risk == "added":
+        target = background + bmr
+    else:
+        raise ValueError(f"unknown risk convention {risk!r}; expected 'extra' or 'added'")
+    # `< 1` and not `<= 1`: a target of exactly one is only reached where the curve saturates, which
+    # is an asymptote rather than a root, so it identifies no dose either.
+    return float(target) if np.isfinite(target) and target < 1.0 else None
+
+
 def _solve_bmd(
     model: str, coef: np.ndarray, background: float, bmr: float, risk: str, dose_hi: float
 ) -> tuple[float, bool]:
@@ -178,14 +203,14 @@ def _solve_bmd(
     large-but-finite number. When no bracket exists anywhere in that range (a flat, wrong-signed,
     or too-shallow curve), or brentq itself does not converge, this returns an explicit failure
     rather than the exhausted search boundary.
+
+    Also returns an explicit failure when the requested benchmark response is not a probability at
+    all -- see :func:`_benchmark_target`. Substituting a reachable target for an unreachable one
+    (MXR-080-1579) answers a question the caller did not ask.
     """
-    if risk == "extra":
-        target = background + bmr * (1.0 - background)
-    elif risk == "added":
-        target = background + bmr
-    else:
-        raise ValueError(f"unknown risk convention {risk!r}; expected 'extra' or 'added'")
-    target = min(target, 1.0 - 1e-9)
+    target = _benchmark_target(background, bmr, risk)
+    if target is None:
+        return float("nan"), False
 
     def f(d: float) -> float:
         return _quantal_p(model, np.array([d]), coef)[0] - target
@@ -297,9 +322,13 @@ def _bmd_gradient(
     """
 
     def target_of(b: float, c: float) -> float:
-        bg = _quantal_p(model, np.array([dose_min_eff]), np.array([b, c]))[0]
-        t = bg + bmr * (1.0 - bg) if risk == "extra" else bg + bmr
-        return min(t, 1.0 - 1e-9)
+        bg = float(_quantal_p(model, np.array([dose_min_eff]), np.array([b, c]))[0])
+        # NaN, not the old clip to `1 - 1e-9` (MXR-080-1579): if a finite-difference perturbation of
+        # the coefficients pushes the benchmark target off the probability scale, this partial is
+        # undefined, and the non-finite check below turns that into an unavailable gradient rather
+        # than a derivative of a substituted target.
+        target = _benchmark_target(bg, bmr, risk)
+        return float("nan") if target is None else target
 
     def big_f(d: float, b: float, c: float) -> float:
         p_d = _quantal_p(model, np.array([d]), np.array([b, c]))[0]
@@ -525,9 +554,7 @@ def rfd_exceedance(
     if not isinstance(bmd, BMDResult):
         raise TypeError(f"bmd must be a validated BMDResult, got {type(bmd).__name__}")
     if bmd.status != "ok":
-        raise ValueError(
-            f"bmd status is {bmd.status!r}, not 'ok'; cannot compute an RfD without an identified BMDL"
-        )
+        raise ValueError(f"bmd status is {bmd.status!r}, not 'ok'; cannot compute an RfD without an identified BMDL")
 
     rng = rng if rng is not None else np.random.default_rng()
     rfd = bmd.bmdl / uf

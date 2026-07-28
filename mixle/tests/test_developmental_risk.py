@@ -498,3 +498,67 @@ def test_rfd_exceedance_rejects_posterior_draws_with_ambiguous_or_wrong_axes(dra
     result = _valid_bmd_result()
     with pytest.raises(ValueError, match="exactly one scalar"):
         rfd_exceedance(_RawDrawPosterior(draws), result, uf=100.0, n=3, rng=np.random.default_rng(0))
+
+
+# --------------------------------------------------------------------------------------------------
+# MXR-080-1579: for the "added" convention the benchmark target is `background + bmr`, which is not a
+# probability once the fitted background exceeds `1 - bmr`. That target used to be clipped to
+# `1 - 1e-9` and solved anyway, reporting a converged BMD for a benchmark response nobody requested.
+# --------------------------------------------------------------------------------------------------
+def test_impossible_added_risk_target_is_not_silently_replaced():
+    """Audit repro: distinct impossible added-risk requests all solved the SAME substituted target.
+
+    With a steep fitted curve, backgrounds of 0.95/0.99/0.999 at bmr=0.10 ask for benchmark responses
+    of 1.05/1.09/1.099 -- none of them probabilities. Pre-fix, every one was clipped to `1 - 1e-9` and
+    returned the identical converged dose, which is the answer to a different question.
+    """
+    from mixle.analysis.developmental_risk import _solve_bmd
+
+    coef = np.array([0.0, 10.0])
+    for background in (0.95, 0.99, 0.999):
+        dose, converged = _solve_bmd("loglogistic", coef, background, bmr=0.10, risk="added", dose_hi=100.0)
+        assert converged is False, f"background {background} must not solve an unattainable added-risk target"
+        assert np.isnan(dose)
+
+
+def test_attainable_added_risk_targets_still_solve_and_stay_distinct():
+    """Negative control: added-risk requests that ARE probabilities must still converge -- and must
+    give genuinely different doses for different backgrounds, which is precisely what the clipped
+    behaviour destroyed."""
+    from mixle.analysis.developmental_risk import _solve_bmd
+
+    coef = np.array([0.0, 10.0])
+    doses = []
+    for background in (0.50, 0.85, 0.89):
+        dose, converged = _solve_bmd("loglogistic", coef, background, bmr=0.10, risk="added", dose_hi=100.0)
+        assert converged is True
+        assert np.isfinite(dose) and dose > 0.0
+        doses.append(dose)
+    assert len(set(doses)) == len(doses)  # distinct requests -> distinct answers
+    assert doses == sorted(doses)  # a higher background needs a higher dose for the same added risk
+
+
+def test_extra_risk_is_unaffected_because_its_target_is_always_a_probability():
+    """Negative control: `extra` measures bmr against the background-to-certainty headroom, so its
+    target is below one for any background below one and must keep converging at high backgrounds."""
+    from mixle.analysis.developmental_risk import _solve_bmd
+
+    coef = np.array([0.0, 10.0])
+    for background in (0.50, 0.95, 0.99, 0.999):
+        dose, converged = _solve_bmd("loglogistic", coef, background, bmr=0.10, risk="extra", dose_hi=100.0)
+        assert converged is True, f"extra risk at background {background} must remain solvable"
+        assert np.isfinite(dose) and dose > 0.0
+
+
+def test_high_background_added_risk_cohort_reports_unidentifiable_end_to_end():
+    """The same failure through the public entry point: a cohort whose fitted background is above
+    `1 - bmr` cannot support the requested added risk, and must say so rather than report a BMD."""
+    doses = np.array([0.001, 0.5, 1.0, 2.0, 4.0, 8.0])
+    n_total = np.full(doses.shape, 200.0)
+    # ~96% affected at the lowest dose and rising: the fitted background leaves under 0.10 headroom
+    n_affected = np.array([192.0, 195.0, 197.0, 198.0, 199.0, 200.0])
+    result = benchmark_dose(doses, n_affected, n_total, bmr=0.10, model="loglogistic", risk="added")
+    assert result.status == "unidentifiable"
+    assert result.converged is False
+    assert np.isnan(result.bmd)
+    assert np.isnan(result.bmdl)
