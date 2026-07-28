@@ -24,6 +24,32 @@ import numpy as np
 from scipy import stats
 
 
+def _as_paired_series(x: np.ndarray, name: str) -> np.ndarray:
+    """``x`` as the documented ``(n,)`` per-observation array -- validated *before* any coercion.
+
+    Every comparison here documents one-dimensional, per-observation input, but each used to call
+    ``.ravel()`` first and validate the already-flattened result. Flattening silently redefines the
+    experimental unit: a malformed ``(2, 3)`` pair became six independent observations, and the paired
+    t route reported ``p=0.00593``, Vuong ``p=4.59e-06``, and Clarke ``p=0.03125`` off it. Real
+    ``(model, fold)``, ``(chain, draw)`` or repeated-measures arrays flatten the same way, turning
+    dependent measurements into pseudo-replicates that overstate precision -- and the returned dict
+    carries no trace of the original shape, so nothing downstream can notice.
+
+    Pairing is what these tests are for, so the observation axis has to be the caller's declared one.
+    An intentional flattening is still available by passing ``x.ravel()`` explicitly.
+    """
+    a = np.asarray(x, dtype=float)
+    if a.ndim != 1:
+        raise ValueError(
+            f"{name} must be a 1-D array of per-observation values, got shape {a.shape}. These are paired "
+            "per-observation comparisons: flattening a higher-dimensional array would silently treat "
+            f"{a.size} dependent measurements (folds, chains, outcomes, repeated measures) as independent "
+            "observations and overstate precision. Reduce to one value per experimental unit, or pass "
+            "an explicitly raveled array if the flattening is what you mean."
+        )
+    return a
+
+
 def _validate_paired(a: np.ndarray, b: np.ndarray, *, min_n: int = 2) -> None:
     """Common guard for every paired per-observation comparison in this module.
 
@@ -63,8 +89,8 @@ def paired_score_difference(
         variance paired difference (every observation agrees exactly) is maximally significant when
         the shared value is nonzero, not an automatic tie -- see the ``se == 0`` handling below.
     """
-    a = np.asarray(scores_a, dtype=float).ravel()
-    b = np.asarray(scores_b, dtype=float).ravel()
+    a = _as_paired_series(scores_a, "scores_a")
+    b = _as_paired_series(scores_b, "scores_b")
     _validate_paired(a, b)
     d = a - b
     n = d.shape[0]
@@ -134,8 +160,8 @@ def vuong_test(
     Returns:
         ``{'statistic', 'p_value', 'favored'}``.
     """
-    la = np.asarray(loglik_a, dtype=float).ravel()
-    lb = np.asarray(loglik_b, dtype=float).ravel()
+    la = _as_paired_series(loglik_a, "loglik_a")
+    lb = _as_paired_series(loglik_b, "loglik_b")
     _validate_paired(la, lb)
     m = la - lb
     n = m.shape[0]
@@ -170,8 +196,8 @@ def clarke_test(
     Returns:
         ``{'statistic', 'p_value', 'favored', 'n'}`` -- ``statistic`` is the number of points favoring A.
     """
-    la = np.asarray(loglik_a, dtype=float).ravel()
-    lb = np.asarray(loglik_b, dtype=float).ravel()
+    la = _as_paired_series(loglik_a, "loglik_a")
+    lb = _as_paired_series(loglik_b, "loglik_b")
     _validate_paired(la, lb)
     n = la.shape[0]
     d = la - lb - _complexity_correction(correction, k_a, k_b, n) / n
@@ -198,8 +224,8 @@ def compare_elpd(pointwise_a: np.ndarray, pointwise_b: np.ndarray) -> dict:
         pointwise difference is maximally significant when ``elpd_diff`` is nonzero, not an automatic
         tie -- see the ``se == 0`` handling below (same degeneracy as :func:`paired_score_difference`).
     """
-    a = np.asarray(pointwise_a, dtype=float).ravel()
-    b = np.asarray(pointwise_b, dtype=float).ravel()
+    a = _as_paired_series(pointwise_a, "pointwise_a")
+    b = _as_paired_series(pointwise_b, "pointwise_b")
     _validate_paired(a, b)
     d = a - b
     n = d.shape[0]
