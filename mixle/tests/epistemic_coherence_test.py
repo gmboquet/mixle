@@ -5,6 +5,8 @@ import unittest
 import numpy as np
 
 from mixle.epistemic.coherence import (
+    CONSERVATION_ATOL,
+    evidence_conservation_deviation,
     evidence_conservation_violation,
     exchangeability_violation,
     martingale_violation,
@@ -106,6 +108,47 @@ class EvidenceConservationTest(unittest.TestCase):
 
         violation = evidence_conservation_violation(portfolio, 2.0, dedup_likelihood)
         self.assertFalse(violation)
+
+    def test_a_small_double_ingestion_is_not_absorbed_by_a_relative_tolerance(self):
+        """MXR-080-1757: np.allclose was given atol=1e-9 but kept its default rtol=1e-5, so the
+        effective threshold was ~250x the documented absolute scale and a repeat update that moved a
+        weight by 2.5e-7 -- real double counting -- was reported as conserved."""
+        portfolio = _toy_portfolio()
+
+        def barely_informative(hypothesis, observation):
+            return 1.0 + (1e-6 if hypothesis.id == "h0" else 0.0)
+
+        deviation = evidence_conservation_deviation(portfolio, 2.0, barely_informative)
+        self.assertGreater(deviation, 1e-7)
+        self.assertLess(deviation, 1e-5)  # inside the old default rtol band, outside the stated atol
+        self.assertTrue(evidence_conservation_violation(portfolio, 2.0, barely_informative))
+
+    def test_a_genuinely_conserved_update_still_reports_no_violation(self):
+        portfolio = _toy_portfolio()
+        deviation = evidence_conservation_deviation(portfolio, 2.0, lambda h, o: 1.0)
+        self.assertLessEqual(deviation, CONSERVATION_ATOL)
+        self.assertFalse(evidence_conservation_violation(portfolio, 2.0, lambda h, o: 1.0))
+
+
+class BudgetAndEmptyPortfolioTest(unittest.TestCase):
+    """MXR-080-1758: a zero sample budget reported assurance without measuring anything, and a valid
+    open-world-only portfolio raised out of np.max on its empty weight vector."""
+
+    def test_a_zero_or_invalid_sample_budget_is_refused(self):
+        portfolio = _toy_portfolio()
+        for budget in (0, -1, 2.5, True):
+            with self.assertRaises(ValueError):
+                exchangeability_violation(portfolio, [1.0, 2.0], _gaussian_likelihood, n_permutations=budget)
+            with self.assertRaises(ValueError):
+                martingale_violation(portfolio, lambda rng: 1.0, _gaussian_likelihood, n=budget)
+
+    def test_an_open_world_only_portfolio_is_trivially_coherent(self):
+        empty = HypothesisPortfolio([], np.array([]), w_open=1.0)
+        self.assertEqual(
+            exchangeability_violation(empty, [1.0, 2.0], _gaussian_likelihood, n_permutations=3, rng=0), 0.0
+        )
+        self.assertEqual(martingale_violation(empty, lambda rng: 1.0, _gaussian_likelihood, n=3, rng=0), 0.0)
+        self.assertFalse(evidence_conservation_violation(empty, 1.0, _gaussian_likelihood))
 
 
 if __name__ == "__main__":
