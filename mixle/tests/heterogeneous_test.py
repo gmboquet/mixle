@@ -31,12 +31,13 @@ class HeterogeneousPlanTest(unittest.TestCase):
         self.assertEqual(by["c0"].precision, "float32")  # CPU's fastest real compute precision
 
     def test_tight_accuracy_forces_high_precision_everywhere(self):
-        plan = plan_heterogeneous(
-            self._pool(), 1_000_000, target_rel_error=1e-12, op_count=1000, allow_infeasible=True
-        )
+        plan = plan_heterogeneous(self._pool(), 1_000_000, target_rel_error=1e-12, op_count=1000)
         for a in plan.assignments:
             self.assertEqual(a.precision, "float64")  # only float64 meets the budget
-            self.assertFalse(a.meets_target)  # the format score is heuristic, not a workload certificate
+            self.assertTrue(a.meets_target)  # ~1.1e-13 at op_count=1000: a factual statement about numbers
+            self.assertFalse(a.is_certified)  # the format score ranks options; it is not a workload certificate
+        self.assertTrue(plan.is_feasible())
+        self.assertFalse(plan.is_certified())
 
     def test_load_balances_toward_faster_workers(self):
         plan = plan_heterogeneous(self._pool(), 1_000_000, target_rel_error=None)
@@ -49,6 +50,16 @@ class HeterogeneousPlanTest(unittest.TestCase):
         plan = plan_heterogeneous(workers, 10_000_000)
         self.assertEqual(plan.reduce_depth, math.ceil(math.log2(1000) / 2))
         self.assertGreaterEqual(plan.reduce_depth, 4)  # not a single-root fan-in
+
+    def test_reduce_depth_is_the_radix_4_tree_depth_not_a_binary_one(self):
+        # ceil(log2(W)/2) == ceil(log4(W)): the depth of the planner's 4-WAY reduction tree. It is
+        # deliberately not the binary height (which would be 2 for 4 workers and 4 for 16), so nothing
+        # downstream should read this field as a binary tree height.
+        for n_workers, expected in ((2, 1), (4, 1), (5, 2), (16, 2), (17, 3)):
+            with self.subTest(n_workers=n_workers):
+                workers = [Worker("w%d" % i, "cpu", ("float64",)) for i in range(n_workers)]
+                plan = plan_heterogeneous(workers, 1000)
+                self.assertEqual(plan.reduce_depth, expected)
 
     def test_single_worker_pool(self):
         plan = plan_heterogeneous([Worker("solo", "cpu", ("float32", "float64"))], 500)
@@ -73,6 +84,10 @@ class InfeasiblePrecisionTest(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn("w0", message)
         self.assertIn("1e-20", message)
+        # The claim made is about certification, not about what is achievable: this planner cannot know
+        # that 1e-20 is unreachable by any algorithm, only that no format it models scores there.
+        self.assertIn("cannot certify", message)
+        self.assertNotIn("is not achievable", message)
 
     def test_allow_infeasible_returns_explicit_infeasible_plan_with_achieved_bound(self):
         worker = Worker(name="w0", device="cpu", precisions=("float32",))
@@ -91,23 +106,53 @@ class InfeasiblePrecisionTest(unittest.TestCase):
 
     def test_endpoint_score_below_target_remains_explicitly_heuristic(self):
         worker = Worker(name="w0", device="cpu", precisions=("float32", "float64"))
-        with self.assertRaises(InfeasiblePrecisionError):
-            plan_heterogeneous([worker], 1000, target_rel_error=1e-12, op_count=1000)
-        plan = plan_heterogeneous(
-            [worker], 1000, target_rel_error=1e-12, op_count=1000, allow_infeasible=True
-        )
-        self.assertFalse(plan.is_feasible())
-        self.assertFalse(plan.assignments[0].meets_target)
-        self.assertEqual(plan.assignments[0].evidence_kind, "heuristic")
+        plan = plan_heterogeneous([worker], 1000, target_rel_error=1e-12, op_count=1000)
+        # float64's gamma-1000 score is ~1.1e-13, genuinely below the 1e-12 ask -> feasible, no opt-in.
+        self.assertTrue(plan.is_feasible())
+        self.assertTrue(plan.assignments[0].meets_target)
         self.assertEqual(plan.assignments[0].precision, "float64")
         self.assertIsNotNone(plan.assignments[0].achieved_rel_error)
         self.assertLessEqual(plan.assignments[0].achieved_rel_error, 1e-12)
+        # ...but still only a format-ranking score, so the plan is explicitly uncertified.
+        self.assertEqual(plan.assignments[0].evidence_kind, "heuristic")
+        self.assertFalse(plan.assignments[0].is_certified)
+        self.assertFalse(plan.is_certified())
 
-    def test_unconstrained_plan_is_always_feasible(self):
+    def test_a_target_the_numbers_clear_needs_no_allow_infeasible_opt_in(self):
+        # The regression: `target_rel_error is not None or not choice.meets_target` short-circuited, so
+        # ANY target raised -- here quoting an achieved ~1.1e-13 as evidence that 1e-3 "is not achievable".
+        worker = Worker(name="w0", device="cpu", precisions=("float64", "dd"), base_throughput=1.0)
+        plan = plan_heterogeneous([worker], n_rows=1000, target_rel_error=1e-3)
+        assignment = plan.assignments[0]
+        self.assertTrue(assignment.meets_target)
+        self.assertLess(assignment.achieved_rel_error, 1e-3)
+        self.assertTrue(plan.is_feasible())
+        self.assertEqual(plan.infeasible_assignments(), ())
+        self.assertEqual(plan.total_rows(), 1000)
+        # The planner's inability to certify is preserved -- it is just no longer spelled "infeasible".
+        self.assertFalse(plan.is_certified())
+        self.assertEqual(assignment.evidence_kind, "heuristic")
+
+    def test_unconstrained_plan_is_always_feasible_and_vacuously_certified(self):
         worker = Worker(name="w0", device="cpu", precisions=("float32", "float64"))
         plan = plan_heterogeneous([worker], 1000, target_rel_error=None)
         self.assertTrue(plan.is_feasible())
         self.assertTrue(plan.assignments[0].meets_target)
+        self.assertTrue(plan.is_certified())  # nothing was claimed, so nothing is uncertified
+        self.assertEqual(plan.assignments[0].evidence_kind, "unconstrained")
+        self.assertIsNone(plan.assignments[0].achieved_rel_error)
+
+    def test_worker_running_no_allowed_precision_is_infeasible_even_without_a_target(self):
+        # A capability miss, not an accuracy miss: it must never be relabelled "unconstrained" just
+        # because no target was requested.
+        worker = Worker(name="dd_only", device="cpu", precisions=("dd",))
+        with self.assertRaises(InfeasiblePrecisionError) as ctx:
+            plan_heterogeneous([worker], 100, allowed_precisions=("float32",))
+        self.assertIn("supports none of the allowed precisions", str(ctx.exception))
+        plan = plan_heterogeneous([worker], 100, allowed_precisions=("float32",), allow_infeasible=True)
+        self.assertFalse(plan.is_feasible())
+        self.assertEqual(plan.infeasible_assignments()[0].name, "dd_only")
+        self.assertEqual(plan.assignments[0].evidence_kind, "heuristic")
 
     def test_fallback_prefers_the_most_accurate_option_not_the_fastest(self):
         # A GPU worker with both float16 (throughput 2.5, coarse) and float64 (throughput 1.0, tightest):
@@ -196,6 +241,7 @@ class WorkerAssignmentValidationTest(unittest.TestCase):
                 achieved_rel_error=float("nan"),
                 evidence_kind="heuristic",
             )
+        # meets_target=True is a claim about a number, so a heuristic record must carry that number.
         with self.assertRaises(ValueError):
             WorkerAssignment(
                 name="w",
@@ -203,9 +249,22 @@ class WorkerAssignmentValidationTest(unittest.TestCase):
                 precision="float32",
                 effective_throughput=1.0,
                 meets_target=True,
-                achieved_rel_error=0.1,
+                achieved_rel_error=None,
                 evidence_kind="heuristic",
             )
+
+    def test_a_quantified_heuristic_assignment_may_meet_the_target_but_is_never_certified(self):
+        assignment = WorkerAssignment(
+            name="w",
+            rows=1,
+            precision="float64",
+            effective_throughput=1.0,
+            meets_target=True,
+            achieved_rel_error=1e-13,
+            evidence_kind="heuristic",
+        )
+        self.assertTrue(assignment.meets_target)
+        self.assertFalse(assignment.is_certified)
 
     def test_plan_record_requires_assignments_and_exact_reduction_depth(self):
         with self.assertRaises(ValueError):
@@ -243,9 +302,7 @@ class PlanInputValidationTest(unittest.TestCase):
 
     def test_allow_infeasible_requires_actual_boolean(self):
         with self.assertRaises(ValueError):
-            plan_heterogeneous(
-                [self._worker()], 100, target_rel_error=1e-12, allow_infeasible="false"
-            )
+            plan_heterogeneous([self._worker()], 100, target_rel_error=1e-12, allow_infeasible="false")
 
     def test_million_operation_float32_score_uses_gamma_and_remains_uncertified(self):
         worker = Worker("w", "cpu", ("float32",))
