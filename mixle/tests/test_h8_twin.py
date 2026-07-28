@@ -52,14 +52,14 @@ def test_twin_reproduces_and_relieves_a_saturated_plant_arc():
     base = twin.run(6)
     assert base["bottleneck_arc"] == (2, 4)
     assert np.all(base["bottleneck_utilization"] > 0.999)  # arc (2,4) runs pinned at its cap every period
-    assert base["queue"][-1] > 0.0  # unmet customer0 demand accumulates as backlog
+    assert base["lost_sales_cumulative"][-1] > 0.0  # customer0 demand goes unmet every period
 
     relieved = twin.scenario("inter_plant_transfer", {"add_arc": {(2, 3): (20.0, 0.3)}}).run(
         6, scenario="inter_plant_transfer"
     )
 
     assert relieved["throughput"][-1] > base["throughput"][-1]
-    assert relieved["queue"][-1] < base["queue"][-1]
+    assert relieved["lost_sales_cumulative"][-1] < base["lost_sales_cumulative"][-1]
 
     base_util_24 = base["utilization"][:, 2, 4]
     relieved_util_24 = relieved["utilization"][:, 2, 4]
@@ -72,7 +72,15 @@ def test_build_twin_returns_pipeline_twin_and_scenario_is_immutable():
     assert isinstance(twin, PipelineTwin)
 
     out = twin.run(1)
-    assert {"throughput", "queue", "utilization", "bottleneck_arc", "bottleneck_utilization"} <= set(out)
+    assert {
+        "throughput",
+        "lost_sales",
+        "lost_sales_cumulative",
+        "demand",
+        "utilization",
+        "bottleneck_arc",
+        "bottleneck_utilization",
+    } <= set(out)
 
     twin.scenario("plant_down", {"zero_capacity_node": [3]})
     # the base twin (no scenario requested) is unaffected by having registered one
@@ -116,7 +124,7 @@ def test_slack_is_never_preferred_over_a_costlier_real_route():
     out = twin.run(1)
 
     assert out["throughput"][0] == 1.0  # the real arc satisfied the one unit of demand
-    assert out["queue"][-1] == 0.0  # nothing went unmet
+    assert out["lost_sales_cumulative"][-1] == 0.0  # nothing went unmet
     assert out["bottleneck_arc"] == (0, 1)  # the real arc, not slack, carried the flow
     assert out["bottleneck_utilization"][0] == 1.0
 
@@ -144,7 +152,7 @@ def test_slack_absorbs_supply_beyond_the_default_slack_capacity():
     out = twin.run(1)  # must not raise
 
     assert out["throughput"][0] == 0.0  # no real arc exists to deliver anything
-    assert out["queue"][-1] == _SLACK_CAPACITY + 1.0  # the whole demand is unmet, absorbed by slack
+    assert out["lost_sales_cumulative"][-1] == _SLACK_CAPACITY + 1.0  # the whole demand is unmet
     assert out["bottleneck_arc"] is None  # no real arcs at all, so no bottleneck among them
 
 
@@ -162,3 +170,59 @@ def test_run_rejects_non_positive_period_counts():
             raise AssertionError(f"expected ValueError for n_periods={bad_n}")
         except ValueError:
             pass
+
+
+def _two_node_twin(arc_capacity, demand=10.0, supply_units=None):
+    """One supply node feeding one demand node over a single arc of the given capacity."""
+    cap = np.zeros((2, 2))
+    cost = np.zeros((2, 2))
+    cap[0, 1] = arc_capacity
+    cost[0, 1] = 1.0
+    supply = np.array([demand if supply_units is None else supply_units, -demand])
+    return build_twin(
+        {"cap": cap, "cost": cost, "supply": supply, "supply_nodes": [0], "demand_nodes": [1]}, {}, seed=0
+    )
+
+
+def test_a_positive_demand_spike_raises_demand_not_lowers_it():
+    """MXR-080-1700: the network convention is positive supply / negative demand, but demand_delta
+    added the caller's positive delta straight onto the signed supply vector. A documented demand
+    spike of +5 turned a demand of -10 into -5, HALVING demand: delivered throughput fell from 10 to 5
+    and the run reported nothing unmet -- silently the opposite of the requested scenario."""
+    twin = _two_node_twin(arc_capacity=100.0, demand=10.0, supply_units=20.0)
+    base = twin.run(1)
+    assert base["throughput"][0] == 10.0
+    assert base["demand"].tolist() == [10.0]
+
+    spiked = twin.scenario("spike", {"demand_delta": {1: 5.0}}).run(1, scenario="spike")
+    assert spiked["demand"].tolist() == [15.0]  # a +5 spike means 15 demanded, not 5
+    assert spiked["throughput"][0] == 15.0  # supply and capacity allow it: MORE is delivered, not less
+
+    relieved = twin.scenario("relief", {"demand_delta": {1: -4.0}}).run(1, scenario="relief")
+    assert relieved["demand"].tolist() == [6.0]
+    assert relieved["throughput"][0] == 6.0
+
+
+def test_a_demand_delta_on_a_supply_node_is_rejected():
+    twin = _two_node_twin(arc_capacity=100.0).scenario("bad", {"demand_delta": {0: 5.0}})
+    try:
+        twin.run(1, scenario="bad")
+        raise AssertionError("expected ValueError for a demand_delta aimed at a supply node")
+    except ValueError:
+        pass
+
+
+def test_unmet_demand_is_reported_as_lost_sales_not_a_servable_queue():
+    """MXR-080-1701: each period solves against the same nominal demand and adds that period's
+    shortfall to a cumulative total reported as `queue`, but the outstanding amount is never added to
+    a later period's demand. A capacity-five network facing demand ten reported a growing "queue" of
+    5 then 10 while the second solve still requested only ten rather than the outstanding fifteen --
+    that is lost demand, and naming it a queue implied a backlog that would clear."""
+    out = _two_node_twin(arc_capacity=5.0).run(2)
+
+    assert "queue" not in out  # the misleading name is gone
+    assert out["throughput"].tolist() == [5.0, 5.0]
+    assert out["lost_sales"].tolist() == [5.0, 5.0]  # per period, not a running total
+    assert out["lost_sales_cumulative"].tolist() == [5.0, 10.0]
+    # the demand actually solved against is reported, and it never grows by the unserved remainder
+    assert out["demand"].tolist() == [10.0]

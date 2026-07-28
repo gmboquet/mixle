@@ -187,10 +187,24 @@ class PipelineTwin:
                 for node, mult in spec.items():
                     supply[node] *= float(mult)
             elif kind == "demand_delta":
-                # {node: additive delta} -- demand-spike (or relief) at a demand node (a customer, in
-                # this module's mine-planning instantiation).
+                # {node: additive change in DEMAND, positive = more demand} -- a demand spike (or,
+                # negative, relief) at a demand node (a customer, in this module's mine-planning
+                # instantiation).
+                #
+                # The delta is stated in demand, NOT in the signed supply vector this network stores
+                # it in. Those have opposite signs: the network convention is positive supply /
+                # negative demand, so a documented positive spike of 5 added onto a demand node's
+                # supply of -10 produced -5 -- half the demand, the exact opposite of the requested
+                # scenario, and delivered throughput fell while the run reported nothing unmet.
+                # Subtracting the delta from the signed supply is what "a spike of 5 means 5 more
+                # units demanded" actually requires.
                 for node, delta in spec.items():
-                    supply[node] += float(delta)
+                    if int(node) not in self._demand_nodes:
+                        raise ValueError(
+                            f"demand_delta targets node {node!r}, which is not one of this twin's demand "
+                            f"nodes {self._demand_nodes!r}; a demand change has no meaning at a supply node"
+                        )
+                    supply[node] -= float(delta)
             else:
                 raise KeyError(f"unknown intervention kind {kind!r}")
 
@@ -198,9 +212,20 @@ class PipelineTwin:
         """Step the twin ``n_periods`` periods, re-solving the flow each period.
 
         Returns a dict of per-period diagnostics: ``throughput`` (delivered per period),
-        ``queue`` (cumulative unmet demand), ``utilization`` (per-period ``(n, n)`` arc
-        flow/capacity ratios), ``bottleneck_arc`` (the ``(u, v)`` with highest utilization in the
-        final period), and ``bottleneck_utilization`` (that arc's utilization series).
+        ``lost_sales`` (demand unmet in that period), ``lost_sales_cumulative`` (the running total),
+        ``demand`` (the effective per-demand-node demand actually solved against, after any scenario
+        interventions), ``utilization`` (per-period ``(n, n)`` arc flow/capacity ratios),
+        ``bottleneck_arc`` (the ``(u, v)`` with highest utilization in the final period), and
+        ``bottleneck_utilization`` (that arc's utilization series).
+
+        ``lost_sales`` is LOST demand, not a backlog. Every period solves against the same nominal
+        demand; unmet demand is counted and dropped, never added to a later period's demand or carried
+        as state, so it can never be served late. This series used to be reported as ``queue``, which
+        read as a backlog that would eventually clear: a capacity-five network facing demand ten
+        reported a growing "queue" of 5 then 10 while the second solve still requested only ten rather
+        than the outstanding fifteen. Modelling an actual backlog needs per-node carried state in the
+        conservation constraints, with aging, service and terminal treatment defined; until that
+        exists, the honest name for this number is lost sales.
 
         Raises :class:`ValueError` for ``n_periods < 1`` -- matching this class's other invalid-input
         conventions (an unregistered ``scenario`` name or intervention ``kind`` raises rather than
@@ -227,11 +252,12 @@ class PipelineTwin:
         nominal_demand = -supply[self._demand_nodes]
 
         throughput_series: list[float] = []
-        queue_series: list[float] = []
+        lost_sales_series: list[float] = []
+        lost_sales_cumulative: list[float] = []
         utilization_series: list[np.ndarray] = []
         bottleneck_arcs: list[tuple[int, int] | None] = []
         bottleneck_utils: list[float] = []
-        queue_total = 0.0
+        lost_total = 0.0
 
         for t in range(int(n_periods)):
             period_supply = supply.copy()
@@ -245,7 +271,7 @@ class PipelineTwin:
 
             delivered = flow[:, self._demand_nodes].sum(axis=0)
             shortfall = float(np.clip(nominal_demand - delivered, 0.0, None).sum())
-            queue_total += shortfall
+            lost_total += shortfall
 
             util = np.zeros_like(cap)
             util[arc_mask] = flow[arc_mask] / cap[arc_mask]
@@ -260,12 +286,15 @@ class PipelineTwin:
                 bottleneck_utils.append(0.0)
 
             throughput_series.append(float(delivered.sum()))
-            queue_series.append(queue_total)
+            lost_sales_series.append(shortfall)
+            lost_sales_cumulative.append(lost_total)
             utilization_series.append(util)
 
         return {
             "throughput": np.array(throughput_series),
-            "queue": np.array(queue_series),
+            "lost_sales": np.array(lost_sales_series),
+            "lost_sales_cumulative": np.array(lost_sales_cumulative),
+            "demand": np.array(nominal_demand, dtype=float),
             "utilization": np.array(utilization_series),
             "bottleneck_arc": bottleneck_arcs[-1],
             "bottleneck_utilization": np.array(bottleneck_utils),
