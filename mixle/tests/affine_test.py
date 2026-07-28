@@ -19,6 +19,29 @@ class UnitRoundoffTest(unittest.TestCase):
 
 
 class AffineSoundnessTest(unittest.TestCase):
+    def test_constructor_rejects_invalid_state_and_owns_immutable_evidence(self):
+        for center in (float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                AffineForm.constant(center)
+        with self.assertRaises(ValueError):
+            AffineForm.uncertain(1.0, float("nan"))
+        with self.assertRaises(ValueError):
+            AffineForm([1.0, 2.0], {1: np.ones(3)})
+
+        center = np.array([1.0])
+        coefficient = np.array([0.1])
+        terms = {1: coefficient}
+        form = AffineForm(center, terms)
+        center[0] = 99.0
+        coefficient[0] = 7.0
+        terms[1] = np.array([8.0])
+        self.assertEqual(float(form.center[0]), 1.0)
+        self.assertAlmostEqual(form.max_radius(), 0.1)
+        self.assertFalse(form.center.flags.writeable)
+        self.assertFalse(form.terms[1].flags.writeable)
+        with self.assertRaises(TypeError):
+            form.terms[2] = np.array([1.0])
+
     def test_form_contains_actual_values_incl_nonlinear(self):
         rng = np.random.RandomState(0)
         a0, ra = 5.0, 0.1
@@ -72,8 +95,9 @@ class PrecisionDialTest(unittest.TestCase):
         # 1000 ops on magnitude ~1.0, tolerate 1e-4 abs error
         r = allocate_precision(1.0, 1000, 1e-4)
         self.assertEqual(r.dtype, "float32")  # 1000*2^-24 ~ 6e-5 < 1e-4
-        self.assertEqual(r.status, "ok")
-        self.assertTrue(r.met_target)
+        self.assertEqual(r.status, "heuristic_fit")
+        self.assertTrue(r.heuristic_met_target)
+        self.assertFalse(r.met_target)
         self.assertLessEqual(r.estimated_abs_error, 1e-4)
         self.assertEqual(r.target_abs_error, 1e-4)
         # same ops but a tiny tolerance -> needs float64
@@ -140,26 +164,31 @@ class AllocatePrecisionFailClosedTest(unittest.TestCase):
         # this silently returned "qd" with no indication the target was actually missed.
         r = allocate_precision(1.0, 10**10, 1e-70)
         self.assertEqual(r.dtype, "qd")
-        self.assertEqual(r.status, "insufficient")
+        self.assertEqual(r.status, "heuristic_insufficient")
         self.assertFalse(r.met_target)
         self.assertGreater(r.estimated_abs_error, r.target_abs_error)
         self.assertEqual(r.target_abs_error, 1e-70)
 
-    def test_achievable_target_is_certified_ok(self):
-        # Negative control: legitimate finite-nonnegative magnitude/op_count and a genuinely achievable
-        # positive target must still select a sensible dtype, now with an explicit "ok" certificate.
+    def test_achievable_endpoint_estimate_is_explicitly_not_a_certificate(self):
         r = allocate_precision(1.0, 1000, 1e-4)
         self.assertEqual(r.dtype, "float32")
-        self.assertEqual(r.status, "ok")
-        self.assertTrue(r.met_target)
+        self.assertEqual(r.status, "heuristic_fit")
+        self.assertTrue(r.heuristic_met_target)
+        self.assertFalse(r.met_target)
         self.assertLessEqual(r.estimated_abs_error, r.target_abs_error)
+
+    def test_zero_endpoint_cannot_create_a_false_zero_error_certificate(self):
+        r = allocate_precision(0.0, 1e12, 1e-300)
+        self.assertEqual(r.estimated_abs_error, 0.0)
+        self.assertTrue(r.heuristic_met_target)
+        self.assertFalse(r.met_target)
 
     def test_zero_op_count_and_zero_magnitude_are_legitimate_nonnegative_inputs(self):
         # Zero is a valid (not rejected) op_count/magnitude -- no operations or a zero-sized quantity
         # legitimately accumulates zero error, satisfying even the cheapest dtype.
         r = allocate_precision(0.0, 0, 1e-6)
         self.assertEqual(r.dtype, "float16")
-        self.assertEqual(r.status, "ok")
+        self.assertEqual(r.status, "heuristic_fit")
         self.assertEqual(r.estimated_abs_error, 0.0)
 
 
