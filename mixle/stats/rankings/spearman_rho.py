@@ -47,6 +47,7 @@ from mixle.stats.rankings._contracts import (
 from mixle.stats.rankings._contracts import weights as validate_weights
 from mixle.stats.rankings._permutation_kernels import log_matrix_permanent
 from mixle.stats.rankings.representations import ItemOrdering, RankVector
+from mixle.utils.vector import owned_backend_parameter
 
 _DEFAULT_MAX_DIM = 10
 _HARD_EXACT_DIM = 22
@@ -318,7 +319,7 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
         """Engine-neutral vectorized scoring for encoded item orderings."""
         return self.backend_log_density_from_params(
             engine.asarray(x),
-            engine.asarray(self._sigma.copy()),
+            engine.asarray(owned_backend_parameter(self._sigma)),
             engine.asarray(self.rho),
             engine.asarray(self.log_const),
             engine,
