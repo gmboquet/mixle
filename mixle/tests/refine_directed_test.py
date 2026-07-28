@@ -11,17 +11,19 @@ notes/refine-directed-negative.md, not to paper over.
 """
 
 import unittest
+from unittest import mock
 
 import numpy as np
 
-from mixle.inference.bayesian_network import HeterogeneousBayesianNetwork, _MarginalFactor
+import mixle.inference.refine as refine_module
+from mixle.inference.bayesian_network import HeterogeneousBayesianNetwork, _LinearGaussianFactor, _MarginalFactor
 from mixle.inference.explain import diagnose
 from mixle.inference.refine import (
     apply_add_edge_fix,
     blind_search_trials_to_target,
     directed_correction,
 )
-from mixle.stats import GaussianDistribution
+from mixle.stats import CategoricalDistribution, GaussianDistribution
 
 
 def _buggy_net():
@@ -151,6 +153,114 @@ class RefineVsBlindSearchTest(unittest.TestCase):
         held_out = _make_rows(200, seed=31)
         result = directed_correction(well_specified, failing, train, held_out, background=background)
         self.assertIsNone(result.n_trials)  # nothing dominant -> no fix applied -> correctly unreached
+
+
+class AddEdgePreservesTheModelTest(unittest.TestCase):
+    """MXR-080-1627: 'add edge' must ADD, not rewrite the child's factor."""
+
+    @staticmethod
+    def _two_driver_rows(n, seed):
+        """field1 is driven by BOTH field0 and field2, so 2 -> 1 is decisively the better orientation."""
+        rng = np.random.RandomState(seed)
+        f0 = rng.normal(0.0, 1.0, size=n)
+        f2 = rng.normal(0.0, 1.0, size=n)
+        f1 = 0.9 * f0 + 0.9 * f2 + rng.normal(0.0, 0.05, size=n)
+        f3 = rng.normal(0.0, 1.0, size=n)
+        return [(float(a), float(b), float(c), float(d)) for a, b, c, d in zip(f0, f1, f2, f3)]
+
+    def _net_with_existing_edge(self, data):
+        """field1 already depends on field0; field2/field3 stay independent roots."""
+        cols = [[row[i] for row in data] for i in range(4)]
+        return HeterogeneousBayesianNetwork(
+            [
+                _MarginalFactor(0, GaussianDistribution(0.0, 1.0)),
+                _LinearGaussianFactor.fit(1, [0], cols, {}),
+                _MarginalFactor(2, GaussianDistribution(0.0, 1.0)),
+                _MarginalFactor(3, GaussianDistribution(0.0, 1.0)),
+            ]
+        )
+
+    def test_existing_parents_are_kept_when_a_new_one_is_added(self):
+        from mixle.inference.explain import FaultReport
+
+        data = self._two_driver_rows(300, seed=41)
+        net = self._net_with_existing_edge(data)
+        self.assertEqual(net.edges(), [(0, 1)])
+        fault = FaultReport(dominant="field[1]|x+field[2]|y", suggested_fix="add_edge")
+        fixed = apply_add_edge_fix(net, fault, data)
+        self.assertIsNotNone(fixed)
+        child1 = next(f for f in fixed.factors if f.child == 1)
+        # Before the fix the child's factor was rebuilt from [parent] alone, so the pre-existing
+        # 0 -> 1 dependency was silently deleted by an operation named "add edge".
+        self.assertEqual(sorted(child1.parents), [0, 2])
+        self.assertIn((0, 1), fixed.edges())
+
+    def test_a_non_linear_gaussian_child_is_reported_unsupported_not_rewritten(self):
+        from mixle.inference.explain import FaultReport
+
+        data = [(float(a), "yes" if a > 0 else "no", 0.0, 0.0) for a in np.linspace(-3, 3, 60)]
+        net = HeterogeneousBayesianNetwork(
+            [
+                _MarginalFactor(0, GaussianDistribution(0.0, 1.0)),
+                _MarginalFactor(1, CategoricalDistribution({"yes": 0.5, "no": 0.5})),
+                _MarginalFactor(2, GaussianDistribution(0.0, 1.0)),
+                _MarginalFactor(3, GaussianDistribution(0.0, 1.0)),
+            ]
+        )
+        fault = FaultReport(dominant="field[0]|x+field[1]|y", suggested_fix="add_edge")
+        fixed = apply_add_edge_fix(net, fault, data)
+        # The 1 -> 0 orientation is expressible, so an edit may still be returned -- but the
+        # categorical child must never have been turned into a scalar linear-Gaussian regression,
+        # and the raw "could not convert string to float" from inside fit() must not escape.
+        if fixed is not None:
+            child1 = next(f for f in fixed.factors if f.child == 1)
+            self.assertNotIsInstance(child1, _LinearGaussianFactor)
+
+    def test_the_valid_orientation_survives_a_cyclic_one(self):
+        from mixle.inference.explain import FaultReport
+
+        data = self._two_driver_rows(300, seed=42)
+        net = self._net_with_existing_edge(data)
+        # 0 -> 1 already exists, so orienting 1 -> 0 would close a cycle. The other orientation
+        # (adding 0 as a parent it already has) is a no-op, so this must report unsupported rather
+        # than raise out of the constructor before the alternative was considered.
+        fault = FaultReport(dominant="field[0]|x+field[1]|y", suggested_fix="add_edge")
+        self.assertIsNone(apply_add_edge_fix(net, fault, data))
+
+
+class NonFiniteScoreTest(unittest.TestCase):
+    """MXR-080-1628: a candidate that could not be scored is not a verified improvement."""
+
+    def test_nan_after_score_is_not_a_successful_correction(self):
+        background, failing = _diagnose_probe_cases()
+        train, held_out = _make_rows(200, seed=50), _make_rows(200, seed=51)
+        real = refine_module.held_out_log_likelihood
+
+        def scoring_that_fails_on_the_candidate(model, data):
+            value = real(model, data)
+            return float("nan") if getattr(model, "_candidate", False) else value
+
+        original = _buggy_net()
+        with mock.patch.object(refine_module, "held_out_log_likelihood", scoring_that_fails_on_the_candidate):
+            with mock.patch.object(refine_module, "apply_add_edge_fix") as fake_fix:
+                candidate = _buggy_net()
+                candidate._candidate = True
+                fake_fix.return_value = candidate
+                result = refine_module.directed_correction(original, failing, train, held_out, background=background)
+        # `after <= before` is FALSE for NaN, so this used to be returned as a 1-trial success.
+        self.assertIsNone(result.n_trials)
+        self.assertIs(result.final_model, original)
+
+    def test_empty_held_out_is_rejected(self):
+        background, failing = _diagnose_probe_cases()
+        with self.assertRaises(ValueError):
+            directed_correction(_buggy_net(), failing, _make_rows(50, seed=52), [], background=background)
+
+    def test_a_genuine_improvement_is_still_accepted(self):
+        background, failing = _diagnose_probe_cases()
+        train, held_out = _make_rows(200, seed=53), _make_rows(200, seed=54)
+        result = directed_correction(_buggy_net(), failing, train, held_out, background=background)
+        self.assertEqual(result.n_trials, 1)
 
 
 if __name__ == "__main__":
