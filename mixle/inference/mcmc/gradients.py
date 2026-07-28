@@ -69,23 +69,36 @@ def torch_gradient(log_target_torch: Callable[[Any], Any], dtype: str = "float64
 def value_and_torch_gradient(
     log_target_torch: Callable[[Any], Any], dtype: str = "float64"
 ) -> Callable[[Any], tuple[float, Any]]:
-    """Like :func:`torch_gradient` but returns ``(value, gradient)`` in one backward pass.
+    """Like :func:`torch_gradient` but returns ``(value, gradient)`` from ONE forward/backward pass.
 
     Useful for samplers that need both the log-target and its gradient at the same point
-    (HMC/NUTS leapfrog), avoiding a redundant forward evaluation.
+    (HMC/NUTS leapfrog), avoiding a redundant forward evaluation. The target is evaluated
+    exactly once per call and the gradient is taken of *that* scalar, so the returned value
+    and gradient always describe the same evaluation -- a target with internal state (a call
+    counter, a data minibatch, a stochastic estimator) cannot return a value from one state
+    paired with a gradient from another.
     """
-    grad_only = torch_gradient(log_target_torch, dtype=dtype)
-    import torch
+    try:
+        import torch
+    except Exception as e:  # pragma: no cover - exercised only without Torch
+        raise RuntimeError(
+            "value_and_torch_gradient requires PyTorch; install torch or use the finite-difference path."
+        ) from e
 
     tdtype = getattr(torch, dtype)
 
     def value_and_grad(x: Any) -> tuple[float, Any]:
         scalar = np.isscalar(x) or np.ndim(x) == 0
         arr = np.atleast_1d(np.asarray(x, dtype=float))
-        t = torch.tensor(arr, dtype=tdtype)
-        with torch.no_grad():
-            val = log_target_torch(t if not scalar else t[0])
-            value = float(val.reshape(()).item()) if torch.is_tensor(val) else float(val)
-        return value, grad_only(x)
+        t = torch.tensor(arr, dtype=tdtype, requires_grad=True)
+        val = log_target_torch(t if not scalar else t[0])
+        if not torch.is_tensor(val) or val.ndim != 0:
+            val = val.reshape(()) if torch.is_tensor(val) else torch.as_tensor(val, dtype=tdtype)
+        (g,) = torch.autograd.grad(val, t)
+        value = float(val.detach().item())
+        gn = np.asarray(g.detach().cpu().numpy(), dtype=float)
+        if not np.all(np.isfinite(gn)):
+            raise ValueError("value_and_torch_gradient produced non-finite values; check the log-target.")
+        return value, (float(gn[0]) if scalar else gn)
 
     return value_and_grad
