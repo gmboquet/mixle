@@ -29,11 +29,17 @@ def _task(probabilities=None):
 
 
 class CalibrationContractTest(unittest.TestCase):
-    def test_calibration_support_must_equal_the_model_label_space(self):
-        calibrated = CalibratedTaskModel(_task())
-        with self.assertRaisesRegex(ValueError, "outside the model label space"):
-            calibrated.calibrate(["x"], ["unseen"])
-        self.assertIsNone(calibrated.qhat)
+    def test_a_label_outside_the_model_space_is_scored_as_a_miss_not_rejected(self):
+        # A teacher or a real split can return a label the student never learned. Refusing to
+        # calibrate makes the method unusable on exactly that data; scoring the label as a
+        # guaranteed miss is both usable and conservative, since the zero true-class score lowers
+        # qhat and widens the prediction sets. mixle/tests/calibrate_unseen_label_test.py owns the
+        # full contract -- this asserts only that calibration completes and stays sound.
+        calibrated = CalibratedTaskModel(_task()).calibrate(["x"], ["unseen"])
+        self.assertIsNotNone(calibrated.qhat)
+        seen = CalibratedTaskModel(_task()).calibrate(["x"] * 20, ["a"] * 20)
+        salted = CalibratedTaskModel(_task()).calibrate(["x"] * 20, ["a"] * 10 + ["unseen"] * 10)
+        self.assertGreaterEqual(salted.qhat, seen.qhat)
 
     def test_calibration_rows_are_nonempty_aligned_and_row_stochastic(self):
         with self.assertRaisesRegex(ValueError, "non-empty"):

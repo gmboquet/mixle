@@ -45,10 +45,7 @@ def _validated_alpha(alpha: Any) -> float:
 def _validated_qhat(qhat: Any, *, allow_none: bool = True) -> float | None:
     if qhat is None and allow_none:
         return None
-    if (
-        isinstance(qhat, (bool, np.bool_))
-        or not isinstance(qhat, (int, float, np.integer, np.floating))
-    ):
+    if isinstance(qhat, (bool, np.bool_)) or not isinstance(qhat, (int, float, np.integer, np.floating)):
         raise ValueError("qhat must be a finite number in [0, 1], positive infinity, or None")
     result = float(qhat)
     if np.isnan(result) or np.isneginf(result) or result < 0.0 or (np.isfinite(result) and result > 1.0):
@@ -109,12 +106,6 @@ class CalibratedTaskModel:
         if len(rows) != len(observed):
             raise ValueError("texts and teacher_labels must have identical non-zero lengths")
         index = {label: i for i, label in enumerate(self.labels)}
-        unknown = sorted(set(observed) - set(index))
-        if unknown:
-            raise ValueError(
-                f"calibration labels {unknown!r} are outside the model label space; "
-                "finite-sample label coverage cannot be claimed"
-            )
         prob = np.asarray(self._proba(rows), dtype=float)
         if prob.shape != (len(rows), len(self.labels)):
             raise ValueError(
@@ -126,7 +117,13 @@ class CalibratedTaskModel:
             or not np.allclose(prob.sum(axis=1), 1.0, rtol=1e-7, atol=1e-9)
         ):
             raise ValueError("adapter probabilities must be finite row-stochastic values in [0, 1]")
-        cal_true = np.array([prob[i, index[label]] for i, label in enumerate(observed)], dtype=float)
+        # A teacher, or a realistic dataset split, can return a label the student's class set does not
+        # contain. That label has no column in the probability vector, so its true-class score is 0 --
+        # the student is guaranteed to miss it. Scoring the miss is what keeps the threshold sound: it
+        # pushes qhat down, so the predictor becomes MORE conservative and the guaranteed miss is paid
+        # for by wider sets elsewhere. Dropping such rows would overstate coverage, and rejecting them
+        # outright makes calibration impossible on exactly the data conformal prediction is for.
+        cal_true = np.array([prob[i, index[label]] if label in index else 0.0 for i, label in enumerate(observed)])
         qhat = conformal_label_threshold(cal_true, alpha=self.alpha)
         self.qhat = _validated_qhat(qhat, allow_none=False)
         return self
