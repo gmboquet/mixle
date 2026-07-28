@@ -401,3 +401,52 @@ def test_priced_liabilities_still_accepts_negative_grade_and_exposure_proxies():
     assert np.allclose(out["carbon"], [4.0, 8.0])
     assert np.allclose(out["total"], [16.0, 12.0])
     assert out["grand_total"] == pytest.approx(28.0)
+
+
+def _plain_plan_call(constraints):
+    return risk_adjusted_plan(
+        _FlatGradePosterior(),
+        np.full(N_BLOCKS, COST),
+        PRICE,
+        {},
+        constraints,
+        k_scenarios=5,
+        alpha=0.9,
+        rng=np.random.default_rng(0),
+    )
+
+
+def test_hard_exclusions_require_a_genuine_boolean_mask():
+    # MXR-080-1722: the mask was coerced with dtype=bool, which maps every nonzero object to True.
+    # The string "False" -- and a NaN, which is truthy -- therefore became a permanent hard
+    # exclusion of that item, the exact opposite of what the data says.
+    for bad in (
+        np.array(["False"] * N_BLOCKS, dtype=object),
+        np.full(N_BLOCKS, np.nan),
+        np.zeros(N_BLOCKS, dtype=float),
+        np.zeros(N_BLOCKS, dtype=int),
+    ):
+        with pytest.raises(ValueError):
+            _plain_plan_call({"no_mine_mask": bad})
+
+    honest = np.zeros(N_BLOCKS, dtype=bool)
+    assert bool(_plain_plan_call({"no_mine_mask": honest}).extract.all())
+
+
+def test_unknown_constraint_and_cap_keys_are_refused_not_ignored():
+    # MXR-080-1722: constraint/cap dicts had no closed schema, so a misspelled control was dropped
+    # in silence and the caller believed a restriction was in force that never reached the solver.
+    with pytest.raises(ValueError):
+        _plain_plan_call({"no_min_mask": np.ones(N_BLOCKS, dtype=bool)})
+    with pytest.raises(ValueError):
+        _plain_plan_call({"caps": [{"coeffs": np.ones(N_BLOCKS), "bound": 3.0, "sence": "<="}]})
+
+
+def test_cap_geometry_must_be_finite():
+    for cap in (
+        {"coeffs": np.full(N_BLOCKS, np.nan), "bound": 3.0},
+        {"coeffs": np.ones(N_BLOCKS), "bound": np.inf},
+        {"coeffs": np.ones((2, N_BLOCKS)), "bound": 3.0},
+    ):
+        with pytest.raises(ValueError):
+            _plain_plan_call({"caps": [cap]})

@@ -1,17 +1,29 @@
-"""Two-stage stochastic programming with CVaR risk under scenario uncertainty (work-plan §7-H, H4).
+"""Scenario-based CVaR selection under uncertainty (work-plan §7-H, H4).
 
 Bridges a calibrated `Posterior` over an uncertain per-item value (IC-1, `.samples(n, rng)`) into a
 single-period binary selection decision. Rather than optimizing against one point-estimate value,
-`two_stage_stochastic_plan` draws `k_scenarios` realizations and solves a two-stage scenario program:
-one shared first-stage selection decision `x_b in {0, 1}` per item, with per-scenario recourse value
+`two_stage_stochastic_plan` draws `k_scenarios` realizations and solves the sample-average program:
+one shared selection decision `x_b in {0, 1}` per item, with per-scenario realized value
 ``v_k(x) = sum_b x_b * (price * g[k, b] - item_cost[b])``. The objective trades expected value against
 downside risk via ``CVaR_alpha(-v_k(x))`` (Rockafellar–Uryasev), so an item whose *average* realization
 looks profitable but whose scenario-conditional downside is large is priced correctly instead of
-naively included on its mean alone. Two-stage CVaR-penalized scenario selection is a general
+naively included on its mean alone. CVaR-penalized scenario selection is a general
 finance/operations-research technique -- portfolio selection under uncertain returns and project
 selection under uncertain payoffs are the same construction; this module's worked instantiation is
 mine-planning block selection under grade uncertainty (an item is a block, price is ore price, and the
 downside risk being priced is grade uncertainty / ore-waste misclassification risk).
+
+**What "two-stage" does and does not mean here.** The implemented program has exactly one decision
+vector, `x`, taken before any scenario is observed, plus the `eta`/`u_k` variables that linearize
+CVaR. There is no scenario-indexed operational decision, no recourse constraint or recourse cost, no
+second information stage, and therefore no nonanticipativity coupling to enforce -- a scenario's
+"recourse value" above is simply the payoff of that same `x` evaluated under scenario `k`. This is a
+*single-stage* sample-average risk-adjusted selection model (the deterministic equivalent of a
+chance-constrained/CVaR selection), not a two-stage stochastic program with recourse. The function
+name is kept for API compatibility with existing callers; a genuine second stage would require
+per-scenario decision variables `y_k` with their own constraints and costs, which nothing here
+builds. Read the outputs accordingly: `expected_value` and `cvar` describe the one committed
+selection, not the value of an adaptive policy.
 
 `cvar_epigraph` is the reusable LP-representable epigraph of CVaR: given ``losses[k] = L_k(x)`` as a
 linear map of the (as yet undetermined) decision vector — an ``(K, n)`` coefficient matrix, not realized
@@ -54,8 +66,74 @@ __all__ = ["StochasticPlan", "cvar_epigraph", "risk_adjusted_plan", "two_stage_s
 _CVAR_LAMBDA = 1.0
 
 
+def _finite_1d(value: Any, name: str) -> np.ndarray:
+    """``value`` as a finite 1-D float array, or a ``ValueError`` naming what was wrong.
+
+    Deliberately not ``.size``-flattening: a ``(2, 3)`` cost matrix has six entries, and quietly
+    reading it as a six-item vector turns an alignment mistake into a different, plausible-looking
+    problem instead of an error.
+    """
+    arr = np.asarray(value, dtype=np.float64)
+    if arr.ndim != 1:
+        raise ValueError(f"{name} must be a 1-D array of per-item values, got shape {arr.shape}")
+    if not np.isfinite(arr).all():
+        raise ValueError(f"{name} must be finite, got {value!r}")
+    return arr
+
+
+def _finite_scalar(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.integer, np.floating)):
+        raise ValueError(f"{name} must be a finite number, got {value!r}")
+    out = float(value)
+    if not np.isfinite(out):
+        raise ValueError(f"{name} must be a finite number, got {value!r}")
+    return out
+
+
+def _count(value: Any, name: str) -> int:
+    """An exact positive integer count -- ``True`` is not one scenario, and ``50.5`` is not fifty."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or int(value) < 1:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
+    return int(value)
+
+
+def _empirical_cvar(losses: np.ndarray, alpha: float) -> float:
+    """Exact ``CVaR_alpha`` of a finite equal-weight loss sample.
+
+    The Rockafellar-Uryasev objective ``eta + (1 / ((1 - alpha) K)) * sum_k max(L_k - eta, 0)`` is
+    piecewise linear in ``eta`` with breakpoints at the sample losses, so its minimum is attained at
+    one of them; evaluating all K breakpoints from a sorted cumulative sum is O(K log K) and exact.
+    """
+    ordered = np.sort(np.asarray(losses, dtype=np.float64))
+    k_scenarios = ordered.size
+    coef = 1.0 / ((1.0 - alpha) * k_scenarios)
+    cumulative = np.cumsum(ordered)
+    tail_excess = (cumulative[-1] - cumulative) - (k_scenarios - 1 - np.arange(k_scenarios)) * ordered
+    return float(np.min(ordered + coef * tail_excess))
+
+
+def _discrete_plan(
+    x_full: np.ndarray, n_items: int, profit: np.ndarray, mean_profit: np.ndarray, alpha: float, name: str
+) -> tuple[np.ndarray, float, float]:
+    """The returned selection and the risk/value figures recomputed *from that selection*.
+
+    The solver's own ``eta``/``u_k`` variables describe whatever relaxed point it stopped at; the
+    plan a caller acts on is the rounded binary vector. Reading the CVaR out of the solver rather
+    than recomputing it for the discrete artifact lets the two disagree -- an ``x`` of 0.49 rounds
+    away to "select nothing", whose loss is identically zero and whose CVaR is therefore zero, while
+    the solver block still reports the risk of the fractional point. Everything reported here is
+    computed from the exact selection being returned, after checking the solver honored integrality.
+    """
+    relaxed = x_full[:n_items]
+    if np.max(np.abs(relaxed - np.round(relaxed)), initial=0.0) > 1e-6:
+        raise ValueError(f"{name}: solver returned a fractional selection for binary variables; refusing to certify it")
+    extract = np.round(relaxed).astype(bool)
+    selected = extract.astype(np.float64)
+    return extract, float(mean_profit @ selected), _empirical_cvar(-(profit @ selected), alpha)
+
+
 class StochasticPlan(NamedTuple):
-    """A two-stage scenario-optimal selection plan: which items, and its risk profile.
+    """A scenario-optimal selection plan: which items, and its risk profile.
 
     ``extract`` is the boolean per-item decision (named for this module's mine-planning instantiation;
     kept as-is rather than renamed to something like ``selected`` since existing callers already
@@ -63,6 +141,9 @@ class StochasticPlan(NamedTuple):
     was optimized against; ``cvar`` is ``CVaR_alpha(-v_k(extract))`` (a more negative value is safer —
     the tail is still profitable; a less negative or positive value is riskier); ``scenarios`` is the
     raw ``(K, n_items)`` value draws used for planning.
+
+    Both figures are recomputed from ``extract`` itself, not read out of the solver's relaxation, so
+    they always describe the selection actually being returned.
     """
 
     extract: np.ndarray
@@ -95,8 +176,13 @@ def cvar_epigraph(losses: Any, alpha: float) -> tuple[np.ndarray, np.ndarray, np
     loss = np.asarray(losses, dtype=np.float64)
     if loss.ndim != 2:
         raise ValueError("losses must be a (K, n) matrix: scenario loss as a linear map of the decision")
-    if not (0.0 < alpha < 1.0):
+    if not (0.0 < alpha < 1.0):  # NaN fails this comparison too, which is the intended answer
         raise ValueError("alpha must be in (0, 1)")
+    # Every entry becomes a constraint coefficient. A NaN or infinite loss coefficient does not make
+    # the program infeasible -- it makes an ordinary-looking row that no solver can interpret, and the
+    # answer that comes back is not the answer to any stated problem.
+    if not np.isfinite(loss).all():
+        raise ValueError("losses must be finite: a NaN/infinite coefficient produces an uninterpretable CVaR row")
     k_scenarios, n = loss.shape
     if k_scenarios == 0:
         raise ValueError("losses must have at least one scenario (K >= 1); CVaR of zero scenarios is undefined")
@@ -125,25 +211,37 @@ def two_stage_stochastic_plan(
     alpha: float = 0.9,
     rng: np.random.Generator,
 ) -> StochasticPlan:
-    """Two-stage scenario program: select items to maximize ``E[v] - lambda * CVaR_alpha(-v)``.
+    """Scenario program: select items to maximize ``E[v] - lambda * CVaR_alpha(-v)``.
 
     Draws ``g = posterior.samples(k_scenarios, rng)`` (IC-1) as the calibrated value scenarios, forms
-    the per-scenario recourse value ``v_k(x) = sum_b x_b * (price * g[k, b] - cost[b])``, and
+    the per-scenario realized value ``v_k(x) = sum_b x_b * (price * g[k, b] - cost[b])``, and
     solves the joint MILP — binary ``x`` plus the free ``eta``/``u_k >= 0`` block from
     :func:`cvar_epigraph` — via :func:`mixle.relations.branch_and_bound_milp`.
+
+    Despite the name (kept for API compatibility), the program has a single here-and-now decision and
+    no second-stage recourse variables; see the module docstring for exactly what is and is not
+    modeled. Every scenario/economic input is validated as a finite, aligned schema first: a NaN
+    price, an infinite cost, a ``(2, 3)`` cost matrix read as six items, or a fractional/Boolean
+    scenario count is refused rather than turned into a different, plausible-looking problem.
     """
-    cost = np.asarray(cost, dtype=np.float64)
+    cost = _finite_1d(cost, "two_stage_stochastic_plan: cost")
+    price = _finite_scalar(price, "two_stage_stochastic_plan: price")
+    k_scenarios = _count(k_scenarios, "two_stage_stochastic_plan: k_scenarios")
     n_items = cost.size
+    if n_items == 0:
+        raise ValueError("two_stage_stochastic_plan: cost must describe at least one item")
 
     g = np.asarray(posterior.samples(k_scenarios, rng), dtype=np.float64)
     if g.shape != (k_scenarios, n_items):
         raise ValueError(f"posterior.samples returned shape {g.shape}, expected {(k_scenarios, n_items)}")
+    if not np.isfinite(g).all():
+        raise ValueError("two_stage_stochastic_plan: posterior.samples returned a non-finite scenario value")
 
     profit = price * g - cost[None, :]  # (K, n_items): v_k(x) = profit[k] @ x
     mean_profit = profit.mean(axis=0)
     losses = -profit  # L_k(x) = -v_k(x)
 
-    c_add, a_ub_rows, b_ub, var_index = cvar_epigraph(losses, alpha)
+    c_add, a_ub_rows, b_ub, _var_index = cvar_epigraph(losses, alpha)
     width = a_ub_rows.shape[1]
 
     c_ev = np.zeros(width, dtype=np.float64)
@@ -158,13 +256,9 @@ def two_stage_stochastic_plan(
         raise ValueError("two_stage_stochastic_plan: MILP infeasible for the given items/scenarios")
     _, x_full = solved
 
-    extract = np.round(x_full[:n_items]).astype(bool)
-    eta_star = float(x_full[var_index])
-    u_star = x_full[var_index + 1 :]
-    coef = 1.0 / ((1.0 - alpha) * k_scenarios)
-    cvar = eta_star + coef * float(u_star.sum())
-    expected_value = float(mean_profit @ extract.astype(np.float64))
-
+    extract, expected_value, cvar = _discrete_plan(
+        x_full, n_items, profit, mean_profit, alpha, "two_stage_stochastic_plan"
+    )
     return StochasticPlan(extract=extract, expected_value=expected_value, cvar=cvar, scenarios=g)
 
 
@@ -202,18 +296,24 @@ def risk_adjusted_plan(
     for the extended MILP — the same solver ``two_stage_stochastic_plan`` uses, so value, cost, and any
     other priced terms all trade off against each other on one objective.
     """
-    cost = np.asarray(cost, dtype=np.float64)
+    cost = _finite_1d(cost, "risk_adjusted_plan: cost")
+    price = _finite_scalar(price, "risk_adjusted_plan: price")
+    k_scenarios = _count(k_scenarios, "risk_adjusted_plan: k_scenarios")
     n_items = cost.size
+    if n_items == 0:
+        raise ValueError("risk_adjusted_plan: cost must describe at least one item")
 
     g = np.asarray(posterior.samples(k_scenarios, rng), dtype=np.float64)
     if g.shape != (k_scenarios, n_items):
         raise ValueError(f"posterior.samples returned shape {g.shape}, expected {(k_scenarios, n_items)}")
+    if not np.isfinite(g).all():
+        raise ValueError("risk_adjusted_plan: posterior.samples returned a non-finite scenario value")
 
     liability_total = liabilities.get("total") if liabilities else None
     if liability_total is None:
         liability = np.zeros(n_items, dtype=np.float64)
     else:
-        liability = np.asarray(liability_total, dtype=np.float64)
+        liability = _finite_1d(liability_total, "risk_adjusted_plan: liabilities['total']")
         if liability.shape != (n_items,):
             raise ValueError(f"risk_adjusted_plan: liabilities['total'] shape {liability.shape} != {(n_items,)}")
 
@@ -221,7 +321,7 @@ def risk_adjusted_plan(
     mean_profit = profit.mean(axis=0)
     losses = -profit  # L_k(x) = -v_k(x)
 
-    c_add, a_ub_rows, b_ub, var_index = cvar_epigraph(losses, alpha)
+    c_add, a_ub_rows, b_ub, _var_index = cvar_epigraph(losses, alpha)
     width = a_ub_rows.shape[1]
 
     c_ev = np.zeros(width, dtype=np.float64)
@@ -231,9 +331,24 @@ def risk_adjusted_plan(
     bounds = [(0.0, 1.0)] * n_items + [(-np.inf, np.inf)] + [(0.0, np.inf)] * k_scenarios
 
     constraints = constraints or {}
+    # A hard constraint is a policy decision, so the controls carrying it are a closed schema: an
+    # unrecognized key is a miswired or misspelled control that would otherwise be dropped in
+    # silence, leaving the caller believing a restriction is in force that never reached the solver.
+    unknown = set(constraints) - {"no_mine_mask", "caps"}
+    if unknown:
+        raise ValueError(f"risk_adjusted_plan: unknown constraint key(s) {sorted(unknown)}")
     no_mine_mask = constraints.get("no_mine_mask")
     if no_mine_mask is not None:
-        mask = np.asarray(no_mine_mask, dtype=bool)
+        # NOT dtype=bool coercion: that maps every nonzero object to True, so the string "False",
+        # a NaN (truthy -- NaN is only falsy under ==) or a stray sentinel becomes a permanent
+        # exclusion, the exact opposite of what the data says. Only a genuine Boolean array decides
+        # which items may never be selected.
+        mask = np.asarray(no_mine_mask)
+        if mask.dtype != np.bool_:
+            raise ValueError(
+                "risk_adjusted_plan: constraints['no_mine_mask'] must be an actual Boolean array "
+                f"(dtype bool), got dtype {mask.dtype} ({no_mine_mask!r})"
+            )
         if mask.shape != (n_items,):
             raise ValueError(f"risk_adjusted_plan: constraints['no_mine_mask'] shape {mask.shape} != {(n_items,)}")
         for b in np.flatnonzero(mask):
@@ -242,8 +357,11 @@ def risk_adjusted_plan(
     extra_rows: list[np.ndarray] = []
     extra_b: list[float] = []
     for cap in constraints.get("caps") or ():
-        coeffs = np.asarray(cap["coeffs"], dtype=np.float64)
-        bound = float(cap["bound"])
+        unknown_cap = set(cap) - {"coeffs", "bound", "sense"}
+        if unknown_cap:
+            raise ValueError(f"risk_adjusted_plan: unknown cap key(s) {sorted(unknown_cap)}")
+        coeffs = _finite_1d(cap["coeffs"], "risk_adjusted_plan: constraints['caps'] coeffs")
+        bound = _finite_scalar(cap["bound"], "risk_adjusted_plan: constraints['caps'] bound")
         sense = cap.get("sense", "<=")
         if sense == ">=":
             coeffs, bound = -coeffs, -bound
@@ -266,11 +384,5 @@ def risk_adjusted_plan(
         raise ValueError("risk_adjusted_plan: MILP infeasible for the given items/scenarios/constraints")
     _, x_full = solved
 
-    extract = np.round(x_full[:n_items]).astype(bool)
-    eta_star = float(x_full[var_index])
-    u_star = x_full[var_index + 1 :]
-    coef = 1.0 / ((1.0 - alpha) * k_scenarios)
-    cvar = eta_star + coef * float(u_star.sum())
-    expected_value = float(mean_profit @ extract.astype(np.float64))
-
+    extract, expected_value, cvar = _discrete_plan(x_full, n_items, profit, mean_profit, alpha, "risk_adjusted_plan")
     return StochasticPlan(extract=extract, expected_value=expected_value, cvar=cvar, scenarios=g)
