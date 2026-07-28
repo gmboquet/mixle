@@ -13,7 +13,7 @@ expand/shrink state if you want to drive the loop yourself. Both fit the torch G
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -24,7 +24,7 @@ from mixle.doe.bayesopt import _fit_surrogate, _require_finite_scalar
 from mixle.doe.designs import Bounds, _as_bounds, _as_rng, _require_exact_positive_int, latin_hypercube
 
 
-@dataclass
+@dataclass(frozen=True)
 class TrustRegion:
     """Expand/shrink state of a TuRBO trust region (side length in normalized ``[0, 1]^d`` coordinates).
 
@@ -49,49 +49,80 @@ class TrustRegion:
     length_max: float = 1.6
     success_tol: int = 3
     failure_tol: int = 0  # 0 -> set to dim in __post_init__
-    _success: int = 0
-    _failure: int = 0
+    _success: int = field(default=0, init=False, repr=False)
+    _failure: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self.dim = _require_exact_positive_int(self.dim, "dim")
-        self.success_tol = _require_exact_positive_int(self.success_tol, "success_tol")
-        self.failure_tol = _require_exact_positive_int(self.failure_tol, "failure_tol", minimum=0)
-        if self.failure_tol <= 0:
-            self.failure_tol = max(4, self.dim)
-        self.length_min = _require_finite_scalar(self.length_min, "length_min")
-        if self.length_min <= 0.0:
-            raise ValueError(f"length_min must be positive, got {self.length_min!r}.")
-        self.length_max = _require_finite_scalar(self.length_max, "length_max")
-        if self.length_max < self.length_min:
+        dim = _require_exact_positive_int(self.dim, "dim")
+        success_tol = _require_exact_positive_int(self.success_tol, "success_tol")
+        failure_tol = _require_exact_positive_int(self.failure_tol, "failure_tol", minimum=0)
+        if failure_tol <= 0:
+            failure_tol = max(4, dim)
+        length_min = _require_finite_scalar(self.length_min, "length_min")
+        if length_min <= 0.0:
+            raise ValueError(f"length_min must be positive, got {length_min!r}.")
+        length_max = _require_finite_scalar(self.length_max, "length_max")
+        if length_max < length_min:
             raise ValueError(
-                f"length_max must be >= length_min, got length_max={self.length_max!r}, length_min={self.length_min!r}."
+                f"length_max must be >= length_min, got length_max={length_max!r}, length_min={length_min!r}."
             )
-        self.length = _require_finite_scalar(self.length, "length")
-        if not (self.length_min <= self.length <= self.length_max):
+        length = _require_finite_scalar(self.length, "length")
+        if not (length_min <= length <= length_max):
             raise ValueError(
-                f"length must satisfy length_min <= length <= length_max, got length={self.length!r}, "
-                f"length_min={self.length_min!r}, length_max={self.length_max!r}."
+                f"length must satisfy length_min <= length <= length_max, got length={length!r}, "
+                f"length_min={length_min!r}, length_max={length_max!r}."
             )
+        object.__setattr__(self, "dim", dim)
+        object.__setattr__(self, "success_tol", success_tol)
+        object.__setattr__(self, "failure_tol", failure_tol)
+        object.__setattr__(self, "length_min", length_min)
+        object.__setattr__(self, "length_max", length_max)
+        object.__setattr__(self, "length", length)
 
     @property
     def collapsed(self) -> bool:
         """Return whether the trust-region length has shrunk below its usable minimum."""
         return self.length < self.length_min
 
-    def update(self, improved: bool) -> None:
-        """Record whether the latest batch improved the incumbent, and resize the region."""
+    def update(self, improved: bool) -> TrustRegion:
+        """Return the next validated state after recording one batch outcome.
+
+        States are immutable: callers must retain the returned instance. This prevents a region that
+        passed construction validation from later being assigned invalid geometry.
+        """
+        if type(improved) is not bool:
+            raise TypeError(f"improved must be a bool, got {type(improved).__name__}.")
+        if self.collapsed:
+            raise RuntimeError("A collapsed trust region must be restarted before it can be updated.")
         if improved:
-            self._success += 1
-            self._failure = 0
+            success = self._success + 1
+            failure = 0
         else:
-            self._failure += 1
-            self._success = 0
-        if self._success >= self.success_tol:
-            self.length = min(self.length * 2.0, self.length_max)
-            self._success = 0
-        if self._failure >= self.failure_tol:
-            self.length /= 2.0
-            self._failure = 0
+            failure = self._failure + 1
+            success = 0
+        length = self.length
+        if success >= self.success_tol:
+            length = min(length * 2.0, self.length_max)
+            success = 0
+        if failure >= self.failure_tol:
+            length /= 2.0
+            failure = 0
+
+        # Construct from the still-valid pre-transition geometry, then install the derived state.
+        # ``length`` may legitimately be below ``length_min`` only as the result of this transition;
+        # public construction still rejects an initially collapsed region.
+        result = TrustRegion(
+            dim=self.dim,
+            length=self.length,
+            length_min=self.length_min,
+            length_max=self.length_max,
+            success_tol=self.success_tol,
+            failure_tol=self.failure_tol,
+        )
+        object.__setattr__(result, "length", length)
+        object.__setattr__(result, "_success", success)
+        object.__setattr__(result, "_failure", failure)
+        return result
 
 
 def _tr_candidates(center: np.ndarray, length: float, n: int, rng: RandomState) -> np.ndarray:
@@ -114,15 +145,43 @@ def _tr_candidates(center: np.ndarray, length: float, n: int, rng: RandomState) 
 
 def _thompson_batch(gp: Any, xn: np.ndarray, yn: np.ndarray, cand: np.ndarray, q: int, rng: RandomState) -> np.ndarray:
     """Pick ``q`` distinct trust-region candidates by Thompson sampling (joint GP posterior draws)."""
+    q = _require_exact_positive_int(q, "q")
+    cand = np.asarray(cand, dtype=np.float64)
+    if cand.ndim != 2 or cand.shape[0] == 0 or cand.shape[1] == 0:
+        raise ValueError(f"cand must be a non-empty 2-D array, got shape {cand.shape}.")
+    if not np.all(np.isfinite(cand)):
+        raise ValueError("cand must contain only finite values.")
     if q > cand.shape[0]:
         # once every candidate index is chosen, the inner loop finds nothing left to pick and that
         # round silently contributes NOTHING to `picks` -- the caller would get fewer than q points
         # back with no error. Name the actual constraint instead.
         raise ValueError(f"_thompson_batch requires q <= cand.shape[0] (q={q}, candidates={cand.shape[0]}).")
-    mean, cov = gp.predict(xn, yn, cand, return_cov=True)
-    mean = np.asarray(mean, dtype=np.float64).ravel()
+    mean_raw, cov_raw = gp.predict(xn, yn, cand, return_cov=True)
+    mean = np.asarray(mean_raw, dtype=np.float64)
+    if mean.shape == (cand.shape[0], 1):
+        mean = mean[:, 0]
+    elif mean.shape != (cand.shape[0],):
+        raise np.linalg.LinAlgError(
+            f"GP posterior mean must have shape ({cand.shape[0]},) or ({cand.shape[0]}, 1), got {mean.shape}."
+        )
+    if not np.all(np.isfinite(mean)):
+        raise np.linalg.LinAlgError("GP posterior mean must contain only finite values.")
+    cov = np.asarray(cov_raw, dtype=np.float64)
+    expected_cov_shape = (cand.shape[0], cand.shape[0])
+    if cov.shape != expected_cov_shape:
+        raise np.linalg.LinAlgError(f"GP posterior covariance must have shape {expected_cov_shape}, got {cov.shape}.")
+    if not np.all(np.isfinite(cov)):
+        raise np.linalg.LinAlgError("GP posterior covariance must contain only finite values.")
+    scale = max(float(np.max(np.abs(cov))), np.finfo(np.float64).tiny)
+    symmetry_tol = 64.0 * np.finfo(np.float64).eps * scale
+    asymmetry = float(np.max(np.abs(cov - cov.T)))
+    if asymmetry > symmetry_tol:
+        raise np.linalg.LinAlgError(
+            f"GP posterior covariance must be symmetric within {symmetry_tol:.3g}; "
+            f"maximum asymmetry is {asymmetry:.3g}."
+        )
     try:
-        chol = _safe_cholesky(np.atleast_2d(np.asarray(cov, dtype=np.float64)))
+        chol = _safe_cholesky(cov)
     except ValueError as exc:
         # _safe_cholesky raises plain ValueError for every one of its own failure modes (non-finite
         # covariance, not positive-semidefinite within tolerance, or PSD but still unfactorable after its
@@ -137,12 +196,16 @@ def _thompson_batch(gp: Any, xn: np.ndarray, yn: np.ndarray, cand: np.ndarray, q
     chosen: set[int] = set()
     for _ in range(q):
         sample = mean + chol @ rng.standard_normal(mean.size)
+        if not np.all(np.isfinite(sample)):
+            raise np.linalg.LinAlgError("GP posterior draw produced non-finite values.")
         for idx in np.argsort(sample):
             if int(idx) not in chosen:
                 chosen.add(int(idx))
                 picks.append(cand[int(idx)])
                 break
-    return np.asarray(picks)
+    if len(picks) != q or len(chosen) != q:
+        raise np.linalg.LinAlgError(f"Thompson sampling produced {len(picks)} distinct picks; expected exactly {q}.")
+    return np.asarray(picks, dtype=np.float64).reshape(q, cand.shape[1])
 
 
 def _numerical_fit_error_types() -> tuple[type[BaseException], ...]:
@@ -242,35 +305,95 @@ def turbo_minimize(
             f"turbo_minimize requires batch_size <= n_candidates (batch_size={batch_size}, "
             f"n_candidates={n_cand}); increase n_candidates or lower batch_size."
         )
+    if type(maximize) is not bool:
+        raise TypeError(f"maximize must be a bool, got {type(maximize).__name__}.")
     sign = -1.0 if maximize else 1.0  # always minimize sign*objective
 
     def to_unit(x):
         return (x - b[:, 0]) / span
 
-    def evaluate(xn):
-        return sign * float(objective(np.asarray(xn, dtype=np.float64)))
+    attempted_evals = 0
+    failed_evaluations: list[dict[str, Any]] = []
 
-    x_all = latin_hypercube(b, n_init, rng)
-    y_all = np.array([evaluate(p) for p in x_all], dtype=np.float64)
+    def evaluate(x: np.ndarray) -> float | None:
+        nonlocal attempted_evals
+        point = np.array(x, dtype=np.float64, copy=True)
+        attempted_evals += 1
+        raw_value = float(objective(point.copy()))
+        if not np.isfinite(raw_value):
+            failed_evaluations.append(
+                {
+                    "evaluation": attempted_evals,
+                    "x": point,
+                    "status": "nonfinite_observation",
+                    "observation": raw_value,
+                }
+            )
+            return None
+        return sign * raw_value
+
+    x_rows: list[np.ndarray] = []
+    y_values: list[float] = []
     tr = TrustRegion(dim=d)
-    best = float(y_all.min())
     restarts = 0
     n_bayes_batches = 0
     n_fit_failures = 0
     last_fit_error: str | None = None
     fit_error_types = _numerical_fit_error_types()
 
-    while y_all.shape[0] < max_evals:
+    def result(stopped_reason: str) -> dict[str, Any]:
+        x_all = np.asarray(x_rows, dtype=np.float64).reshape(-1, d)
+        y_all = np.asarray(y_values, dtype=np.float64)
+        if y_all.size:
+            idx = int(np.argmin(y_all))
+            best_x: np.ndarray | None = x_all[idx].copy()
+            best_y: float | None = sign * float(y_all[idx])
+        else:
+            best_x = None
+            best_y = None
+        return {
+            "x": best_x,
+            "y": best_y,
+            "X": x_all,
+            "Y": sign * y_all,
+            "n_evaluations": attempted_evals,
+            "failed_evaluations": tuple(failed_evaluations),
+            "n_restarts": restarts,
+            "n_bayes_batches": n_bayes_batches,
+            "n_fit_failures": n_fit_failures,
+            "last_fit_error": last_fit_error,
+            "degraded_to_random_search": n_bayes_batches == 0,
+            "stopped_reason": stopped_reason,
+        }
+
+    initial_design = latin_hypercube(b, n_init, rng)
+    for point in initial_design:
+        value = evaluate(point)
+        if value is None:
+            return result("objective_failed")
+        x_rows.append(np.array(point, dtype=np.float64, copy=True))
+        y_values.append(value)
+
+    x_all = np.asarray(x_rows, dtype=np.float64)
+    y_all = np.asarray(y_values, dtype=np.float64)
+    best = float(y_all.min())
+
+    while attempted_evals < max_evals:
         if tr.collapsed:
             restarts += 1
             # clamp the restart design to the REMAINING budget -- an unclamped n_init-point design
             # can overshoot max_evals by up to n_init real objective calls if the trust region
             # collapses near the end of the run (a real, common occurrence on hard landscapes).
-            n_restart = min(n_init, max_evals - y_all.shape[0])
+            n_restart = min(n_init, max_evals - attempted_evals)
             xr = latin_hypercube(b, n_restart, rng)
-            yr = np.array([evaluate(p) for p in xr], dtype=np.float64)
-            x_all = np.vstack([x_all, xr])
-            y_all = np.append(y_all, yr)
+            for point in xr:
+                value = evaluate(point)
+                if value is None:
+                    return result("objective_failed")
+                x_rows.append(np.array(point, dtype=np.float64, copy=True))
+                y_values.append(value)
+            x_all = np.asarray(x_rows, dtype=np.float64)
+            y_all = np.asarray(y_values, dtype=np.float64)
             tr = TrustRegion(dim=d)
             best = float(y_all.min())
             continue
@@ -290,7 +413,7 @@ def turbo_minimize(
         ymean, ystd = float(yloc.mean()), float(yloc.std() or 1.0)
         yz = (yloc - ymean) / ystd
         cand = _tr_candidates(center, tr.length, n_cand, rng)
-        q = min(batch_size, max(1, max_evals - y_all.shape[0]))
+        q = min(batch_size, max_evals - attempted_evals)
         try:
             gp = _fit_surrogate(xu, yz, None, fit_kwargs)
             picks_u = _thompson_batch(gp, xu, yz, cand, q, rng)
@@ -301,33 +424,25 @@ def turbo_minimize(
             # of being silently caught and relabeled "model failure" (MXR-080-0197).
             n_fit_failures += 1
             last_fit_error = f"{type(exc).__name__}: {exc}"
-            tr.update(False)
+            tr = tr.update(False)
             continue
         n_bayes_batches += 1
         improved = False
         for pu in picks_u:
             xn = b[:, 0] + pu * span
             yn = evaluate(xn)
-            x_all = np.vstack([x_all, xn])
-            y_all = np.append(y_all, yn)
+            if yn is None:
+                return result("objective_failed")
+            x_rows.append(np.array(xn, dtype=np.float64, copy=True))
+            y_values.append(yn)
             if yn < best - 1e-3 * abs(best):
                 best = yn
                 improved = True
-        tr.update(improved)
+        x_all = np.asarray(x_rows, dtype=np.float64)
+        y_all = np.asarray(y_values, dtype=np.float64)
+        tr = tr.update(improved)
 
-    idx = int(np.argmin(y_all))
-    return {
-        "x": x_all[idx],
-        "y": sign * float(y_all[idx]),
-        "X": x_all,
-        "Y": sign * y_all,
-        "n_restarts": restarts,
-        "n_bayes_batches": n_bayes_batches,
-        "n_fit_failures": n_fit_failures,
-        "last_fit_error": last_fit_error,
-        "degraded_to_random_search": n_bayes_batches == 0,
-        "stopped_reason": "budget_exhausted",
-    }
+    return result("budget_exhausted")
 
 
 __all__ = ["TrustRegion", "turbo_minimize"]
