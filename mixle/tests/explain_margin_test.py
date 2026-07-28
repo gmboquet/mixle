@@ -10,7 +10,7 @@ when every other field is identical between the two candidate records.
 import numpy as np
 import pytest
 
-from mixle.inference import explain_margin, explain_margin_mixture
+from mixle.inference import explain, explain_margin, explain_margin_mixture
 from mixle.inference.bayesian_network import HeterogeneousBayesianNetwork, _LinearGaussianFactor, _MarginalFactor
 from mixle.stats import (
     CategoricalDistribution,
@@ -109,6 +109,99 @@ class MixtureMarginTest:
         _c0, _c1, mix = self._mix()
         with pytest.raises(TypeError, match="explain_margin_mixture"):
             explain_margin(mix, ("a", 0.0), ("b", 0.0))
+
+
+class MixtureMarginHypothesisValidationTest:
+    """MXR-080-1615: a hypothesis names a class exactly -- it is not rounded, wrapped, or self-compared."""
+
+    def _mix(self):
+        c0 = CompositeDistribution((CategoricalDistribution({"a": 0.9, "b": 0.1}), GaussianDistribution(-3.0, 1.0)))
+        c1 = CompositeDistribution((CategoricalDistribution({"a": 0.1, "b": 0.9}), GaussianDistribution(3.0, 1.0)))
+        return MixtureDistribution([c0, c1], [0.5, 0.5])
+
+    def test_fractional_hypotheses_are_rejected_not_truncated(self):
+        mix = self._mix()
+        with pytest.raises(TypeError, match="exact integer component index"):
+            explain_margin_mixture(mix, ("b", 3.2), answer=0.9, runner_up=1.9)
+
+    def test_negative_hypothesis_does_not_wrap_to_the_last_component(self):
+        mix = self._mix()
+        with pytest.raises(IndexError, match="negative wrap-around"):
+            explain_margin_mixture(mix, ("b", 3.2), answer=-1, runner_up=0)
+
+    def test_out_of_range_hypothesis_is_rejected(self):
+        mix = self._mix()
+        with pytest.raises(IndexError, match="2-component mixture"):
+            explain_margin_mixture(mix, ("b", 3.2), answer=2, runner_up=0)
+
+    def test_boolean_hypotheses_are_rejected(self):
+        mix = self._mix()
+        with pytest.raises(TypeError, match="not a Boolean"):
+            explain_margin_mixture(mix, ("b", 3.2), answer=True, runner_up=False)
+
+    def test_identical_hypotheses_are_rejected_rather_than_reported_as_a_zero_margin(self):
+        mix = self._mix()
+        with pytest.raises(ValueError, match="two distinct"):
+            explain_margin_mixture(mix, ("b", 3.2), answer=1, runner_up=1)
+
+    def test_numpy_integer_hypotheses_are_accepted(self):
+        mix = self._mix()
+        ex = explain_margin_mixture(mix, ("b", 3.2), answer=np.int64(1), runner_up=np.int64(0))
+        assert ex.is_exact()
+
+    def test_mismatched_component_schemas_do_not_produce_a_truncated_field_ledger(self):
+        """A truncating zip drops the trailing fields, leaving a margin ledger with a phantom correction.
+
+        The mixture margin is documented to need no correction (the normalizer cancels), so a non-zero
+        one here means evidence silently fell out of the per-field breakdown.
+        """
+
+        class _Field:
+            def __init__(self, v):
+                self.v = v
+
+            def log_density(self, _x):
+                return self.v
+
+        class _Component:
+            def __init__(self, dists, total):
+                self.dists = dists
+                self._total = total
+
+            def log_density(self, _x):
+                return self._total
+
+        class _Mix:
+            def __init__(self, components):
+                self.components = components
+                self.log_w = np.log([0.5, 0.5])
+
+        answer_c = _Component([_Field(-0.4), _Field(-0.6)], -1.0)
+        runner_c = _Component([_Field(-0.1), _Field(-0.2), _Field(-0.7)], -1.0)
+        ex = explain_margin_mixture(_Mix([runner_c, answer_c]), (0.0, 0.0), answer=1, runner_up=0)
+        assert {name for name, _ in ex.parts} == {"prior", "component_density"}
+        assert abs(ex.correction) < 1e-9
+        assert ex.is_exact()
+
+
+class GenericModelSingleEvaluationTest:
+    """MXR-080-1614: a generic scorer is evaluated exactly once per explanation."""
+
+    class _CountingModel:
+        def __init__(self):
+            self.calls = 0
+
+        def log_density(self, x):
+            self.calls += 1
+            return float(self.calls)
+
+    def test_generic_fallback_scores_once_and_the_ledger_reconstructs_the_total(self):
+        model = self._CountingModel()
+        ex = explain(model, 0.0)
+        assert model.calls == 1
+        assert ex.total == 1.0
+        assert ex.parts == [("model", 1.0)]
+        assert ex.is_exact()
 
 
 if __name__ == "__main__":

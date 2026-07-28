@@ -133,7 +133,11 @@ def explain(model: Any, x: Any) -> Explanation:
         parts = _composite_parts(model, x)
         return Explanation(float(sum(v for _, v in parts)), sorted(parts, key=lambda p: p[1]))
 
-    return Explanation(float(model.log_density(x)), [("model", float(model.log_density(x)))])
+    # generic fallback: one opaque part. ``log_density`` is evaluated exactly once -- a scorer may
+    # consume randomness, hit a remote service, or count its own calls, so the ledger reuses the single
+    # scalar rather than re-scoring for the part.
+    score = float(model.log_density(x))
+    return Explanation(score, [("model", score)])
 
 
 def explain_margin(model: Any, answer: Any, runner_up: Any) -> Explanation:
@@ -170,6 +174,45 @@ def explain_margin(model: Any, answer: Any, runner_up: Any) -> Explanation:
     return Explanation(total, [("model", total)], correction=0.0)
 
 
+def _field_aligned(ca: Any, cr: Any, x: Any) -> bool:
+    """Return whether both components and ``x`` share one field schema, so a per-field ledger is complete.
+
+    ``zip`` truncates to the shortest of the three, so a schema mismatch would silently drop the trailing
+    fields from the ledger while ``total`` still scored the whole observation -- a ledger that no longer
+    sums to its own margin. When the schemas do not line up, the margin is reported at component
+    granularity instead (still exact), rather than as a per-field breakdown that omits evidence.
+    """
+    if not (hasattr(ca, "dists") and hasattr(cr, "dists")):
+        return False
+    try:
+        return len(ca.dists) == len(cr.dists) == len(x)
+    except TypeError:  # an observation without a length (scalar / iterator) has no field schema
+        return False
+
+
+def _hypothesis_index(value: Any, name: str, n_components: int) -> int:
+    """Validate one component index of a mixture margin: an exact, in-range, non-Boolean integer.
+
+    A hypothesis in an evidence ledger names a class, so it must be identified exactly: ``0.9`` is not
+    "component 0", ``True`` is not "component 1", and ``-1`` is not "the last class" -- each of those is
+    a caller mistake that ordinary ``int()``/Python indexing would turn into a confident wrong ledger.
+    """
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be an integer component index, not a Boolean; got {value!r}.")
+    if not isinstance(value, (int, np.integer)):
+        raise TypeError(
+            f"{name} must be an exact integer component index (a class label), got {type(value).__name__} "
+            f"{value!r}; a fractional or string hypothesis is not a component."
+        )
+    idx = int(value)
+    if not 0 <= idx < n_components:
+        raise IndexError(
+            f"{name}={idx} is not a component of this {n_components}-component mixture; component indices "
+            "are 0-based and negative wrap-around is not a hypothesis."
+        )
+    return idx
+
+
 def explain_margin_mixture(model: Any, x: Any, answer: int, runner_up: int) -> Explanation:
     """Exact per-part attribution of the decision margin between two Mixture components at one point ``x``.
 
@@ -178,11 +221,27 @@ def explain_margin_mixture(model: Any, x: Any, answer: int, runner_up: int) -> E
     The mixture's logsumexp normalizer -- the same term :func:`explain` must name as a correction for the
     absolute ``log p(x)`` -- cancels exactly in this subtraction, so the margin ledger needs no correction
     (computed and asserted at 0.0, not assumed away).
+
+    Both hypotheses must be exact, distinct, in-range integer component indices: a margin of a hypothesis
+    against itself is 0 by construction and is a caller error, not evidence, so it is rejected rather than
+    reported as a confident tie.
+
+    Raises:
+        TypeError: if either hypothesis is not an exact non-Boolean integer.
+        IndexError: if either hypothesis is outside ``range(len(model.components))``.
+        ValueError: if both hypotheses name the same component.
     """
-    a_idx, r_idx = int(answer), int(runner_up)
-    ca, cr = model.components[a_idx], model.components[r_idx]
+    components = model.components
+    a_idx = _hypothesis_index(answer, "answer", len(components))
+    r_idx = _hypothesis_index(runner_up, "runner_up", len(components))
+    if a_idx == r_idx:
+        raise ValueError(
+            f"answer and runner_up both name component {a_idx}: a decision margin needs two distinct "
+            "hypotheses (the margin of a component against itself is 0 by construction, not evidence)."
+        )
+    ca, cr = components[a_idx], components[r_idx]
     wa, wr = float(model.log_w[a_idx]), float(model.log_w[r_idx])
-    if hasattr(ca, "dists") and hasattr(cr, "dists"):
+    if _field_aligned(ca, cr, x):
         parts = [("prior", wa - wr)] + [
             (f"field[{i}]", float(da.log_density(xi)) - float(dr.log_density(xi)))
             for i, (da, dr, xi) in enumerate(zip(ca.dists, cr.dists, x))
@@ -203,6 +262,22 @@ _FIX_VOCAB = frozenset({"add_edge", "upgrade_leaf", "split_region", "add_factor"
 # of a high-confidence finding from numerical noise or a single case.
 _MIN_BACKGROUND = 4
 _MIN_CASES_FOR_COOCCURRENCE = 3
+
+
+def _validated_min_z(min_z: float) -> float:
+    """A robust z-score cutoff: finite and non-negative (adverse scores are clipped at 0)."""
+    z = float(min_z)
+    if not np.isfinite(z) or z < 0.0:
+        raise ValueError(f"min_z must be a finite, non-negative z-score cutoff; got {min_z!r}.")
+    return z
+
+
+def _validated_threshold(threshold: float) -> float:
+    """A co-occurrence rate cutoff: finite and within ``[0, 1]``, the range the rate itself can take."""
+    t = float(threshold)
+    if not np.isfinite(t) or not (0.0 <= t <= 1.0):
+        raise ValueError(f"co_occurrence_threshold must be a rate in [0, 1]; got {threshold!r}.")
+    return t
 
 
 @dataclass
@@ -243,7 +318,17 @@ def diagnose(
     cases more often than chance predicts, indicating a possible unmodeled
     edge. When no such co-anomalous pair is found, the report remains
     empty/low-severity rather than guessing a fix.
+
+    ``min_z`` is a robust z-score cutoff (finite, ``>= 0``) and
+    ``co_occurrence_threshold`` is a rate in ``[0, 1]``; out-of-range values are
+    rejected rather than silently turning both comparisons into tautologies that
+    prescribe an ``add_edge`` backed by no co-anomalous case at all.
     """
+    min_z = _validated_min_z(min_z)
+    co_occurrence_threshold = _validated_threshold(co_occurrence_threshold)
+    # materialize once: ``cases``/``background`` may be numpy arrays or one-shot iterators, and a bare
+    # truth test on an array raises an ambiguous-truth-value error rather than reporting "no cases".
+    cases = list(cases)
     bg = list(background) if background is not None else list(cases)
     if len(bg) < _MIN_BACKGROUND or not cases:
         return FaultReport(
@@ -274,7 +359,10 @@ def diagnose(
         both = sum(1 for r in rows if r.get(top_name, 0.0) > min_z and r.get(second_name, 0.0) > min_z)
         either = sum(1 for r in rows if r.get(top_name, 0.0) > min_z or r.get(second_name, 0.0) > min_z)
         co_occurrence = (both / either) if either else 0.0
-        if either > 0 and co_occurrence >= co_occurrence_threshold:
+        # ``both > 0`` is the evidence precondition: a structural repair is only ever proposed from at
+        # least one case where BOTH parts are adverse together. A threshold of 0.0 is a legitimate
+        # "any co-occurrence counts" setting, not a licence to prescribe an edge from zero evidence.
+        if both > 0 and co_occurrence >= co_occurrence_threshold:
             dominant, fix, severity = f"{top_name}+{second_name}", "add_edge", co_occurrence
 
     return FaultReport(
