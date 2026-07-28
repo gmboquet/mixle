@@ -120,7 +120,12 @@ def validate_effective_sample_mass(
     if declared is None:
         return EffectiveSampleReceipt(None, assigned, 0.0, allow_unassigned)
 
-    tolerance = 1.0e-9 * max(1.0, declared, assigned)
+    # Relative tolerance. The 1e-9 floor is a float64 figure: responsibilities summed on a float32
+    # engine (the torch/MPS EM path) cannot agree that closely -- float32 eps alone is ~1.2e-7, and
+    # accumulating n of them loses more still, so a float64-calibrated bound rejected sufficient
+    # statistics that were as exact as their arithmetic allows. Scale the floor to float32 eps with
+    # headroom for accumulation; a genuine mass violation is O(1) relative, orders of magnitude above.
+    tolerance = 64.0 * float(np.finfo(np.float32).eps) * max(1.0, declared, assigned)
     difference = declared - assigned
     if difference < -tolerance:
         raise ValueError(f"{label} assigned mass cannot exceed declared mass")
