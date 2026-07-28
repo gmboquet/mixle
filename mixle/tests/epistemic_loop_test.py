@@ -6,7 +6,7 @@ import warnings
 
 import numpy as np
 
-from mixle.epistemic.loop import step
+from mixle.epistemic.loop import _add_hypothesis, _portfolio_eig_nmc, step
 from mixle.epistemic.portfolio import Hypothesis, HypothesisPortfolio
 
 
@@ -203,6 +203,173 @@ class SurpriseAbductionTest(unittest.TestCase):
 
         step(portfolio, 2.0, _gaussian_likelihood, surprise_threshold=0.999, propose_fn=propose_fn)
         self.assertFalse(proposed["called"])
+
+
+class SingleLikelihoodEvaluationTest(unittest.TestCase):
+    """MXR-080-1752: surprise and the posterior must come from the SAME evidence."""
+
+    def test_each_active_likelihood_is_evaluated_once_per_step(self):
+        calls = []
+
+        def counting_likelihood(hypothesis, observation):
+            calls.append(hypothesis.id)
+            return _gaussian_likelihood(hypothesis, observation)
+
+        step(_toy_portfolio(), 2.0, counting_likelihood)
+        self.assertEqual(sorted(calls), ["h0", "h1", "h2"])
+
+    def test_a_stateful_likelihood_cannot_report_two_different_beliefs(self):
+        # Alternating values previously fed surprise one pair and the posterior the opposite pair.
+        state = {"n": 0}
+
+        def alternating(hypothesis, observation):
+            state["n"] += 1
+            return 1.0 if state["n"] % 2 else 2.0
+
+        hyps = [Hypothesis("a", None), Hypothesis("b", None)]
+        portfolio = HypothesisPortfolio(hyps, np.array([0.5, 0.5]))
+        outcome = step(portfolio, "o", alternating)
+        self.assertEqual(state["n"], 2)  # two hypotheses, one evaluation each
+        # The values actually used were 1.0 and 2.0, so the posterior is exactly [1/3, 2/3] AND the
+        # surprise is the score of that same pair -- consistent, not two different experiments.
+        self.assertTrue(np.allclose(outcome.portfolio_after.weights, [1 / 3, 2 / 3]))
+        self.assertAlmostEqual(outcome.surprise, 1.0 / (1.0 + 1.5), places=12)
+
+
+class OpenWorldEIGTest(unittest.TestCase):
+    """MXR-080-1753: EIG must not silently condition away the open-world mass."""
+
+    @staticmethod
+    def _likelihood(hypothesis, observation):
+        return float(np.exp(-0.5 * ((observation - hypothesis.payload) / 0.2) ** 2))
+
+    @staticmethod
+    def _simulate_fn(hypothesis, action, rng):
+        return float(hypothesis.payload + rng.normal(scale=0.2))
+
+    def _eig(self, w_open):
+        # Two portfolios identical apart from w_open (the exact reported shape): before the fix both
+        # renormalized the known hypotheses to one and returned the very same number.
+        hyps = [Hypothesis("h0", 0.0), Hypothesis("h1", 3.0)]
+        weights = np.array([(1.0 - w_open) / 2] * 2)
+        return _portfolio_eig_nmc(
+            HypothesisPortfolio(hyps, weights, w_open=w_open),
+            0.0,
+            self._likelihood,
+            self._simulate_fn,
+            np.random.RandomState(0),
+            n_outer=64,
+            n_inner=32,
+        )
+
+    def test_open_world_mass_lowers_the_reported_eig(self):
+        closed = self._eig(0.0)
+        mostly_open = self._eig(0.99)
+        self.assertGreater(closed, 0.4)
+        self.assertLess(mostly_open, closed)
+        # The conditional estimate is weighted by the probability the model set is complete at all.
+        self.assertAlmostEqual(mostly_open, 0.01 * closed, places=10)
+
+    def test_all_open_world_mass_yields_no_expected_gain(self):
+        self.assertEqual(self._eig(1.0), 0.0)
+
+
+class AbductionFundingTest(unittest.TestCase):
+    """MXR-080-1754: an abduced hypothesis must get a prior multiplicative updates can revive."""
+
+    def test_a_closed_portfolio_still_funds_the_new_hypothesis(self):
+        portfolio = HypothesisPortfolio([Hypothesis("incumbent", 0.0)], np.array([1.0]), w_open=0.0)
+        outcome = step(
+            portfolio,
+            1000.0,
+            lambda h, o: 1e-9,
+            surprise_threshold=0.5,
+            propose_fn=lambda p: Hypothesis("h_new", 1000.0),
+        )
+        after = outcome.portfolio_after
+        idx = {h.id: i for i, h in enumerate(after.hypotheses)}
+        self.assertGreater(after.weights[idx["h_new"]], 0.0)
+        self.assertLess(after.weights[idx["incumbent"]], 1.0)
+        self.assertAlmostEqual(float(after.weights.sum()) + after.w_open, 1.0, places=12)
+
+    def test_a_revivable_prior_actually_revives_under_evidence(self):
+        # The whole point of abduction: the new hypothesis must be able to overtake the incumbent it
+        # was proposed against. With a weight of 0.0 multiplicative updates could never do that.
+        portfolio = HypothesisPortfolio([Hypothesis("incumbent", 0.0)], np.array([1.0]), w_open=0.0)
+        after = step(
+            portfolio,
+            1000.0,
+            lambda h, o: 1e-9,
+            surprise_threshold=0.5,
+            propose_fn=lambda p: Hypothesis("h_new", 1000.0),
+        ).portfolio_after
+        after = after.reweight(1000.0, _gaussian_likelihood)
+        idx = {h.id: i for i, h in enumerate(after.hypotheses)}
+        self.assertGreater(after.weights[idx["h_new"]], 0.9)
+
+    def test_open_world_mass_is_the_preferred_funding_source(self):
+        hyps = [Hypothesis("a", None), Hypothesis("b", None)]
+        portfolio = HypothesisPortfolio(hyps, np.array([0.4, 0.3]), w_open=0.3)
+        grown = _add_hypothesis(portfolio, Hypothesis("h_new", None), floor_weight=0.1)
+        self.assertAlmostEqual(grown.w_open, 0.2, places=12)
+        self.assertTrue(np.allclose(grown.weights[:2], [0.4, 0.3]))  # incumbents untouched
+
+    def test_shortfall_dilutes_incumbents_proportionally(self):
+        hyps = [Hypothesis("a", None), Hypothesis("b", None)]
+        portfolio = HypothesisPortfolio(hyps, np.array([0.6, 0.3]), w_open=0.1)
+        grown = _add_hypothesis(portfolio, Hypothesis("h_new", None), floor_weight=0.3)
+        self.assertAlmostEqual(grown.w_open, 0.0, places=12)
+        self.assertAlmostEqual(grown.weights[-1], 0.3, places=12)
+        # 0.1 came from w_open; the 0.2 shortfall scales the 0.9 of active mass down to 0.7.
+        self.assertTrue(np.allclose(grown.weights[:2], np.array([0.6, 0.3]) * (0.7 / 0.9)))
+        self.assertAlmostEqual(float(grown.weights.sum()) + grown.w_open, 1.0, places=12)
+
+    def test_a_floor_weight_outside_the_open_interval_is_rejected(self):
+        portfolio = HypothesisPortfolio([Hypothesis("a", None)], np.array([1.0]))
+        for bad in (0.0, -0.1, 1.0, 2.0, float("nan")):
+            with self.subTest(floor_weight=bad), self.assertRaises(ValueError):
+                _add_hypothesis(portfolio, Hypothesis("h_new", None), floor_weight=bad)
+
+
+class ActionEvidenceValidationTest(unittest.TestCase):
+    """MXR-080-1755 / MXR-080-1756: invalid budgets and economics must not silently erase actions."""
+
+    @staticmethod
+    def _simulate_fn(hypothesis, action, rng):
+        return float(hypothesis.payload + rng.normal(scale=0.2))
+
+    def _step(self, **kwargs):
+        return step(
+            _toy_portfolio(),
+            2.0,
+            _gaussian_likelihood,
+            action_space=[1.0],
+            simulate_fn=self._simulate_fn,
+            rng=0,
+            **kwargs,
+        )
+
+    def test_invalid_sample_budgets_are_rejected(self):
+        for budget in (0, -5, 2.5, float("nan"), float("inf"), None, True):
+            with self.subTest(n_outer=budget), self.assertRaises(ValueError):
+                self._step(n_outer=budget, n_inner=8)
+            with self.subTest(n_inner=budget), self.assertRaises(ValueError):
+                self._step(n_outer=8, n_inner=budget)
+
+    def test_invalid_costs_do_not_make_the_only_candidate_vanish(self):
+        for bad in (float("nan"), float("inf"), -1.0):
+            with self.subTest(cost=bad), self.assertRaises(ValueError):
+                self._step(n_outer=8, n_inner=8, cost_fn=lambda a, v=bad: v)
+
+    def test_invalid_lam_is_rejected(self):
+        for bad in (float("nan"), float("inf"), -1.0):
+            with self.subTest(lam=bad), self.assertRaises(ValueError):
+                self._step(n_outer=8, n_inner=8, lam=bad, cost_fn=lambda a: 1.0)
+
+    def test_valid_economics_still_select_an_action(self):
+        outcome = self._step(n_outer=8, n_inner=8, lam=0.5, cost_fn=lambda a: 1.0)
+        self.assertEqual(outcome.next_action, 1.0)
+        self.assertTrue(math.isfinite(outcome.next_action_eig))
 
 
 if __name__ == "__main__":
