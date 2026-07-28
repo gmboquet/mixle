@@ -111,6 +111,65 @@ class StreamingEstimatorTestCase(unittest.TestCase):
         self.assertEqual(stream.last_batch_scale, 10.0)
         self.assertEqual(stream.value()[2], 100.0)
 
+    def test_nonfinite_dataset_size_is_rejected_at_construction(self):
+        # MXR-080-1609: ``dataset_size <= 0`` is false for NaN and for +inf, so both used to reach the
+        # accumulator scaling and poison the running statistics.
+        for bad in (float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                StreamingEstimator(GaussianEstimator(), dataset_size=bad)
+
+    def test_nonfinite_schedule_leaves_running_state_untouched(self):
+        # MXR-080-1609: both ordered comparisons are false for NaN, so a NaN step size used to scale the
+        # already-valid running accumulator to NaN before the M-step raised.
+        estimator = GaussianEstimator()
+        start = GaussianDistribution(0.0, 1.0)
+        schedule = lambda step: 0.5 if step == 1 else float("nan")  # noqa: E731
+        stream = StreamingEstimator(estimator, schedule=schedule, model=start)
+
+        stream.update(np.asarray([-1.0, 0.0, 1.0]))
+        good_value, good_nobs, good_step = stream.value(), stream.nobs, stream.step
+
+        with self.assertRaises(ValueError):
+            stream.update(np.asarray([2.0, 3.0]))
+
+        _assert_suff_close(self, stream.value(), good_value)
+        self.assertEqual(stream.nobs, good_nobs)
+        self.assertEqual(stream.step, good_step)
+        self.assertTrue(all(np.isfinite(np.asarray(v, dtype=float)).all() for v in stream.value()))
+
+    def test_failed_m_step_rolls_the_running_accumulator_back(self):
+        # MXR-080-1609: a raising M-step used to leave the scaled/combined accumulator and the advanced
+        # ``nobs`` behind, so catching the exception and retrying could not recover.
+        estimator = GaussianEstimator()
+        start = GaussianDistribution(0.0, 1.0)
+        stream = StreamingEstimator(estimator, schedule=constant(0.5), model=start)
+        stream.update(np.asarray([-1.0, 0.0, 1.0]))
+        good_value, good_nobs, good_step = stream.value(), stream.nobs, stream.step
+
+        boom = RuntimeError("M-step failed")
+
+        def failing_estimate(nobs, suff_stat):
+            raise boom
+
+        original = estimator.estimate
+        estimator.estimate = failing_estimate
+        try:
+            with self.assertRaises(RuntimeError):
+                stream.update(np.asarray([2.0, 3.0]))
+        finally:
+            estimator.estimate = original
+
+        _assert_suff_close(self, stream.value(), good_value)
+        self.assertEqual(stream.nobs, good_nobs)
+        self.assertEqual(stream.step, good_step)
+        # the rolled-back estimator still folds the retried batch exactly as an untouched one would
+        retried = stream.update(np.asarray([2.0, 3.0]))
+        reference = StreamingEstimator(GaussianEstimator(), schedule=constant(0.5), model=start)
+        reference.update(np.asarray([-1.0, 0.0, 1.0]))
+        reference.update(np.asarray([2.0, 3.0]))
+        _assert_suff_close(self, stream.value(), reference.value())
+        self.assertAlmostEqual(retried.mu, reference.model.mu)
+
     def test_streaming_update_accepts_local_encoded_data_handle(self):
         estimator = GaussianEstimator()
         start = GaussianDistribution(0.0, 1.0)
