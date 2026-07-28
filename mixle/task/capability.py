@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import random
 import string
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -73,7 +74,21 @@ def whitespace_invariance(text: str) -> str:
 
 
 def _exact_outputs(outputs: Any, n: int, *, context: str) -> list[Any]:
-    if isinstance(outputs, (str, bytes)) or not isinstance(outputs, Sequence):
+    """Validate one batch result as exactly ``n`` per-input outputs, and materialize it as a list.
+
+    Accepts any indexable, sized batch result -- a list or tuple, a NumPy prediction vector, a pandas
+    Series, a tensor (MXR-080-1600). Requiring ``collections.abc.Sequence`` rejected all of those,
+    even though a NumPy label vector of exactly the right length is the single most ordinary thing a
+    batch callable returns. Strings/bytes and mappings/sets are still rejected: the first is a single
+    output that merely happens to be iterable, and the latter two carry no positional correspondence
+    to the inputs, so neither can be aligned row-for-row.
+    """
+    if isinstance(outputs, (str, bytes, bytearray, Mapping, AbstractSet)):
+        raise ValueError(f"{context} must return one indexable output per input")
+    if isinstance(outputs, np.ndarray):
+        if outputs.ndim != 1:
+            raise ValueError(f"{context} must return a 1-D batch of outputs, got shape {outputs.shape}")
+    elif not isinstance(outputs, Sequence) and not (hasattr(outputs, "__len__") and hasattr(outputs, "__getitem__")):
         raise ValueError(f"{context} must return a sequence with exactly one output per input")
     result = list(outputs)
     if len(result) != n:

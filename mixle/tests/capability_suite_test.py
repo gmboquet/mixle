@@ -19,6 +19,7 @@ from mixle.task.capability import (  # noqa: E402
     CapabilitySuite,
     _decide,
     _escalation_rate,
+    _predict,
     capture_profile,
     case_jitter_invariance,
     keyboard_typo_corruption,
@@ -154,6 +155,68 @@ class CapabilitySuiteTest(unittest.TestCase):
         self.assertEqual(profile["corruptions"], {})
         self.assertEqual(profile["invariances"], {})
         self.assertNotIn("probes", profile)
+
+
+class BatchOutputDispatchTest(unittest.TestCase):
+    """MXR-080-1600: a batch callable's array-like result must be accepted and validated, not discarded.
+
+    Requiring ``collections.abc.Sequence`` rejected a NumPy prediction vector of exactly the right
+    length -- the single most ordinary thing a batch model returns -- even though nothing about it is
+    ambiguous. Each of these models records its invocations, so the tests also pin that a batch model
+    is called exactly once per batch and never re-probed per row.
+    """
+
+    class _Recording:
+        def __init__(self, result_for):
+            self.result_for = result_for
+            self.calls = []
+
+        def __call__(self, texts):
+            rows = list(texts)
+            self.calls.append(rows)
+            return self.result_for(rows)
+
+    def test_numpy_batch_result_is_accepted_and_the_model_called_once(self):
+        model = self._Recording(lambda rows: np.array(["spam"] * len(rows)))
+        got = _predict(model, ["a", "b", "c"])
+        self.assertEqual([str(x) for x in got], ["spam", "spam", "spam"])
+        self.assertEqual(len(model.calls), 1, "a valid batch result must not trigger a per-row re-probe")
+        self.assertEqual(model.calls[0], ["a", "b", "c"])
+
+    def test_list_and_tuple_batch_results_still_work(self):
+        for factory in (list, tuple):
+            with self.subTest(kind=factory.__name__):
+                model = self._Recording(lambda rows, f=factory: f(["ham"] * len(rows)))
+                self.assertEqual(_predict(model, ["a", "b"]), ["ham", "ham"])
+                self.assertEqual(len(model.calls), 1)
+
+    def test_malformed_batch_results_are_rejected_not_silently_reshaped(self):
+        cases = {
+            "wrong length": np.array(["spam"]),
+            "two dimensional": np.array([["a", "b"], ["c", "d"]]),
+            "bare string": "spam",
+            "mapping": {"a": "spam", "b": "ham"},
+            "set": {"spam", "ham"},
+        }
+        for name, bad in cases.items():
+            with self.subTest(case=name):
+                model = self._Recording(lambda rows, b=bad: b)
+                with self.assertRaises(ValueError):
+                    _predict(model, ["a", "b"])
+                self.assertEqual(len(model.calls), 1, "a rejected batch must not be retried per row")
+
+    def test_capture_profile_evaluates_a_numpy_batch_model_exactly_once_per_batch(self):
+        student = self._Recording(lambda rows: np.array(["spam"] * len(rows)))
+        teacher = self._Recording(lambda rows: np.array(["spam"] * len(rows)))
+        texts = ["free prize", "team meeting", "cheap offer"]
+
+        profile = capture_profile(student, teacher, texts, CapabilitySuite())
+
+        self.assertEqual(profile["clean_agreement"], 1.0)
+        self.assertEqual(profile["n_evaluated"], len(texts))
+        # no corruptions and no invariances: exactly one clean batch per side, never re-evaluated
+        self.assertEqual(len(student.calls), 1)
+        self.assertEqual(len(teacher.calls), 1)
 
 
 if __name__ == "__main__":
