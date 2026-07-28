@@ -532,5 +532,62 @@ class CalibrateRestartLeakTest(unittest.TestCase):
         self.assertIsNotNone(m.calibration)
 
 
+class EvidenceRecordTest(unittest.TestCase):
+    """MXR-080-1715: both evidence-producing steps catch every exception and replace the result with
+    None, without status, reason or note -- so an injected internal certification failure returned a
+    fitted model with certificate=None, calibration=None and empty notes, indistinguishable from a
+    caller who never requested (or whose model never supported) those checks."""
+
+    def _fit(self, **kw):
+        import mixle
+        import mixle.stats as st
+
+        return mixle.Model(st.GaussianEstimator()).fit([float(i) for i in range(8)], **kw)
+
+    def test_a_fit_that_was_never_asked_to_calibrate_says_so(self):
+        m = self._fit()
+        self.assertEqual(m.evidence["certificate"]["status"], "succeeded")
+        self.assertEqual(m.evidence["calibration"]["status"], "not_applicable")
+        self.assertIsNone(m.calibration)
+
+    def test_a_successful_calibration_is_recorded_with_its_holdout_size(self):
+        m = self._fit(calibrate=0.25)
+        self.assertEqual(m.evidence["calibration"]["status"], "succeeded")
+        self.assertGreater(m.evidence["calibration"]["n_holdout"], 0)
+        self.assertIsNotNone(m.calibration)
+
+    def test_an_internal_certification_failure_is_not_erased(self):
+        from unittest import mock
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("injected certification failure")
+
+        with mock.patch("mixle.inference.certify", side_effect=boom):
+            m = self._fit(calibrate=0.25)
+
+        self.assertIsNone(m.certificate)  # the fit still succeeds and stays usable
+        record = m.evidence["certificate"]
+        self.assertEqual(record["status"], "failed")  # but NOT indistinguishable from never-attempted
+        self.assertEqual(record["error_type"], "RuntimeError")
+        self.assertIn("injected certification failure", record["error"])
+        self.assertTrue(any("certificate failed" in note for note in m.notes))
+        self.assertIn("certificate failed", m.explain())
+
+    def test_an_internal_calibration_failure_is_not_erased(self):
+        from unittest import mock
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("injected calibration failure")
+
+        with mock.patch("mixle.inference.calibration_report", side_effect=boom):
+            m = self._fit(calibrate=0.25)
+
+        self.assertIsNone(m.calibration)
+        record = m.evidence["calibration"]
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual(record["error_type"], "RuntimeError")
+        self.assertTrue(any("calibration failed" in note for note in m.notes))
+
+
 if __name__ == "__main__":
     unittest.main()
