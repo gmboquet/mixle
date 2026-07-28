@@ -219,5 +219,55 @@ class CompareElpdTest(unittest.TestCase):
         self.assertEqual(compare_elpd(pa, pb)["favored"], "tie")
 
 
+class ComparisonControlValidationTest(unittest.TestCase):
+    """MXR-080-1605: neither ``ci_level`` nor the corrected parameter counts were validated.
+
+    ``stats.t.ppf(0.5 + ci_level / 2, ...)`` reports no error of its own, so a negative level
+    returned a negative critical value and therefore an inverted ``[+inf, -inf]`` interval; a level
+    above one or NaN produced NaN endpoints. Both then fed the ``p < 1 - ci_level`` decision that
+    names a favored model. On the correction path ``_complexity_correction`` subtracted ``k_a - k_b``
+    unchecked: NaN made the test NaN while still naming a winner, ``inf`` drove ``p_value`` to
+    exactly 0.0, and a negative count manufactured a highly significant advantage.
+    """
+
+    def setUp(self):
+        rng = np.random.RandomState(0)
+        self.a = rng.normal(size=50)
+        self.b = self.a + rng.normal(scale=0.1, size=50)
+
+    def test_paired_score_difference_rejects_levels_outside_the_unit_interval(self):
+        for level in (-1.0, 1.5, np.nan, 0.0, 1.0, True):
+            with self.assertRaisesRegex(ValueError, "ci_level"):
+                paired_score_difference(self.a, self.b, ci_level=level)
+
+    def test_corrected_tests_reject_invalid_parameter_counts(self):
+        for test in (vuong_test, clarke_test):
+            for correction in ("aic", "bic"):
+                for k_a in (np.nan, np.inf, -3, 1.5, True):
+                    with self.assertRaisesRegex(ValueError, "k_a"):
+                        test(self.a, self.b, k_a=k_a, k_b=1, correction=correction)
+                with self.assertRaisesRegex(ValueError, "k_b"):
+                    test(self.a, self.b, k_a=1, k_b=-1, correction=correction)
+
+    def test_unknown_correction_is_rejected_before_the_counts_are_read(self):
+        with self.assertRaisesRegex(ValueError, "correction must be"):
+            vuong_test(self.a, self.b, k_a=1, k_b=1, correction="waic")
+
+    def test_valid_controls_are_unchanged(self):
+        # negative control: an ordinary level still yields a finite, correctly ordered interval, and
+        # a valid correction still shifts the statistic by exactly k_a - k_b under AIC.
+        out = paired_score_difference(self.a, self.b, ci_level=0.9)
+        self.assertTrue(np.isfinite(out["ci_low"]) and np.isfinite(out["ci_high"]))
+        self.assertLess(out["ci_low"], out["ci_high"])
+        uncorrected = vuong_test(self.a, self.b)
+        corrected = vuong_test(self.a, self.b, k_a=3, k_b=1, correction="aic")
+        self.assertLess(corrected["statistic"], uncorrected["statistic"])
+        # k_a == k_b makes the AIC correction a no-op, so the statistic must match exactly
+        self.assertAlmostEqual(
+            vuong_test(self.a, self.b, k_a=2, k_b=2, correction="aic")["statistic"],
+            uncorrected["statistic"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
