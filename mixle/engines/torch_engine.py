@@ -21,6 +21,20 @@ except ImportError:  # pragma: no cover - exercised when optional extra is absen
     torch = None
 
 
+def _require_bool(value: Any, name: str) -> bool:
+    """Require an actual Boolean for an execution-path feature flag (MXR-080-1563).
+
+    ``bool(value)`` is the wrong gate for a flag that selects a *compilation or numerical path*:
+    every non-empty string is truthy, so a configuration value that round-tripped through YAML/JSON/
+    an environment variable as ``"false"`` or ``"0"`` used to switch the path ON -- the exact
+    opposite of what it says. Only ``True``/``False`` (or their NumPy scalars) can mean what the flag
+    means, so anything else is refused instead of being coerced into a plausible-looking answer.
+    """
+    if not isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be a bool, got {type(value).__name__} ({value!r}).")
+    return bool(value)
+
+
 class TorchEngine(ComputeEngine):
     """Torch tensor engine for device placement, autograd, and optional DTensor sharding."""
 
@@ -37,6 +51,7 @@ class TorchEngine(ComputeEngine):
     ) -> None:
         if torch is None:
             require("torch", "torch")
+        compile = _require_bool(compile, "TorchEngine compile")
         if shard not in (None, "components"):
             raise ValueError("TorchEngine shard must be None or 'components'.")
         if mesh is not None and shard == "components" and not _dtensor_ops_supported():
@@ -85,7 +100,7 @@ class TorchEngine(ComputeEngine):
                 )
         else:
             self.dtype = torch.float32 if self._no_f64 else torch.float64
-        self.compile_enabled = bool(compile)
+        self.compile_enabled = compile
         self.mesh = mesh
         self.shard = shard
 
