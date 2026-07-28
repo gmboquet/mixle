@@ -12,8 +12,12 @@ and prints both fits so you can see they agree. The cluster backends are identic
 launcher, so they are documented (not run) at the bottom: ``'mpi'`` (mpi4py) and Spark RDDs.
 
 We fit a CompositeDistribution (a Gaussian + a Categorical + a Poisson per record) -- a realistic tabular
-record whose MLE is closed-form, so the fit is deterministic and local/mp recovery is bit-for-bit the same.
+record whose MLE is closed-form, so the fit is deterministic and local/mp recover the same parameters --
+to within floating-point reassociation, since a data-parallel backend adds the per-shard sufficient
+statistics in a different order than the single-process fold. Agreement, not bit-equality.
 """
+
+import math
 
 from mixle.inference import optimize
 from mixle.stats import (
@@ -51,7 +55,17 @@ if __name__ == "__main__":
 
     multiprocessing = _fit(data, "mp", num_workers=4)
     print("backend='mp' (x4) : mu=%.2f  P(a)=%.2f  lam=%.2f" % multiprocessing)
-    assert multiprocessing == local, (local, multiprocessing)
+    # Agreement, not bit-equality. A data-parallel backend shards the rows across workers and adds the
+    # per-shard sufficient statistics back together, so the summation ORDER differs from the
+    # single-process fold. Floating-point addition is not associative, so the two agree to within
+    # reassociation error -- here the last ulp of a ~2.0 mean -- and the library documents exactly that
+    # (mixle.utils.parallel.model_parallel: "exact up to float reassociation like every data-parallel
+    # backend"). Asserting == demanded a guarantee no data-parallel reduce can give, and this example
+    # existed to show the backends agree, which they do.
+    assert all(math.isclose(m, ell, rel_tol=1e-9, abs_tol=1e-12) for m, ell in zip(multiprocessing, local)), (
+        local,
+        multiprocessing,
+    )
 
     # --- cluster backends (same optimize() call, external launcher) ---------------------------------
     # MPI -- run on N ranks; the model is the same on every rank, optimize() runs in lockstep:

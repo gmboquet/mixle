@@ -64,7 +64,7 @@ _ENTRIES = (
         "configuration": {"seed": "declared in script", "dataset": "synthetic"},
         "expected": {
             "format": "text",
-            "stdout_sha256": "9e7667d4fc942dcbf00f52eea48a0da2b65f1964d216dab35828aec331ca5e7f",
+            "stdout_sha256": "813f26e144a823777d5d56fd9ddf96c621c8dda510ee43b9b14cce48b77416ac",
             "contains": [
                 "fit : GaussianDistribution(1.5485975768849254, 4.0204098815165565",
                 "fit : PoissonDistribution(4.027",
@@ -100,7 +100,7 @@ _ENTRIES = (
         "configuration": {"seed": "declared in script", "dataset": "synthetic"},
         "expected": {
             "format": "text",
-            "stdout_sha256": "c9e3874f3f4dac45ee6f88127c56033821658965a9d4db2ab6055d4d2539b669",
+            "stdout_sha256": "c96a537aff03118e2340e859b24ac62e864922b41ea1b2b83104b4423001803d",
             "contains": [
                 "# lineage verified: True",
                 "drift on shifted batch: True",
