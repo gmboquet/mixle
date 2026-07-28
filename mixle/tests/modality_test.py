@@ -31,6 +31,50 @@ class ImageFeatureTest(unittest.TestCase):
         right[:, 8:] = 1.0  # bright on the right
         self.assertFalse(np.allclose(image_features(left, dim=16), image_features(right, dim=16)))
 
+    def test_no_spatial_blind_spot_for_non_square_dim(self):
+        # MXR-080-1662: a ceil(sqrt(dim)) square grid truncated row-major to dim did not pool to a
+        # coarser resolution -- it deleted the bottom/right cells outright. At dim=2 the entire bottom
+        # half of this image was invisible (descriptor stayed exactly [0, 0]); at dim=3 the whole
+        # bottom-right quadrant was.
+        base = np.zeros((4, 4))
+        for dim in (2, 3, 5, 7):
+            ref = image_features(base, dim=dim)
+            self.assertEqual(ref.shape, (dim,))
+            bottom = base.copy()
+            bottom[2:, :] = 100.0
+            self.assertFalse(np.allclose(ref, image_features(bottom, dim=dim)), f"bottom half invisible at dim={dim}")
+            quadrant = base.copy()
+            quadrant[2:, 2:] = 100.0
+            self.assertFalse(
+                np.allclose(ref, image_features(quadrant, dim=dim)), f"bottom-right quadrant invisible at dim={dim}"
+            )
+
+    def test_every_pixel_influences_the_descriptor(self):
+        # The cells partition the image, so each pixel lands in exactly one output coordinate; no
+        # location may be a documented-nonzero-influence hole.
+        zero = np.zeros((4, 4))
+        for dim in (1, 2, 3, 5, 8, 16):
+            ref = image_features(zero, dim=dim)
+            for i in range(4):
+                for j in range(4):
+                    lit = zero.copy()
+                    lit[i, j] = 1.0
+                    self.assertFalse(
+                        np.allclose(ref, image_features(lit, dim=dim)), f"pixel ({i},{j}) invisible at dim={dim}"
+                    )
+
+    def test_small_axis_is_reread_not_zero_padded(self):
+        # Fewer image rows than grid rows must not append fabricated all-zero cells that are
+        # indistinguishable from measured black regions.
+        v = image_features(np.array([[1.0, 2.0, 3.0, 4.0]]), dim=16)
+        self.assertEqual(v.shape, (16,))
+        self.assertTrue((v > 0).all())
+
+    def test_explicit_grid_must_partition_the_requested_dim(self):
+        with self.assertRaises(ValueError):
+            image_features(np.zeros((4, 4)), dim=5, grid=3)
+        self.assertEqual(image_features(np.zeros((4, 4)), dim=4, grid=2).shape, (4,))
+
 
 class SignalFeatureTest(unittest.TestCase):
     def test_fixed_dim(self):
