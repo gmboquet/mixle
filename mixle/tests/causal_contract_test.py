@@ -11,6 +11,8 @@ from mixle.causal import (
     IdentificationResult,
     IdentificationStatus,
     InterventionSpec,
+    canonical_json,
+    semantic_id,
 )
 
 
@@ -60,6 +62,68 @@ class CausalContractTest(unittest.TestCase):
                 (self.exchangeability,),
                 CausalEvidenceKind.ASSOCIATION,
             )
+
+    def test_identification_refuses_unresolved_assumptions_and_prediction_evidence(self):
+        # MXR-080-1675: only FAILED assumptions were rejected and evidence_kind was unconstrained, so an
+        # "identified" record could rest on a CHALLENGED exchangeability assumption with
+        # evidence_kind="prediction" and the purely observational expression E[Y|X].
+        challenged = CausalAssumption(
+            id="a1",
+            kind="exchangeability",
+            statement="no unmeasured confounding",
+            status=AssumptionStatus.CHALLENGED,
+        )
+        with self.assertRaisesRegex(CausalContractError, "challenged"):
+            IdentificationResult(
+                estimand_ref=self.estimand.identity,
+                status=IdentificationStatus.IDENTIFIED,
+                assumptions=(challenged,),
+                evidence_kind=CausalEvidenceKind.ASSOCIATION,
+                identifying_expression="E[Y|X]",
+            )
+        for status in (IdentificationStatus.IDENTIFIED, IdentificationStatus.PARTIALLY_IDENTIFIED):
+            with self.subTest(status=status), self.assertRaisesRegex(CausalContractError, "prediction-only"):
+                IdentificationResult(
+                    estimand_ref=self.estimand.identity,
+                    status=status,
+                    assumptions=(self.exchangeability,),
+                    evidence_kind=CausalEvidenceKind.PREDICTION,
+                    identifying_expression="E[Y|X]" if status is IdentificationStatus.IDENTIFIED else None,
+                    lower_bound=None if status is IdentificationStatus.IDENTIFIED else -0.2,
+                    upper_bound=None if status is IdentificationStatus.IDENTIFIED else 0.7,
+                )
+        failed = CausalAssumption(
+            id="a1", kind="exchangeability", statement="no unmeasured confounding", status=AssumptionStatus.FAILED
+        )
+        with self.assertRaisesRegex(CausalContractError, "failed assumptions"):
+            IdentificationResult(
+                estimand_ref=self.estimand.identity,
+                status=IdentificationStatus.PARTIALLY_IDENTIFIED,
+                assumptions=(failed,),
+                evidence_kind=CausalEvidenceKind.ASSOCIATION,
+                lower_bound=-0.2,
+                upper_bound=0.7,
+            )
+        # an unresolved assumption is still perfectly reportable -- as a downgraded status
+        downgraded = IdentificationResult(
+            estimand_ref=self.estimand.identity,
+            status=IdentificationStatus.NOT_IDENTIFIED,
+            assumptions=(challenged,),
+            evidence_kind=CausalEvidenceKind.PREDICTION,
+            diagnostics=("exchangeability challenged",),
+        )
+        self.assertEqual(downgraded.as_dict()["status"], "not_identified")
+
+    def test_semantic_identity_does_not_erase_distinct_mapping_keys(self):
+        # MXR-080-1676: str(key) inside a dict comprehension let distinct keys overwrite before hashing,
+        # so semantic_id({1: "first", "1": "last"}) equaled semantic_id({"1": "last"}) and the canonical
+        # payload retained only the later value.
+        with self.assertRaisesRegex(CausalContractError, "string mapping keys"):
+            semantic_id({1: "first", "1": "last"})
+        with self.assertRaises(CausalContractError):
+            canonical_json({"x": float("nan")})
+        self.assertNotEqual(semantic_id({"1": "first"}), semantic_id({"1": "last"}))
+        self.assertEqual(canonical_json({"b": 1, "a": 2}), '{"a":2,"b":1}')
 
     def test_intervention_range_and_authority_are_distinct(self):
         intervention = InterventionSpec("dose-1", "dose", 0.5, 0.0, 1.0, None, ("interlock",))

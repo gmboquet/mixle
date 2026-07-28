@@ -41,19 +41,36 @@ def _required(value: str, label: str) -> None:
 
 
 def _json_value(value: Any) -> Any:
+    """Canonical JSON-able form of ``value``, without collapsing distinct mappings onto one payload.
+
+    Mapping keys used to go through ``str(key)`` inside a dict comprehension, so distinct keys could
+    overwrite each other before hashing: ``{1: "first", "1": "last"}`` canonicalized to ``{"1": "last"}``
+    -- identical to ``{"1": "last"}`` itself -- silently *erasing* the first entry from a content identity
+    that binds causal records together. Keys must therefore already be strings; there is exactly one
+    canonical spelling of a mapping key, so the encoding is injective over what it admits.
+    """
     if isinstance(value, StrEnum):
         return value.value
     if is_dataclass(value):
         return {key: _json_value(item) for key, item in asdict(value).items()}
     if isinstance(value, dict):
-        return {str(key): _json_value(item) for key, item in value.items()}
+        non_string = [key for key in value if not isinstance(key, str)]
+        if non_string:
+            raise CausalContractError(
+                f"canonical causal payloads require string mapping keys; got {non_string[0]!r} "
+                f"({type(non_string[0]).__name__}). Distinct keys that stringify alike would collide and "
+                "erase each other from the content identity."
+            )
+        return {key: _json_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_value(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        raise CausalContractError(f"canonical causal payloads require finite numbers, got {value!r}")
     return value
 
 
 def canonical_json(value: Any) -> str:
-    return json.dumps(_json_value(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return json.dumps(_json_value(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
 
 def semantic_id(value: Any) -> str:
@@ -184,11 +201,34 @@ class IdentificationResult:
         if len({item.id for item in self.assumptions}) != len(self.assumptions):
             raise CausalContractError("identification assumptions must have unique ids")
         failed = [item.id for item in self.assumptions if item.status is AssumptionStatus.FAILED]
+        challenged = [item.id for item in self.assumptions if item.status is AssumptionStatus.CHALLENGED]
+        claims_identification = self.status in (
+            IdentificationStatus.IDENTIFIED,
+            IdentificationStatus.PARTIALLY_IDENTIFIED,
+        )
+        if claims_identification:
+            # A failed assumption invalidates the derivation of a point expression AND of bounds, and
+            # prediction-only evidence cannot support either: it says nothing about the interventional
+            # distribution the estimand is defined over. Both used to pass -- only IDENTIFIED checked
+            # `failed`, and `evidence_kind` was unconstrained -- so an "identified" record could rest on
+            # a CHALLENGED exchangeability assumption with evidence_kind="prediction" and the purely
+            # observational expression E[Y|X], which is exactly the overstatement this contract exists
+            # to prevent. Downgrade the status to not_identified and record why in `diagnostics`.
+            if failed:
+                raise CausalContractError(f"{self.status.value} results cannot rely on failed assumptions: {failed}")
+            if self.evidence_kind is CausalEvidenceKind.PREDICTION:
+                raise CausalContractError(
+                    f"{self.status.value} results cannot rest on prediction-only evidence; "
+                    "association, mechanism or intervention evidence is required"
+                )
         if self.status is IdentificationStatus.IDENTIFIED:
             if not self.identifying_expression:
                 raise CausalContractError("identified results require an identifying expression")
-            if failed:
-                raise CausalContractError("identified results cannot rely on failed assumptions")
+            if challenged:
+                raise CausalContractError(
+                    f"identified results cannot rely on unresolved (challenged) assumptions: {challenged}. "
+                    "Resolve them, or report partial/not identification."
+                )
             if self.lower_bound is not None or self.upper_bound is not None:
                 raise CausalContractError("identified results cannot also claim partial bounds")
         elif self.status is IdentificationStatus.PARTIALLY_IDENTIFIED:

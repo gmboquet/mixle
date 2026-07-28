@@ -33,6 +33,69 @@ from mixle.relations import branch_and_bound_milp, irreducible_infeasible_subset
 
 __all__ = ["blend_to_spec", "blend_feasibility"]
 
+# Relative slack allowed when re-checking a solver's answer against the physical blend it claims.
+_VERIFY_RTOL = 1.0e-6
+
+
+def _finite(name: str, value: np.ndarray) -> np.ndarray:
+    if not np.isfinite(value).all():
+        raise ValueError(f"blend {name} must be finite")
+    return value
+
+
+def _validate_blend_geometry(
+    grades: np.ndarray, spec_lo: np.ndarray, spec_hi: np.ndarray, avail: np.ndarray, demand: float
+) -> float:
+    """Check the physical geometry of a blend before any solver sees it.
+
+    ``demand`` in particular must be finite and strictly positive. The linearized window constraints
+    multiply every grade deviation by source tonnage, so at ``demand == 0`` every grade row reads
+    ``0 <= 0`` and is vacuously satisfied: the solver happily certified a zero-tonnage "blend" of
+    0.1-0.2 grade sources against a 0.9-1.0 window at cost zero, even though the blended grade it is
+    certified against -- a ratio whose denominator is the total tonnage -- is undefined there.
+    """
+    if grades.ndim != 2 or grades.shape[0] == 0 or grades.shape[1] == 0:
+        raise ValueError(f"blend grades must be a non-empty (n_sources, n_elements) matrix, got shape {grades.shape}")
+    n_sources, n_elements = grades.shape
+    _finite("grades", grades)
+    for name, window in (("spec_lo", spec_lo), ("spec_hi", spec_hi)):
+        if window.shape != (n_elements,):
+            raise ValueError(f"blend {name} must have one entry per element ({n_elements}), got shape {window.shape}")
+        _finite(name, window)
+    if np.any(spec_lo > spec_hi):
+        raise ValueError("blend spec window is reversed: every spec_lo must be <= its spec_hi")
+    if avail.shape != (n_sources,):
+        raise ValueError(f"blend avail must have one entry per source ({n_sources}), got shape {avail.shape}")
+    _finite("avail", avail)
+    if np.any(avail < 0.0):
+        raise ValueError("blend avail must be non-negative: a source cannot hold negative material")
+    demand = float(demand)
+    if not np.isfinite(demand) or demand <= 0.0:
+        raise ValueError(
+            f"blend demand must be finite and strictly positive, got {demand!r}; the blended grade is a "
+            "ratio over total tonnage and is undefined for a zero-tonnage blend, so the spec window "
+            "cannot be certified there."
+        )
+    return demand
+
+
+def _verify_blend(
+    tonnage: np.ndarray, grades: np.ndarray, spec_lo: np.ndarray, spec_hi: np.ndarray, demand: float
+) -> None:
+    """Recompute the returned blend's actual tonnage and grade and refuse to certify a violation."""
+    total = float(tonnage.sum())
+    if not np.isclose(total, demand, rtol=_VERIFY_RTOL, atol=_VERIFY_RTOL * max(1.0, demand)):
+        raise ValueError(f"blend_to_spec: returned blend totals {total}, not the requested demand {demand}")
+    blended = (tonnage @ grades) / total
+    tol = _VERIFY_RTOL * np.maximum(1.0, np.maximum(np.abs(spec_lo), np.abs(spec_hi)))
+    outside = np.nonzero((blended < spec_lo - tol) | (blended > spec_hi + tol))[0]
+    if outside.size:
+        raise ValueError(
+            f"blend_to_spec: returned blend's actual grade is outside the spec window for element(s) "
+            f"{outside.tolist()}: blended={blended[outside].tolist()}, "
+            f"window=[{spec_lo[outside].tolist()}, {spec_hi[outside].tolist()}]"
+        )
+
 
 def _spec_constraints(
     grades: np.ndarray, spec_lo: np.ndarray, spec_hi: np.ndarray, avail: np.ndarray, demand: float
@@ -118,7 +181,15 @@ def blend_to_spec(
     spec_lo = np.asarray(spec_lo, dtype=np.float64)
     spec_hi = np.asarray(spec_hi, dtype=np.float64)
     avail = np.asarray(avail, dtype=np.float64)
+    demand = _validate_blend_geometry(grades, spec_lo, spec_hi, avail, demand)
     n_sources = grades.shape[0]
+    if costs.shape != (n_sources,):
+        raise ValueError(f"blend costs must have one entry per source ({n_sources}), got shape {costs.shape}")
+    _finite("costs", costs)
+    if min_parcel is not None:
+        min_parcel = float(min_parcel)
+        if not np.isfinite(min_parcel) or min_parcel < 0.0:
+            raise ValueError(f"blend min_parcel must be finite and non-negative, got {min_parcel!r}")
 
     a_ub, b_ub, bounds = _spec_constraints(grades, spec_lo, spec_hi, avail, demand)
     if min_parcel is None:
@@ -144,7 +215,9 @@ def blend_to_spec(
             f"infeasible constraint rows ({row_desc}): {iis}"
         )
     value, x = res
-    return float(value), np.asarray(x[:n_sources], dtype=np.float64)
+    tonnage = np.asarray(x[:n_sources], dtype=np.float64)
+    _verify_blend(tonnage, grades, spec_lo, spec_hi, demand)
+    return float(value), tonnage
 
 
 def blend_feasibility(grades: Any, spec_lo: Any, spec_hi: Any, avail: Any, demand: float) -> list[int] | None:
@@ -159,5 +232,6 @@ def blend_feasibility(grades: Any, spec_lo: Any, spec_hi: Any, avail: Any, deman
     spec_lo = np.asarray(spec_lo, dtype=np.float64)
     spec_hi = np.asarray(spec_hi, dtype=np.float64)
     avail = np.asarray(avail, dtype=np.float64)
+    demand = _validate_blend_geometry(grades, spec_lo, spec_hi, avail, demand)
     a_ub, b_ub, bounds = _spec_constraints(grades, spec_lo, spec_hi, avail, demand)
     return irreducible_infeasible_subset(a_ub, b_ub, bounds)
