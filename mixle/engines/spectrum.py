@@ -148,6 +148,31 @@ def _preserved_evidence_sum(raw: np.ndarray, target_rel_error: float) -> SumResu
     return _high_precision_sum(raw, cond, target_rel_error)
 
 
+def _exact_infinite_sum(x: Any, target_rel_error: float) -> SumResult | None:
+    """Return the exact sum when infinities alone decide it, else None.
+
+    The log density of a zero-probability event is -inf, and adding finite terms to it is exactly
+    -inf. That is not an overflow and no amount of extra precision improves on it, but routing it
+    through the escalation path both paid for an arbitrary-precision accumulator and labelled an
+    exact answer ``status="overflow"``. Only a one-signed infinity is resolvable this way: mixed
+    signs are genuinely indeterminate, and a NaN input is an error, so both stay on the old path.
+    """
+    try:
+        arr = np.asarray(x)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if arr.dtype.kind != "f" or arr.dtype.itemsize > 8:  # object/int/longdouble keep their own paths
+        return None
+    flat = arr.ravel()
+    if not flat.size or np.any(np.isnan(flat)):
+        return None
+    has_positive = bool(np.any(np.isposinf(flat)))
+    has_negative = bool(np.any(np.isneginf(flat)))
+    if has_positive == has_negative:  # neither (ordinary finite sum) or both (indeterminate)
+        return None
+    return SumResult(math.inf if has_positive else -math.inf, "float64", 0.0, target_rel_error, "ok")
+
+
 def accurate_sum(x: Any, target_rel_error: float = 1e-12) -> SumResult:
     """Sum ``x`` to ``target_rel_error`` relative accuracy using the lowest-cost sufficient backend.
 
@@ -163,6 +188,10 @@ def accurate_sum(x: Any, target_rel_error: float = 1e-12) -> SumResult:
         math.isfinite(target_rel_error) and target_rel_error > 0.0
     ):
         raise ValueError("target_rel_error must be a positive, finite number; got %r." % (target_rel_error,))
+
+    resolved = _exact_infinite_sum(x, target_rel_error)
+    if resolved is not None:
+        return resolved
 
     arr = _native_exact_float64(x)
     if arr is None:
