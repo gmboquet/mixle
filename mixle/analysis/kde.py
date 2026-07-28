@@ -351,9 +351,7 @@ class KDE:
 
         z_lo = (lo - centers) / bandwidths
         z_hi = (hi - centers) / bandwidths
-        normalizers = 0.5 * (
-            special.erf(z_hi / np.sqrt(2.0)) - special.erf(z_lo / np.sqrt(2.0))
-        )
+        normalizers = 0.5 * (special.erf(z_hi / np.sqrt(2.0)) - special.erf(z_lo / np.sqrt(2.0)))
         if not np.all(np.isfinite(normalizers)) or np.any(normalizers <= 0.0):
             raise ValueError("bounded KDE kernel normalization is not finite and positive")
 
@@ -439,14 +437,26 @@ def kde_mode(
         ci: if True return a percentile bootstrap interval for the mode.
         n_boot, ci_level, seed: bootstrap controls.
 
+    Bootstrap policy for degenerate resamples (MXR-080-1587): a resample of a perfectly valid,
+    nonconstant sample can itself come out constant -- ``[0, 0, 1]`` resamples to ``[0, 0, 0]`` roughly
+    one draw in four -- and an automatic bandwidth selector has no spread to estimate from, so it
+    raises. That made the interval fail *at random, depending on the seed*, for a fit that had already
+    succeeded. A degenerate resample is now scored at the ORIGINAL fit's bandwidth (the sample the
+    bandwidth was selected from is the full one, and a bootstrap replicate is a resample of it, not a
+    new dataset), rather than skipped -- skipping would quietly narrow the interval by dropping exactly
+    the least-dispersed replicates. The count of replicates that needed the fallback is reported as
+    ``n_degenerate_resamples`` so a caller can see when the interval rests largely on them.
+
     Returns:
-        The mode (float), or ``{'mode', 'ci_low', 'ci_high'}`` when ``ci`` is True.
+        The mode (float), or ``{'mode', 'ci_low', 'ci_high', 'n_boot', 'n_degenerate_resamples'}``
+        when ``ci`` is True.
 
     Raises:
         ValueError: ``data`` is empty or not 1-D; or, when ``ci`` is True, ``n_boot`` is not a positive
             integer or ``ci_level`` is not in the open interval ``(0, 1)`` (MXR-080-0100). Also
-            propagates any :class:`KDE` construction error from :func:`kde` (e.g. automatic bandwidth
-            selection on a constant sample).
+            propagates any :class:`KDE` construction error from :func:`kde` on the ORIGINAL sample
+            (e.g. automatic bandwidth selection on a constant input) -- that is a genuine property of
+            the data, unlike a degenerate resample, which is handled by the policy above.
     """
     x = np.asarray(data, dtype=float)
     if x.ndim > 1:
@@ -466,16 +476,32 @@ def kde_mode(
     if grid is None:
         pad = 0.1 * (x.max() - x.min() + 1e-12)
         grid = np.linspace(x.min() - pad, x.max() + pad, 512)
-    mode = float(grid[np.argmax(kde(x, bandwidth=bandwidth, bounds=bounds).evaluate(grid))])
+    fit = kde(x, bandwidth=bandwidth, bounds=bounds)
+    mode = float(grid[np.argmax(fit.evaluate(grid))])
     if not ci:
         return mode
     rng = seed if isinstance(seed, RandomState) else RandomState(seed)
+    # The bandwidth the ORIGINAL fit resolved to, used as the documented fallback when a resample is
+    # too degenerate for the automatic selector to run on (see the bootstrap policy above).
+    fallback_bandwidth = float(np.atleast_1d(np.asarray(fit.bandwidth, dtype=float)).ravel()[0])
     boot = np.empty(n_boot)
+    n_degenerate = 0
     for b in range(n_boot):
         sample = x[rng.randint(0, x.shape[0], x.shape[0])]
-        boot[b] = grid[np.argmax(kde(sample, bandwidth=bandwidth, bounds=bounds).evaluate(grid))]
+        try:
+            replicate = kde(sample, bandwidth=bandwidth, bounds=bounds)
+        except ValueError:
+            n_degenerate += 1
+            replicate = kde(sample, bandwidth=fallback_bandwidth, bounds=bounds)
+        boot[b] = grid[np.argmax(replicate.evaluate(grid))]
     lo_q = (1.0 - ci_level) / 2.0
-    return {"mode": mode, "ci_low": float(np.quantile(boot, lo_q)), "ci_high": float(np.quantile(boot, 1.0 - lo_q))}
+    return {
+        "mode": mode,
+        "ci_low": float(np.quantile(boot, lo_q)),
+        "ci_high": float(np.quantile(boot, 1.0 - lo_q)),
+        "n_boot": int(n_boot),
+        "n_degenerate_resamples": int(n_degenerate),
+    }
 
 
 def intensity(

@@ -199,3 +199,137 @@ class OneSharedIntervalLevelContractTest:
             quantity.credible_interval(1.5)
         lo, hi = quantity.credible_interval(0.9)
         assert np.all(np.asarray(lo) <= np.asarray(hi))
+
+
+class ShrinkageReceiptsAreDetachedTest:
+    """MXR-080-1578: value() handed out the estimator's live arrays; from_value() took any tuple."""
+
+    def _fitted(self):
+        from mixle.analysis.covariance_shrinkage import LedoitWolfEstimator
+
+        estimator = LedoitWolfEstimator(dim=2)
+        accumulator = estimator.accumulator_factory().make()
+        for row in ([1.0, 2.0], [2.0, 1.0], [3.0, 4.0]):
+            accumulator.update(np.array(row), 1.0, None)
+        return estimator, accumulator
+
+    def test_value_receipt_is_owned_and_read_only(self):
+        _, accumulator = self._fitted()
+        receipt = accumulator.value()
+        for moment in receipt[:3]:
+            assert not moment.flags.writeable
+            with pytest.raises(ValueError):
+                moment[...] = 0.0
+        # And the receipt does not track the estimator forward either.
+        snapshot = np.array(receipt[0], copy=True)
+        accumulator.update(np.array([10.0, 10.0]), 1.0, None)
+        assert np.array_equal(receipt[0], snapshot)
+
+    @pytest.mark.parametrize(
+        ("bad", "match"),
+        [
+            ((np.zeros(9), np.zeros(9), np.zeros((9, 9)), 1.0, 1.0), "shapes must agree"),
+            ((np.array([np.nan, 0.0]), np.zeros((2, 2)), np.zeros(2), 1.0, 1.0), "finite"),
+            ((np.zeros(2), np.array([[1.0, 2.0], [3.0, 1.0]]), np.zeros(2), 1.0, 1.0), "symmetric"),
+            ((np.zeros(2), np.zeros((2, 2)), np.zeros(2), 1.0, -1.0), "nonnegative"),
+            ((np.zeros(2), np.zeros((2, 2))), "5-tuple"),
+        ],
+    )
+    def test_from_value_validates_at_the_ownership_boundary(self, bad, match):
+        estimator, _ = self._fitted()
+        with pytest.raises(ValueError, match=match):
+            estimator.accumulator_factory().make().from_value(bad)
+
+    def test_round_trip_and_combine_still_work(self):
+        estimator, accumulator = self._fitted()
+        restored = estimator.accumulator_factory().make().from_value(accumulator.value())
+        assert np.allclose(restored.value()[1], accumulator.value()[1])
+        merged = estimator.accumulator_factory().make()
+        merged.combine(accumulator.value())
+        merged.combine(accumulator.value())
+        assert merged.value()[4] == pytest.approx(2.0 * accumulator.value()[4])
+
+
+class RadonSamplingControlsAreRealTest:
+    """MXR-080-1574: `n`/`rng` were accepted on every path and used on none of them."""
+
+    class _Exposure:
+        """Minimal IC-1 `Posterior` over a single cumulative-exposure quantity."""
+
+        def samples(self, n, rng):
+            return rng.lognormal(0.0, 0.3, size=(n, 1))
+
+        @property
+        def mean(self):
+            return np.array([1.0])
+
+        @property
+        def cov(self):
+            return np.array([[0.1]])
+
+        def credible_interval(self, level):
+            return np.array([0.5]), np.array([2.0])
+
+        def derived_quantity(self, fn, n, rng):
+            drawn = fn(self.samples(n, rng))
+
+            class _DQ:
+                samples = drawn
+                prior_dominated = False
+
+                def credible_interval(self, level):
+                    return float(np.min(drawn)), float(np.max(drawn))
+
+            return _DQ()
+
+    def test_posterior_exposure_honours_n_and_rng(self):
+        from mixle.analysis.carcinogenic_risk import radon_wlm_risk
+
+        exposure = self._Exposure()
+        assert radon_wlm_risk(exposure, n=17, rng=np.random.default_rng(0)).samples.shape == (17,)
+        assert radon_wlm_risk(exposure, n=33, rng=np.random.default_rng(0)).samples.shape == (33,)
+        first = radon_wlm_risk(exposure, n=17, rng=np.random.default_rng(4)).samples
+        again = radon_wlm_risk(exposure, n=17, rng=np.random.default_rng(4)).samples
+        assert np.array_equal(first, again)
+
+    @pytest.mark.parametrize("bad", [-1, 0, 1.5, True])
+    def test_impossible_draw_counts_are_rejected_not_ignored(self, bad):
+        from mixle.analysis.carcinogenic_risk import radon_wlm_risk
+
+        with pytest.raises(ValueError, match="n must be a positive integer"):
+            radon_wlm_risk(np.array([1.0]), n=bad)
+
+    def test_array_and_scalar_paths_still_work(self):
+        from mixle.analysis.carcinogenic_risk import radon_wlm_risk
+
+        assert radon_wlm_risk(np.array([1.0, 2.0, 3.0])).samples.shape == (3,)
+        assert radon_wlm_risk(5.0).samples.shape == (1,)
+        with pytest.raises(ValueError, match="single cumulative exposure per sample"):
+            radon_wlm_risk(np.array([[1.0, 2.0], [3.0, 4.0]]))
+
+
+class KdeBootstrapHandlesDegenerateResamplesTest:
+    """MXR-080-1587: a valid sample's own resample can be constant, and the selector then raised."""
+
+    def test_tied_sample_no_longer_fails_by_seed(self):
+        from mixle.analysis.kde import kde_mode
+
+        # [0, 0, 1] resamples to [0, 0, 0] often enough that this used to fail outright at seed 0.
+        for seed in range(8):
+            result = kde_mode(np.array([0.0, 0.0, 1.0]), ci=True, n_boot=8, seed=seed)
+            assert result["ci_low"] <= result["ci_high"]
+            assert 0 <= result["n_degenerate_resamples"] <= result["n_boot"] == 8
+
+    def test_degenerate_replicates_are_counted_not_dropped(self):
+        from mixle.analysis.kde import kde_mode
+
+        result = kde_mode(np.array([0.0, 0.0, 1.0, 1.0, 0.0]), ci=True, n_boot=40, seed=1)
+        assert result["n_degenerate_resamples"] > 0  # this sample really does produce them
+        assert result["n_boot"] == 40  # ... and every replicate still contributed a mode
+
+    def test_a_genuinely_constant_input_still_raises(self):
+        from mixle.analysis.kde import kde_mode
+
+        # Negative control: the fallback is for degenerate *resamples*, not for a degenerate dataset.
+        with pytest.raises(ValueError, match="nonzero variation"):
+            kde_mode(np.array([1.0, 1.0, 1.0]), ci=True, n_boot=4, seed=0)
