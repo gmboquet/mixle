@@ -63,6 +63,41 @@ class EmbedderTest(unittest.TestCase):
         self.assertLess(hits[0][0], 20)  # retrieves from the refund half
 
 
+class EmbedderKindSchemaTest(unittest.TestCase):
+    """MXR-080-1784: one validated input schema, resolved before any featurizing or fitting.
+
+    No torch needed -- every case here must fail before ``fit_autoencoder`` is ever reached, which
+    is precisely the point: an unrecognized kind used to route to the record featurizer and only
+    surface after a complete fit, and an un-declared mixed corpus used to be typed off item 0 alone.
+    """
+
+    def test_unknown_kind_is_rejected_by_the_featurizer_router(self):
+        from mixle.represent.api import _featurizer
+
+        # The router itself must not treat "anything that isn't 'text'" as a record request.
+        with self.assertRaisesRegex(ValueError, "kind must be one of"):
+            _featurizer("txet", 16, 0)
+
+    def test_unknown_kind_is_rejected_before_fitting(self):
+        from mixle.represent import fit_embedder
+
+        with self.assertRaisesRegex(ValueError, "kind must be one of"):
+            fit_embedder(["a", "b", "c", "d"], dim=4, kind="txet", feature_dim=16, epochs=2)
+
+    def test_inferred_kind_rejects_a_mixed_corpus(self):
+        from mixle.represent import fit_embedder
+
+        # Typed off item 0 alone this fit as kind="text" and str()-coerced the dict record.
+        with self.assertRaisesRegex(ValueError, "mixing"):
+            fit_embedder(["a", {"x": 1}, "c", "d"], dim=4, feature_dim=16, epochs=2)
+
+    def test_inferred_kind_accepts_mixed_record_containers(self):
+        from mixle.represent.api import _kind_of
+
+        # dict/tuple/list are all one kind ("record"), so a corpus mixing them stays inferable.
+        self.assertEqual({_kind_of(x) for x in ({"a": 1}, (1, 2), [3, 4])}, {"record"})
+
+
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class EmbedderRetrieveKValidationTest(unittest.TestCase):
     """retrieve(k=...) must reject a k that can't mean "top k": negative or fractional."""

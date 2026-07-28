@@ -50,9 +50,21 @@ def _envelope_digest(manifest: dict[str, Any], body: bytes) -> str:
     return hashlib.sha256(_canonical(manifest) + body).hexdigest()
 
 
+_KINDS = ("text", "record")
+
+
 def _featurizer(kind: str, dim: int, seed: int) -> Any:
+    """Return the featurizer for ``kind``, which must name one of the two supported input schemas.
+
+    The kind is checked against the closed :data:`_KINDS` enum here rather than being treated as
+    "text, or else record": routing every unrecognized value to :class:`HashedRecord` meant a typo
+    such as ``kind="txet"`` selected the record featurizer and drove a whole autoencoder fit before
+    anything noticed (MXR-080-1784).
+    """
     from mixle.task.model import HashedNGram, HashedRecord
 
+    if kind not in _KINDS:
+        raise ValueError(f"kind must be one of {list(_KINDS)}, got {kind!r}")
     return HashedNGram(n=3, dim=dim, seed=seed) if kind == "text" else HashedRecord(dim=dim, seed=seed)
 
 
@@ -95,7 +107,7 @@ class Embedder:
     """A fitted embedding of raw heterogeneous items: ``transform`` to vectors, ``retrieve`` neighbours."""
 
     def __init__(self, featurizer: Any, result: AutoencoderResult, kind: str, corpus_vectors: np.ndarray) -> None:
-        if kind not in ("text", "record"):
+        if kind not in _KINDS:
             raise ValueError(f"kind must be 'text' or 'record', got {kind!r}")
         self.featurizer = featurizer
         self.result = result
@@ -336,11 +348,35 @@ def fit_embedder(
     Items featurize deterministically (hashing trick; no fitted vocabulary), then an autoencoder learns a
     ``dim``-dimensional generative representation of the corpus. ``retrieve`` works out of the box over
     the fitted data; ``transform`` embeds anything of the same kind.
+
+    ``kind`` is one explicit input schema for the whole corpus, resolved and validated BEFORE any
+    featurizing or fitting happens (MXR-080-1784). An explicit ``kind`` must name one of the two
+    supported schemas; an unrecognized value used to select the record featurizer and only surface
+    at the very end of an otherwise complete autoencoder fit. When ``kind`` is left to inference,
+    EVERY item is inspected rather than only the first: a corpus mixing text and record items has no
+    single schema to infer, and silently featurizing dict records through ``str()`` as text (or the
+    reverse) is a wrong representation, not a usable one. Declare ``kind`` explicitly if that
+    coercion is what you want.
+
+    Raises:
+        ValueError: If ``kind`` names no supported schema, or if it is left to inference over a
+            corpus whose items are not all the same kind.
     """
     items = list(data)
     if len(items) < 4:
         raise ValueError("fit_embedder needs at least 4 items")
-    k = kind or _kind_of(items[0])
+    if kind is None:
+        observed = {_kind_of(x) for x in items}
+        if len(observed) > 1:
+            raise ValueError(
+                f"cannot infer one input kind from a corpus mixing {sorted(observed)} items; pass "
+                "kind='text' or kind='record' to declare the schema every item is featurized under."
+            )
+        k = observed.pop()
+    elif kind not in _KINDS:
+        raise ValueError(f"kind must be one of {list(_KINDS)} or None, got {kind!r}")
+    else:
+        k = kind
     feat = _featurizer(k, feature_dim, seed)
     units = np.asarray(feat.transform([str(x) for x in items] if k == "text" else items), dtype=np.float32)
     result = fit_autoencoder(units, dim, hidden=hidden, epochs=epochs, lr=lr, seed=seed)
