@@ -14,6 +14,7 @@ import math
 import os
 import tempfile
 import threading
+from collections import Counter
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -82,6 +83,8 @@ class Telemetry:
         self._unflushed: list[Event] = []
         self._lock = threading.Lock()
         self._clock = 0.0  # monotonic fallback clock when no wall time is supplied (deterministic)
+        self._written = ""  # the exact log text this recorder last wrote or loaded
+        self._external: list[str] = []  # verbatim rows another writer appended; preserved on rewrite
         if self.path is not None and self.path.exists():
             self._load()
 
@@ -153,9 +156,58 @@ class Telemetry:
         # later" pattern) since the last flush, and an append-only write would never pick that up
         # -- the on-disk log would silently keep showing the stale (e.g. "pending") value forever.
         # Write to a temp file and swap it in so a crash mid-flush can't leave a truncated log.
+        #
+        # Rewriting is a read-modify-write of a file another process may share, so it runs under an
+        # inter-process lock and re-reads what is actually on disk first: anything there that this
+        # recorder never wrote belongs to another writer and is carried through unchanged. Without
+        # that, two recorders opened on the same path simply overwrote each other -- the second
+        # flush erased the first's events for good.
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._write_atomically("".join(json.dumps(ev.as_row()) + "\n" for ev in self._buffer))
+        ours = "".join(json.dumps(ev.as_row()) + "\n" for ev in self._buffer)
+        with self._exclusive():
+            self._adopt_external_rows()
+            text = "".join(self._external) + ours
+            self._write_atomically(text)
+        self._written = text
         self._unflushed.clear()
+
+    @contextlib.contextmanager
+    def _exclusive(self) -> Iterator[None]:
+        """Hold an inter-process exclusive lock on a sidecar file for the log's read-modify-write."""
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - advisory locking is POSIX-only
+            yield
+            return
+        fd = os.open(self.path.parent / (self.path.name + ".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
+    def _adopt_external_rows(self) -> None:
+        """Take over any row on disk that this recorder did not put there, so a rewrite keeps it.
+
+        Rows are matched verbatim against the text this recorder last wrote (or loaded), with
+        multiplicity, so an in-place ``.outcome`` mutation still updates our own row rather than
+        duplicating it: the stale line on disk is what we last wrote, and it is our buffer that
+        re-emits the current value.
+        """
+        try:
+            current = self.path.read_text()
+        except FileNotFoundError:
+            return
+        if current == self._written:
+            return
+        known = Counter(line for line in self._written.splitlines() if line.strip())
+        for line in current.splitlines():
+            if not line.strip():
+                continue
+            if known[line]:
+                known[line] -= 1
+            else:
+                self._external.append(line + "\n")
 
     def _write_atomically(self, text: str) -> None:
         """Replace the log with ``text`` via a fresh private temp file in the log's own directory.
@@ -180,12 +232,12 @@ class Telemetry:
             raise
 
     def _load(self) -> None:
-        with open(self.path) as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    row = json.loads(line)
-                    self._buffer.append(Event(**row))
+        self._written = self.path.read_text()  # the baseline a later flush diffs other writers against
+        for line in self._written.splitlines():
+            line = line.strip()
+            if line:
+                row = json.loads(line)
+                self._buffer.append(Event(**row))
         # Advance the fallback clock past whatever timestamps this log already contains.
         # Without this, a freshly constructed instance's _clock restarts at 0.0, oblivious to
         # what it just loaded, and the next default-timestamped record() would hand out a ts
