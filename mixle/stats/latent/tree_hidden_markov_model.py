@@ -2782,7 +2782,11 @@ def level_state_prob(levels, num_states, tr_mat, init_prob, out):
     for k in range(1, levels):
         for i in range(num_states):
             for j in range(num_states):
-                out[k, i] += out[k - 1, i] * tr_mat[i, j]
+                # Accumulate into the DESTINATION state j, not the source i. Writing out[k, i]
+                # summed over j collapsed to out[k-1, i] * sum_j tr_mat[i, j], and rows of a
+                # stochastic matrix sum to 1 -- so every level silently reproduced the root prior
+                # instead of propagating it through the transition matrix.
+                out[k, j] += out[k - 1, i] * tr_mat[i, j]
 
 
 def _register_tree_hmm_engine_kernel():
