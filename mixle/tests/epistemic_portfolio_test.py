@@ -188,6 +188,46 @@ class LikelihoodDomainTest(unittest.TestCase):
             self.assertLess(score, 1.0 + 1e-12)
 
 
+class ResampleValidationTest(unittest.TestCase):
+    """MXR-080-1759 -- `resample`'s contract must not depend on the current weights.
+
+    `method` was only inspected after the ESS early return, and `ess_threshold` was never validated
+    at all, so the same call raised or silently no-opped depending on the data it was handed.
+    """
+
+    def test_unknown_method_raises_even_when_ess_clears_the_threshold(self):
+        # Uniform weights => ESS == n, so the ESS branch returns early and never reaches the method
+        # dispatch; the invalid method must still be reported.
+        portfolio = _toy_portfolio()
+        with self.assertRaises(ValueError):
+            portfolio.resample(method="bogus", rng=np.random.RandomState(0))
+
+    def test_unknown_method_still_raises_when_a_resample_would_happen(self):
+        portfolio = HypothesisPortfolio([Hypothesis("h0", 0.0), Hypothesis("h1", 1.0)], np.array([0.99, 0.01]))
+        with self.assertRaises(ValueError):
+            portfolio.resample(method="bogus", rng=np.random.RandomState(0))
+
+    def test_out_of_domain_thresholds_are_rejected(self):
+        portfolio = _toy_portfolio()
+        for bad in (-0.5, 1.5, float("nan"), float("inf"), -float("inf")):
+            with self.subTest(ess_threshold=bad), self.assertRaises(ValueError):
+                portfolio.resample(ess_threshold=bad, rng=np.random.RandomState(0))
+
+    def test_boundary_thresholds_are_accepted(self):
+        portfolio = _toy_portfolio()
+        for good in (0.0, 0.5, 1.0):
+            with self.subTest(ess_threshold=good):
+                out = portfolio.resample(ess_threshold=good, rng=np.random.RandomState(0))
+                self.assertAlmostEqual(float(out.weights.sum()) + out.w_open, 1.0, places=8)
+
+    def test_zero_threshold_disables_resampling_instead_of_a_negative_one(self):
+        # A negative threshold used to be the (silent) way to disable resampling; 0.0 is the
+        # in-domain way to ask for the same thing and must keep working.
+        portfolio = HypothesisPortfolio([Hypothesis("h0", 0.0), Hypothesis("h1", 1.0)], np.array([0.99, 0.01]))
+        out = portfolio.resample(ess_threshold=0.0, rng=np.random.RandomState(0))
+        self.assertIs(out, portfolio)
+
+
 class SerializationRoundTripTest(unittest.TestCase):
     def test_to_dict_from_dict_round_trips_exactly(self):
         portfolio = _toy_portfolio(w_open=0.1).prune(min_weight=0.5)
