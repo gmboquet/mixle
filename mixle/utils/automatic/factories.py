@@ -178,8 +178,15 @@ DictRecordEstimator = _estimator_provider(False).DictRecordEstimator
 
 
 def get_optional_estimator(est: ParameterEstimator, missing_value: Any | None = None, use_bstats: bool = False):
-    """Wrap an estimator with an optional/missing-value model."""
-    return _estimator_provider(use_bstats).OptionalEstimator(est, missing_value=missing_value)
+    """Wrap an estimator with an optional/missing-value model.
+
+    ``est_prob=True`` because this is the automatic path: the caller handed over data that
+    happens to contain missing values and asked for a model of it, so how often a value is
+    missing is one of the things being learned. Leaving it off yields ``p=None``, which is a
+    marginalized likelihood factor -- correct when conditioning on a known missingness pattern,
+    but it cannot generate, so the fitted model scores and then raises on sampler().
+    """
+    return _estimator_provider(use_bstats).OptionalEstimator(est, missing_value=missing_value, est_prob=True)
 
 
 def get_length_estimator(
