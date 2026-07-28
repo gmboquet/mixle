@@ -87,6 +87,46 @@ def _zero_skill_oracle(replicate_seed):
 
 
 class AmplifyAndCaptureTest(unittest.TestCase):
+    def test_random_streams_are_independent_and_receipted(self):
+        oracle = _quadratic_bowl_oracle(target=np.array([0.2]))
+        report = amplify_and_capture(
+            oracle,
+            [(-1.0, 1.0)],
+            n_init=1,
+            n_iter=0,
+            candidate_pool_size=1,
+            seed=7,
+        )
+        self.assertEqual(len({report.seeds.search, report.seeds.baseline, report.seeds.permutation, report.seeds.round2_pool}), 4)
+        self.assertFalse(np.array_equal(report.round1.xs[0], report.baseline.xs[0]))
+
+    def test_invalid_policy_and_underfilled_pool_fail_before_oracle_calls(self):
+        calls = 0
+
+        def score(x):
+            nonlocal calls
+            calls += 1
+            return OracleResult(score=0.0)
+
+        for significance in (np.nan, np.inf, -0.1, 0.0, 1.0, 2.0):
+            with self.assertRaises(ValueError):
+                amplify_and_capture(
+                    VerifiableOracle(name="counted", tier="executable", score_fn=score),
+                    _BOUNDS,
+                    n_init=2,
+                    n_iter=0,
+                    significance=significance,
+                )
+        with self.assertRaisesRegex(ValueError, "candidate_pool_size"):
+            amplify_and_capture(
+                VerifiableOracle(name="counted", tier="executable", score_fn=score),
+                _BOUNDS,
+                n_init=3,
+                n_iter=2,
+                candidate_pool_size=4,
+            )
+        self.assertEqual(calls, 0)
+
     def test_round1_beats_a_budget_matched_random_baseline(self):
         oracle = _quadratic_bowl_oracle(target=np.array([2.0, -1.0]))
         report = amplify_and_capture(oracle, _BOUNDS, n_init=4, n_iter=8, seed=0)
@@ -168,18 +208,19 @@ class AmplifyAndCaptureTest(unittest.TestCase):
         surrogate this module builds on, unrelated to this fix), so this checks every seed that
         actually reaches round 2 rather than asserting on one -- the disjointness must hold for all of
         them, and at least one must reach round 2 or the check below is vacuous."""
-        saw_round2 = False
-        for seed in range(6):
-            oracle = _quadratic_bowl_oracle(target=np.array([2.0, -1.0]))
-            report = amplify_and_capture(oracle, _BOUNDS, n_init=4, n_iter=8, seed=seed)
-            if report.round2 is None:
-                continue
-            saw_round2 = True
-            self.assertEqual(len(report.round2.run.history), len(report.round1.run.history))  # matched budget
-            round1_xs = {tuple(np.round(x, 12)) for x in report.round1.xs}
-            round2_xs = {tuple(np.round(x, 12)) for x in report.round2.xs}
-            self.assertEqual(round1_xs & round2_xs, set(), f"seed {seed}: round 2 re-offered a round 1 point")
-        self.assertTrue(saw_round2, "no seed in range(6) reached round 2; the check above never ran")
+        # Use a valid but deliberately permissive gate threshold so this structural test deterministically
+        # reaches round 2. With genuinely independent baseline/search streams, a random-only n_iter=0
+        # round should clear a conventional 0.05 gate only at its nominal rate; relying on a fixed seed
+        # to pass at 0.05 would recreate the same-seed coupling this audit batch removed.
+        oracle = _quadratic_bowl_oracle(target=np.array([2.0, -1.0]))
+        report = amplify_and_capture(
+            oracle, _BOUNDS, n_init=12, n_iter=0, significance=0.99, degree=2, seed=7
+        )
+        self.assertIsNotNone(report.round2)
+        self.assertEqual(len(report.round2.run.history), len(report.round1.run.history))
+        round1_xs = {tuple(np.round(x, 12)) for x in report.round1.xs}
+        round2_xs = {tuple(np.round(x, 12)) for x in report.round2.xs}
+        self.assertEqual(round1_xs & round2_xs, set())
 
     def test_round2_beats_round1_is_no_longer_tautological_for_a_misspecified_student(self):
         """MXR-080-0162 non-circularity regression. Against the unfixed code, round2_beats_round1 was
@@ -194,7 +235,9 @@ class AmplifyAndCaptureTest(unittest.TestCase):
         all, which is what makes this a real demonstration of round 2 losing, not a case that never
         got the chance to win."""
         oracle = _quadratic_bowl_oracle(target=np.array([2.0, -1.0]))
-        report = amplify_and_capture(oracle, _BOUNDS, n_init=12, n_iter=0, degree=1, seed=7)
+        report = amplify_and_capture(
+            oracle, _BOUNDS, n_init=12, n_iter=0, degree=1, significance=0.99, seed=7
+        )
 
         self.assertTrue(report.beats_baseline)
         self.assertIsNotNone(report.round2)
@@ -212,7 +255,9 @@ class AmplifyAndCaptureTest(unittest.TestCase):
         round2_beats_round1 must still be able to report True honestly. The fix must not make this
         metric impossible to satisfy, only stop guaranteeing it by construction."""
         oracle = _quadratic_bowl_oracle(target=np.array([2.0, -1.0]))
-        report = amplify_and_capture(oracle, _BOUNDS, n_init=12, n_iter=0, degree=2, seed=7)
+        report = amplify_and_capture(
+            oracle, _BOUNDS, n_init=12, n_iter=0, degree=2, significance=0.99, seed=7
+        )
 
         self.assertTrue(report.beats_baseline)
         self.assertIsNotNone(report.round2)
@@ -222,7 +267,9 @@ class AmplifyAndCaptureTest(unittest.TestCase):
 
     def test_collapse_monitor_is_run_and_reused_not_reimplemented(self):
         oracle = _quadratic_bowl_oracle(target=np.array([2.0, -1.0]))
-        report = amplify_and_capture(oracle, _BOUNDS, n_init=12, n_iter=0, degree=2, seed=7)
+        report = amplify_and_capture(
+            oracle, _BOUNDS, n_init=12, n_iter=0, degree=2, significance=0.99, seed=7
+        )
 
         self.assertIsNotNone(report.collapse)
         self.assertTrue(report.collapse.ok)
@@ -333,6 +380,35 @@ class AmplifyAbstentionHandlingTest(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             fit_student(run, degree=2)
         self.assertIn("abstained", str(ctx.exception))
+
+    def test_fit_student_requires_enough_identifiable_genuine_evidence(self):
+        run = DesignRun(oracle_name="t", oracle_tier="executable", oracle_fidelity=None)
+        for value in (0.0, 1.0):
+            run.append(
+                DesignCandidate(
+                    x=np.array([value, value]),
+                    result=OracleResult(score=value, receipt={}, cost=1.0),
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "identifiable"):
+            fit_student(run, degree=2)
+
+    def test_insufficient_genuine_samples_stop_before_statistical_inference(self):
+        oracle = VerifiableOracle(
+            name="always-abstain",
+            tier="executable",
+            score_fn=lambda _x: OracleResult(
+                score=float("-inf"),
+                receipt={"reason": "no evidence"},
+                abstained=True,
+            ),
+        )
+        report = amplify_and_capture(oracle, _BOUNDS, n_init=2, n_iter=0, candidate_pool_size=2, seed=0)
+        self.assertTrue(report.stopped_early)
+        self.assertIsNone(report.baseline_p_value)
+        self.assertEqual(report.round1_effective_n, 0)
+        self.assertEqual(report.baseline_effective_n, 0)
+        self.assertIn("insufficient genuine", report.reason)
 
     def test_end_to_end_amplify_and_capture_survives_abstentions_with_a_finite_student(self):
         """Integration-level negative control: a full amplify_and_capture run against a flaky oracle

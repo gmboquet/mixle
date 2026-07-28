@@ -110,6 +110,22 @@ class ConstrainedEvidenceContractTest(unittest.TestCase):
             )
         self.assertEqual(point.shape, (1,))
 
+    def test_acquisition_requires_one_finite_score_per_candidate(self):
+        arguments = (
+            np.array([[0.0], [1.0]]),
+            np.array([0.0, 1.0]),
+            np.array([-1.0, -1.0]),
+            [(0.0, 1.0)],
+        )
+        acquisitions = (
+            lambda mean, std, best, **kwargs: np.zeros((len(mean), 1)),
+            lambda mean, std, best, **kwargs: np.full(len(mean), np.nan),
+        )
+        for acquisition in acquisitions:
+            with mock.patch.object(constrained_module, "_fit_surrogate", return_value=_StubGP()):
+                with self.assertRaises(ValueError):
+                    propose_next_constrained(*arguments, n_candidates=4, acq=acquisition, seed=0)
+
     def test_nonfinite_constraint_evidence_cannot_select_an_incumbent(self):
         with self.assertRaisesRegex(ValueError, "constraint observations"):
             _best_feasible(np.array([0.0, 1.0]), np.array([[np.nan], [1.0]]))

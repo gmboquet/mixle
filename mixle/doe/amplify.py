@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from scipy.stats import permutation_test
 
-from mixle.doe.designs import Bounds, random_design
+from mixle.doe.designs import Bounds, _as_bounds, _require_exact_positive_int, random_design
 from mixle.doe.oracle import DesignCandidate, DesignRun, VerifiableOracle, optimize_under_oracle
 
 if TYPE_CHECKING:
@@ -110,6 +110,7 @@ def fit_student(run: DesignRun, *, degree: int = 2) -> StudentTeacher:
     captured student that guides round 2's candidate ranking into a useless, uniformly-``nan`` predictor
     with no visible error at the call site.
     """
+    degree = _require_exact_positive_int(degree, "degree", minimum=0)
     genuine = run.genuine_history
     if not genuine:
         raise ValueError(
@@ -120,7 +121,18 @@ def fit_student(run: DesignRun, *, degree: int = 2) -> StudentTeacher:
     xs = np.stack([c.x for c in genuine]).astype(np.float64)
     ys = np.asarray([c.result.score for c in genuine], dtype=np.float64)
     x_design = _design_matrix(xs, degree)
+    if not np.all(np.isfinite(xs)) or not np.all(np.isfinite(ys)) or not np.all(np.isfinite(x_design)):
+        raise ValueError("cannot fit a student from non-finite verified design evidence.")
+    n_parameters = x_design.shape[1]
+    rank = int(np.linalg.matrix_rank(x_design))
+    if x_design.shape[0] < n_parameters or rank < n_parameters:
+        raise ValueError(
+            "cannot fit an identifiable student: "
+            f"{x_design.shape[0]} genuine observations provide rank {rank} for {n_parameters} coefficients."
+        )
     coef, *_ = np.linalg.lstsq(x_design, ys, rcond=None)
+    if not np.all(np.isfinite(coef)):
+        raise ValueError("student fit produced non-finite coefficients.")
     return StudentTeacher(coef=coef, degree=degree)
 
 
@@ -129,8 +141,18 @@ class AmplificationRound:
     """One oracle-verified amplification round and its best observed score."""
 
     run: DesignRun
-    best_score: float
+    best_score: float | None
     xs: list[np.ndarray]
+
+
+@dataclass(frozen=True)
+class AmplificationSeeds:
+    """Concrete independent random streams used by an amplification receipt."""
+
+    search: int
+    baseline: int
+    permutation: int
+    round2_pool: int
 
 
 @dataclass
@@ -154,15 +176,19 @@ class AmplifyReport:
     round1: AmplificationRound
     round2: AmplificationRound | None
     baseline: AmplificationRound
-    baseline_p_value: float
+    baseline_p_value: float | None
     significance: float
     beats_baseline: bool
     round2_beats_round1: bool
-    incumbent_best_score: float
+    incumbent_best_score: float | None
     collapse: CollapseVerdict | None
     student: StudentTeacher | None
     stopped_early: bool
     reason: str | None
+    seeds: AmplificationSeeds
+    round1_effective_n: int
+    baseline_effective_n: int
+    round2_effective_n: int | None
 
 
 def amplify_and_capture(
@@ -196,17 +222,52 @@ def amplify_and_capture(
     blind, but every accepted score is still oracle-verified. Runs
     :func:`mixle.task.collapse.collapse_monitor` over the two rounds.
     """
-    run1 = optimize_under_oracle(oracle, bounds, n_init=n_init, n_iter=n_iter, seed=seed)
-    round1 = AmplificationRound(run=run1, best_score=float(run1.best.result.score), xs=[c.x for c in run1.history])
+    b = _as_bounds(bounds)
+    n_init = _require_exact_positive_int(n_init, "n_init")
+    n_iter = _require_exact_positive_int(n_iter, "n_iter", minimum=0)
+    candidate_pool_size = _require_exact_positive_int(candidate_pool_size, "candidate_pool_size")
+    degree = _require_exact_positive_int(degree, "degree", minimum=0)
+    budget = n_init + n_iter
+    if candidate_pool_size < budget:
+        raise ValueError(
+            f"candidate_pool_size must be at least the matched evaluation budget {budget}, "
+            f"got {candidate_pool_size}."
+        )
+    try:
+        significance = float(significance)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"significance must be a finite probability in (0, 1), got {significance!r}.") from exc
+    if not np.isfinite(significance) or not (0.0 < significance < 1.0):
+        raise ValueError(f"significance must be a finite probability in (0, 1), got {significance!r}.")
 
-    budget = int(n_init) + int(n_iter)
+    root_sequence = np.random.SeedSequence(seed)
+    child_sequences = root_sequence.spawn(4 if seed is None else 3)
+    search_seed = (
+        int(child_sequences[0].generate_state(1, dtype=np.uint32)[0])
+        if seed is None
+        else int(seed)
+    )
+    offset = 1 if seed is None else 0
+    seeds = AmplificationSeeds(
+        search=search_seed,
+        baseline=int(child_sequences[offset].generate_state(1, dtype=np.uint32)[0]),
+        permutation=int(child_sequences[offset + 1].generate_state(1, dtype=np.uint32)[0]),
+        round2_pool=int(child_sequences[offset + 2].generate_state(1, dtype=np.uint32)[0]),
+    )
+
+    run1 = optimize_under_oracle(oracle, b, n_init=n_init, n_iter=n_iter, seed=seeds.search)
+    run1_scores = _genuine_scores(run1)
+    round1 = AmplificationRound(
+        run=run1,
+        best_score=float(np.max(run1_scores)) if run1_scores.size else None,
+        xs=[c.x for c in run1.history],
+    )
 
     # Budget-matched baseline (MXR-080-0161): the same number of oracle-verified draws as round 1 spent,
-    # every one of them receipted in its own DesignRun -- not one extra, uncounted draw. Reuses round 1's
-    # own `seed` (a different RandomState-consuming call than `optimize_under_oracle`'s BayesianOptimizer,
-    # so this does not replay round 1's sequence); `fresh_pool` below deliberately uses `seed + 1` so the
-    # round-2 candidate pool's draw never repeats this baseline's draw.
-    baseline_xs = random_design(bounds, budget, seed=seed)
+    # every one receipted in its own DesignRun. Its recorded child seed is independent of the search,
+    # permutation, and round-2 streams; restarting both search and baseline from the same integer seed
+    # can replay the identical first point and invalidate the comparison.
+    baseline_xs = random_design(b, budget, seed=seeds.baseline)
     baseline_run = DesignRun(oracle_name=oracle.name, oracle_tier=oracle.tier, oracle_fidelity=oracle.fidelity)
     for x in baseline_xs:
         # Every draw is recorded, abstained or not (mirrors optimize_under_oracle's own "always record,
@@ -214,9 +275,45 @@ def amplify_and_capture(
         # abstention-safe; the permutation test below is the other consumer of this run's scores, and is
         # made abstention-safe via _genuine_scores() rather than here.
         baseline_run.append(DesignCandidate(x=x, result=oracle(x)))
+    if baseline_run.oracle_calls != budget:
+        raise RuntimeError(f"baseline executed {baseline_run.oracle_calls} calls; expected exactly {budget}.")
+    baseline_scores = _genuine_scores(baseline_run)
     baseline = AmplificationRound(
-        run=baseline_run, best_score=float(baseline_run.best.result.score), xs=[c.x for c in baseline_run.history]
+        run=baseline_run,
+        best_score=float(np.max(baseline_scores)) if baseline_scores.size else None,
+        xs=[c.x for c in baseline_run.history],
     )
+
+    def stopped_report(
+        reason: str,
+        *,
+        p_value: float | None = None,
+        gate_passed: bool = False,
+    ) -> AmplifyReport:
+        return AmplifyReport(
+            round1=round1,
+            round2=None,
+            baseline=baseline,
+            baseline_p_value=p_value,
+            significance=significance,
+            beats_baseline=gate_passed,
+            round2_beats_round1=False,
+            incumbent_best_score=round1.best_score,
+            collapse=None,
+            student=None,
+            stopped_early=True,
+            reason=reason,
+            seeds=seeds,
+            round1_effective_n=int(run1_scores.size),
+            baseline_effective_n=int(baseline_scores.size),
+            round2_effective_n=None,
+        )
+
+    if run1_scores.size < 2 or baseline_scores.size < 2:
+        return stopped_report(
+            "insufficient genuine observations for the baseline permutation test: "
+            f"round1={run1_scores.size}, baseline={baseline_scores.size}; at least 2 per group are required"
+        )
 
     # Statistical improvement test, not a point comparison: is round 1's best score bigger than the
     # baseline's best score by more than a fair reshuffling of the pooled `2 * budget` scores would
@@ -237,36 +334,35 @@ def amplify_and_capture(
     # for the receipted record; this simply is not the right input for a test that assumes its inputs are
     # exchangeable draws from the same distribution.
     permutation = permutation_test(
-        (_genuine_scores(run1), _genuine_scores(baseline_run)),
+        (run1_scores, baseline_scores),
         _best_score_gap,
         permutation_type="independent",
         alternative="greater",
         n_resamples=9999,
-        rng=seed,
+        rng=seeds.permutation,
     )
     baseline_p_value = float(permutation.pvalue)
+    if not np.isfinite(baseline_p_value) or not (0.0 <= baseline_p_value <= 1.0):
+        raise ValueError(f"permutation test produced invalid p-value {baseline_p_value!r}.")
     beats_baseline = bool(baseline_p_value < significance)
     if not beats_baseline:
-        return AmplifyReport(
-            round1=round1,
-            round2=None,
-            baseline=baseline,
-            baseline_p_value=baseline_p_value,
-            significance=significance,
-            beats_baseline=False,
-            round2_beats_round1=False,
-            incumbent_best_score=round1.best_score,
-            collapse=None,
-            student=None,
-            stopped_early=True,
-            reason=(
+        return stopped_report(
+            (
                 "the amplified teacher (round 1 search) did not beat a budget-matched random baseline "
                 f"(one-sided permutation test p={baseline_p_value:.4g}, significance={significance}); "
                 "nothing to capture"
             ),
+            p_value=baseline_p_value,
         )
 
-    student = fit_student(run1, degree=degree)
+    try:
+        student = fit_student(run1, degree=degree)
+    except ValueError as exc:
+        return stopped_report(
+            f"baseline gate passed but student evidence is insufficient: {exc}",
+            p_value=baseline_p_value,
+            gate_passed=True,
+        )
 
     # MXR-080-0162 fix: the round 2 pool is FRESH candidates only -- round 1's own points are never
     # unioned in. Including them (the earlier code did) spends round 2's budget re-verifying points
@@ -275,16 +371,56 @@ def amplify_and_capture(
     # retained incumbent smuggled into the evaluation budget, not evidence round 2 proposed anything
     # better. `round1`'s best point is still available -- see `incumbent_best_score` below -- just kept
     # separate from the budget spent testing the student on candidates it has not seen.
-    fresh_pool = random_design(bounds, int(candidate_pool_size), seed=None if seed is None else seed + 1)
-    predicted = np.asarray([student(x) for x in fresh_pool])
+    fresh_pool = random_design(b, candidate_pool_size, seed=seeds.round2_pool)
+    round1_keys = {np.asarray(point, dtype=np.float64).tobytes() for point in round1.xs}
+    fresh_pool = np.asarray(
+        [point for point in fresh_pool if np.asarray(point, dtype=np.float64).tobytes() not in round1_keys],
+        dtype=np.float64,
+    ).reshape(-1, b.shape[0])
+    if fresh_pool.shape[0] < budget:
+        raise ValueError(
+            f"fresh candidate pool contains only {fresh_pool.shape[0]} points after excluding round 1; "
+            f"{budget} are required."
+        )
+    predicted = np.asarray([student(x) for x in fresh_pool], dtype=np.float64)
+    if not np.all(np.isfinite(predicted)):
+        raise ValueError("student produced non-finite candidate rankings.")
     top_idx = np.argsort(-predicted)[:budget]
+    if top_idx.size != budget:
+        raise RuntimeError(f"round 2 selected {top_idx.size} candidates; expected exactly {budget}.")
 
     run2 = DesignRun(oracle_name=oracle.name, oracle_tier=oracle.tier, oracle_fidelity=oracle.fidelity)
     for idx in top_idx:
         x = fresh_pool[idx]
         result = oracle(x)  # the oracle supplies the accepted score; the student only proposes where to look
         run2.append(DesignCandidate(x=x, result=result))
-    round2 = AmplificationRound(run=run2, best_score=float(run2.best.result.score), xs=[c.x for c in run2.history])
+    if run2.oracle_calls != budget:
+        raise RuntimeError(f"round 2 executed {run2.oracle_calls} calls; expected exactly {budget}.")
+    run2_scores = _genuine_scores(run2)
+    round2 = AmplificationRound(
+        run=run2,
+        best_score=float(np.max(run2_scores)) if run2_scores.size else None,
+        xs=[c.x for c in run2.history],
+    )
+    if round2.best_score is None:
+        return AmplifyReport(
+            round1=round1,
+            round2=round2,
+            baseline=baseline,
+            baseline_p_value=baseline_p_value,
+            significance=significance,
+            beats_baseline=True,
+            round2_beats_round1=False,
+            incumbent_best_score=round1.best_score,
+            collapse=None,
+            student=student,
+            stopped_early=True,
+            reason="round 2 produced no genuine oracle observations",
+            seeds=seeds,
+            round1_effective_n=int(run1_scores.size),
+            baseline_effective_n=int(baseline_scores.size),
+            round2_effective_n=0,
+        )
 
     from mixle.task.collapse import collapse_monitor
 
@@ -311,4 +447,8 @@ def amplify_and_capture(
         student=student,
         stopped_early=False,
         reason=None,
+        seeds=seeds,
+        round1_effective_n=int(run1_scores.size),
+        baseline_effective_n=int(baseline_scores.size),
+        round2_effective_n=int(run2_scores.size),
     )
