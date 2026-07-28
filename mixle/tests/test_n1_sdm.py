@@ -51,7 +51,7 @@ def test_fit_sdm_recovers_field_beats_null_and_is_calibrated_on_held_out_fold():
     occurrences, counts = _synthetic_presences(lambda_true, area, rng)
     assert len(occurrences) > 200  # sanity: the synthetic field actually produced data
 
-    model = fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=1e-3)
+    model = fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=1e-3, species_id="lynx_rufus")
 
     assert isinstance(model, HabitatModel)
     assert isinstance(model, Posterior)  # IC-12 must satisfy IC-1
@@ -95,7 +95,7 @@ def test_critical_habitat_mask_is_boolean_and_thresholded():
     area = np.ones(num_cells)
     occurrences, _ = _synthetic_presences(lambda_true, area, rng)
 
-    model = fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=1e-2)
+    model = fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=1e-2, species_id="lynx_rufus")
     threshold = float(np.median(model.mean))
     mask = model.critical_habitat_mask(threshold)
 
@@ -112,7 +112,7 @@ def test_samples_and_derived_quantity_shapes():
     area = np.ones(num_cells)
     occurrences, _ = _synthetic_presences(lambda_true, area, rng)
 
-    model = fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=1e-2)
+    model = fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=1e-2, species_id="lynx_rufus")
 
     draw_rng = np.random.default_rng(0)
     draws = model.samples(256, draw_rng)
@@ -140,8 +140,10 @@ def test_background_quadrature_offset_does_not_crash_and_shifts_offset():
     occurrences, _ = _synthetic_presences(lambda_true, area, rng)
     background = rng.uniform(0.0, num_cells, size=300)
 
-    model_no_bg = fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=1e-2)
-    model_bg = fit_sdm(occurrences, env.reshape(-1, 1), area, background=background, ridge=1e-2)
+    model_no_bg = fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=1e-2, species_id="lynx_rufus")
+    model_bg = fit_sdm(
+        occurrences, env.reshape(-1, 1), area, background=background, ridge=1e-2, species_id="lynx_rufus"
+    )
 
     assert model_bg.mean.shape == (num_cells,)
     assert np.all(np.isfinite(model_bg.mean))
@@ -158,7 +160,7 @@ def test_fit_sdm_beta_recovers_sign_of_covariate_effect():
     area = np.ones(num_cells)
     occurrences, _ = _synthetic_presences(lambda_true, area, rng)
 
-    model = fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=1e-3)
+    model = fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=1e-3, species_id="lynx_rufus")
 
     # beta = [intercept, slope]; the fitted slope must recover the strong positive true effect (b=2.0)
     assert model.beta.shape == (2,)
@@ -218,7 +220,7 @@ def test_fit_sdm_rejects_out_of_domain_presence_locations():
         SpeciesObservation(species_id="lynx_rufus", detection=True, location=np.array([99.0])),
     ]
     with pytest.raises(ValueError, match=r"presence locations"):
-        fit_sdm(occurrences, env.reshape(-1, 1), area)
+        fit_sdm(occurrences, env.reshape(-1, 1), area, species_id="lynx_rufus")
 
 
 def test_fit_sdm_rejects_nan_presence_location():
@@ -227,7 +229,7 @@ def test_fit_sdm_rejects_nan_presence_location():
     area = np.ones(num_cells)
     occurrences = [SpeciesObservation(species_id="x", detection=True, location=np.array([float("nan")]))]
     with pytest.raises(ValueError, match=r"non-finite"):
-        fit_sdm(occurrences, env.reshape(-1, 1), area)
+        fit_sdm(occurrences, env.reshape(-1, 1), area, species_id="x")
 
 
 def test_fit_sdm_rejects_out_of_domain_background_locations():
@@ -236,7 +238,7 @@ def test_fit_sdm_rejects_out_of_domain_background_locations():
     area = np.ones(num_cells)
     occurrences = [SpeciesObservation(species_id="x", detection=True, location=np.array([2.0]))]
     with pytest.raises(ValueError, match=r"background locations"):
-        fit_sdm(occurrences, env.reshape(-1, 1), area, background=np.array([-1.0, 21.0]))
+        fit_sdm(occurrences, env.reshape(-1, 1), area, background=np.array([-1.0, 21.0]), species_id="x")
 
 
 def test_fit_sdm_still_fits_with_legitimate_in_domain_locations():
@@ -249,7 +251,7 @@ def test_fit_sdm_still_fits_with_legitimate_in_domain_locations():
     occurrences, _ = _synthetic_presences(lambda_true, area, rng)
     background = rng.uniform(0.0, num_cells, size=100)
 
-    model = fit_sdm(occurrences, env.reshape(-1, 1), area, background=background, ridge=1e-2)
+    model = fit_sdm(occurrences, env.reshape(-1, 1), area, background=background, ridge=1e-2, species_id="lynx_rufus")
 
     assert model.mean.shape == (num_cells,)
     assert np.all(np.isfinite(model.mean))
@@ -367,7 +369,7 @@ def test_fit_sdm_prior_dominated_uses_the_full_two_ridge_hessian_trace():
     occurrences, covariates, area, ridge = _make_prior_dominated_boundary_fixture()
     p = covariates.shape[1] + 1
 
-    model = fit_sdm(occurrences, covariates, area, ridge=ridge)
+    model = fit_sdm(occurrences, covariates, area, ridge=ridge, species_id="x")
 
     # Recompute data_curvature from the model's own fitted state (no background in this fixture, so
     # effective_area == cell_area) to pin the boundary fixture itself, not just trust the search that
@@ -396,7 +398,7 @@ def test_fit_sdm_negative_control_prior_dominated_still_false_with_ample_data():
     area = np.ones(num_cells)
     occurrences, _ = _synthetic_presences(lambda_true, area, rng)
 
-    model = fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=1e-3)
+    model = fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=1e-3, species_id="lynx_rufus")
 
     dq = model.derived_quantity(lambda draws: draws, 2, np.random.default_rng(0))
     assert dq.prior_dominated is False
@@ -540,9 +542,9 @@ def test_fit_sdm_rejects_invalid_ridge():
     area = np.ones(num_cells)
     occurrences = [SpeciesObservation(species_id="x", detection=True, location=np.array([2.0]))]
     with pytest.raises(ValueError, match=r"ridge"):
-        fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=-1.0)
+        fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=-1.0, species_id="x")
     with pytest.raises(ValueError, match=r"ridge"):
-        fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=float("nan"))
+        fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=float("nan"), species_id="x")
 
 
 def test_fit_sdm_rejects_non_finite_covariates():
@@ -552,7 +554,7 @@ def test_fit_sdm_rejects_non_finite_covariates():
     area = np.ones(num_cells)
     occurrences = [SpeciesObservation(species_id="x", detection=True, location=np.array([2.0]))]
     with pytest.raises(ValueError, match=r"covariates"):
-        fit_sdm(occurrences, env, area)
+        fit_sdm(occurrences, env, area, species_id="x")
 
 
 def test_fit_sdm_rejects_invalid_area_instead_of_using_a_pseudo_area():
@@ -565,17 +567,17 @@ def test_fit_sdm_rejects_invalid_area_instead_of_using_a_pseudo_area():
     zero_area = np.ones(num_cells)
     zero_area[0] = 0.0
     with pytest.raises(ValueError, match=r"cell_area"):
-        fit_sdm(occurrences, env.reshape(-1, 1), zero_area)
+        fit_sdm(occurrences, env.reshape(-1, 1), zero_area, species_id="x")
 
     negative_area = np.ones(num_cells)
     negative_area[1] = -5.0
     with pytest.raises(ValueError, match=r"cell_area"):
-        fit_sdm(occurrences, env.reshape(-1, 1), negative_area)
+        fit_sdm(occurrences, env.reshape(-1, 1), negative_area, species_id="x")
 
     nan_area = np.ones(num_cells)
     nan_area[2] = np.nan
     with pytest.raises(ValueError, match=r"cell_area"):
-        fit_sdm(occurrences, env.reshape(-1, 1), nan_area)
+        fit_sdm(occurrences, env.reshape(-1, 1), nan_area, species_id="x")
 
 
 def _valid_habitat_model_kwargs(p: int = 2, num_cells: int = 1) -> dict:
@@ -584,6 +586,7 @@ def _valid_habitat_model_kwargs(p: int = 2, num_cells: int = 1) -> dict:
         "beta_cov": np.eye(p) * 1e-3,
         "design": np.ones((num_cells, p)),
         "cell_area": np.ones(num_cells),
+        "species_id": "lynx_rufus",
     }
 
 
@@ -599,7 +602,7 @@ def test_habitat_model_owns_and_freezes_validated_parameter_arrays():
     beta_cov = np.eye(2)
     design = np.array([[1.0, 2.0], [1.0, 3.0]])
     cell_area = np.array([1.0, 2.0])
-    model = HabitatModel(beta, beta_cov, design, cell_area)
+    model = HabitatModel(beta, beta_cov, design, cell_area, species_id="lynx_rufus")
     mean_before = model.mean.copy()
     beta[:] = 100.0
     beta_cov[:] = np.nan
@@ -693,6 +696,7 @@ def test_habitat_model_mean_and_credible_interval_stay_finite_under_extreme_beta
         beta_cov=np.eye(2) * 1e-6,
         design=np.array([[1.0, 1.0]]),
         cell_area=np.array([1.0]),
+        species_id="lynx_rufus",
     )
     assert np.all(np.isfinite(model.mean))
     lo, hi = model.credible_interval(0.9)
@@ -707,6 +711,7 @@ def test_habitat_model_rejects_unrepresentable_dense_covariance():
         beta_cov=np.array([[1.0]]),
         design=np.array([[1.0]]),
         cell_area=np.array([1.0]),
+        species_id="lynx_rufus",
     )
     assert np.isfinite(model.mean).all()
     with pytest.raises(ValueError, match="dense habitat intensity covariance"):
@@ -720,6 +725,7 @@ def test_habitat_model_uses_matrix_free_covariance_for_large_domains():
         beta_cov=np.array([[2.0]]),
         design=np.ones((num_cells, 1)),
         cell_area=np.ones(num_cells),
+        species_id="lynx_rufus",
         var_scale=3.0,
     )
     covariance = model.cov
@@ -792,7 +798,7 @@ def test_fit_sdm_negative_control_normal_fit_is_valid_finite_and_psd():
     area = np.ones(num_cells)
     occurrences, _ = _synthetic_presences(lambda_true, area, rng)
 
-    model = fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=1e-2)
+    model = fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=1e-2, species_id="lynx_rufus")
 
     assert np.all(np.isfinite(model.mean))
     assert model.beta_cov.shape == (2, 2)
@@ -803,3 +809,98 @@ def test_fit_sdm_negative_control_normal_fit_is_valid_finite_and_psd():
     draws = model.samples(100, np.random.default_rng(1))
     assert draws.shape == (100, num_cells)
     assert np.all(np.isfinite(draws))
+
+
+# --------------------------------------------------------------------------------------------------
+# MXR-080-1590: fit_sdm binned every truthy detection without requiring one common species, so a
+# single fitted intensity could pool records from unrelated species; and HabitatModel stored neither
+# species identity nor input receipts, so neither error was detectable downstream.
+# --------------------------------------------------------------------------------------------------
+def test_fit_sdm_rejects_occurrences_from_a_different_species():
+    """Audit repro: records for another species must not be pooled into this species' field."""
+    num_cells = 20
+    env = np.zeros(num_cells)
+    area = np.ones(num_cells)
+    occurrences = [
+        SpeciesObservation(species_id="lynx_rufus", detection=True, location=np.array([2.0])),
+        SpeciesObservation(species_id="ursus_arctos", detection=True, location=np.array([5.0])),
+    ]
+    with pytest.raises(ValueError, match="ursus_arctos"):
+        fit_sdm(occurrences, env.reshape(-1, 1), area, species_id="lynx_rufus")
+
+
+def test_fit_sdm_rejects_a_missing_or_blank_target_species():
+    num_cells = 20
+    env = np.zeros(num_cells)
+    area = np.ones(num_cells)
+    occurrences = [SpeciesObservation(species_id="lynx_rufus", detection=True, location=np.array([2.0]))]
+    for bad in ("", "   "):
+        with pytest.raises(ValueError, match="species_id"):
+            fit_sdm(occurrences, env.reshape(-1, 1), area, species_id=bad)
+    with pytest.raises(TypeError):
+        fit_sdm(occurrences, env.reshape(-1, 1), area)
+
+
+def test_fitted_model_carries_species_identity_and_immutable_input_receipts():
+    rng = np.random.default_rng(13)
+    num_cells = 60
+    env = rng.uniform(-1.0, 1.0, size=num_cells)
+    area = np.ones(num_cells)
+    occurrences, _ = _synthetic_presences(np.exp(-0.2 + 1.0 * env), area, rng)
+
+    model = fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=1e-2, species_id="lynx_rufus")
+
+    assert model.species_id == "lynx_rufus"
+    for key in ("species_id", "presence_digest", "covariate_digest", "cell_area_digest", "n_presence_records"):
+        assert key in model.provenance, key
+    assert model.provenance["species_id"] == "lynx_rufus"
+    assert len(model.provenance["presence_digest"]) == 64  # sha256 hex
+    assert model.provenance["background_digest"] is None  # no background supplied here
+    # the receipt is immutable: a mutable one is not a receipt
+    with pytest.raises(TypeError):
+        model.provenance["species_id"] = "ursus_arctos"
+
+
+def test_input_receipts_distinguish_different_source_datasets():
+    """Two fits that differ ONLY in their occurrence data must carry different presence digests, and
+    two fits on identical data must agree -- otherwise the receipt cannot trace anything."""
+    rng = np.random.default_rng(29)
+    num_cells = 40
+    env = rng.uniform(-1.0, 1.0, size=num_cells)
+    area = np.ones(num_cells)
+    occurrences, _ = _synthetic_presences(np.exp(0.4 + 0.6 * env), area, rng)
+    assert len(occurrences) > 5
+
+    base = fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=1e-2, species_id="lynx_rufus")
+    same = fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=1e-2, species_id="lynx_rufus")
+    fewer = fit_sdm(occurrences[:-1], env.reshape(-1, 1), area, ridge=1e-2, species_id="lynx_rufus")
+
+    assert base.provenance["presence_digest"] == same.provenance["presence_digest"]
+    assert base.provenance["presence_digest"] != fewer.provenance["presence_digest"]
+    assert base.provenance["covariate_digest"] == fewer.provenance["covariate_digest"]
+
+    other_env = env + 1.0
+    other_cov = fit_sdm(occurrences, other_env.reshape(-1, 1), area, ridge=1e-2, species_id="lynx_rufus")
+    assert base.provenance["covariate_digest"] != other_cov.provenance["covariate_digest"]
+
+
+def test_habitat_model_requires_a_non_empty_species_id():
+    for bad in ("", "   ", None, 7):
+        kwargs = _valid_habitat_model_kwargs()
+        kwargs["species_id"] = bad
+        with pytest.raises(ValueError, match="species_id"):
+            HabitatModel(**kwargs)
+
+
+def test_fit_sdm_matched_species_negative_control():
+    """Negative control: an all-matching occurrence set fits exactly as before the identity check."""
+    rng = np.random.default_rng(31)
+    num_cells = 80
+    env = rng.uniform(-1.0, 1.0, size=num_cells)
+    area = np.ones(num_cells)
+    occurrences, _ = _synthetic_presences(np.exp(-0.1 + 1.1 * env), area, rng)
+
+    model = fit_sdm(occurrences, env.reshape(-1, 1), area, ridge=1e-2, species_id="lynx_rufus")
+    assert isinstance(model, HabitatModel)
+    assert model.mean.shape == (num_cells,)
+    assert np.all(np.isfinite(model.mean)) and np.all(model.mean > 0.0)

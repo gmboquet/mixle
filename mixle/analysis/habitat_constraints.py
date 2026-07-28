@@ -97,8 +97,37 @@ def _dilate_conservatively(mask: np.ndarray, buffer_cells: int) -> np.ndarray:
     return grown
 
 
+def _species_models(habitat: Any) -> dict[str, Any]:
+    """Normalize ``habitat`` into a ``{species_id: HabitatModel}`` mapping (MXR-080-1591).
+
+    Accepts either a single :class:`~mixle.analysis.sdm.HabitatModel` -- keyed by its own
+    ``species_id`` -- or an explicit species-to-model mapping. A model with no ``species_id`` is
+    rejected: without an identity there is nothing to match against, which is exactly how a field
+    fitted for species A came to impose species B's legal exclusion.
+    """
+    models = habitat if isinstance(habitat, dict) else {None: habitat}
+    resolved: dict[str, Any] = {}
+    for key, model in models.items():
+        identity = getattr(model, "species_id", None)
+        if not isinstance(identity, str) or not identity.strip():
+            raise ValueError(
+                "critical_habitat_exclusion: every HabitatModel must carry a non-empty species_id so "
+                "the field can be matched to the listed species whose exclusion it imposes; got "
+                f"species_id={identity!r}."
+            )
+        if key is not None and key != identity:
+            raise ValueError(
+                f"critical_habitat_exclusion: habitat mapping key {key!r} does not match the model's own "
+                f"species_id {identity!r}."
+            )
+        if identity in resolved:
+            raise ValueError(f"critical_habitat_exclusion: two habitat models supplied for species {identity!r}.")
+        resolved[identity] = model
+    return resolved
+
+
 def critical_habitat_exclusion(
-    habitat: HabitatModel,
+    habitat: HabitatModel | dict[str, HabitatModel],
     listed: Sequence[ListedSpecies],
     *,
     suitability_cut: float,
@@ -106,17 +135,24 @@ def critical_habitat_exclusion(
 ) -> np.ndarray:
     """Boolean no-mine mask over blocks (work-plan algorithm steps 1-2).
 
-    For every ``listed`` record whose ``critical_habitat`` flag is set, the fitted suitability field's
-    own ``habitat.critical_habitat_mask(suitability_cut)`` (IC-12) contributes its ``lambda_c >=
-    suitability_cut`` cells to the exclusion; a record with ``critical_habitat=False`` (a species that is
-    tracked but has no critical-habitat designation) contributes nothing. If no ``listed`` record
-    qualifies, nothing is excluded. The per-species contribution is unioned (``OR``) across every
-    qualifying species -- with a single shared ``habitat`` field this collapses to one mask, but the
-    union step is kept explicit so a future multi-field caller (one ``HabitatModel`` per species) composes
-    the same way. When the fit itself is prior-dominated (``habitat``'s own honesty flag: not enough
-    presence data has yet informed the field), there isn't enough evidence to clear *any* block, so
-    the mask is excluded conservatively in full (every block is treated as potential critical habitat)
-    rather than optimistically reporting whatever the under-determined field happens to say.
+    For every ``listed`` record whose ``critical_habitat`` flag is set, THAT SPECIES' OWN fitted
+    suitability field contributes its ``lambda_c >= suitability_cut`` cells (via IC-12's
+    ``critical_habitat_mask``) to the exclusion; a record with ``critical_habitat=False`` (a species
+    that is tracked but has no critical-habitat designation) contributes nothing. If no ``listed``
+    record qualifies, nothing is excluded. The per-species contributions are unioned (``OR``).
+
+    ``habitat`` is either a single :class:`~mixle.analysis.sdm.HabitatModel` or an explicit
+    ``{species_id: HabitatModel}`` mapping, and every qualifying listed species must have a model whose
+    ``species_id`` matches it exactly (MXR-080-1591). Previously any qualifying record applied whatever
+    single field happened to be passed in, and no comparison was made at all: a model fitted for species
+    A could impose species B's legal exclusion, and several listed species all collapsed onto species
+    A's same field. A qualifying species with no matching model raises rather than borrowing another
+    species' range.
+
+    When a matched fit is prior-dominated (``habitat``'s own honesty flag: not enough presence data has
+    yet informed the field), there isn't enough evidence to clear *any* block, so the mask is excluded
+    conservatively in full (every block is treated as potential critical habitat) rather than
+    optimistically reporting whatever the under-determined field happens to say.
 
     ``buffer_cells`` conservatively dilates the resulting mask outward (:func:`_dilate_conservatively`)
     to approximate a regulatory buffer around a designation boundary.
@@ -129,12 +165,13 @@ def critical_habitat_exclusion(
     ``OR`` into ``mask`` before the buffer dilation, using the same conservative-inclusion rule.
 
     Args:
-        habitat: N1's fitted habitat-suitability field (IC-12 ``HabitatModel``, satisfies IC-1
-            ``Posterior``).
-        listed: ``ListedSpecies`` records (``mixle_knowledge.contracts``); only ``critical_habitat``
-            and, when informativeness must be checked, the model's own honesty flag are consulted here
-            -- every other field (citation, jurisdiction, listing status) is provenance the caller and
-            downstream audit trail carry, not logic this function branches on.
+        habitat: N1's fitted habitat-suitability field(s) (IC-12 ``HabitatModel``, satisfies IC-1
+            ``Posterior``) -- one model, or a ``{species_id: HabitatModel}`` mapping.
+        listed: ``ListedSpecies`` records (``mixle_knowledge.contracts``); ``critical_habitat``,
+            ``species_id`` (to match the record to its own fitted field) and, when informativeness must
+            be checked, the matched model's own honesty flag are consulted here -- every other field
+            (citation, jurisdiction, listing status) is provenance the caller and downstream audit trail
+            carry, not logic this function branches on.
         suitability_cut: the fitted-intensity threshold passed to ``critical_habitat_mask``.
         buffer_cells: conservative dilation radius, in blocks, applied after the union.
 
@@ -145,32 +182,57 @@ def critical_habitat_exclusion(
     if suitability_cut < 0.0:
         raise ValueError(f"suitability_cut must be nonnegative, got {suitability_cut}.")
     buffer_cells = _nonnegative_integer(buffer_cells, name="buffer_cells")
-    habitat_mean = np.asarray(habitat.mean)
-    if habitat_mean.ndim != 1 or habitat_mean.size == 0:
-        raise ValueError(f"habitat.mean must be a non-empty one-dimensional cell field, got shape {habitat_mean.shape}.")
-    if not np.all(np.isfinite(habitat_mean)):
-        raise ValueError("habitat.mean must be finite.")
-    num_cells = habitat_mean.shape[0]
+    models = _species_models(habitat)
+
+    num_cells: int | None = None
+    field_means: dict[str, np.ndarray] = {}
+    for identity, model in models.items():
+        habitat_mean = np.asarray(model.mean)
+        if habitat_mean.ndim != 1 or habitat_mean.size == 0:
+            raise ValueError(
+                f"habitat.mean must be a non-empty one-dimensional cell field, got shape {habitat_mean.shape}."
+            )
+        if not np.all(np.isfinite(habitat_mean)):
+            raise ValueError("habitat.mean must be finite.")
+        if num_cells is None:
+            num_cells = habitat_mean.shape[0]
+        elif habitat_mean.shape[0] != num_cells:
+            raise ValueError(
+                "critical_habitat_exclusion: every habitat model must share one block grid; species "
+                f"{identity!r} has {habitat_mean.shape[0]} cells, expected {num_cells}."
+            )
+        field_means[identity] = habitat_mean
+    assert num_cells is not None  # _species_models always yields at least one entry
+
     qualifies = [species for species in listed if bool(getattr(species, "critical_habitat", False))]
     if not qualifies:
         return np.zeros(num_cells, dtype=bool)
 
-    rng = np.random.default_rng(0)
-    honesty = habitat.derived_quantity(lambda draws: draws, 2, rng)
-    if bool(getattr(honesty, "prior_dominated", False)):
-        return np.ones(num_cells, dtype=bool)
-
     mask = np.zeros(num_cells, dtype=bool)
-    raw_base_mask = np.asarray(habitat.critical_habitat_mask(suitability_cut))
-    if raw_base_mask.dtype != np.bool_:
-        raise ValueError("habitat.critical_habitat_mask must return a Boolean array.")
-    base_mask = _boolean_or_binary_mask(
-        raw_base_mask,
-        name="habitat.critical_habitat_mask",
-        expected_length=num_cells,
-    )
-    for _species in qualifies:
-        mask = mask | base_mask
+    rng = np.random.default_rng(0)
+    for species in qualifies:
+        identity = getattr(species, "species_id", None)
+        # Exact match only (MXR-080-1591): borrowing another species' fitted range to impose this
+        # species' statutory exclusion is not a conservative fallback, it is the wrong exclusion.
+        if not isinstance(identity, str) or identity not in models:
+            raise ValueError(
+                f"critical_habitat_exclusion: no habitat model supplied for listed species {identity!r} "
+                f"(models available for {sorted(models)}). A field fitted for one species cannot stand in "
+                "for another species' critical-habitat designation."
+            )
+        model = models[identity]
+        honesty = model.derived_quantity(lambda draws: draws, 2, rng)
+        if bool(getattr(honesty, "prior_dominated", False)):
+            # Not enough evidence to clear any block for this species; that alone excludes everything.
+            return np.ones(num_cells, dtype=bool)
+        raw_base_mask = np.asarray(model.critical_habitat_mask(suitability_cut))
+        if raw_base_mask.dtype != np.bool_:
+            raise ValueError("habitat.critical_habitat_mask must return a Boolean array.")
+        mask = mask | _boolean_or_binary_mask(
+            raw_base_mask,
+            name="habitat.critical_habitat_mask",
+            expected_length=num_cells,
+        )
 
     return _dilate_conservatively(mask, buffer_cells)
 
