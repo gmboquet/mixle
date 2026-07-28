@@ -213,7 +213,7 @@ def amplify_and_capture(
         # selectively use" pattern) -- best_score above already goes through DesignRun.best, which is
         # abstention-safe; the permutation test below is the other consumer of this run's scores, and is
         # made abstention-safe via _genuine_scores() rather than here.
-        baseline_run.history.append(DesignCandidate(x=x, result=oracle(x)))
+        baseline_run.append(DesignCandidate(x=x, result=oracle(x)))
     baseline = AmplificationRound(
         run=baseline_run, best_score=float(baseline_run.best.result.score), xs=[c.x for c in baseline_run.history]
     )
@@ -283,7 +283,7 @@ def amplify_and_capture(
     for idx in top_idx:
         x = fresh_pool[idx]
         result = oracle(x)  # the oracle supplies the accepted score; the student only proposes where to look
-        run2.history.append(DesignCandidate(x=x, result=result))
+        run2.append(DesignCandidate(x=x, result=result))
     round2 = AmplificationRound(run=run2, best_score=float(run2.best.result.score), xs=[c.x for c in run2.history])
 
     from mixle.task.collapse import collapse_monitor

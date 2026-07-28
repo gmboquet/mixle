@@ -26,23 +26,25 @@ for exactly this, and :func:`optimize_under_oracle` never feeds an abstained res
 model's fit as if it were ground truth, even though it is still kept in ``DesignRun.history`` for the
 receipted record. ``VerifiableOracle`` also validates every result crossing its boundary (return type,
 finite score unless abstained, finite nonnegative cost, receipt shape) rather than letting a malformed
-``score_fn`` return silently corrupt the run, and offers a best-effort cooperative cancellation signal to
-a timed-out call's abandoned worker (Python cannot forcibly kill a thread; see
-``VerifiableOracle._call_with_timeout``) plus after-the-fact accounting for whatever that abandoned work
-eventually returns, so a side-effecting oracle's cost is never simply lost.
+``score_fn`` return silently corrupt the run. Timeout workers are bounded by a circuit breaker,
+cooperative cancellation is requested, and eventual late outcomes are linked back to their run by
+immutable call IDs so side-effecting cost is never silently lost.
 """
 
 from __future__ import annotations
 
 import inspect
+import itertools
 import math
-from collections.abc import Callable
-from dataclasses import dataclass, field
+import threading
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
 
-from mixle.doe.designs import Bounds
+from mixle.doe.designs import Bounds, _require_exact_positive_int
 from mixle.system.fault import abstain_on_timeout
 
 # The declared verifiability tiers, weakest to strongest. "self_graded" is deliberately excluded: a
@@ -81,7 +83,53 @@ def _accepts_keyword(fn: Callable[..., Any], keyword: str) -> bool:
     return False
 
 
-@dataclass
+def _freeze_receipt_value(value: Any, path: str) -> Any:
+    """Copy and recursively freeze durable receipt data."""
+    if value is None or type(value) in (bool, int, float, str):
+        if type(value) is float and not math.isfinite(value):
+            raise ValueError(f"{path} contains a non-finite number.")
+        return value
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        converted = float(value)
+        if not math.isfinite(converted):
+            raise ValueError(f"{path} contains a non-finite number.")
+        return converted
+    if type(value) is dict:
+        frozen: dict[str, Any] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise TypeError(f"{path} contains non-string key {key!r}.")
+            frozen[key] = _freeze_receipt_value(item, f"{path}.{key}")
+        return MappingProxyType(frozen)
+    if type(value) in (list, tuple):
+        return tuple(_freeze_receipt_value(item, f"{path}[{index}]") for index, item in enumerate(value))
+    if type(value) in (set, frozenset):
+        return frozenset(_freeze_receipt_value(item, path) for item in value)
+    if isinstance(value, np.ndarray):
+        array = np.asarray(value).copy()
+        if np.issubdtype(array.dtype, np.number) and not np.all(np.isfinite(array)):
+            raise ValueError(f"{path} contains a non-finite array.")
+        array.setflags(write=False)
+        return array
+    raise TypeError(f"{path} contains unsupported mutable value {type(value).__name__}.")
+
+
+def _receipt_to_plain(value: Any) -> Any:
+    """Return a detached report-friendly view of frozen receipt data."""
+    if isinstance(value, Mapping):
+        return {key: _receipt_to_plain(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_receipt_to_plain(item) for item in value]
+    if isinstance(value, frozenset):
+        return [_receipt_to_plain(item) for item in sorted(value, key=repr)]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    return value
+
+
+@dataclass(frozen=True)
 class OracleResult:
     """One candidate's verification outcome: its score, a receipt of how it was scored, and its cost.
 
@@ -99,36 +147,56 @@ class OracleResult:
     """
 
     score: float
-    receipt: dict[str, Any] = field(default_factory=dict)
+    receipt: Mapping[str, Any] = field(default_factory=dict)
     cost: float = 1.0
     abstained: bool = False
     passed: bool = True
     valid: bool = True
+    call_id: str | None = None
+    call_started: bool = True
 
     def __post_init__(self) -> None:
-        self.score = _validated_real(self.score, "OracleResult.score")
-        if not self.abstained and not math.isfinite(self.score):
+        score = _validated_real(self.score, "OracleResult.score")
+        if type(self.abstained) is not bool:
+            raise TypeError("OracleResult.abstained must be an actual bool.")
+        if type(self.passed) is not bool or type(self.valid) is not bool or type(self.call_started) is not bool:
+            raise TypeError("OracleResult passed, valid, and call_started verdicts must be actual booleans.")
+        if self.call_id is not None and (type(self.call_id) is not str or not self.call_id):
+            raise ValueError("OracleResult.call_id must be None or a nonempty string.")
+        if type(self.receipt) is not dict and not isinstance(self.receipt, MappingProxyType):
+            raise TypeError(
+                f"OracleResult.receipt must be a dict, got {type(self.receipt).__name__}: {self.receipt!r}."
+            )
+        frozen_receipt = _freeze_receipt_value(dict(self.receipt), "OracleResult.receipt")
+        if not self.abstained and not math.isfinite(score):
             raise ValueError(
                 f"OracleResult.score={self.score} is not finite. A genuine (non-abstained) oracle "
                 "result must report a real, finite score -- an oracle that cannot score a candidate "
                 "should return abstained=True instead of encoding 'unknown' as an infinite or NaN "
                 "score, which would be indistinguishable from a genuinely catastrophic observation."
             )
-        self.cost = _validated_real(self.cost, "OracleResult.cost")
-        if not math.isfinite(self.cost) or self.cost < 0.0:
-            raise ValueError(f"OracleResult.cost must be finite and nonnegative, got {self.cost}.")
-        if not isinstance(self.receipt, dict):
-            raise TypeError(
-                f"OracleResult.receipt must be a dict, got {type(self.receipt).__name__}: {self.receipt!r}."
-            )
-        if not isinstance(self.passed, bool) or not isinstance(self.valid, bool):
-            raise TypeError("OracleResult passed and valid verdicts must be boolean")
         if self.abstained:
-            self.passed = False
-            self.valid = False
+            if score != float("-inf"):
+                raise ValueError("An abstained OracleResult must use score=-inf as its explicit non-observation marker.")
+            reason = (
+                frozen_receipt.get("reason")
+                or frozen_receipt.get("degraded_reason")
+                or frozen_receipt.get("status")
+            )
+            if type(reason) is not str or not reason.strip():
+                raise ValueError("An abstained OracleResult receipt requires a nonempty reason or status.")
+        cost = _validated_real(self.cost, "OracleResult.cost")
+        if not math.isfinite(cost) or cost < 0.0:
+            raise ValueError(f"OracleResult.cost must be finite and nonnegative, got {cost}.")
+        object.__setattr__(self, "score", score)
+        object.__setattr__(self, "cost", cost)
+        object.__setattr__(self, "receipt", frozen_receipt)
+        if self.abstained:
+            object.__setattr__(self, "passed", False)
+            object.__setattr__(self, "valid", False)
 
 
-@dataclass
+@dataclass(frozen=True)
 class LateOracleResult:
     """A timed-out oracle call's outcome, captured after the fact.
 
@@ -140,10 +208,16 @@ class LateOracleResult:
     received an abstention in its place.
     """
 
+    call_id: str
     candidate: Any
     ok: bool
     result: OracleResult | None
-    error: BaseException | None
+    error: str | None
+
+    def __post_init__(self) -> None:
+        candidate = np.asarray(self.candidate, dtype=np.float64).copy()
+        candidate.setflags(write=False)
+        object.__setattr__(self, "candidate", candidate)
 
 
 @dataclass
@@ -160,11 +234,10 @@ class VerifiableOracle:
     once, at construction, via introspection -- see ``_accepts_keyword``). A side-effecting ``score_fn``
     that wraps something cancellable (a subprocess, an HTTP request) should periodically check
     ``cancel_event.is_set()`` and tear its underlying call down promptly once set. This is a best-effort,
-    cooperative cancellation boundary, not a forced kill -- Python cannot forcibly terminate a thread, so
-    a ``score_fn`` that does not accept ``cancel_event`` (every existing caller as of this writing)
-    simply keeps running to completion in the background after a timeout abstains, exactly as before,
-    except its eventual outcome is now captured in ``late_results`` rather than lost. See
-    ``_call_with_timeout``.
+    cooperative cancellation boundary, not a forced kill -- Python cannot forcibly terminate a thread.
+    Calls that ignore cancellation remain quarantined, count against ``max_outstanding_timeouts``, and
+    eventually open a circuit that prevents additional worker creation. Their outcomes are captured in
+    ``late_results`` when they finish. See ``_call_with_timeout``.
     """
 
     name: str
@@ -172,8 +245,12 @@ class VerifiableOracle:
     score_fn: Callable[[Any], OracleResult]
     fidelity: str | None = None
     timeout: float | None = None  # seconds; FAULT-a oracle_timeout: abstain rather than block or guess
-    late_results: list[LateOracleResult] = field(default_factory=list, init=False, repr=False, compare=False)
+    max_outstanding_timeouts: int = 4
+    _late_results: list[LateOracleResult] = field(default_factory=list, init=False, repr=False, compare=False)
     _accepts_cancel_event: bool = field(default=False, init=False, repr=False, compare=False)
+    _call_counter: Any = field(default_factory=lambda: itertools.count(1), init=False, repr=False, compare=False)
+    _state_lock: Any = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
+    _outstanding_call_ids: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.tier not in VERIFIABILITY_TIERS:
@@ -190,7 +267,26 @@ class VerifiableOracle:
                     f"no timeout; got {self.timeout}."
                 )
             self.timeout = timeout
+        self.max_outstanding_timeouts = _require_exact_positive_int(
+            self.max_outstanding_timeouts, "max_outstanding_timeouts"
+        )
         self._accepts_cancel_event = _accepts_keyword(self.score_fn, "cancel_event")
+
+    @property
+    def late_results(self) -> tuple[LateOracleResult, ...]:
+        """Immutable snapshot of late outcomes accumulated so far."""
+        with self._state_lock:
+            return tuple(self._late_results)
+
+    @property
+    def outstanding_timeouts(self) -> int:
+        """Number of timed-out workers that have not cooperatively stopped or completed."""
+        with self._state_lock:
+            return len(self._outstanding_call_ids)
+
+    def _next_call_id(self) -> str:
+        with self._state_lock:
+            return f"{self.name}:{next(self._call_counter)}"
 
     def __call__(self, candidate: Any) -> OracleResult:
         if candidate is None:
@@ -199,9 +295,10 @@ class VerifiableOracle:
                 "scored, and this is rejected as a caller bug rather than silently forwarded to "
                 "score_fn."
             )
+        call_id = self._next_call_id()
         if self.timeout is None:
-            return self._validate_returned(self.score_fn(candidate))
-        return self._call_with_timeout(candidate)
+            return replace(self._validate_returned(self.score_fn(candidate)), call_id=call_id, call_started=True)
+        return self._call_with_timeout(candidate, call_id)
 
     def _validate_returned(self, returned: Any) -> OracleResult:
         """Reject anything ``score_fn`` returns that is not an :class:`OracleResult`.
@@ -219,27 +316,46 @@ class VerifiableOracle:
             )
         return returned
 
-    def _record_late_result(self, candidate: Any, ok: bool, payload: Any) -> None:
+    def _record_late_result(self, call_id: str, candidate: Any, ok: bool, payload: Any) -> None:
         """Record a timed-out call's outcome once it eventually arrives, instead of losing it."""
         if not ok:
-            self.late_results.append(LateOracleResult(candidate=candidate, ok=False, result=None, error=payload))
+            late = LateOracleResult(
+                call_id=call_id,
+                candidate=candidate,
+                ok=False,
+                result=None,
+                error=f"{type(payload).__name__}: {payload}",
+            )
+            with self._state_lock:
+                self._late_results.append(late)
             return
         try:
-            validated = self._validate_returned(payload)
-        except TypeError as exc:
-            self.late_results.append(LateOracleResult(candidate=candidate, ok=False, result=None, error=exc))
+            validated = replace(self._validate_returned(payload), call_id=call_id, call_started=True)
+        except (TypeError, ValueError) as exc:
+            late = LateOracleResult(
+                call_id=call_id,
+                candidate=candidate,
+                ok=False,
+                result=None,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            with self._state_lock:
+                self._late_results.append(late)
             return
-        self.late_results.append(LateOracleResult(candidate=candidate, ok=True, result=validated, error=None))
+        late = LateOracleResult(call_id=call_id, candidate=candidate, ok=True, result=validated, error=None)
+        with self._state_lock:
+            self._late_results.append(late)
 
-    def _call_with_timeout(self, candidate: Any) -> OracleResult:
+    def _call_with_timeout(self, candidate: Any, call_id: str) -> OracleResult:
         """FAULT-a ``oracle_timeout``: abstain (a maximally-uninformative, zero-cost, explicitly flagged
         result) rather than block the caller or guess a score, if a single scoring call runs over budget.
 
         Runs ``score_fn`` on a worker thread so a hang there cannot hang the caller either --
         ``Thread.join(timeout=...)`` returns on schedule whether or not the thread actually finished, so
-        a genuinely hung ``score_fn`` leaves its thread running in the background indefinitely (Python has
-        no API to forcibly kill a thread). The worker is created with ``daemon=True`` so that leak cannot
-        also keep the whole *process* alive once everything else is done.
+        a genuinely hung ``score_fn`` leaves its thread running in the background (Python has no API to
+        forcibly kill a thread). At most ``max_outstanding_timeouts`` such workers can exist per oracle;
+        further calls receive an explicit ``oracle_quarantined`` abstention and start no thread. Workers
+        are daemonized so they cannot keep the process alive.
 
         Deliberately a raw ``threading.Thread``, not a ``concurrent.futures.ThreadPoolExecutor``: routing
         this through an executor looks like the safer, more "proper" choice, but it is not --
@@ -263,12 +379,28 @@ class VerifiableOracle:
         dropped on the floor.
         """
         import queue
-        import threading
-
         result: queue.Queue = queue.Queue(maxsize=1)
         cancel_event = threading.Event()
         decision_lock = threading.Lock()
         decided: list[str | None] = [None]  # single-slot cell: None -> "on_time" | "timed_out", set once
+
+        with self._state_lock:
+            if len(self._outstanding_call_ids) >= self.max_outstanding_timeouts:
+                return OracleResult(
+                    score=float("-inf"),
+                    receipt={
+                        "status": "oracle_quarantined",
+                        "reason": "outstanding timed-out worker limit reached",
+                        "oracle_id": self.name,
+                        "tier": self.tier,
+                        "outstanding_timeouts": len(self._outstanding_call_ids),
+                    },
+                    cost=0.0,
+                    abstained=True,
+                    call_id=call_id,
+                    call_started=False,
+                )
+            self._outstanding_call_ids.add(call_id)
 
         def _target() -> None:
             try:
@@ -276,10 +408,12 @@ class VerifiableOracle:
                     payload = self.score_fn(candidate, cancel_event=cancel_event)
                 else:
                     payload = self.score_fn(candidate)
-                payload = self._validate_returned(payload)
+                payload = replace(self._validate_returned(payload), call_id=call_id, call_started=True)
                 ok = True
             except BaseException as exc:  # noqa: BLE001 -- ferried to whichever side wins the race below
                 payload, ok = exc, False
+            with self._state_lock:
+                self._outstanding_call_ids.discard(call_id)
             with decision_lock:
                 if decided[0] is None:
                     decided[0] = "on_time"
@@ -287,11 +421,16 @@ class VerifiableOracle:
                     return
             # Lost the race: the caller already timed out and moved on without us. Account for this
             # instead of letting it vanish -- see the method docstring.
-            self._record_late_result(candidate, ok, payload)
+            self._record_late_result(call_id, candidate, ok, payload)
 
         def _run() -> OracleResult:
             worker = threading.Thread(target=_target, daemon=True)
-            worker.start()
+            try:
+                worker.start()
+            except BaseException:
+                with self._state_lock:
+                    self._outstanding_call_ids.discard(call_id)
+                raise
             worker.join(timeout=self.timeout)
             with decision_lock:
                 if decided[0] is None:
@@ -315,45 +454,78 @@ class VerifiableOracle:
                     "tier": self.tier,
                     "cancel_requested": True,
                     "cooperative_cancel_supported": self._accepts_cancel_event,
+                    "external_call_started": True,
                     **outcome.to_receipt_fields(),
                 },
                 cost=0.0,
                 abstained=True,
+                call_id=call_id,
+                call_started=True,
             )
         return outcome.value
 
 
-@dataclass
+@dataclass(frozen=True)
 class DesignCandidate:
     """One proposed-and-verified candidate: the point tried and what the oracle said about it."""
 
     x: np.ndarray
     result: OracleResult
+    phase: str | None = None
+
+    def __post_init__(self) -> None:
+        point = np.asarray(self.x, dtype=np.float64)
+        if point.ndim != 1 or point.size == 0 or not np.all(np.isfinite(point)):
+            raise ValueError("DesignCandidate.x must be a nonempty finite one-dimensional point.")
+        if not isinstance(self.result, OracleResult):
+            raise TypeError("DesignCandidate.result must be an OracleResult.")
+        if self.phase not in (None, "initial", "adaptive"):
+            raise ValueError("DesignCandidate.phase must be None, 'initial', or 'adaptive'.")
+        point = point.copy()
+        point.setflags(write=False)
+        object.__setattr__(self, "x", point)
 
 
-@dataclass
+@dataclass(frozen=True)
 class DesignRun:
     """The full receipted history of a design loop: every candidate tried, and the oracle's identity."""
 
     oracle_name: str
     oracle_tier: str
     oracle_fidelity: str | None
-    history: list[DesignCandidate] = field(default_factory=list)
+    _oracle: VerifiableOracle | None = field(default=None, repr=False, compare=False)
+    _history: list[DesignCandidate] = field(default_factory=list, init=False, repr=False, compare=False)
+
+    @property
+    def history(self) -> tuple[DesignCandidate, ...]:
+        """Immutable chronological snapshot of the append-only candidate ledger."""
+        return tuple(self._history)
+
+    def append(self, candidate: DesignCandidate) -> None:
+        """Append one immutable candidate record; existing ledger entries can never be replaced."""
+        if not isinstance(candidate, DesignCandidate):
+            raise TypeError("DesignRun.append requires a DesignCandidate.")
+        self._history.append(candidate)
 
     @property
     def oracle_calls(self) -> int:
         """Return the number of candidates attempted against the oracle (abstentions included)."""
-        return len(self.history)
+        return sum(1 for candidate in self._history if candidate.result.call_started)
 
     @property
-    def genuine_history(self) -> list[DesignCandidate]:
+    def candidate_attempts(self) -> int:
+        """All proposed candidates, including circuit-breaker abstentions that started no external call."""
+        return len(self._history)
+
+    @property
+    def genuine_history(self) -> tuple[DesignCandidate, ...]:
         """Return ``history`` filtered to genuine (non-abstained) observations.
 
         An abstention (see ``OracleResult.abstained`` -- e.g. a timeout) is not a real observation of
         the oracle's objective, so it is excluded here; use ``history`` directly for the full,
         unfiltered receipted record, abstentions included.
         """
-        return [c for c in self.history if not c.result.abstained]
+        return tuple(c for c in self._history if not c.result.abstained)
 
     @property
     def best(self) -> DesignCandidate:
@@ -364,41 +536,87 @@ class DesignRun:
         report a fabricated result as if it were verified. Raises if every candidate abstained (no
         genuine observation exists to report), distinct from the empty-history case.
         """
-        if not self.history:
+        if not self._history:
             raise ValueError("no candidates were proposed; the run history is empty.")
         genuine = self.genuine_history
         if not genuine:
             raise ValueError(
-                f"all {len(self.history)} candidate(s) in the run history abstained (e.g. every oracle "
+                f"all {len(self._history)} candidate(s) in the run history abstained (e.g. every oracle "
                 "call timed out); there is no genuine, verified observation to report as the best."
             )
         return max(genuine, key=lambda c: c.result.score)
 
     def scores(self) -> np.ndarray:
         """Return the run's oracle scores in chronological order, abstentions included (not hidden)."""
-        return np.asarray([c.result.score for c in self.history], dtype=float)
+        return np.asarray([c.result.score for c in self._history], dtype=float)
 
     def report(self) -> dict[str, Any]:
         """Named receipt of the run: which oracle, at what tier/fidelity, the best candidate found.
 
-        ``abstained_calls`` is the count of attempted-but-abstained calls (e.g. timeouts) folded into
-        ``oracle_calls`` but excluded from ``best_*``; ``total_cost`` sums ``OracleResult.cost`` exactly
-        as receipted at the time of the call and does not retroactively include a late-arriving cost
-        from an abandoned oracle call that completes after the fact (see
-        ``VerifiableOracle.late_results``).
+        ``provisional_total_cost`` is the cost known when calls returned. Late outcomes linked by
+        immutable call IDs are reconciled into ``settled_late_cost`` and ``settled_total_cost``.
+        ``total_cost`` is only populated once no timed-out call remains outstanding or unresolved.
         """
-        b = self.best
+        genuine = self.genuine_history
+        best = max(genuine, key=lambda candidate: candidate.result.score) if genuine else None
+        late_results = self._oracle.late_results if self._oracle is not None else ()
+        history_call_ids = {
+            candidate.result.call_id for candidate in self._history if candidate.result.call_id is not None
+        }
+        linked_late = tuple(late for late in late_results if late.call_id in history_call_ids)
+        late_by_call = {late.call_id: late for late in linked_late}
+        timed_out_call_ids = {
+            candidate.result.call_id
+            for candidate in self._history
+            if candidate.result.call_id is not None
+            and candidate.result.receipt.get("degraded_mode") == "oracle_timeout"
+        }
+        outstanding = timed_out_call_ids - late_by_call.keys()
+        unresolved = {late.call_id for late in linked_late if not late.ok or late.result is None}
+        settled_late_cost = float(
+            sum(late.result.cost for late in linked_late if late.ok and late.result is not None)
+        )
+        provisional_total = float(sum(candidate.result.cost for candidate in self._history))
+        settled_total = provisional_total + settled_late_cost
+        cost_status = "settled"
+        if outstanding:
+            cost_status = "provisional"
+        elif unresolved:
+            cost_status = "unresolved"
         return {
             "oracle": self.oracle_name,
             "tier": self.oracle_tier,
             "fidelity": self.oracle_fidelity,
             "oracle_calls": self.oracle_calls,
-            "abstained_calls": sum(1 for c in self.history if c.result.abstained),
-            "best_score": b.result.score,
-            "best_x": b.x.tolist(),
-            "best_cost": b.result.cost,
-            "best_receipt": dict(b.result.receipt),
-            "total_cost": float(sum(c.result.cost for c in self.history)),
+            "candidate_attempts": self.candidate_attempts,
+            "initial_calls": sum(
+                1 for candidate in self._history if candidate.phase == "initial" and candidate.result.call_started
+            ),
+            "adaptive_calls": sum(
+                1 for candidate in self._history if candidate.phase == "adaptive" and candidate.result.call_started
+            ),
+            "abstained_calls": sum(1 for candidate in self._history if candidate.result.abstained),
+            "status": "verified_result" if best is not None else "no_verified_result",
+            "best_score": None if best is None else best.result.score,
+            "best_x": None if best is None else best.x.tolist(),
+            "best_cost": None if best is None else best.result.cost,
+            "best_receipt": None if best is None else _receipt_to_plain(best.result.receipt),
+            "provisional_total_cost": provisional_total,
+            "settled_late_cost": settled_late_cost,
+            "settled_total_cost": settled_total,
+            "total_cost": settled_total if cost_status == "settled" else None,
+            "cost_status": cost_status,
+            "outstanding_late_calls": len(outstanding),
+            "unresolved_late_calls": len(unresolved),
+            "late_results": [
+                {
+                    "call_id": late.call_id,
+                    "ok": late.ok,
+                    "cost": late.result.cost if late.result is not None else None,
+                    "error": late.error,
+                }
+                for late in linked_late
+            ],
         }
 
 
@@ -436,14 +654,28 @@ def optimize_under_oracle(
             "no verifiable objective; cannot optimize. optimize_under_oracle requires a "
             "VerifiableOracle -- this is a hard precondition, not a missing default."
         )
+    n_init = _require_exact_positive_int(n_init, "n_init")
+    n_iter = _require_exact_positive_int(n_iter, "n_iter", minimum=0)
     from mixle.doe.optimizer import BayesianOptimizer
 
     opt = BayesianOptimizer(bounds, maximize=True, n_init=n_init, seed=seed, **bo_kwargs)
-    run = DesignRun(oracle_name=oracle.name, oracle_tier=oracle.tier, oracle_fidelity=oracle.fidelity)
-    for _ in range(int(n_init) + int(n_iter)):
-        x = np.asarray(opt.ask(), dtype=np.float64)
-        result = oracle(x)
-        run.history.append(DesignCandidate(x=x, result=result))
-        if not result.abstained:
-            opt.tell(x, result.score)
+    run = DesignRun(
+        oracle_name=oracle.name,
+        oracle_tier=oracle.tier,
+        oracle_fidelity=oracle.fidelity,
+        _oracle=oracle,
+    )
+    circuit_open = False
+    for phase, budget in (("initial", n_init), ("adaptive", n_iter)):
+        for _ in range(budget):
+            x = np.asarray(opt.ask(), dtype=np.float64)
+            result = oracle(x)
+            run.append(DesignCandidate(x=x, result=result, phase=phase))
+            if result.receipt.get("status") == "oracle_quarantined":
+                circuit_open = True
+                break
+            if not result.abstained:
+                opt.tell(x, result.score)
+        if circuit_open:
+            break
     return run

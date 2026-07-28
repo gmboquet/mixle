@@ -230,9 +230,28 @@ class OracleResultValidationTest(unittest.TestCase):
             OracleResult(score=float("nan"))
 
     def test_non_finite_score_is_accepted_when_abstained(self):
-        r = OracleResult(score=float("-inf"), abstained=True)
+        r = OracleResult(score=float("-inf"), receipt={"reason": "no observation"}, abstained=True)
         self.assertTrue(r.abstained)
         self.assertEqual(r.score, float("-inf"))
+
+    def test_abstained_requires_an_actual_boolean_and_distinct_receipt_schema(self):
+        for abstained in ("false", 1, np.bool_(True)):
+            with self.subTest(abstained=abstained), self.assertRaises(TypeError):
+                OracleResult(score=float("-inf"), receipt={"reason": "none"}, abstained=abstained)
+        with self.assertRaises(ValueError):
+            OracleResult(score=float("-inf"), receipt={}, abstained=True)
+        with self.assertRaises(ValueError):
+            OracleResult(score=0.0, receipt={"reason": "none"}, abstained=True)
+
+    def test_result_and_nested_receipt_are_detached_and_immutable(self):
+        receipt = {"nested": {"values": [1, 2]}}
+        result = OracleResult(score=1.0, receipt=receipt)
+        receipt["nested"]["values"].append(3)
+        self.assertEqual(result.receipt["nested"]["values"], (1, 2))
+        with self.assertRaises(TypeError):
+            result.receipt["new"] = "tamper"
+        with self.assertRaises((AttributeError, TypeError)):
+            result.score = float("nan")
 
     def test_negative_cost_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -375,10 +394,11 @@ class OracleAbstentionNeverTrainedAsTruthTest(unittest.TestCase):
 
         # every attempt is receipted (transparency: kept, not hidden)...
         self.assertEqual(run.oracle_calls, 4)
+        self.assertEqual(run.candidate_attempts, 4)
         self.assertTrue(all(c.result.abstained for c in run.history))
         self.assertEqual(run.scores().tolist(), [float("-inf")] * 4)
         # ...but none of them was ever fed to the fit as ground truth.
-        self.assertEqual(run.genuine_history, [])
+        self.assertEqual(run.genuine_history, ())
 
     def test_opt_tell_is_never_called_with_a_negative_infinite_score(self):
         """Direct assertion on the actual bug mechanism: inspect what optimize_under_oracle told the
@@ -401,7 +421,8 @@ class OracleAbstentionNeverTrainedAsTruthTest(unittest.TestCase):
         with mock.patch("mixle.doe.optimizer.BayesianOptimizer", _Spy):
             run = optimize_under_oracle(oracle, [(-10.0, 10.0)], n_init=4, n_iter=0, seed=0)
 
-        self.assertEqual(run.oracle_calls, 4)  # the budget was still spent -- just never trained on
+        self.assertEqual(run.oracle_calls, 4)
+        self.assertEqual(run.candidate_attempts, 4)
         self.assertEqual(captured["stub"].told_y, [])  # zero tell() calls -- not even one -inf slipped through
 
     def test_a_genuine_non_abstained_run_is_told_every_observation_as_before(self):
@@ -450,11 +471,61 @@ class OracleAbstentionNeverTrainedAsTruthTest(unittest.TestCase):
             run = optimize_under_oracle(oracle, [(-10.0, 10.0)], n_init=9, n_iter=0, seed=0)
 
         self.assertEqual(run.oracle_calls, 9)
-        self.assertEqual(sum(1 for c in run.history if c.result.abstained), 3)  # calls 3, 6, 9 hung
+        self.assertEqual(run.candidate_attempts, 9)
+        self.assertEqual(sum(1 for c in run.history if c.result.abstained), 3)
         told_y = captured["stub"].told_y
-        self.assertEqual(len(told_y), 6)  # only the 6 genuine calls were told
+        self.assertEqual(len(told_y), 6)
         self.assertTrue(all(np.isfinite(y) for y in told_y))
         self.assertNotIn(float("-inf"), told_y)
+
+
+class OracleBudgetAndCircuitBreakerTest(unittest.TestCase):
+    def test_initial_and_adaptive_call_budgets_are_exact_and_separate(self):
+        oracle = VerifiableOracle(
+            name="instant",
+            tier="executable",
+            score_fn=lambda x: OracleResult(score=float(x[0])),
+        )
+        with mock.patch("mixle.doe.optimizer.BayesianOptimizer", _RecordingBOStub):
+            run = optimize_under_oracle(oracle, [(-1.0, 1.0)], n_init=2, n_iter=3, seed=0)
+        self.assertEqual([candidate.phase for candidate in run.history], ["initial"] * 2 + ["adaptive"] * 3)
+        report = run.report()
+        self.assertEqual(report["initial_calls"], 2)
+        self.assertEqual(report["adaptive_calls"], 3)
+
+    def test_invalid_call_budgets_are_not_truncated_or_canceled(self):
+        oracle = VerifiableOracle(name="unused", tier="executable", score_fn=lambda x: OracleResult(0.0))
+        for kwargs in (
+            {"n_init": 0, "n_iter": 1},
+            {"n_init": 1.5, "n_iter": 1},
+            {"n_init": True, "n_iter": 1},
+            {"n_init": 1, "n_iter": -2},
+            {"n_init": 1, "n_iter": 0.5},
+            {"n_init": 1, "n_iter": True},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+                optimize_under_oracle(oracle, [(-1.0, 1.0)], **kwargs)
+
+    def test_noncooperative_timeout_opens_a_bounded_circuit(self):
+        never = threading.Event()
+
+        def hangs(candidate):
+            never.wait()
+            return OracleResult(score=1.0)
+
+        oracle = VerifiableOracle(
+            name="bounded",
+            tier="executable",
+            score_fn=hangs,
+            timeout=0.03,
+            max_outstanding_timeouts=1,
+        )
+        with mock.patch("mixle.doe.optimizer.BayesianOptimizer", _RecordingBOStub):
+            run = optimize_under_oracle(oracle, [(-1.0, 1.0)], n_init=20, n_iter=20)
+        self.assertEqual(oracle.outstanding_timeouts, 1)
+        self.assertEqual(run.oracle_calls, 1)
+        self.assertEqual(run.candidate_attempts, 2)
+        self.assertEqual(run.history[-1].result.receipt["status"], "oracle_quarantined")
 
 
 class DesignRunAbstentionBookkeepingTest(unittest.TestCase):
@@ -466,11 +537,16 @@ class DesignRunAbstentionBookkeepingTest(unittest.TestCase):
         run = DesignRun(oracle_name=oracle_name, oracle_tier=tier, oracle_fidelity=fidelity)
         for x_val, score, abstained in history_specs:
             result = (
-                OracleResult(score=float("-inf"), abstained=True, cost=0.0)
+                OracleResult(
+                    score=float("-inf"),
+                    receipt={"reason": "test abstention"},
+                    abstained=True,
+                    cost=0.0,
+                )
                 if abstained
                 else OracleResult(score=score, cost=1.0)
             )
-            run.history.append(DesignCandidate(x=np.array([x_val]), result=result))
+            run.append(DesignCandidate(x=np.array([x_val]), result=result))
         return run
 
     def test_best_skips_abstained_candidates_even_when_they_would_not_win_anyway(self):
@@ -490,6 +566,16 @@ class DesignRunAbstentionBookkeepingTest(unittest.TestCase):
             _ = run.best
         self.assertIn("empty", str(ctx.exception))
 
+    def test_all_abstention_report_is_complete_without_a_fabricated_best(self):
+        run = self._run([(0.0, None, True), (1.0, None, True)])
+        report = run.report()
+        self.assertEqual(report["status"], "no_verified_result")
+        self.assertIsNone(report["best_score"])
+        self.assertIsNone(report["best_x"])
+        self.assertIsNone(report["best_receipt"])
+        self.assertEqual(report["abstained_calls"], 2)
+        self.assertEqual(report["total_cost"], 0.0)
+
     def test_genuine_history_excludes_abstentions_full_history_does_not(self):
         run = self._run([(0.0, 1.0, False), (1.0, None, True)])
         self.assertEqual(len(run.history), 2)
@@ -508,6 +594,18 @@ class DesignRunAbstentionBookkeepingTest(unittest.TestCase):
         full, unfiltered receipted record, unlike best()/genuine_history."""
         run = self._run([(0.0, 1.0, False), (1.0, None, True)])
         self.assertEqual(run.scores().tolist(), [1.0, float("-inf")])
+
+    def test_candidate_and_public_history_are_immutable_snapshots(self):
+        point = np.array([1.0])
+        candidate = DesignCandidate(x=point, result=OracleResult(score=2.0))
+        run = DesignRun(oracle_name="test", oracle_tier="executable", oracle_fidelity=None)
+        run.append(candidate)
+        point[0] = 99.0
+        self.assertEqual(run.history[0].x.tolist(), [1.0])
+        with self.assertRaises(ValueError):
+            run.history[0].x[0] = 3.0
+        with self.assertRaises(AttributeError):
+            run.history.append(candidate)
 
 
 class TimeoutAbstentionReceiptTest(unittest.TestCase):
@@ -605,7 +703,7 @@ class LateResultAccountingTest(unittest.TestCase):
         )
         oracle(np.array([1.0]))
         time.sleep(0.1)
-        self.assertEqual(oracle.late_results, [])
+        self.assertEqual(oracle.late_results, ())
 
     def test_a_late_success_is_recorded_with_its_real_cost(self):
         def finishes_late(_candidate):
@@ -639,8 +737,8 @@ class LateResultAccountingTest(unittest.TestCase):
         late = oracle.late_results[0]
         self.assertFalse(late.ok)
         self.assertIsNone(late.result)
-        self.assertIsInstance(late.error, RuntimeError)
-        self.assertIn("late external failure", str(late.error))
+        self.assertIsInstance(late.error, str)
+        self.assertIn("late external failure", late.error)
 
     def test_a_late_malformed_return_is_recorded_as_a_validation_error(self):
         def returns_garbage_late(_candidate):
@@ -653,7 +751,27 @@ class LateResultAccountingTest(unittest.TestCase):
         self.assertTrue(self._wait_until(lambda: len(oracle.late_results) == 1))
         late = oracle.late_results[0]
         self.assertFalse(late.ok)
-        self.assertIsInstance(late.error, TypeError)
+        self.assertIsInstance(late.error, str)
+        self.assertIn("TypeError", late.error)
+
+    def test_run_report_reconciles_late_cost_by_call_id(self):
+        def finishes_late(candidate):
+            time.sleep(0.15)
+            return OracleResult(score=5.0, receipt={"late": True}, cost=7.5)
+
+        oracle = VerifiableOracle(name="settle", tier="simulation", score_fn=finishes_late, timeout=0.03)
+        with mock.patch("mixle.doe.optimizer.BayesianOptimizer", _RecordingBOStub):
+            run = optimize_under_oracle(oracle, [(-1.0, 1.0)], n_init=1, n_iter=0)
+        provisional = run.report()
+        self.assertEqual(provisional["cost_status"], "provisional")
+        self.assertEqual(provisional["provisional_total_cost"], 0.0)
+        self.assertIsNone(provisional["total_cost"])
+        self.assertTrue(self._wait_until(lambda: len(oracle.late_results) == 1))
+        settled = run.report()
+        self.assertEqual(settled["cost_status"], "settled")
+        self.assertEqual(settled["settled_late_cost"], 7.5)
+        self.assertEqual(settled["total_cost"], 7.5)
+        self.assertEqual(settled["late_results"][0]["call_id"], run.history[0].result.call_id)
 
 
 if __name__ == "__main__":

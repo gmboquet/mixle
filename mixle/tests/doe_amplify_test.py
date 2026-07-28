@@ -295,15 +295,21 @@ class AmplifyAbstentionHandlingTest(unittest.TestCase):
         for _ in range(8):
             x = rng.uniform(-5, 5, size=2)
             d2 = float(np.sum((x - target) ** 2))
-            run.history.append(DesignCandidate(x=x, result=OracleResult(score=-d2, receipt={}, cost=1.0)))
+            run.append(DesignCandidate(x=x, result=OracleResult(score=-d2, receipt={}, cost=1.0)))
         genuine_only_student = fit_student(run, degree=2)
         self.assertTrue(np.all(np.isfinite(genuine_only_student.coef)))
 
         # Append ONE abstained candidate to the SAME history, exactly as optimize_under_oracle would
         # after a timeout -- confirmed pre-fix this alone drove the entire coef vector to nan.
-        run.history.append(
+        run.append(
             DesignCandidate(
-                x=rng.uniform(-5, 5, size=2), result=OracleResult(score=float("-inf"), abstained=True, cost=0.0)
+                x=rng.uniform(-5, 5, size=2),
+                result=OracleResult(
+                    score=float("-inf"),
+                    receipt={"reason": "test abstention"},
+                    abstained=True,
+                    cost=0.0,
+                ),
             )
         )
         student_with_abstention_present = fit_student(run, degree=2)
@@ -313,8 +319,16 @@ class AmplifyAbstentionHandlingTest(unittest.TestCase):
 
     def test_fit_student_raises_a_specific_error_when_every_candidate_abstained(self):
         run = DesignRun(oracle_name="t", oracle_tier="executable", oracle_fidelity=None)
-        run.history.append(
-            DesignCandidate(x=np.array([0.0, 0.0]), result=OracleResult(score=float("-inf"), abstained=True, cost=0.0))
+        run.append(
+            DesignCandidate(
+                x=np.array([0.0, 0.0]),
+                result=OracleResult(
+                    score=float("-inf"),
+                    receipt={"reason": "test abstention"},
+                    abstained=True,
+                    cost=0.0,
+                ),
+            )
         )
         with self.assertRaises(ValueError) as ctx:
             fit_student(run, degree=2)
