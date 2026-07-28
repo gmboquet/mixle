@@ -73,5 +73,40 @@ class ImproveByRegretTest(unittest.TestCase):
         self.assertAlmostEqual(report.scorecard_after.quality, 0.0)
 
 
+class ImprovementEconomicsTest(unittest.TestCase):
+    """MXR-080-1686: costs, regrets and the budget were never validated."""
+
+    def _option(self, **kwargs):
+        base = {"name": "opt", "cost": 1.0, "run": lambda: None, "estimated_regret": 1.0}
+        return ImprovementOption(**{**base, **kwargs})
+
+    def test_negative_and_nonfinite_costs_are_rejected(self):
+        # under budget=0 an option costing -5 used to RUN and report spent=-5, and a NaN cost ran too
+        # because `spent + cost > budget` is false for NaN -- the hard ceiling failed open.
+        for bad in (-5.0, float("nan"), float("inf")):
+            with self.subTest(cost=bad), self.assertRaises(ValueError):
+                self._option(cost=bad)
+        for bad in (float("nan"), float("inf")):
+            with self.subTest(regret=bad), self.assertRaises(ValueError):
+                self._option(estimated_regret=bad)
+
+    def test_budget_and_option_identities_are_validated(self):
+        system = _make_system({})
+        with self.assertRaises(ValueError):
+            improve_by_regret(system, _QUESTIONS, [self._option()], budget=float("nan"))
+        with self.assertRaises(ValueError):
+            improve_by_regret(system, _QUESTIONS, [self._option()], budget=-1.0)
+        with self.assertRaisesRegex(ValueError, "unique"):
+            improve_by_regret(system, _QUESTIONS, [self._option(), self._option()], budget=10.0)
+
+    def test_a_zero_budget_runs_nothing(self):
+        ran = []
+        option = self._option(cost=5.0, run=lambda: ran.append(1))
+        report = improve_by_regret(_make_system({}), _QUESTIONS, [option], budget=0.0)
+        self.assertEqual(ran, [])
+        self.assertEqual(report.skipped, ["opt"])
+        self.assertEqual(report.spent, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

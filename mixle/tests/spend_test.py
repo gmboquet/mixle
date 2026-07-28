@@ -25,5 +25,33 @@ class SpendTest(unittest.TestCase):
         self.assertEqual(Spend(**s.to_dict()), s)
 
 
+class SpendLedgerInvariantTest(unittest.TestCase):
+    """MXR-080-1685: Spend had no construction invariants, so work could create budget."""
+
+    def test_negative_counts_cannot_create_budget(self):
+        self.assertEqual(Spend(frontier_calls=5).total_units(), 5.0)
+        for kwargs in ({"frontier_calls": -5}, {"oracle_calls": -1}):
+            with self.subTest(**kwargs), self.assertRaises(ValueError):
+                Spend(**kwargs)
+
+    def test_call_counts_must_be_exact_non_boolean_integers(self):
+        for bad in (True, 1.5, "2", None):
+            with self.subTest(value=bad), self.assertRaises(ValueError):
+                Spend(frontier_calls=bad)
+
+    def test_measured_costs_must_be_finite_and_nonnegative(self):
+        for field in ("wall_ms", "dollars"):
+            for bad in (float("nan"), float("inf"), -1.0):
+                with self.subTest(field=field, value=bad), self.assertRaises(ValueError):
+                    Spend(**{field: bad})
+
+    def test_invariants_are_rechecked_after_addition_and_round_trip(self):
+        total = Spend(frontier_calls=2, wall_ms=1.0) + Spend(oracle_calls=3, dollars=0.5)
+        self.assertEqual(total.total_units(), 5.0)
+        self.assertEqual(Spend(**total.to_dict()), total)
+        with self.assertRaises(ValueError):
+            Spend(**{**total.to_dict(), "wall_ms": float("nan")})
+
+
 if __name__ == "__main__":
     unittest.main()
