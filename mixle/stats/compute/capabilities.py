@@ -155,7 +155,9 @@ def numpy_only_distribution_types() -> tuple[type[Any], ...]:
     """
     with _CAPABILITIES_LOCK:
         registry = dict(_CAPABILITIES)
-    return tuple(dist_type for dist_type in registered_capability_types() if registry[dist_type].is_permanently_numpy_only)
+    return tuple(
+        dist_type for dist_type in registered_capability_types() if registry[dist_type].is_permanently_numpy_only
+    )
 
 
 def _hook_result(hook: Any, owner: type[Any]) -> DistributionCapabilities | None:
@@ -177,6 +179,21 @@ def _hook_result(hook: Any, owner: type[Any]) -> DistributionCapabilities | None
 def capabilities_for(x: Any) -> DistributionCapabilities:
     """Return registered capabilities for a distribution instance or class."""
     cls = x if isinstance(x, type) else type(x)
+
+    # A class that declares its own `engine_ready` outranks a compute_capabilities() hook it merely
+    # INHERITED. Without this, a subclass narrowing its engine support -- the documented way to say
+    # "this variant is numpy-only" -- was silently overruled by the parent's hook and kept claiming
+    # torch and jax. A declaration that does nothing is worse than no declaration at all: callers
+    # dispatch on supported_engines() and would place the model on an engine it just disclaimed.
+    # A hook defined ON the class still wins, since that is the more specific statement of intent.
+    own_engine_ready = "engine_ready" in getattr(cls, "__dict__", {})
+    own_hook = "compute_capabilities" in getattr(cls, "__dict__", {})
+    if own_engine_ready and not own_hook:
+        return DistributionCapabilities(
+            engine_ready=tuple(cls.engine_ready),
+            kernel_status=getattr(cls, "kernel_status", "generic"),
+            numpy_only_reason=getattr(cls, "numpy_only_reason", None),
+        )
 
     if not isinstance(x, type):
         hook = getattr(x, "compute_capabilities", None)
