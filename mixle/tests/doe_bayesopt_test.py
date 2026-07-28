@@ -23,7 +23,7 @@ from mixle.doe import (
     thompson_sampling,
     upper_confidence_bound,
 )
-from mixle.doe.bayesopt import _get_acquisition
+from mixle.doe.bayesopt import _get_acquisition, _validate_xy, knowledge_gradient
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
 
@@ -443,6 +443,13 @@ class SurrogateBoundaryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             propose_next(self.x, self.y, self.bounds, n_candidates=self.n_candidates, seed=1, gp=gp)
 
+    def test_propose_next_rejects_indefinite_covariance(self):
+        cov = np.eye(self.n_candidates)
+        cov[:2, :2] = np.array([[1.0, 2.0], [2.0, 1.0]])
+        gp = _MockSurrogate(mean=np.zeros(self.n_candidates), cov=cov)
+        with self.assertRaisesRegex(ValueError, "positive-semidefinite"):
+            propose_next(self.x, self.y, self.bounds, n_candidates=self.n_candidates, seed=1, gp=gp)
+
     def test_propose_next_rejects_nonfinite_observations_before_fitting(self):
         # Non-finite y never reaches the (mock) surrogate at all -- _fit_surrogate's own boundary
         # check fires first, regardless of what the surrogate would have done with it.
@@ -495,6 +502,63 @@ class SurrogateBoundaryTest(unittest.TestCase):
         point = propose_knowledge_gradient(self.x, self.y, self.bounds, n_candidates=self.n_candidates, gp=gp)
         self.assertEqual(point.shape, (2,))
         self.assertTrue(np.all(point >= [-2.0, -2.0]) and np.all(point <= [2.0, 2.0]))
+
+
+class KnowledgeGradientContractTest(unittest.TestCase):
+    def test_rejects_invalid_public_probabilistic_inputs(self):
+        with self.assertRaises(ValueError):
+            knowledge_gradient([0.0, 0.0], [[1.0, 0.2], [0.0, 1.0]])
+        with self.assertRaisesRegex(ValueError, "positive-semidefinite"):
+            knowledge_gradient([0.0, 0.0], [[1.0, 2.0], [2.0, 1.0]])
+        with self.assertRaisesRegex(ValueError, "noise"):
+            knowledge_gradient([0.0], [[1.0]], noise=-2.0)
+        with self.assertRaises(ValueError):
+            knowledge_gradient([np.nan], [[1.0]])
+
+    def test_valid_result_is_finite_and_nonnegative(self):
+        result = knowledge_gradient([0.0, 1.0], [[1.0, 0.2], [0.2, 2.0]], noise=0.1)
+        self.assertEqual(result.shape, (2,))
+        self.assertTrue(np.all(np.isfinite(result)))
+        self.assertTrue(np.all(result >= 0.0))
+
+
+class SequentialRunEvidenceContractTest(unittest.TestCase):
+    def test_validate_xy_requires_explicit_two_dimensional_training_matrix(self):
+        with self.assertRaisesRegex(ValueError, "explicit 2-D"):
+            _validate_xy([1.0, 2.0], [3.0])
+        x, y = _validate_xy([[1.0], [2.0]], [3.0, 4.0])
+        self.assertEqual(x.shape, (2, 1))
+        self.assertEqual(y.shape, (2,))
+
+    def test_nonfinite_initial_objective_is_separate_failed_evidence(self):
+        calls = 0
+
+        def objective(_point):
+            nonlocal calls
+            calls += 1
+            return 1.0 if calls == 1 else np.nan
+
+        result = minimize(objective, [(0.0, 1.0)], n_init=2, n_iter=0, n_candidates=4, seed=0)
+        self.assertEqual(result.x.shape, (1, 1))
+        np.testing.assert_array_equal(result.y, [1.0])
+        self.assertEqual(result.best_y, 1.0)
+        self.assertEqual(result.n_evaluations, 2)
+        self.assertEqual(len(result.failed_evaluations), 1)
+        self.assertEqual(result.stopped_reason, "objective_failed")
+
+    def test_iteration_and_candidate_budgets_are_exact_nonboolean_counts(self):
+        for invalid in (-1, 0.5, True, np.bool_(True)):
+            with self.assertRaises((TypeError, ValueError)):
+                minimize(lambda point: float(point[0]), [(0.0, 1.0)], n_init=1, n_iter=invalid)
+        for invalid in (0, 2.5, True, np.bool_(True)):
+            with self.assertRaises((TypeError, ValueError)):
+                minimize(
+                    lambda point: float(point[0]),
+                    [(0.0, 1.0)],
+                    n_init=1,
+                    n_iter=0,
+                    n_candidates=invalid,
+                )
 
 
 class ThompsonSamplingRngThreadingTest(unittest.TestCase):

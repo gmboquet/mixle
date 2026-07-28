@@ -121,7 +121,15 @@ class BayesianOptimizer:
             raise ValueError("no observations yet; call tell(...) before best.")
         y = self.y
         idx = int(np.argmax(y) if self.maximize else np.argmin(y))
-        return BayesOptResult(best_x=self.x[idx], best_y=float(y[idx]), x=self.x, y=y)
+        return BayesOptResult(
+            best_x=self.x[idx],
+            best_y=float(y[idx]),
+            x=self.x,
+            y=y,
+            n_evaluations=len(y),
+            failed_evaluations=(),
+            stopped_reason="current_state",
+        )
 
     @staticmethod
     def _close(a: np.ndarray, b: np.ndarray) -> bool:
