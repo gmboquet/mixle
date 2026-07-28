@@ -16,15 +16,38 @@ Deterministic given ``seed``. Needs torch only to FIT; a saved Embedder reloads 
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
+import os
 import pickle
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from mixle.data.hashing import _canonical
 from mixle.represent.generative import AutoencoderResult, fit_autoencoder
+
+_ARTIFACT_ID = "represent.Embedder/v2"
+_ARTIFACT_NAME = "embedder.mixle"
+_ARTIFACT_MAGIC = b"MIXLEEMB2\n"
+
+
+def _envelope_digest(manifest: dict[str, Any], body: bytes) -> str:
+    """SHA-256 over the whole artifact: every manifest field (except ``digest``, which cannot cover
+    its own value) plus the serialized body.
+
+    The manifest is hashed through :func:`mixle.data.hashing._canonical` rather than its raw JSON
+    bytes -- the same helper :mod:`mixle.data.encoded_io` uses for the identical job -- so the
+    digest is independent of on-disk key order and whitespace, and ``_canonical``'s length-prefixed,
+    separator-free encoding makes the manifest/body concatenation unambiguous: no other split can
+    land on the same bytes. Covering the manifest is the point: hashing the body alone would let the
+    recorded kind, dim, or corpus count be edited on disk without invalidating anything.
+    """
+    return hashlib.sha256(_canonical(manifest) + body).hexdigest()
 
 
 def _featurizer(kind: str, dim: int, seed: int) -> Any:
@@ -180,36 +203,52 @@ class Embedder:
         return [(int(i), float(sims[i])) for i in order]
 
     def save(self, path: str) -> str:
-        """Persist the embedder and fitted corpus vectors."""
+        """Persist the embedder and fitted corpus vectors as one atomic, digest-bound envelope.
+
+        The artifact is a single file: magic, a canonical JSON manifest, then the pickled state.
+        The manifest's digest covers the manifest fields AND the body together, and the file is
+        written to a temporary sibling and ``os.replace``-d into position, so a reader can never see
+        a half-written artifact or a manifest describing a different payload than the one beside it.
+        """
         out = Path(path)
         out.mkdir(parents=True, exist_ok=True)
-        with open(out / "embedder.pkl", "wb") as f:
-            pickle.dump(
-                {
-                    "featurizer": self.featurizer,
-                    "result": self.result,
-                    "kind": self.kind,
-                    "corpus_vectors": self.corpus_vectors,
-                },
-                f,
-            )
-        (out / "manifest.json").write_text(
-            json.dumps(
-                {
-                    "mixle_artifact": "represent.Embedder/v1",
-                    "kind": self.kind,
-                    "dim": self.dim,
-                    "n_corpus": int(self.corpus_vectors.shape[0]),
-                    "created_at": time.time(),
-                },
-                indent=2,
-            )
+        body = pickle.dumps(
+            {
+                "featurizer": self.featurizer,
+                "result": self.result,
+                "kind": self.kind,
+                "corpus_vectors": self._corpus_vectors,
+            },
+            protocol=pickle.HIGHEST_PROTOCOL,
         )
+        manifest: dict[str, Any] = {
+            "mixle_artifact": _ARTIFACT_ID,
+            "kind": self.kind,
+            "dim": self.dim,
+            "n_corpus": int(self._corpus_vectors.shape[0]),
+            "created_at": time.time(),
+        }
+        meta = {"digest": _envelope_digest(manifest, body), **manifest}
+        destination = out / _ARTIFACT_NAME
+        fd, temporary = tempfile.mkstemp(prefix=f".{_ARTIFACT_NAME}.", suffix=".tmp", dir=str(out))
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(_ARTIFACT_MAGIC)
+                f.write(json.dumps(meta, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+                f.write(b"\n")
+                f.write(body)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary, destination)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary)
+            raise
         return str(out)
 
     @classmethod
     def load(cls, path: str, *, trust_code: bool = False) -> Embedder:
-        """Load an embedder previously saved with :meth:`save`.
+        """Load an embedder previously saved with :meth:`save`, verifying its manifest.
 
         The saved artifact is a pickle of the fitted state, and ``result`` can embed a live torch
         module (see :class:`~mixle.represent.generative.AutoencoderResult`) -- unpickling it executes
@@ -217,6 +256,15 @@ class Embedder:
         default; pass ``trust_code=True`` for a path whose source you trust (or call from inside
         :func:`mixle.utils.serialization.trusted_deserialization`), matching
         :meth:`mixle.inference.production.registry.Registry.get`.
+
+        Beyond that trust gate, the manifest is now actually enforced rather than ignored
+        (MXR-080-1786). The envelope digest -- manifest fields and body together -- is checked BEFORE
+        the body is unpickled, so a truncated, corrupted, swapped or manifest-tampered artifact is
+        rejected before any deserialization runs; and the decoded payload's own type, kind, and
+        corpus shape are checked against what the manifest declared, so state that does not match
+        its description can never load under it. The digest is corruption/mismatch detection, not
+        authentication: it lives in the same file it covers, so it cannot prove the artifact was not
+        replaced wholesale by whoever could already write to ``path``.
         """
         from mixle.utils.serialization import SerializationError, deserialization_is_trusted
 
@@ -227,9 +275,49 @@ class Embedder:
                 "you trust, and pass trust_code=True (or call inside "
                 "mixle.utils.serialization.trusted_deserialization())."
             )
-        with open(Path(path) / "embedder.pkl", "rb") as f:
-            d = pickle.load(f)
-        return cls(d["featurizer"], d["result"], d["kind"], d["corpus_vectors"])
+        root = Path(path)
+        envelope = root / _ARTIFACT_NAME
+        if not envelope.exists() and (root / "embedder.pkl").exists():
+            raise ValueError(
+                f"{path!r} holds a legacy unbound Embedder artifact (an undigested pickle beside a "
+                f"manifest nothing verified); re-save it with the current mixle to produce a "
+                f"{_ARTIFACT_NAME} envelope."
+            )
+        with open(envelope, "rb") as f:
+            if f.read(len(_ARTIFACT_MAGIC)) != _ARTIFACT_MAGIC:
+                raise ValueError(f"{path!r} is not a mixle Embedder artifact")
+            meta_line = bytearray()
+            while True:
+                c = f.read(1)
+                if c in (b"\n", b""):
+                    break
+                meta_line += c
+            try:
+                meta = json.loads(bytes(meta_line).decode("utf-8"))
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise ValueError(f"{path!r} has a corrupt Embedder manifest") from exc
+            body = f.read()
+        manifest = {k: v for k, v in meta.items() if k != "digest"}
+        if _envelope_digest(manifest, body) != meta.get("digest"):
+            raise ValueError(f"{path!r} failed its integrity check (corrupt, truncated, or a tampered manifest)")
+        if meta.get("mixle_artifact") != _ARTIFACT_ID:
+            raise ValueError(f"{path!r} declares artifact {meta.get('mixle_artifact')!r}, expected {_ARTIFACT_ID!r}")
+        payload = pickle.loads(body)  # noqa: S301 - trust-gated above and digest-verified; see the docstring
+        expected = {"featurizer", "result", "kind", "corpus_vectors"}
+        if not isinstance(payload, dict) or set(payload) != expected:
+            raise ValueError(f"{path!r} does not contain an Embedder state payload")
+        vectors = payload["corpus_vectors"]
+        declared = (meta.get("n_corpus"), meta.get("dim"))
+        if not isinstance(vectors, np.ndarray) or vectors.shape != declared:
+            raise ValueError(
+                f"{path!r} carries corpus vectors of shape {getattr(vectors, 'shape', type(vectors).__name__)!r}, "
+                f"but its manifest declares {declared!r}"
+            )
+        if payload["kind"] != meta.get("kind"):
+            raise ValueError(
+                f"{path!r} carries kind {payload['kind']!r}, but its manifest declares {meta.get('kind')!r}"
+            )
+        return cls(payload["featurizer"], payload["result"], payload["kind"], vectors)
 
 
 def fit_embedder(
