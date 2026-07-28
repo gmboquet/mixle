@@ -125,6 +125,70 @@ class CapabilityLifecycleContractTest(unittest.TestCase):
                 decided_at=T0,
             )
 
+    def _record(self, **overrides):
+        record = {
+            "capability": self.identity.as_dict(),
+            "maturity": "concept",
+            "operational": "unavailable",
+            "evaluation": "unevaluated",
+            "epistemic": "unassessed",
+            "authorization": None,
+            "revision": 0,
+            "updated_at": "2026-01-01T00:00:00Z",
+        }
+        record.update(overrides)
+        return record
+
+    def test_direct_snapshots_canonicalize_states_and_cannot_forge_a_promotion(self):
+        # MXR-080-1678: string dimensions used to be stored verbatim, and nothing required a
+        # validated/supported snapshot to have been evaluated at all, so a direct construction
+        # bypassed every promotion gate and only failed later inside as_dict().
+        lifecycle = CapabilityLifecycle(
+            self.identity,
+            maturity="candidate",
+            operational="available",
+            evaluation="running",
+            epistemic="hypothesis",
+            updated_at=T0,
+        )
+        self.assertIs(lifecycle.maturity, CapabilityMaturity.CANDIDATE)
+        self.assertIs(lifecycle.operational, OperationalState.AVAILABLE)
+        self.assertIs(lifecycle.evaluation, EvaluationState.RUNNING)
+        self.assertIs(lifecycle.epistemic, EpistemicStanding.HYPOTHESIS)
+        self.assertEqual(lifecycle.as_dict()["maturity"], "candidate")
+
+        with self.assertRaisesRegex(ValueError, "cannot be unevaluated"):
+            CapabilityLifecycle(
+                self.identity,
+                maturity="supported",
+                operational="available",
+                evaluation="unevaluated",
+                updated_at=T0,
+            )
+        with self.assertRaises(ValueError):
+            CapabilityLifecycle(self.identity, maturity="extremely-supported", updated_at=T0)
+
+        # A promotion that was legitimately earned survives a later stale/failed evaluation:
+        # the dimensions stay independent once the gate itself has been passed.
+        earned = (
+            CapabilityLifecycle(self.identity, updated_at=T0)
+            .evolve(maturity=CapabilityMaturity.CANDIDATE, evaluation=EvaluationState.RUNNING, at=T0)
+            .evolve(evaluation=EvaluationState.PASSED, at=T0)
+            .evolve(maturity=CapabilityMaturity.VALIDATED, at=T0)
+            .evolve(evaluation=EvaluationState.STALE, at=T0)
+        )
+        self.assertIs(earned.evaluation, EvaluationState.STALE)
+        self.assertEqual(CapabilityLifecycle.from_dict(earned.as_dict()), earned)
+
+    def test_revision_is_validated_before_conversion(self):
+        # MXR-080-1678: from_dict() ran int() first, so a persisted -0.5 silently became 0.
+        for bad in (-0.5, 2.5, True, "3", float("nan")):
+            with self.assertRaises(ValueError):
+                CapabilityLifecycle.from_dict(self._record(revision=bad))
+        with self.assertRaises(ValueError):
+            CapabilityLifecycle(self.identity, revision=True, updated_at=T0)
+        self.assertEqual(CapabilityLifecycle.from_dict(self._record(revision=3)).revision, 3)
+
     def test_illegal_transitions_and_cross_identity_authorization_fail(self):
         lifecycle = CapabilityLifecycle(self.identity, updated_at=T0)
         with self.assertRaisesRegex(LifecycleTransitionError, "concept -> supported"):
