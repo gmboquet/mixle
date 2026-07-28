@@ -96,6 +96,34 @@ class PairedValidationTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 fn(np.array([1.0, np.nan, 2.0]), np.array([1.0, 2.0, 3.0]))
 
+    def test_all_four_reject_higher_dimensional_input_instead_of_flattening_it(self):
+        # MXR-080-1606: all four document (n,) per-observation arrays but called .ravel() BEFORE
+        # validating shape, so a malformed (2, 3) pair became six independent observations -- the
+        # paired t route reported p=0.00593, Vuong p=4.59e-06, Clarke p=0.03125 off it. Flattening
+        # turns folds/chains/outcomes/repeated measures into pseudo-replicates and overstates
+        # precision, and the returned dict keeps no trace of the original unit.
+        a = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        b = a + 0.5
+        for fn in (paired_score_difference, vuong_test, clarke_test, compare_elpd):
+            with self.assertRaises(ValueError) as ctx:
+                fn(a, b)
+            self.assertIn("(2, 3)", str(ctx.exception))
+
+    def test_column_vectors_are_rejected_not_silently_accepted(self):
+        for fn in (paired_score_difference, vuong_test, clarke_test, compare_elpd):
+            with self.assertRaises(ValueError):
+                fn(np.zeros((4, 1)), np.ones((4, 1)))
+
+    def test_explicit_ravel_is_still_available_for_a_deliberate_flatten(self):
+        a = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        b = a + 0.5
+        res = paired_score_difference(a.ravel(), b.ravel())
+        self.assertEqual(res["favored"], "A")
+
+    def test_lists_of_scalars_are_still_accepted(self):
+        res = paired_score_difference([1.0, 2.0, 3.0], [1.5, 2.5, 3.5])
+        self.assertEqual(res["favored"], "A")
+
 
 class DegenerateStandardErrorTest(unittest.TestCase):
     """Regression: a paired (or pointwise elpd) difference that is EXACTLY constant across every
