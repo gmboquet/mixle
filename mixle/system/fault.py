@@ -46,6 +46,10 @@ NON_RECOVERABLE_FAULTS: tuple[type[BaseException], ...] = (
     PermissionError,
 )
 
+#: The degradation modes this module's own helpers emit, for readers of a receipt. Informational, not
+#: a closed set: :class:`DegradedResult` accepts any named mode (see its docstring for why).
+DEGRADATION_MODES: frozenset[str] = frozenset({"teacher_down", "store_down", "oracle_timeout", "model_error"})
+
 
 def _is_recoverable(exc: BaseException, recoverable: Sequence[type[BaseException]] | None) -> bool:
     """Whether ``exc`` may be degraded: an explicit allowlist when given, else the default policy."""
@@ -61,6 +65,19 @@ class DegradedResult:
     ``attempts`` carries the structured causal evidence for a multi-tier route: one
     ``(tier_name, exception_repr)`` pair per tier that was tried and failed, so a receipt records
     what actually went wrong rather than only that something did.
+
+    ``degraded``, ``mode`` and ``reason`` are one fact in three fields, so they are checked against
+    each other at construction: a degraded result names its mode and carries a reason, and a
+    non-degraded one carries neither. Without that, ``DegradedResult("v", False, "teacher_down",
+    "failure")`` serialized a receipt asserting that a *successful* answer was produced by a
+    degradation, and ``DegradedResult("v", True)`` one asserting a degradation nobody can attribute
+    -- both of which downstream audit code reads as ordinary records.
+
+    ``mode`` is deliberately NOT restricted to :data:`DEGRADATION_MODES`. This is a reusable fault
+    boundary and callers name their own routes (:mod:`mixle.inference.production.serving` degrades
+    under ``model_unavailable``/``batch_unavailable``); a closed set would turn an unlisted caller's
+    *recoverable* failure into a hard constructor error on the fallback path, which is precisely the
+    outage this class exists to survive. The name must simply be a real one.
     """
 
     value: Any
@@ -68,6 +85,20 @@ class DegradedResult:
     mode: str | None = None
     reason: str | None = None
     attempts: tuple[tuple[str, str], ...] = field(default=())
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.degraded, bool):
+            raise TypeError(f"degraded must be a bool, got {self.degraded!r}")
+        if self.degraded:
+            if not isinstance(self.mode, str) or not self.mode.strip():
+                raise ValueError(f"a degraded result must name the mode that produced it, got mode={self.mode!r}")
+            if not isinstance(self.reason, str):
+                raise ValueError(f"a degraded result must carry a reason string, got reason={self.reason!r}")
+        elif self.mode is not None or self.reason is not None:
+            raise ValueError(
+                f"a non-degraded result carries no degradation mode or reason, got "
+                f"mode={self.mode!r}, reason={self.reason!r}"
+            )
 
     def to_receipt_fields(self) -> dict[str, Any]:
         """Return ``degraded_mode`` and ``degraded_reason`` receipt fields."""
@@ -91,7 +122,13 @@ def with_fallback(
 
     If ``fallback`` itself raises, that exception propagates. A fallback that
     cannot produce a value is a real failure, not a second implicit fallback.
+
+    ``mode`` is checked BEFORE ``fn`` runs: an unnamed mode makes the eventual receipt
+    unattributable, and discovering that only on the fallback path would convert a survivable outage
+    into a hard failure at exactly the wrong moment.
     """
+    if not isinstance(mode, str) or not mode.strip():
+        raise ValueError(f"mode must name the degradation this route records, got {mode!r}")
     try:
         return DegradedResult(value=fn(), degraded=False)
     except Exception as exc:  # noqa: BLE001 -- recoverability is decided by policy, just below

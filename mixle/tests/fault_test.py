@@ -149,5 +149,58 @@ class RecoverabilityPolicyTest(unittest.TestCase):
             self.assertIn(cls, NON_RECOVERABLE_FAULTS)
 
 
+class ReceiptConsistencyTest(unittest.TestCase):
+    """MXR-080-1694: the public frozen receipt validated nothing, so a self-contradictory record --
+    a *successful* result carrying a degradation mode and failure reason, or a degradation nobody can
+    attribute -- constructed and serialized as an ordinary audit row."""
+
+    def test_a_success_cannot_carry_a_degradation_mode_or_reason(self):
+        with self.assertRaises(ValueError):
+            DegradedResult("unsafe", False, "teacher_down", "failure")
+        with self.assertRaises(ValueError):
+            DegradedResult(value=1, degraded=False, mode="store_down")
+        with self.assertRaises(ValueError):
+            DegradedResult(value=1, degraded=False, reason="disk full")
+
+    def test_a_degradation_must_name_its_mode_and_reason(self):
+        with self.assertRaises(ValueError):
+            DegradedResult(value=1, degraded=True)
+        with self.assertRaises(ValueError):
+            DegradedResult(value=1, degraded=True, mode="  ", reason="x")
+        with self.assertRaises(ValueError):
+            DegradedResult(value=1, degraded=True, mode="store_down")
+
+    def test_an_unnamed_mode_is_refused_before_the_primary_path_runs(self):
+        calls = []
+
+        with self.assertRaises(ValueError):
+            with_fallback(lambda: calls.append("primary"), lambda exc: None, mode="")
+        self.assertEqual(calls, [])
+
+    def test_caller_named_modes_outside_this_module_still_degrade(self):
+        # mixle.inference.production.serving degrades under `model_unavailable`; a closed vocabulary
+        # would turn its recoverable outage into a hard constructor failure.
+        def down():
+            raise ConnectionError("endpoint unreachable")
+
+        result = with_fallback(down, lambda exc: "fallback", mode="model_unavailable")
+        self.assertTrue(result.degraded)
+        self.assertEqual(result.mode, "model_unavailable")
+
+    def test_an_exception_with_no_message_still_produces_a_receipt(self):
+        def down():
+            raise ConnectionError
+
+        result = with_fallback(down, lambda exc: "fallback", mode="teacher_down")
+        self.assertTrue(result.degraded)
+        self.assertEqual(result.reason, "")
+
+    def test_the_helpers_all_build_consistent_receipts(self):
+        self.assertTrue(with_fallback(lambda: 1, lambda exc: 0, mode="teacher_down").degraded is False)
+        self.assertTrue(abstain_on_timeout(lambda: 1).degraded is False)
+        timed_out = abstain_on_timeout(lambda: (_ for _ in ()).throw(TimeoutError("slow")))
+        self.assertEqual(timed_out.mode, "oracle_timeout")
+
+
 if __name__ == "__main__":
     unittest.main()
