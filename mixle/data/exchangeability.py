@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
+from scipy.stats import rankdata
 
 
 @dataclass
@@ -87,8 +88,19 @@ def _numeric_columns(rows: list[Any]) -> dict[str, np.ndarray]:
 
 
 def _rank_corr(x: np.ndarray, y: np.ndarray) -> float:
-    rx = np.argsort(np.argsort(x)).astype(float)
-    ry = np.argsort(np.argsort(y)).astype(float)
+    """Spearman rank correlation, using MID-RANKS for tied values.
+
+    ``argsort(argsort(x))`` was used here (MXR-080-1602). That assigns arbitrary DISTINCT ranks to
+    tied values -- whichever order argsort happened to break the tie in -- so it is not the Spearman
+    statistic on tied data, and because the same transform is reapplied to every permuted sample it
+    also changes the permutation null the statistic is judged against. On the 20-value tied sequence
+    ``[1,1,1,1,1,3,2,0,0,0,0,2,1,2,3,3,3,3,3,3]`` it reported a trend correlation of 0.5233 where
+    the mid-rank Spearman value is 0.6001, and with 999 permutations at seed 19 that understated
+    trend evidence came back as ``p=0.042`` -- passing an ``alpha=0.01`` screen -- against ``p=0.008``
+    for a correct mid-rank permutation. ``rankdata`` is the tie-correct transform.
+    """
+    rx = rankdata(x).astype(float)
+    ry = rankdata(y).astype(float)
     sx, sy = rx.std(), ry.std()
     if sx <= 0 or sy <= 0:
         return 0.0
@@ -144,24 +156,16 @@ def exchangeability_check(
         raise ValueError(f"n_perm must be a positive integer, got {n_perm!r}")
     if isinstance(seed, (bool, np.bool_)) or not isinstance(seed, (int, np.integer)) or not 0 <= seed < 2**32:
         raise ValueError(f"seed must be an integer in [0, 2**32), got {seed!r}")
-    if (
-        isinstance(max_records, (bool, np.bool_))
-        or not isinstance(max_records, (int, np.integer))
-        or max_records < 20
-    ):
+    if isinstance(max_records, (bool, np.bool_)) or not isinstance(max_records, (int, np.integer)) or max_records < 20:
         raise ValueError(f"max_records must be an integer >= 20, got {max_records!r}")
     source = data.records() if hasattr(data, "records") and callable(data.records) else data
     rows = list(itertools.islice(source, int(max_records)))
     receipt = {"n_examined": len(rows), "max_records": int(max_records), "bounded": len(rows) == max_records}
     if len(rows) < 20:
-        return ExchangeabilityReport(
-            label="inconclusive", fields=[{"note": "n < 20: no power to test"}], **receipt
-        )
+        return ExchangeabilityReport(label="inconclusive", fields=[{"note": "n < 20: no power to test"}], **receipt)
     cols = _numeric_columns(rows)
     if not cols:
-        return ExchangeabilityReport(
-            label="inconclusive", fields=[{"note": "no numeric fields to test"}], **receipt
-        )
+        return ExchangeabilityReport(label="inconclusive", fields=[{"note": "no numeric fields to test"}], **receipt)
 
     fields: list[dict[str, Any]] = []
     worst = "exchangeable"

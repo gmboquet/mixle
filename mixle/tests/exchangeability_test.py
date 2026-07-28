@@ -121,5 +121,54 @@ class WiringTest(unittest.TestCase):
         self.assertIsNone(ds.provenance["exchangeability"])  # nothing real to test; honest None
 
 
+class TiedRankTransformTest(unittest.TestCase):
+    """MXR-080-1602: ``argsort(argsort(x))`` gives tied values arbitrary DISTINCT ranks.
+
+    That is not the Spearman statistic on tied data, and because the same transform is reapplied to
+    every permuted sample it also shifts the permutation null the statistic is judged against -- so a
+    tied, clearly ordered sequence could be certified exchangeable.
+    """
+
+    # audit repro: 20 tied values that rise across the sequence
+    TIED_ORDERED = [1, 1, 1, 1, 1, 3, 2, 0, 0, 0, 0, 2, 1, 2, 3, 3, 3, 3, 3, 3]
+
+    def test_ordered_tied_data_is_not_certified_exchangeable(self):
+        rep = exchangeability_check(self.TIED_ORDERED, alpha=0.01, n_perm=999, seed=19)
+        self.assertNotEqual(rep.label, "exchangeable")
+        self.assertFalse(rep.exchangeable)
+        # pre-fix this reported trend_p=0.042, which passes an alpha=0.01 screen
+        self.assertLess(rep.fields[0]["trend_p"], 0.01)
+
+    def test_rank_correlation_matches_an_independent_mid_rank_spearman(self):
+        from scipy import stats
+
+        from mixle.data.exchangeability import _rank_corr
+
+        x = np.array(self.TIED_ORDERED, dtype=float)
+        position = np.arange(x.size, dtype=float)
+        # checked against scipy's own Spearman, not a constant copied from the implementation
+        self.assertAlmostEqual(_rank_corr(position, x), float(stats.spearmanr(position, x).statistic), places=12)
+        # sanity: this case genuinely has ties, so it exercises the mid-rank path
+        self.assertLess(np.unique(x).size, x.size)
+
+    def test_untied_data_is_unaffected(self):
+        """Negative control: with no ties, mid-ranks and argsort ranks coincide, so nothing changes."""
+        from scipy import stats
+
+        from mixle.data.exchangeability import _rank_corr
+
+        rng = np.random.RandomState(5)
+        x = rng.normal(0.0, 1.0, 50)
+        self.assertEqual(np.unique(x).size, x.size)  # sanity: genuinely untied
+        position = np.arange(x.size, dtype=float)
+        self.assertAlmostEqual(_rank_corr(position, x), float(stats.spearmanr(position, x).statistic), places=12)
+
+    def test_heavily_tied_iid_data_is_still_exchangeable(self):
+        """Negative control: ties alone must not manufacture a violation -- only ordered ties do."""
+        rng = np.random.RandomState(11)
+        data = [float(v) for v in rng.randint(0, 4, 200)]
+        self.assertEqual(exchangeability_check(data, n_perm=199, seed=3).label, "exchangeable")
+
+
 if __name__ == "__main__":
     unittest.main()
