@@ -125,8 +125,13 @@ class ExternalModel:
         finite cutoff -- callers must fail closed on ``None``, never treat a missing cutoff as
         "anything finite is confident" the way an unguarded ``entropy <= inf`` silently would.
         """
-        raw = float(self._uq.payload.get("max_entropy", float("inf")))
-        return raw if math.isfinite(raw) else None
+        # A stored None is the no-policy case this property exists to report, but it also bypasses
+        # get()'s default, so coercing first turned "no cutoff configured" into a TypeError.
+        raw = self._uq.payload.get("max_entropy")
+        if raw is None:
+            return None
+        value = float(raw)
+        return value if math.isfinite(value) else None
 
     def answer(self, prompt: Any) -> ExternalAnswer:
         """Sample the external model; the first draw is the returned answer (MXR-080-0270).
