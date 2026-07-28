@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import unittest
 
 import numpy as np
@@ -78,6 +79,25 @@ class ClosedLoopDriftRecoveryTest(unittest.TestCase):
 class OperatorCreditBanditTest(unittest.TestCase):
     """Acceptance criterion 2: the operator-credit bandit beats uniform operator choice when one
     operator is known to win more often for a given context."""
+
+    def test_duplicate_operator_names_are_rejected(self):
+        # MXR-080-1772: names index the arms positionally and reward() resolves one via
+        # `.index(operator)`, which returns the FIRST equal name -- so a duplicate silently credits
+        # the wrong arm and report() lists the same name twice with different statistics.
+        with self.assertRaises(ValueError):
+            OperatorCreditBandit(["distill", "distill", "refine"])
+
+    def test_non_finite_reward_is_refused_rather_than_absorbed(self):
+        bandit = OperatorCreditBandit(["distill", "refine"], seed=0)
+        bandit.select("ctx")
+        bandit.reward("ctx", "distill", 1.0)
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(reward=bad), self.assertRaises(ValueError):
+                bandit.reward("ctx", "distill", bad)
+        with self.assertRaises(KeyError):
+            bandit.reward("ctx", "not_an_operator", 1.0)
+        stats = bandit.report()["ctx"]["distill"]
+        self.assertTrue(math.isfinite(stats["mean_reward"]))
 
     def test_bandit_converges_to_the_better_operator_faster_than_uniform(self):
         operators = ["distill", "refine", "evolve"]

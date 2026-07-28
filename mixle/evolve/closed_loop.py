@@ -58,6 +58,7 @@ that case.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -219,6 +220,12 @@ class OperatorCreditBandit:
         self.operator_names = list(operator_names)
         if len(self.operator_names) < 2:
             raise ValueError("OperatorCreditBandit needs at least two operators.")
+        if len(set(self.operator_names)) != len(self.operator_names):
+            # Names index the arms positionally, and reward() resolves one via `.index(operator)` --
+            # which returns the FIRST equal name. Duplicates therefore credit the wrong arm silently,
+            # and report() lists the same name twice with different statistics.
+            dupes = sorted({n for n in self.operator_names if self.operator_names.count(n) > 1})
+            raise ValueError(f"OperatorCreditBandit operator names must be unique, got duplicate(s): {dupes!r}")
         self._c = float(c)
         self._seed = int(seed)
         self._bandits: dict[str, UCB1] = {}
@@ -236,9 +243,18 @@ class OperatorCreditBandit:
         return self.operator_names[arm]
 
     def reward(self, context: str, operator: str, reward: float) -> None:
-        """Fold an observed (non-negative, anti-regression) reward back into ``operator``'s arm."""
+        """Fold an observed (non-negative, anti-regression) reward back into ``operator``'s arm.
+
+        ``reward`` must be finite: ``max(nan, 0.0)`` is ``nan``, which would poison the arm's running
+        mean and every selection that reads it, permanently.
+        """
+        if operator not in self.operator_names:
+            raise KeyError(f"unknown operator {operator!r}.")
+        reward = float(reward)
+        if not math.isfinite(reward):
+            raise ValueError(f"reward for operator {operator!r} must be finite, got {reward!r}")
         arm = self.operator_names.index(operator)
-        self._bandit_for(context).update(arm, max(float(reward), 0.0))
+        self._bandit_for(context).update(arm, max(reward, 0.0))
 
     def report(self) -> dict[str, dict[str, float]]:
         """Per-context, per-operator mean reward and pull count."""

@@ -12,9 +12,10 @@ Population.step and the loud-failure guard on challenger_beats_champion (evolve_
 import math
 
 import numpy as np
+import pytest
 
 from mixle.evolve.operators import Candidate
-from mixle.evolve.population import Population
+from mixle.evolve.population import OperatorBandit, Population
 from mixle.evolve.verify import challenger_beats_champion
 from mixle.inference.multiple_testing import adjust_pvalues
 
@@ -440,3 +441,80 @@ def test_evaluate_holdout_does_not_promote_without_a_real_difference():
 
     assert verdict.favored == "tie"
     assert verdict.promote is False
+
+
+class _Op:
+    """A trivial named operator; the bandit only needs `name` and `cost_hint`."""
+
+    def __init__(self, name, cost_hint=1.0):
+        self.name = name
+        self.cost_hint = cost_hint
+
+    def applicable(self, model, data, *, ctx):
+        del model, data, ctx
+        return True
+
+    def propose(self, model, data, *, ctx):
+        del data, ctx
+        return Candidate(model, {})
+
+
+def test_operator_bandit_rejects_duplicate_names():
+    # MXR-080-1772: `{op.name: op for op in ops}` collapsed two supplied operators into one arm.
+    with pytest.raises(ValueError, match="unique"):
+        OperatorBandit([_Op("same"), _Op("same")])
+    assert len(OperatorBandit([_Op("a"), _Op("b")]).arms) == 2
+
+
+def test_operator_bandit_refuses_non_finite_feedback():
+    # One NaN update used to leave mean delta, mean cost, and the next Thompson value NaN forever.
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        bandit = OperatorBandit([_Op("a"), _Op("b")])
+        with pytest.raises(ValueError):
+            bandit.reward("a", bad, 1.0)
+        with pytest.raises(ValueError):
+            bandit.reward("a", 1.0, bad)
+    bandit = OperatorBandit([_Op("a"), _Op("b")])
+    with pytest.raises(ValueError):
+        bandit.reward("a", 1.0, -1.0)  # a negative cost is not a cost
+
+
+def test_operator_bandit_policy_state_survives_a_rejected_update():
+    bandit = OperatorBandit([_Op("a"), _Op("b")])
+    bandit.reward("a", 2.0, 1.0)
+    with pytest.raises(ValueError):
+        bandit.reward("a", float("nan"), 1.0)
+    report = bandit.report()["operators"]["a"]
+    assert math.isfinite(report["mean_delta"]) and report["mean_delta"] > 0.0
+    assert math.isfinite(report["mean_cost"])
+    assert all(math.isfinite(bandit.value(name)) or name == "b" for name in ("a", "b"))
+
+
+class _NanObjective:
+    name = "nan_fitness"
+    lower_is_better = True
+
+    def pointwise(self, model, data):
+        return None
+
+    def scalar(self, model, data):
+        del model, data
+        return float("nan")
+
+
+def test_population_rejects_nan_fitness_instead_of_ranking_it():
+    # MXR-080-1771: two NaN-scored seeds plus generations=0 returned the first seed, best_score=NaN,
+    # search_failed=False, and zero evaluations -- a failed search shaped like a successful one.
+    pop = Population([_NullModel(None), _NullModel(1)], objective=_NanObjective(), size=4, seed=0)
+    with pytest.raises(ValueError, match="finite"):
+        pop.run(list(range(_N_OBS)), generations=0)
+
+
+def test_population_run_reports_the_same_evaluation_semantics_as_other_backends():
+    seeds = [_NullModel(None), _NullModel(1)]
+    pop = Population(seeds, objective=_NullObjective(_N_OBS), operators=[_NullOp("op0", noise_seed=2)], seed=0)
+    result = pop.run(list(range(_N_OBS)), generations=0)
+    assert result.search_failed is False
+    assert result.n_evaluations == len(seeds)  # the seed scorings really happened
+    assert result.n_successes == result.n_evaluations
+    assert math.isfinite(result.best_score)

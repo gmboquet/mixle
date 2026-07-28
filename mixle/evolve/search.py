@@ -159,9 +159,10 @@ class SearchResult:
     ``search_failed`` / ``n_evaluations`` / ``n_successes`` distinguish "we searched and found a real
     (if mediocre) model" from "every configuration failed and best_model is a hollow placeholder" --
     without them, a totally failed search (``best_model=None``, ``best_score`` at the internal penalty
-    sentinel) is shaped identically to a real result. Populated by the ``bo`` / ``evolutionary``
-    backends; the ``bandit`` backend (built on :class:`~mixle.evolve.population.Population`, which owns
-    its own success/failure bookkeeping) leaves them at their defaults.
+    sentinel) is shaped identically to a real result. Every backend populates them, including the
+    ``bandit`` one via :meth:`mixle.evolve.population.Population.run` -- it used to leave them at their
+    defaults, so a run that evaluated seeds and generations still reported ``n_evaluations=0`` and
+    ``search_failed=False``, which reads as a successful search that did no work.
     """
 
     best_config: dict[str, Any]
@@ -171,6 +172,26 @@ class SearchResult:
     search_failed: bool = False  # True iff NO configuration was ever successfully built/scored
     n_evaluations: int = 0  # total build/score attempts (successes + failures)
     n_successes: int = 0  # of those, how many actually succeeded
+
+
+def _positive_int(value: Any, name: str) -> int:
+    """Validate a search control as an exact positive integer.
+
+    ``n_iter`` is a work budget and ``mu``/``lam`` are population sizes: a zero, negative, or
+    fractional value is not a count of anything, and a budget of zero buys no result at all (BO
+    cannot fit a surrogate from no observations; the evolutionary loop cannot seed a population).
+    Rejected outright rather than silently normalized into "do some work anyway", which is what
+    ``n_iter=0`` used to do in both backends.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"search: {name} must be an exact positive integer, got {value!r}")
+    try:
+        count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"search: {name} must be an exact positive integer, got {value!r}") from None
+    if count != value or count < 1:
+        raise ValueError(f"search: {name} must be an exact positive integer, got {value!r}")
+    return count
 
 
 def _held_out_score(
@@ -225,9 +246,13 @@ def search(
             (a (mu + lambda) loop over ``sample`` / ``neighbors``), or ``'bandit'`` (delegate the
             operator policy to an :class:`~mixle.evolve.population.OperatorBandit`).
         n_iter: the TOTAL evaluation budget (build/score attempts), consistently for ``bo`` and
-            ``evolutionary``. Both backends need at least one evaluation to produce any result, so
+            ``evolutionary`` -- each reserves every evaluation against it before spending, so neither
+            can exceed it (the evolutionary backend used to treat it as a generation count and spend
+            ``mu + lam * n_iter``). Both need at least one evaluation to produce any result, so
             ``n_iter<=0`` is rejected with a clear error instead of silently spending an evaluation
-            anyway. (``bandit`` interprets ``n_iter`` as a generation count, unchanged.)
+            anyway. (``bandit`` interprets ``n_iter`` as a generation count, unchanged -- it delegates
+            to :class:`~mixle.evolve.population.Population`, whose per-generation work depends on the
+            operator policy rather than on a fixed offspring count.)
         holdout: held-out fraction for the inner objective.
         seed: RNG seed.
         method_kwargs: backend-specific knobs (e.g. ``mu`` / ``lam`` for the evolutionary loop,
@@ -287,12 +312,7 @@ def _search_bo(
     """
     from mixle.doe import minimize
 
-    n_iter = int(n_iter)
-    if n_iter <= 0:
-        raise ValueError(
-            "search(method='bo'): n_iter must be >= 1 -- Bayesian optimization needs at least one "
-            f"initial evaluation to fit its surrogate and produce a result; got n_iter={n_iter}."
-        )
+    n_iter = _positive_int(n_iter, "n_iter")
 
     bounds = space.to_bounds()
     history: list[dict[str, Any]] = []
@@ -328,21 +348,22 @@ def _search_evolutionary(
 ) -> tuple[dict[str, Any], Any, float, list[dict[str, Any]]]:
     """A (mu + lambda) evolutionary loop over ``Space.sample`` / ``Space.neighbors``.
 
-    Maintains ``mu`` parents; each generation spawns ``lam`` offspring (a random neighbor of a random
-    parent), evaluates them, and keeps the best ``mu`` of (parents + offspring). Categoricals are handled
-    natively (no numeric rounding), so this is the backend for spaces BO encodes lossily.
+    Maintains up to ``mu`` parents; each generation spawns up to ``lam`` offspring (a random neighbor
+    of a random parent), evaluates them, and keeps the best ``mu`` of (parents + offspring).
+    Categoricals are handled natively (no numeric rounding), so this is the backend for spaces BO
+    encodes lossily.
 
-    ``n_iter`` is the generation count, but the loop cannot seed a population -- let alone rank one --
-    without evaluating at least its ``mu`` initial parents, so ``n_iter <= 0`` is rejected outright
-    rather than silently spending ``mu`` evaluations anyway (the previous behavior for ``n_iter=0``).
+    ``n_iter`` is the TOTAL evaluation budget -- the same meaning :func:`search` documents and the
+    ``bo`` backend already honors -- NOT a generation count. It used to be the latter, so the loop
+    spent ``mu + lam * n_iter`` evaluations: with ``n_iter=1, mu=4, lam=8`` the receipt reported 12
+    successful evaluations against a stated budget of one. Every evaluation is now reserved against
+    the budget before it is spent, so the initial parents are capped at ``min(mu, n_iter)`` and a
+    generation stops mid-way once the budget is exhausted. ``n_iter <= 0`` buys nothing and is
+    rejected outright.
     """
-    n_iter = int(n_iter)
-    if n_iter <= 0:
-        raise ValueError(
-            "search(method='evolutionary'): n_iter must be >= 1 -- the loop needs at least "
-            f"mu={mu} initial-parent evaluations to seed a population before any generation can "
-            f"run; got n_iter={n_iter}."
-        )
+    n_iter = _positive_int(n_iter, "n_iter")
+    mu = _positive_int(mu, "mu")
+    lam = _positive_int(lam, "lam")
 
     rng = np.random.RandomState(seed)
     history: list[dict[str, Any]] = []
@@ -352,17 +373,20 @@ def _search_evolutionary(
         history.append({"config": config, "score": float(canonical), "failed": error is not None, "error": error})
         return canonical, model
 
-    # initial parents: random samples.
+    # initial parents: random samples, capped by the budget (a population is worth nothing if seeding
+    # it already overspends what the caller authorized).
     population: list[tuple[float, dict[str, Any], Any]] = []
-    for _ in range(mu):
+    for _ in range(min(mu, n_iter)):
         cfg = space.sample(rng)
         score, model = evaluate(cfg)
         population.append((score, cfg, model))
     population.sort(key=lambda t: t[0])
 
-    for _ in range(n_iter):
+    while len(history) < n_iter:
         offspring: list[tuple[float, dict[str, Any], Any]] = []
         for _ in range(lam):
+            if len(history) >= n_iter:
+                break
             parent = population[int(rng.randint(0, len(population)))][1]
             nbrs = space.neighbors(parent)
             child = nbrs[int(rng.randint(0, len(nbrs)))] if nbrs else space.sample(rng)

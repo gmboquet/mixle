@@ -85,6 +85,14 @@ class OperatorBandit:
         ops = list(operators)
         if not ops:
             raise ValueError("OperatorBandit needs at least one operator.")
+        names = [op.name for op in ops]
+        if len(set(names)) != len(names):
+            # `{op.name: op for op in ops}` silently collapsed same-named operators into one arm, so
+            # two supplied operators shared a single set of statistics, only one of them was ever
+            # selectable, and reward() credited whichever survived the collapse. An operator name is
+            # the arm identity here and in every report -- an ambiguous one has no correct resolution.
+            dupes = sorted({name for name in names if names.count(name) > 1})
+            raise ValueError(f"OperatorBandit operator names must be unique, got duplicate(s): {dupes!r}")
         if policy not in ("thompson", "ucb"):
             raise ValueError(f"policy must be 'thompson' or 'ucb' (got {policy!r}).")
         if not 0.0 < decay <= 1.0:
@@ -138,9 +146,21 @@ class OperatorBandit:
         Decays every arm first (non-stationarity), then updates the chosen arm. A ``delta`` is clipped at
         0 below -- a rejected challenger is a zero reward, never negative, matching the anti-regression
         guarantee (we never *punish* an operator for a rejected proposal beyond not rewarding it).
+
+        ``delta`` and ``cost`` must be finite (and ``cost`` non-negative). ``max(nan, 0.0)`` returns
+        ``nan``, so a single non-finite update used to poison the arm permanently: mean delta, mean
+        cost, and every subsequent Thompson draw for it came back ``nan``, and a ``nan`` policy value
+        sorts unpredictably against real ones. Policy state is not a place to absorb an invalid
+        measurement.
         """
         if op_name not in self.arms:
             raise KeyError(f"unknown operator {op_name!r}.")
+        delta = float(delta)
+        cost = float(cost)
+        if not math.isfinite(delta):
+            raise ValueError(f"reward for operator {op_name!r} must be a finite delta, got {delta!r}")
+        if not math.isfinite(cost) or cost < 0.0:
+            raise ValueError(f"reward for operator {op_name!r} must have a finite, non-negative cost, got {cost!r}")
         for arm in self.arms.values():
             arm.pulls *= self.decay
             arm.wins *= self.decay
@@ -306,9 +326,26 @@ class Population:
 
     # -- scoring helpers -----------------------------------------------------
     def _score(self, model: Any, data: Any) -> float:
-        """Objective scalar normalized so *smaller is always better* (lower-is-better canonical form)."""
+        """Objective scalar normalized so *smaller is always better* (lower-is-better canonical form).
+
+        Fitness must be finite. Nothing required that before, so a NaN-scored seed produced a
+        population whose ``min()`` selection is order-dependent (every NaN comparison is ``False``, so
+        ``min`` simply returns whichever element it saw first), a champion chosen by that accident,
+        and a :class:`~mixle.evolve.search.SearchResult` reporting ``best_score=nan`` while looking
+        like an ordinary successful search. Survivor and champion comparisons downstream have no
+        ordering to work with either. This mirrors
+        :func:`mixle.evolve.search._held_out_score`, which already treats a non-finite score as a
+        failed evaluation rather than a value.
+        """
         s = float(self.objective.scalar(model, data))
-        return s if self.objective.lower_is_better else -s
+        s = s if self.objective.lower_is_better else -s
+        if not math.isfinite(s):
+            raise ValueError(
+                f"objective {self.objective.name!r} scored {type(model).__name__} as {s!r}; population "
+                "fitness must be finite -- a non-finite score defines no ordering for survivor "
+                "selection or the champion comparison."
+            )
+        return s
 
     def _member(self, model: Any, data: Any) -> _Member:
         return _Member(model, self._score(model, data), capabilities(model))
@@ -548,11 +585,19 @@ class Population:
             )
         # report best_score back in the objective's native orientation.
         native_best = self._champion_score if self.objective.lower_is_better else -self._champion_score
+        # Same unsuccessful/incomplete semantics the bo/evolutionary backends report, rather than
+        # leaving them at defaults that read as a successful search of zero evaluations: every seed
+        # scoring plus every proposal this run made is real, budgeted work, and each one succeeded
+        # (a non-finite fitness now raises in _score rather than becoming a member).
+        n_evaluations = len(self._raw_seeds) + sum(int(row["proposals"]) for row in history)
         return SearchResult(
             best_config={},  # population searches structures, not a config vector
             best_model=self._champion,
             best_score=float(native_best),
             history=history,
+            search_failed=not self._members,
+            n_evaluations=n_evaluations,
+            n_successes=n_evaluations,
         )
 
     def evaluate_holdout(
