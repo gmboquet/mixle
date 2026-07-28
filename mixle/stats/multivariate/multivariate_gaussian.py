@@ -307,19 +307,21 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         covar = coalesce_alias("covar", covar, "covariance", covariance, default=MISSING)
         self.mu = vector_parameter(mu, label="multivariate Gaussian mean")
         self.dim = len(self.mu)
+        # Shape/finiteness/dtype are validated here, but NOT symmetry: a float32/GPU sample covariance
+        # is routinely asymmetric in the last bits, and _robust_cho_factor exists precisely to
+        # symmetrize (and, if needed, jitter-heal) that rather than reject it. It still raises when the
+        # input is too far from positive-definite to attribute to float noise, so an unambiguously
+        # invalid covariance is still refused -- see _MAX_HEAL_EIGENVALUE_RATIO.
         self.covar = matrix_parameter(
             covar,
             label="multivariate Gaussian covariance",
             dim=self.dim,
-            symmetric=True,
         )
-        try:
-            self.chol = scipy.linalg.cho_factor(self.covar)
-        except (scipy.linalg.LinAlgError, np.linalg.LinAlgError) as exc:
-            raise ValueError(
-                "multivariate Gaussian covariance must be strictly positive definite; "
-                "regularize estimator output explicitly before construction"
-            ) from exc
+        # self.covar is reassigned here to the EXACT (symmetrized, and self-healed if necessary)
+        # covariance _robust_cho_factor actually factorized -- not the possibly asymmetric/indefinite
+        # input -- so every downstream reader of self.covar (the sampler, __str__, condition/marginal,
+        # the Fisher view, ...) agrees with what chol/log_det/inv_covar drive scoring from.
+        self.chol, self.covar = _robust_cho_factor(self.covar)
         self.name = name
         self.keys = keys
 
@@ -970,9 +972,7 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             if self.dim is None:
                 self.dim = prior_dim
             elif self.dim != prior_dim:
-                raise ValueError(
-                    "multivariate Gaussian estimator prior dimension must match its configured dimension"
-                )
+                raise ValueError("multivariate Gaussian estimator prior dimension must match its configured dimension")
         self.min_covar = finite_scalar(
             1.0e-8 if min_covar is None else min_covar,
             label="multivariate Gaussian min_covar",

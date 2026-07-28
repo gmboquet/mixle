@@ -118,12 +118,7 @@ def pseudo_counts(value: Any, *, label: str) -> tuple[float | None, float | None
         raw = (None, None)
     if not isinstance(raw, (tuple, list)) or len(raw) != 2:
         raise ValueError("%s must be a scalar or a two-item sequence" % label)
-    checked = tuple(
-        None
-        if item is None
-        else finite_scalar(item, label=label, nonnegative=True)
-        for item in raw
-    )
+    checked = tuple(None if item is None else finite_scalar(item, label=label, nonnegative=True) for item in raw)
     return checked[0], checked[1]
 
 
@@ -218,12 +213,7 @@ def pooled_gaussian_covariance(
             prior_scatter = pseudo_count * (prior_covar + (prior_mean - mean) ** 2)
             return (observed_scatter + prior_scatter) / (count + pseudo_count)
     else:
-        observed_scatter = (
-            sum_xx
-            - np.outer(mean, sum_x)
-            - np.outer(sum_x, mean)
-            + count * np.outer(mean, mean)
-        )
+        observed_scatter = sum_xx - np.outer(mean, sum_x) - np.outer(sum_x, mean) + count * np.outer(mean, mean)
         observed_scatter = 0.5 * (observed_scatter + observed_scatter.T)
         eigenvalues = np.linalg.eigvalsh(observed_scatter)
         scale = max(
@@ -290,9 +280,16 @@ def gaussian_moments(
             value[1],
             label="Gaussian second-moment statistic",
             dim=inferred_dim,
-            symmetric=True,
         )
         scale = max(float(np.linalg.norm(sum_xx, ord=2)), 1.0)
+        # sum_i w_i x_i x_i^T is symmetric by construction, so any asymmetry here is float
+        # accumulation noise -- and float32/GPU EM produces exactly that. Requiring exact symmetry
+        # rejected those legitimate sufficient statistics outright. Refuse asymmetry too large to be
+        # noise (same relative tolerance as the PSD check below, which already concedes the point),
+        # then symmetrize the remainder rather than failing on it.
+        if np.max(np.abs(sum_xx - sum_xx.T), initial=0.0) > 1.0e-6 * scale:
+            raise ValueError("Gaussian second-moment statistic must be symmetric")
+        sum_xx = 0.5 * (sum_xx + sum_xx.T)
         if np.linalg.eigvalsh(sum_xx)[0] < -1.0e-6 * scale:
             raise ValueError("Gaussian second-moment statistic must be positive semidefinite")
     if count == 0.0 and (np.any(sum_x != 0.0) or np.any(sum_xx != 0.0)):
@@ -305,9 +302,7 @@ def student_t_moments(
     dim: int | None,
 ) -> tuple[float, float, np.ndarray | None, np.ndarray | None, int | None]:
     if not isinstance(value, tuple) or len(value) != 4:
-        raise ValueError(
-            "Student-t sufficient statistic must be a (count, latent_weight, sum, second_moment) tuple"
-        )
+        raise ValueError("Student-t sufficient statistic must be a (count, latent_weight, sum, second_moment) tuple")
     count = weight(value[0], label="Student-t sufficient-statistic count")
     sum_u = weight(value[1], label="Student-t latent-weight total")
     if value[2] is None or value[3] is None:
@@ -329,8 +324,6 @@ def student_t_moments(
         raise ValueError("Student-t second-moment statistic must be positive semidefinite")
     if (count == 0.0) != (sum_u == 0.0):
         raise ValueError("Student-t count and latent-weight total must both be zero or both be positive")
-    if sum_u == 0.0 and (
-        np.any(sum_ux != 0.0) or np.any(sum_uxx != 0.0)
-    ):
+    if sum_u == 0.0 and (np.any(sum_ux != 0.0) or np.any(sum_uxx != 0.0)):
         raise ValueError("zero Student-t latent weight requires zero weighted moments")
     return count, sum_u, sum_ux, sum_uxx, inferred_dim

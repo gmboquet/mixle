@@ -62,9 +62,13 @@ class RobustCholeskyTest(unittest.TestCase):
         np.testing.assert_allclose(effective_covar, np.array([[1.0, 0.55], [0.55, 1.0]]), atol=1e-12)
         np.testing.assert_allclose(effective_covar, _covar_from_cho_factor(chol), atol=1e-12)
 
-    def test_public_construction_rejects_non_pd_input(self):
-        with self.assertRaises(ValueError):
-            st.MultivariateGaussianDistribution(np.zeros(2), np.array([[1.0, 1.0], [1.0, 1.0]]))
+    def test_public_construction_heals_an_exactly_rank_deficient_covariance(self):
+        # Rank-1 PSD (min eigenvalue exactly 0, not negative) is a legitimate degenerate covariance --
+        # an EM component that collapsed onto a line, not invalid input. It heals to the nearest PD
+        # matrix rather than raising, matching test_near_psd_float_noise_still_heals_after_the_bound.
+        dist = st.MultivariateGaussianDistribution(np.zeros(2), np.array([[1.0, 1.0], [1.0, 1.0]]))
+        self.assertGreater(np.linalg.eigvalsh(dist.covar).min(), 0.0)
+        np.testing.assert_allclose(dist.covar, _covar_from_cho_factor(dist.chol), atol=1e-12)
 
     def test_severely_invalid_covariance_is_refused_not_healed(self):
         # Before this bound, the jitter-healing loop had no limit on how invalid an input it would
@@ -111,11 +115,25 @@ class RobustCholeskyTest(unittest.TestCase):
         self.assertIsNotNone(chol)
         np.testing.assert_allclose(healed, _covar_from_cho_factor(chol), atol=1e-12)
 
-    def test_public_construction_does_not_replace_invalid_covariance(self):
-        for bad_covar in (
+    def test_public_construction_stores_the_covariance_it_actually_factorized(self):
+        # These two inputs are the float-noise cases the self-healing exists for, so construction
+        # must SUCCEED -- but self.covar must then be the symmetrized/healed matrix the factor
+        # corresponds to, never the raw input, or scoring and sampling silently disagree about the
+        # effective covariance. (Refusing them outright instead contradicted
+        # test_near_psd_float_noise_still_heals_after_the_bound above, which requires the second of
+        # these to heal, and broke the float32 EM path this module exists to support.)
+        for covar in (
             np.array([[1.0, 0.5], [0.6, 1.0]]),  # asymmetric, PD via cho_factor's fast path
             np.array([[1.0, 1.0], [1.0, 1.0 - 1e-9]]),  # symmetric, tiny negative eigenvalue
         ):
+            dist = st.MultivariateGaussianDistribution(np.zeros(2), covar)
+            np.testing.assert_allclose(dist.covar, dist.covar.T, atol=0.0)  # stored covar is symmetric
+            np.testing.assert_allclose(dist.covar, _covar_from_cho_factor(dist.chol), atol=1e-12)
+
+    def test_public_construction_still_refuses_a_substantively_invalid_covariance(self):
+        # Healing is bounded: an input too far from PD to be float noise is still refused at the
+        # public constructor, not silently replaced with an arbitrary PD substitute.
+        for bad_covar in (-np.eye(2), np.diag([5.0, -1.0])):
             with self.assertRaises(ValueError):
                 st.MultivariateGaussianDistribution(np.zeros(2), bad_covar)
 
