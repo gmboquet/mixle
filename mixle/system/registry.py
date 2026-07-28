@@ -15,8 +15,11 @@ directly (``Router(tiers=stack)``), with the frontier appended last as the route
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import fcntl
 import json
+import math
 import os
 import tempfile
 from collections.abc import Sequence
@@ -32,6 +35,11 @@ __all__ = ["Registry", "RegistryEntry"]
 
 _INDEX_NAME = "index.json"
 _LOCK_NAME = ".registry.lock"
+
+#: The closed set of artifact kinds this registry knows how to reload. Anything else is an unreadable
+#: record, not a task model: :meth:`Registry.load` used to treat every unrecognized kind as the default
+#: ``TaskModel`` branch, so an index naming ``kind="invented"`` still reached ``TaskModel.load``.
+_KINDS = ("task", "calibrated", "field_posterior")
 
 
 def _safe_entry_id(entry_id: str) -> str:
@@ -107,17 +115,76 @@ def _load_field_posterior(path: str) -> Any:
     return load_posterior(path)
 
 
-@dataclass
+def _validated_fingerprint(fingerprint: Any, entry_id: str) -> list[float] | None:
+    """Return ``fingerprint`` as a list of finite floats, or raise; ``None`` passes through.
+
+    A fingerprint is a point in a metric space -- nearest-model selection orders entries by distance
+    to it. A NaN coordinate makes every distance comparison false, so a NaN-bearing entry keeps
+    whatever position it happened to hold and can be returned as the "nearest" match ahead of an exact
+    hit; there is no ordering in which an undefined distance is meaningfully the smallest. Reject the
+    coordinate at the boundary instead of letting it participate in ranking.
+    """
+    if fingerprint is None:
+        return None
+    try:
+        values = [float(v) for v in fingerprint]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"registry entry {entry_id!r} has a non-numeric fingerprint") from exc
+    if any(not math.isfinite(v) for v in values):
+        raise ValueError(f"registry entry {entry_id!r} has a non-finite fingerprint coordinate")
+    return values
+
+
+@dataclass(frozen=True)
 class RegistryEntry:
-    """One catalog record: where the artifact lives, what it's registered under, and how much it costs to run."""
+    """One catalog record: where the artifact lives, what it's registered under, and how much it costs to run.
+
+    Frozen, and validated on construction. A durable catalog record is a *persisted fact*, not a
+    scratch object: :meth:`Registry.find_for` used to hand out the very objects stored in
+    ``Registry._entries``, so rebinding a lookup result's ``path`` silently redirected the next
+    :meth:`Registry.load` and clearing its ``capabilities`` removed it from later matching -- all
+    without any registry mutation API, validation, persistence, or receipt. Lookups now return
+    defensive copies (see :meth:`copy`), and a rebinding attempt raises instead of quietly rewriting
+    routing.
+    """
 
     entry_id: str
     path: str
-    kind: str  # "task", "calibrated", or "field_posterior" -- which loader reloads the artifact at ``path``
+    kind: str  # one of _KINDS -- which loader reloads the artifact at ``path``
     capabilities: list[str] = field(default_factory=list)
     fingerprint: list[float] | None = None
     profile: dict[str, Any] = field(default_factory=dict)
     cost: float = 0.0
+
+    def __post_init__(self) -> None:
+        _safe_entry_id(self.entry_id)
+        if self.kind not in _KINDS:
+            raise ValueError(
+                f"registry entry {self.entry_id!r} has unknown kind {self.kind!r}; expected one of {_KINDS}"
+            )
+        if not isinstance(self.path, str) or not self.path:
+            raise ValueError(f"registry entry {self.entry_id!r} has no artifact path")
+        if any(not isinstance(c, str) for c in self.capabilities):
+            raise ValueError(f"registry entry {self.entry_id!r} capabilities must be strings")
+        object.__setattr__(self, "capabilities", list(self.capabilities))
+        object.__setattr__(self, "fingerprint", _validated_fingerprint(self.fingerprint, self.entry_id))
+        object.__setattr__(self, "profile", copy.deepcopy(dict(self.profile)))
+        cost = float(self.cost)
+        if not math.isfinite(cost):
+            raise ValueError(f"registry entry {self.entry_id!r} cost must be finite, got {self.cost!r}")
+        object.__setattr__(self, "cost", cost)
+
+    def copy(self) -> RegistryEntry:
+        """A defensive copy: mutating its containers cannot reach the registry's own state."""
+        return RegistryEntry(
+            entry_id=self.entry_id,
+            path=self.path,
+            kind=self.kind,
+            capabilities=list(self.capabilities),
+            fingerprint=list(self.fingerprint) if self.fingerprint is not None else None,
+            profile=copy.deepcopy(self.profile),
+            cost=self.cost,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the registry entry into JSON-compatible fields."""
@@ -127,13 +194,19 @@ class RegistryEntry:
             "kind": self.kind,
             "capabilities": list(self.capabilities),
             "fingerprint": list(self.fingerprint) if self.fingerprint is not None else None,
-            "profile": self.profile,
+            "profile": copy.deepcopy(self.profile),
             "cost": self.cost,
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> RegistryEntry:
-        """Create a registry entry from a JSON index record."""
+        """Create a registry entry from a JSON index record.
+
+        The index is untrusted persisted input, not a trusted in-process value: ``entry_id``, ``kind``,
+        ``fingerprint`` and ``cost`` are validated here exactly as they are on :meth:`Registry.register`
+        (see :meth:`Registry._read_index`, which additionally re-derives ``path`` from the registry root
+        rather than trusting the serialized one).
+        """
         return cls(
             entry_id=d["entry_id"],
             path=d["path"],
@@ -158,10 +231,26 @@ class Registry:
         return os.path.join(self.dir, _INDEX_NAME)
 
     def _read_index(self) -> list[RegistryEntry]:
+        """Load the on-disk index, validating every record and re-deriving each artifact path.
+
+        Path containment and kind validity used to be checked only while *registering*; deserialization
+        trusted both fields verbatim. An index record naming an absolute path outside the registry and
+        an invented kind therefore loaded straight through :meth:`load`'s fallthrough ``TaskModel``
+        branch, handing the loader a path the registry never wrote. The index is untrusted persisted
+        input: ``RegistryEntry.from_dict`` validates the id/kind/fingerprint, and the artifact path is
+        derived from the registry root plus the entry id -- exactly what :meth:`register` writes -- so a
+        serialized path can never redirect a load.
+        """
         if not os.path.exists(self._index_path()):
             return []
         with open(self._index_path()) as f:
-            return [RegistryEntry.from_dict(d) for d in json.load(f)]
+            records = json.load(f)
+        entries: list[RegistryEntry] = []
+        for record in records:
+            entry = RegistryEntry.from_dict(record)
+            derived = os.path.join(self.dir, entry.entry_id)
+            entries.append(entry.copy() if entry.path == derived else dataclasses.replace(entry, path=derived))
+        return entries
 
     def _write_index(self) -> None:
         """Persist ``self._entries`` to the index file, atomically (temp file + ``os.replace``).
@@ -236,6 +325,9 @@ class Registry:
             )
         if entry_id is not None:
             _safe_entry_id(entry_id)
+        # validated before anything is written: an invalid fingerprint must not leave an artifact and a
+        # claim marker behind for an index row that then fails to construct.
+        fingerprint = _validated_fingerprint(list(fingerprint) if fingerprint is not None else None, entry_id or "?")
 
         lock_path = os.path.join(self.dir, _LOCK_NAME)
         with open(lock_path, "w") as lock_f:
@@ -307,15 +399,22 @@ class Registry:
                 self._write_index()
             finally:
                 fcntl.flock(lock_f, fcntl.LOCK_UN)
-        return entry
+        return entry.copy()
 
     def load(self, entry_id: str) -> TaskModel | CalibratedTaskModel | Any:
-        """Reload a registered model by ``entry_id`` (round-trips through the artifact on disk)."""
+        """Reload a registered model by ``entry_id`` (round-trips through the artifact on disk).
+
+        Always resolves through :meth:`_get` against the registry's own validated state -- never a
+        record a caller was handed by :meth:`find_for` and may have altered.
+        """
         entry = self._get(entry_id)
         if entry.kind == "field_posterior":
             return _load_field_posterior(entry.path)
-        cls = CalibratedTaskModel if entry.kind == "calibrated" else TaskModel
-        return cls.load(entry.path)
+        if entry.kind == "calibrated":
+            return CalibratedTaskModel.load(entry.path)
+        if entry.kind == "task":
+            return TaskModel.load(entry.path)
+        raise ValueError(f"registry entry {entry_id!r} has unknown kind {entry.kind!r}")
 
     def _get(self, entry_id: str) -> RegistryEntry:
         for e in self._entries:
@@ -326,21 +425,32 @@ class Registry:
     def find_for(self, query: str | Sequence[float], *, top_k: int | None = None) -> list[RegistryEntry]:
         """Entries matching ``query``: a capability name (``str``, containment match) or a task fingerprint
         vector (array-like of floats, nearest-neighbor match). ``top_k`` caps how many are returned -- every
-        capability match by default, or the single nearest fingerprint match by default."""
+        capability match by default, or the single nearest fingerprint match by default.
+
+        Returns defensive copies: the results are a *view* of the catalog, not handles onto it, so
+        altering one cannot silently rewrite where a later :meth:`load` reads from or which entries a
+        later query matches (registration is the only way to change the catalog).
+
+        An entry whose fingerprint does not share the query's dimension is skipped individually rather
+        than aborting the whole search: one length-3 record used to make every two-dimensional query
+        raise a broadcasting ``ValueError``, hiding every healthy entry behind one incompatible one.
+        """
         if isinstance(query, str):
-            matches = [e for e in self._entries if query in e.capabilities]
+            matches = [e.copy() for e in self._entries if query in e.capabilities]
             return matches[:top_k] if top_k is not None else matches
         q: np.ndarray = np.asarray(query, dtype=np.float64)
+        if q.ndim != 1 or not np.isfinite(q).all():
+            raise ValueError("fingerprint query must be a finite one-dimensional vector")
         scored = sorted(
             (
-                (float(np.linalg.norm(np.asarray(e.fingerprint, dtype=np.float64) - q)), e)
-                for e in self._entries
-                if e.fingerprint is not None
+                (float(np.linalg.norm(np.asarray(e.fingerprint, dtype=np.float64) - q)), i, e)
+                for i, e in enumerate(self._entries)
+                if e.fingerprint is not None and len(e.fingerprint) == q.shape[0]
             ),
-            key=lambda t: t[0],
+            key=lambda t: (t[0], t[1]),
         )
         k = top_k if top_k is not None else 1
-        return [e for _, e in scored[:k]]
+        return [e.copy() for _, _, e in scored[:k]]
 
     def tier_stack(
         self,

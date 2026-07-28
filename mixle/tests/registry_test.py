@@ -16,6 +16,8 @@ Also regression-tests two review findings fixed in this file:
    on-disk index fresh under the lock) plus an independent claim-file conflict guard.
 """
 
+import dataclasses
+import json
 import multiprocessing as mp
 import os
 import tempfile
@@ -337,6 +339,120 @@ class RegistryTest(unittest.TestCase):
             self.assertEqual(indexed_ids, {f"writer_{i}" for i in range(n_writers)})
             for i in range(n_writers):
                 reg.load(f"writer_{i}")
+
+
+def _write_index(root, records):
+    os.makedirs(root, exist_ok=True)
+    with open(os.path.join(root, "index.json"), "w") as f:
+        json.dump(records, f)
+
+
+def _record(entry_id, root, **kw):
+    base = {
+        "entry_id": entry_id,
+        "path": os.path.join(root, entry_id),
+        "kind": "task",
+        "capabilities": ["cap"],
+        "fingerprint": None,
+        "profile": {},
+        "cost": 0.0,
+    }
+    base.update(kw)
+    return base
+
+
+class UntrustedIndexTest(unittest.TestCase):
+    """MXR-080-1695: path containment and kind validation applied only while registering. Index
+    deserialization trusted both fields, so a record naming an absolute path outside the registry and
+    ``kind="invented"`` loaded straight through load()'s fallthrough TaskModel branch."""
+
+    def test_an_unknown_kind_is_rejected_rather_than_treated_as_a_task_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "reg")
+            _write_index(root, [_record("e0", root, kind="invented")])
+            with self.assertRaises(ValueError):
+                Registry(root)
+
+    def test_a_serialized_path_cannot_redirect_a_load_outside_the_registry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "reg")
+            outside = os.path.join(tmp, "outside", "artifact")
+            _write_index(root, [_record("e0", root, path=outside)])
+            reg = Registry(root)
+            self.assertEqual(reg._get("e0").path, os.path.join(root, "e0"))
+
+    def test_an_unsafe_entry_id_in_the_index_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "reg")
+            _write_index(root, [_record("../escaped", root)])
+            with self.assertRaises(ValueError):
+                Registry(root)
+
+
+class ImmutableRecordsTest(unittest.TestCase):
+    """MXR-080-1696: find_for() returned the very objects held in Registry._entries, so mutating a
+    lookup result rewrote later routing and loads with no mutation API, validation or persistence."""
+
+    def test_a_lookup_result_cannot_rebind_the_registrys_artifact_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "reg")
+            _write_index(root, [_record("a", root)])
+            reg = Registry(root)
+            found = reg.find_for("cap")[0]
+            with self.assertRaises(dataclasses.FrozenInstanceError):
+                found.path = "/tmp/redirected"
+            self.assertEqual(reg._get("a").path, os.path.join(root, "a"))
+
+    def test_clearing_a_lookup_results_capabilities_does_not_unregister_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "reg")
+            _write_index(root, [_record("a", root)])
+            reg = Registry(root)
+            reg.find_for("cap")[0].capabilities.clear()
+            self.assertEqual([e.entry_id for e in reg.find_for("cap")], ["a"])
+
+    def test_nested_profile_data_is_defensively_copied(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "reg")
+            _write_index(root, [_record("a", root, profile={"capture": {"n": 1}})])
+            reg = Registry(root)
+            reg.find_for("cap")[0].profile["capture"]["n"] = 99
+            self.assertEqual(reg._get("a").profile, {"capture": {"n": 1}})
+
+
+class FingerprintSelectionTest(unittest.TestCase):
+    """MXR-080-1697: registration and deserialization accepted arbitrary fingerprint values and
+    dimensions -- a NaN entry could be selected as "nearest" over an exact match, and one length-3
+    record made every two-dimensional query raise a broadcasting ValueError."""
+
+    def test_a_non_finite_fingerprint_is_rejected_at_the_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "reg")
+            nan = float("nan")
+            _write_index(root, [_record("bad", root, fingerprint=[nan, nan])])
+            with self.assertRaises(ValueError):
+                Registry(root)
+
+    def test_an_incompatible_dimension_is_skipped_not_fatal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "reg")
+            _write_index(
+                root,
+                [
+                    _record("wrong_dim", root, fingerprint=[1.0, 2.0, 3.0]),
+                    _record("healthy", root, fingerprint=[0.0, 0.0]),
+                ],
+            )
+            reg = Registry(root)
+            self.assertEqual([e.entry_id for e in reg.find_for([0.0, 0.0])], ["healthy"])
+
+    def test_a_non_finite_query_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "reg")
+            _write_index(root, [_record("healthy", root, fingerprint=[0.0, 0.0])])
+            reg = Registry(root)
+            with self.assertRaises(ValueError):
+                reg.find_for([float("nan"), 0.0])
 
 
 if __name__ == "__main__":
