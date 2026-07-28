@@ -4,6 +4,10 @@ An :class:`Event` is a typed, timestamped decision record containing the
 decision kind, the features used, the selected choice, and an optional outcome.
 A :class:`Telemetry` recorder buffers events and can append them to a JSONL log
 for dashboards or learned policies.
+
+``kind`` is validated against :data:`EVENT_KINDS`; the payload fields are not
+validated, filtered or redacted at all. See the package docstring
+(:mod:`mixle.telemetry`) for what that means for anything sensitive.
 """
 
 from __future__ import annotations
