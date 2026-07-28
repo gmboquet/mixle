@@ -57,6 +57,65 @@ class CreateTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             create(_scalar(100, 0), calibrate=1.5)
 
+    def test_successful_run_records_every_postcondition_as_performed(self):
+        art = create(_scalar(300, 0), calibrate=0.3, quantify_uq=True, seed=0)
+        self.assertTrue(art.is_certified())
+        self.assertEqual(art.failed_postconditions(), [])
+        for name in ("calibration", "uq"):
+            self.assertTrue(art.postconditions[name]["requested"])
+            self.assertTrue(art.postconditions[name]["performed"])
+            self.assertIsNone(art.postconditions[name]["error"])
+        self.assertGreaterEqual(int(art.guarantee), 4)
+
+
+class RequestedPostconditionFailureTest(unittest.TestCase):
+    """MXR-080-1649: a requested calibration/UQ that raised may not vanish behind a 'certified' claim."""
+
+    def _both_failing(self):
+        import importlib
+        import sys
+
+        from mixle.inference.planning import Guarantee
+
+        cal_module = importlib.import_module("mixle.inference.calibrate_fit")
+        # mixle.inference re-exports uq() as an attribute, shadowing the submodule for attribute
+        # access -- reach the module object itself through sys.modules.
+        uq_module = sys.modules["mixle.inference.uq"]
+
+        def _boom(*a, **kw):
+            raise RuntimeError("postcondition backend is down")
+
+        real_cal, real_uq = cal_module.calibration_report, uq_module.uq
+        try:
+            cal_module.calibration_report = _boom
+            uq_module.uq = _boom
+            art = create(_scalar(300, 0), calibrate=0.2, quantify_uq=True, seed=0)
+        finally:
+            cal_module.calibration_report = real_cal
+            uq_module.uq = real_uq
+        return art, Guarantee
+
+    def test_failed_postconditions_are_recorded_and_block_certification(self):
+        art, Guarantee = self._both_failing()
+        self.assertIsNone(art.calibration)
+        self.assertIsNone(art.uq)
+        self.assertEqual(art.failed_postconditions(), ["calibration", "uq"])
+        self.assertFalse(art.is_certified())
+        for name in ("calibration", "uq"):
+            self.assertTrue(art.postconditions[name]["requested"])
+            self.assertFalse(art.postconditions[name]["performed"])
+            self.assertIn("postcondition backend is down", art.postconditions[name]["error"])
+        # the aggregate claim no longer outruns the conditions it was asked to establish
+        self.assertEqual(art.guarantee, Guarantee.UNVERIFIED)
+        # a requested-but-failed calibration is False, not the "never asked" None
+        self.assertIs(art.is_calibrated(), False)
+
+    def test_unrequested_postconditions_leave_the_artifact_certified(self):
+        art = create(_scalar(300, 0), seed=0)
+        self.assertTrue(art.is_certified())
+        self.assertIsNone(art.is_calibrated())  # never asked -> unknown, not failed
+        self.assertGreaterEqual(int(art.guarantee), 4)
+
 
 if __name__ == "__main__":
     unittest.main()

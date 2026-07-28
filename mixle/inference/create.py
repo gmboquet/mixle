@@ -20,7 +20,14 @@ from typing import Any
 
 @dataclass
 class CreatedModel:
-    """A certified model artifact: the fitted model plus its guarantees and provenance."""
+    """A certified model artifact: the fitted model plus its guarantees and provenance.
+
+    ``postconditions`` records every post-fit condition the caller asked for and what became of it:
+    ``{"calibration": {"requested": True, "performed": False, "error": "..."}, ...}``. A requested
+    postcondition that raised used to be replaced by a bare ``None`` field, so an artifact whose
+    calibration and UQ had both failed was indistinguishable from one where neither was asked for --
+    while still advertising the estimation certificate's guarantee.
+    """
 
     model: Any
     certificate: Any
@@ -28,10 +35,34 @@ class CreatedModel:
     calibration: Any | None = None
     uq: Any | None = None
     provenance: dict[str, Any] = field(default_factory=dict)
+    postconditions: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def failed_postconditions(self) -> list[str]:
+        """Names of the postconditions the caller requested that did not complete."""
+        return sorted(
+            name for name, state in self.postconditions.items() if state.get("requested") and not state.get("performed")
+        )
+
+    def is_certified(self) -> bool:
+        """Whether every requested postcondition actually completed.
+
+        The estimation certificate alone does not make an artifact certified: a caller who asked for
+        calibration or UQ asked for it as part of the claim, so a silent failure invalidates the
+        aggregate claim even though the fit itself succeeded.
+        """
+        return not self.failed_postconditions()
 
     @property
     def guarantee(self) -> Any:
-        """The aggregate estimation guarantee (MIN over blocks) -- the artifact's summary claim."""
+        """The aggregate estimation guarantee (MIN over blocks) -- the artifact's summary claim.
+
+        Reports ``Guarantee.UNVERIFIED`` when a requested postcondition failed: the artifact cannot
+        expose a guarantee stronger than the weakest condition it was asked to establish.
+        """
+        if not self.is_certified():
+            from mixle.inference.planning import Guarantee
+
+            return Guarantee.UNVERIFIED
         return self.certificate.guarantee
 
     def why(self) -> str:
@@ -39,9 +70,14 @@ class CreatedModel:
         return self.certificate.why_not_adam() if hasattr(self.certificate, "why_not_adam") else ""
 
     def is_calibrated(self) -> bool | None:
-        """Whether the calibration holdout judged the model calibrated (None if not checked)."""
+        """Whether the calibration holdout judged the model calibrated.
+
+        ``None`` means calibration was never requested. A *requested* calibration that failed is
+        ``False``, not ``None`` -- the check was asked for and did not pass, which is a different
+        statement from never having asked.
+        """
         if self.calibration is None:
-            return None
+            return False if self.postconditions.get("calibration", {}).get("requested") else None
         return bool(self.calibration.is_calibrated())
 
 
@@ -90,12 +126,22 @@ def create(
     model = optimize(fit_rows, out=None, max_its=max_its, structure=structure, rng=np.random.RandomState(seed))
     cert = certify(model, data=fit_rows)
 
+    # Requested post-conditions stay non-fatal, but the failure is RECORDED rather than replaced by a
+    # bare None: an artifact whose requested calibration/UQ raised is not a certified artifact, and
+    # its guarantee reflects that (see CreatedModel.is_certified).
+    postconditions: dict[str, dict[str, Any]] = {
+        "calibration": {"requested": holdout is not None, "performed": False, "error": None},
+        "uq": {"requested": bool(quantify_uq), "performed": False, "error": None},
+    }
+
     calibration = None
     if holdout is not None:
         try:
             calibration = calibration_report(model, holdout)
-        except Exception:  # noqa: BLE001 - calibration is a best-effort post-condition, never fatal
+            postconditions["calibration"]["performed"] = True
+        except Exception as exc:  # noqa: BLE001 - non-fatal, but never silent
             calibration = None
+            postconditions["calibration"]["error"] = f"{type(exc).__name__}: {exc}"
 
     uq_handle = None
     if quantify_uq:
@@ -103,8 +149,10 @@ def create(
             from mixle.inference.uq import uq as _uq
 
             uq_handle = _uq(model, fit_rows)
-        except Exception:  # noqa: BLE001 - UQ is optional; absence is explicit, not a crash
+            postconditions["uq"]["performed"] = True
+        except Exception as exc:  # noqa: BLE001 - non-fatal, but never silent
             uq_handle = None
+            postconditions["uq"]["error"] = f"{type(exc).__name__}: {exc}"
 
     # M2 precondition: pooling rows into one model assumes exchangeability -- test it, record the
     # verdict next to the artifact (a warning, never a silent refusal).
@@ -121,6 +169,7 @@ def create(
         strategy="edge-constrained" if constrained else "structured",
         calibration=calibration,
         uq=uq_handle,
+        postconditions=postconditions,
         provenance={
             "n": len(rows),
             "n_fit": len(fit_rows),
@@ -129,5 +178,6 @@ def create(
             "device": repr(device) if device is not None else None,
             "seed": seed,
             "exchangeability": exch,
+            "postconditions": postconditions,
         },
     )
