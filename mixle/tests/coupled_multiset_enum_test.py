@@ -185,7 +185,8 @@ class LabeledLDANonEnumerableTestCase(unittest.TestCase):
         from mixle.stats.latent.labeled_lda import LabeledLDADistribution
 
         topics = [np.log([0.6, 0.3, 0.1]), np.log([0.1, 0.4, 0.5])]
-        dist = LabeledLDADistribution(topics, [1.0, 1.0])
+        # alphas is a (label configurations, topics) matrix, not a per-topic vector
+        dist = LabeledLDADistribution(topics, [[1.0, 1.0]])
         with self.assertRaises(EnumerationError):
             dist.enumerator()
         self.assertFalse(supports_enumeration(dist))
