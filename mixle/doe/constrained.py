@@ -23,8 +23,15 @@ from numpy.random import RandomState
 from scipy.special import ndtr
 
 from mixle.doe._contracts import Acquisition, Surrogate
-from mixle.doe.bayesopt import BayesOptResult, _fit_surrogate, _get_acquisition, _validate_xy
-from mixle.doe.designs import Bounds, _as_bounds, _as_rng, latin_hypercube
+from mixle.doe.bayesopt import (
+    BayesOptResult,
+    _fit_surrogate,
+    _get_acquisition,
+    _select_index,
+    _validate_prediction,
+    _validate_xy,
+)
+from mixle.doe.designs import Bounds, _as_bounds, _as_rng, _require_exact_positive_int, latin_hypercube
 
 
 @dataclass(frozen=True)
@@ -96,12 +103,26 @@ def probability_of_feasibility(mean: Any, std: Any) -> np.ndarray:
 def _predict_std(gp: Surrogate, x: np.ndarray, y: np.ndarray, candidates: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Return posterior mean and standard deviation of ``gp`` at ``candidates``."""
     mean, cov = gp.predict(x, y, candidates, return_cov=True)
-    std = np.sqrt(np.clip(np.diag(np.asarray(cov, dtype=np.float64)), 0.0, None))
-    return np.asarray(mean, dtype=np.float64), std
+    mean, cov = _validate_prediction(mean, cov, candidates.shape[0], context="constrained BO")
+    assert cov is not None
+    std = np.sqrt(np.maximum(np.diag(cov), 0.0))
+    return mean, std
 
 
 def _best_feasible(y: np.ndarray, c: np.ndarray, maximize: bool = False) -> tuple[int, np.ndarray]:
     """Return (index of incumbent, feasibility mask). Incumbent = best feasible, else least-infeasible."""
+    y = np.asarray(y, dtype=np.float64)
+    if y.ndim != 1:
+        raise ValueError(f"y must be one-dimensional, got shape {y.shape}.")
+    c = _as_feasibility_matrix("c", c)
+    if c.shape[0] != y.shape[0] or c.shape[1] == 0:
+        raise ValueError("c must have one nonempty constraint row per objective observation.")
+    if not np.all(np.isfinite(y)):
+        raise ValueError("objective observations must be finite.")
+    if not np.all(np.isfinite(c)):
+        raise ValueError("constraint observations must be finite.")
+    if type(maximize) is not bool:
+        raise TypeError(f"maximize must be a bool, got {type(maximize).__name__}.")
     if y.size == 0:
         # np.argmin on an empty violation/masked array crashes with an opaque "attempt to get argmin
         # of an empty sequence" ValueError. Same documented path as bayesopt._propose_one: there is no
@@ -145,6 +166,9 @@ def propose_next_constrained(
     """
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
+    n_candidates = _require_exact_positive_int(n_candidates, "n_candidates")
+    if type(maximize) is not bool:
+        raise TypeError(f"maximize must be a bool, got {type(maximize).__name__}.")
     x, y = _validate_xy(x, y)
     if y.size == 0:
         # Same defect class as bayesopt._propose_one / batch.propose_qei_batch /
@@ -156,9 +180,15 @@ def propose_next_constrained(
         # rather than failing fast, so the real error would only surface several lines later. Check
         # here, first, so every environment gets the same clear error.
         raise ValueError("cannot propose a next constrained point with zero observations; call tell() first.")
-    c = np.atleast_2d(np.asarray(c, dtype=np.float64))
+    c = _as_feasibility_matrix("c", c)
     if c.shape[0] != x.shape[0]:
         raise ValueError("c must have one row of constraint values per observation.")
+    if c.shape[1] == 0:
+        raise ValueError("c must contain at least one constraint column.")
+    if not np.all(np.isfinite(y)):
+        raise ValueError("objective observations must be finite.")
+    if not np.all(np.isfinite(c)):
+        raise ValueError("constraint observations must be finite.")
     acq_fn = _get_acquisition(acq)
     kw = {"xi": xi, **(acq_kwargs or {})}
 
@@ -183,7 +213,7 @@ def propose_next_constrained(
         c_mean[:, k], c_std[:, k] = _predict_std(gp_k, x, ck, candidates)
 
     merit = acq_vals * probability_of_feasibility(c_mean, c_std)
-    pick = int(np.argmax(merit))
+    pick = _select_index(merit, candidates.shape[0], largest=True, context="constrained BO merit")
     if return_acquisition:
         return candidates[pick], float(merit[pick])
     return candidates[pick]
@@ -213,19 +243,76 @@ def constrained_minimize(
     """
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
-    if n_init <= 0:
-        raise ValueError("n_init must be positive.")
+    n_init = _require_exact_positive_int(n_init, "n_init")
+    n_iter = _require_exact_positive_int(n_iter, "n_iter", minimum=0)
+    n_candidates = _require_exact_positive_int(n_candidates, "n_candidates")
+    if type(maximize) is not bool:
+        raise TypeError(f"maximize must be a bool, got {type(maximize).__name__}.")
     if len(constraints) == 0:
         raise ValueError("constrained_minimize requires at least one constraint; use minimize otherwise.")
 
-    def eval_c(point: np.ndarray) -> list[float]:
-        return [float(con(point)) for con in constraints]
+    x_rows: list[np.ndarray] = []
+    y_values: list[float] = []
+    c_rows: list[np.ndarray] = []
+    failed_evaluations: list[dict[str, Any]] = []
+    n_evaluations = 0
 
-    x = latin_hypercube(b, n_init, rng)
-    y = np.array([float(objective(np.asarray(row, dtype=np.float64))) for row in x], dtype=np.float64)
-    c = np.array([eval_c(np.asarray(row, dtype=np.float64)) for row in x], dtype=np.float64)
+    def evaluate(point: np.ndarray) -> tuple[float, np.ndarray] | None:
+        nonlocal n_evaluations
+        candidate = np.array(point, dtype=np.float64, copy=True)
+        n_evaluations += 1
+        objective_value = float(objective(candidate.copy()))
+        constraint_values = np.asarray([float(con(candidate.copy())) for con in constraints], dtype=np.float64)
+        if not np.isfinite(objective_value) or not np.all(np.isfinite(constraint_values)):
+            failed_evaluations.append(
+                {
+                    "evaluation": n_evaluations,
+                    "x": candidate,
+                    "status": "nonfinite_observation",
+                    "objective": objective_value,
+                    "constraints": constraint_values,
+                }
+            )
+            return None
+        return objective_value, constraint_values
 
-    for _ in range(int(n_iter)):
+    def result(stopped_reason: str) -> ConstrainedBayesOptResult:
+        x = np.asarray(x_rows, dtype=np.float64).reshape(-1, b.shape[0])
+        y = np.asarray(y_values, dtype=np.float64)
+        c = np.asarray(c_rows, dtype=np.float64).reshape(-1, len(constraints))
+        if y.size:
+            idx, feasible = _best_feasible(y, c, maximize=maximize)
+            best_x: np.ndarray | None = x[idx].copy()
+            best_y: float | None = float(y[idx])
+        else:
+            feasible = np.empty(0, dtype=bool)
+            best_x = None
+            best_y = None
+        return ConstrainedBayesOptResult(
+            best_x=best_x,
+            best_y=best_y,
+            x=x,
+            y=y,
+            n_evaluations=n_evaluations,
+            failed_evaluations=tuple(failed_evaluations),
+            stopped_reason=stopped_reason,
+            c=c,
+            feasible=feasible,
+        )
+
+    for row in latin_hypercube(b, n_init, rng):
+        observation = evaluate(row)
+        if observation is None:
+            return result("objective_or_constraint_failed")
+        objective_value, constraint_values = observation
+        x_rows.append(np.array(row, dtype=np.float64, copy=True))
+        y_values.append(objective_value)
+        c_rows.append(constraint_values.copy())
+
+    for _ in range(n_iter):
+        x = np.asarray(x_rows, dtype=np.float64)
+        y = np.asarray(y_values, dtype=np.float64)
+        c = np.asarray(c_rows, dtype=np.float64)
         nxt = np.asarray(
             propose_next_constrained(
                 x,
@@ -242,22 +329,15 @@ def constrained_minimize(
             ),
             dtype=np.float64,
         )
-        x = np.vstack([x, nxt[None, :]])
-        y = np.append(y, float(objective(nxt)))
-        c = np.vstack([c, np.asarray(eval_c(nxt), dtype=np.float64)[None, :]])
+        observation = evaluate(nxt)
+        if observation is None:
+            return result("objective_or_constraint_failed")
+        objective_value, constraint_values = observation
+        x_rows.append(nxt.copy())
+        y_values.append(objective_value)
+        c_rows.append(constraint_values.copy())
 
-    idx, feasible = _best_feasible(y, c, maximize=maximize)
-    return ConstrainedBayesOptResult(
-        best_x=x[idx],
-        best_y=float(y[idx]),
-        x=x,
-        y=y,
-        n_evaluations=len(y),
-        failed_evaluations=(),
-        stopped_reason="budget_exhausted",
-        c=c,
-        feasible=feasible,
-    )
+    return result("budget_exhausted")
 
 
 __all__: Sequence[str] = [
