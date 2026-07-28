@@ -94,6 +94,36 @@ def _require_id(value: str, label: str) -> None:
         raise ValueError(f"{label} must be a portable non-empty identifier")
 
 
+def _require_schema_version(value: Any, label: str) -> None:
+    """Reject a record that does not declare exactly the schema version this module implements.
+
+    Every contract here carries ``schema_version``, but nothing checked it, so a record declaring
+    ``"future/999"`` constructed normally and was then interpreted under the 1.0 field rules and given
+    an authoritative semantic identity. A version this build does not implement must stay unreadable
+    (a caller can migrate it explicitly) rather than be silently reinterpreted as a current contract.
+    """
+    if value != SEMANTICS_SCHEMA_VERSION:
+        raise ValueError(
+            f"{label} declares schema_version {value!r}, which this build does not implement; "
+            f"only {SEMANTICS_SCHEMA_VERSION!r} is supported -- migrate the record explicitly"
+        )
+
+
+def _canonical_mapping(value: Any, label: str) -> dict[str, Any]:
+    """Deep-normalize a caller-owned mapping into an owned canonical value.
+
+    Frozen records used to retain the caller's mapping BY REFERENCE, so a durable semantic identity
+    changed underneath itself: constructing a ``PriorSpec`` from ``{"mu": 0}`` and then setting the
+    original mapping's ``"mu"`` to ``9`` changed that same object's ``identity`` digest. Normalizing
+    (which also validates canonical-JSON-ness, as the old ``canonical_json(...)`` call did) produces
+    fresh nested containers the caller has no handle on.
+    """
+    normalized = _normalize(value, semantic=False)
+    if not isinstance(normalized, dict):
+        raise TypeError(f"{label} must be a mapping with string keys")
+    return normalized
+
+
 def _coerce_enum(value: Any, enum_cls: type[StrEnum], label: str) -> StrEnum:
     """Coerce ``value`` into a member of ``enum_cls``, as every ``from_record`` already does.
 
@@ -144,6 +174,7 @@ class ConstraintSpec:
     schema_version: str = SEMANTICS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        _require_schema_version(self.schema_version, "constraint")
         if self.lower is not None and not math.isfinite(self.lower):
             raise ValueError("constraint lower bound must be finite")
         if self.upper is not None and not math.isfinite(self.upper):
@@ -179,6 +210,7 @@ class TransformSpec:
     schema_version: str = SEMANTICS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        _require_schema_version(self.schema_version, "transform")
         object.__setattr__(self, "kind", _coerce_enum(self.kind, TransformKind, "transform kind"))
         if not all(math.isfinite(item) for item in (self.scale, self.offset, self.lower, self.upper)):
             raise ValueError("transform parameters must be finite")
@@ -250,15 +282,18 @@ class PriorSpec:
     schema_version: str = SEMANTICS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        _require_schema_version(self.schema_version, "prior")
         _require_id(self.id, "prior id")
         _require_id(self.family, "prior family")
         if not self.unit:
             raise ValueError("prior unit is required; use '1' for dimensionless")
-        canonical_json(self.parameters)
+        object.__setattr__(self, "parameters", _canonical_mapping(self.parameters, "prior parameters"))
+        object.__setattr__(self, "_identity", semantic_digest(self))
 
     @property
     def identity(self) -> str:
-        return semantic_digest(self)
+        """The content digest fixed at construction -- a durable record cannot drift into a new identity."""
+        return self._identity
 
     @classmethod
     def from_record(cls, value: Mapping[str, Any]) -> PriorSpec:
@@ -282,6 +317,7 @@ class ValueSpec:
     schema_version: str = SEMANTICS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        _require_schema_version(self.schema_version, "value")
         object.__setattr__(self, "role", _coerce_enum(self.role, ValueRole, "value role"))
         _require_id(self.id, "value id")
         if not self.unit:
@@ -300,11 +336,13 @@ class ValueSpec:
             raise ValueError(f"{self.role.value} values cannot declare a prior")
         if self.constraint and self.value is not None and not self.constraint.accepts(self.value):
             raise ValueError("value violates its declared constraint")
-        canonical_json(self.value)
+        object.__setattr__(self, "value", _normalize(self.value, semantic=False))
+        object.__setattr__(self, "_identity", semantic_digest(self))
 
     @property
     def identity(self) -> str:
-        return semantic_digest(self)
+        """The content digest fixed at construction -- a durable record cannot drift into a new identity."""
+        return self._identity
 
     @classmethod
     def from_record(cls, value: Mapping[str, Any]) -> ValueSpec:
@@ -331,11 +369,12 @@ class LikelihoodSpec:
     schema_version: str = SEMANTICS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        _require_schema_version(self.schema_version, "likelihood")
         _require_id(self.id, "likelihood id")
         _require_id(self.family, "likelihood family")
         if not self.observation_ids or len(self.observation_ids) != len(set(self.observation_ids)):
             raise ValueError("likelihood requires unique observation ids")
-        canonical_json(self.parameters)
+        object.__setattr__(self, "parameters", _canonical_mapping(self.parameters, "likelihood parameters"))
 
     @classmethod
     def from_record(cls, value: Mapping[str, Any]) -> LikelihoodSpec:
@@ -354,6 +393,7 @@ class ObservationSpec:
     schema_version: str = SEMANTICS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        _require_schema_version(self.schema_version, "observation")
         _require_id(self.id, "observation id")
         _require_id(self.value_spec_id, "observation value id")
         if not _SHA256.fullmatch(self.content_digest) or not self.data_ref:
@@ -381,6 +421,7 @@ class UncertaintyComponent:
     schema_version: str = SEMANTICS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        _require_schema_version(self.schema_version, "uncertainty")
         object.__setattr__(self, "kind", _coerce_enum(self.kind, UncertaintyKind, "uncertainty kind"))
         _require_id(self.id, "uncertainty id")
         if (self.value is None) == (self.artifact_digest is None):
@@ -413,6 +454,7 @@ class PosteriorArtifact:
     schema_version: str = SEMANTICS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        _require_schema_version(self.schema_version, "posterior")
         _require_id(self.id, "posterior id")
         if not self.values or not self.observations or not self.method:
             raise ValueError("posterior values, observations, and method are required")
@@ -426,12 +468,14 @@ class PosteriorArtifact:
             raise ValueError("posterior likelihood must close over exactly its observations")
         if self.sample_digest is not None and not _SHA256.fullmatch(self.sample_digest):
             raise ValueError("posterior sample digest must be SHA-256")
-        canonical_json(self.summary)
-        canonical_json(self.diagnostics)
+        object.__setattr__(self, "summary", _canonical_mapping(self.summary, "posterior summary"))
+        object.__setattr__(self, "diagnostics", _canonical_mapping(self.diagnostics, "posterior diagnostics"))
+        object.__setattr__(self, "_identity", semantic_digest(self))
 
     @property
     def identity(self) -> str:
-        return semantic_digest(self)
+        """The content digest fixed at construction -- a durable record cannot drift into a new identity."""
+        return self._identity
 
     @classmethod
     def from_record(cls, value: Mapping[str, Any]) -> PosteriorArtifact:
@@ -458,6 +502,7 @@ class PredictiveArtifact:
     schema_version: str = SEMANTICS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        _require_schema_version(self.schema_version, "predictive")
         _require_id(self.id, "predictive id")
         if not _SHA256.fullmatch(self.posterior_identity) or not _SHA256.fullmatch(self.content_digest):
             raise ValueError("predictive posterior and content identities must be SHA-256")
@@ -475,10 +520,12 @@ class CalibrationArtifact:
     schema_version: str = SEMANTICS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        _require_schema_version(self.schema_version, "calibration")
         _require_id(self.id, "calibration id")
         if not _SHA256.fullmatch(self.target_identity) or not self.method or not self.metrics:
             raise ValueError("calibration target, method, and metrics are required")
-        canonical_json(self.metrics)
+        object.__setattr__(self, "metrics", _canonical_mapping(self.metrics, "calibration metrics"))
+        object.__setattr__(self, "slice", _canonical_mapping(self.slice, "calibration slice"))
 
 
 @dataclass(frozen=True)
@@ -493,6 +540,7 @@ class DecisionArtifact:
     schema_version: str = SEMANTICS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        _require_schema_version(self.schema_version, "decision")
         _require_id(self.id, "decision id")
         if len(self.alternatives) < 2 or len(set(self.alternatives)) != len(self.alternatives):
             raise ValueError("decision alternatives must contain at least two unique values")
@@ -502,6 +550,7 @@ class DecisionArtifact:
             raise ValueError("decision posterior identity and risk measure are required")
         if any(not math.isfinite(value) for value in self.utility.values()):
             raise ValueError("decision utility values must be finite")
+        object.__setattr__(self, "utility", _canonical_mapping(self.utility, "decision utility"))
 
 
 @dataclass(frozen=True)
@@ -514,6 +563,7 @@ class CapabilityExtension:
     schema_version: str = SEMANTICS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        _require_schema_version(self.schema_version, "capability extension")
         _require_id(self.id, "capability extension id")
         _require_id(self.owner_project, "capability extension owner")
         _require_id(self.maturity, "capability extension maturity")
@@ -532,13 +582,14 @@ class TraceEvent:
     schema_version: str = SEMANTICS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        _require_schema_version(self.schema_version, "trace event")
         _require_id(self.trace_id, "trace id")
         _require_id(self.event_type, "trace event type")
         if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 0:
             raise ValueError("trace sequence must be a nonnegative integer")
         if not _SHA256.fullmatch(self.semantic_identity):
             raise ValueError("trace semantic identity must be SHA-256")
-        canonical_json(self.payload)
+        object.__setattr__(self, "payload", _canonical_mapping(self.payload, "trace payload"))
         try:
             timestamp = datetime.fromisoformat(self.occurred_at.replace("Z", "+00:00"))
         except (AttributeError, ValueError) as exc:
