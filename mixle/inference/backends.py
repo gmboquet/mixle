@@ -50,8 +50,44 @@ class InferenceBackend:
 _INFERENCE_BACKENDS: dict[str, InferenceBackend] = {}
 
 
-def register_inference_backend(backend: InferenceBackend) -> None:
-    """Register (or replace) an inference backend under ``backend.name``."""
+def register_inference_backend(backend: InferenceBackend, *, replace: bool = False) -> None:
+    """Register an inference backend under ``backend.name``.
+
+    The registry is global process state that :func:`select_backend` dispatches every ``nuts`` call
+    through, so one malformed registration is not a local mistake -- it corrupts dispatch for every
+    caller. A backend with an empty name and an unrecognized ``target_kind`` used to register
+    successfully and become selectable, even though :func:`select_backend` rejects that same kind
+    string when a *caller* supplies it.
+
+    Replacing an already-registered name requires ``replace=True``. Silent replacement let a second
+    import or a typo'd name swap out a live sampler with no trace; an intentional override (a test
+    double, a vendored engine) says so explicitly.
+
+    Raises:
+        TypeError: if ``backend`` is not an :class:`InferenceBackend`, or ``available``/``nuts`` are
+            not callable.
+        ValueError: for an empty/blank name, an unrecognized ``target_kind``, or an unrequested
+            replacement of a registered name.
+    """
+    if not isinstance(backend, InferenceBackend):
+        raise TypeError(f"register_inference_backend expects an InferenceBackend, got {type(backend).__name__}.")
+    if not isinstance(backend.name, str) or not backend.name.strip():
+        raise ValueError(f"inference backend name must be a non-empty string; got {backend.name!r}.")
+    if backend.target_kind not in _KIND_PREFERENCE:
+        raise ValueError(
+            f"inference backend {backend.name!r} declares unknown target kind {backend.target_kind!r}; "
+            f"known kinds: {', '.join(sorted(_KIND_PREFERENCE))}. Target kinds are the calling convention "
+            "select_backend dispatches on, so an unrecognized one is never selectable for any target."
+        )
+    if not callable(backend.available):
+        raise TypeError(f"inference backend {backend.name!r} needs a callable available() probe.")
+    if not callable(backend.nuts):
+        raise TypeError(f"inference backend {backend.name!r} needs a callable nuts implementation.")
+    if backend.name in _INFERENCE_BACKENDS and not replace:
+        raise ValueError(
+            f"inference backend {backend.name!r} is already registered; pass replace=True to override it "
+            "deliberately (silent replacement swaps out a live sampler for every caller with no trace)."
+        )
     _INFERENCE_BACKENDS[backend.name] = backend
 
 
@@ -65,8 +101,43 @@ def get_inference_backend(name: str) -> InferenceBackend:
 
 
 def available_backends() -> list[str]:
-    """Return the names of registered backends whose engine is importable, in registration order."""
-    return [name for name, b in _INFERENCE_BACKENDS.items() if b.available()]
+    """Return the names of registered backends whose engine is importable, in registration order.
+
+    Each probe is isolated: one backend whose ``available()`` raises used to propagate out of this
+    call and hide *every* healthy backend, so a single broken third-party registration made the
+    always-present numpy path look unavailable too. A raising probe answers "unknown", which is
+    reported as a warning and treated as unavailable -- it cannot be silently equivalent to a probe
+    that returned ``False``, because the caller may need to know its engine is misconfigured rather
+    than absent.
+    """
+    return [name for name, _ok, _err in _probe_backends() if _ok]
+
+
+def backend_availability() -> list[tuple[str, bool, str | None]]:
+    """Per-backend ``(name, available, probe_error)`` in registration order.
+
+    ``probe_error`` is ``None`` unless that backend's ``available()`` raised, in which case it is the
+    formatted exception and ``available`` is ``False``.
+    """
+    return _probe_backends()
+
+
+def _probe_backends() -> list[tuple[str, bool, str | None]]:
+    import warnings
+
+    out: list[tuple[str, bool, str | None]] = []
+    for name, b in _INFERENCE_BACKENDS.items():
+        try:
+            out.append((name, bool(b.available()), None))
+        except Exception as exc:  # noqa: BLE001 - one broken probe must not hide every healthy backend
+            warnings.warn(
+                f"inference backend {name!r} availability probe raised "
+                f"{type(exc).__name__}: {exc}; treating it as unavailable.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            out.append((name, False, f"{type(exc).__name__}: {exc}"))
+    return out
 
 
 def select_backend(backend: str = "auto", target: str | None = None) -> str:
