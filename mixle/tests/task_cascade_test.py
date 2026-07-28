@@ -100,5 +100,56 @@ class CascadeServeTest(unittest.TestCase):
         self.assertLessEqual(model2.escalation_rate(fresh), model.escalation_rate(fresh) + 0.05)
 
 
+class _AlwaysEscalate:
+    """Minimal stand-in for a CalibratedTaskModel that defers every request to the teacher."""
+
+    def decide(self, text):
+        from mixle.task.calibrate import ESCALATE
+
+        return ESCALATE
+
+
+class TeacherBatchNormalizationTest(unittest.TestCase):
+    """MXR-080-1664: a one-element teacher batch is unwrapped whatever container it arrives in."""
+
+    def test_numpy_batch_output_is_unwrapped_to_its_element(self):
+        casc = Cascade(_AlwaysEscalate(), lambda batch: np.array(["teacher-label"]))
+        answer = casc("anything")
+        self.assertEqual(answer, "teacher-label")
+        self.assertNotIsInstance(answer, np.ndarray)
+        _texts, labels = casc.harvested()
+        self.assertEqual(labels, ["teacher-label"])
+
+    def test_list_and_tuple_batches_still_unwrap(self):
+        for out in (["a"], ("a",)):
+            casc = Cascade(_AlwaysEscalate(), lambda batch, out=out: out)
+            self.assertEqual(casc("x"), "a")
+
+    def test_scalar_teacher_output_is_rejected_under_the_batch_contract(self):
+        casc = Cascade(_AlwaysEscalate(), lambda batch: "bare-label")
+        with self.assertRaises(TypeError):
+            casc("x")
+
+    def test_item_mode_takes_the_scalar_answer_verbatim(self):
+        seen = []
+
+        def teacher(text):
+            seen.append(text)
+            return "bare-label"
+
+        casc = Cascade(_AlwaysEscalate(), teacher, teacher_mode="item")
+        self.assertEqual(casc("x"), "bare-label")
+        self.assertEqual(seen, ["x"])  # called with the request itself, not a one-element batch
+
+    def test_wrong_cardinality_batch_is_rejected(self):
+        casc = Cascade(_AlwaysEscalate(), lambda batch: ["a", "b"])
+        with self.assertRaises(ValueError):
+            casc("x")
+
+    def test_unknown_teacher_mode_is_rejected(self):
+        with self.assertRaises(ValueError):
+            Cascade(_AlwaysEscalate(), lambda batch: ["a"], teacher_mode="guess")
+
+
 if __name__ == "__main__":
     unittest.main()
