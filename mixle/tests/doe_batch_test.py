@@ -127,6 +127,19 @@ class SafeCholeskyValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not finite"):
             monte_carlo_qei([0.0, 0.0], [[1.0, 0.0], [0.0, np.nan]], best=1.0, samples=100, seed=0)
 
+    def test_zero_covariance_is_valid_and_reports_absolute_jitter(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            value = monte_carlo_qei([0.5, 0.5], np.zeros((2, 2)), best=1.0, samples=32, seed=0)
+        self.assertAlmostEqual(value, 0.5, places=9)
+        messages = [str(item.message) for item in caught if issubclass(item.category, RuntimeWarning)]
+        self.assertEqual(len(messages), 1)
+        self.assertIn("absolute jitter for zero covariance scale", messages[0])
+
+    def test_asymmetric_covariance_is_rejected_not_replaced(self):
+        with self.assertRaisesRegex(ValueError, "not symmetric"):
+            monte_carlo_qei([0.0, 0.0], [[1.0, 0.2], [0.0, 1.0]], best=1.0, samples=32, seed=0)
+
 
 class MonteCarloQeiInputValidationTest(unittest.TestCase):
     """MXR-080-0167 at the monte_carlo_qei level: nonpositive/fractional sample counts, mean/cov shape
@@ -145,6 +158,11 @@ class MonteCarloQeiInputValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "samples"):
             monte_carlo_qei([0.5], [[0.64]], best=1.0, samples=10.5, seed=0)
 
+    def test_boolean_samples_rejected(self):
+        for bad in (True, False, np.bool_(True)):
+            with self.assertRaises((TypeError, ValueError)):
+                monte_carlo_qei([0.5], [[0.64]], best=1.0, samples=bad, seed=0)
+
     def test_cov_mean_shape_mismatch_rejected(self):
         with self.assertRaisesRegex(ValueError, "shape"):
             monte_carlo_qei([0.5, 0.5, 0.5], [[1.0, 0.0], [0.0, 1.0]], best=1.0, samples=100, seed=0)
@@ -152,6 +170,18 @@ class MonteCarloQeiInputValidationTest(unittest.TestCase):
     def test_non_finite_mean_rejected(self):
         with self.assertRaisesRegex(ValueError, "not finite|non-finite"):
             monte_carlo_qei([np.nan, 0.5], [[1.0, 0.0], [0.0, 1.0]], best=1.0, samples=100, seed=0)
+
+    def test_non_finite_incumbent_and_non_boolean_sense_are_rejected(self):
+        for invalid in (np.nan, np.inf, -np.inf):
+            with self.assertRaisesRegex(ValueError, "best"):
+                monte_carlo_qei([0.5], [[0.64]], best=invalid, samples=10, seed=0)
+        for invalid in ("false", 0, np.bool_(True)):
+            with self.assertRaises(TypeError):
+                monte_carlo_qei([0.5], [[0.64]], best=1.0, maximize=invalid, samples=10, seed=0)
+
+    def test_overflowing_finite_inputs_do_not_publish_infinite_qei(self):
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            monte_carlo_qei([1e308], [[1.0]], best=-1e308, maximize=True, samples=10, seed=0)
 
     def test_a_well_posed_call_is_unaffected(self):
         # negative control: ordinary, valid inputs still work exactly as before.
@@ -196,6 +226,23 @@ class BatchDriverInputValidationTest(unittest.TestCase):
                 propose_qei_batch(
                     self.x, self.y, self.bounds, q=2, n_candidates=10, mc_samples=bad_mc, gp=_StubSurrogate()
                 )
+
+    def test_boolean_counts_are_rejected_by_both_batch_drivers(self):
+        for bad in (True, np.bool_(True)):
+            with self.assertRaises((TypeError, ValueError)):
+                propose_qei_batch(
+                    self.x, self.y, self.bounds, q=bad, n_candidates=10, mc_samples=32, gp=_StubSurrogate()
+                )
+            with self.assertRaises((TypeError, ValueError)):
+                propose_local_penalization(
+                    self.x, self.y, self.bounds, q=bad, n_candidates=10, gp=_StubSurrogate()
+                )
+
+    def test_propose_qei_batch_rejects_batch_larger_than_candidates(self):
+        with self.assertRaisesRegex(ValueError, "q <= n_candidates"):
+            propose_qei_batch(
+                self.x, self.y, self.bounds, q=3, n_candidates=2, mc_samples=16, gp=_StubSurrogate()
+            )
 
     def test_propose_local_penalization_rejects_nonpositive_or_fractional_q(self):
         for bad_q in (0, -1, 2.5):
@@ -254,6 +301,7 @@ class BatchDriverInputValidationTest(unittest.TestCase):
         self.assertEqual(batch.shape, (2, 2))
         self.assertTrue(np.isfinite(batch).all())
         self.assertTrue(((batch >= -1.0) & (batch <= 1.0)).all())
+        self.assertEqual(np.unique(batch, axis=0).shape[0], 2)
 
     def test_propose_local_penalization_negative_control_still_selects_sensible_candidates(self):
         batch = propose_local_penalization(
