@@ -3,6 +3,7 @@
 import importlib.util
 import unittest
 import warnings
+from dataclasses import FrozenInstanceError
 from unittest import mock
 
 import numpy as np
@@ -34,19 +35,19 @@ class TrustRegionStateTest(unittest.TestCase):
         tr = TrustRegion(dim=4)
         start = tr.length
         for _ in range(tr.success_tol):
-            tr.update(True)
+            tr = tr.update(True)
         self.assertGreater(tr.length, start)  # doubled after consecutive successes
 
         tr = TrustRegion(dim=4)
         start = tr.length
         for _ in range(tr.failure_tol):
-            tr.update(False)
+            tr = tr.update(False)
         self.assertLess(tr.length, start)  # halved after consecutive failures
 
     def test_collapses(self):
         tr = TrustRegion(dim=2)
-        for _ in range(200):
-            tr.update(False)
+        while not tr.collapsed:
+            tr = tr.update(False)
         self.assertTrue(tr.collapsed)
 
 
@@ -105,14 +106,30 @@ class TrustRegionValidationTest(unittest.TestCase):
         tr = TrustRegion(**kwargs)
         start = tr.length
         for _ in range(tr.success_tol):
-            tr.update(True)
+            tr = tr.update(True)
         self.assertGreater(tr.length, start)
 
         tr = TrustRegion(**kwargs)
         start = tr.length
         for _ in range(tr.failure_tol):
-            tr.update(False)
+            tr = tr.update(False)
         self.assertLess(tr.length, start)
+
+    def test_update_requires_an_exact_boolean_and_preserves_the_old_state(self):
+        tr = TrustRegion(dim=2, success_tol=1)
+        for bad in ("false", 1, np.bool_(True)):
+            with self.assertRaises(TypeError):
+                tr.update(bad)
+        updated = tr.update(True)
+        self.assertEqual(tr.length, 0.8)
+        self.assertEqual(updated.length, 1.6)
+
+    def test_validated_state_cannot_be_invalidated_after_construction(self):
+        tr = TrustRegion(dim=2)
+        with self.assertRaises(FrozenInstanceError):
+            tr.length = np.nan
+        with self.assertRaises(FrozenInstanceError):
+            tr.dim = 0
 
 
 class TurboMinimizeValidationTest(unittest.TestCase):
@@ -177,6 +194,82 @@ class TurboMinimizeValidationTest(unittest.TestCase):
             )
         self.assertEqual(res["Y"].shape[0], 40)
         self.assertGreaterEqual(res["n_restarts"], 0)
+
+    def test_nonfinite_objective_is_failed_evidence_not_an_optimum(self):
+        for invalid in (np.nan, np.inf, -np.inf):
+            res = turbo_minimize(
+                lambda _x, value=invalid: value,
+                [(-1.0, 1.0)] * 2,
+                n_init=4,
+                max_evals=4,
+                seed=0,
+            )
+            self.assertIsNone(res["x"])
+            self.assertIsNone(res["y"])
+            self.assertEqual(res["X"].shape, (0, 2))
+            self.assertEqual(res["Y"].shape, (0,))
+            self.assertEqual(res["n_evaluations"], 1)
+            self.assertEqual(len(res["failed_evaluations"]), 1)
+            self.assertEqual(res["failed_evaluations"][0]["status"], "nonfinite_observation")
+            self.assertEqual(res["stopped_reason"], "objective_failed")
+
+    def test_nonfinite_later_observation_does_not_contaminate_verified_history(self):
+        calls = 0
+
+        def objective(x):
+            nonlocal calls
+            calls += 1
+            return float(np.sum(x**2)) if calls < 5 else np.nan
+
+        with mock.patch.object(tr_module, "_fit_surrogate", side_effect=_fake_fit_surrogate_ok):
+            res = turbo_minimize(
+                objective, [(-1.0, 1.0)] * 2, n_init=4, max_evals=8, batch_size=2, n_candidates=10, seed=0
+            )
+        self.assertEqual(res["n_evaluations"], 5)
+        self.assertEqual(res["X"].shape, (4, 2))
+        self.assertTrue(np.all(np.isfinite(res["Y"])))
+        self.assertEqual(len(res["failed_evaluations"]), 1)
+        self.assertEqual(res["stopped_reason"], "objective_failed")
+
+
+class ThompsonBatchContractTest(unittest.TestCase):
+    def setUp(self):
+        self.rng = np.random.RandomState(0)
+        self.xn = self.rng.uniform(size=(3, 2))
+        self.yn = self.rng.normal(size=3)
+        self.cand = self.rng.uniform(size=(5, 2))
+
+    def _gp(self, mean, covariance):
+        class _Posterior:
+            def predict(self, xn, yn, cand, return_cov=True):
+                return mean, covariance
+
+        return _Posterior()
+
+    def test_rejects_malformed_or_nonfinite_posterior_mean(self):
+        from mixle.doe.trust_region import _thompson_batch
+
+        covariance = np.eye(5)
+        for mean in (np.zeros(4), np.zeros((1, 5)), np.full(5, np.nan)):
+            with self.assertRaises(np.linalg.LinAlgError):
+                _thompson_batch(self._gp(mean, covariance), self.xn, self.yn, self.cand, 2, self.rng)
+
+    def test_rejects_malformed_nonfinite_or_asymmetric_covariance(self):
+        from mixle.doe.trust_region import _thompson_batch
+
+        asymmetric = np.eye(5)
+        asymmetric[0, 1] = 0.2
+        for covariance in (np.eye(4), np.full((5, 5), np.nan), asymmetric):
+            with self.assertRaises(np.linalg.LinAlgError):
+                _thompson_batch(self._gp(np.zeros(5), covariance), self.xn, self.yn, self.cand, 2, self.rng)
+
+    def test_returns_exactly_q_distinct_finite_candidates(self):
+        from mixle.doe.trust_region import _thompson_batch
+
+        picks = _thompson_batch(self._gp(np.zeros(5), np.eye(5)), self.xn, self.yn, self.cand, 4, self.rng)
+        self.assertEqual(picks.shape, (4, 2))
+        self.assertEqual(np.unique(picks, axis=0).shape[0], 4)
+        self.assertTrue(np.all(np.isfinite(picks)))
 
 
 # --------------------------------------------------------------------------- MXR-080-0197
