@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from mixle.doe.designs import Bounds, _as_bounds, _require_exact_positive_int
+from mixle.doe.designs import Bounds, _as_bounds, _require_exact_positive_int, _scale_coded
 
 # Standard cyclic generating rows for the non-power-of-two Plackett-Burman designs (length N-1).
 _PB_GEN: dict[int, str] = {
@@ -33,9 +33,7 @@ _PB_GEN: dict[int, str] = {
 
 def _coded_to_bounds(coded: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Map a coded design (factors centred on 0) into ``bounds``: ``-1`` -> low, ``+1`` -> high."""
-    mid = 0.5 * (b[:, 0] + b[:, 1])
-    half = 0.5 * (b[:, 1] - b[:, 0])
-    return mid + coded * half
+    return _scale_coded(coded, b)
 
 
 def _two_level_full(k: int) -> np.ndarray:
@@ -127,28 +125,44 @@ def fractional_factorial(bounds: Bounds, generators: str | list, *, coded: bool 
     return out if coded else _coded_to_bounds(out, b)
 
 
-def generator_alias_structure(generators: str | list) -> dict[str, str]:
-    """Return the classical alias structure a fractional-factorial ``generators`` spec defines.
+def _alias_word_record(sign: int, factors: frozenset[int]) -> dict[str, object]:
+    """Return one JSON-friendly signed factorial word using public positional factor labels."""
+    return {"sign": sign, "factors": [f"x{index}" for index in sorted(factors)]}
 
-    For each factor whose token is a *compound* generator (a product of two or more base letters,
-    e.g. the ``"d = ab"`` in :func:`fractional_factorial`'s docstring example), maps its positional
-    label (``"x0"``, ``"x1"``, ... in token order, matching :func:`mixle.doe.analysis.factorial_effects`'
-    term naming) to the letters of the interaction it is aliased with (e.g. ``{"x3": "ab"}``, sign-
-    prefixed with ``"-"`` for a negated generator). Base (single-letter) factors are omitted -- they
-    are the generating columns, not aliased with anything; a full (non-fractional) factorial returns
-    an empty dict. Published so the aliasing :func:`fractional_factorial` builds into the design is
-    available to the caller rather than only computed-and-discarded internally (MXR-080-0179).
 
-    Raises the same ``ValueError`` as :func:`fractional_factorial` for a ``generators`` spec that is
-    malformed or degenerate (an undefined letter, a constant column, or two factors aliased with each
-    other), so a design and its published alias structure can never silently disagree.
+def _alias_word_label(factors: frozenset[int]) -> str:
+    """Canonical public name for an identity, main-effect, or interaction word."""
+    return "I" if not factors else ":".join(f"x{index}" for index in sorted(factors))
+
+
+def generator_alias_structure(generators: str | list, *, max_order: int = 2) -> dict[str, object]:
+    """Return signed defining words and complete alias chains through ``max_order``.
+
+    The result is a JSON-friendly record with:
+
+    * ``factor_labels`` mapping every public positional factor name to its source token;
+    * ``base_factors`` mapping each latent generator letter to its named factor and sign;
+    * ``generators`` expressing every compound generator using those public factor names;
+    * ``defining_relations`` and the complete generated ``defining_group`` as signed words; and
+    * ``alias_sets`` for the identity and every effect through the requested interaction order.
+
+    A word record has an integer ``sign`` (``+1`` or ``-1``) and a ``factors`` list. For example,
+    ``"a b ab"`` defines ``I = +x0:x1:x2``; through order two, ``x0`` is aliased with
+    ``+x1:x2`` and ``x2`` with ``+x0:x1``. Negated base or compound tokens propagate their signs
+    through every relation and alias. This supplies the actual confounding structure rather than only
+    repeating the compound generator fragments (MXR-080-1477).
+
+    Every latent base letter must have one named singleton token so aliases can be mapped
+    unambiguously to the positional ``xN`` labels used by :mod:`mixle.doe.analysis`. The generator
+    syntax is otherwise validated exactly like :func:`fractional_factorial`.
     """
+    order_limit = _require_exact_positive_int(max_order, "max_order", minimum=0)
     tokens = _split_generator_tokens(generators)
     letters = sorted({ch for t in tokens for ch in t if ch.isalpha()})
     if not letters:
         raise ValueError("generators must reference at least one base-factor letter.")
     seen: dict[frozenset[str], int] = {}
-    structure: dict[str, str] = {}
+    parsed: list[tuple[int, frozenset[str]]] = []
     for j, token in enumerate(tokens):
         sign, reduced = _reduce_generator_token(token, letters, label="generator token")
         if reduced in seen:
@@ -159,9 +173,71 @@ def generator_alias_structure(generators: str | list) -> dict[str, str]:
                 "generators per factor."
             )
         seen[reduced] = j
-        if len(reduced) > 1:
-            structure[f"x{j}"] = ("-" if sign < 0 else "") + "".join(sorted(reduced))
-    return structure
+        parsed.append((sign, reduced))
+
+    base_factors: dict[str, tuple[int, int]] = {}
+    for index, (sign, reduced) in enumerate(parsed):
+        if len(reduced) == 1:
+            base_factors[next(iter(reduced))] = (index, sign)
+    missing = [letter for letter in letters if letter not in base_factors]
+    if missing:
+        raise ValueError(
+            "every base generator letter must have a named singleton factor for unambiguous aliases; "
+            f"missing singleton token(s) for {', '.join(missing)}."
+        )
+
+    generator_records: dict[str, dict[str, object]] = {}
+    defining_words: list[tuple[int, frozenset[int]]] = []
+    for index, (token_sign, reduced) in enumerate(parsed):
+        if len(reduced) == 1:
+            continue
+        effective_sign = token_sign
+        base_indices: set[int] = set()
+        for letter in reduced:
+            base_index, base_sign = base_factors[letter]
+            effective_sign *= base_sign
+            base_indices.add(base_index)
+        generator_records[f"x{index}"] = _alias_word_record(effective_sign, frozenset(base_indices))
+        defining_words.append((effective_sign, frozenset({index, *base_indices})))
+
+    defining_group: set[tuple[int, frozenset[int]]] = {(1, frozenset())}
+    for relation in defining_words:
+        relation_sign, relation_factors = relation
+        products = {
+            (sign * relation_sign, factors.symmetric_difference(relation_factors))
+            for sign, factors in defining_group
+        }
+        defining_group.update(products)
+    ordered_group = sorted(defining_group, key=lambda word: (len(word[1]), tuple(sorted(word[1])), word[0]))
+
+    from itertools import combinations
+
+    alias_sets: dict[str, list[dict[str, object]]] = {}
+    for effect_order in range(order_limit + 1):
+        for factor_tuple in combinations(range(len(tokens)), effect_order):
+            effect = frozenset(factor_tuple)
+            aliases = {
+                (sign, effect.symmetric_difference(relation_factors))
+                for sign, relation_factors in defining_group
+                if len(effect.symmetric_difference(relation_factors)) <= order_limit
+            }
+            ordered_aliases = sorted(aliases, key=lambda word: (len(word[1]), tuple(sorted(word[1])), word[0]))
+            alias_sets[_alias_word_label(effect)] = [
+                _alias_word_record(sign, factors) for sign, factors in ordered_aliases
+            ]
+
+    return {
+        "max_order": order_limit,
+        "factor_labels": {f"x{index}": token for index, token in enumerate(tokens)},
+        "base_factors": {
+            letter: {"factor": f"x{index}", "sign": sign}
+            for letter, (index, sign) in sorted(base_factors.items())
+        },
+        "generators": generator_records,
+        "defining_relations": [_alias_word_record(sign, factors) for sign, factors in defining_words],
+        "defining_group": [_alias_word_record(sign, factors) for sign, factors in ordered_group],
+        "alias_sets": alias_sets,
+    }
 
 
 def _pb_cyclic(gen: str) -> np.ndarray:
@@ -258,6 +334,8 @@ def central_composite(
         else:
             raise ValueError("alpha must be 'rotatable', 'orthogonal', 'face', or a positive float.")
     else:
+        if isinstance(alpha, (bool, np.bool_)):
+            raise TypeError("numeric alpha must be a real number, not bool.")
         a = float(alpha)
         if not np.isfinite(a) or a <= 0.0:
             raise ValueError("numeric alpha must be finite and positive.")

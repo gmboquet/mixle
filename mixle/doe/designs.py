@@ -74,10 +74,49 @@ def _require_exact_positive_int(value: Any, name: str, *, minimum: int = 1) -> i
 
 
 def _scale_unit(unit: np.ndarray, bounds: np.ndarray) -> np.ndarray:
-    """Scale points from the unit cube ``[0, 1]^d`` into ``bounds``."""
+    """Scale points from ``[0, 1]^d`` without materializing a possibly overflowing span."""
+    values = np.asarray(unit, dtype=np.float64)
+    if values.ndim != 2 or values.shape[1] != bounds.shape[0]:
+        raise ValueError("unit design must be a two-dimensional array with one column per bound.")
+    if not np.all(np.isfinite(values)) or np.any(values < 0.0) or np.any(values > 1.0):
+        raise ValueError("unit design coordinates must be finite and lie in [0, 1].")
+    return _scale_coded(2.0 * values - 1.0, bounds)
+
+
+def _scale_coded(coded: np.ndarray, bounds: np.ndarray) -> np.ndarray:
+    """Scale centred coded coordinates into bounds using overflow-safe midpoint/half-width arithmetic.
+
+    Computing ``high - low`` or ``high + low`` first can overflow even when the requested mapped point
+    is representable. Halving each endpoint before combining it avoids that unnecessary intermediate
+    overflow. Coded coordinates outside ``[-1, 1]`` are allowed for response-surface axial points, but
+    the final mapped design must still be finite.
+    """
+    values = np.asarray(coded, dtype=np.float64)
+    if values.ndim != 2 or values.shape[1] != bounds.shape[0]:
+        raise ValueError("coded design must be a two-dimensional array with one column per bound.")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("coded design coordinates must be finite.")
     low = bounds[:, 0]
     high = bounds[:, 1]
-    return low + unit * (high - low)
+    midpoint = 0.5 * low + 0.5 * high
+    half_width = 0.5 * high - 0.5 * low
+    with np.errstate(over="ignore", invalid="ignore"):
+        mapped = midpoint + values * half_width
+    # Preserve the exact declared endpoints for the overwhelmingly common two-level case.
+    mapped = np.where(values == -1.0, low, np.where(values == 1.0, high, mapped))
+    if not np.all(np.isfinite(mapped)):
+        raise ValueError("coded design cannot be represented finitely within the requested bounds.")
+    return np.asarray(mapped, dtype=np.float64)
+
+
+def _latin_unit(n: int, d: int, rng: RandomState, *, center: bool = False) -> np.ndarray:
+    """Build one Latin hypercube directly in unit coordinates."""
+    unit = np.empty((n, d), dtype=np.float64)
+    for j in range(d):
+        perm = rng.permutation(n)
+        offset = 0.5 if center else rng.random_sample(n)
+        unit[:, j] = (perm + offset) / n
+    return unit
 
 
 def random_design(bounds: Bounds, n: int, seed: int | RandomState | None = None) -> np.ndarray:
@@ -103,11 +142,7 @@ def latin_hypercube(
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
     d = b.shape[0]
-    unit = np.empty((n, d), dtype=np.float64)
-    for j in range(d):
-        perm = rng.permutation(n)
-        offset = 0.5 if center else rng.random_sample(n)
-        unit[:, j] = (perm + offset) / n
+    unit = _latin_unit(n, d, rng, center=center)
     return _scale_unit(unit, b)
 
 
@@ -123,23 +158,23 @@ def maximin_latin_hypercube(
     trials = _require_exact_positive_int(trials, "trials")
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
-    span = b[:, 1] - b[:, 0]
-    best_design: np.ndarray | None = None
+    d = b.shape[0]
+    best_unit: np.ndarray | None = None
     best_score = -np.inf
     for _ in range(trials):
-        design = latin_hypercube(b, n, rng)
+        unit = _latin_unit(n, d, rng)
         if n < 2:
-            return design
-        scaled = (design - b[:, 0]) / span
-        diff = scaled[:, None, :] - scaled[None, :, :]
+            return _scale_unit(unit, b)
+        diff = unit[:, None, :] - unit[None, :, :]
         sq = np.sum(diff * diff, axis=2)
         iu = np.triu_indices(n, k=1)
         score = float(np.min(sq[iu]))
         if score > best_score:
             best_score = score
-            best_design = design
-    assert best_design is not None
-    return best_design
+            best_unit = unit
+    if best_unit is None:  # Defensive: validated positive trials always produce a finite candidate.
+        raise RuntimeError("failed to construct a maximin Latin hypercube candidate.")
+    return _scale_unit(best_unit, b)
 
 
 _MAXPRO_TINY = 1e-12
@@ -271,7 +306,8 @@ def maxpro_design(
                     verified, verified_crit = cand, crit
         if verified_crit < best_crit:
             best_crit, best_unit = verified_crit, verified
-    assert best_unit is not None
+    if best_unit is None:  # Defensive: validated positive restarts always produce a candidate.
+        raise RuntimeError("failed to construct a MaxPro candidate.")
     return _scale_unit(best_unit, b)
 
 
@@ -342,9 +378,12 @@ def full_factorial(bounds: Bounds, levels: int | Sequence[int]) -> np.ndarray:
     # "applied to every dimension" shorthand the docstring promises.
     level_list = [_require_exact_positive_int(k, f"levels[{j}]") for j, k in enumerate(level_list)]
 
-    axes = []
+    axes: list[np.ndarray] = []
     for j, k in enumerate(level_list):
-        low, high = b[j, 0], b[j, 1]
-        axes.append(np.array([0.5 * (low + high)]) if k == 1 else np.linspace(low, high, k))
+        unit_axis = np.array([[0.5]]) if k == 1 else np.linspace(0.0, 1.0, k)[:, None]
+        axes.append(_scale_unit(unit_axis, b[j : j + 1])[:, 0])
     mesh = np.meshgrid(*axes, indexing="ij")
-    return np.stack([m.reshape(-1) for m in mesh], axis=1)
+    design = np.stack([m.reshape(-1) for m in mesh], axis=1)
+    if not np.all(np.isfinite(design)):
+        raise ValueError("full-factorial design cannot be represented finitely within the requested bounds.")
+    return design
