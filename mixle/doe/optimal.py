@@ -26,7 +26,7 @@ import numpy as np
 from numpy.random import RandomState
 
 from mixle.doe._contracts import Criterion
-from mixle.doe.designs import Bounds, _as_bounds, _as_rng, sobol_design
+from mixle.doe.designs import Bounds, _as_bounds, _as_rng, _require_exact_positive_int, sobol_design
 
 ModelMatrix = Callable[[np.ndarray], np.ndarray]
 
@@ -39,8 +39,7 @@ def polynomial_features(degree: int = 1, *, bias: bool = True) -> ModelMatrix:
     (so ``degree=1`` is linear, ``degree=2`` is a full quadratic response surface including the
     cross terms ``x_i x_j``).
     """
-    if degree < 1:
-        raise ValueError("degree must be >= 1.")
+    degree = _require_exact_positive_int(degree, "degree")
 
     def f(x: Any) -> np.ndarray:
         x = np.atleast_2d(np.asarray(x, dtype=np.float64))
@@ -68,8 +67,8 @@ def _validate_info(info: np.ndarray) -> np.ndarray:
     could never arise from a real ``F.T @ F``, so it is rejected outright rather than silently scored.
     """
     info = np.asarray(info, dtype=np.float64)
-    if info.ndim != 2 or info.shape[0] != info.shape[1]:
-        raise ValueError(f"information matrix must be square 2-D; got shape {info.shape}.")
+    if info.ndim != 2 or info.shape[0] != info.shape[1] or info.shape[0] == 0:
+        raise ValueError(f"information matrix must be non-empty square 2-D; got shape {info.shape}.")
     if not np.all(np.isfinite(info)):
         raise ValueError("information matrix must be finite (no NaN/Inf entries).")
     if not np.allclose(info, info.T, atol=1e-8, rtol=1e-6):
@@ -87,14 +86,30 @@ def _validate_info(info: np.ndarray) -> np.ndarray:
 def _validate_ref(ref: np.ndarray, p: int) -> np.ndarray:
     """Validate a reference model matrix has shape ``(*, p)``, matching the information matrix."""
     ref = np.asarray(ref, dtype=np.float64)
-    if ref.ndim != 2 or ref.shape[1] != p:
+    if ref.ndim != 2 or ref.shape[0] == 0 or ref.shape[1] != p:
         raise ValueError(
-            f"reference model matrix must be 2-D with {p} columns to match the information matrix "
+            f"reference model matrix must be non-empty 2-D with {p} columns to match the information matrix "
             f"dimension; got shape {ref.shape}."
         )
     if not np.all(np.isfinite(ref)):
         raise ValueError("reference model matrix must be finite (no NaN/Inf entries).")
     return ref
+
+
+def _validate_merit(value: Any, *, criterion_name: str) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{criterion_name} returned Boolean merit {value!r}; merit must be numeric.")
+    array = np.asarray(value)
+    if array.ndim != 0:
+        raise ValueError(f"{criterion_name} must return one scalar merit; got shape {array.shape}.")
+    try:
+        merit = float(array)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{criterion_name} must return one numeric scalar merit; got {value!r}.") from exc
+    if np.isnan(merit) or np.isposinf(merit):
+        raise ValueError(f"{criterion_name} returned invalid merit {merit!r}.")
+    # `-inf` is the public, documented infeasible-design sentinel for singular information.
+    return merit
 
 
 def d_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
@@ -109,7 +124,7 @@ def d_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
         chol = np.linalg.cholesky(info)
     except np.linalg.LinAlgError:
         return -np.inf
-    return float(2.0 * np.sum(np.log(np.diag(chol))))
+    return _validate_merit(2.0 * np.sum(np.log(np.diag(chol))), criterion_name="d_criterion")
 
 
 def a_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
@@ -123,7 +138,7 @@ def a_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
         inv = np.linalg.solve(info, np.eye(info.shape[0]))
     except np.linalg.LinAlgError:
         return -np.inf
-    return float(-np.trace(inv))
+    return _validate_merit(-np.trace(inv), criterion_name="a_criterion")
 
 
 def i_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
@@ -143,13 +158,16 @@ def i_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
     try:
         if ref is None:
             # Fall back to A-optimality: trace(M^{-1}) via solving M X = I.
-            return float(-np.trace(np.linalg.solve(info, np.eye(p))))
+            return _validate_merit(-np.trace(np.linalg.solve(info, np.eye(p))), criterion_name="i_criterion")
         # Prediction variance g M^{-1} g per reference row via solving M Y = ref.T.
         sol = np.linalg.solve(info, ref.T)
     except np.linalg.LinAlgError:
         return -np.inf
-    pred_var = np.einsum("ij,ji->i", ref, sol)
-    return float(-np.mean(pred_var))
+    with np.errstate(over="ignore", invalid="ignore"):
+        pred_var = np.einsum("ij,ji->i", ref, sol)
+    if not np.all(np.isfinite(pred_var)):
+        raise ValueError("i_criterion produced non-finite prediction variance.")
+    return _validate_merit(-np.mean(pred_var), criterion_name="i_criterion")
 
 
 def g_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
@@ -169,11 +187,18 @@ def g_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
         ref = _validate_ref(ref, p)
     try:
         if ref is None:
-            return float(-np.max(np.diag(np.linalg.solve(info, np.eye(p)))))
+            return _validate_merit(
+                -np.max(np.diag(np.linalg.solve(info, np.eye(p)))),
+                criterion_name="g_criterion",
+            )
         sol = np.linalg.solve(info, ref.T)
     except np.linalg.LinAlgError:
         return -np.inf
-    return float(-np.max(np.einsum("ij,ji->i", ref, sol)))
+    with np.errstate(over="ignore", invalid="ignore"):
+        pred_var = np.einsum("ij,ji->i", ref, sol)
+    if not np.all(np.isfinite(pred_var)):
+        raise ValueError("g_criterion produced non-finite prediction variance.")
+    return _validate_merit(-np.max(pred_var), criterion_name="g_criterion")
 
 
 def e_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
@@ -186,7 +211,7 @@ def e_criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
     Raises ``ValueError`` if ``info`` is not a finite, symmetric, PSD matrix.
     """
     info = _validate_info(info)
-    return float(np.linalg.eigvalsh(info)[0])  # eigvalsh is ascending -> [0] is the smallest
+    return _validate_merit(np.linalg.eigvalsh(info)[0], criterion_name="e_criterion")
 
 
 def c_criterion(c: np.ndarray) -> Criterion:
@@ -200,8 +225,10 @@ def c_criterion(c: np.ndarray) -> Criterion:
     is not a finite, symmetric, PSD matrix or if ``c``'s length does not match ``info``'s dimension.
     """
     cvec = np.asarray(c, dtype=np.float64)
-    if cvec.ndim != 1:
-        raise ValueError(f"contrast vector c must be 1-D; got shape {cvec.shape}.")
+    if cvec.ndim != 1 or cvec.size == 0:
+        raise ValueError(f"contrast vector c must be non-empty 1-D; got shape {cvec.shape}.")
+    if not np.all(np.isfinite(cvec)):
+        raise ValueError("contrast vector c must be finite.")
 
     def criterion(info: np.ndarray, *, ref: np.ndarray | None = None) -> float:
         info = _validate_info(info)
@@ -211,7 +238,10 @@ def c_criterion(c: np.ndarray) -> Criterion:
                 "the information matrix dimension."
             )
         try:
-            return float(-cvec @ np.linalg.solve(info, cvec))
+            return _validate_merit(
+                -cvec @ np.linalg.solve(info, cvec),
+                criterion_name="c_criterion",
+            )
         except np.linalg.LinAlgError:
             return -np.inf
 
@@ -275,9 +305,9 @@ def _exchange(
     pool = fmat.shape[0]
     sel = list(rng.choice(pool, size=n, replace=False))
     in_design = set(sel)
-    cur = crit(fmat[sel].T @ fmat[sel], ref=ref)
+    cur = _validate_merit(crit(fmat[sel].T @ fmat[sel], ref=ref), criterion_name="criterion")
 
-    for _ in range(int(max_iter)):
+    for _ in range(max_iter):
         best_gain = 1.0e-10
         best_swap: tuple[int, int, float] | None = None
         remaining = [c for c in range(pool) if c not in in_design]
@@ -286,7 +316,7 @@ def _exchange(
             base = fmat[kept]
             for add in remaining:
                 trial = np.vstack([base, fmat[add]])
-                val = crit(trial.T @ trial, ref=ref)
+                val = _validate_merit(crit(trial.T @ trial, ref=ref), criterion_name="criterion")
                 if val - cur > best_gain:
                     best_gain = val - cur
                     best_swap = (pos, add, val)
@@ -323,24 +353,33 @@ def optimal_design(
     returned as an ``(n, d)`` array. For ``"I"`` optimality, prediction variance is averaged over
     ``ref`` (a model matrix) when given, else over the candidate pool.
 
-    Raises ``ValueError`` if ``n`` is below the number of model parameters (the information matrix
-    would be singular), and :class:`InfeasibleDesignError` (a ``ValueError`` subclass) if ``n`` is
-    otherwise sufficient by count but the candidate pool's model matrix is rank-deficient -- e.g. a
-    constant or otherwise degenerate pool, where ``n >= p`` rows can never make up for the pool
-    itself spanning fewer than ``p`` independent directions -- or if, defensively, every exchange
-    restart still fails to find a finite-merit design.
+    All count controls are exact positive non-Boolean integers. Candidate and model matrices must be
+    finite nonempty two-dimensional arrays with exactly one model row per candidate; ``ref`` is a
+    finite nonempty model matrix with the same feature width. Raises ``ValueError`` if those contracts
+    fail or if ``n`` is below the number of model parameters (the information matrix would be
+    singular), and :class:`InfeasibleDesignError` (a ``ValueError`` subclass) if ``n`` is otherwise
+    sufficient by count but the candidate pool's model matrix is rank-deficient -- e.g. a constant or
+    otherwise degenerate pool, where ``n >= p`` rows can never make up for the pool itself spanning
+    fewer than ``p`` independent directions -- or if, defensively, every exchange restart still fails
+    to find a finite-merit design.
     """
-    if n <= 0:
-        raise ValueError("n must be positive.")
+    n = _require_exact_positive_int(n, "n")
+    n_candidates = _require_exact_positive_int(n_candidates, "n_candidates")
+    n_restarts = _require_exact_positive_int(n_restarts, "n_restarts")
+    max_iter = _require_exact_positive_int(max_iter, "max_iter")
     rng = _as_rng(seed)
     model = model or polynomial_features(1)
 
     if candidates is not None:
-        pool = np.atleast_2d(np.asarray(candidates, dtype=np.float64))
+        pool = np.asarray(candidates, dtype=np.float64)
+        if pool.ndim != 2 or pool.shape[0] == 0 or pool.shape[1] == 0:
+            raise ValueError(f"candidates must be a non-empty two-dimensional (P, d) array; got shape {pool.shape}.")
+        if not np.all(np.isfinite(pool)):
+            raise ValueError("candidates must contain only finite values.")
     elif bounds is not None:
         # Round the Sobol pool up to a power of two for its balance properties (exact size is
         # not critical -- it is only the candidate set the exchange selects from).
-        pool_n = 1 << int(np.ceil(np.log2(max(2, int(n_candidates)))))
+        pool_n = 1 << int(np.ceil(np.log2(max(2, n_candidates))))
         pool = sobol_design(_as_bounds(bounds), pool_n, rng)
     else:
         raise ValueError("provide either bounds (to generate a candidate pool) or an explicit candidates array.")
@@ -348,6 +387,13 @@ def optimal_design(
         raise ValueError("n cannot exceed the number of candidate points.")
 
     fmat = np.asarray(model(pool), dtype=np.float64)
+    if fmat.ndim != 2 or fmat.shape[0] != pool.shape[0] or fmat.shape[1] == 0:
+        raise ValueError(
+            "model(candidates) must return a non-empty two-dimensional matrix with one row per "
+            f"candidate; got shape {fmat.shape} for {pool.shape[0]} candidate(s)."
+        )
+    if not np.all(np.isfinite(fmat)):
+        raise ValueError("model(candidates) must contain only finite features.")
     p = fmat.shape[1]
     if n < p:
         raise ValueError(f"n={n} is below the {p} model parameters; the information matrix is singular.")
@@ -363,13 +409,13 @@ def optimal_design(
             "degenerate candidate pool or a lower-degree model."
         )
 
-    ref_mat = np.asarray(ref, dtype=np.float64) if ref is not None else fmat
+    ref_mat = _validate_ref(ref, p) if ref is not None else fmat
     crit = _get_criterion(criterion)
 
     best_sel: list[int] | None = None
     best_val = -np.inf
-    for _ in range(max(1, int(n_restarts))):
-        sel, val = _exchange(fmat, int(n), crit, ref_mat, rng, max_iter)
+    for _ in range(n_restarts):
+        sel, val = _exchange(fmat, n, crit, ref_mat, rng, max_iter)
         if val > best_val:
             best_val = val
             best_sel = sel
