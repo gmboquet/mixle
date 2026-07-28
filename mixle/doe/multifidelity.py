@@ -21,7 +21,7 @@ from numpy.random import RandomState
 from scipy.stats import norm
 
 from mixle.doe.bayesopt import _fit_surrogate
-from mixle.doe.designs import Bounds, _as_bounds, _as_rng, latin_hypercube
+from mixle.doe.designs import Bounds, _as_bounds, _as_rng, _require_exact_positive_int, latin_hypercube
 
 
 def _surrogate_fit_error_types() -> tuple[type[BaseException], ...]:
@@ -42,6 +42,43 @@ def _surrogate_fit_error_types() -> tuple[type[BaseException], ...]:
     except ImportError:
         return errors
     return (*errors, torch.linalg.LinAlgError)
+
+
+def _validated_posterior(
+    gp: Any,
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    points: np.ndarray,
+    *,
+    label: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return a finite, symmetric, PSD surrogate posterior with exact requested axes."""
+    mean_raw, covariance_raw = gp.predict(x_train, y_train, points, return_cov=True)
+    mean = np.asarray(mean_raw, dtype=np.float64)
+    n_points = points.shape[0]
+    if mean.shape == (n_points, 1):
+        mean = mean[:, 0]
+    elif mean.shape != (n_points,):
+        raise ValueError(f"{label} posterior mean must have shape ({n_points},) or ({n_points}, 1), got {mean.shape}.")
+    covariance = np.asarray(covariance_raw, dtype=np.float64)
+    if covariance.shape != (n_points, n_points):
+        raise ValueError(
+            f"{label} posterior covariance must have shape ({n_points}, {n_points}), got {covariance.shape}."
+        )
+    if not np.all(np.isfinite(mean)) or not np.all(np.isfinite(covariance)):
+        raise ValueError(f"{label} posterior mean and covariance must be finite.")
+    scale = max(1.0, float(np.linalg.norm(covariance, ord=np.inf)))
+    tolerance = 1e-10 * scale
+    if not np.allclose(covariance, covariance.T, rtol=1e-10, atol=tolerance):
+        raise ValueError(f"{label} posterior covariance must be symmetric.")
+    symmetric = 0.5 * (covariance + covariance.T)
+    minimum_eigenvalue = float(np.linalg.eigvalsh(symmetric).min())
+    if minimum_eigenvalue < -tolerance:
+        raise ValueError(
+            f"{label} posterior covariance must be positive semidefinite; "
+            f"minimum eigenvalue is {minimum_eigenvalue:.6g}."
+        )
+    return mean, covariance
 
 
 def multi_fidelity_minimize(
@@ -71,9 +108,11 @@ def multi_fidelity_minimize(
     alike -- reserves its cost against ``max_cost`` before calling ``objective``, so cumulative cost never
     overshoots ``max_cost``; a ``max_cost`` too small to afford even one evaluation is rejected up front.
 
-    Returns ``{'x', 'y', 'X', 'Y', 'cost', 'target_evaluated', 'stopped_reason', 'error'}``. ``X``/``Y``
-    are the full augmented evaluation history (fidelity in the last column of ``X``) and ``cost`` the
-    total spent. ``x``/``y`` are the best *target-fidelity* point and response, but only when
+    Returns ``{'x', 'y', 'X', 'Y', 'cost', 'target_evaluated', 'stopped_reason', 'error',
+    'failed_evaluations'}``. ``X``/``Y`` are the usable finite augmented evaluation history (fidelity
+    in the last column of ``X``) and ``cost`` is the total actually spent, including failed calls.
+    ``failed_evaluations`` separately preserves each unusable attempt's point, fidelity, cost, status,
+    and error. ``x``/``y`` are the best *target-fidelity* point and response, but only when
     ``target_evaluated`` is true: if the budget ran out before any target-fidelity evaluation was
     affordable, ``x``/``y`` are ``None`` rather than silently standing in a lower-fidelity result for the
     target-fidelity answer the caller asked for. ``stopped_reason`` is ``"budget_exhausted"`` (the loop
@@ -84,8 +123,7 @@ def multi_fidelity_minimize(
     out of surrogate fitting (a bad ``fit_kwargs`` optimizer name, a missing torch install, ...)
     propagates rather than being reported as a quiet early stop.
     """
-    if int(n_candidates) <= 0:
-        raise ValueError("n_candidates must be positive.")
+    n_candidates = _require_exact_positive_int(n_candidates, "n_candidates")
     b = _as_bounds(bounds)
     d = b.shape[0]
     rng = _as_rng(seed)
@@ -131,9 +169,7 @@ def multi_fidelity_minimize(
         raise ValueError(f"max_cost must be finite and non-negative, got {max_cost!r}.")
 
     sign = -1.0 if maximize else 1.0
-    n_init = int(n_init) if n_init else 2 * d
-    if n_init <= 0:
-        raise ValueError("n_init must be positive.")
+    n_init = 2 * d if n_init is None else _require_exact_positive_int(n_init, "n_init")
 
     cheapest = min(cost_map.values())
     if cheapest > max_cost:
@@ -147,37 +183,100 @@ def multi_fidelity_minimize(
 
     rows: list[np.ndarray] = []
     y: list[float] = []
+    failed_evaluations: list[dict[str, Any]] = []
     spent = 0.0
+
+    def evaluate(xx: np.ndarray, fidelity: float) -> float | None:
+        """Charge one attempted call and retain explicit evidence if it does not yield a finite scalar."""
+        nonlocal spent, error, stopped_reason
+        cost = cost_map[fidelity]
+        spent += cost
+        failure = {
+            "x": np.asarray(xx, dtype=np.float64).copy(),
+            "fidelity": fidelity,
+            "cost": cost,
+        }
+        try:
+            raw = objective(np.asarray(xx, dtype=np.float64), fidelity)
+        except Exception as exc:  # noqa: BLE001 - preserve operational call failure and its real cost
+            error = f"{type(exc).__name__}: {exc}"
+            failure.update({"status": "exception", "error": error})
+            failed_evaluations.append(failure)
+            stopped_reason = "objective_failed"
+            return None
+        raw_array = np.asarray(raw)
+        if raw_array.shape != () or np.issubdtype(raw_array.dtype, np.bool_):
+            error = f"objective returned {type(raw).__name__}; expected one finite numeric scalar"
+            failure.update({"status": "invalid_observation", "error": error})
+            failed_evaluations.append(failure)
+            stopped_reason = "objective_failed"
+            return None
+        try:
+            observation = float(raw)
+        except (TypeError, ValueError, OverflowError) as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            failure.update({"status": "invalid_observation", "error": error})
+            failed_evaluations.append(failure)
+            stopped_reason = "objective_failed"
+            return None
+        if not np.isfinite(observation):
+            error = f"objective returned non-finite observation {observation!r}"
+            failure.update({"status": "nonfinite_observation", "error": error})
+            failed_evaluations.append(failure)
+            stopped_reason = "objective_failed"
+            return None
+        return sign * observation
+
+    stopped_reason = "budget_exhausted"
+    error: str | None = None
+    objective_failed = False
     for s in fids:  # seed every fidelity, budget permitting
         c = cost_map[float(s)]
         for xx in latin_hypercube(b, n_init, rng):
             if spent + c > max_cost:
                 break  # this fidelity's next seed point would overshoot the remaining budget
+            observation = evaluate(xx, float(s))
+            if observation is None:
+                objective_failed = True
+                break
             rows.append(np.append(xx, s))
-            y.append(sign * float(objective(np.asarray(xx, dtype=np.float64), float(s))))
-            spent += c
-    x_aug = np.asarray(rows)
+            y.append(observation)
+        if objective_failed:
+            break
+    x_aug = np.asarray(rows, dtype=np.float64).reshape(-1, d + 1)
     y_arr = np.asarray(y, dtype=np.float64)
 
-    stopped_reason = "budget_exhausted"
-    error: str | None = None
     fit_error_types = _surrogate_fit_error_types()
-    while spent < max_cost:
+    while not objective_failed and spent < max_cost:
         try:
             gp = _fit_surrogate(x_aug, y_arr, None, fit_kwargs)
         except fit_error_types as exc:
             stopped_reason = "surrogate_fit_failed"
             error = f"{type(exc).__name__}: {exc}"
             break
-        cand = latin_hypercube(b, int(n_candidates), rng)
+        cand = latin_hypercube(b, n_candidates, rng)
         cand_t = np.column_stack([cand, np.full(cand.shape[0], target)])
-        mean, cov = gp.predict(x_aug, y_arr, cand_t, return_cov=True)
-        mean = np.asarray(mean, dtype=np.float64).ravel()
-        std = np.sqrt(np.clip(np.diag(np.atleast_2d(np.asarray(cov, dtype=np.float64))), 1e-18, None))
+        try:
+            mean, cov = _validated_posterior(gp, x_aug, y_arr, cand_t, label="target-candidate")
+        except ValueError as exc:
+            stopped_reason = "surrogate_prediction_failed"
+            error = f"{type(exc).__name__}: {exc}"
+            break
+        variance = np.diag(cov)
+        tolerance = 1e-10 * max(1.0, float(np.linalg.norm(cov, ord=np.inf)))
+        variance = np.where((variance < 0.0) & (variance >= -tolerance), 0.0, variance)
+        std = np.sqrt(variance)
         at_target = x_aug[:, -1] == target
         best_t = float(y_arr[at_target].min()) if at_target.any() else float(mean.min())
-        z = (best_t - mean) / std
-        ei = (best_t - mean) * norm.cdf(z) + std * norm.pdf(z)  # EI at the target fidelity (minimization)
+        improvement = best_t - mean
+        ei = np.maximum(improvement, 0.0)
+        uncertain = std > 0.0
+        z = improvement[uncertain] / std[uncertain]
+        ei[uncertain] = improvement[uncertain] * norm.cdf(z) + std[uncertain] * norm.pdf(z)
+        if not np.all(np.isfinite(ei)):
+            stopped_reason = "surrogate_prediction_failed"
+            error = "ValueError: expected improvement is non-finite"
+            break
         xstar = cand[int(np.argmax(ei))]
 
         # Pick the fidelity that most reduces the target's posterior variance per unit cost, among those
@@ -189,21 +288,35 @@ def multi_fidelity_minimize(
             if spent + c > max_cost:
                 continue  # would overshoot the remaining budget; not eligible this round
             pts = np.array([np.append(xstar, target), np.append(xstar, float(s))])
-            _, c2 = gp.predict(x_aug, y_arr, pts, return_cov=True)
-            c2 = np.atleast_2d(np.asarray(c2, dtype=np.float64))
-            var_reduction = c2[0, 1] ** 2 / max(c2[1, 1], 1e-12)
+            try:
+                _, c2 = _validated_posterior(gp, x_aug, y_arr, pts, label=f"fidelity-{float(s):g}")
+            except ValueError as exc:
+                stopped_reason = "surrogate_prediction_failed"
+                error = f"{type(exc).__name__}: {exc}"
+                best_s = None
+                break
+            var_reduction = 0.0 if c2[1, 1] == 0.0 else c2[0, 1] ** 2 / c2[1, 1]
             score = var_reduction / c
+            if not np.isfinite(score) or score < 0.0:
+                stopped_reason = "surrogate_prediction_failed"
+                error = f"ValueError: fidelity-{float(s):g} variance-reduction score is invalid"
+                best_s = None
+                break
             if score > best_score:
                 best_score, best_s = score, float(s)
+        if stopped_reason == "surrogate_prediction_failed":
+            break
         if best_s is None:
             break  # nothing affordable in the remaining budget; stopped_reason stays "budget_exhausted"
 
-        yn = sign * float(objective(np.asarray(xstar, dtype=np.float64), best_s))
+        yn = evaluate(xstar, best_s)
+        if yn is None:
+            objective_failed = True
+            break
         x_aug = np.vstack([x_aug, np.append(xstar, best_s)])
         y_arr = np.append(y_arr, yn)
-        spent += cost_map[best_s]
 
-    at_target = x_aug[:, -1] == target
+    at_target = x_aug[:, -1] == target if x_aug.size else np.array([], dtype=bool)
     target_evaluated = bool(at_target.any())
     if target_evaluated:
         idx = int(np.where(at_target)[0][int(np.argmin(y_arr[at_target]))])
@@ -225,6 +338,7 @@ def multi_fidelity_minimize(
         "target_evaluated": target_evaluated,
         "stopped_reason": stopped_reason,
         "error": error,
+        "failed_evaluations": failed_evaluations,
     }
 
 
