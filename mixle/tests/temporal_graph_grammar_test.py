@@ -167,17 +167,13 @@ class TemporalGraphGrammarContractTest(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         stats.TemporalGraphGrammarDistribution([1, 1, 1, 1], **{keyword: value})
         with self.assertRaises(ValueError):
-            stats.TemporalGraphGrammarDistribution(
-                [1, 1], motif=stats.CommonNeighbourMotif((0, 1), directed=True)
-            )
+            stats.TemporalGraphGrammarDistribution([1, 1], motif=stats.CommonNeighbourMotif((0, 1), directed=True))
 
     def test_exact_finite_candidate_law_is_normalized_and_preserves_zeros(self):
         dist = stats.TemporalGraphGrammarDistribution([1, 0, 0, 0], edge_rate=2.0)
         empty_two = np.zeros((2, 2))
         edge_two = np.array([[0.0, 1.0], [1.0, 0.0]])
-        probability = np.exp(dist.log_density([empty_two, empty_two])) + np.exp(
-            dist.log_density([empty_two, edge_two])
-        )
+        probability = np.exp(dist.log_density([empty_two, empty_two])) + np.exp(dist.log_density([empty_two, edge_two]))
         self.assertAlmostEqual(probability, 1.0, places=12)
         self.assertAlmostEqual(np.exp(dist.log_density([empty_two, edge_two])), 1.0 - np.exp(-2.0), places=12)
 
@@ -524,9 +520,7 @@ class ScalableSamplerTest(unittest.TestCase):
             edge_remove_rate=2.0,
         )
         seqs = [
-            gt.sampler(seed=s).sample_one_scalable(
-                num_steps=6, seed_edges=self._seed_edges(rng, n=40)
-            ).snapshots
+            gt.sampler(seed=s).sample_one_scalable(num_steps=6, seed_edges=self._seed_edges(rng, n=40)).snapshots
             for s in range(60)
         ]
         self.assertTrue(all(sp.issparse(a) for seq in seqs for a in seq))  # never densified
@@ -543,9 +537,7 @@ class ScalableSamplerTest(unittest.TestCase):
         gt = stats.TemporalGraphGrammarDistribution([0.4, 0.3, 0.2, 0.1], edge_rate=5.0, node_rate=1.0)
         big = [(int(rng.randint(40_000)), int(rng.randint(40_000))) for _ in range(120_000)]
         big = [(i, j) for i, j in big if i != j]
-        approximate = gt.sampler(seed=1).sample_one_scalable(
-            num_steps=2, seed_edges=big
-        )  # dense would need ~13 GB
+        approximate = gt.sampler(seed=1).sample_one_scalable(num_steps=2, seed_edges=big)  # dense would need ~13 GB
         self.assertFalse(approximate.receipt.exact)
         snaps = approximate.snapshots
         self.assertTrue(all(sp.issparse(a) for a in snaps))
@@ -553,9 +545,9 @@ class ScalableSamplerTest(unittest.TestCase):
 
     def test_scalable_directed_emits_asymmetric_sparse(self):
         gt = stats.TemporalGraphGrammarDistribution([0.25] * 4, edge_rate=3.0, node_rate=1.0, directed=True)
-        snaps = gt.sampler(seed=0).sample_one_scalable(
-            num_steps=4, seed_edges=[(0, 1), (1, 2), (2, 0), (3, 1)]
-        ).snapshots
+        snaps = (
+            gt.sampler(seed=0).sample_one_scalable(num_steps=4, seed_edges=[(0, 1), (1, 2), (2, 0), (3, 1)]).snapshots
+        )
         self.assertTrue(all(sp.issparse(a) for a in snaps))
         g = snaps[-1].toarray()
         self.assertFalse(np.array_equal(g, g.T))  # directed: asymmetric adjacency
@@ -876,9 +868,18 @@ class GraphGrammarClosuresTest(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(gt.seq_log_density([s]))))  # the directed scorer accepts it
         # the dominant (well-sampled) motifs recover; the cn>=3 motif is starved in a sparse directed graph
         seqs = [
-            gt.sampler(seed=k).sample_one_scalable(
-                num_steps=6, seed_edges=[(int(rng.randint(150)), int(rng.randint(150))) for _ in range(400)]
-            ).snapshots
+            gt.sampler(seed=k)
+            .sample_one_scalable(
+                num_steps=6,
+                # drop self-loops, as `big` above already does: 400 draws from 150 nodes hit i == j
+                # by chance, and the grammar is over simple graphs so seed_edges rejects them
+                seed_edges=[
+                    edge
+                    for edge in ((int(rng.randint(150)), int(rng.randint(150))) for _ in range(400))
+                    if edge[0] != edge[1]
+                ],
+            )
+            .snapshots
             for k in range(80)
         ]
         est = stats.TemporalGraphGrammarEstimator(stats.CommonNeighbourMotif(directed=True), pseudo_count=0.5)
