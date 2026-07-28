@@ -13,6 +13,7 @@ to persist, audit, replay, and exchange between projects.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -123,12 +124,45 @@ def _parse_timestamp(value: str, field_name: str) -> datetime:
     return _require_aware(parsed, field_name)
 
 
+# Fixed-width cryptographic digests only: a variable-width algorithm (blake2b, shake) cannot be
+# checked against its label, which is the whole point of naming the algorithm.
+_DIGEST_SIZES = {"sha256": 64, "sha384": 96, "sha512": 128, "sha3-256": 64, "sha3-384": 96, "sha3-512": 128}
+_HEX = re.compile(r"[0-9a-f]+")
+
+
+def _canonical_digest(digest: str) -> str:
+    """Return ``algorithm:hexdigest`` for an artifact integrity digest.
+
+    A digest exists to verify concrete bytes, so it has to name the algorithm
+    that produced it; free text binds an authorization to a label nothing can
+    check.  A bare 64-character hex string is accepted as SHA-256, which is what
+    :func:`mixle.semantics.semantic_digest` and :func:`mixle.data.hashing.model_hash`
+    emit.
+    """
+    text = digest.strip()
+    if not text:
+        raise ValueError("digest must be non-empty when supplied")
+    algorithm, separator, hexdigest = text.partition(":")
+    if not separator:
+        algorithm, hexdigest = "sha256", text
+    algorithm, hexdigest = algorithm.lower(), hexdigest.lower()
+    if _DIGEST_SIZES.get(algorithm) != len(hexdigest) or not _HEX.fullmatch(hexdigest):
+        raise ValueError(
+            "digest must be a hex cryptographic digest, optionally labelled '<algorithm>:<hex>' "
+            f"with one of {sorted(_DIGEST_SIZES)}; got {digest!r}"
+        )
+    return f"{algorithm}:{hexdigest}"
+
+
 @dataclass(frozen=True, slots=True)
 class CapabilityIdentity:
     """Immutable identity of one capability version.
 
-    ``digest`` is optional for a purely semantic capability and should be set to
-    the integrity digest of a concrete artifact when one exists.
+    ``digest`` is optional for a purely semantic capability and must be the
+    integrity digest of a concrete artifact when one exists.  It is stored
+    canonically as ``algorithm:hexdigest`` so that a holder of the artifact bytes
+    can actually recompute it; a bare SHA-256 hex string is accepted and
+    labelled.
     """
 
     capability_id: str
@@ -140,8 +174,8 @@ class CapabilityIdentity:
             raise ValueError("capability_id must not be empty")
         if not self.version.strip():
             raise ValueError("version must not be empty")
-        if self.digest is not None and not self.digest.strip():
-            raise ValueError("digest must be non-empty when supplied")
+        if self.digest is not None:
+            object.__setattr__(self, "digest", _canonical_digest(self.digest))
 
     def as_dict(self) -> dict[str, str | None]:
         return {"capability_id": self.capability_id, "version": self.version, "digest": self.digest}
