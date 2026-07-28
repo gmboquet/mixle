@@ -140,6 +140,64 @@ class EmbedderRecordVsBatchContractTest(unittest.TestCase):
 
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class EmbedderCorpusOwnershipTest(unittest.TestCase):
+    """MXR-080-1785: retrieval evidence must not be mutable into arbitrary results.
+
+    The corpus vectors ARE the retrieval evidence. They used to be the caller's own writable array,
+    published as a plain attribute with no shape/finiteness check, so setting one entry to NaN made
+    retrieve() return an ordinary-looking ranked list whose similarities were all NaN.
+    """
+
+    def setUp(self):
+        from mixle.represent import fit_embedder
+
+        self.data = _records(12)
+        self.emb = fit_embedder(self.data, dim=4, epochs=5, seed=0)
+
+    def test_corpus_vectors_are_read_only(self):
+        with self.assertRaises(ValueError):
+            self.emb.corpus_vectors[0, 0] = np.nan
+
+    def test_corpus_vectors_attribute_cannot_be_rebound(self):
+        with self.assertRaises(AttributeError):
+            self.emb.corpus_vectors = np.zeros((3, 4), dtype=np.float32)
+
+    def test_constructor_does_not_alias_the_callers_array(self):
+        from mixle.represent import Embedder
+
+        supplied = np.array(self.emb.corpus_vectors, dtype=np.float32)
+        clone = Embedder(self.emb.featurizer, self.emb.result, self.emb.kind, supplied)
+        supplied[:] = np.nan  # the caller still holds their array and corrupts it
+        hits = clone.retrieve(self.data[0], k=3)
+        self.assertTrue(all(np.isfinite(s) for _, s in hits))
+
+    def test_constructor_rejects_non_finite_corpus(self):
+        from mixle.represent import Embedder
+
+        bad = np.array(self.emb.corpus_vectors, dtype=np.float32)
+        bad[0, 0] = np.nan
+        with self.assertRaises(ValueError):
+            Embedder(self.emb.featurizer, self.emb.result, self.emb.kind, bad)
+
+    def test_constructor_rejects_wrong_rank_and_empty_corpus(self):
+        from mixle.represent import Embedder
+
+        for bad in (np.zeros((3, 2, 2), dtype=np.float32), np.zeros((0, 4), dtype=np.float32)):
+            with self.assertRaises(ValueError):
+                Embedder(self.emb.featurizer, self.emb.result, self.emb.kind, bad)
+
+    def test_constructor_rejects_a_width_the_fitted_encoder_cannot_produce(self):
+        from mixle.represent import Embedder
+
+        with self.assertRaises(ValueError):
+            Embedder(self.emb.featurizer, self.emb.result, self.emb.kind, np.zeros((5, 9), dtype=np.float32))
+
+    def test_corpus_vectors_stay_unit_normalized(self):
+        norms = np.linalg.norm(self.emb.corpus_vectors, axis=1)
+        np.testing.assert_allclose(norms, np.ones_like(norms), atol=1e-5)
+
+
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class EmbedderLoadTrustGateTest(unittest.TestCase):
     """Embedder.load unpickles a live torch module -- it must refuse without explicit trust."""
 

@@ -43,27 +43,75 @@ def _kind_of(x: Any) -> str:
     )
 
 
+def _own_corpus_vectors(corpus_vectors: Any, result: AutoencoderResult) -> np.ndarray:
+    """Return a private, immutable, finite, unit-normalized ``(N, dim)`` copy bound to ``result``.
+
+    The array is copied (never aliased to the caller's), checked for rank/cardinality/finiteness,
+    checked to be the width the fitted encoder actually produces, re-normalized with the same
+    zero-safe clamp the fitter uses (so a legitimately all-zero row survives instead of being
+    rejected), and finally frozen with ``writeable = False``.
+    """
+    vectors = np.array(corpus_vectors, dtype=np.float32)  # np.array copies; never alias the caller's buffer
+    if vectors.ndim != 2:
+        raise ValueError(f"corpus_vectors must be a 2-D (n_corpus, dim) array, got shape {vectors.shape}")
+    if vectors.shape[0] == 0 or vectors.shape[1] == 0:
+        raise ValueError(f"corpus_vectors must be non-empty in both dimensions, got shape {vectors.shape}")
+    if not np.isfinite(vectors).all():
+        raise ValueError("corpus_vectors must contain only finite values")
+    encoder_dim = getattr(getattr(result, "encoder", None), "dim", None)
+    if encoder_dim is not None and int(encoder_dim) != vectors.shape[1]:
+        raise ValueError(
+            f"corpus_vectors width {vectors.shape[1]} does not match the fitted encoder's dim {int(encoder_dim)}"
+        )
+    vectors /= np.maximum(np.linalg.norm(vectors, axis=1, keepdims=True), 1e-12)
+    vectors.flags.writeable = False
+    return vectors
+
+
 class Embedder:
     """A fitted embedding of raw heterogeneous items: ``transform`` to vectors, ``retrieve`` neighbours."""
 
     def __init__(self, featurizer: Any, result: AutoencoderResult, kind: str, corpus_vectors: np.ndarray) -> None:
+        if kind not in ("text", "record"):
+            raise ValueError(f"kind must be 'text' or 'record', got {kind!r}")
         self.featurizer = featurizer
         self.result = result
         self.kind = kind
-        self.corpus_vectors = corpus_vectors  # (N, dim) unit-normalized embeddings of the fitted data
+        self._corpus_vectors = _own_corpus_vectors(corpus_vectors, result)
+
+    @property
+    def corpus_vectors(self) -> np.ndarray:
+        """The fitted corpus's ``(N, dim)`` unit embeddings, as a privately owned read-only array.
+
+        Retrieval ranks against these vectors, so they are the embedder's evidence, not a scratch
+        buffer: they are validated, normalized and frozen at construction, and exposed only through
+        this property. Handing back the caller's own writable array (or letting the attribute be
+        rebound) meant a post-construction ``corpus_vectors[0, 0] = nan`` turned ``retrieve()`` into
+        an ordinary-looking ranked result whose similarities were all NaN (MXR-080-1785).
+        """
+        return self._corpus_vectors
 
     @property
     def dim(self) -> int:
         """Return embedding dimensionality."""
-        return int(self.corpus_vectors.shape[1])
+        return int(self._corpus_vectors.shape[1])
 
     def _units(self, items: list) -> np.ndarray:
         coerced = [str(x) for x in items] if self.kind == "text" else list(items)
         return np.asarray(self.featurizer.transform(coerced), dtype=np.float32)
 
     def _embed(self, rows: list) -> np.ndarray:
-        """Embed an explicit list of whole records into unit-normalized ``(n, dim)`` rows."""
-        vec = self.result.encode(self._units(rows))
+        """Embed an explicit list of whole records into unit-normalized ``(n, dim)`` rows.
+
+        The encoded block is checked for shape and finiteness before it leaves: an embedding the
+        fitted encoder could not actually produce (wrong width, NaN/inf) is a broken result, not a
+        usable coordinate, and must never reach a similarity ranking as an ordinary vector.
+        """
+        vec = np.asarray(self.result.encode(self._units(rows)), dtype=np.float32)
+        if vec.ndim != 2 or vec.shape[0] != len(rows) or vec.shape[1] != self.dim:
+            raise ValueError(f"encoder returned shape {vec.shape}, expected ({len(rows)}, {self.dim})")
+        if not np.isfinite(vec).all():
+            raise ValueError("encoder produced a non-finite embedding; the fitted state is unusable")
         return vec / np.maximum(np.linalg.norm(vec, axis=1, keepdims=True), 1e-12)
 
     def transform_one(self, item: Any) -> np.ndarray:
@@ -125,7 +173,9 @@ class Embedder:
         if kf < 0 or kf != round(kf):
             raise ValueError(f"k must be a non-negative integer, got {k!r}")
         q = self.transform_one(query)  # a query is exactly one item; never guess batch-ness here
-        sims = self.corpus_vectors @ q
+        sims = self._corpus_vectors @ q
+        if not np.isfinite(sims).all():
+            raise ValueError("retrieval similarities are not finite; refusing to rank invalid evidence")
         order = np.argsort(-sims)[: int(kf)]
         return [(int(i), float(sims[i])) for i in order]
 
