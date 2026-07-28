@@ -178,10 +178,13 @@ class BaseProtocolAdoptionTest(unittest.TestCase):
         # independent copies of the pooled realizations.
         from mixle.stats.processes.power_law_hawkes import PowerLawHawkesAccumulator
 
-        acc_a = PowerLawHawkesAccumulator(window=10.0, alpha_fixed=None, keys="h")
-        acc_b = PowerLawHawkesAccumulator(window=10.0, alpha_fixed=None, keys="h")
-        acc_a.realizations.extend([[0.1, 0.5], [1.0, 2.0]])
-        acc_b.realizations.extend([[3.0, 4.0]])
+        acc_a = PowerLawHawkesAccumulator(window=10.0, alpha_fixed=0.0, mark_dist=None, keys="h")
+        acc_b = PowerLawHawkesAccumulator(window=10.0, alpha_fixed=0.0, mark_dist=None, keys="h")
+        # populated through update() so realizations and their weights stay in step: value() pairs
+        # them, and poking realizations directly leaves the weight vector the wrong length
+        for realization in ([0.1, 0.5], [1.0, 2.0]):
+            acc_a.update(realization, 1.0, None)
+        acc_b.update([3.0, 4.0], 1.0, None)
         stats: dict = {}
         acc_a.key_merge(stats)
         acc_b.key_merge(stats)

@@ -18,7 +18,10 @@ def test_a1_power_law_hawkes_encoder_is_abc_and_equal():
     from mixle.stats.compute.pdist import DataSequenceEncoder
     from mixle.stats.processes.power_law_hawkes import PowerLawHawkesDataEncoder
 
-    e1, e2 = PowerLawHawkesDataEncoder(), PowerLawHawkesDataEncoder()
+    # window and mark_dist became required when the mark log-density was added; an unmarked
+    # process passes mark_dist=None. The point of the test is the encoder interface, not the arity.
+    e1 = PowerLawHawkesDataEncoder(window=10.0, mark_dist=None)
+    e2 = PowerLawHawkesDataEncoder(window=10.0, mark_dist=None)
     assert isinstance(e1, DataSequenceEncoder)  # was a bare object -> broke encoder interchange
     assert e1 == e2  # __eq__ added; two encoders must compare equal for batching
 
@@ -30,7 +33,8 @@ def test_a1_power_law_hawkes_accumulator_is_abc():
         PowerLawHawkesEstimator,
     )
 
-    acc = PowerLawHawkesEstimator(window=10.0).accumulator_factory().make()
+    # an unmarked process must fix alpha=0: with no marks there is no mark-excitation to estimate
+    acc = PowerLawHawkesEstimator(window=10.0, alpha_fixed=0.0).accumulator_factory().make()
     assert isinstance(acc, SequenceEncodableStatisticAccumulator)
     assert hasattr(acc, "key_merge") and hasattr(acc, "scale")
     # the factory is now a module-level class, not a single-use nested one
