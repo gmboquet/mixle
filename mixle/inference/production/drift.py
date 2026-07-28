@@ -87,21 +87,45 @@ def js_divergence(reference: Any, current: Any, *, bins: int = 20) -> float:
     return 0.5 * kl(p, m) + 0.5 * kl(q, m)
 
 
-def _log_densities(model: Any, data: Any) -> np.ndarray:
+def _log_densities(model: Any, rows: list) -> np.ndarray:
+    """One log-density per row of an ALREADY-MATERIALIZED population.
+
+    ``rows`` must be a list, not an iterator: the batch path is tried first and, if it raises, the
+    scalar path retries over these same rows. Passing a one-shot stream meant the retry iterated an
+    iterator the batch attempt had already drained, so a transient batch failure silently reported no
+    scores at all. The dispatch is non-destructive by construction now, and the chosen path's output
+    is required to have exactly one score per row.
+    """
     try:
-        enc = model.dist_to_encoder().seq_encode(list(data))
-        return np.asarray(model.seq_log_density(enc), dtype=float)
-    except Exception:  # noqa: BLE001
-        return np.asarray([model.log_density(x) for x in data], dtype=float)
+        enc = model.dist_to_encoder().seq_encode(rows)
+        scores = np.asarray(model.seq_log_density(enc), dtype=float)
+    except Exception:  # noqa: BLE001 - the batch path is optional; retry the SAME rows scalar-wise
+        scores = np.asarray([model.log_density(x) for x in rows], dtype=float)
+    scores = np.atleast_1d(scores)
+    if scores.shape != (len(rows),):
+        raise ValueError(
+            f"model scoring returned {scores.shape} log-densities for {len(rows)} records; drift "
+            "analysis needs exactly one score per record to compare populations"
+        )
+    return scores
 
 
 def score_drift(model: Any, reference: Any, current: Any) -> dict:
     """The model-native drift signal: how the model's log-density distribution shifts from reference to
     current data. Returns the KS statistic between the two log-likelihood samples and their mean shift
     (mean current log-density minus mean reference; negative => current data is less likely under the
-    model)."""
-    ll_ref = _log_densities(model, reference)
-    ll_cur = _log_densities(model, current)
+    model).
+
+    Both populations are materialized here exactly once, so a one-shot iterable is safe and the
+    reported counts describe the records actually scored. Alongside the shift statistics the report
+    carries the evidence behind them -- how many records each population held and what fraction of
+    each was unscorable -- because a shift measured over a handful of surviving finite scores is not
+    the same claim as one measured over the whole sample.
+    """
+    ref_rows = list(reference)
+    cur_rows = list(current)
+    ll_ref = _log_densities(model, ref_rows)
+    ll_cur = _log_densities(model, cur_rows)
     fr = ll_ref[np.isfinite(ll_ref)]
     fc = ll_cur[np.isfinite(ll_cur)]
     return {
@@ -110,25 +134,38 @@ def score_drift(model: Any, reference: Any, current: Any) -> dict:
         "mean_loglik_reference": float(fr.mean()) if fr.size else None,
         "mean_loglik_current": float(fc.mean()) if fc.size else None,
         "fraction_unscorable_current": float(np.mean(~np.isfinite(ll_cur))) if ll_cur.size else 0.0,
+        "fraction_unscorable_reference": float(np.mean(~np.isfinite(ll_ref))) if ll_ref.size else 0.0,
+        "n_reference": int(ll_ref.size),
+        "n_current": int(ll_cur.size),
+        "n_scorable_reference": int(fr.size),
+        "n_scorable_current": int(fc.size),
     }
 
 
 @dataclass
 class DriftReport:
-    """Drift decision, aggregate score, feature details, and thresholds."""
+    """Drift decision, aggregate score, feature details, and thresholds.
+
+    ``reasons`` names every condition that raised the ``drift`` flag, so a verdict driven by lost
+    scoring coverage is distinguishable from one driven by a genuine distribution shift.
+    """
 
     drift: bool
     score: dict
     per_feature: dict = field(default_factory=dict)
     thresholds: dict = field(default_factory=dict)
     processed_count: int = 0
+    reasons: list[str] = field(default_factory=list)
 
     def __str__(self) -> str:
         flag = "DRIFT" if self.drift else "ok"
         feats = ", ".join(f"{k}: psi={v['psi']:.3f}/ks={v['ks']:.3f}" for k, v in self.per_feature.items())
+        why = f"\n  reasons: {', '.join(self.reasons)}" if self.reasons else ""
         return (
             f"DriftReport[{flag}]  score: ks={self.score.get('ks'):.3f}, "
-            f"mean_loglik_shift={self.score.get('mean_loglik_shift'):.3f}" + (f"\n  features: {feats}" if feats else "")
+            f"mean_loglik_shift={self.score.get('mean_loglik_shift'):.3f}"
+            + why
+            + (f"\n  features: {feats}" if feats else "")
         )
 
 
@@ -158,13 +195,30 @@ def detect_drift(
     psi_threshold: float = 0.25,
     ks_threshold: float = 0.2,
     loglik_shift_threshold: float = -0.5,
+    min_scorable_fraction: float = 0.5,
+    unscorable_shift_threshold: float = 0.1,
     per_feature: bool = True,
 ) -> DriftReport:
     """Combine score drift and per-feature drift into a single :class:`DriftReport`.
 
     ``drift`` is flagged if the score-distribution KS exceeds ``ks_threshold``, OR the mean log-likelihood
     drops by more than ``-loglik_shift_threshold`` (i.e. ``mean_loglik_shift < loglik_shift_threshold``),
-    OR any feature's PSI exceeds ``psi_threshold``."""
+    OR any feature's PSI exceeds ``psi_threshold``, OR the current sample lost too much scoring
+    coverage to support a no-drift verdict.
+
+    Coverage is part of the verdict, not just of the report. ``score_drift`` drops unscorable records
+    before comparing distributions, so a current sample of one matching score plus nine records the
+    model cannot score at all used to produce KS 0, mean shift 0, and ``drift=False`` -- a confident
+    "no drift" from 10% of the evidence. Two coverage conditions now fail closed:
+
+    * fewer than ``min_scorable_fraction`` of current records scored finitely, and
+    * the current unscorable rate exceeds the reference's by more than ``unscorable_shift_threshold``
+      (records moving outside the model's support IS the world moving away from the model).
+
+    Both populations are materialized once and reused for scoring and for the per-field columns, so a
+    one-shot iterable is safe: consuming the stream twice previously left the feature pass with empty
+    columns and manufactured a PSI-infinity DRIFT verdict out of two identical inputs.
+    """
     reference = list(reference)
     current = list(current)
     if not reference:
@@ -172,7 +226,23 @@ def detect_drift(
     if not current:
         raise ValueError("drift detection requires a non-empty current dataset")
     score = score_drift(model, reference, current)
-    flagged = score["ks"] > ks_threshold or score["mean_loglik_shift"] < loglik_shift_threshold
+    reasons: list[str] = []
+    if score["ks"] > ks_threshold:
+        reasons.append(f"score KS {score['ks']:.3f} > {ks_threshold}")
+    if score["mean_loglik_shift"] < loglik_shift_threshold:
+        reasons.append(f"mean log-likelihood shift {score['mean_loglik_shift']:.3f} < {loglik_shift_threshold}")
+
+    scorable_current = 1.0 - score["fraction_unscorable_current"]
+    if scorable_current < min_scorable_fraction:
+        reasons.append(
+            f"only {scorable_current:.3f} of current records were scorable (< {min_scorable_fraction}); "
+            "too little current evidence to certify no drift"
+        )
+    unscorable_shift = score["fraction_unscorable_current"] - score["fraction_unscorable_reference"]
+    if unscorable_shift > unscorable_shift_threshold:
+        reasons.append(
+            f"unscorable rate rose {unscorable_shift:.3f} above the reference (> {unscorable_shift_threshold})"
+        )
 
     feats: dict = {}
     if per_feature:
@@ -189,12 +259,19 @@ def detect_drift(
             psi = population_stability_index(rc, cc)
             feats[nm] = {"psi": psi, "ks": ks_statistic(rc, cc)}
             if psi > psi_threshold:
-                flagged = True
+                reasons.append(f"feature {nm!r} PSI {psi:.3f} > {psi_threshold}")
 
     return DriftReport(
-        drift=bool(flagged),
+        drift=bool(reasons),
         score=score,
         per_feature=feats,
-        thresholds={"psi": psi_threshold, "ks": ks_threshold, "loglik_shift": loglik_shift_threshold},
+        thresholds={
+            "psi": psi_threshold,
+            "ks": ks_threshold,
+            "loglik_shift": loglik_shift_threshold,
+            "min_scorable_fraction": min_scorable_fraction,
+            "unscorable_shift": unscorable_shift_threshold,
+        },
         processed_count=len(current),
+        reasons=reasons,
     )
