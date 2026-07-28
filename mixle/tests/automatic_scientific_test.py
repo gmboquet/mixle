@@ -201,9 +201,14 @@ class AutomaticScientificProfilingTestCase(unittest.TestCase):
         self.assertEqual(field.missing_count, 80)
         self.assertEqual(field.missing_fraction, 0.5)
         self.assertEqual(field.observed_count, 80)
-        # Positive-only data ({1.0, 2.5}) now also considers a log-normal: it wins the BIC prefilter
-        # but held-out predictive validation still prefers the Gaussian here (the two can disagree).
-        self.assertEqual(field.recommendation, "lognormal")
+        # Positive-only data ({1.0, 2.5}) makes the BIC prefilter pick a positive-support family over
+        # the Gaussian, while held-out predictive validation still prefers the Gaussian -- the point of
+        # this case is that the two can disagree. Which positive-support family wins is not asserted:
+        # on two distinct values the log-normal and gamma fits are indistinguishable, separated by
+        # 0.04 BIC (log-likelihood -87.721 vs -87.702 over 80 observations), so pinning one of them
+        # names the winner of a tie and flips on any innocuous numerical change.
+        self.assertIn(field.recommendation, ("lognormal", "gamma"))
+        self.assertNotEqual(field.recommendation, field.validation_recommendation)
         self.assertAlmostEqual(field.unique_fraction, 2.0 / 80.0)
         self.assertGreater(field.effective_cardinality, 1.0)
         self.assertEqual(field.validation_count, 20)
