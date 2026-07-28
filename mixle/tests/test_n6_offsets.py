@@ -262,3 +262,59 @@ def test_no_net_loss_constraint_negative_control_valid_positive_inputs_still_pro
     assert payload["lost_equivalents"] > 0.0
     assert np.isfinite(payload["required_offset"])
     assert payload["required_offset"] == pytest.approx(2.0 * payload["lost_equivalents"])
+
+
+# --------------------------------------------------------------------------------------------------
+# MXR-080-1572: every INPUT was checked for finiteness, but neither the per-cell product nor the
+# reduction nor the priced product was. Finite suitability/area/ratio/unit-cost near the float64
+# ceiling could overflow, so a "validated finite" contract published an infinite offset requirement,
+# an infinite constraint bound, and an infinite liability.
+# --------------------------------------------------------------------------------------------------
+_HUGE = 1e308
+
+
+def test_lost_equivalents_rejects_overflow_from_finite_suitability_and_area():
+    # audit repro: every input is finite, but suitability * area is not representable
+    footprint = np.array([True, True])
+    habitat = _habitat(np.array([_HUGE, _HUGE]), np.array([_HUGE, _HUGE]))
+    with pytest.raises(ValueError):
+        habitat_offset_liability(footprint, habitat, offset_ratio=1.0, unit_offset_cost=1.0)
+    with pytest.raises(ValueError):
+        no_net_loss_constraint(footprint, habitat, offset_ratio=1.0)
+
+
+def test_lost_equivalents_rejects_overflow_in_the_reduction_alone():
+    # each per-cell product is representable; only their SUM overflows
+    footprint = np.ones(4, dtype=bool)
+    habitat = _habitat(np.full(4, _HUGE), np.ones(4))
+    with pytest.raises(ValueError):
+        no_net_loss_constraint(footprint, habitat, offset_ratio=1.0)
+
+
+def test_habitat_offset_liability_rejects_overflow_in_the_priced_product():
+    # lost_equivalents is representable; offset_ratio * lost * unit_offset_cost is not
+    footprint = np.array([True, True])
+    habitat = _habitat(np.array([1e200, 1e200]), np.ones(2))
+    with pytest.raises(ValueError):
+        habitat_offset_liability(footprint, habitat, offset_ratio=1e200, unit_offset_cost=1e200)
+
+
+def test_no_net_loss_constraint_rejects_overflow_in_the_published_bound():
+    # lost_equivalents is representable; offset_ratio * lost_equivalents is not, and an infinite bound
+    # is not a hard constraint but an unsatisfiable row
+    footprint = np.array([True, True])
+    habitat = _habitat(np.array([1e200, 1e200]), np.ones(2))
+    with pytest.raises(ValueError):
+        no_net_loss_constraint(footprint, habitat, offset_ratio=1e200)
+
+
+def test_overflow_guards_negative_control_large_but_representable_values_still_work():
+    # The guards must reject only genuinely unrepresentable arithmetic, not merely large magnitudes:
+    # these values are big enough to be nowhere near the default fixtures yet stay finite throughout.
+    footprint = np.array([True, True])
+    habitat = _habitat(np.array([1e100, 2e100]), np.array([10.0, 10.0]))
+    liability = habitat_offset_liability(footprint, habitat, offset_ratio=3.0, unit_offset_cost=2.0)
+    assert liability == pytest.approx(3.0 * 2.0 * (1e100 + 2e100) * 10.0)
+    payload = no_net_loss_constraint(footprint, habitat, offset_ratio=3.0)
+    assert payload["required_offset"] == pytest.approx(3.0 * (1e100 + 2e100) * 10.0)
+    assert np.all(np.isfinite(payload["per_cell_lost_equivalents"]))
