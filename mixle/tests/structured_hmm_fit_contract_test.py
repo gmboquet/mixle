@@ -207,5 +207,45 @@ class ExplicitDurationFitContractTest(unittest.TestCase):
         self.assertFalse(result.diagnostics.approximate)
 
 
+class ChunkedEmissionScoringTest(unittest.TestCase):
+    """Splitting a sequence into chunks must not multiply the emission-scoring work by the chunk count.
+
+    _log_b scores every emission at every position. Calling it per chunk re-scored the whole sequence
+    once per chunk, so the emission cost grew with the split these functions exist to parallelize.
+    """
+
+    @staticmethod
+    def _model_and_counter():
+        calls = [0]
+
+        class _Counting(stats.GaussianDistribution):
+            def log_density(self, x):
+                calls[0] += 1
+                return super().log_density(x)
+
+        model = StructuredHMM(
+            [_Counting(-1.0, 1.0), _Counting(1.0, 1.0)],
+            [0.5, 0.5],
+            DenseTransition(np.array([[0.8, 0.2], [0.3, 0.7]])),
+        )
+        return model, calls
+
+    def test_chunked_posteriors_score_each_position_once_per_state(self):
+        model, calls = self._model_and_counter()
+        sequence = [float(v) for v in np.linspace(-1.5, 1.5, 24)]
+        calls[0] = 0
+        chunked_state_posteriors(model, sequence, chunk=6, overlap=2)
+        self.assertEqual(calls[0], len(sequence) * model.K)
+
+    def test_chunked_fit_scores_each_position_once_per_state_per_iteration(self):
+        model, calls = self._model_and_counter()
+        sequence = [float(v) for v in np.linspace(-1.5, 1.5, 24)]
+        calls[0] = 0
+        fit_chunked(model, [sequence], chunk=6, overlap=2, max_its=1)
+        # The M-step replaces hmm.emissions with plain estimates, so only the first E-step runs
+        # through the counting class: one scoring pass over the sequence, not one per chunk.
+        self.assertEqual(calls[0], len(sequence) * model.K)
+
+
 if __name__ == "__main__":
     unittest.main()
