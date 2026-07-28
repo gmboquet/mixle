@@ -344,6 +344,24 @@ class SmithMaxStableSampler:
     def __init__(self, dist: SmithMaxStable, locations: np.ndarray, seed: int | None = None):
         self.dist = dist
         owned_locations = np.array(locations, dtype=float, copy=True)
+        # At least one location, matching the process's own dimension. An empty (0, d) matrix used to
+        # construct a perfectly normal-looking sampler and only fail later, deep inside `sample`, as
+        # "zero-size array to reduction operation minimum which has no identity" -- a NumPy message
+        # that says nothing about the actual mistake. A max-stable field with no locations is not a
+        # degenerate draw, it is a caller error.
+        if owned_locations.ndim != 2 or owned_locations.shape[0] == 0:
+            raise ValueError(
+                "SmithMaxStableSampler: locations must be a non-empty (n_locations, d) matrix, "
+                f"got shape {owned_locations.shape}."
+            )
+        expected_d = int(np.shape(dist.sigma)[0])
+        if owned_locations.shape[1] != expected_d:
+            raise ValueError(
+                f"SmithMaxStableSampler: locations must have {expected_d} coordinate(s) per site to match "
+                f"the process covariance, got {owned_locations.shape[1]}."
+            )
+        if not np.all(np.isfinite(owned_locations)):
+            raise ValueError("SmithMaxStableSampler: locations must be finite (no NaN/Inf).")
         owned_locations.setflags(write=False)
         self.loc = owned_locations
         self.rng = np.random.RandomState(seed)

@@ -31,6 +31,7 @@ from numbers import Real
 
 import numpy as np
 
+from mixle.analysis._interval import validated_level
 from mixle.reason.posterior_protocol import DerivedQuantity, Posterior
 
 __all__ = ["SlopeFactor", "RiskQuantity", "excess_lifetime_cancer_risk", "radon_wlm_risk"]
@@ -111,11 +112,13 @@ class RiskQuantity:
         return float(np.mean(self.samples))
 
     def credible_interval(self, level: float = 0.9) -> tuple[float, float]:
-        """Central ``level`` credible interval of the risk samples (e.g. ``level=0.9`` -> 5%/95%)."""
-        if isinstance(level, (bool, np.bool_)) or not isinstance(level, Real):
-            raise TypeError("level must be a real scalar probability.")
-        if not np.isfinite(level) or not 0.0 < level < 1.0:
-            raise ValueError("level must be in (0, 1).")
+        """Central ``level`` credible interval of the risk samples (e.g. ``level=0.9`` -> 5%/95%).
+
+        ``level`` goes through the shared ``mixle.analysis`` interval contract
+        (:func:`~mixle.analysis._interval.validated_level`), so every IC-1 carrier in the package
+        rejects the same out-of-range levels the same way (MXR-080-1580).
+        """
+        level = validated_level(level)
         alpha = (1.0 - level) / 2.0
         lo = float(np.quantile(self.samples, alpha))
         hi = float(np.quantile(self.samples, 1.0 - alpha))

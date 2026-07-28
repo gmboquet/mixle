@@ -39,6 +39,7 @@ from typing import Any
 import numpy as np
 from scipy import stats
 
+from mixle.analysis._interval import validated_level
 from mixle.inference.survival import aalen_johansen, cox_ph
 
 __all__ = ["CohortAttribution", "cohort_attribution"]
@@ -78,7 +79,8 @@ class _AFDistribution:
         object.__setattr__(self, name, value)
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
-        a = (1.0 - level) / 2.0
+        """Central ``level`` interval of the bootstrap AF draws (shared analysis contract; MXR-080-1580)."""
+        a = (1.0 - validated_level(level)) / 2.0
         lo = np.quantile(self.samples, a)
         hi = np.quantile(self.samples, 1.0 - a)
         return lo, hi
