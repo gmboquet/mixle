@@ -6,7 +6,8 @@ footer/metadata-only read of field types and nullability, not the row data itsel
 deferred to first use like every other :class:`~mixle.data.core.LazySource` connector. Passing an
 explicit ``schema=`` skips inference entirely (and keeps even that metadata read lazy).
 
-The inferred mapping covers Arrow's common scalar types: signed/unsigned integers -> ``Count``,
+The inferred mapping covers Arrow's common scalar types: signed integers -> ``Integer``, unsigned
+integers -> ``Count``,
 ``float16``/``float32``/``float64`` -> ``Real``, ``bool`` -> ``Boolean``, ``string``/``large_string`` ->
 ``Text``, dictionary-encoded columns -> ``Categorical`` (values only -- the fixed category set itself
 is not reconstructed), and a nullable Arrow field -> ``Optional(...)``. Arrow types with no Mixle
@@ -57,8 +58,11 @@ def _table_records(table: Any, columns: list[str] | None) -> list[Any]:
 def _arrow_field_type(arrow_type: Any) -> Any:
     """Map one Arrow scalar/dictionary type to its Mixle :class:`~mixle.data.schema.FieldType`.
 
-    Deliberately narrow, matching ``schema.py``'s own closed type vocabulary: signed/unsigned integers
-    (``int8``..``int64``, ``uint8``..``uint64``) -> :class:`~mixle.data.schema.Count`;
+    Deliberately narrow, matching ``schema.py``'s own closed type vocabulary: signed integers
+    (``int8``..``int64``) -> :class:`~mixle.data.schema.Integer`; unsigned integers
+    (``uint8``..``uint64``) -> :class:`~mixle.data.schema.Count`. Signed columns must NOT map to
+    ``Count``: ``Count`` asserts non-negativity, so the inferred type would reject a ``-1`` that is
+    perfectly valid in the source's own declared storage type.
     ``float16``/``float32``/``float64`` -> :class:`~mixle.data.schema.Real`; ``bool`` ->
     :class:`~mixle.data.schema.Boolean`; ``string``/``large_string`` ->
     :class:`~mixle.data.schema.Text`; dictionary-encoded (categorical) columns ->
