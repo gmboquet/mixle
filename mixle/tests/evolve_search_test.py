@@ -287,8 +287,10 @@ def test_search_n_iter_positive_negative_control_exact_evaluation_count():
     res_evo = search(
         sp, data, objective=obj, build_fn=build_fn_evo, method="evolutionary", n_iter=1, seed=0, mu=2, lam=2
     )
-    assert len(calls_evo) == 2 + 2  # mu initial parents + 1 generation * lam offspring
-    assert res_evo.n_evaluations == 4
+    # MXR-080-1769: n_iter is the TOTAL evaluation budget for the evolutionary backend too, not a
+    # generation count. This used to spend mu + lam * n_iter == 4 evaluations under a budget of one.
+    assert len(calls_evo) == 1
+    assert res_evo.n_evaluations == 1
 
 
 def test_operator_bandit_concentrates_on_winner():
@@ -453,3 +455,38 @@ def test_search_bandit_method_runs():
         seed=0,
     )
     assert isinstance(res, SearchResult) and res.best_model is not None
+
+
+def test_evolutionary_never_exceeds_its_total_evaluation_budget():
+    # MXR-080-1769: the evolutionary backend treated n_iter as a generation count and spent
+    # mu + lam * n_iter evaluations, so a stated budget of 1 bought 12 with mu=4, lam=8.
+    sp = Space({"mu": Real(-1.0, 1.0)})
+    data = list(range(20))
+    obj = nll_objective()
+
+    for n_iter in (1, 3, 5, 12, 40):
+        calls = []
+
+        def build_fn(cfg, train_data, _calls=calls):
+            _calls.append(cfg)
+            return GaussianDistribution(float(cfg["mu"]), 1.0)
+
+        res = search(
+            sp, data, objective=obj, build_fn=build_fn, method="evolutionary", n_iter=n_iter, seed=0, mu=4, lam=8
+        )
+        assert len(calls) == n_iter, f"n_iter={n_iter}: spent {len(calls)} evaluations"
+        assert res.n_evaluations == n_iter
+
+
+def test_evolutionary_rejects_invalid_population_controls():
+    sp = Space({"mu": Real(-1.0, 1.0)})
+    data = list(range(20))
+    obj = nll_objective()
+
+    def build_fn(cfg, train_data):
+        return GaussianDistribution(float(cfg["mu"]), 1.0)
+
+    for bad in (0, -2, 2.5):
+        for kwargs in ({"mu": bad}, {"lam": bad}):
+            with pytest.raises(ValueError, match="exact positive integer"):
+                search(sp, data, objective=obj, build_fn=build_fn, method="evolutionary", n_iter=4, seed=0, **kwargs)
