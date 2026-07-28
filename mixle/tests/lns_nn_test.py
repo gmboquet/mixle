@@ -241,6 +241,25 @@ class SumProductCircuitValidationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             SumProductCircuit([("leaf", 0), ("leaf", 1), ("product", [-1, 1])])
 
+    def test_boolean_child_and_nonvector_weights_are_rejected(self):
+        with self.assertRaises(ValueError):
+            SumProductCircuit([("leaf", 0), ("product", [False])])
+        with self.assertRaises(ValueError):
+            SumProductCircuit([("leaf", 0), ("sum", [0], [[0.0]])])
+
+    def test_circuit_owns_an_immutable_canonical_graph(self):
+        children = [0]
+        weights = np.array([0.0])
+        nodes = [("leaf", 0), ("sum", children, weights)]
+        circuit = SumProductCircuit(nodes)
+        children[0] = 1
+        weights[0] = 99.0
+        nodes[1] = ("product", [1])
+        self.assertEqual(circuit.nodes, (("leaf", 0), ("sum", (0,), (0.0,))))
+        self.assertIsInstance(circuit.nodes, tuple)
+        self.assertIsInstance(circuit.leaf_ids, frozenset)
+        self.assertEqual(float(circuit.evaluate_float({0: 2.0})), 2.0)
+
     def test_cardinality_mismatch_is_rejected(self):
         with self.assertRaises(ValueError):
             SumProductCircuit([("leaf", 0), ("leaf", 1), ("sum", [0, 1], [0.0])])

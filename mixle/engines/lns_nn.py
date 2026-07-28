@@ -144,7 +144,7 @@ def cross_entropy(logits: Any, targets: Any, lns: LogNumberSystem, axis: int = -
     return float(np.mean((lse_k - target_codes).astype(np.float64) * lns.step))
 
 
-def _validate_circuit_children(i: int, children: Any) -> None:
+def _canonical_circuit_children(i: int, children: Any) -> tuple[int, ...]:
     """MXR-080-0142: every product/sum node must have >=1 child, each an earlier, in-range node index.
 
     Requiring ``0 <= child < i`` (strictly earlier than the referencing node's own index) in one
@@ -156,34 +156,56 @@ def _validate_circuit_children(i: int, children: Any) -> None:
         raise ValueError(f"SumProductCircuit: node {i} children must be a list/tuple of indices, got {children!r}")
     if len(children) == 0:
         raise ValueError(f"SumProductCircuit: node {i} has no children (empty product/sum node)")
+    canonical = []
     for c in children:
-        if not isinstance(c, (int, np.integer)):
+        if isinstance(c, (bool, np.bool_)) or not isinstance(c, (int, np.integer)):
             raise ValueError(f"SumProductCircuit: node {i} has a non-integer child reference {c!r}")
         if c < 0 or c >= i:
             raise ValueError(
                 f"SumProductCircuit: node {i} references child {c}, which must be an earlier node "
                 f"(0 <= child < {i}); forward, self, and out-of-range references are not a valid DAG"
             )
+        canonical.append(int(c))
+    return tuple(canonical)
 
 
-def _validate_circuit_sum_weights(i: int, children: Any, log_weights: Any) -> None:
+def _canonical_circuit_sum_weights(i: int, children: Any, log_weights: Any) -> tuple[float, ...]:
     """MXR-080-0142: a sum node's weight count must match its child count, and the (exponentiated)
     weights must be finite and sum to ~1 -- a genuine probability simplex, the same contract
     :class:`mixle.stats.latent.mixture.MixtureDistribution` enforces on its own component weights.
     """
-    if len(log_weights) != len(children):
+    raw = np.asarray(log_weights)
+    if raw.ndim != 1 or raw.shape != (len(children),):
         raise ValueError(
-            f"SumProductCircuit: sum node {i} has {len(children)} children but {len(log_weights)} "
-            "weights; these must match"
+            f"SumProductCircuit: sum node {i} weights must have exact shape {(len(children),)}, got {raw.shape}"
         )
-    w = np.exp(np.asarray(log_weights, dtype=np.float64))
-    if not np.isfinite(w).all():
+    log_w = np.array(raw, dtype=np.float64, copy=True)
+    if not np.isfinite(log_w).all():
         raise ValueError(f"SumProductCircuit: sum node {i} has non-finite weight(s): {list(log_weights)!r}")
+    w = np.exp(log_w)
     total = float(w.sum())
     if not np.isclose(total, 1.0, rtol=_SUM_NODE_WEIGHT_RTOL, atol=_SUM_NODE_WEIGHT_ATOL):
         raise ValueError(
             f"SumProductCircuit: sum node {i} weights must sum to 1.0 (simplex weights), got sum={total!r}"
         )
+    return tuple(float(value) for value in log_w)
+
+
+def _canonical_leaf_id(value: Any) -> Any:
+    """Own an immutable leaf identifier rather than retaining a mutable caller object."""
+    if isinstance(value, (str, bytes, int, bool, type(None))):
+        return value
+    if isinstance(value, float):
+        if not np.isfinite(value):
+            raise ValueError("SumProductCircuit leaf ids must not be NaN/Inf")
+        return value
+    if isinstance(value, tuple):
+        return tuple(_canonical_leaf_id(item) for item in value)
+    if isinstance(value, frozenset):
+        return frozenset(_canonical_leaf_id(item) for item in value)
+    raise ValueError(
+        "SumProductCircuit leaf ids must be immutable scalar/tuple/frozenset values, got %r" % (value,)
+    )
 
 
 class SumProductCircuit:
@@ -210,6 +232,7 @@ class SumProductCircuit:
         if len(nodes) == 0:
             raise ValueError("SumProductCircuit requires at least one node; got an empty circuit")
         leaf_ids: set = set()
+        canonical_nodes = []
         for i, node in enumerate(nodes):
             if not isinstance(node, (tuple, list)) or len(node) == 0:
                 raise ValueError(f"SumProductCircuit: node {i} must be a nonempty (kind, ...) tuple, got {node!r}")
@@ -217,27 +240,25 @@ class SumProductCircuit:
             if kind == "leaf":
                 if len(node) != 2:
                     raise ValueError(f"SumProductCircuit: leaf node {i} must be ('leaf', leaf_id), got {node!r}")
-                try:
-                    leaf_ids.add(node[1])
-                except TypeError:
-                    raise ValueError(
-                        f"SumProductCircuit: leaf node {i} has an unhashable leaf id {node[1]!r}"
-                    ) from None
+                leaf_id = _canonical_leaf_id(node[1])
+                leaf_ids.add(leaf_id)
+                canonical_nodes.append(("leaf", leaf_id))
             elif kind == "product":
                 if len(node) != 2:
                     raise ValueError(f"SumProductCircuit: product node {i} must be ('product', children), got {node!r}")
-                _validate_circuit_children(i, node[1])
+                canonical_nodes.append(("product", _canonical_circuit_children(i, node[1])))
             elif kind == "sum":
                 if len(node) != 3:
                     raise ValueError(
                         f"SumProductCircuit: sum node {i} must be ('sum', children, log_weights), got {node!r}"
                     )
-                _validate_circuit_children(i, node[1])
-                _validate_circuit_sum_weights(i, node[1], node[2])
+                children = _canonical_circuit_children(i, node[1])
+                log_weights = _canonical_circuit_sum_weights(i, children, node[2])
+                canonical_nodes.append(("sum", children, log_weights))
             else:
                 raise ValueError(f"SumProductCircuit: node {i} has an unrecognized kind {kind!r}")
-        self.nodes = nodes
-        self.leaf_ids = leaf_ids
+        self.nodes = tuple(canonical_nodes)
+        self.leaf_ids = frozenset(leaf_ids)
 
     def _check_leaf_values(self, method: str, leaf_values: dict[Any, Any]) -> None:
         missing = self.leaf_ids - leaf_values.keys()
