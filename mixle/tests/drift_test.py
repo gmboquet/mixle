@@ -55,6 +55,122 @@ class DetectDriftTest(unittest.TestCase):
         self.assertIn("value", report.per_feature)
 
 
+class _PartialScorer:
+    """A model that scores a sentinel record as NaN (unscorable) and everything else exactly."""
+
+    SENTINEL = "unscorable"
+
+    def dist_to_encoder(self):
+        return self
+
+    def seq_encode(self, rows):
+        return list(rows)
+
+    def seq_log_density(self, enc):
+        return np.asarray([self.log_density(r) for r in enc], dtype=float)
+
+    def log_density(self, x):
+        return float("nan") if x == self.SENTINEL else -1.0
+
+
+class _ShortBatchScorer:
+    """A model whose batch path always returns one fewer score than it was given records."""
+
+    def dist_to_encoder(self):
+        return self
+
+    def seq_encode(self, rows):
+        return list(rows)
+
+    def seq_log_density(self, enc):
+        return np.zeros(max(len(enc) - 1, 0), dtype=float)
+
+    def log_density(self, x):
+        return 0.0
+
+
+class _BatchDownScorer:
+    """A model whose batch path always raises; the per-record path scores every record fine."""
+
+    def __init__(self):
+        self.scalar_calls = 0
+
+    def dist_to_encoder(self):
+        return self
+
+    def seq_encode(self, rows):
+        return list(rows)
+
+    def seq_log_density(self, enc):
+        raise ConnectionError("batch scoring endpoint is down")
+
+    def log_density(self, x):
+        self.scalar_calls += 1
+        return -1.0
+
+
+class DriftEvidenceCoverageTest(unittest.TestCase):
+    """MXR-080-1640: an unscorable current sample cannot be certified drift-free."""
+
+    def test_mostly_unscorable_current_sample_is_not_declared_drift_free(self):
+        model = _PartialScorer()
+        ref = ["ok"] * 10
+        current = ["ok"] + [_PartialScorer.SENTINEL] * 9
+        report = detect_drift(model, ref, current, per_feature=False)
+        self.assertAlmostEqual(report.score["fraction_unscorable_current"], 0.9, places=9)
+        self.assertAlmostEqual(report.score["ks"], 0.0, places=9)
+        self.assertAlmostEqual(report.score["mean_loglik_shift"], 0.0, places=9)
+        self.assertTrue(report.drift)  # coverage, not the shift statistics, drives this verdict
+        self.assertTrue(any("scorable" in r for r in report.reasons))
+
+    def test_a_rise_in_the_unscorable_rate_is_itself_drift(self):
+        model = _PartialScorer()
+        ref = ["ok"] * 100
+        # 80% still scorable, so the coverage floor is met -- but the rate rose 20 points vs reference
+        current = ["ok"] * 80 + [_PartialScorer.SENTINEL] * 20
+        report = detect_drift(model, ref, current, per_feature=False)
+        self.assertTrue(report.drift)
+        self.assertTrue(any("unscorable rate rose" in r for r in report.reasons))
+
+    def test_fully_scorable_matching_populations_stay_clean(self):
+        model = _PartialScorer()
+        report = detect_drift(model, ["ok"] * 50, ["ok"] * 50, per_feature=False)
+        self.assertFalse(report.drift)
+        self.assertEqual(report.reasons, [])
+        self.assertEqual(report.score["n_scorable_current"], 50)
+
+
+class DriftOneShotPopulationTest(unittest.TestCase):
+    """MXR-080-1641: each population is consumed exactly once and scoring output is size-checked."""
+
+    def test_identical_one_shot_streams_do_not_produce_a_false_drift_verdict(self):
+        model = _PartialScorer()
+        report = detect_drift(model, iter([0.0, 1.0, 2.0]), iter([0.0, 1.0, 2.0]))
+        self.assertFalse(report.drift)
+        self.assertEqual(report.reasons, [])
+        self.assertEqual(report.processed_count, 3)
+        for stats in report.per_feature.values():
+            self.assertTrue(np.isfinite(stats["psi"]))
+            self.assertLess(stats["ks"], 1.0)
+
+    def test_score_drift_accepts_one_shot_iterables(self):
+        model = _PartialScorer()
+        s = score_drift(model, iter([0.0, 1.0]), iter([0.0, 1.0]))
+        self.assertEqual(s["n_reference"], 2)
+        self.assertEqual(s["n_current"], 2)
+
+    def test_batch_failure_falls_back_without_consuming_the_population(self):
+        model = _BatchDownScorer()
+        s = score_drift(model, iter([0.0, 1.0, 2.0]), iter([0.0, 1.0, 2.0]))
+        self.assertEqual(s["n_scorable_reference"], 3)
+        self.assertEqual(s["n_scorable_current"], 3)
+        self.assertEqual(model.scalar_calls, 6)  # every record was actually retried, none lost
+
+    def test_wrong_cardinality_scoring_output_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "exactly one score per record"):
+            score_drift(_ShortBatchScorer(), [0.0, 1.0, 2.0], [0.0, 1.0, 2.0])
+
+
 class ModelMonitorTest(unittest.TestCase):
     def test_retrains_and_swaps_on_drift(self):
         rng = np.random.RandomState(2)
