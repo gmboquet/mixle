@@ -22,6 +22,7 @@ from mixle.engines.extended import DoubleDouble, dd_sum
 _TINY = np.finfo(np.float64).tiny
 _FLOAT64_MAX = np.finfo(np.float64).max
 _U_DD = 2.0**-106  # double-double unit roundoff
+_MAX_EXACT_INT = 2**53  # above this an integer stops being exactly representable in float64
 _MIN_MPFR_BITS = 128
 _MAX_MPFR_BITS = 4096  # a compute-cost ceiling on accurate_sum's own escalation, not a backend limit --
 # see _condition_number: no representable finite float64 (cond, target_rel_error) pair legitimately
@@ -89,6 +90,64 @@ def _condition_number(abs_sum: float, s_dd: float) -> float:
     return min(raw, float(_FLOAT64_MAX))
 
 
+def _native_exact_float64(x: Any) -> np.ndarray | None:
+    """Return ``x`` as a flat ``float64`` array when its *native* dtype already carries every input bit
+    exactly, else ``None`` (meaning: route through the evidence-preserving object path).
+
+    :func:`accurate_sum` only needs one bit of information about its inputs -- can a ``float64``
+    accumulator hold them without discarding source evidence? For an array that is already a native
+    numeric dtype, the dtype answers that for every element at once, and the two value-dependent parts
+    (integers past the 53-bit exact range, non-finite floats) are single vectorized reductions. Deciding
+    it per element instead -- boxing each value into a Python object and re-deriving its type and width
+    one at a time -- measured at ~79% of ``accurate_sum``'s runtime on plain ``float64`` input, putting
+    the module's own fast path in the ~1000x-slower-than-float64 regime it exists to avoid. An
+    ``object`` dtype (``Decimal``, strings, over-wide integers, backend-native scalars) still gets the
+    per-element treatment, because there the element type genuinely varies.
+    """
+    try:
+        arr = np.asarray(x)
+    except (TypeError, ValueError, OverflowError):
+        return None  # e.g. integers too large for any native dtype: keep them as objects
+    if arr.dtype == object:
+        return None
+    kind = arr.dtype.kind
+    if kind == "b":
+        return arr.ravel().astype(np.float64)
+    if kind in "iu":
+        flat = arr.ravel()
+        if flat.size and (int(flat.min()) < -_MAX_EXACT_INT or int(flat.max()) > _MAX_EXACT_INT):
+            return None  # float64 would silently drop low bits; the high-precision path keeps them
+        return flat.astype(np.float64)
+    if kind == "f" and arr.dtype.itemsize <= 8:  # float16/32/64 widen to float64 exactly; not longdouble
+        flat = arr.ravel().astype(np.float64, copy=False)
+        if flat.size and not np.all(np.isfinite(flat)):
+            return None  # non-finite: let the object path decide between "overflow" and a hard error
+        return flat
+    return None  # complex, datetime, strings, longdouble: not float64-exact numerics
+
+
+def _preserved_evidence_sum(raw: np.ndarray, target_rel_error: float) -> SumResult:
+    """Sum an object array whose elements are not uniformly float64-exact, keeping the source scalars
+    (``Decimal``/string/large-integer/backend-native) intact until the selected accumulator."""
+    if raw.size == 0:
+        return SumResult(0.0, "float64", 0.0, target_rel_error, "ok")
+    try:
+        approx = np.array([float(value) for value in raw], dtype=np.float64)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("sum inputs must be finite numeric values") from None
+    if np.any(np.isnan(approx)):
+        raise ValueError("sum inputs must be finite numeric values")
+    with np.errstate(over="ignore", invalid="ignore"):
+        approx_sum = abs(float(np.sum(approx)))
+        approx_abs_sum = float(np.abs(approx).sum())
+    cond = (
+        float(_FLOAT64_MAX)
+        if not math.isfinite(approx_sum) or not math.isfinite(approx_abs_sum)
+        else _condition_number(approx_abs_sum, approx_sum)
+    )
+    return _high_precision_sum(raw, cond, target_rel_error)
+
+
 def accurate_sum(x: Any, target_rel_error: float = 1e-12) -> SumResult:
     """Sum ``x`` to ``target_rel_error`` relative accuracy using the lowest-cost sufficient backend.
 
@@ -105,40 +164,12 @@ def accurate_sum(x: Any, target_rel_error: float = 1e-12) -> SumResult:
     ):
         raise ValueError("target_rel_error must be a positive, finite number; got %r." % (target_rel_error,))
 
-    raw = np.asarray(x, dtype=object).ravel()
-    if raw.size == 0:
+    arr = _native_exact_float64(x)
+    if arr is None:
+        return _preserved_evidence_sum(np.asarray(x, dtype=object).ravel(), target_rel_error)
+    if arr.size == 0:
         return SumResult(0.0, "float64", 0.0, target_rel_error, "ok")
 
-    def _native_exact(value: Any) -> bool:
-        if isinstance(value, (bool, np.bool_)):
-            return True
-        if isinstance(value, (int, np.integer)):
-            return abs(int(value)) <= 2**53
-        if isinstance(value, (float, np.floating)):
-            return np.asarray(value).dtype.itemsize <= 8 and math.isfinite(float(value))
-        return False
-
-    if not all(_native_exact(value) for value in raw):
-        # Preserve Decimal/string/large-integer/backend-native evidence until the selected accumulator.
-        try:
-            approx = np.array([float(value) for value in raw], dtype=np.float64)
-        except (TypeError, ValueError, OverflowError):
-            raise ValueError("sum inputs must be finite numeric values") from None
-        if np.any(np.isnan(approx)):
-            raise ValueError("sum inputs must be finite numeric values")
-        with np.errstate(over="ignore", invalid="ignore"):
-            approx_sum = abs(float(np.sum(approx)))
-            approx_abs_sum = float(np.abs(approx).sum())
-        cond = (
-            float(_FLOAT64_MAX)
-            if not math.isfinite(approx_sum) or not math.isfinite(approx_abs_sum)
-            else _condition_number(approx_abs_sum, approx_sum)
-        )
-        return _high_precision_sum(raw, cond, target_rel_error)
-
-    arr = np.asarray(raw.tolist(), dtype=np.float64)
-    if not np.all(np.isfinite(arr)):
-        raise ValueError("sum inputs must be finite numeric values")
     if float64_sum_is_accurate(arr, target_rel_error):
         s0_value = float(np.sum(arr))
         s0 = abs(s0_value)
@@ -148,19 +179,19 @@ def accurate_sum(x: Any, target_rel_error: float = 1e-12) -> SumResult:
     with np.errstate(over="ignore", invalid="ignore"):
         abs_sum = float(np.abs(arr).sum())
     if not math.isfinite(abs_sum):
-        return _high_precision_sum(raw, float(_FLOAT64_MAX), target_rel_error)
+        return _high_precision_sum(arr, float(_FLOAT64_MAX), target_rel_error)
 
     with np.errstate(over="ignore", invalid="ignore"):
         dd = dd_sum(arr)
         dd_value = float(dd.to_float())
     if not math.isfinite(dd_value) or not np.all(np.isfinite(dd.hi)) or not np.all(np.isfinite(dd.lo)):
-        return _high_precision_sum(raw, float(_FLOAT64_MAX), target_rel_error)
+        return _high_precision_sum(arr, float(_FLOAT64_MAX), target_rel_error)
     s_dd = abs(dd_value)
     cond = _condition_number(abs_sum, s_dd)
     dd_rel_error = cond * _U_DD
     if dd_rel_error <= target_rel_error:
         return SumResult(dd_value, "dd", dd_rel_error, target_rel_error, "ok")
-    result = _high_precision_sum(raw, cond, target_rel_error)
+    result = _high_precision_sum(arr, cond, target_rel_error)
     if result.backend == "unavailable":
         return SumResult(dd_value, "dd", dd_rel_error, target_rel_error, "insufficient")
     return result

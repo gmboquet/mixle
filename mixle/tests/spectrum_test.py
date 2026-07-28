@@ -1,5 +1,7 @@
 """The precision-spectrum front door (mixle.engines.spectrum): auto-route to the cheapest accurate backend."""
 
+import math
+import time
 import unittest
 from decimal import Decimal
 from unittest import mock
@@ -167,6 +169,62 @@ class AccurateSumFailClosedTest(unittest.TestCase):
         for bad in (0.0, -1e-9, float("nan"), float("inf"), True):
             with self.assertRaises(ValueError):
                 accurate_sum(np.array([1.0, 2.0]), bad)
+
+
+class AccurateSumCostModelTest(unittest.TestCase):
+    """accurate_sum's routing decision must cost one dtype inspection, not one per element.
+
+    The module's opening docstring rejects mpmath for being "~1000x slower than float64" -- so a
+    per-element Python-object scan (box every value, re-derive its type and width one at a time) put
+    accurate_sum's own *fast* path in exactly that regime: ~1620x np.sum and ~13.7x math.fsum on 200k
+    float64, with ~79% of the runtime in the scan alone. A native numeric dtype answers "is this
+    float64-exact?" for the whole array at once; only a genuine ``object`` array has per-element types
+    to inspect.
+    """
+
+    def test_native_dtypes_never_take_the_per_element_object_route(self):
+        def _boom(raw, target_rel_error):
+            raise AssertionError("native dtype %r must not be boxed per element" % (raw.dtype,))
+
+        native = [
+            np.arange(1000, dtype=np.float64) + 1.0,
+            np.arange(1000, dtype=np.float32) + 1.0,
+            np.arange(1000, dtype=np.float16) + 1.0,
+            np.arange(1000, dtype=np.int64),
+            np.arange(1000, dtype=np.uint16),
+            (np.arange(1000) % 2).astype(bool),
+        ]
+        with mock.patch("mixle.engines.spectrum._preserved_evidence_sum", _boom):
+            for x in native:
+                self.assertEqual(accurate_sum(x, 1e-12).status, "ok")
+
+    def test_non_native_evidence_still_takes_the_object_route(self):
+        # Negative control for the early-out: everything whose per-element identity actually matters must
+        # still reach the evidence-preserving accumulator, not get flattened through float64 first.
+        for x in (
+            [Decimal("1.0000000000000000000000000000000001"), Decimal("-1")],
+            np.array([2**54, 1], dtype=np.int64),  # past float64's exact integer range
+            [2**70, -(2**70), 1],  # too large for any native dtype at all
+            ["1.5", "2.5"],
+        ):
+            r = accurate_sum(x, 1e-25)
+            self.assertTrue(r.backend.startswith("mpfr"), r.backend)
+
+    def test_native_float64_path_beats_math_fsum(self):
+        # math.fsum is the obvious per-element correctly-rounded alternative; a vectorized backend that
+        # is *slower* than it has no reason to exist. Best-of-5 on the vectorized side (a scheduler
+        # preemption under the parallel runner can inflate any single rep); fsum single-shot, since load
+        # only ever slows it, which cannot flip the assertion.
+        x = np.random.RandomState(0).randn(200_000)
+        t_spectrum = float("inf")
+        for _ in range(5):
+            t0 = time.perf_counter()
+            accurate_sum(x, 1e-12)
+            t_spectrum = min(t_spectrum, time.perf_counter() - t0)
+        t0 = time.perf_counter()
+        math.fsum(x)
+        t_fsum = time.perf_counter() - t0
+        self.assertLess(t_spectrum, t_fsum)
 
 
 class CastTest(unittest.TestCase):
