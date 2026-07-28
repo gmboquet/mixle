@@ -112,6 +112,16 @@ def _robust_cho_factor(covar: np.ndarray) -> tuple[tuple[np.ndarray, bool], np.n
         return scipy.linalg.cho_factor(sym), sym
     except (scipy.linalg.LinAlgError, np.linalg.LinAlgError):
         evals = np.linalg.eigvalsh(sym)
+        if not evals.max() > 0.0:
+            # No direction carries positive variance, so this is not float noise around a valid
+            # covariance -- it is degenerate (all-zero, or negative semi-definite throughout). The
+            # jitter below is trace-scaled and would fall back to an absolute scale of 1.0 here,
+            # manufacturing a ~1e-10*I covariance out of a matrix that contains no information.
+            # Healing exists for near-PD inputs; refuse this one.
+            raise ValueError(
+                "covar is not positive definite: no direction carries positive variance (largest "
+                f"eigenvalue {evals.max():.6g}); refusing to self-heal a degenerate covariance."
+            ) from None
         if evals.min() < -_MAX_HEAL_EIGENVALUE_RATIO * np.abs(evals).max():
             raise ValueError(
                 "covar is not positive semi-definite within tolerance (worst eigenvalue "
