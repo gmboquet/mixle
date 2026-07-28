@@ -82,6 +82,40 @@ class _Slot:
     aliases: tuple[int, ...] = ()  # flat-family argument positions supplied by this canonical slot
 
 
+# The domain a prior's own draws live in, which is NOT the same thing as the support of the model
+# slot it fills. A slot's support says what the LIKELIHOOD will accept there (Normal's mean accepts
+# any real); a prior's domain says where its density is defined. Putting a Beta prior in a real slot
+# left the slot unconstrained, so the sampler/optimizer worked in raw coordinates and evaluated
+# Beta's density at values outside (0, 1) -- -inf at the boundaries and NaN beyond them, which is
+# what the autograd targets then refused to differentiate. Slots merge the two (most constrained
+# wins), so naming a domain here only ever tightens a slot that was previously unconstrained.
+# Deliberately omitted: the discrete families, which do not appear as continuous priors, and Pareto,
+# whose support starts at its scale rather than at 0 and so is not simply "positive".
+_PRIOR_VALUE_SUPPORT = {
+    "Beta": "unit",
+    "Exponential": "positive",
+    "Gamma": "positive",
+    "LogNormal": "positive",
+    "Rayleigh": "positive",
+    "Weibull": "positive",
+}
+_SUPPORT_ORDER = {"real": 0, "positive": 1, "unit": 2}
+
+
+def _widen_to_prior_domain(handle, support: str) -> str:
+    """Return the more constrained of a model slot's support and its prior's own domain.
+
+    A non-centered (``loc_scale``) latent is sampled as z ~ N(0,1) and shifted, so its slot stays
+    real by construction and must not be re-constrained here.
+    """
+    if getattr(handle, "_reparam", None) == "loc_scale":
+        return support
+    own = _PRIOR_VALUE_SUPPORT.get(getattr(getattr(handle, "_family", None), "name", None))
+    if own is None or support not in _SUPPORT_ORDER:
+        return support
+    return max((support, own), key=_SUPPORT_ORDER.__getitem__)
+
+
 def _to_value(support: str, u: float):
     """Map an unconstrained scalar to the constrained parameter, with the log|Jacobian|."""
     u = float(u)
@@ -318,6 +352,8 @@ def _slots_of(rv: RandomVariable, fam, extra_latents=()) -> tuple[list[_Slot], d
         the ``prior-arg -> child-slot`` map so the prior log-density is scored as a function of them.
         """
         key = id(handle)
+        # A bounded prior constrains its own latent no matter how permissive the model slot is.
+        support = _widen_to_prior_domain(handle, support)
         if key in prior_slot:
             canonical = prior_slot[key]
             merge_support(slot_by_index[canonical], support)
@@ -335,9 +371,7 @@ def _slots_of(rv: RandomVariable, fam, extra_latents=()) -> tuple[list[_Slot], d
         if handle._reparam == "loc_scale":
             # Non-centered: sample z ~ N(0,1) (real) and set value = loc + scale*z. The slot is real
             # regardless of the model's support, and carries parent_args so loc/scale resolve at eval.
-            slot = _Slot(
-                index, None, False, nm, handle, "real", parent_args=parent_args, reparam="loc_scale"
-            )
+            slot = _Slot(index, None, False, nm, handle, "real", parent_args=parent_args, reparam="loc_scale")
         elif parent_args:
             slot = _Slot(index, None, support == "positive", nm, handle, support, parent_args=parent_args)
         else:
@@ -529,6 +563,8 @@ def _collect_composite(rv: RandomVariable):
     def collect_prior(handle: RandomVariable, support: str, name: str) -> int:
         """Collect one identity-preserving prior node and its unique hyperparameter parents."""
         key = id(handle)
+        # A bounded prior constrains its own latent no matter how permissive the model slot is.
+        support = _widen_to_prior_domain(handle, support)
         if key in prior_slots:
             index = prior_slots[key]
             merge_support(slots[index], support)
@@ -665,7 +701,9 @@ def _collect_composite(rv: RandomVariable):
                 for position, argument in enumerate(node._args):
                     if isinstance(argument, (list, tuple)):
                         new_args.append(
-                            tuple(build_node(child) if isinstance(child, RandomVariable) else child for child in argument)
+                            tuple(
+                                build_node(child) if isinstance(child, RandomVariable) else child for child in argument
+                            )
                         )
                         continue
                     spec = _struct_spec_for(node, argument)
@@ -1627,9 +1665,7 @@ def _prepare_target(
     if _is_grouped(rv):  # random-intercept / plate model: per-group latents + shared hyperparameters
         if missing != "error":
             raise NotImplementedError("grouped inference does not support missing='marginalize'")
-        log_target, grad, slots, build, dmean, dstd = _grouped_target(
-            rv, data, want_grad=want_grad, jacobian=jacobian
-        )
+        log_target, grad, slots, build, dmean, dstd = _grouped_target(rv, data, want_grad=want_grad, jacobian=jacobian)
         soft = _soft_penalty(soft_constraints, slots, eff)
         feasible = _feasibility(hard_constraints, slots)
         log_target = _constrain_target(log_target, feasible)
@@ -2068,9 +2104,7 @@ def map_fit(
             dtype=float,
         )
         scalar_values = {
-            slot.name: float(value_row[k])
-            for k, slot in enumerate(slots)
-            if slot.handle is not group_prior
+            slot.name: float(value_row[k]) for k, slot in enumerate(slots) if slot.handle is not group_prior
         }
         optimizer = {
             "algorithm": "L-BFGS-B" if clean_gradient else "Nelder-Mead",
@@ -2731,9 +2765,7 @@ def _conjugate_observations(rv: RandomVariable, data) -> np.ndarray:
             prior = components[0]
         categories = len(np.asarray(prior._args[0]).reshape(-1))
         if not np.all(integral) or np.any((values < 0) | (values >= categories)):
-            raise ValueError(
-                f"Categorical conjugacy requires exact integer observations in [0, {categories})"
-            )
+            raise ValueError(f"Categorical conjugacy requires exact integer observations in [0, {categories})")
     if family in {"Exponential", "Gamma"} and np.any(values <= 0.0):
         raise ValueError(f"{family} conjugacy requires strictly positive observations")
     return np.asarray(values, dtype=float)
@@ -3510,9 +3542,7 @@ def _indexed_label_layout(labels, expected_rows: int, dim: int, field: str):
     """
     raw = np.asarray(labels, dtype=object)
     if raw.ndim != 1 or raw.size != expected_rows:
-        raise ValueError(
-            f"given[{field!r}] must be one-dimensional with {expected_rows} rows; got shape {raw.shape}."
-        )
+        raise ValueError(f"given[{field!r}] must be one-dimensional with {expected_rows} rows; got shape {raw.shape}.")
     values = []
     for row, value in enumerate(raw.tolist()):
         if isinstance(value, np.generic):
@@ -3558,8 +3588,7 @@ def _indexed_label_layout(labels, expected_rows: int, dim: int, field: str):
         indices[row] = mapping[value]
     if len(ordered) != dim:
         raise ValueError(
-            f"given[{field!r}] has {len(ordered)} distinct symbolic labels, "
-            f"but the indexed latent has dimension {dim}."
+            f"given[{field!r}] has {len(ordered)} distinct symbolic labels, but the indexed latent has dimension {dim}."
         )
     return indices, tuple(ordered), dict(mapping)
 
@@ -3585,15 +3614,8 @@ def _indexed_observations(rv: RandomVariable, data) -> np.ndarray:
         if not isinstance(trials, (int, float, np.integer, np.floating)):
             raise NotImplementedError("indexed Binomial fitting requires a fixed numeric trial count")
         trials = float(trials)
-        if (
-            not trials.is_integer()
-            or trials < 0.0
-            or not np.all(integral)
-            or np.any((values < 0) | (values > trials))
-        ):
-            raise ValueError(
-                f"Binomial indexed fitting requires exact integer observations in [0, {trials:g}]"
-            )
+        if not trials.is_integer() or trials < 0.0 or not np.all(integral) or np.any((values < 0) | (values > trials)):
+            raise ValueError(f"Binomial indexed fitting requires exact integer observations in [0, {trials:g}]")
     if family == "Beta" and np.any((values <= 0.0) | (values >= 1.0)):
         raise ValueError("Beta indexed fitting requires observations strictly inside (0, 1)")
     if family in {"LogNormal", "Gamma", "Weibull", "Rayleigh"} and np.any(values <= 0.0):
@@ -3803,9 +3825,7 @@ def indexed_fit(
         raise NotImplementedError(f"data-indexed latents support how='map'/'mcmc' (got {how!r}).")
     is_sampler = how == "mcmc"
     if is_sampler:
-        draws, burn, thin, _chains, _parallel, rng = _sampler_controls(
-            draws, burn, thin, 1, False, rng
-        )
+        draws, burn, thin, _chains, _parallel, rng = _sampler_controls(draws, burn, thin, 1, False, rng)
     else:
         max_iter = _exact_int_control(max_iter, "indexed max_iter", minimum=1)
         tol = _finite_control(tol, "indexed tol", lower=0.0)
