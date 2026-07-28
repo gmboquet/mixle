@@ -381,13 +381,18 @@ class LNSIntegerTablesTest(unittest.TestCase):
         self.assertGreater(calls["n"], 0)  # the continuous factor really uses the float boundary
         self.assertLess(calls["n"], total_leaf_evals)  # but not every factor does: tables took over
 
-    def test_unseen_categorical_value_scores_log_zero_not_crash(self):
-        pred = self.lns_student(("purple", "s"))  # a color never seen in training
-        self.assertIn(pred, ("a", "b"))
-        ints = self.lns_student.adapter.int_logits_batch(self.lns_student.model, [("purple", "s")])
+    def test_unseen_categorical_value_scores_log_zero_and_is_explicit(self):
+        from mixle.task.model import ImpossibleEvidenceError
         from mixle.task.quantize import _LOG_ZERO_INT
 
+        ints = self.lns_student.adapter.int_logits_batch(self.lns_student.model, [("purple", "s")])
         self.assertTrue((ints <= _LOG_ZERO_INT // 2).all())  # no invented mass for unseen values
+        # Every label being log-zero means the integer tables cannot discriminate at all, so an argmax
+        # would be inventing a decision the evidence does not support. The LNS adapter reports that the
+        # same way the float adapter does (MXR-080-0651/0652) -- explicitly, for the calibrated serving
+        # layer to escalate. task_model_evidence_contract_test covers that escalation end to end.
+        with self.assertRaises(ImpossibleEvidenceError):
+            self.lns_student(("purple", "s"))  # a color never seen in training
 
     def test_compiled_tables_are_invalidated_after_factor_mutation(self):
         tree = self.lns_student.model
