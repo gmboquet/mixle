@@ -155,13 +155,19 @@ def _validated_prior_flag(quantity: Any, *, name: str) -> bool:
     return bool(flag)
 
 
-@dataclass
+@dataclass(frozen=True)
 class _SampleDerivedQuantity:
     """A concrete IC-1 `DerivedQuantity`: a draw matrix + the honesty flag, CI by empirical quantile.
 
     The same "samples + quantile-based `credible_interval` + `prior_dominated`" shape used by the
     frozen IC-1 conformance stub and the H4 stochastic-plan tests -- the repo's established idiom for
     a concrete derived quantity, rather than a bespoke one per caller.
+
+    Frozen, holding a validated read-only copy of the draws. The validation below was previously
+    performed on a throwaway array while the field kept aliasing whatever the caller passed, so the
+    checked object and the stored object were not the same one: a later in-place edit through the
+    caller's handle put NaNs (or a different distribution entirely) behind a record that had already
+    certified itself finite.
     """
 
     samples: np.ndarray
@@ -173,18 +179,20 @@ class _SampleDerivedQuantity:
         # liabilities), so only a finite/non-empty check is universal here -- the probability-specific
         # [0, 1] range gate lives at the dose-response pushforward itself (`_validated_response_fn`),
         # where the samples' meaning as a probability is actually known.
-        arr = np.asarray(self.samples, dtype=float)
+        arr = np.array(self.samples, dtype=float, copy=True)
         if arr.size == 0:
             raise ValueError("_SampleDerivedQuantity.samples must be non-empty.")
         if not np.isfinite(arr).all():
             raise ValueError("_SampleDerivedQuantity.samples must be finite (no NaN/Inf).")
+        arr.setflags(write=False)
+        object.__setattr__(self, "samples", arr)
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
         a = (1.0 - level) / 2.0
         return np.quantile(self.samples, a, axis=0), np.quantile(self.samples, 1.0 - a, axis=0)
 
 
-@dataclass
+@dataclass(frozen=True)
 class _DeterministicRisk:
     """A degenerate `DerivedQuantity` for a plain-`ndarray` (no-UQ) deformation input.
 
@@ -205,11 +213,14 @@ class _DeterministicRisk:
     prior_dominated: bool = field(default=False)
 
     def __post_init__(self) -> None:
-        arr = np.asarray(self.samples, dtype=float)
+        arr = np.array(self.samples, dtype=float, copy=True)
         if arr.size == 0:
             raise ValueError("_DeterministicRisk.samples must be non-empty.")
         if not np.isfinite(arr).all():
             raise ValueError("_DeterministicRisk.samples must be finite (no NaN/Inf).")
+        arr.setflags(write=False)
+        object.__setattr__(self, "samples", arr)
+        object.__setattr__(self, "grid_shape", tuple(int(d) for d in self.grid_shape))
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
         point = self.samples[0]
@@ -334,7 +345,7 @@ def _as_dose_samples(dose: Any, n: int, rng: np.random.Generator) -> np.ndarray:
     return arr[idx]
 
 
-@dataclass
+@dataclass(frozen=True)
 class DoseResponse:
     """A named dose-response model: ``model`` selects the functional form, ``params`` its coefficients.
 
@@ -350,6 +361,12 @@ class DoseResponse:
 
     No regulatory dose-response table ships here -- ``params`` are supplied by the caller (see the
     module Non-goals).
+
+    Frozen, holding its own copy of ``params``. The eager domain validation below is only meaningful
+    if the validated coefficients are the ones actually used: with a mutable record and a shared
+    dict, a caller could construct a valid model and then swap ``model`` or edit ``params`` -- and
+    every later ``response_fn()`` would rebuild the closure from coefficients that never passed the
+    construction-time gate.
     """
 
     model: str
@@ -358,6 +375,7 @@ class DoseResponse:
     def __post_init__(self) -> None:
         if self.model not in DOSE_RESPONSE_MODELS:
             raise ValueError(f"unknown dose-response model {self.model!r}; expected one of {DOSE_RESPONSE_MODELS}")
+        object.__setattr__(self, "params", dict(self.params))
         # Eager parameter-domain validation (MXR-080-0094): fail at construction, not at first use --
         # `_dose_response_fn` raises a clear, model-specific error for an out-of-domain coefficient.
         _dose_response_fn(self.model, self.params)
@@ -866,7 +884,7 @@ def _min_adequate_calib_size(alpha: float) -> int:
     return max(1, int(np.ceil(_MIN_CALIB_MARGIN / alpha)) - 1)
 
 
-@dataclass
+@dataclass(frozen=True)
 class ExceedanceReport:
     """Per-timestep exceedance call: which points alert, their raw probability, and the target rate.
 
@@ -885,6 +903,11 @@ class ExceedanceReport:
     ``warmed_up`` (MXR-080-0096) marks which timesteps had enough strictly-prior history to be scored
     at all; an unwarmed timestep always reports ``prob_exceed == 0.0`` and never alerts -- an explicit
     "not yet evaluated", never a confident "safe".
+
+    The record is frozen and owns read-only copies of its three arrays. ``calibrated`` and
+    ``warmed_up`` are the honesty flags that qualify ``alerts``; while the record was mutable,
+    flipping ``calibrated`` to True or overwriting ``alerts`` in place upgraded a best-effort
+    heuristic into an apparently-proven false-alarm bound with nothing else changing.
     """
 
     alerts: np.ndarray
@@ -892,6 +915,14 @@ class ExceedanceReport:
     false_alarm_target: float
     calibrated: bool = True
     warmed_up: np.ndarray = field(default_factory=lambda: np.array([], dtype=bool))
+
+    def __post_init__(self) -> None:
+        for name, dtype in (("alerts", bool), ("prob_exceed", float), ("warmed_up", bool)):
+            owned = np.array(getattr(self, name), dtype=dtype, copy=True)
+            owned.setflags(write=False)
+            object.__setattr__(self, name, owned)
+        object.__setattr__(self, "false_alarm_target", float(self.false_alarm_target))
+        object.__setattr__(self, "calibrated", bool(self.calibrated))
 
 
 def _causal_local_scale(x: np.ndarray, window: int) -> tuple[np.ndarray, np.ndarray]:

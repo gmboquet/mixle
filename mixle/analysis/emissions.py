@@ -114,7 +114,7 @@ class EmissionFactors:
     sigma: dict[str, float] | None = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class Footprint:
     """A Scope 1/2/3 CO2e footprint with an optional 90% credible interval and full provenance.
 
@@ -131,6 +131,12 @@ class Footprint:
     Monte-Carlo configuration behind ``ci``. Hashing the activity alone was not enough to
     distinguish two runs: the same schedule costed against a supplier-specific factor set and
     against a national average is a different footprint with different provenance.
+
+    The record is frozen: a reported footprint is evidence, and rebinding ``total`` or ``scope2``
+    after construction would leave the numbers, the interval and the provenance describing three
+    different computations. ``ci`` is normalized to a ``(lo, hi)`` tuple and ``provenance`` to a
+    dict this record owns, so a later edit to the caller's own dict cannot retroactively rewrite
+    what a footprint claims it was computed from.
     """
 
     scope1: float
@@ -139,6 +145,12 @@ class Footprint:
     total: float
     ci: tuple[float, float] | None = None
     provenance: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.ci is not None:
+            lo, hi = self.ci
+            object.__setattr__(self, "ci", (float(lo), float(hi)))
+        object.__setattr__(self, "provenance", dict(self.provenance))
 
 
 def _scope_dict(factors: EmissionFactors, scope: int) -> dict[str, float]:
@@ -357,7 +369,7 @@ def emissions_footprint(
     )
 
 
-@dataclass
+@dataclass(frozen=True)
 class TransitionRiskResult:
     """The carbon-adjusted NPV distribution across carbon-price/policy scenarios (L3).
 
@@ -379,12 +391,17 @@ class TransitionRiskResult:
     :func:`transition_risk`) fails to validate its own inputs, the same guard applied to
     ``carcinogenic_risk.RiskQuantity`` and the ``_SampleDerivedQuantity`` carriers elsewhere in
     ``mixle.analysis``.
+
+    The record is frozen and owns its arrays (validated copies, write-locked), so ``ranking`` and
+    ``scenario_mean`` cannot drift out of agreement with the ``samples`` they were derived from:
+    an unfrozen record let a caller reorder the ranking or overwrite a scenario mean while every
+    summary method kept reporting off the original draws.
     """
 
     samples: np.ndarray
     prior_dominated: bool
     scenario_mean: np.ndarray
-    ranking: list[int]
+    ranking: tuple[int, ...]
     carbon_cost: np.ndarray
     provenance: dict
 
@@ -409,9 +426,12 @@ class TransitionRiskResult:
             or sorted(self.ranking) != list(range(n_scenarios))
         ):
             raise ValueError("TransitionRiskResult.ranking must be a permutation of scenario indices.")
-        self.samples = np.array(arr, copy=True)
-        self.scenario_mean = np.array(means, copy=True)
-        self.carbon_cost = np.array(costs, copy=True)
+        for name, source in (("samples", arr), ("scenario_mean", means), ("carbon_cost", costs)):
+            owned = np.array(source, copy=True)
+            owned.setflags(write=False)
+            object.__setattr__(self, name, owned)
+        object.__setattr__(self, "ranking", tuple(int(i) for i in self.ranking))
+        object.__setattr__(self, "provenance", dict(self.provenance))
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
         """Per-scenario central ``level`` interval of the carbon-adjusted NPV, each shape ``(k,)``."""
@@ -577,7 +597,7 @@ def transition_risk(
         raise ValueError("transition_risk: carbon-adjusted NPV samples must remain finite")
 
     scenario_mean = _stable_column_means(adjusted)
-    ranking = [int(i) for i in np.argsort(-scenario_mean)]
+    ranking = tuple(int(i) for i in np.argsort(-scenario_mean))
 
     provenance = {
         "footprint_activity_hash": footprint.provenance.get("activity_content_hash"),
