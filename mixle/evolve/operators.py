@@ -236,11 +236,22 @@ class _RecalibratedModel:
     """
 
     def __init__(self, base: Any, temperature: float, center: float) -> None:
-        if temperature <= 0.0:
-            raise ValueError("recalibration temperature must be positive.")
+        # `temperature <= 0.0` alone let NaN and infinity straight through (both comparisons are
+        # False), and center was unchecked. The affine map y -> c + (y - c) / T is simply undefined
+        # for a non-finite T or c: NaN gave NaN densities and NaN samples, and T = inf collapsed
+        # every observation onto the center and returned -inf density with NaN samples -- a
+        # confidently-reported predictive model that is not a distribution at all. Neither state is
+        # something recalibration legitimately produces (the searched grid is finite and positive,
+        # and the center is a predictive mean), and no healing path downstream repairs them.
+        t = float(temperature)
+        if not np.isfinite(t) or t <= 0.0:
+            raise ValueError(f"recalibration temperature must be finite and positive, got {temperature!r}")
+        c = float(center)
+        if not np.isfinite(c):
+            raise ValueError(f"recalibration center must be finite, got {center!r}")
         self.base = base
-        self.temperature = float(temperature)
-        self.center = float(center)
+        self.temperature = t
+        self.center = c
 
     # -- scoring -------------------------------------------------------------
     def _transform(self, x: np.ndarray) -> np.ndarray:
@@ -356,6 +367,22 @@ class Recalibrate:
     seed: int = 0
     grid: tuple[float, ...] = (0.6, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 2.0)
 
+    def __post_init__(self) -> None:
+        """Validate the search controls at the declaration boundary.
+
+        An empty grid used to leave the initial ``best_t = 1.0`` in place with ``best_err`` still
+        infinite -- a temperature reported as chosen that no candidate evaluation ever produced --
+        and a non-positive or non-finite grid entry only failed much later, inside the base family's
+        own density, as an error that never mentions the grid.
+        """
+        if isinstance(self.ensemble, bool) or not isinstance(self.ensemble, int) or self.ensemble <= 0:
+            raise ValueError(f"ensemble must be a positive integer sample budget, got {self.ensemble!r}")
+        grid = tuple(self.grid)
+        if not grid:
+            raise ValueError("grid must contain at least one candidate temperature")
+        if any(not np.isfinite(float(t)) or float(t) <= 0.0 for t in grid):
+            raise ValueError(f"grid temperatures must all be finite and positive, got {self.grid!r}")
+
     def applicable(self, model: Any, data: Any, *, ctx: dict) -> bool:
         """Return whether ``model`` can be sampled and the batch is non-empty."""
         if isinstance(model, _RecalibratedModel):
@@ -367,18 +394,26 @@ class Recalibrate:
         from mixle.inference.calibration import pit_calibration_error, pit_ensemble
 
         rows = np.asarray(_materialize(data, ctx), dtype=float).reshape(-1)
+        if rows.size == 0 or not np.isfinite(rows).all():
+            raise ValueError("recalibration needs a non-empty batch of finite observations")
         sampler = model.sampler(self.seed)
         ref = np.asarray(sampler.sample(self.ensemble), dtype=float).reshape(-1)
+        if ref.size == 0 or not np.isfinite(ref).all():
+            raise ValueError("the model's reference draws must be a non-empty finite ensemble")
         center = float(np.mean(ref))
 
-        best_t, best_err = 1.0, np.inf
+        best_t: float | None = None
+        best_err = np.inf
         for t in self.grid:
-            cand = _RecalibratedModel(model, t, center)
             f = np.broadcast_to(center + t * (ref - center), (rows.shape[0], ref.shape[0]))
             pit = pit_ensemble(rows, f, seed=self.seed)
-            err = pit_calibration_error(pit)
+            err = float(pit_calibration_error(pit))
             if err < best_err:
-                best_err, best_t = err, t
+                best_err, best_t = err, float(t)
+        # never report a temperature the search did not actually evaluate: `best_t` stays None iff
+        # every candidate's calibration error was non-finite (or the loop never ran).
+        if best_t is None or not np.isfinite(best_err):
+            raise ValueError("no grid temperature produced a finite PIT calibration error")
 
         recal = _RecalibratedModel(model, best_t, center)
         return Candidate(
