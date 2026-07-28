@@ -121,14 +121,44 @@ class ComponentParallelTest(unittest.TestCase):
 
 
 class ComponentResponsibilityValidationTest(unittest.TestCase):
-    def test_positive_infinity_dominates_and_ties_split_mass(self):
+    def test_a_single_positive_infinity_dominates_and_ties_are_rejected(self):
+        # This used to assert that several +inf components split the limiting mass equally, which was
+        # the behaviour of a SECOND normalization implementation living in model_parallel.py. That
+        # duplicate also folded the observation weight into the softmax denominator where the serial
+        # E-step divides first and weights after, so a component-parallel fit drifted from the serial
+        # fit on the last digit. The duplicate is gone; this path now calls the canonical normalizer,
+        # which treats two components each claiming infinite density for one observation as ambiguous
+        # evidence and refuses rather than inventing a split. Assert the canonical contract.
+        from mixle.stats.compute.mixture_evidence import InvalidMixtureEvidenceError
         from mixle.utils.parallel.model_parallel import _weighted_component_responsibilities
 
         result = _weighted_component_responsibilities(
-            np.asarray([[np.inf, np.inf, 0.0], [0.0, -np.inf, 0.0]]),
+            np.asarray([[np.inf, 0.0, 0.0], [0.0, -np.inf, 0.0]]),
             np.asarray([2.0, 3.0]),
         )
-        np.testing.assert_equal(result, np.asarray([[1.0, 1.0, 0.0], [1.5, 0.0, 1.5]]))
+        np.testing.assert_equal(result, np.asarray([[2.0, 0.0, 0.0], [1.5, 0.0, 1.5]]))
+
+        with self.assertRaises(InvalidMixtureEvidenceError):
+            _weighted_component_responsibilities(
+                np.asarray([[np.inf, np.inf, 0.0]]),
+                np.asarray([2.0]),
+            )
+
+    def test_component_parallel_responsibilities_match_the_serial_e_step_bit_for_bit(self):
+        """The parallel weighting must be the serial weighting, not an algebraic equivalent of it.
+
+        `(exp(s - m) / T) * w` and `exp(s - m) * (w / T)` agree mathematically and differ in the
+        last ULP, and that difference compounds across EM iterations -- which is what broke
+        `optimize(backend="model_parallel")`'s documented bit-identity with the serial trajectory.
+        """
+        from mixle.stats.compute.mixture_evidence import normalize_mixture_log_scores
+        from mixle.utils.parallel.model_parallel import _weighted_component_responsibilities
+
+        rng = np.random.RandomState(0)
+        scores = rng.normal(size=(200, 4)) * 7.0
+        weights = rng.rand(200) + 0.5
+        serial = normalize_mixture_log_scores(scores).responsibilities * weights[:, None]
+        np.testing.assert_array_equal(_weighted_component_responsibilities(scores, weights), serial)
 
     def test_impossible_and_nan_evidence_are_rejected(self):
         from mixle.utils.parallel.model_parallel import _weighted_component_responsibilities
