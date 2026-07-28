@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
+from numbers import Integral
 from typing import Any
 
 __all__ = [
@@ -338,6 +339,9 @@ _EPISTEMIC_TRANSITIONS = {
 }
 
 
+_EVALUATED_MATURITIES = frozenset({CapabilityMaturity.VALIDATED, CapabilityMaturity.SUPPORTED})
+
+
 def _check_transition(current: StrEnum, target: StrEnum, allowed: Mapping[StrEnum, set[StrEnum]]) -> None:
     if target != current and target not in allowed[current]:
         message = f"illegal {type(current).__name__} transition: {current.value} -> {target.value}"
@@ -358,13 +362,27 @@ class CapabilityLifecycle:
     updated_at: datetime = datetime(1970, 1, 1, tzinfo=UTC)
 
     def __post_init__(self) -> None:
+        # Canonicalize every dimension before any identity comparison below.
+        object.__setattr__(self, "maturity", CapabilityMaturity(self.maturity))
+        object.__setattr__(self, "operational", OperationalState(self.operational))
+        object.__setattr__(self, "evaluation", EvaluationState(self.evaluation))
+        object.__setattr__(self, "epistemic", EpistemicStanding(self.epistemic))
+        if isinstance(self.revision, bool) or not isinstance(self.revision, Integral):
+            raise ValueError("revision must be an exact integer")
         if self.revision < 0:
             raise ValueError("revision must be non-negative")
+        object.__setattr__(self, "revision", int(self.revision))
         object.__setattr__(self, "updated_at", _require_aware(self.updated_at, "updated_at"))
         if self.authorization is not None and self.authorization.capability != self.capability:
             raise ValueError("authorization capability does not match lifecycle capability")
         if self.authorization is not None and self.authorization.decided_at > self.updated_at:
             raise ValueError("authorization decision cannot postdate its lifecycle snapshot")
+        if self.maturity in _EVALUATED_MATURITIES and self.evaluation is EvaluationState.UNEVALUATED:
+            # Promotion into validated/supported gates on a passed evaluation, and no evaluation
+            # transition ever returns to "unevaluated", so this pair is unreachable by any legal
+            # history.  A later stale/failed/running evaluation stays legal: the dimensions are
+            # deliberately independent once the promotion itself has been earned.
+            raise ValueError(f"a {self.maturity.value} capability cannot be unevaluated")
         retired_maturity = self.maturity is CapabilityMaturity.RETIRED
         retired_operation = self.operational is OperationalState.RETIRED
         if retired_maturity != retired_operation:
@@ -459,6 +477,7 @@ class CapabilityLifecycle:
             evaluation=EvaluationState(value["evaluation"]),
             epistemic=EpistemicStanding(value["epistemic"]),
             authorization=None if authorization is None else AuthorizationDecision.from_dict(authorization),
-            revision=int(value["revision"]),
+            # Deliberately NOT int(): coercing before validation turned a persisted -0.5 into 0.
+            revision=value["revision"],
             updated_at=_parse_timestamp(value["updated_at"], "updated_at"),
         )
