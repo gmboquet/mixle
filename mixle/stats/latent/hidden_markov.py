@@ -2831,15 +2831,23 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 steps[cond] += 1
                 cond = steps < sz_next
 
+            # The emission mask must pair each observation's weight with the SAME state draw that the
+            # init/state/transition counts used for it. ``idx`` is indexed sequence-major (aligned with
+            # ``xs_enc`` and with the ``bincount(idx, weights_nz[seq_i])`` above), so the per-observation
+            # weight vector has to be built sequence-major too. Indexing ``weights`` by the encoder's
+            # time-major ``idx_vec`` instead applied a PERMUTATION of the weights against an unpermuted
+            # state draw: the total mass survived, but it landed on the wrong states, leaving emission
+            # counts that disagreed with state_counts whenever the sequence weights were not uniform.
+            obs_weights = weights_nz[seq_i]
             if self._homogeneous_emissions:
                 for j in range(self.num_states):
-                    w = weights[idx_vec]
+                    w = obs_weights.copy()
                     w[idx != j] = 0.0
                     self.accumulators[j].seq_initialize(xs_enc, w.flatten(), self._acc_rng[j])
             else:
                 for group_indices, group_enc in _iter_emission_groups(xs_enc):
                     for j in group_indices:
-                        w = weights[idx_vec]
+                        w = obs_weights.copy()
                         w[idx != j] = 0.0
                         self.accumulators[j].seq_initialize(group_enc, w.flatten(), self._acc_rng[j])
 
@@ -2858,30 +2866,27 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
             # Emission init parity with the numpy ("bands") branch.
             #
-            # Both branches draw the SAME values from self._idx_rng (same call, same size); ``states`` here equals
-            # the numpy branch's time-major draw ``idx``. They differ ONLY in how that draw is mapped onto the
-            # emission observations: the numba encoding stores observations sequence-major (``xs``), whereas the
-            # numpy branch builds the per-observation weight mask in TIME-MAJOR ("banded") order via ``idx_vec``
-            # and applies it positionally to its sequence-major ``xs_enc`` (which is identical to ``xs``). To stay
-            # bit-identical with the pinned numpy path we reconstruct that same time-major ``idx_vec`` here and
-            # build the mask the same way, rather than the sequence-major ``weights[idx]`` mask used previously.
-            len_vec = np.asarray(sz, dtype=int)
-            non_zero_len = len_vec != 0
-            nz_len_vec = len_vec[non_zero_len]
-            orig_ids_nz = np.nonzero(non_zero_len)[0]
-            max_len = int(nz_len_vec.max()) if nz_len_vec.size else 0
-            band_seq_i = [j for t in range(max_len) for j in range(len(nz_len_vec)) if t < nz_len_vec[j]]
-            idx_vec = orig_ids_nz[np.asarray(band_seq_i, dtype=int)]
-
+            # Both branches draw the SAME values from self._idx_rng (same call, same size), and both index that
+            # draw sequence-major -- the layout of ``xs``/``xs_enc`` and of the state/transition/init counts
+            # accumulated below. So the per-observation weight vector is ``weights[idx]``, which pairs each
+            # observation's own sequence weight with the state that same observation was assigned.
+            #
+            # This previously rebuilt a TIME-MAJOR ("banded") ``idx_vec`` to mirror the numpy branch. That did
+            # match the numpy branch, but both were wrong the same way: a time-major weight vector masked by a
+            # sequence-major state draw is a PERMUTATION of the weights applied against an unpermuted draw. Total
+            # mass was preserved, so nothing downstream noticed, but the mass landed on the wrong states and the
+            # emission counts contradicted state_counts for any non-uniform sequence weighting (e.g. a
+            # responsibility-weighted HMM inside a mixture).
+            obs_weights = weights[idx]
             if self._homogeneous_emissions:
                 for j in range(self.num_states):
-                    w = weights[idx_vec]
+                    w = obs_weights.copy()
                     w[states != j] = 0.0
                     self.accumulators[j].seq_initialize(xs, w.flatten(), self._acc_rng[j])
             else:
                 for group_indices, group_enc in _iter_emission_groups(xs):
                     for j in group_indices:
-                        w = weights[idx_vec]
+                        w = obs_weights.copy()
                         w[states != j] = 0.0
                         self.accumulators[j].seq_initialize(group_enc, w.flatten(), self._acc_rng[j])
 
