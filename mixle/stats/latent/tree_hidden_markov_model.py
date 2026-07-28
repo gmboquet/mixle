@@ -1268,6 +1268,13 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 trans_cnts = np.bincount(multi_idx, weights=bin_weights, minlength=ns2)
                 self.trans_counts += np.reshape(trans_cnts, (num_states, num_states))
 
+                # A node occupies its state whether it is a root or a child. Only the roots were being
+                # counted, so state_counts held one unit per tree while init_counts + trans_counts held
+                # one per node -- the estimator's occupancy identity (state == initial + transition mass)
+                # then failed for every tree with more than one node. Each child contributes with the same
+                # weight as the edge that reaches it, mirroring the numba path's per-child accumulation.
+                self.state_counts += np.bincount(states[xcs], weights=bin_weights, minlength=num_states)
+
             obs_idx = len_enc[0]
 
             for i in range(self.num_states):
