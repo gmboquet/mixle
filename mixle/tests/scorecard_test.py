@@ -4,7 +4,7 @@ import unittest
 
 from mixle.substrate.core import Substrate, SubstrateItem
 from mixle.system import Query, System, SystemConfig, SystemScorecard, detect_regression, evaluate
-from mixle.system.scorecard import question_set_identity
+from mixle.system.scorecard import DEFAULT_SCORER_VERSION, _default_scorer, question_set_identity
 
 
 class EvaluateTest(unittest.TestCase):
@@ -219,6 +219,48 @@ class ComparisonFailsClosedTest(unittest.TestCase):
         self.assertNotEqual(card_a.question_set_id, lax.question_set_id)
         # and the honest same-set comparison still works
         self.assertTrue(detect_regression(card_a, evaluate(system, set_a)).comparable)
+
+
+def _identity_under_version(version: str) -> str:
+    """question_set_identity for the default judge as if DEFAULT_SCORER_VERSION were ``version``."""
+    import mixle.system.scorecard as scorecard_module
+
+    original = scorecard_module.DEFAULT_SCORER_VERSION
+    scorecard_module.DEFAULT_SCORER_VERSION = version
+    try:
+        return question_set_identity([(Query("q1"), "yes")])
+    finally:
+        scorecard_module.DEFAULT_SCORER_VERSION = original
+
+
+class DefaultJudgeContractTest(unittest.TestCase):
+    """MXR-080-1690: the default scorer accepted an empty reference, making every reply correct."""
+
+    def test_a_blank_reference_answer_is_not_scorable(self):
+        system = System(SystemConfig(teacher=lambda p: "anything at all"))
+        for blank in ("", "   "):
+            with self.subTest(expected=blank), self.assertRaisesRegex(ValueError, "non-empty reference"):
+                evaluate(system, [(Query("q1"), blank)])
+        with self.assertRaises(ValueError):
+            _default_scorer("anything at all", "")
+
+    def test_the_default_judge_carries_a_version_in_the_card_identity(self):
+        # cards judged by different versions of the weak default judge must never be compared
+        set_a = [(Query("q1"), "yes")]
+        default_id = question_set_identity(set_a)
+        custom_id = question_set_identity(set_a, scorer=lambda reply, expected: True)
+        self.assertNotEqual(default_id, custom_id)
+        self.assertTrue(DEFAULT_SCORER_VERSION)
+        # the version participates in the identity, so bumping it invalidates old comparisons
+        self.assertNotEqual(default_id, _identity_under_version("substring/v-other"))
+
+    def test_the_default_judge_is_documented_as_unable_to_see_negation(self):
+        # the known false positive is retained deliberately (a lexical baseline cannot resolve
+        # negation without introducing false negatives) but must be stated, not implied.
+        self.assertTrue(_default_scorer("Paris is not the answer", "Paris"))
+        doc = _default_scorer.__doc__ or ""
+        self.assertIn("negation", doc)
+        self.assertIn("task-specific", doc)
 
 
 if __name__ == "__main__":

@@ -16,14 +16,45 @@ from typing import Any
 
 from mixle.system.core import Query, System
 
+#: Bumped whenever :func:`_default_scorer`'s judgement changes, so cards judged by different versions
+#: of the default judge get different :func:`question_set_identity` values and cannot be compared.
+DEFAULT_SCORER_VERSION = "substring/v2"
+
+
+def _require_reference(expected: str) -> str:
+    """A non-empty reference answer, or ``ValueError``.
+
+    An empty ``expected`` made the substring test vacuously true, so every non-``None`` reply scored
+    correct and the card reported ``quality=1.0`` while measuring nothing at all. A reference that
+    cannot discriminate is invalid scoring data, not a lenient one.
+    """
+    if not isinstance(expected, str) or not expected.strip():
+        raise ValueError(f"expected answer must be a non-empty reference string, got {expected!r}")
+    return expected
+
 
 def _default_scorer(reply: str | None, expected: str) -> bool:
+    """Lexical baseline judge: is the (validated, non-empty) reference a substring of the reply?
+
+    This is a weak judge and is documented as one. It is purely lexical: it cannot detect negation
+    ("Paris is not the answer" contains "Paris" and scores correct for expected "Paris"), paraphrase,
+    or semantic equivalence, so a scorecard built on it bounds quality from *above* and
+    :func:`~mixle.system.meta.improve_by_regret`, which allocates effort by measured quality, is only
+    as trustworthy as this judge. Pass a task-specific ``scorer`` to :func:`evaluate` for anything
+    where being wrong about correctness matters; that scorer's identity is folded into
+    :func:`question_set_identity`, so cards from different judges are never compared to each other.
+
+    What it now refuses is scoring against a reference that cannot discriminate at all (see
+    :func:`_require_reference`).
+    """
+    _require_reference(expected)
     return reply is not None and expected.strip().lower() in reply.strip().lower()
 
 
 def _scorer_identity(scorer: Callable[[str | None, str], bool]) -> str:
     """A stable name for the judge used to produce a scorecard (part of the card's held-out identity)."""
-    return f"{getattr(scorer, '__module__', '?')}.{getattr(scorer, '__qualname__', repr(scorer))}"
+    name = f"{getattr(scorer, '__module__', '?')}.{getattr(scorer, '__qualname__', repr(scorer))}"
+    return f"{name}@{DEFAULT_SCORER_VERSION}" if scorer is _default_scorer else name
 
 
 def question_set_identity(
@@ -96,8 +127,14 @@ def evaluate(
 ) -> SystemScorecard:
     """Evaluate ``system`` over a fixed ``[(query, expected_answer), ...]`` set.
 
-    * ``quality`` -- fraction of questions ``scorer`` judges correct (default: case-insensitive
-      substring match of ``expected`` in the reply).
+    Every ``expected`` is validated up front: a blank reference cannot discriminate, and a question set
+    containing one is rejected rather than scored (it used to make every non-``None`` reply correct and
+    report ``quality=1.0``).
+
+    * ``quality`` -- fraction of questions ``scorer`` judges correct. The default judge is
+      :func:`_default_scorer`, a deliberately weak lexical baseline (case-insensitive substring match)
+      that cannot see negation or paraphrase; read its docstring before treating ``quality`` as
+      authoritative, and pass a task-specific ``scorer`` where correctness actually matters.
     * ``grounded_fraction`` -- fraction answered WITHOUT a degraded mode (teacher or captured, not a
       store-only fallback / refusal / failure): the fraction of answers you can actually trust came
       from a real answer path, not a fault-boundary guess.
@@ -121,6 +158,8 @@ def evaluate(
     re-evaluating the "held-out" set afterward would be trivially free and perfect. Never call
     ``system.answer`` without ``read_only=True`` from this function.
     """
+    for _query, expected in question_set:
+        _require_reference(expected)
     set_id = question_set_identity(question_set, scorer=scorer)
     n = len(question_set)
     if n == 0:
