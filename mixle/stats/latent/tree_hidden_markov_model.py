@@ -1208,6 +1208,10 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             # caller-supplied weights at the boundary -- integer weights (np.ones with an int dtype, a
             # list of ints) otherwise arrive as int64 and eager dispatch refuses with "No matching
             # definition" (seen on Python 3.14; the signature has no widening to hide it).
+            n_rows = len(tz) - 1
+            init_acc = np.zeros((n_rows, self.num_states), dtype=np.float64)
+            state_acc = np.zeros((n_rows, self.num_states), dtype=np.float64)
+            trans_acc = np.zeros((n_rows, self.num_states, self.num_states), dtype=np.float64)
             numba_initialize(
                 tz,
                 txz,
@@ -1217,10 +1221,15 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 xc,
                 states,
                 np.ascontiguousarray(weights, dtype=np.float64),
-                self.init_counts,
-                self.state_counts,
-                self.trans_counts,
+                init_acc,
+                state_acc,
+                trans_acc,
             )
+            # reduce the per-record rows the kernel wrote privately; see numba_initialize for why the
+            # counts cannot be accumulated into these shared arrays from inside the parallel loop.
+            self.init_counts += init_acc.sum(axis=0)
+            self.state_counts += state_acc.sum(axis=0)
+            self.trans_counts += trans_acc.sum(axis=0)
 
             idx = len_enc[0]
 
@@ -2727,14 +2736,25 @@ def numba_posteriors_downward(num_states, tz, txz, tp, tpz, xp, xc, xl, xbi, p_l
 
 
 @numba.jit(
-    "void(int32[:], int32[:], int32[:], int32[:], int32[:], int32[:], int64[:], float64[:], float64[:], "
-    "float64[:], float64[:,:])",
+    "void(int32[:], int32[:], int32[:], int32[:], int32[:], int32[:], int64[:], float64[:], float64[:,:], "
+    "float64[:,:], float64[:,:,:])",
     parallel=True,
     nopython=True,
     cache=True,
 )
-def numba_initialize(tz, txz, tp, tpz, xp, xc, states, weights, init_counts, state_counts, trans_counts):
-    """Numba kernel: accumulate initial-state, state, and transition counts for random state assignments."""
+def numba_initialize(tz, txz, tp, tpz, xp, xc, states, weights, init_acc, state_acc, trans_acc):
+    """Numba kernel: accumulate initial-state, state, and transition counts for random state assignments.
+
+    Each record writes into its OWN row of ``init_acc`` / ``state_acc`` / ``trans_acc``; the caller
+    sums over that leading axis. The counts used to be accumulated straight into the shared
+    ``(K,)`` and ``(K, K)`` statistic arrays from inside this ``prange``, which is an unsynchronized
+    read-modify-write: two threads reading the same element before either wrote lost one update.
+    Training mass silently vanished -- a 200-record fixture with 752 nodes accumulated 674-749 of
+    them, differing run to run -- so every tree-HMM fit began from statistics that had dropped
+    several percent of the evidence at random. Only the mass-conservation check downstream noticed.
+    Per-record rows make the accumulation race-free while keeping the loop parallel; this is the
+    same private-slice idiom ``numba_baum_welch`` already uses for ``pi_acc``/``xi_acc``.
+    """
     for n in numba.prange(len(tz) - 1):
         s0, s1 = tz[n], tz[n + 1]
 
@@ -2743,8 +2763,8 @@ def numba_initialize(tz, txz, tp, tpz, xp, xc, states, weights, init_counts, sta
 
         weight_loc = weights[n]
         ss = states[s0:s1]
-        init_counts[ss[0]] += weight_loc
-        state_counts[ss[0]] += weight_loc
+        init_acc[n, ss[0]] += weight_loc
+        state_acc[n, ss[0]] += weight_loc
 
         i0, i1 = txz[n], txz[n + 1]
 
@@ -2760,8 +2780,8 @@ def numba_initialize(tz, txz, tp, tpz, xp, xc, states, weights, init_counts, sta
             p = ss[xps[j0]]
             for k in range(j0, j1):
                 c = ss[xcs[k]]
-                trans_counts[p, c] += weight_loc
-                state_counts[c] += weight_loc
+                trans_acc[n, p, c] += weight_loc
+                state_acc[n, c] += weight_loc
 
 
 @numba.njit(

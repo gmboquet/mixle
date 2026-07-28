@@ -54,6 +54,44 @@ class TreeHmmKernelDtypeTest(unittest.TestCase):
         acc.seq_update(enc, np.ones(len(data)), model)
         self.assertTrue(np.isfinite(np.sum(model.seq_log_density(enc))))
 
+    def test_initialize_conserves_training_mass_under_every_thread_count(self):
+        """seq_initialize must count every node exactly once, however many threads numba uses.
+
+        The kernel accumulated straight into the shared ``(K,)``/``(K, K)`` statistic arrays from
+        inside a ``prange``. That is an unsynchronized read-modify-write: two threads reading the
+        same element before either wrote lost one update, so training mass silently vanished. A
+        200-record fixture with 752 nodes accumulated 674-749 of them, differing run to run, and
+        every tree-HMM fit began from statistics missing several percent of the evidence at random.
+        Assert the conservation law directly -- one unit of initial-state mass per tree plus one
+        unit of transition mass per edge must equal the total state mass, which equals the node
+        count -- and assert it is bit-identical across thread counts so a reintroduced race cannot
+        hide behind a single-threaded CI runner.
+        """
+        import numba
+
+        model = self._model()
+        data = model.sampler(seed=3).sample(200)
+        nodes = sum(len(record) for record in data)
+        roots = sum(1 for record in data for node in record if node[0][1] == -1)
+        enc = model.dist_to_encoder().seq_encode(data)
+        est = model.estimator()
+
+        available = numba.get_num_threads()
+        try:
+            for threads in {1, available}:
+                numba.set_num_threads(threads)
+                for trial in range(4):
+                    acc = est.accumulator_factory().make()
+                    acc.seq_initialize(enc, np.ones(len(data)), np.random.RandomState(trial))
+                    state = float(acc.state_counts.sum())
+                    assigned = float(acc.init_counts.sum() + acc.trans_counts.sum())
+                    self.assertEqual(state, float(nodes), f"lost state mass at {threads} thread(s)")
+                    self.assertEqual(float(acc.init_counts.sum()), float(roots))
+                    self.assertEqual(float(acc.trans_counts.sum()), float(nodes - roots))
+                    self.assertEqual(assigned, state, f"mass not conserved at {threads} thread(s)")
+        finally:
+            numba.set_num_threads(available)
+
 
 if __name__ == "__main__":
     unittest.main()
