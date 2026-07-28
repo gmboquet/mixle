@@ -247,7 +247,17 @@ def constrained_minimize(
         c = np.vstack([c, np.asarray(eval_c(nxt), dtype=np.float64)[None, :]])
 
     idx, feasible = _best_feasible(y, c, maximize=maximize)
-    return ConstrainedBayesOptResult(best_x=x[idx], best_y=float(y[idx]), x=x, y=y, c=c, feasible=feasible)
+    return ConstrainedBayesOptResult(
+        best_x=x[idx],
+        best_y=float(y[idx]),
+        x=x,
+        y=y,
+        n_evaluations=len(y),
+        failed_evaluations=(),
+        stopped_reason="budget_exhausted",
+        c=c,
+        feasible=feasible,
+    )
 
 
 __all__: Sequence[str] = [

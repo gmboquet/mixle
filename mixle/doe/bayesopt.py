@@ -25,7 +25,7 @@ from numpy.random import RandomState
 from scipy.special import erfcx, ndtr
 
 from mixle.doe._contracts import Acquisition, Surrogate
-from mixle.doe.designs import Bounds, _as_bounds, _as_rng, latin_hypercube
+from mixle.doe.designs import Bounds, _as_bounds, _as_rng, _require_exact_positive_int, latin_hypercube
 
 
 def _require_finite_scalar(value: Any, name: str) -> float:
@@ -297,8 +297,11 @@ class OptimizationResult:
 class BayesOptResult(OptimizationResult):
     """Outcome of a Bayesian-optimization run."""
 
-    best_x: np.ndarray
-    best_y: float
+    best_x: np.ndarray | None
+    best_y: float | None
+    n_evaluations: int
+    failed_evaluations: tuple[dict[str, Any], ...]
+    stopped_reason: str
 
 
 def _validate_observations(x: np.ndarray, y: np.ndarray, *, context: str) -> None:
@@ -332,13 +335,32 @@ def _validate_prediction(mean: Any, cov: Any, n: int, *, context: str) -> tuple[
         raise ValueError(f"{context}: surrogate predicted mean contains non-finite values (NaN/Inf).")
     if cov is None:
         return mean, None
-    cov = np.atleast_2d(np.asarray(cov, dtype=np.float64))
+    cov = np.asarray(cov, dtype=np.float64)
     if cov.shape != (n, n):
         raise ValueError(f"{context}: surrogate covariance has shape {cov.shape}, expected ({n}, {n}).")
     if not np.all(np.isfinite(cov)):
         raise ValueError(f"{context}: surrogate covariance contains non-finite values (NaN/Inf).")
-    if not np.allclose(cov, cov.T, atol=1.0e-8, rtol=1.0e-5):
-        raise ValueError(f"{context}: surrogate covariance is not symmetric.")
+    scale = (
+        max(float(np.linalg.norm(cov, ord=np.inf)), np.finfo(np.float64).tiny)
+        if cov.size
+        else np.finfo(np.float64).tiny
+    )
+    tolerance = 64.0 * np.finfo(np.float64).eps * scale * max(n, 1)
+    asymmetry = float(np.linalg.norm(cov - cov.T, ord=np.inf))
+    if asymmetry > tolerance:
+        raise ValueError(
+            f"{context}: surrogate covariance is not symmetric within {tolerance:.6g}; "
+            f"asymmetry is {asymmetry:.6g}."
+        )
+    cov = 0.5 * (cov + cov.T)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    if eigvals[0] < -tolerance:
+        raise ValueError(
+            f"{context}: surrogate covariance is not positive-semidefinite; "
+            f"smallest eigenvalue is {eigvals[0]:.6g}."
+        )
+    if eigvals[0] < 0.0:
+        cov = (eigvecs * np.clip(eigvals, 0.0, None)) @ eigvecs.T
     return mean, cov
 
 
@@ -405,8 +427,7 @@ def _propose_one(
     contract (wrong shape, non-finite, asymmetric covariance) or if every candidate's acquisition
     merit is non-finite (see :func:`_validate_prediction` / :func:`_select_index`).
     """
-    if int(n_candidates) <= 0:
-        raise ValueError("n_candidates must be positive.")
+    n_candidates = _require_exact_positive_int(n_candidates, "n_candidates")
     if y.size == 0:
         # np.min/np.max on an empty y crashes with an opaque "zero-size array" ValueError. This is a
         # real, reachable path: BayesianOptimizer.ask(q) with q > n_init before any tell() calls
@@ -418,7 +439,7 @@ def _propose_one(
     n_cand = candidates.shape[0]
     mean, cov = gp.predict(x, y, candidates, return_cov=True)
     mean, cov = _validate_prediction(mean, cov, n_cand, context="_propose_one")
-    std = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+    std = np.sqrt(np.maximum(np.diag(cov), 0.0))
     best = float(np.max(y)) if maximize else float(np.min(y))
     # {"rng": rng, **acq_kwargs}: an explicit rng in acq_kwargs (a caller-supplied override) wins over
     # this ambient one -- dict-literal duplicate keys resolve to the later value, so an acq_kwargs
@@ -469,12 +490,36 @@ def knowledge_gradient(mean: Any, cov: Any, noise: float = 1.0e-6) -> np.ndarray
     *maximization* objective; negate ``mean`` for minimization. Computed exactly via the piecewise-linear
     epigraph of the fantasized posterior means, and ``>= 0`` by construction.
     """
-    mean = np.asarray(mean, dtype=np.float64)
-    cov = np.asarray(cov, dtype=np.float64)
-    out = np.empty(mean.size)
-    for x in range(mean.size):
-        sigma_x = np.sqrt(max(cov[x, x] + noise, 1.0e-12))
-        out[x] = _kg_inner(mean.copy(), cov[:, x] / sigma_x)
+    mean_array = np.asarray(mean, dtype=np.float64)
+    if mean_array.ndim == 2 and mean_array.shape[1] == 1:
+        n = mean_array.shape[0]
+    elif mean_array.ndim == 1:
+        n = mean_array.shape[0]
+    else:
+        raise ValueError(f"knowledge_gradient mean must be one-dimensional, got shape {mean_array.shape}.")
+    if n == 0:
+        raise ValueError("knowledge_gradient requires at least one candidate.")
+    mean_array, covariance = _validate_prediction(mean_array, cov, n, context="knowledge_gradient")
+    noise = _require_finite_scalar(noise, "noise")
+    if noise < 0.0:
+        raise ValueError(f"noise must be nonnegative, got {noise!r}.")
+    assert covariance is not None
+    out = np.empty(n, dtype=np.float64)
+    for candidate_index in range(n):
+        predictive_variance = covariance[candidate_index, candidate_index] + noise
+        if not np.isfinite(predictive_variance) or predictive_variance < 0.0:
+            raise ValueError("knowledge_gradient predictive variance must be finite and nonnegative.")
+        if predictive_variance == 0.0:
+            out[candidate_index] = 0.0
+            continue
+        sigma_x = np.sqrt(predictive_variance)
+        value = _kg_inner(mean_array.copy(), covariance[:, candidate_index] / sigma_x)
+        tolerance = 64.0 * np.finfo(np.float64).eps * max(float(np.max(np.abs(mean_array))), 1.0)
+        if not np.isfinite(value) or value < -tolerance:
+            raise ValueError(f"knowledge_gradient produced invalid merit {value!r}.")
+        out[candidate_index] = max(value, 0.0)
+    if not np.all(np.isfinite(out)) or np.any(out < 0.0):
+        raise ValueError("knowledge_gradient must produce finite nonnegative merits.")
     return out
 
 
@@ -501,8 +546,7 @@ def propose_knowledge_gradient(
     contract (wrong shape, non-finite, asymmetric covariance) or if every candidate's knowledge-gradient
     value is non-finite (see :func:`_validate_prediction` / :func:`_select_index`).
     """
-    if int(n_candidates) <= 0:
-        raise ValueError("n_candidates must be positive.")
+    n_candidates = _require_exact_positive_int(n_candidates, "n_candidates")
     x, y = _validate_xy(x, y)
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
@@ -518,7 +562,12 @@ def propose_knowledge_gradient(
 
 
 def _validate_xy(x: Any, y: Any) -> tuple[np.ndarray, np.ndarray]:
-    x = np.atleast_2d(np.asarray(x, dtype=np.float64))
+    x = np.asarray(x, dtype=np.float64)
+    if x.ndim != 2:
+        raise ValueError(
+            f"x must be an explicit 2-D (n_observations, n_features) matrix, got shape {x.shape}; "
+            "reshape one-dimensional data to (-1, 1)."
+        )
     y = np.asarray(y, dtype=np.float64).reshape(-1)
     if x.shape[0] != y.shape[0]:
         raise ValueError("x and y must have the same number of observations.")
@@ -598,15 +647,15 @@ def propose_batch(
     prediction don't match the candidate contract, or if every candidate's acquisition merit is
     non-finite at some step (see :func:`_validate_prediction` / :func:`_select_index`).
     """
-    if int(q) <= 0:
-        raise ValueError("q must be positive.")
+    q = _require_exact_positive_int(q, "q")
+    n_candidates = _require_exact_positive_int(n_candidates, "n_candidates")
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
     xs, ys = _validate_xy(x, y)
     acq_fn = _get_acquisition(acq)
     kw = {"xi": xi, **(acq_kwargs or {})}
     picks = []
-    for _ in range(int(q)):
+    for _ in range(q):
         point, _, gp = _propose_one(
             xs,
             ys,
@@ -653,19 +702,68 @@ def minimize(
     Minimizes by default; set ``maximize=True`` to maximize. ``objective`` takes a ``(d,)`` point and
     returns a float.
 
-    Raises ``ValueError`` if every evaluated ``y`` is non-finite at the end of the run (see
-    :func:`_select_index`) -- e.g. ``objective`` itself returned NaN/Inf on its very last call, too
-    late for the next :func:`propose_next` call to catch via its own observation validation.
+    A non-finite objective response is recorded in ``failed_evaluations`` and stops the run with
+    ``stopped_reason='objective_failed'``. It is never admitted to the fitted ``x``/``y`` history.
     """
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
-    if n_init <= 0:
-        raise ValueError("n_init must be positive.")
+    n_init = _require_exact_positive_int(n_init, "n_init")
+    n_iter = _require_exact_positive_int(n_iter, "n_iter", minimum=0)
+    n_candidates = _require_exact_positive_int(n_candidates, "n_candidates")
+    if type(maximize) is not bool:
+        raise TypeError(f"maximize must be a bool, got {type(maximize).__name__}.")
+    x_rows: list[np.ndarray] = []
+    y_values: list[float] = []
+    failed_evaluations: list[dict[str, Any]] = []
+    n_evaluations = 0
 
-    x = latin_hypercube(b, n_init, rng)
-    y = np.array([float(objective(np.asarray(row, dtype=np.float64))) for row in x], dtype=np.float64)
+    def evaluate(point: np.ndarray) -> float | None:
+        nonlocal n_evaluations
+        candidate = np.array(point, dtype=np.float64, copy=True)
+        n_evaluations += 1
+        value = float(objective(candidate.copy()))
+        if not np.isfinite(value):
+            failed_evaluations.append(
+                {
+                    "evaluation": n_evaluations,
+                    "x": candidate,
+                    "status": "nonfinite_observation",
+                    "observation": value,
+                }
+            )
+            return None
+        return value
 
-    for _ in range(int(n_iter)):
+    def result(stopped_reason: str) -> BayesOptResult:
+        x = np.asarray(x_rows, dtype=np.float64).reshape(-1, b.shape[0])
+        y = np.asarray(y_values, dtype=np.float64)
+        if y.size:
+            best_idx = int(np.argmax(y) if maximize else np.argmin(y))
+            best_x: np.ndarray | None = x[best_idx].copy()
+            best_y: float | None = float(y[best_idx])
+        else:
+            best_x = None
+            best_y = None
+        return BayesOptResult(
+            best_x=best_x,
+            best_y=best_y,
+            x=x,
+            y=y,
+            n_evaluations=n_evaluations,
+            failed_evaluations=tuple(failed_evaluations),
+            stopped_reason=stopped_reason,
+        )
+
+    for row in latin_hypercube(b, n_init, rng):
+        value = evaluate(row)
+        if value is None:
+            return result("objective_failed")
+        x_rows.append(np.array(row, dtype=np.float64, copy=True))
+        y_values.append(value)
+
+    for _ in range(n_iter):
+        x = np.asarray(x_rows, dtype=np.float64)
+        y = np.asarray(y_values, dtype=np.float64)
         nxt = propose_next(
             x,
             y,
@@ -679,11 +777,13 @@ def minimize(
             fit_kwargs=fit_kwargs,
         )
         nxt = np.asarray(nxt, dtype=np.float64)
-        x = np.vstack([x, nxt[None, :]])
-        y = np.append(y, float(objective(nxt)))
+        value = evaluate(nxt)
+        if value is None:
+            return result("objective_failed")
+        x_rows.append(nxt.copy())
+        y_values.append(value)
 
-    best_idx = _select_index(y, len(y), largest=maximize, context="minimize")
-    return BayesOptResult(best_x=x[best_idx], best_y=float(y[best_idx]), x=x, y=y)
+    return result("budget_exhausted")
 
 
 __all__: Sequence[str] = [

@@ -99,10 +99,15 @@ def noisy_minimize(
     estimate. The full ``(x, y)`` evaluation history is preserved on the result.
     """
     result = minimize(objective, bounds, n_init=n_init, n_iter=n_iter, seed=seed, maximize=maximize, **minimize_kwargs)
+    if result.stopped_reason != "budget_exhausted":
+        return result
     incumbent = posterior_incumbent(result.x, result.y, maximize=maximize, gp=gp, fit_kwargs=fit_kwargs)
     return BayesOptResult(
         best_x=incumbent.best_x,
         best_y=incumbent.best_mean,
         x=result.x,
         y=result.y,
+        n_evaluations=result.n_evaluations,
+        failed_evaluations=result.failed_evaluations,
+        stopped_reason=result.stopped_reason,
     )
