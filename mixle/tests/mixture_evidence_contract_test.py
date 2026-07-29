@@ -48,7 +48,7 @@ class MixtureEvidenceContractTest(unittest.TestCase):
             np.array([[np.nan, 0.0]]),
             np.array([[np.inf, np.inf]]),
         ):
-            with self.subTest(scores=scores):
+            with self.subTest(scores=repr(scores)):
                 with self.assertRaises(InvalidMixtureEvidenceError):
                     normalize_mixture_log_scores(scores)
                 with self.assertRaises(InvalidMixtureEvidenceError):
@@ -117,7 +117,7 @@ class MixtureEvidenceContractTest(unittest.TestCase):
             stats.HeterogeneousMixtureDistribution,
             stats.SemiSupervisedMixtureDistribution,
         ):
-            with self.subTest(mixture_type=mixture_type.__name__):
+            with self.subTest(mixture_type=repr(mixture_type.__name__)):
                 with self.assertRaises(ValueError):
                     mixture_type([stats.CategoricalDistribution({"a": 1.0})], [0.5, 0.5])
                 with self.assertRaises(ValueError):
@@ -138,7 +138,7 @@ class MixtureEvidenceContractTest(unittest.TestCase):
             lambda: stats.SemiSupervisedMixtureDistribution([scorer], [1.0]),
             lambda: stats.HierarchicalMixtureDistribution([scorer], [1.0], [[1.0]]),
         ):
-            with self.subTest(constructor=constructor):
+            with self.subTest(constructor=repr(constructor)):
                 with self.assertRaisesRegex(TypeError, "generative probability laws"):
                     constructor()
 
@@ -241,7 +241,7 @@ class MixtureEvidenceContractTest(unittest.TestCase):
     def test_joint_mixture_rejects_invalid_joint_geometry(self):
         component = stats.CategoricalDistribution({"a": 1.0})
         for joint in ([[0.5]], [[np.nan]], [[-0.5]], [[0.4, 0.6]]):
-            with self.subTest(joint=joint):
+            with self.subTest(joint=repr(joint)):
                 with self.assertRaises(ValueError):
                     stats.JointMixtureDistribution([component], [component], joint_weights=joint)
         with self.assertRaises(TypeError):
@@ -289,7 +289,7 @@ class MixtureEvidenceContractTest(unittest.TestCase):
         )
         invalid_priors = [[(0.5, 1.0)], [(True, 1.0)], [(0, np.nan)], [(0, np.inf)]]
         for prior in invalid_priors:
-            with self.subTest(prior=prior):
+            with self.subTest(prior=repr(prior)):
                 with self.assertRaises((TypeError, ValueError)):
                     model.posterior(("a", prior))
                 with self.assertRaises((TypeError, ValueError)):

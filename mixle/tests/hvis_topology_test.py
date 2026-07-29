@@ -154,7 +154,7 @@ class EmbeddingHealthTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "same number"):
             embedding_health(fitted.coords[:-1], self._MODEL3, data, k=1)
         for kwargs in ({"k": 0}, {"k": 3}, {"k": 1.5}, {"max_rows": 2}):
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 embedding_health(fitted.coords, self._MODEL3, data, **kwargs)
 
         tiny = data[:2]

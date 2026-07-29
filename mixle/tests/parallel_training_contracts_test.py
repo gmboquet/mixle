@@ -27,7 +27,7 @@ class ParallelPlanContractTest(unittest.TestCase):
         self.assertEqual(plan.axis_sizes[ParallelAxis.TP], 2)
         self.assertEqual(plan.as_dict()["tp"], 2)
         for value in (1.9, True, 0, -1):
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 ParallelPlan(tp=value)
 
     def test_world_size_validation_does_not_truncate(self):
@@ -40,7 +40,7 @@ class TrainingReceiptContractTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ParameterLayout("p", (2,), placements=(("tp", "a"), ("tp", "b")))
         for shape in ((2.5,), (-1,), (True,)):
-            with self.subTest(shape=shape), self.assertRaises(ValueError):
+            with self.subTest(shape=repr(shape)), self.assertRaises(ValueError):
                 ParameterLayout("p", shape)
 
     def test_distributed_update_rejects_invalid_typed_identity(self):
@@ -78,7 +78,7 @@ class TrainingReceiptContractTest(unittest.TestCase):
             {"local_examples": -1},
             {"collective_bytes": -1},
         ):
-            with self.subTest(updates=updates), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(updates=repr(updates)), self.assertRaises((TypeError, ValueError)):
                 StepReceipt(**(base | updates))
 
 

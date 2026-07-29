@@ -251,7 +251,7 @@ class ReductionInputDomainTest(unittest.TestCase):
         # The audit's exact repro. 1e-200 * 1e-200 rounds to zero -- it is worth less than one smallest
         # subnormal against the other term -- so the dot is 1.0, on both dispatch paths.
         for available in self._DISPATCH:
-            with self.subTest(compiled=available):
+            with self.subTest(compiled=repr(available)):
                 with mock.patch("mixle.engines.extended.HAS_DD_KERNELS", available):
                     self.assertEqual(float(dd_dot([1e-200, 1.0], [1e-200, 1.0]).to_float()), 1.0)
 
@@ -269,7 +269,7 @@ class ReductionInputDomainTest(unittest.TestCase):
         }
         for label, (args, expected) in cases.items():
             for available in self._DISPATCH:
-                with self.subTest(case=label, compiled=available):
+                with self.subTest(case=repr(label), compiled=repr(available)):
                     with mock.patch("mixle.engines.extended.HAS_DD_KERNELS", available):
                         with self.assertRaises(expected):
                             dd_dot(*args)

@@ -68,16 +68,16 @@ class MaskRampCorrectnessTest(unittest.TestCase):
             {"start_step": 0, "end_step": 10, "target_density": np.nan},
             {"start_step": 0, "end_step": 10, "schedule": 1},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 TwoFourSparsityRamp(**kwargs)
 
         for result in (np.nan, np.inf, -0.1, 1.1, "0.5"):
             ramp = TwoFourSparsityRamp(0, 10, schedule=lambda *_args, result=result: result)
-            with self.subTest(result=result), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(result=repr(result)), self.assertRaises((TypeError, ValueError)):
                 ramp.fraction(5)
         ramp = TwoFourSparsityRamp(0, 10)
         for step in (1.5, True, -1):
-            with self.subTest(step=step), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(step=repr(step)), self.assertRaises((TypeError, ValueError)):
                 ramp.fraction(step)
 
     def test_partial_ramp_only_constrains_the_first_fraction_of_rows(self):
@@ -144,7 +144,7 @@ class CompressDecompressRoundTripTest(unittest.TestCase):
     def test_round_trip_exact_on_several_matrices(self):
         rng = np.random.default_rng(0)
         for d_out, d_in in [(4, 4), (5, 8), (16, 32), (3, 12)]:
-            with self.subTest(shape=(d_out, d_in)):
+            with self.subTest(shape=repr((d_out, d_in))):
                 w = self._random_2_4_matrix(rng, d_out, d_in)
                 compressed = export_2_4_compressed(w)
                 self.assertIsInstance(compressed, Compressed2to4)
@@ -169,7 +169,7 @@ class CompressDecompressRoundTripTest(unittest.TestCase):
         for dtype in (np.float16, np.float32, np.float64):
             w = base.astype(dtype)
             compressed = export_2_4_compressed(w)
-            with self.subTest(dtype=dtype):
+            with self.subTest(dtype=repr(dtype)):
                 self.assertEqual(compressed.values.dtype, np.dtype(dtype))
                 np.testing.assert_array_equal(decompress(compressed), w)
                 payload = compressed.to_bytes()
@@ -192,7 +192,7 @@ class CompressDecompressRoundTripTest(unittest.TestCase):
             {"values": values, "indices": indices, "shape": (1, 4), "format_version": 2},
         )
         for kwargs in invalid:
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 Compressed2to4(**kwargs)
 
         valid = Compressed2to4(values, indices, (1, 4))

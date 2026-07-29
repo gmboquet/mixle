@@ -93,7 +93,7 @@ class FusedEMTestCase(unittest.TestCase):
             est = HiddenMarkovEstimator(
                 [GaussianEstimator()] * 3, len_estimator=PoissonEstimator(), use_numba=use_numba
             )
-            with self.subTest(use_numba=use_numba):
+            with self.subTest(use_numba=repr(use_numba)):
                 # E-step reported LL == seq_log_density_sum.
                 acc = est.accumulator_factory().make()
                 acc._track_ll = True
@@ -193,7 +193,7 @@ class FusedEMTestCase(unittest.TestCase):
         self.assertGreater(len(steps), 0)
         for s in steps:
             direct_ll = sum(s.model.log_density(x) for x in data)
-            with self.subTest(iter=s.iter):
+            with self.subTest(iter=repr(s.iter)):
                 self.assertAlmostEqual(direct_ll, s.log_density, places=6)
 
 

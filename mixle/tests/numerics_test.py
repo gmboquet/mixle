@@ -93,9 +93,9 @@ class VectorUtilsTestCase(unittest.TestCase):
             ([0.0, np.nan], ValueError),
             ([0.0, np.inf], ValueError),
         ):
-            with self.subTest(values=values), self.assertRaises(error):
+            with self.subTest(values=repr(values)), self.assertRaises(error):
                 posterior(np.asarray(values))
-            with self.subTest(values=values), self.assertRaises(error):
+            with self.subTest(values=repr(values)), self.assertRaises(error):
                 log_posterior(np.asarray(values))
 
     def test_posterior_log_sum_value(self):
@@ -131,7 +131,7 @@ class VectorUtilsTestCase(unittest.TestCase):
 
     def test_weighted_posteriors_reject_impossible_evidence(self):
         for function in (weighted_log_posterior, weighted_log_posterior_sum):
-            with self.subTest(function=function.__name__), self.assertRaises(ImpossibleEvidenceError):
+            with self.subTest(function=repr(function.__name__)), self.assertRaises(ImpossibleEvidenceError):
                 function(np.asarray([-np.inf, -np.inf]), np.asarray([0.0, -np.inf]))
 
     def test_matrix_posterior_rejects_impossible_slice(self):
@@ -159,7 +159,7 @@ class VectorUtilsTestCase(unittest.TestCase):
             [[0.5, np.nan]],
             [[0.5, np.inf]],
         ):
-            with self.subTest(p_mat=p_mat), self.assertRaises(ValueError):
+            with self.subTest(p_mat=repr(p_mat)), self.assertRaises(ValueError):
                 row_choice(np.asarray(p_mat), np.random.RandomState(1))
 
 

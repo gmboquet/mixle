@@ -191,7 +191,7 @@ class ComponentResponsibilityValidationTest(unittest.TestCase):
         estimator = stats.GaussianEstimator()
         handle = ModelParallelEncodedData([0.0, 1.0], estimator=estimator)
         for p in (float("nan"), -0.1, 1.1):
-            with self.subTest(p=p), self.assertRaises(ValueError):
+            with self.subTest(p=repr(p)), self.assertRaises(ValueError):
                 handle.pysp_seq_initialize(estimator, np.random.RandomState(0), p)
         with self.assertRaises(ImpossibleEvidenceError):
             handle.pysp_seq_initialize(estimator, np.random.RandomState(0), 0.0)
@@ -529,7 +529,7 @@ class SparkSequenceFoldTest(unittest.TestCase):
         sc = self._spark_context_or_skip("sequence-treereduce-fold")
         try:
             for n_partitions in (1, 5, 11, len(data) + 60):  # last: more partitions than rows (many empty)
-                with self.subTest(n_partitions=n_partitions):
+                with self.subTest(n_partitions=repr(n_partitions)):
                     rdd = sc.parallelize(data, n_partitions)
                     enc_data = seq_encode(rdd, model=model)
                     fit = seq_estimate(enc_data, keyed, model)

@@ -32,21 +32,21 @@ class FusedWeightValidationTest(unittest.TestCase):
     def test_weight_count_must_match_encoded_rows(self):
         for make_case in (_flat_case, _nested_case):
             accumulate, model, encoded = make_case()
-            with self.subTest(path=make_case.__name__, mismatch="short"):
+            with self.subTest(path=repr(make_case.__name__), mismatch="short"):
                 with self.assertRaisesRegex(ValueError, "2 encoded rows but 1 weights"):
                     accumulate(model, encoded, np.ones(1))
-            with self.subTest(path=make_case.__name__, mismatch="long"):
+            with self.subTest(path=repr(make_case.__name__), mismatch="long"):
                 with self.assertRaisesRegex(ValueError, "2 encoded rows but 3 weights"):
                     accumulate(model, encoded, np.ones(3))
 
     def test_weights_must_be_one_dimensional_and_finite(self):
         for make_case in (_flat_case, _nested_case):
             accumulate, model, encoded = make_case()
-            with self.subTest(path=make_case.__name__, invalid="matrix"):
+            with self.subTest(path=repr(make_case.__name__), invalid="matrix"):
                 with self.assertRaisesRegex(ValueError, "one-dimensional"):
                     accumulate(model, encoded, np.ones((2, 1)))
             for invalid in (np.array([1.0, np.nan]), np.array([1.0, np.inf])):
-                with self.subTest(path=make_case.__name__, invalid=invalid[1]):
+                with self.subTest(path=repr(make_case.__name__), invalid=repr(invalid[1])):
                     with self.assertRaisesRegex(ValueError, "finite"):
                         accumulate(model, encoded, invalid)
 

@@ -84,7 +84,7 @@ class SyntheticGenerationContractTest(unittest.TestCase):
             {"alpha": 0.0},
         )
         for kwargs in invalid:
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 generate_synthetic_chinchilla_data(**kwargs)
 
 
@@ -112,7 +112,7 @@ class ScalingFitContractTest(unittest.TestCase):
             (valid, {"seed": 1, "rng": np.random.RandomState(1)}),
         )
         for records, kwargs in cases:
-            with self.subTest(records=records, kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(records=repr(records), kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 fit_scaling_law(records, **kwargs)
 
     def test_unusable_fit_cannot_drive_decisions(self):
@@ -128,7 +128,7 @@ class AllocationContractTest(unittest.TestCase):
             {"compute_budget": 1.0, "ratio": 0.0},
             {"compute_budget": 1.0, "flops_per_token_param": -1.0},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 allocate_fixed_heuristic(**kwargs)
 
         fit = _usable_fit()
@@ -139,7 +139,7 @@ class AllocationContractTest(unittest.TestCase):
             {"compute_budget": 1.0e12, "n_iter": 0},
             {"compute_budget": 1.0e12, "flops_per_token_param": 0.0},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 allocate_compute(fit, **kwargs)
 
     def test_learned_allocation_remains_pending_until_measured(self):

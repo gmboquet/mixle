@@ -23,7 +23,7 @@ class IntegerBernoulliSetDistributionTestCase(unittest.TestCase):
             [[np.log(0.5)]],
         )
         for log_pvec in invalid_primary:
-            with self.subTest(log_pvec=log_pvec), self.assertRaises(ValueError):
+            with self.subTest(log_pvec=repr(log_pvec)), self.assertRaises(ValueError):
                 IntegerBernoulliSetDistribution(log_pvec)
         with self.assertRaises(ValueError):
             IntegerBernoulliSetDistribution(
@@ -61,7 +61,7 @@ class IntegerBernoulliSetDistributionTestCase(unittest.TestCase):
         dist = IntegerBernoulliSetDistribution(np.log([0.2, 0.7]))
         encoder = dist.dist_to_encoder()
         for observation in ([0.9], [-1], [2], [0, 0]):
-            with self.subTest(observation=observation):
+            with self.subTest(observation=repr(observation)):
                 with self.assertRaises((TypeError, ValueError)):
                     dist.log_density(observation)
                 with self.assertRaises((TypeError, ValueError)):
@@ -73,7 +73,7 @@ class IntegerBernoulliSetDistributionTestCase(unittest.TestCase):
             (1, np.asarray([1]), np.asarray([0])),
         )
         for encoded in invalid_encoded:
-            with self.subTest(encoded=encoded):
+            with self.subTest(encoded=repr(encoded)):
                 with self.assertRaises(ValueError):
                     dist.seq_log_density(encoded)
                 with self.assertRaises(ValueError):
@@ -120,7 +120,7 @@ class IntegerBernoulliSetInferenceTestCase(unittest.TestCase):
             ([1], -1.0),
             ([1], np.nan),
         ):
-            with self.subTest(observation=observation, weight=weight):
+            with self.subTest(observation=repr(observation), weight=repr(weight)):
                 with self.assertRaises((TypeError, ValueError)):
                     acc.update(observation, weight, None)
                 np.testing.assert_array_equal(acc.value()[0], before_counts)
@@ -138,7 +138,7 @@ class IntegerBernoulliSetInferenceTestCase(unittest.TestCase):
             np.asarray([1.0, -1.0]),
             np.asarray([1.0, np.nan]),
         ):
-            with self.subTest(weights=weights), self.assertRaises(ValueError):
+            with self.subTest(weights=repr(weights)), self.assertRaises(ValueError):
                 acc.seq_update(encoded, weights, None)
         with self.assertRaises(ValueError):
             acc.from_value((np.asarray([3.0, 0.0]), 2.0))
@@ -159,7 +159,7 @@ class IntegerBernoulliSetInferenceTestCase(unittest.TestCase):
             np.asarray([[1.0, -1.0], [1.0, 1.0]]),
             np.asarray([[1.0, np.nan], [1.0, 1.0]]),
         ):
-            with self.subTest(weights=weights), self.assertRaises(ValueError):
+            with self.subTest(weights=repr(weights)), self.assertRaises(ValueError):
                 IntegerBernoulliSetDistribution.backend_stacked_sufficient_statistics(
                     encoded,
                     weights,
@@ -169,7 +169,7 @@ class IntegerBernoulliSetInferenceTestCase(unittest.TestCase):
 
     def test_estimator_rejects_invalid_configuration_and_statistics(self):
         for min_prob in (-0.1, 0.51, np.nan):
-            with self.subTest(min_prob=min_prob), self.assertRaises(ValueError):
+            with self.subTest(min_prob=repr(min_prob)), self.assertRaises(ValueError):
                 IntegerBernoulliSetEstimator(2, min_prob=min_prob)
         with self.assertRaises(ValueError):
             IntegerBernoulliSetEstimator(2, pseudo_count=-1.0)

@@ -15,7 +15,7 @@ class GEVGPDMomentsTest(unittest.TestCase):
         # mixle shape xi corresponds to scipy genextreme c = -xi
         for loc, scale, xi in [(0.0, 1.0, 0.2), (1.0, 2.0, 0.0), (-1.0, 1.5, -0.3)]:
             d, fr = GEV(loc, scale, xi), ss.genextreme(c=-xi, loc=loc, scale=scale)
-            with self.subTest(xi=xi):
+            with self.subTest(xi=repr(xi)):
                 self.assertAlmostEqual(d.mean(), float(fr.mean()), places=7)
                 self.assertAlmostEqual(d.variance(), float(fr.var()), places=7)
 
@@ -23,7 +23,7 @@ class GEVGPDMomentsTest(unittest.TestCase):
         # mixle shape xi corresponds to scipy genpareto c = xi
         for scale, xi, loc in [(1.0, 0.3, 0.0), (2.0, 0.0, 1.0), (1.5, -0.5, 0.0)]:
             d, fr = GPD(scale, xi, loc), ss.genpareto(c=xi, loc=loc, scale=scale)
-            with self.subTest(xi=xi):
+            with self.subTest(xi=repr(xi)):
                 self.assertAlmostEqual(d.mean(), float(fr.mean()), places=7)
                 self.assertAlmostEqual(d.variance(), float(fr.var()), places=7)
 

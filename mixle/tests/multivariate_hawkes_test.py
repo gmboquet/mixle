@@ -93,7 +93,7 @@ class MultivariateHawkesTest(unittest.TestCase):
                 values[field].flat[0] = np.inf
             else:
                 values[field] = np.inf
-            with self.subTest(field=field), self.assertRaises(ValueError):
+            with self.subTest(field=repr(field)), self.assertRaises(ValueError):
                 MultivariateHawkesProcessDistribution(**values)
 
     def test_strict_history_and_query_contracts(self):

@@ -40,7 +40,7 @@ class RetrieveTest(unittest.TestCase):
     def test_retrieve_rejects_invalid_queries_and_limits(self):
         store = CrossModalStore([[0.0], [1.0]], [1, 2], coarse=lambda p: None, fine=lambda p: None)
         for query, k in (([0.0, 1.0], 1), ([np.nan], 1), ([0.0], -1), ([0.0], True), ([0.0], 1.5)):
-            with self.subTest(query=query, k=k), self.assertRaises(ValueError):
+            with self.subTest(query=repr(query), k=repr(k)), self.assertRaises(ValueError):
                 store.retrieve(query, k)
         cosine = CrossModalStore([[1.0], [2.0]], [1, 2], coarse=lambda p: None, fine=lambda p: None, metric="cosine")
         with self.assertRaisesRegex(ValueError, "non-zero"):

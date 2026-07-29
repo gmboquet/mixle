@@ -649,7 +649,7 @@ class AutoregressiveEnumerableTest(unittest.TestCase):
             {"max_len": _LEN, "branch_cap": 2.9},
         ]
         for kwargs in fractional_kwargs:
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 AutoregressiveEnumerable(self.next_logprobs, **kwargs)
 
     def test_constructor_rejects_non_positive_config_values(self):
@@ -668,7 +668,7 @@ class AutoregressiveEnumerableTest(unittest.TestCase):
             {"max_len": _LEN, "branch_cap": -2},
         ]
         for kwargs in non_positive_kwargs:
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 AutoregressiveEnumerable(self.next_logprobs, **kwargs)
 
     def test_constructor_accepts_whole_number_floats_and_none_caps(self):

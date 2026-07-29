@@ -27,7 +27,7 @@ class ProjectionContractsTest(unittest.TestCase):
     def test_mixture_weights_and_covariances_are_validated(self):
         components = [_GaussianLike([0.0], [[1.0]]), _GaussianLike([1.0], [[1.0]])]
         for weights in ([0.0, 0.0], [1.0, -1.0], [1.0, np.nan]):
-            with self.subTest(weights=weights), self.assertRaises(ValueError):
+            with self.subTest(weights=repr(weights)), self.assertRaises(ValueError):
                 collapse_mixture(_MixtureLike(weights, components))
         with self.assertRaises(ValueError):
             collapse_mixture(_MixtureLike([0.5, 0.5], [components[0], _GaussianLike([1.0], [[-1.0]])]))

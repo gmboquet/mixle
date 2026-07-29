@@ -175,11 +175,11 @@ class SpatialMixtureInitializationTest(unittest.TestCase):
 
     def test_rejects_fractional_or_boolean_topology_and_component_counts(self):
         for bad_shape in ((1.9, 2), (True, 2), (2.0, 2)):
-            with self.subTest(shape=bad_shape):
+            with self.subTest(shape=repr(bad_shape)):
                 with self.assertRaises(ValueError):
                     SpatialMixture(bad_shape, 2, GaussianEstimator())
         for bad_components in (1.9, True, 2.0):
-            with self.subTest(n_components=bad_components):
+            with self.subTest(n_components=repr(bad_components)):
                 with self.assertRaises(ValueError):
                     SpatialMixture((2, 2), bad_components, GaussianEstimator())
 
@@ -206,10 +206,10 @@ class SpatialMixtureInitializationTest(unittest.TestCase):
         sm = SpatialMixture((2, 2), 2, GaussianEstimator())
         obs = [0.0, 1.0, 2.0, 3.0]
         for bad in (1.5, True, 2.0):
-            with self.subTest(max_iter=bad):
+            with self.subTest(max_iter=repr(bad)):
                 with self.assertRaisesRegex(ValueError, "max_iter"):
                     sm.fit(obs, max_iter=bad)
-            with self.subTest(mf_iter=bad):
+            with self.subTest(mf_iter=repr(bad)):
                 with self.assertRaisesRegex(ValueError, "mf_iter"):
                     sm.fit(obs, mf_iter=bad)
 

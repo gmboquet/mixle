@@ -48,7 +48,7 @@ class SparseMarkovEngineParityTestCase(unittest.TestCase):
         enc = self.dist.dist_to_encoder().seq_encode(self.data)
         ref = np.asarray(self.dist.seq_log_density(enc))
         for name, engine in self.engines:
-            with self.subTest(engine=name):
+            with self.subTest(engine=repr(name)):
                 self.assertTrue(self.dist.supports_engine(engine))
                 got = np.asarray(engine.to_numpy(backend_seq_log_density(self.dist, enc, engine)))
                 self.assertTrue(

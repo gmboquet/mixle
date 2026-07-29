@@ -122,7 +122,7 @@ class PowerLawHawkesTest(unittest.TestCase):
                 mark_dist=GaussianDistribution(0.0, 1.0),
             )
             values[field] = np.inf
-            with self.subTest(field=field), self.assertRaises(ValueError):
+            with self.subTest(field=repr(field)), self.assertRaises(ValueError):
                 PLH(**values)
         with self.assertRaises(ValueError):
             PLH(

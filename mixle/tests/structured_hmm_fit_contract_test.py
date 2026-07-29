@@ -71,10 +71,10 @@ class StructuredFitContractTest(unittest.TestCase):
             {"weights": [0.0]},
         )
         for kwargs in invalid_calls:
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 self._model().fit(data, **kwargs)
         for invalid_data in ([], [[]]):
-            with self.subTest(data=invalid_data), self.assertRaises(ValueError):
+            with self.subTest(data=repr(invalid_data)), self.assertRaises(ValueError):
                 self._model().fit(invalid_data)
 
     def test_chunk_controls_and_receipt_are_validated(self):
@@ -86,7 +86,7 @@ class StructuredFitContractTest(unittest.TestCase):
             {"chunk": 2, "overlap": 2},
             {"chunk": 2, "overlap": 0, "workers": 1.5},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 fit_chunked(self._model(), data, max_its=1, **kwargs)
         result = fit_chunked(self._model(), data, chunk=4, overlap=0, max_its=1)
         self.assertTrue(result.diagnostics.approximate)
@@ -118,7 +118,7 @@ class IOHMMFitContractTest(unittest.TestCase):
             [[0, 2]],
         )
         for inputs in invalid_inputs:
-            with self.subTest(inputs=inputs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(inputs=repr(inputs)), self.assertRaises((TypeError, ValueError)):
                 self._model().fit(observations, inputs, max_its=1)
         with self.assertRaises(TypeError):
             self._model().log_density([(-1.0, 0.0), (1.0, 1)])

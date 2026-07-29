@@ -94,7 +94,7 @@ class VariogramTest(unittest.TestCase):
             (valid_coords, valid_values, {"max_dist": np.nan}),
         )
         for coords, values, kwargs in bad_calls:
-            with self.subTest(kwargs=kwargs, coords_shape=coords.shape):
+            with self.subTest(kwargs=repr(kwargs), coords_shape=repr(coords.shape)):
                 with self.assertRaises(ValueError):
                     empirical_variogram(coords, values, **kwargs)
 
@@ -290,7 +290,7 @@ class KrigingValidationTest(unittest.TestCase):
 
     def test_universal_kriging_rejects_undefined_degrees(self):
         for degree in (-1, 1.5, 3, True):
-            with self.subTest(degree=degree):
+            with self.subTest(degree=repr(degree)):
                 with self.assertRaisesRegex(ValueError, "degree"):
                     universal_kriging(self.coords, self.z, self.vg, self.coords[:1], degree=degree)
 

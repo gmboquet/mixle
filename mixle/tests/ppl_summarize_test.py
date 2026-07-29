@@ -30,7 +30,7 @@ class HdiTest(unittest.TestCase):
 
     def test_rejects_empty_nonfinite_and_multivariate_draws(self):
         for draws in ([], [0.0, np.nan], [0.0, np.inf]):
-            with self.subTest(draws=draws), self.assertRaises(ValueError):
+            with self.subTest(draws=repr(draws)), self.assertRaises(ValueError):
                 hdi(draws)
         with self.assertRaisesRegex(ValueError, "select one coordinate"):
             hdi(np.zeros((2, 3)))

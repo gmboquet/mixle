@@ -45,7 +45,7 @@ class DocstringReferencesTest(unittest.TestCase):
                     break
                 except ModuleNotFoundError:
                     continue
-            with self.subTest(module=name):
+            with self.subTest(module=repr(name)):
                 self.assertIsNotNone(mod, f"{name} not found in the univariate subpackages")
                 self.assertIn("Reference", mod.__doc__)
 

@@ -102,7 +102,7 @@ class SpectrumDecisionTest(unittest.TestCase):
 
     def test_workload_and_costs_are_not_silently_rewritten(self):
         for n_data in (0, -1, 1.5, True):
-            with self.subTest(n_data=n_data), self.assertRaises(ValueError):
+            with self.subTest(n_data=repr(n_data)), self.assertRaises(ValueError):
                 balance_plan(_mixture(4), _cluster(2), n_data=n_data)
         with mock.patch("mixle.utils.parallel.balance.compute_cost", return_value=(np.nan, 0)):
             with self.assertRaises(ValueError):

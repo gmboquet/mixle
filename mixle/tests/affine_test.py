@@ -138,13 +138,13 @@ class AllocatePrecisionFailClosedTest(unittest.TestCase):
 
     def test_nonfinite_target_abs_error_rejected(self):
         for bad in (float("nan"), float("inf"), float("-inf")):
-            with self.subTest(target_abs_error=bad):
+            with self.subTest(target_abs_error=repr(bad)):
                 with self.assertRaises(ValueError):
                     allocate_precision(1.0, 1000, bad)
 
     def test_nonfinite_center_magnitude_rejected(self):
         for bad in (float("nan"), float("inf"), float("-inf")):
-            with self.subTest(center_magnitude=bad):
+            with self.subTest(center_magnitude=repr(bad)):
                 with self.assertRaises(ValueError):
                     allocate_precision(bad, 1000, 1e-6)
 
@@ -154,7 +154,7 @@ class AllocatePrecisionFailClosedTest(unittest.TestCase):
 
     def test_nonfinite_op_count_rejected(self):
         for bad in (float("nan"), float("inf"), float("-inf")):
-            with self.subTest(op_count=bad):
+            with self.subTest(op_count=repr(bad)):
                 with self.assertRaises(ValueError):
                     allocate_precision(1.0, bad, 1e-6)
 

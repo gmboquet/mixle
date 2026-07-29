@@ -327,7 +327,7 @@ class AbductionFundingTest(unittest.TestCase):
     def test_a_floor_weight_outside_the_open_interval_is_rejected(self):
         portfolio = HypothesisPortfolio([Hypothesis("a", None)], np.array([1.0]))
         for bad in (0.0, -0.1, 1.0, 2.0, float("nan")):
-            with self.subTest(floor_weight=bad), self.assertRaises(ValueError):
+            with self.subTest(floor_weight=repr(bad)), self.assertRaises(ValueError):
                 _add_hypothesis(portfolio, Hypothesis("h_new", None), floor_weight=bad)
 
 
@@ -351,19 +351,19 @@ class ActionEvidenceValidationTest(unittest.TestCase):
 
     def test_invalid_sample_budgets_are_rejected(self):
         for budget in (0, -5, 2.5, float("nan"), float("inf"), None, True):
-            with self.subTest(n_outer=budget), self.assertRaises(ValueError):
+            with self.subTest(n_outer=repr(budget)), self.assertRaises(ValueError):
                 self._step(n_outer=budget, n_inner=8)
-            with self.subTest(n_inner=budget), self.assertRaises(ValueError):
+            with self.subTest(n_inner=repr(budget)), self.assertRaises(ValueError):
                 self._step(n_outer=8, n_inner=budget)
 
     def test_invalid_costs_do_not_make_the_only_candidate_vanish(self):
         for bad in (float("nan"), float("inf"), -1.0):
-            with self.subTest(cost=bad), self.assertRaises(ValueError):
+            with self.subTest(cost=repr(bad)), self.assertRaises(ValueError):
                 self._step(n_outer=8, n_inner=8, cost_fn=lambda a, v=bad: v)
 
     def test_invalid_lam_is_rejected(self):
         for bad in (float("nan"), float("inf"), -1.0):
-            with self.subTest(lam=bad), self.assertRaises(ValueError):
+            with self.subTest(lam=repr(bad)), self.assertRaises(ValueError):
                 self._step(n_outer=8, n_inner=8, lam=bad, cost_fn=lambda a: 1.0)
 
     def test_valid_economics_still_select_an_action(self):

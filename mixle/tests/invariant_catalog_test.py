@@ -63,7 +63,7 @@ class InvariantCatalogTest(unittest.TestCase):
 
     def test_normalized_density_or_mass(self):
         for case in _CATALOG:
-            with self.subTest(family=case.name):
+            with self.subTest(family=repr(case.name)):
                 if case.kind == "discrete":
                     mass = sum(float(np.exp(case.dist.log_density(k))) for k in case.support)
                     self.assertAlmostEqual(mass, 1.0, places=4, msg=f"{case.name}: pmf sums to {mass}")
@@ -76,7 +76,7 @@ class InvariantCatalogTest(unittest.TestCase):
 
     def test_scalar_vectorized_agreement(self):
         for case in _CATALOG:
-            with self.subTest(family=case.name):
+            with self.subTest(family=repr(case.name)):
                 data = list(case.dist.sampler(seed=0).sample(64))
                 enc = case.dist.dist_to_encoder().seq_encode(data)
                 seq = np.asarray(case.dist.seq_log_density(enc), dtype=float)
@@ -85,7 +85,7 @@ class InvariantCatalogTest(unittest.TestCase):
 
     def test_finite_score_after_fit(self):
         for case in _CATALOG:
-            with self.subTest(family=case.name):
+            with self.subTest(family=repr(case.name)):
                 data = list(case.dist.sampler(seed=1).sample(400))
                 fitted = optimize(data, case.estimator, max_its=25, out=None)
                 lls = np.array([float(fitted.log_density(x)) for x in data])
@@ -93,7 +93,7 @@ class InvariantCatalogTest(unittest.TestCase):
 
     def test_serialization_score_equivalence(self):
         for case in _CATALOG:
-            with self.subTest(family=case.name):
+            with self.subTest(family=repr(case.name)):
                 back = from_serializable(to_serializable(case.dist))
                 for x in case.probes:
                     self.assertAlmostEqual(

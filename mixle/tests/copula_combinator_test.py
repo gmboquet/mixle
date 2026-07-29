@@ -209,9 +209,9 @@ class CopulaDistributionTest(unittest.TestCase):
     def test_scalar_and_batch_paths_require_exact_finite_geometry(self):
         cop = _proto()
         for row in ((1.0,), (1.0, 2.0, 3.0), (1.0, float("nan"))):
-            with self.subTest(row=row), self.assertRaises(ValueError):
+            with self.subTest(row=repr(row)), self.assertRaises(ValueError):
                 cop.log_density(row)
-            with self.subTest(encoded_row=row), self.assertRaises(ValueError):
+            with self.subTest(encoded_row=repr(row)), self.assertRaises(ValueError):
                 cop.dist_to_encoder().seq_encode([row])
 
     def test_empty_batch_has_canonical_shape_and_empty_scores(self):

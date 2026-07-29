@@ -385,7 +385,7 @@ class NumFreeParamsTest(unittest.TestCase):
         for k in (2, 5, 20):
             col = [str(i % k) for i in range(400)]
             dist = fit(col, st.CategoricalEstimator(), max_its=5, out=None)
-            with self.subTest(k=k):
+            with self.subTest(k=repr(k)):
                 self.assertEqual(_num_free_params(dist), k - 1)
 
     def test_composite_sums_its_fields_not_a_flat_constant(self):

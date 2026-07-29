@@ -47,7 +47,7 @@ class CapabilityFailureTest(unittest.TestCase):
     def test_top_k_validates_budget_before_capability_work(self):
         value = _CountingEnumerable()
         for bad in (-1, 1.5, True, np.nan):
-            with self.subTest(k=bad), self.assertRaises(ValueError):
+            with self.subTest(k=repr(bad)), self.assertRaises(ValueError):
                 capability.top_k(value, bad)
         self.assertEqual(value.calls, 0)
 

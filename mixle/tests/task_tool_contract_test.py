@@ -31,7 +31,7 @@ class ToolSpecContractTest(unittest.TestCase):
     def test_required_arguments_are_presence_based(self):
         spec = ToolSpec("set_flag", ["value"])
         for value in (0, False, "", [], {}):
-            with self.subTest(value=value):
+            with self.subTest(value=repr(value)):
                 caller = ToolCaller(
                     selector=_selector("set_flag"),
                     extractors={"set_flag": lambda _request, value=value: {"value": value}},

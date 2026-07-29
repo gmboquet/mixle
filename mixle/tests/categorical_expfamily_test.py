@@ -26,7 +26,7 @@ class CategoricalExponentialFamilyTest(unittest.TestCase):
             {0: 0.1, 1: 0.4, 2: 0.25, 3: 0.25},
             {"x": 0.6, "y": 0.4},
         ):
-            with self.subTest(pmap=pmap):
+            with self.subTest(pmap=repr(pmap)):
                 d = CategoricalDistribution(pmap)
                 self.assertTrue(is_exponential_family(d))
                 form = to_exponential_family(d)

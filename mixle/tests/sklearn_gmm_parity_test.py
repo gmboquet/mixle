@@ -101,7 +101,7 @@ class SklearnGmmParityTest(unittest.TestCase):
 
     def test_parameter_parity_across_seeds(self):
         for seed in range(4):
-            with self.subTest(seed=seed):
+            with self.subTest(seed=repr(seed)):
                 self._assert_parity(seed)
 
 

@@ -95,9 +95,9 @@ class HiddenAssociationContractTestCase(unittest.TestCase):
             ([("a", 1)], [("x", np.nan)]),
             ([], [("x", 1)]),
         ):
-            with self.subTest(generic=invalid), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(generic=repr(invalid)), self.assertRaises((TypeError, ValueError)):
                 generic.log_density(invalid)
-            with self.subTest(generic_encoder=invalid), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(generic_encoder=repr(invalid)), self.assertRaises((TypeError, ValueError)):
                 generic.dist_to_encoder().seq_encode([invalid])
 
         integer = self._integer()
@@ -109,9 +109,9 @@ class HiddenAssociationContractTestCase(unittest.TestCase):
             ([(0, 1)], [(0, -1)]),
             ([], [(0, 1)]),
         ):
-            with self.subTest(integer=invalid), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(integer=repr(invalid)), self.assertRaises((TypeError, ValueError)):
                 integer.log_density(invalid)
-            with self.subTest(integer_encoder=invalid), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(integer_encoder=repr(invalid)), self.assertRaises((TypeError, ValueError)):
                 integer.dist_to_encoder().seq_encode([invalid])
 
     def test_integer_constructor_requires_matching_simplexes_and_alpha(self):
@@ -125,7 +125,7 @@ class HiddenAssociationContractTestCase(unittest.TestCase):
             ([[0.5, 0.5]], [[1.0]], np.nan),
         )
         for state, conditional, alpha in invalid:
-            with self.subTest(parameters=(state, conditional, alpha)), self.assertRaises(ValueError):
+            with self.subTest(parameters=repr((state, conditional, alpha))), self.assertRaises(ValueError):
                 IntegerHiddenAssociationDistribution(state, conditional, alpha=alpha)
 
     def test_impossible_positive_weight_evidence_is_transactional(self):

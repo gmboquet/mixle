@@ -42,7 +42,7 @@ class ChowLiuStructureTest(unittest.TestCase):
             ([None, 2, 1], [0, 1, 2]),
         ]
         for parents, order in invalid:
-            with self.subTest(parents=parents, order=order), self.assertRaises(ValueError):
+            with self.subTest(parents=repr(parents), order=repr(order)), self.assertRaises(ValueError):
                 self._make(parents, order)
         self._make([None, 0, 1], [0, 1, 2])
 
@@ -63,7 +63,7 @@ class GraphSupportTest(unittest.TestCase):
     def test_erdos_renyi_rejects_invalid_statistics_and_controls(self):
         estimator = ErdosRenyiGraphDistribution(0.5, num_nodes=2).estimator()
         for value in ((-1.0, -2.0), (1.0, 2.0), (np.inf, 0.0)):
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 estimator.estimate(None, value)
         with self.assertRaises(ValueError):
             estimator.estimate(None, (0.0, 0.0))
@@ -189,7 +189,7 @@ class GraphSupportTest(unittest.TestCase):
 
     def test_num_nodes_rejects_lossy_controls(self):
         for value in (True, 2.5, -1):
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 ErdosRenyiGraphDistribution(0.5, num_nodes=value)
 
 
@@ -198,7 +198,7 @@ class OptionalExtensionLoaderTest(unittest.TestCase):
         absent = ModuleNotFoundError("missing", name="example.extension")
         for error, status in ((absent, "absent"), (OSError("bad ABI"), "incompatible")):
             with (
-                self.subTest(status=status),
+                self.subTest(status=repr(status)),
                 patch(
                     "mixle.engines._optional_extension.importlib.import_module",
                     side_effect=error,

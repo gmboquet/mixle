@@ -170,7 +170,7 @@ class HiddenMarkovGeometryAndOwnershipTestCase(unittest.TestCase):
 class HiddenMarkovEmptyBatchTestCase(unittest.TestCase):
     def test_empty_batches_are_valid_neutral_inputs(self):
         for use_numba in (False, True):
-            with self.subTest(use_numba=use_numba):
+            with self.subTest(use_numba=repr(use_numba)):
                 hmm = HiddenMarkovModelDistribution(
                     _gaussian_topics(),
                     [0.5, 0.5],

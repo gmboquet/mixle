@@ -29,7 +29,7 @@ class IntegerMultinomialLenDistTestCase(unittest.TestCase):
     def test_log_density_includes_len_dist_term(self):
         d = IntegerMultinomialDistribution(min_val=0, p_vec=[0.2, 0.3, 0.5], len_dist=PoissonDistribution(3.0))
         for x in DATA:
-            with self.subTest(x=x):
+            with self.subTest(x=repr(x)):
                 total = sum(cnt for _, cnt in x)
                 category_term = sum(d.log_p_vec[v] * cnt for v, cnt in x)
                 coefficient = gammaln(total + 1.0) - sum(gammaln(cnt + 1.0) for _, cnt in x)

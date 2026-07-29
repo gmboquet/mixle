@@ -36,7 +36,7 @@ class NeuralPPLContractTest(unittest.TestCase):
             ([0, 1, 0], [1.0, np.nan, 1.0]),
         ]
         for labels, weights in invalid:
-            with self.subTest(labels=labels, weights=weights), self.assertRaises(ValueError):
+            with self.subTest(labels=repr(labels), weights=repr(weights)), self.assertRaises(ValueError):
                 neural_fit(rv, labels, given={"x": x}, weights=weights, epochs=1)
 
     def test_neural_fit_rejects_invalid_geometry_and_controls(self):
@@ -53,7 +53,7 @@ class NeuralPPLContractTest(unittest.TestCase):
             ({"batch_size": 0}, ValueError),
             ({"device": "meta"}, ValueError),
         ]:
-            with self.subTest(kwargs=kwargs), self.assertRaises(error):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(error):
                 neural_fit(rv, [0], given={"x": [[1.0, 0.0]]}, **kwargs)
 
     def test_normal_rejects_controls_it_cannot_honor(self):

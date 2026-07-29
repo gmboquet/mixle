@@ -29,24 +29,24 @@ class IndianBuffetProcessTestCase(unittest.TestCase):
 
     def test_dimensions_and_sparse_ids_require_exact_integers(self):
         for invalid in (2.0, 2.5, True, np.nan, np.inf, "2"):
-            with self.subTest(num_features=invalid), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(num_features=repr(invalid)), self.assertRaises((TypeError, ValueError)):
                 IndianBuffetProcessDistribution(invalid)
 
         dist = IndianBuffetProcessDistribution(2, data_format="sparse")
         encoder = dist.dist_to_encoder()
         for invalid in ([0.5], [np.nan], [np.inf], [True], ["0"]):
-            with self.subTest(row=invalid), self.assertRaises((TypeError, ValueError, OverflowError)):
+            with self.subTest(row=repr(invalid)), self.assertRaises((TypeError, ValueError, OverflowError)):
                 dist.log_density(invalid)
-            with self.subTest(encoded_row=invalid), self.assertRaises((TypeError, ValueError, OverflowError)):
+            with self.subTest(encoded_row=repr(invalid)), self.assertRaises((TypeError, ValueError, OverflowError)):
                 encoder.seq_encode([invalid])
 
         np.testing.assert_array_equal(encoder.seq_encode([[np.int64(0), np.int32(1)]]), [[True, True]])
 
     def test_min_prob_is_a_valid_effective_open_interval(self):
         for invalid in (-0.1, 0.5, 1.0, np.nan, np.inf):
-            with self.subTest(min_prob=invalid), self.assertRaises(ValueError):
+            with self.subTest(min_prob=repr(invalid)), self.assertRaises(ValueError):
                 IndianBuffetProcessDistribution(1, min_prob=invalid)
-            with self.subTest(estimator_min_prob=invalid), self.assertRaises(ValueError):
+            with self.subTest(estimator_min_prob=repr(invalid)), self.assertRaises(ValueError):
                 IndianBuffetProcessEstimator(1, min_prob=invalid)
 
         dist = IndianBuffetProcessDistribution(1, feature_probs=[1.0], min_prob=0.0)

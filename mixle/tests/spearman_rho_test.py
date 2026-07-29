@@ -137,17 +137,17 @@ class SpearmanRankingContractTestCase(unittest.TestCase):
         dist = SpearmanRankingDistribution([0, 1, 2], rho=0.8)
         encoder = SpearmanRankingDataEncoder(dim=3)
         for invalid in ([0, 0, 2], [0, 1], [0, 1, 3], [0.0, 1.5, 2.0]):
-            with self.subTest(invalid=invalid), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(invalid=repr(invalid)), self.assertRaises((TypeError, ValueError)):
                 dist.log_density(invalid)
-            with self.subTest(encoded=invalid), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(encoded=repr(invalid)), self.assertRaises((TypeError, ValueError)):
                 encoder.seq_encode([invalid])
 
     def test_controls_and_location_are_validated(self):
         for rho in (-1.0, np.nan, np.inf):
-            with self.subTest(rho=rho), self.assertRaises(ValueError):
+            with self.subTest(rho=repr(rho)), self.assertRaises(ValueError):
                 SpearmanRankingDistribution([0, 1, 2], rho=rho)
         for max_dim in (0, 1.5, True):
-            with self.subTest(max_dim=max_dim), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(max_dim=repr(max_dim)), self.assertRaises((TypeError, ValueError)):
                 SpearmanRankingDistribution([0, 1, 2], max_dim=max_dim)
         with self.assertRaises(ValueError):
             SpearmanRankingDistribution([])

@@ -18,7 +18,7 @@ from mixle.stats import TweedieDistribution, TweedieEstimator
 class TweedieDistributionTest(unittest.TestCase):
     def test_density_normalizes_and_matches_moments(self):
         for mu, phi, p in [(2.0, 1.0, 1.5), (5.0, 0.5, 1.3), (1.0, 2.0, 1.7)]:
-            with self.subTest(mu=mu, phi=phi, p=p):
+            with self.subTest(mu=repr(mu), phi=repr(phi), p=repr(p)):
                 d = TweedieDistribution(mu, phi, p)
                 p0 = math.exp(-d.lam)
                 hi = mu * 60.0

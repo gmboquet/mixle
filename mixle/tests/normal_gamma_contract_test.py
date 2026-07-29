@@ -18,7 +18,7 @@ class NormalGammaContractTest(unittest.TestCase):
             ([0.0], 1.0, 1.0, 1.0),
         )
         for params in invalid:
-            with self.subTest(params=params):
+            with self.subTest(params=repr(params)):
                 with self.assertRaises(ValueError):
                     NormalGammaDistribution(*params)
 
@@ -32,7 +32,7 @@ class NormalGammaContractTest(unittest.TestCase):
     def test_scalar_and_batch_scoring_validate_observation_support(self):
         dist = NormalGammaDistribution(0.0, 1.0, 2.0, 3.0)
         for value in ((0.0,), (0.0, 0.0), (0.0, -1.0), (np.inf, 1.0)):
-            with self.subTest(value=value):
+            with self.subTest(value=repr(value)):
                 with self.assertRaises(ValueError):
                     dist.log_density(value)
 
@@ -42,7 +42,7 @@ class NormalGammaContractTest(unittest.TestCase):
             np.array([[0.0, 1.0], [1.0, 0.0]]),
             np.array([[0.0, 1.0], [np.nan, 1.0]]),
         ):
-            with self.subTest(shape=values.shape):
+            with self.subTest(shape=repr(values.shape)):
                 with self.assertRaises(ValueError):
                     dist.seq_log_density(values)
 
@@ -59,7 +59,7 @@ class NormalGammaContractTest(unittest.TestCase):
 
         sampler = dist.sampler(seed=1)
         for size in (True, 1.5, -1):
-            with self.subTest(size=size):
+            with self.subTest(size=repr(size)):
                 with self.assertRaises((TypeError, ValueError)):
                     sampler.sample(size)
         dist.a = 0.0
@@ -79,7 +79,7 @@ class MultivariateNormalGammaContractTest(unittest.TestCase):
             ([], [], [], []),
         )
         for params in invalid:
-            with self.subTest(params=params):
+            with self.subTest(params=repr(params)):
                 with self.assertRaises(ValueError):
                     MultivariateNormalGammaDistribution(*params)
 
@@ -117,7 +117,7 @@ class MultivariateNormalGammaContractTest(unittest.TestCase):
             ([0.0, np.inf], [1.0, 1.0]),
         )
         for value in invalid:
-            with self.subTest(value=value):
+            with self.subTest(value=repr(value)):
                 with self.assertRaises(ValueError):
                     dist.log_density(value)
 
@@ -141,7 +141,7 @@ class MultivariateNormalGammaContractTest(unittest.TestCase):
 
         sampler = dist.sampler(seed=1)
         for size in (True, 1.5, -1):
-            with self.subTest(size=size):
+            with self.subTest(size=repr(size)):
                 with self.assertRaises((TypeError, ValueError)):
                     sampler.sample(size)
         dist.lam[0] = 0.0

@@ -485,7 +485,7 @@ class LocalEncodedDataTestCase(unittest.TestCase):
         estimator = GaussianEstimator()
         encoded = seq_encode([0.0, 1.0], estimator=estimator)
         for p in (float("nan"), -0.01, 1.01, True):
-            with self.subTest(p=p), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(p=repr(p)), self.assertRaises((TypeError, ValueError)):
                 seq_initialize(encoded, estimator, np.random.RandomState(0), p=p)
         with self.assertRaises(ImpossibleEvidenceError):
             seq_initialize(encoded, estimator, np.random.RandomState(0), p=0.0)

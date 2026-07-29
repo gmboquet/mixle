@@ -26,7 +26,7 @@ class MultiFidelitySearchTest(unittest.TestCase):
             {"log10_lr_range": (np.nan, -2.0)},
         )
         for kwargs in invalid_spaces:
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 TrainingSpace(**kwargs)
 
         space = TrainingSpace()
@@ -37,7 +37,7 @@ class MultiFidelitySearchTest(unittest.TestCase):
             [-0.1, 0.5, 0.5, 0.5],
             [1.1, 0.5, 0.5, 0.5],
         ):
-            with self.subTest(point=point), self.assertRaises(ValueError):
+            with self.subTest(point=repr(point)), self.assertRaises(ValueError):
                 space.decode(point)
 
     def test_finds_good_recipe_using_both_fidelities(self):
@@ -95,7 +95,7 @@ class LearningCurveTest(unittest.TestCase):
             ([1, 2, 3], [3.0, 2.5, 2.0], 3),
         )
         for steps, losses, at in invalid:
-            with self.subTest(steps=steps, losses=losses, at=at), self.assertRaises(ValueError):
+            with self.subTest(steps=repr(steps), losses=repr(losses), at=repr(at)), self.assertRaises(ValueError):
                 extrapolate_learning_curve(steps, losses, at=at)
 
 
@@ -108,7 +108,7 @@ class RealLMCouplingTest(unittest.TestCase):
 
         train = lm_train_fn([0, 1, 0, 1], [0, 1], vocab=2, block=2, max_epochs=2)
         for budget in (0, -0.5, 1.1, np.nan, np.inf, True):
-            with self.subTest(budget=budget), self.assertRaises(ValueError):
+            with self.subTest(budget=repr(budget)), self.assertRaises(ValueError):
                 train({}, budget)
 
     def test_lm_train_fn_trains_a_real_lm(self):

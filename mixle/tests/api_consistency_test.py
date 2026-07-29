@@ -435,7 +435,7 @@ class AnalysisFacadeExportsTestCase(unittest.TestCase):
             "VoiEstimate",
             "voi_estimate",
         ):
-            with self.subTest(name=name):
+            with self.subTest(name=repr(name)):
                 self.assertIn(name, mixle.analysis.__all__)
                 self.assertTrue(hasattr(mixle.analysis, name))
 

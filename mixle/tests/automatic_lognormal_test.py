@@ -71,7 +71,7 @@ class AutomaticLogNormalTest(unittest.TestCase):
 
         for value, n in ((7.0, 10), (123.456, 50), (100.0, 50)):
             data = [value] * n
-            with self.subTest(value=value, n=n):
+            with self.subTest(value=repr(value), n=repr(n)):
                 model = optimize(data, out=None)
                 # the correct fallback (a degenerate Gaussian, its min_covar floor already handling
                 # constant data elsewhere in the codebase), not a spurious LogGaussianDistribution

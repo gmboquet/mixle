@@ -33,7 +33,7 @@ class GraphColoringTest(unittest.TestCase):
             a = np.triu(a, 1)
             a = a + a.T
             k, col = graph_coloring(a)
-            with self.subTest(seed=seed):
+            with self.subTest(seed=repr(seed)):
                 self.assertTrue(_proper(col, a))  # proper coloring
                 self.assertEqual(max(col) + 1 if n else 0, k)  # uses exactly k colors
                 self.assertEqual(k, _brute_chromatic(a))  # and k is minimal

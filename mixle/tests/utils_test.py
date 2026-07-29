@@ -38,10 +38,10 @@ class UtilsTestCase(unittest.TestCase):
     def test_least_occurring_validates_selection_controls(self):
         values = ["a", "b"]
         for count in (-1, 1.5, True):
-            with self.subTest(count=count), self.assertRaisesRegex(ValueError, "nonnegative integer"):
+            with self.subTest(count=repr(count)), self.assertRaisesRegex(ValueError, "nonnegative integer"):
                 least_occurring(values, count=count)
         for percent in (-0.1, 1.1, float("nan"), float("inf"), True):
-            with self.subTest(percent=percent), self.assertRaisesRegex(ValueError, "between 0 and 1"):
+            with self.subTest(percent=repr(percent)), self.assertRaisesRegex(ValueError, "between 0 and 1"):
                 least_occurring(values, percent=percent)
         with self.assertRaisesRegex(ValueError, "only one"):
             least_occurring(values, count=1, percent=0.5)

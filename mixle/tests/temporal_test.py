@@ -73,9 +73,9 @@ class PeriodicTimeTest(unittest.TestCase):
 
     def test_period_must_be_finite_and_positive_everywhere(self):
         for period in (0.0, -1.0, np.inf, np.nan):
-            with self.subTest(period=period), self.assertRaises(ValueError):
+            with self.subTest(period=repr(period)), self.assertRaises(ValueError):
                 PeriodicTimeDistribution(period)
-            with self.subTest(encoder_period=period), self.assertRaises(ValueError):
+            with self.subTest(encoder_period=repr(period)), self.assertRaises(ValueError):
                 SeasonalTimeSeries(periods=[period])
 
     def test_missing_timestamp_fails_closed(self):

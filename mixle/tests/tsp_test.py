@@ -22,7 +22,7 @@ class TSPTest(unittest.TestCase):
             np.fill_diagonal(d, 0)
             cost, tour = tsp_held_karp(d)
             brute = min(_tour_cost(d, [0, *p]) for p in itertools.permutations(range(1, n)))
-            with self.subTest(seed=seed):
+            with self.subTest(seed=repr(seed)):
                 self.assertEqual(sorted(tour), list(range(n)))  # a valid Hamiltonian cycle
                 self.assertEqual(tour[0], 0)
                 self.assertAlmostEqual(_tour_cost(d, tour), cost, places=9)  # reported cost is the tour's

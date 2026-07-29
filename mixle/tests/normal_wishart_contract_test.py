@@ -17,7 +17,7 @@ class NormalWishartContractTest(unittest.TestCase):
             ([0.0, 0.0], 1.0, np.eye(2), [4.0]),
         )
         for params in invalid:
-            with self.subTest(params=params):
+            with self.subTest(params=repr(params)):
                 with self.assertRaises(ValueError):
                     NormalWishartDistribution(*params)
 
@@ -56,7 +56,7 @@ class NormalWishartContractTest(unittest.TestCase):
             ([0.0, 0.0], [[1.0, 100.0], [0.0, 1.0]]),
         )
         for value in invalid:
-            with self.subTest(value=value):
+            with self.subTest(value=repr(value)):
                 with self.assertRaises(ValueError):
                     dist.log_density(value)
 
@@ -80,7 +80,7 @@ class NormalWishartContractTest(unittest.TestCase):
 
         sampler = dist.sampler(seed=1)
         for size in (True, 1.5, -1):
-            with self.subTest(size=size):
+            with self.subTest(size=repr(size)):
                 with self.assertRaises((TypeError, ValueError)):
                     sampler.sample(size)
         dist.w_mat[1, 0] = 10.0

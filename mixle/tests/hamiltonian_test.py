@@ -44,7 +44,7 @@ class HamiltonianNetTest(unittest.TestCase):
         from mixle.models.hamiltonian import HamiltonianNet
 
         for dim in (0, -1, 1.5, True):
-            with self.subTest(dim=dim), self.assertRaises(ValueError):
+            with self.subTest(dim=repr(dim)), self.assertRaises(ValueError):
                 HamiltonianNet(dim=dim)
 
     def test_default_network_is_structurally_separable(self):
@@ -71,10 +71,10 @@ class HamiltonianNetTest(unittest.TestCase):
         net = HamiltonianNet(dim=2, hidden=[8])
         good = torch.ones(2)
         for dt in (0, -1, float("nan"), float("inf")):
-            with self.subTest(dt=dt), self.assertRaises(ValueError):
+            with self.subTest(dt=repr(dt)), self.assertRaises(ValueError):
                 leapfrog_rollout(net, good, good, dt, 2)
         for steps in (0, -1, 1.5, True):
-            with self.subTest(steps=steps), self.assertRaises(ValueError):
+            with self.subTest(steps=repr(steps)), self.assertRaises(ValueError):
                 leapfrog_rollout(net, good, good, 0.1, steps)
         with self.assertRaisesRegex(ValueError, "identical shape"):
             leapfrog_rollout(net, torch.ones(2), torch.ones(3), 0.1, 2)

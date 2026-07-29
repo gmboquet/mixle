@@ -250,7 +250,7 @@ class StreamingEstimatorTestCase(unittest.TestCase):
         )
         lookback_data = [[0, 1, 1, 2, 2, 0], [2, 2, 1, 1, 0], [0, 0, 1, 2, 1, 0]]
         for dist_cls, est_cls in ((LookbackHiddenMarkovModelDistribution, LookbackHiddenMarkovModelEstimator),):
-            with self.subTest(dist=dist_cls.__module__):
+            with self.subTest(dist=repr(dist_cls.__module__)):
                 dist = dist_cls(
                     lookback_topics,
                     w=[0.6, 0.4],

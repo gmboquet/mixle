@@ -138,7 +138,7 @@ class SquaremPackerContractTest(unittest.TestCase):
             changed_mixture_boundary,
             changed_metadata,
         ):
-            with self.subTest(changed=changed):
+            with self.subTest(changed=repr(changed)):
                 with self.assertRaisesRegex(ValueError, "structure or fixed support"):
                     pack(changed)
 
@@ -155,7 +155,7 @@ class SquaremPackerContractTest(unittest.TestCase):
             ["not", "numeric", "coordinates"],
         )
         for values in invalid:
-            with self.subTest(values=values):
+            with self.subTest(values=repr(values)):
                 with self.assertRaises(ValueError):
                     unpack(values)
 

@@ -257,10 +257,10 @@ class EmNonFiniteGuardTest(unittest.TestCase):
             {"print_iter": 0.5},
         )
         for kwargs in invalid:
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 optimize(data, estimator, **({"max_its": 1, "out": None} | kwargs))
         for kwargs in ({"reuse_estep_ll": 1}, {"monotone": "yes"}, {"track_best": 0}):
-            with self.subTest(kwargs=kwargs), self.assertRaises(TypeError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(TypeError):
                 optimize(data, estimator, max_its=1, out=None, **kwargs)
 
     def test_internal_structure_fit_errors_are_not_masked_as_routing_fallbacks(self):

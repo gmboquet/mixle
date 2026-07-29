@@ -42,7 +42,7 @@ class TreeHmmEngineTestCase(unittest.TestCase):
         hv = host.value()
         # value(): (num_states, init_counts, state_counts, trans_counts, emission_ss, len_ss)
         for name, engine in self.engines:
-            with self.subTest(engine=name):
+            with self.subTest(engine=repr(name)):
                 kernel = self.dist.kernel(engine=engine, estimator=self.est)
                 self.assertEqual(type(kernel).__name__, "TreeHiddenMarkovKernel")
                 value = kernel.accumulate(enc, self.weights)

@@ -80,7 +80,7 @@ class MixtureLatentPosteriorTest(unittest.TestCase):
             np.array([[0.5, np.inf]]),
         )
         for responsibilities in invalid:
-            with self.subTest(responsibilities=responsibilities), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(responsibilities=repr(responsibilities)), self.assertRaises((TypeError, ValueError)):
                 CategoricalLatentPosterior(responsibilities)
         with self.assertRaisesRegex(ValueError, "exactly 2 labels"):
             CategoricalLatentPosterior(np.array([[0.5, 0.5]]), support=["only-one"])
@@ -143,7 +143,10 @@ class HmmChainLatentPosteriorTest(unittest.TestCase):
             (valid_pi, valid_a, np.array([[0.0, np.inf]])),
         )
         for args in invalid:
-            with self.subTest(shapes=tuple(np.shape(arg) for arg in args)), self.assertRaises((TypeError, ValueError)):
+            with (
+                self.subTest(shapes=repr(tuple(np.shape(arg) for arg in args))),
+                self.assertRaises((TypeError, ValueError)),
+            ):
                 MarkovChainLatentPosterior(*args)
 
     def test_empty_chain_is_the_valid_empty_posterior(self):
@@ -166,7 +169,7 @@ class HmmChainLatentPosteriorTest(unittest.TestCase):
         self.assertEqual(q.impossibility.log_evidence, -np.inf)
         self.assertEqual(q.log_likelihood(), -np.inf)
         for operation in (q.marginals, q.sample, q.mode, q.entropy):
-            with self.subTest(operation=operation.__name__), self.assertRaises(ImpossiblePosteriorError):
+            with self.subTest(operation=repr(operation.__name__)), self.assertRaises(ImpossiblePosteriorError):
                 operation()
 
     def test_marginals_mode_entropy_match_brute_force(self):
@@ -294,7 +297,10 @@ class LDAMeanFieldPosteriorTest(unittest.TestCase):
             (valid_gamma, valid_phi, np.array([True, False])),
         )
         for args in invalid:
-            with self.subTest(shapes=tuple(np.shape(arg) for arg in args)), self.assertRaises((TypeError, ValueError)):
+            with (
+                self.subTest(shapes=repr(tuple(np.shape(arg) for arg in args))),
+                self.assertRaises((TypeError, ValueError)),
+            ):
                 MeanFieldLDAPosterior(*args)
 
     def test_constructor_owns_validated_lda_factors(self):

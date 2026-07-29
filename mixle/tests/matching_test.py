@@ -89,7 +89,7 @@ class MatchingTestCase(unittest.TestCase):
 
     def test_extreme_finite_weights_normalize_and_sample(self):
         for scale in (1.0e-300, 1.0e308):
-            with self.subTest(scale=scale):
+            with self.subTest(scale=repr(scale)):
                 dist = MatchingDistribution(np.full((3, 3), scale))
                 values = np.exp(dist.seq_log_density(dist.dist_to_encoder().seq_encode(_perms(3))))
                 np.testing.assert_allclose(values, 1.0 / 6.0, atol=1.0e-12)
@@ -109,11 +109,11 @@ class MatchingTestCase(unittest.TestCase):
         dist = MatchingDistribution(_W)
         malformed = ([0, 0, 1], [0, 1], [0, 1, 4], [0.5, 1.0, 2.0])
         for value in malformed:
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 dist.log_density(value)
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 dist.seq_log_density(np.asarray([value]))
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 dist.dist_to_encoder().seq_encode([value])
         self.assertEqual(MatchingDataEncoder(3), MatchingDataEncoder(3))
         self.assertNotEqual(MatchingDataEncoder(3), MatchingDataEncoder(4))
@@ -147,7 +147,7 @@ class MatchingTestCase(unittest.TestCase):
             {"dim": 3, "tol": 0.0},
         )
         for kwargs in invalid:
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 MatchingEstimator(**kwargs)
         malformed = np.zeros((3, 3))
         malformed[0, 0] = 3.0

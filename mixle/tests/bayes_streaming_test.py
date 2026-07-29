@@ -374,7 +374,7 @@ class BayesianStreamingEstimatorTestCase(unittest.TestCase):
 
     def test_posterior_carry_across_conjugate_families(self):
         for name, factory in _posterior_stream_cases():
-            with self.subTest(family=name):
+            with self.subTest(family=repr(name)):
                 start, estimator, batch1, batch2 = factory()
                 stream = BayesianStreamingEstimator(estimator, model=start)
 
@@ -450,7 +450,7 @@ class BayesianStreamingEstimatorTestCase(unittest.TestCase):
     def test_forgetting_across_conjugate_families(self):
         rho = 0.4
         for name, factory in _posterior_stream_cases():
-            with self.subTest(family=name):
+            with self.subTest(family=repr(name)):
                 start, estimator, batch1, batch2 = factory()
                 stream = BayesianStreamingEstimator(
                     estimator,

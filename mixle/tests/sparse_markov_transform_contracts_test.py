@@ -63,7 +63,7 @@ class SparseMarkovProbabilityContractTest(unittest.TestCase):
         for low_memory in (False, True):
             dist = _distribution(low_memory=low_memory)
             encoded = dist.dist_to_encoder().seq_encode(data)
-            with self.subTest(low_memory=low_memory):
+            with self.subTest(low_memory=repr(low_memory)):
                 self.assertEqual(dist.log_density(data[0]), -np.inf)
                 self.assertEqual(dist.seq_log_density(encoded)[0], -np.inf)
                 backend = backend_seq_log_density(dist, encoded, NUMPY_ENGINE)
@@ -78,7 +78,7 @@ class SparseMarkovProbabilityContractTest(unittest.TestCase):
             dist = _distribution(alpha=0.2, low_memory=low_memory)
             encoded = dist.dist_to_encoder().seq_encode(data)
             expected = np.asarray([dist.log_density(value) for value in data])
-            with self.subTest(low_memory=low_memory):
+            with self.subTest(low_memory=repr(low_memory)):
                 np.testing.assert_allclose(dist.seq_log_density(encoded), expected)
 
     def test_constructor_and_observation_boundaries_reject_invalid_values(self):
@@ -90,7 +90,7 @@ class SparseMarkovProbabilityContractTest(unittest.TestCase):
             ([0.5, 0.5], np.full((2, 2), 0.5), 1.1),
         )
         for initial, conditional, alpha in invalid_parameters:
-            with self.subTest(initial=initial, shape=np.shape(conditional), alpha=alpha):
+            with self.subTest(initial=repr(initial), shape=repr(np.shape(conditional)), alpha=repr(alpha)):
                 with self.assertRaises((TypeError, ValueError)):
                     SparseMarkovAssociationDistribution(initial, conditional, alpha=alpha)
 
@@ -103,7 +103,7 @@ class SparseMarkovProbabilityContractTest(unittest.TestCase):
             ([(0, -1)], []),
         )
         for observation in invalid_observations:
-            with self.subTest(observation=observation):
+            with self.subTest(observation=repr(observation)):
                 with self.assertRaises((TypeError, ValueError)):
                     dist.log_density(observation)
 
@@ -124,7 +124,7 @@ class SparseMarkovSamplingContractTest(unittest.TestCase):
         sampler = _distribution(length=True).sampler(seed=1)
         for draw in ((1,), (1.5, 1), (-1, 1), (0, 1)):
             sampler.size_sampler = self._Draw(draw)
-            with self.subTest(draw=draw):
+            with self.subTest(draw=repr(draw)):
                 with self.assertRaises((TypeError, ValueError)):
                     sampler.sample()
 
@@ -170,7 +170,7 @@ class SparseMarkovEstimationContractTest(unittest.TestCase):
             (np.ones(2), csr_matrix(([-1.0], ([0], [0])), shape=(2, 2)), None),
         )
         for value in invalid:
-            with self.subTest(value=value):
+            with self.subTest(value=repr(value)):
                 with self.assertRaises((TypeError, ValueError)):
                     estimator.estimate(None, value)
 

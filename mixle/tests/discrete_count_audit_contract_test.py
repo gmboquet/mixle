@@ -36,11 +36,11 @@ class BetaBinomialEvidenceContractTest(unittest.TestCase):
         np.testing.assert_array_equal(encoder.seq_encode([0, 1, 2]), np.asarray([0, 1, 2]))
 
         for invalid in (-1, 1.5, 3, np.inf):
-            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+            with self.subTest(invalid=repr(invalid)), self.assertRaises(ValueError):
                 encoder.seq_encode([invalid])
-            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+            with self.subTest(invalid=repr(invalid)), self.assertRaises(ValueError):
                 accumulator.update(invalid, 1.0, distribution)
-            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+            with self.subTest(invalid=repr(invalid)), self.assertRaises(ValueError):
                 accumulator.seq_update(np.asarray([invalid]), np.ones(1), distribution)
 
     def test_encoder_identity_includes_trial_count(self):
@@ -55,7 +55,7 @@ class BinomialEvidenceContractTest(unittest.TestCase):
         distribution = BinomialDistribution(0.4, 10, min_val=5, name="counts", keys="shared")
         statistics = (3.0, 21.0, 7, 7)
         for estimator in (distribution.estimator(), distribution.estimator(pseudo_count=2.0)):
-            with self.subTest(pseudo_count=estimator.pseudo_count):
+            with self.subTest(pseudo_count=repr(estimator.pseudo_count)):
                 fitted = estimator.estimate(None, statistics)
                 self.assertEqual((fitted.n, fitted.min_val), (10, 5))
                 self.assertEqual((fitted.name, fitted.keys), ("counts", "shared"))
@@ -80,7 +80,7 @@ class BinomialEvidenceContractTest(unittest.TestCase):
         np.testing.assert_allclose(scored, [dist.log_density(v) for v in outside])
 
         for invalid in (np.inf, 0.5):  # not a count at all, still rejected
-            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+            with self.subTest(invalid=repr(invalid)), self.assertRaises(ValueError):
                 encoder.seq_encode([invalid])
 
     def test_generic_encoder_uses_checked_int64_without_value_corruption(self):
@@ -233,7 +233,7 @@ class DiscreteProbabilityLawContractTest(unittest.TestCase):
             {"pmap": {"a": 0.5}, "default_value": 0.1},
             {"pmap": {}},
         ):
-            with self.subTest(kwargs=kwargs):
+            with self.subTest(kwargs=repr(kwargs)):
                 distribution = CategoricalDistribution(**kwargs)
                 self.assertFalse(distribution.scoring_only)
                 self.assertFalse(distribution.is_normalized_probability)
@@ -255,13 +255,13 @@ class DiscreteProbabilityLawContractTest(unittest.TestCase):
             (0, [-0.5, 1.5]),
             (0, [float("nan"), 0.5]),
         ):
-            with self.subTest(origin=origin, probabilities=probabilities), self.assertRaises(ValueError):
+            with self.subTest(origin=repr(origin), probabilities=repr(probabilities)), self.assertRaises(ValueError):
                 IntegerCategoricalDistribution(origin, probabilities)
 
         # Mirroring CategoricalDistribution.pmap, an unnormalized (or empty, or all-zero) weight
         # vector is deliberately still constructible; only finiteness/non-negativity is enforced.
         for probabilities in ([], [0.0, 0.0], [0.8, 0.8]):
-            with self.subTest(probabilities=probabilities):
+            with self.subTest(probabilities=repr(probabilities)):
                 distribution = IntegerCategoricalDistribution(0, probabilities)
                 self.assertEqual(distribution.num_vals, len(probabilities))
 
@@ -314,7 +314,7 @@ class DiscreteProbabilityLawContractTest(unittest.TestCase):
             (0, 1, 0.2, 0),
         )
         for k, size, probability, minimum in invalid:
-            with self.subTest(values=(k, size, probability, minimum)), self.assertRaises(ValueError):
+            with self.subTest(values=repr((k, size, probability, minimum))), self.assertRaises(ValueError):
                 IntegerUniformSpikeDistribution(k, size, probability, minimum)
 
     def test_integer_uniform_spike_rejects_fractional_states_in_every_path(self):

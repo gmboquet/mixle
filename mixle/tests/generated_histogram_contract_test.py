@@ -36,7 +36,7 @@ class GeneratedHistogramContractTest(unittest.TestCase):
             np.asarray([0.0, float(2**63)]),
         )
         for values in invalid_values:
-            with self.subTest(values=values):
+            with self.subTest(values=repr(values)):
                 with self.assertRaises(ValueError):
                     _weighted_histogram(values, np.ones(2), NUMPY_ENGINE)
 
@@ -49,7 +49,7 @@ class GeneratedHistogramContractTest(unittest.TestCase):
             np.asarray([1.0, -0.5]),
         )
         for weights in invalid_weights:
-            with self.subTest(weights=weights):
+            with self.subTest(weights=repr(weights)):
                 with self.assertRaises(ValueError):
                     _weighted_histogram(np.asarray([0, 1]), weights, NUMPY_ENGINE)
 

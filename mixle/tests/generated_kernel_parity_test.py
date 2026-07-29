@@ -91,7 +91,7 @@ class GeneratedKernelParityTestCase(unittest.TestCase):
     def test_generated_numba_matches_scalar_and_legacy(self):
         rng = np.random.RandomState(7)
         for label, dist, kind in CASES:
-            with self.subTest(family=label):
+            with self.subTest(family=repr(label)):
                 if not s.generated_numba_log_density_available(dist):
                     self.skipTest("%s has no generated numba kernel" % label)
                 data = _samples(rng, kind)
@@ -154,7 +154,7 @@ class GeneratedKernelParityTestCase(unittest.TestCase):
             "inf": (engine.inf, "_INF"),
         }
         for name, (node, expected) in cases.items():
-            with self.subTest(constant=name):
+            with self.subTest(constant=repr(name)):
                 self.assertEqual(_lower_symbolic_to_numba(node), expected)
         # And in-context: the same expression the real bug hit.
         x, pi = engine.symbol("x"), engine.pi

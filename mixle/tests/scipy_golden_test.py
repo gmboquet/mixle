@@ -62,7 +62,7 @@ class ScipyGoldenTest(unittest.TestCase):
     def test_continuous_logpdf_and_cdf_match_scipy(self):
         for dist, frozen, xs in CONTINUOUS:
             for x in xs:
-                with self.subTest(dist=type(dist).__name__, x=x):
+                with self.subTest(dist=type(dist).__name__, x=repr(x)):
                     self.assertAlmostEqual(dist.log_density(x), float(frozen.logpdf(x)), places=8)
                     if callable(getattr(dist, "cdf", None)):
                         self.assertAlmostEqual(dist.cdf(x), float(frozen.cdf(x)), places=8)
@@ -70,7 +70,7 @@ class ScipyGoldenTest(unittest.TestCase):
     def test_discrete_logpmf_and_cdf_match_scipy(self):
         for dist, frozen, xs in DISCRETE:
             for x in xs:
-                with self.subTest(dist=type(dist).__name__, x=x):
+                with self.subTest(dist=type(dist).__name__, x=repr(x)):
                     self.assertAlmostEqual(dist.log_density(x), float(frozen.logpmf(x)), places=8)
                     if callable(getattr(dist, "cdf", None)):
                         self.assertAlmostEqual(dist.cdf(x), float(frozen.cdf(x)), places=8)

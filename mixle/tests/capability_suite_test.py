@@ -185,7 +185,7 @@ class BatchOutputDispatchTest(unittest.TestCase):
 
     def test_list_and_tuple_batch_results_still_work(self):
         for factory in (list, tuple):
-            with self.subTest(kind=factory.__name__):
+            with self.subTest(kind=repr(factory.__name__)):
                 model = self._Recording(lambda rows, f=factory: f(["ham"] * len(rows)))
                 self.assertEqual(_predict(model, ["a", "b"]), ["ham", "ham"])
                 self.assertEqual(len(model.calls), 1)
@@ -199,7 +199,7 @@ class BatchOutputDispatchTest(unittest.TestCase):
             "set": {"spam", "ham"},
         }
         for name, bad in cases.items():
-            with self.subTest(case=name):
+            with self.subTest(case=repr(name)):
                 model = self._Recording(lambda rows, b=bad: b)
                 with self.assertRaises(ValueError):
                     _predict(model, ["a", "b"])

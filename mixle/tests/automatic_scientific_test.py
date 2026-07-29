@@ -52,7 +52,7 @@ class AutomaticScientificProfilingTestCase(unittest.TestCase):
         ]
 
         for name, data, estimator_type, recommendation in cases:
-            with self.subTest(name=name):
+            with self.subTest(name=repr(name)):
                 self.assertIsInstance(get_estimator(data), estimator_type)
                 profile = analyze_structure(data, pairwise=False)
                 field = profile.fields[0]
@@ -89,7 +89,7 @@ class AutomaticScientificProfilingTestCase(unittest.TestCase):
         ]
 
         for name, data in cases:
-            with self.subTest(name=name):
+            with self.subTest(name=repr(name)):
                 self.assert_vectorized_round_trip(data)
 
     def test_fixed_list_container_topology_is_not_over_merged(self):
@@ -124,7 +124,7 @@ class AutomaticScientificProfilingTestCase(unittest.TestCase):
         ]
 
         for name, data, recommendation in cases:
-            with self.subTest(name=name):
+            with self.subTest(name=repr(name)):
                 profile = analyze_structure(data, pairwise=False)
                 field = profile.fields[0]
                 self.assertEqual(field.recommendation, recommendation)

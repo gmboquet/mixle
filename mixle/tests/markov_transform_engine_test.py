@@ -55,7 +55,7 @@ class MarkovTransformEngineTestCase(unittest.TestCase):
     def test_scoring_parity(self):
         host = self.dist.seq_log_density(self.enc)
         for name, engine in self.engines:
-            with self.subTest(engine=name):
+            with self.subTest(engine=repr(name)):
                 v = np.asarray(engine.to_numpy(backend_seq_log_density(self.dist, self.enc, engine)))
                 self.assertTrue(np.allclose(host, v, atol=1.0e-6), "%s scoring differs" % name)
 
@@ -66,7 +66,7 @@ class MarkovTransformEngineTestCase(unittest.TestCase):
         host.seq_update(self.enc, self.weights, self.dist)
         hv = host.value()
         for name, engine in self.engines:
-            with self.subTest(engine=name):
+            with self.subTest(engine=repr(name)):
                 kernel = self.dist.kernel(engine=engine, estimator=est)
                 value = kernel.accumulate(self.enc, self.weights)
                 # value: (init_count, trans_count (sparse), size_value)

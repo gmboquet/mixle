@@ -24,7 +24,7 @@ class CallableLikelihoodTest(unittest.TestCase):
         # passed straight through, where it moved belief mass and produced out-of-range surprise.
         for bad in (-1.0, -2.0, float("nan"), float("inf")):
             strategy = CallableLikelihood(lambda h, o, v=bad: v, tier="executable")
-            with self.subTest(value=bad), self.assertRaises(ValueError):
+            with self.subTest(value=repr(bad)), self.assertRaises(ValueError):
                 strategy(Hypothesis("h", None), "o")
 
     def test_zero_is_a_legitimate_wrapped_likelihood(self):

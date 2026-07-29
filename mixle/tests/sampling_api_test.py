@@ -37,7 +37,7 @@ class SamplingApiTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "non-negative"):
                     sample(model, -1, seed=0)
             for invalid in (True, 1.5, "2"):
-                with self.subTest(model=type(model).__name__, size=invalid):
+                with self.subTest(model=type(model).__name__, size=repr(invalid)):
                     with self.assertRaises(TypeError):
                         sample(model, invalid, seed=0)
 

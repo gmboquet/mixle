@@ -15,7 +15,7 @@ class RicianTest(unittest.TestCase):
         for nu, sigma in [(2.0, 1.5), (0.0, 1.0), (5.0, 0.8), (1.0, 2.0)]:
             d, fr = R(nu, sigma), ss.rice(nu / sigma, scale=sigma)
             xs = np.array([0.4, 1.2, 2.5, 5.0])
-            with self.subTest(nu=nu, sigma=sigma):
+            with self.subTest(nu=repr(nu), sigma=repr(sigma)):
                 self.assertTrue(np.allclose([d.log_density(x) for x in xs], fr.logpdf(xs)))
                 self.assertTrue(np.allclose(d.seq_log_density(xs), fr.logpdf(xs)))
                 self.assertTrue(np.allclose([d.cdf(x) for x in xs], fr.cdf(xs)))

@@ -27,7 +27,7 @@ class TransformerContractTest(unittest.TestCase):
             {"vocab": 10, "gradient_checkpointing": [True]},
         )
         for kwargs in invalid:
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 build_causal_lm(**kwargs)
 
     def test_token_batch_contract_is_validated(self):
@@ -44,7 +44,7 @@ class TransformerContractTest(unittest.TestCase):
             torch.tensor([[0, -1]]),
         )
         for value in invalid:
-            with self.subTest(shape=tuple(value.shape), dtype=value.dtype), self.assertRaises(ValueError):
+            with self.subTest(shape=repr(tuple(value.shape)), dtype=repr(value.dtype)), self.assertRaises(ValueError):
                 model(value)
         with self.assertRaises(TypeError):
             model([[0, 1]])
@@ -59,14 +59,14 @@ class TransformerContractTest(unittest.TestCase):
             torch.tensor([0, 4]),
         )
         for positions in invalid_positions:
-            with self.subTest(shape=tuple(positions.shape)), self.assertRaises(ValueError):
+            with self.subTest(shape=repr(tuple(positions.shape))), self.assertRaises(ValueError):
                 model(tokens, position_ids=positions)
         with self.assertRaises(TypeError):
             model(tokens, position_ids=[0, 1])
 
         for policy in ([True], [True, 1], "all"):
             model.gradient_checkpointing = policy
-            with self.subTest(policy=policy), self.assertRaises(ValueError):
+            with self.subTest(policy=repr(policy)), self.assertRaises(ValueError):
                 model(tokens)
         model.gradient_checkpointing = [True, False]
         self.assertEqual(model(tokens).shape, (2, 7))

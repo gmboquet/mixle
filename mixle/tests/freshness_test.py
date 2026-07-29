@@ -163,7 +163,7 @@ class FreshnessTest(unittest.TestCase):
         i = s.add(kind="text", text="x")
         s.update(i, created_at=time.time() - 100)
         for bad in (float("nan"), float("inf"), float("-inf"), -5.0):
-            with self.subTest(max_age_s=bad):
+            with self.subTest(max_age_s=repr(bad)):
                 with self.assertRaises(ValueError):
                     check_freshness(s, i, max_age_s=bad)
 

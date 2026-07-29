@@ -90,7 +90,7 @@ class BirthDeathSamplingValidationTestCase(unittest.TestCase):
 
     def test_initial_population_must_be_an_exact_nonnegative_integer(self):
         for value in (True, -1, 0.5):
-            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(value=repr(value)), self.assertRaises((TypeError, ValueError)):
                 BirthDeathSamplingDistribution(
                     0.5,
                     0.3,
@@ -122,7 +122,7 @@ class BirthDeathSamplingValidationTestCase(unittest.TestCase):
             (1, 4.0),
         )
         for trajectory in malformed:
-            with self.subTest(trajectory=trajectory), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(trajectory=repr(trajectory)), self.assertRaises((TypeError, ValueError)):
                 dist.log_density(trajectory)
 
     def test_encoded_schema_and_weights_fail_closed(self):
@@ -139,13 +139,13 @@ class BirthDeathSamplingValidationTestCase(unittest.TestCase):
             np.array([[0.0, 0.0, 0.0, 2.0, np.nan, 4.0]]),
         )
         for rows in malformed:
-            with self.subTest(rows=rows), self.assertRaises(ValueError):
+            with self.subTest(rows=repr(rows)), self.assertRaises(ValueError):
                 dist.seq_log_density(rows)
 
         for weights in ([], [-1.0], [np.nan]):
             accumulator = BirthDeathSamplingAccumulator()
             before = accumulator.value()
-            with self.subTest(weights=weights), self.assertRaises(ValueError):
+            with self.subTest(weights=repr(weights)), self.assertRaises(ValueError):
                 accumulator.seq_update(valid, weights, None)
             self.assertEqual(accumulator.value(), before)
 
@@ -163,7 +163,7 @@ class BirthDeathSamplingValidationTestCase(unittest.TestCase):
             (0.0, 0.0, 0.0, np.nan, 1.0, 4.0),
         )
         for statistic in malformed:
-            with self.subTest(statistic=statistic):
+            with self.subTest(statistic=repr(statistic)):
                 with self.assertRaises(ValueError):
                     BirthDeathSamplingAccumulator().combine(statistic)
                 with self.assertRaises(ValueError):

@@ -109,10 +109,10 @@ class ConditioningReceiptTest(unittest.TestCase):
             np.array([[1.0 + 0.0j, 0.0], [0.0, 1.0]]),
         )
         for covar in invalid:
-            with self.subTest(shape=covar.shape), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(shape=repr(covar.shape)), self.assertRaises((TypeError, ValueError)):
                 conditioning_receipt(covar)
         for threshold in (False, 0.0, -1.0, 1.1, np.nan, np.inf):
-            with self.subTest(threshold=threshold), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(threshold=repr(threshold)), self.assertRaises((TypeError, ValueError)):
                 conditioning_receipt(np.eye(2), threshold)
 
     def test_roundoff_sized_asymmetry_is_reported_before_projection(self):
@@ -201,18 +201,21 @@ class CatastrophicCancellationTest(unittest.TestCase):
             {"n": 1, "total": 1.0, "abs_total": 0.0},
         )
         for kwargs in invalid_states:
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 CompensatedAccumulator(**kwargs)
         acc = CompensatedAccumulator(compensated=True)
         for value, weight in ((np.nan, 1.0), (1.0, np.inf), (1.0e308, 1.0e308)):
-            with self.subTest(value=value, weight=weight), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(value=repr(value), weight=repr(weight)), self.assertRaises((TypeError, ValueError)):
                 acc.add(value, weight)
         with self.assertRaisesRegex(ValueError, "compensated and uncompensated"):
             acc.combine(CompensatedAccumulator(compensated=False))
 
     def test_weighted_reduce_requires_equal_cardinality(self):
         for values, weights in (([1.0, 2.0], [1.0]), ([1.0], [1.0, 2.0])):
-            with self.subTest(values=values, weights=weights), self.assertRaisesRegex(ValueError, "equal cardinality"):
+            with (
+                self.subTest(values=repr(values), weights=repr(weights)),
+                self.assertRaisesRegex(ValueError, "equal cardinality"),
+            ):
                 kahan_reduce(values, weights)
 
     def test_gaussian_accumulator_compensated_bound_ordering(self):

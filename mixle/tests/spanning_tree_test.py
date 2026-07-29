@@ -185,7 +185,7 @@ class SpanningTreeTestCase(unittest.TestCase):
         acc.update(tree, 2.0, None)
         before = acc.value()
         for weight in (-1.0, np.nan):
-            with self.subTest(weight=weight), self.assertRaises(ValueError):
+            with self.subTest(weight=repr(weight)), self.assertRaises(ValueError):
                 acc.update(tree, weight, None)
             np.testing.assert_array_equal(acc.value()[1], before[1])
         encoded = SpanningTreeDistribution(_W).dist_to_encoder().seq_encode([tree])
@@ -241,7 +241,7 @@ class SpanningTreeTestCase(unittest.TestCase):
             {"tol": 0.0},
             {"tol": np.inf},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 SpanningTreeEstimator(3, **kwargs)
         estimator = SpanningTreeEstimator(3)
         with self.assertRaises(SpanningTreeFitError):

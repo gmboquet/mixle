@@ -286,7 +286,7 @@ class FamilyRegistrationContractTest(unittest.TestCase):
         from mixle.evolve.concept_discovery import register_family
 
         for bad in ("", "   ", None, 7):
-            with self.subTest(name=bad), self.assertRaises((ValueError, TypeError)):
+            with self.subTest(name=repr(bad)), self.assertRaises((ValueError, TypeError)):
                 register_family(bad, lambda: GaussianDistribution(0.0, 1.0))
 
     def test_a_non_callable_constructor_is_rejected(self):
@@ -356,7 +356,7 @@ class ConceptLibraryAdmissionContractTest(unittest.TestCase):
     def test_non_finite_admission_quality_is_rejected(self):
         library = ConceptLibrary(base_families=("gaussian",))
         for bad in (float("nan"), float("inf")):
-            with self.subTest(quality=bad), self.assertRaises(ValueError):
+            with self.subTest(quality=repr(bad)), self.assertRaises(ValueError):
                 library.admit("laplace", {}, task_signature="sig", task_index=0, quality=bad)
 
     def test_a_registered_family_still_admits_and_is_recommended(self):

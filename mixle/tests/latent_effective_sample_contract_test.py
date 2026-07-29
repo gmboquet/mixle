@@ -42,7 +42,7 @@ class _RecordingEstimator:
 class LatentEffectiveSampleContractTest(unittest.TestCase):
     def test_observation_weights_are_exact_finite_nonnegative_and_owned(self):
         for value in (True, -1.0, np.nan, np.inf):
-            with self.subTest(value=value):
+            with self.subTest(value=repr(value)):
                 with self.assertRaises((TypeError, ValueError)):
                     validated_observation_weight(value)
 

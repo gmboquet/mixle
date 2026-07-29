@@ -126,7 +126,7 @@ class RenewalProcessTest(unittest.TestCase):
             [0.0],
         )
         for events in malformed:
-            with self.subTest(events=events), self.assertRaises(ValueError):
+            with self.subTest(events=repr(events)), self.assertRaises(ValueError):
                 accumulator.update(events, 1.0, None)
             after = accumulator.value()
             np.testing.assert_array_equal(
@@ -165,7 +165,7 @@ class RenewalProcessTest(unittest.TestCase):
                 _FixedGapExponential(gap),
                 window=1.0,
             )
-            with self.subTest(gap=gap), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(gap=repr(gap)), self.assertRaises((TypeError, ValueError)):
                 dist.sampler(seed=1).sample()
 
         dist = RenewalProcessDistribution(

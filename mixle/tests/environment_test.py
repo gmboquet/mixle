@@ -179,7 +179,7 @@ class BudgetContractTest(unittest.TestCase):
 
     def test_invalid_quote_is_rejected_before_mutation(self):
         for quote in (-1.0, float("nan"), float("inf")):
-            with self.subTest(quote=quote):
+            with self.subTest(quote=repr(quote)):
                 env = _CostEnvironment(quote=quote)
                 with self.assertRaisesRegex(ValueError, "quoted action cost"):
                     interact(env, _NoopBelief(), policy=_first_policy, budget=2.0)
@@ -207,10 +207,10 @@ class BudgetContractTest(unittest.TestCase):
     def test_budget_and_step_limit_are_validated(self):
         env = _CostEnvironment()
         for budget in (-1.0, float("nan"), float("inf")):
-            with self.subTest(budget=budget), self.assertRaisesRegex(ValueError, "budget"):
+            with self.subTest(budget=repr(budget)), self.assertRaisesRegex(ValueError, "budget"):
                 interact(env, _NoopBelief(), policy=_first_policy, budget=budget)
         for max_steps in (0, -1, 1.5, True):
-            with self.subTest(max_steps=max_steps), self.assertRaisesRegex(ValueError, "max_steps"):
+            with self.subTest(max_steps=repr(max_steps)), self.assertRaisesRegex(ValueError, "max_steps"):
                 interact(env, _NoopBelief(), policy=_first_policy, budget=1.0, max_steps=max_steps)
 
 
@@ -220,14 +220,14 @@ class StreamingBeliefDomainTest(unittest.TestCase):
     def test_credible_level_must_be_in_the_open_unit_interval(self):
         belief = GaussianStreamingBelief()
         for level in (-0.9, 0.0, 1.0, 1.1, float("nan"), float("inf")):
-            with self.subTest(level=level), self.assertRaisesRegex(ValueError, "credible level"):
+            with self.subTest(level=repr(level)), self.assertRaisesRegex(ValueError, "credible level"):
                 belief.credible_interval(0, level=level)
 
     def test_valid_levels_return_finite_ordered_intervals(self):
         belief = GaussianStreamingBelief()
         for level in (0.5, 0.8, 0.9, 0.95, 0.99, 0.123):
             lo, hi = belief.credible_interval(0, level=level)
-            with self.subTest(level=level):
+            with self.subTest(level=repr(level)):
                 self.assertTrue(np.isfinite(lo) and np.isfinite(hi))
                 self.assertLessEqual(lo, hi)
 
@@ -245,7 +245,7 @@ class StreamingBeliefDomainTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "min_covar"):
             GaussianStreamingBelief(min_covar=-0.5)
         for bad in (float("nan"), float("inf")):
-            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "finite"):
+            with self.subTest(bad=repr(bad)), self.assertRaisesRegex(ValueError, "finite"):
                 GaussianStreamingBelief(prior_mu=bad)
 
     def test_a_rejected_configuration_never_folds_in_evidence(self):

@@ -65,7 +65,7 @@ class HiddenAssociationEngineTestCase(unittest.TestCase):
         host.seq_update(enc, self.weights, self.dist)
         hv = host.value()
         for name, engine in self.engines:
-            with self.subTest(engine=name):
+            with self.subTest(engine=repr(name)):
                 kernel = self.dist.kernel(engine=engine, estimator=self.est)
                 self.assertEqual(type(kernel).__name__, "HiddenAssociationKernel")
                 value = kernel.accumulate(enc, self.weights)

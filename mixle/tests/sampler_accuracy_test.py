@@ -74,7 +74,7 @@ class SamplerAccuracyTestCase(unittest.TestCase):
         ]
 
         for name, dist, expected_mean, expected_var in scalar_cases:
-            with self.subTest(name=name):
+            with self.subTest(name=repr(name)):
                 samples = dist.sampler(seed=911).sample(size=n)
                 self.assert_mean_var_close(name, samples, expected_mean, expected_var)
 

@@ -248,7 +248,7 @@ class PhysicalPayloadAndContractTest(unittest.TestCase):
         for dtype in (np.float16, np.float32, np.float64, np.int64):
             tensor = np.arange(32, dtype=dtype)
             qt = quantize_tensor(tensor, method="int4", bits=8)
-            with self.subTest(dtype=dtype):
+            with self.subTest(dtype=repr(dtype)):
                 self.assertEqual(qt.source_dtype, tensor.dtype.str)
                 self.assertEqual(qt.receipt.source_dtype, tensor.dtype.str)
                 self.assertEqual(qt.receipt.original_bytes, tensor.nbytes)
@@ -257,7 +257,7 @@ class PhysicalPayloadAndContractTest(unittest.TestCase):
     def test_invalid_values_and_rate_controls_fail_closed(self):
         tensor = np.arange(32, dtype=np.float32)
         for value in ([0.0, np.nan], [0.0, np.inf]):
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 quantize_tensor(value)
         for controls in (
             {"bits": 0},
@@ -272,7 +272,7 @@ class PhysicalPayloadAndContractTest(unittest.TestCase):
             {"seed": True},
             {"seed": -1},
         ):
-            with self.subTest(controls=controls), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(controls=repr(controls)), self.assertRaises((TypeError, ValueError)):
                 quantize_tensor(tensor, **controls)
 
 

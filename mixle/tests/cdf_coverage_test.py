@@ -29,13 +29,13 @@ class CDFCoverageTest(unittest.TestCase):
             samples = np.asarray(dist.sampler(seed=4).sample(200_000), dtype=np.float64).ravel()
             for q in (0.1, 0.3, 0.5, 0.7, 0.9):
                 x = float(np.quantile(samples, q))
-                with self.subTest(dist=type(dist).__name__, q=q):
+                with self.subTest(dist=type(dist).__name__, q=repr(q)):
                     self.assertAlmostEqual(dist.cdf(x), q, delta=0.01)  # analytic cdf ~ empirical quantile level
 
     def test_quantile_inverts_cdf(self):
         for dist in CASES:
             for q in (0.05, 0.25, 0.5, 0.75, 0.95):
-                with self.subTest(dist=type(dist).__name__, q=q):
+                with self.subTest(dist=type(dist).__name__, q=repr(q)):
                     self.assertAlmostEqual(dist.cdf(dist.quantile(q)), q, places=6)
 
     def test_has_cdf_capability(self):

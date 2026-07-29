@@ -172,13 +172,13 @@ class ValidationTest(unittest.TestCase):
     def test_fractional_counts_rejected(self):
         s = _lineage_shard()
         for name in ("max_hops", "seeds", "branch", "max_items"):
-            with self.subTest(param=name), self.assertRaises(TypeError):
+            with self.subTest(param=repr(name)), self.assertRaises(TypeError):
                 multihop(s, "checkout price is wrong", **{name: 1.5})
 
     def test_boolean_counts_rejected(self):
         s = _lineage_shard()
         for name in ("max_hops", "seeds", "branch", "max_items"):
-            with self.subTest(param=name), self.assertRaises(TypeError):
+            with self.subTest(param=repr(name)), self.assertRaises(TypeError):
                 multihop(s, "checkout price is wrong", **{name: True})
 
     def test_valid_traversal_still_works(self):

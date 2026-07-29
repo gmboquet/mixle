@@ -293,13 +293,13 @@ class DisagreementAndEntropySanityTest(unittest.TestCase):
             [[-0.1, 1.1]],
             [[1.0], [1.0]],
         ):
-            with self.subTest(matrix=matrix), self.assertRaises(ValueError):
+            with self.subTest(matrix=repr(matrix)), self.assertRaises(ValueError):
                 acquire(["x"], Invalid(matrix), k=1, strategy="entropy")
 
         invalid_ensemble = Ensemble([StumpModel(), StumpModel()])
         for weights in ([1.0], [1.0, 0.0], [1.0, np.nan]):
             invalid_ensemble.weights = np.asarray(weights)
-            with self.subTest(weights=weights), self.assertRaises(ValueError):
+            with self.subTest(weights=repr(weights)), self.assertRaises(ValueError):
                 acquire(["x"], invalid_ensemble, k=1, strategy="eig")
 
         with self.assertRaisesRegex(ValueError, "non-finite"):
@@ -309,7 +309,7 @@ class DisagreementAndEntropySanityTest(unittest.TestCase):
         self.assertEqual(acquire([], self.ensemble, k=3, strategy="entropy"), [])
         self.assertEqual(acquire(self.pool, self.ensemble, k=0, strategy="entropy"), [])
         for invalid in (-1, 1.5, True):
-            with self.subTest(k=invalid), self.assertRaises(ValueError):
+            with self.subTest(k=repr(invalid)), self.assertRaises(ValueError):
                 acquire(self.pool, self.ensemble, k=invalid, strategy="entropy")
 
 

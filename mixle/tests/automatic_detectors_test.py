@@ -24,7 +24,7 @@ class DetectorRegistryTest(unittest.TestCase):
             "generalized_pareto": 3,
         }
         for name, count in expected_parameter_counts.items():
-            with self.subTest(name=name):
+            with self.subTest(name=repr(name)):
                 self.assertEqual(get_detector(name).n_params, count)
 
     def test_detector_constructs_and_register_returns_it(self):

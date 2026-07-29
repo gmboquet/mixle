@@ -198,17 +198,17 @@ class AdviControlValidationTest(unittest.TestCase):
     def test_non_positive_or_fractional_counts_are_rejected(self):
         for field in ("samples", "mc", "steps"):
             for bad, exc in ((0, ValueError), (-1, ValueError), (True, TypeError), (2.5, TypeError)):
-                with self.subTest(field=field, bad=bad), self.assertRaises(exc):
+                with self.subTest(field=repr(field), bad=repr(bad)), self.assertRaises(exc):
                     self._advi(**{field: bad})
 
     def test_learning_rate_must_be_finite_and_positive(self):
         for bad in (0.0, -0.1, float("nan"), float("inf")):
-            with self.subTest(lr=bad), self.assertRaisesRegex(ValueError, "lr must be"):
+            with self.subTest(lr=repr(bad)), self.assertRaisesRegex(ValueError, "lr must be"):
                 self._advi(lr=bad)
 
     def test_alpha_domain_is_declared_and_enforced(self):
         for bad in (float("nan"), float("inf"), -0.5):
-            with self.subTest(alpha=bad), self.assertRaisesRegex(ValueError, "alpha must be"):
+            with self.subTest(alpha=repr(bad)), self.assertRaisesRegex(ValueError, "alpha must be"):
                 self._advi(alpha=bad)
         self.assertIsNotNone(self._advi(alpha=0.0))  # IWAE bound stays supported
 
@@ -223,7 +223,7 @@ class AdviControlValidationTest(unittest.TestCase):
             (np.zeros(0), np.zeros(0)),  # nothing to infer
         ]
         for u0, s0 in bad_inits:
-            with self.subTest(u0=u0.shape, s0=s0.shape), self.assertRaises(ValueError):
+            with self.subTest(u0=repr(u0.shape), s0=repr(s0.shape)), self.assertRaises(ValueError):
                 self._advi(u0=u0, s0=s0)
 
     def test_a_valid_run_still_returns_finite_fitted_parameters(self):

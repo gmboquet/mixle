@@ -159,7 +159,7 @@ class HealthInputValidationTest(unittest.TestCase):
             {"n_params": 10, "n_layer": 1, "n_head": 1, "d_model": 0, "seq_len": 8},
             {"n_params": 10, "n_layer": 1, "n_head": 1, "d_model": 4, "seq_len": 0},
         ):
-            with self.subTest(values=values), self.assertRaises(ValueError):
+            with self.subTest(values=repr(values)), self.assertRaises(ValueError):
                 ModelFlopConfig(**values)
         with self.assertRaises(ValueError):
             RollingBaseline(window=3, min_periods=4)

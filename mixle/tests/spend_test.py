@@ -36,13 +36,13 @@ class SpendLedgerInvariantTest(unittest.TestCase):
 
     def test_call_counts_must_be_exact_non_boolean_integers(self):
         for bad in (True, 1.5, "2", None):
-            with self.subTest(value=bad), self.assertRaises(ValueError):
+            with self.subTest(value=repr(bad)), self.assertRaises(ValueError):
                 Spend(frontier_calls=bad)
 
     def test_measured_costs_must_be_finite_and_nonnegative(self):
         for field in ("wall_ms", "dollars"):
             for bad in (float("nan"), float("inf"), -1.0):
-                with self.subTest(field=field, value=bad), self.assertRaises(ValueError):
+                with self.subTest(field=repr(field), value=repr(bad)), self.assertRaises(ValueError):
                     Spend(**{field: bad})
 
     def test_invariants_are_rechecked_after_addition_and_round_trip(self):

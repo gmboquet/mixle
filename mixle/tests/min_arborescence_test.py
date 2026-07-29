@@ -43,7 +43,7 @@ class MinArborescenceTest(unittest.TestCase):
             np.fill_diagonal(w, np.inf)
             res = min_arborescence(w, 0)
             bf = _brute(w, 0)
-            with self.subTest(seed=seed):
+            with self.subTest(seed=repr(seed)):
                 if bf is None:
                     self.assertIsNone(res)
                 else:

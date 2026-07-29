@@ -104,7 +104,7 @@ class GatedMixtureTest(unittest.TestCase):
             (np.asarray([[np.nan], [0.0]]), np.zeros(2)),
         ]
         for invalid_weight, invalid_bias in invalid_parameters:
-            with self.subTest(weight=invalid_weight, bias=invalid_bias):
+            with self.subTest(weight=repr(invalid_weight), bias=repr(invalid_bias)):
                 with self.assertRaises(ValueError):
                     SoftmaxGate(invalid_weight, invalid_bias)
 
@@ -117,7 +117,7 @@ class GatedMixtureTest(unittest.TestCase):
             {"lr": np.inf},
             {"tol": -1.0},
         ):
-            with self.subTest(kwargs=kwargs):
+            with self.subTest(kwargs=repr(kwargs)):
                 with self.assertRaises((TypeError, ValueError)):
                     gate.fit(z, r, **kwargs)
 
@@ -129,7 +129,7 @@ class GatedMixtureTest(unittest.TestCase):
             {"gate_tol": -1.0},
             {"max_buffer_rows": 0},
         ):
-            with self.subTest(estimator_kwargs=kwargs):
+            with self.subTest(estimator_kwargs=repr(kwargs)):
                 with self.assertRaises((TypeError, ValueError)):
                     GatedMixtureEstimator(
                         [st.GaussianEstimator(), st.GaussianEstimator()],
@@ -155,7 +155,7 @@ class GatedMixtureTest(unittest.TestCase):
             [([1.0, 2.0], 0.0)],
             [([1.0], 0.0), ([1.0, 2.0], 1.0)],
         ):
-            with self.subTest(data=data):
+            with self.subTest(data=repr(data)):
                 with self.assertRaises((TypeError, ValueError)):
                     encoder.seq_encode(data)
 

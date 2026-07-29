@@ -427,7 +427,7 @@ class CheckDatasetTest(unittest.TestCase):
         # just the exception type, since islice's own opaque error is also (incidentally) a ValueError
         # and a message-blind assertRaises(ValueError) would not distinguish the fix from the old bug.
         for sample in (0, -5, 2.5):
-            with self.subTest(sample=sample):
+            with self.subTest(sample=repr(sample)):
                 with self.assertRaisesRegex(ValueError, "sample"):
                     check_dataset(GaussianDistribution(0.0, 1.0), [1.0, 2.0, 3.0], sample=sample)
 

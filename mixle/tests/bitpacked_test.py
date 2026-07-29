@@ -50,7 +50,7 @@ class AlphabetAndDimensionValidationTest(unittest.TestCase):
     def test_out_of_alphabet_values_rejected(self):
         # The audit's own examples: none of these belong to {-1,0,+1}.
         for bad in (2, -9, 0.2):
-            with self.subTest(bad=bad):
+            with self.subTest(bad=repr(bad)):
                 with self.assertRaises(ValueError):
                     pack_pm1(np.array([bad]))
 
@@ -67,7 +67,7 @@ class AlphabetAndDimensionValidationTest(unittest.TestCase):
         from mixle.engines.bitpacked import pack_ternary
 
         for bad in (2, -9, 0.2):
-            with self.subTest(bad=bad):
+            with self.subTest(bad=repr(bad)):
                 with self.assertRaises(ValueError):
                     pack_ternary(np.array([bad]))
 

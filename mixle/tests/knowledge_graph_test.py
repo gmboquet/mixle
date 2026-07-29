@@ -92,7 +92,7 @@ class KnowledgeGraphTestCase(unittest.TestCase):
             (0, 1, 1),
             (0, 0, 1, 2),
         ):
-            with self.subTest(triple=triple), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(triple=repr(triple)), self.assertRaises((TypeError, ValueError)):
                 model.log_density(triple)
 
     def test_accumulator_validation_and_warm_start(self):
@@ -151,7 +151,7 @@ class KnowledgeGraphTestCase(unittest.TestCase):
             {"pseudo_count": 1.0},
         )
         for controls in invalid:
-            with self.subTest(controls=controls), self.assertRaises((TypeError, ValueError, NotImplementedError)):
+            with self.subTest(controls=repr(controls)), self.assertRaises((TypeError, ValueError, NotImplementedError)):
                 KnowledgeGraphEstimator(3, 1, dim=2, **controls)
 
 

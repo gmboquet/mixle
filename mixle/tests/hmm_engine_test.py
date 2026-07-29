@@ -63,7 +63,7 @@ class HmmEngineForwardBackwardTestCase(unittest.TestCase):
         ref = np.asarray(self.dist.seq_log_density(self.dist.dist_to_encoder().seq_encode(self.data)))
         len_ll = np.asarray([self.dist.len_dist.log_density(len(x)) for x in self.data])
         for name, engine in self.engines:
-            with self.subTest(engine=name):
+            with self.subTest(engine=repr(name)):
                 ll, _, _, _ = hmm_engine_forward_backward(engine, padded, log_w, log_a, mask)
                 ll = np.asarray(engine.to_numpy(ll))
                 self.assertTrue(
@@ -83,7 +83,7 @@ class HmmEngineForwardBackwardTestCase(unittest.TestCase):
         log_w = np.log(self.dist.w)
         log_a = np.log(self.dist.transitions)
         for name, engine in self.engines:
-            with self.subTest(engine=name):
+            with self.subTest(engine=repr(name)):
                 _, gamma, xi_sum, pi = hmm_engine_forward_backward(engine, padded, log_w, log_a, mask, weights=weights)
                 gamma = np.asarray(engine.to_numpy(gamma))
                 xi_sum = np.asarray(engine.to_numpy(xi_sum))
@@ -113,7 +113,7 @@ class HmmEngineForwardBackwardInitTestCase(unittest.TestCase):
         log_w_seq = np.log(rng.dirichlet(np.ones(n_states), size=n_seq))
         engines = [NUMPY_ENGINE] + ([_TORCH] if _TORCH is not None else [])
         for engine in engines:
-            with self.subTest(engine=engine.name):
+            with self.subTest(engine=repr(engine.name)):
                 ll, _, _, _ = hmm_engine_forward_backward(engine, log_emit, log_w_seq, log_a, mask)
                 ll = np.asarray(engine.to_numpy(ll))
                 # each sequence's per-row init result equals running it alone with that shared init
@@ -170,7 +170,7 @@ class HmmEngineEStepTestCase(unittest.TestCase):
             host.seq_update(enc, self.weights, dist)
             host_value = host.value()
             for name, engine in self.engines:
-                with self.subTest(encoding=("numba" if dist.use_numba else "blocked"), engine=name):
+                with self.subTest(encoding=repr("numba" if dist.use_numba else "blocked"), engine=repr(name)):
                     acc = est.accumulator_factory().make()
                     acc.seq_update_engine(enc, self.weights, dist, engine)
                     self._assert_value_parity(host_value, acc.value(), name)
@@ -183,7 +183,7 @@ class HmmEngineEStepTestCase(unittest.TestCase):
         host.seq_update(enc, self.weights, dist)
         host_value = host.value()
         for name, engine in self.engines:
-            with self.subTest(engine=name):
+            with self.subTest(engine=repr(name)):
                 kernel = dist.kernel(engine=engine, estimator=est)
                 self.assertEqual(type(kernel).__name__, "HiddenMarkovModelKernel")
                 self._assert_value_parity(host_value, kernel.accumulate(enc, self.weights), name)

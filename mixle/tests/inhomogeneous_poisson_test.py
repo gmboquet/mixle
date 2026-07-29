@@ -78,7 +78,7 @@ class InhomogeneousPoissonProcessTest(unittest.TestCase):
         accumulator = dist.estimator().accumulator_factory().make()
         before = accumulator.value()
         for events in ([-1.0, 0.5], [0.5, 3.0], [0.5, np.nan]):
-            with self.subTest(events=events):
+            with self.subTest(events=repr(events)):
                 self.assertEqual(dist.log_density(events), -np.inf)
                 with self.assertRaises(ValueError):
                     dist.dist_to_encoder().seq_encode([events])
@@ -96,7 +96,7 @@ class InhomogeneousPoissonProcessTest(unittest.TestCase):
             [[1.0]],
         )
         for counts in malformed_counts:
-            with self.subTest(counts=counts), self.assertRaises(ValueError):
+            with self.subTest(counts=repr(counts)), self.assertRaises(ValueError):
                 dist.seq_log_density(counts)
 
     def test_statistics_and_weights_fail_closed(self):
@@ -107,7 +107,7 @@ class InhomogeneousPoissonProcessTest(unittest.TestCase):
         accumulator = estimator.accumulator_factory().make()
         encoded = np.array([[1.0, 0.0]])
         for weights in ([], [-1.0], [np.nan]):
-            with self.subTest(weights=weights), self.assertRaises(ValueError):
+            with self.subTest(weights=repr(weights)), self.assertRaises(ValueError):
                 accumulator.seq_update(encoded, weights, None)
             np.testing.assert_array_equal(accumulator.bin_counts, [0.0, 0.0])
         malformed = (
@@ -117,7 +117,7 @@ class InhomogeneousPoissonProcessTest(unittest.TestCase):
             (np.array([0.0, 0.0]), np.nan),
         )
         for statistic in malformed:
-            with self.subTest(statistic=statistic), self.assertRaises(ValueError):
+            with self.subTest(statistic=repr(statistic)), self.assertRaises(ValueError):
                 estimator.estimate(None, statistic)
 
     def test_gamma_prior_and_pseudo_count_are_applied_per_bin(self):

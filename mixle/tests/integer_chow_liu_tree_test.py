@@ -53,7 +53,7 @@ class IntegerChowLiuTreeTestCase(unittest.TestCase):
             [0, 0, 0],
         )
         for value in invalid:
-            with self.subTest(value=value):
+            with self.subTest(value=repr(value)):
                 with self.assertRaises((TypeError, ValueError)):
                     dist.log_density(value)
                 with self.assertRaises((TypeError, ValueError)):
@@ -128,7 +128,7 @@ class IntegerChowLiuTreeTestCase(unittest.TestCase):
             ([[2, 0]], [1.0]),
             ([[0]], [1.0]),
         ):
-            with self.subTest(rows=rows, weights=weights):
+            with self.subTest(rows=repr(rows), weights=repr(weights)):
                 accumulator = estimator.accumulator_factory().make()
                 before = accumulator.value()
                 with self.assertRaises((TypeError, ValueError)):
@@ -171,7 +171,7 @@ class IntegerChowLiuTreeTestCase(unittest.TestCase):
             {"pseudo_count": -1.0},
             {"pseudo_count": np.nan},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 IntegerChowLiuTreeEstimator(**kwargs)
 
         estimator = IntegerChowLiuTreeEstimator(

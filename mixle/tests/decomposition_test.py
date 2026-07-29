@@ -94,7 +94,7 @@ class ContractTest(unittest.TestCase):
             },
         )
         for kwargs in invalid:
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 Decomposition(**kwargs)
 
     def test_hook_signature_and_body_failures_are_not_atomic_fallbacks(self):

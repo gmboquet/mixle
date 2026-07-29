@@ -156,7 +156,7 @@ class RandomForestLeafTestCase(unittest.TestCase):
             {"min_sigma": 0.0},
         ]
         for controls in invalid_estimators:
-            with self.subTest(controls=controls), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(controls=repr(controls)), self.assertRaises((TypeError, ValueError)):
                 RandomForestEstimator(task="regression", **controls)
         forest = NativeRandomForest(task="regression", n_estimators=2, random_state=0)
         with self.assertRaisesRegex(RuntimeError, "fitted"):
@@ -169,7 +169,7 @@ class RandomForestLeafTestCase(unittest.TestCase):
             (X, y, np.array([1.0, np.inf, 1.0, 1.0])),
             (X, y, np.zeros(4)),
         ]:
-            with self.subTest(X=bad_X, y=bad_y, w=bad_w), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(X=repr(bad_X), y=repr(bad_y), w=repr(bad_w)), self.assertRaises((TypeError, ValueError)):
                 forest.fit(bad_X, bad_y, bad_w)
 
     def test_conditional_sampler(self):

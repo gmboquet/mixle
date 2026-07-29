@@ -120,7 +120,7 @@ class FieldInferenceContractTest(unittest.TestCase):
             param_specs=[("x", "real", 0.0)],
         )
         for option in ({"vi_steps": 0}, {"vi_samples": 0}, {"vi_lr": 0.0}):
-            with self.subTest(option=option):
+            with self.subTest(option=repr(option)):
                 with self.assertRaises(ValueError):
                     fit_field(None, [proxy], how="vi", **option)
 

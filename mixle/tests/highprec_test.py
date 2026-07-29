@@ -120,7 +120,7 @@ class ArbitraryPrecisionTest(unittest.TestCase):
         # float64 only represents integers exactly up to 2**53; both of these lose their last digit(s)
         # if routed through float() first (2**53+1 rounds down to exactly 2**53).
         for big in (2**53 + 1, 10**60 + 1):
-            with self.subTest(big=big):
+            with self.subTest(big=repr(big)):
                 got = self._scalar(hp_array(big, 256))
                 self.assertEqual(int(got), big)  # exact -- integers have no fractional precision to lose
 

@@ -31,7 +31,7 @@ class KernelNameTest(unittest.TestCase):
 
         for name in ("lengthscale", "amplitude", "noise", "jitter"):
             for value in (0.0, -1.0, np.inf, np.nan):
-                with self.subTest(name=name, value=value), self.assertRaises(ValueError):
+                with self.subTest(name=repr(name), value=repr(value)), self.assertRaises(ValueError):
                     GaussianProcessRegressor(**{name: value})
         with self.assertRaises(ValueError):
             GaussianProcessRegressor(mean=np.nan)
@@ -97,7 +97,7 @@ class KernelMathTest(unittest.TestCase):
             (np.ones((2, 1)), np.array([1.0, np.inf])),
             (np.ones((4, 1)), np.ones((2, 2))),
         ]:
-            with self.subTest(x=x, y=y), self.assertRaises(ValueError):
+            with self.subTest(x=repr(x), y=repr(y)), self.assertRaises(ValueError):
                 gp.log_marginal_likelihood(x, y)
         x = np.linspace(-1.0, 1.0, 8)
         y = np.sin(x)

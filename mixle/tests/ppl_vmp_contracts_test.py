@@ -24,12 +24,12 @@ class VMPGraphContractTest(unittest.TestCase):
             Graph().fit()
         mu = Normal(0.0, 1.0)
         for data in ([], [0.0, np.nan], [[0.0], [1.0]]):
-            with self.subTest(data=data):
+            with self.subTest(data=repr(data)):
                 with self.assertRaises(ValueError):
                     Graph().observe(Normal(mu, 1.0), data).fit()
         graph = Graph().observe(Normal(mu, 1.0), [0.0])
         for kwargs in ({"max_its": 0}, {"max_its": 1.5}, {"tol": 0.0}, {"tol": np.inf}):
-            with self.subTest(kwargs=kwargs):
+            with self.subTest(kwargs=repr(kwargs)):
                 with self.assertRaises(ValueError):
                     graph.fit(**kwargs)
 
@@ -64,7 +64,7 @@ class MixtureVMPContractTest(unittest.TestCase):
             ([0.0], 1, {"alpha0": -1.0}),
         ]
         for data, k, kwargs in invalid_calls:
-            with self.subTest(data=data, k=k, kwargs=kwargs):
+            with self.subTest(data=repr(data), k=repr(k), kwargs=repr(kwargs)):
                 with self.assertRaises(ValueError):
                     mixture_vmp(data, k, **kwargs)
         fit = mixture_vmp([0.0, 1.0], 1, max_its=1)

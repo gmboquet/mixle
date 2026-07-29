@@ -218,7 +218,7 @@ class TippettSubEpsilonTest(unittest.TestCase):
 
     def test_sub_epsilon_minimum_does_not_collapse_to_zero(self):
         for min_p_text in ("1e-17", "1e-20", "1e-100", "1e-300"):
-            with self.subTest(min_p=min_p_text):
+            with self.subTest(min_p=repr(min_p_text)):
                 min_p = float(min_p_text)
                 got = tippett_combine(np.array([min_p, 0.9]))["pvalue"]
                 self.assertGreater(got, 0.0, "a finite nonzero p-value cannot combine to exactly 0")
@@ -239,7 +239,7 @@ class TippettSubEpsilonTest(unittest.TestCase):
     def test_scales_with_the_number_of_tests(self):
         """For a tiny min_p the combined value is ~k * min_p, so k must actually enter the result."""
         for k in (2, 5, 20):
-            with self.subTest(k=k):
+            with self.subTest(k=repr(k)):
                 pvals = np.array([1e-30] + [0.9] * (k - 1))
                 got = tippett_combine(pvals)["pvalue"]
                 self.assertAlmostEqual(got / (k * 1e-30), 1.0, places=12)

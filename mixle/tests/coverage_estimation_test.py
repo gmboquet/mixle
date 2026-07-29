@@ -153,7 +153,7 @@ class AbundanceValidationTest(unittest.TestCase):
     def test_fractional_counts_rejected_by_every_abundance_estimator(self):
         bad = np.array([1.5, 2.5])
         for fn in (turing_coverage, good_turing, chao1, ace, hill_numbers, rarefaction_curve):
-            with self.subTest(fn=fn.__name__):
+            with self.subTest(fn=repr(fn.__name__)):
                 with self.assertRaises(ValueError):
                     fn(bad)
 
@@ -212,13 +212,13 @@ class GoodTuringSmallSupportTest(unittest.TestCase):
     def test_empty_sample_uses_the_common_typed_insufficient_evidence_contract(self):
         abundance_estimators = (turing_coverage, good_turing, chao1, ace, hill_numbers, rarefaction_curve)
         for estimator in abundance_estimators:
-            with self.subTest(estimator=estimator.__name__):
+            with self.subTest(estimator=repr(estimator.__name__)):
                 with self.assertRaises(CoverageInsufficientDataError):
                     estimator(np.array([]))
 
         empty_incidence = np.zeros((2, 3), dtype=int)
         for estimator in (chao2, ice):
-            with self.subTest(estimator=estimator.__name__):
+            with self.subTest(estimator=repr(estimator.__name__)):
                 with self.assertRaises(CoverageInsufficientDataError):
                     estimator(empty_incidence)
 
@@ -265,14 +265,14 @@ class IncidenceValidationTest(unittest.TestCase):
     def test_non_binary_matrix_rejected(self):
         bad = np.array([[0.2, -1.0, 3.0, float("nan")], [1.0, 0.0, 1.0, 0.0]])
         for fn in (chao2, ice):
-            with self.subTest(fn=fn.__name__):
+            with self.subTest(fn=repr(fn.__name__)):
                 with self.assertRaises(ValueError):
                     fn(bad)
 
     def test_matrix_with_no_sites_rejected(self):
         empty = np.empty((3, 0))
         for fn in (chao2, ice):
-            with self.subTest(fn=fn.__name__):
+            with self.subTest(fn=repr(fn.__name__)):
                 with self.assertRaises(ValueError):
                     fn(empty)
 
@@ -291,7 +291,7 @@ class IncidenceValidationTest(unittest.TestCase):
 
     def test_incidence_vector_is_not_silently_promoted_to_a_matrix(self):
         for fn in (chao2, ice):
-            with self.subTest(fn=fn.__name__):
+            with self.subTest(fn=repr(fn.__name__)):
                 with self.assertRaises(ValueError):
                     fn(np.array([1, 0, 1]))
 
@@ -299,7 +299,7 @@ class IncidenceValidationTest(unittest.TestCase):
 class CoverageControlValidationTest(unittest.TestCase):
     def test_confidence_levels_must_be_finite_scalar_probabilities(self):
         for bad in (True, 0.0, 1.0, -0.1, 1.1, float("nan"), float("inf"), np.array([0.95])):
-            with self.subTest(bad=bad):
+            with self.subTest(bad=repr(bad)):
                 with self.assertRaises((TypeError, ValueError)):
                     chao1([1, 2], ci_level=bad)
                 with self.assertRaises((TypeError, ValueError)):
@@ -307,7 +307,7 @@ class CoverageControlValidationTest(unittest.TestCase):
 
     def test_rarity_thresholds_must_be_positive_exact_integers(self):
         for bad in (True, 0, -1, 1.5, float("nan"), float("inf")):
-            with self.subTest(bad=bad):
+            with self.subTest(bad=repr(bad)):
                 with self.assertRaises((TypeError, ValueError)):
                     ace([1, 2], rare_threshold=bad)
                 with self.assertRaises((TypeError, ValueError)):
@@ -315,7 +315,7 @@ class CoverageControlValidationTest(unittest.TestCase):
 
     def test_hill_orders_must_be_a_finite_nonnegative_scalar_or_vector(self):
         for bad in (True, -1.0, float("nan"), float("inf"), [], [[0.0, 1.0]], "1"):
-            with self.subTest(bad=bad):
+            with self.subTest(bad=repr(bad)):
                 with self.assertRaises((TypeError, ValueError)):
                     hill_numbers([1, 2], bad)
 

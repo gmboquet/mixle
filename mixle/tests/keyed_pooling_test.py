@@ -243,7 +243,7 @@ class ArrayAliasingProtocolTest(unittest.TestCase):
         from mixle.stats.latent.semi_supervised_mixture import SemiSupervisedMixtureEstimatorAccumulator
 
         for cls in (MixtureAccumulator, HeterogeneousMixtureAccumulator, SemiSupervisedMixtureEstimatorAccumulator):
-            with self.subTest(cls=cls.__name__):
+            with self.subTest(cls=repr(cls.__name__)):
                 acc_a, acc_b = self._bare(cls), self._bare(cls)
                 for acc in (acc_a, acc_b):
                     acc.weight_key = "w"
@@ -289,7 +289,7 @@ class ArrayAliasingProtocolTest(unittest.TestCase):
         from mixle.stats.latent.tree_hidden_markov_model import TreeHiddenMarkovAccumulator
 
         for cls in (HiddenMarkovAccumulator, TreeHiddenMarkovAccumulator):
-            with self.subTest(cls=cls.__name__):
+            with self.subTest(cls=repr(cls.__name__)):
                 acc_a, acc_b = self._bare(cls), self._bare(cls)
                 for acc in (acc_a, acc_b):
                     acc.init_key = "i"

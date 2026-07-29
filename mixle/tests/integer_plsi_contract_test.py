@@ -72,7 +72,7 @@ class IntegerPLSIContractTestCase(unittest.TestCase):
             (valid[0], valid[1], [0.5]),
         )
         for state_word, doc_state, doc_vec in invalid:
-            with self.subTest(parameters=(state_word, doc_state, doc_vec)), self.assertRaises(ValueError):
+            with self.subTest(parameters=repr((state_word, doc_state, doc_vec))), self.assertRaises(ValueError):
                 IntegerProbabilisticLatentSemanticIndexingDistribution(state_word, doc_state, doc_vec)
 
     def test_observation_schema_rejects_lossy_ids_and_invalid_counts(self):
@@ -88,9 +88,9 @@ class IntegerPLSIContractTestCase(unittest.TestCase):
             (0, [(0, np.inf)]),
         )
         for value in invalid:
-            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(value=repr(value)), self.assertRaises((TypeError, ValueError)):
                 dist.log_density(value)
-            with self.subTest(encoded=value), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(encoded=repr(value)), self.assertRaises((TypeError, ValueError)):
                 dist.dist_to_encoder().seq_encode([value])
 
     def test_empty_documents_have_defined_scalar_and_vector_component_scores(self):
@@ -130,7 +130,7 @@ class IntegerPLSIContractTestCase(unittest.TestCase):
 
     def test_dimensions_and_estimator_statistics_have_exact_geometry(self):
         for invalid in (0, -1, 1.5, True, np.nan):
-            with self.subTest(dimension=invalid), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(dimension=repr(invalid)), self.assertRaises((TypeError, ValueError)):
                 IntegerProbabilisticLatentSemanticIndexingEstimator(invalid, 1, 1)
 
         estimator = IntegerProbabilisticLatentSemanticIndexingEstimator(2, 1, 1)
@@ -143,7 +143,7 @@ class IntegerPLSIContractTestCase(unittest.TestCase):
             (np.asarray([[np.nan, 0.0]]), good[1], good[2], None),
             (np.asarray([[-1.0, 0.0]]), good[1], good[2], None),
         ):
-            with self.subTest(statistics=invalid[:3]), self.assertRaises(ValueError):
+            with self.subTest(statistics=repr(invalid[:3])), self.assertRaises(ValueError):
                 estimator.estimate(None, invalid)
 
 

@@ -34,7 +34,7 @@ class FixedParameterValidationTest(unittest.TestCase):
             lambda: Categorical([0.6, 0.6]),
         )
         for constructor in invalid:
-            with self.subTest(constructor=constructor):
+            with self.subTest(constructor=repr(constructor)):
                 with self.assertRaises(ValueError):
                     constructor()
 
@@ -49,7 +49,7 @@ class FixedParameterValidationTest(unittest.TestCase):
 
     def test_binomial_trial_count_is_exact_fixed_and_nonnegative(self):
         for n in (free, -1, 2.0, 2.5, True):
-            with self.subTest(n=n):
+            with self.subTest(n=repr(n)):
                 with self.assertRaises(ValueError):
                     Binomial(n, 0.5)
         self.assertEqual(Binomial(np.int64(3), 0.5).dist.n, 3)
@@ -67,7 +67,7 @@ class StructuralValidationTest(unittest.TestCase):
             lambda: free(0),
         )
         for constructor in invalid:
-            with self.subTest(constructor=constructor):
+            with self.subTest(constructor=repr(constructor)):
                 with self.assertRaises(ValueError):
                     constructor()
 
@@ -100,7 +100,7 @@ class StructuralValidationTest(unittest.TestCase):
             lambda: Markov(component, states=2, initial=[1.0, -0.0, 0.0]),
             lambda: Markov([component, component], states=3),
         ):
-            with self.subTest(constructor=constructor):
+            with self.subTest(constructor=repr(constructor)):
                 with self.assertRaises(ValueError):
                     constructor()
 

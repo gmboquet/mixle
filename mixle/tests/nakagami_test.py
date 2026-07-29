@@ -15,7 +15,7 @@ class NakagamiTest(unittest.TestCase):
         for m, omega in [(2.5, 3.0), (1.0, 2.0), (0.5, 1.0), (4.0, 0.5)]:
             d, fr = N(m, omega), ss.nakagami(m, scale=np.sqrt(omega))
             xs = np.array([0.2, 0.8, 1.5, 3.0])
-            with self.subTest(m=m, omega=omega):
+            with self.subTest(m=repr(m), omega=repr(omega)):
                 self.assertTrue(np.allclose([d.log_density(x) for x in xs], fr.logpdf(xs)))
                 self.assertTrue(np.allclose(d.seq_log_density(xs), fr.logpdf(xs)))
                 self.assertTrue(np.allclose([d.cdf(x) for x in xs], fr.cdf(xs)))

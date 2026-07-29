@@ -505,7 +505,7 @@ class ParallelValidationTestCase(unittest.TestCase):
         with self.assertRaises(TypeError):
             resolve_workers(True)  # bool is never a meaningful worker count
         for bad in (0, -2, 1.5):
-            with self.subTest(num_workers=bad):
+            with self.subTest(num_workers=repr(bad)):
                 with self.assertRaises(ValueError):
                     distributed_unrank(self.seq, budget_bits=32, count=10, num_workers=bad, backend="local")
 
@@ -525,7 +525,7 @@ class ParallelValidationTestCase(unittest.TestCase):
         # Before: anything other than the literal string "spark" fell through to local execution --
         # a typo'd/near-miss backend silently ran (potentially cluster-sized) work on this machine.
         for spelling in ("Spark", "spark ", " spark", "pyspark", "SPARK", "Local", "LOCAL", "dask", ""):
-            with self.subTest(backend=spelling):
+            with self.subTest(backend=repr(spelling)):
                 with self.assertRaises(ValueError):
                     distributed_unrank(self.seq, budget_bits=32, count=10, num_workers=2, backend=spelling)
 
@@ -631,7 +631,7 @@ class ParallelStartMethodTestCase(unittest.TestCase):
         self.assertEqual(quantization_parallel._mp_context("fork").get_start_method(), "fork")
         self.assertEqual(quantization_parallel._mp_context("forkserver").get_start_method(), "forkserver")
         for bad in ("bogus", "Spawn", "SPAWN", "", "thread"):
-            with self.subTest(start_method=bad):
+            with self.subTest(start_method=repr(bad)):
                 with self.assertRaises(ValueError):
                     quantization_parallel._resolve_start_method(bad)
 

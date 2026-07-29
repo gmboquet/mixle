@@ -71,7 +71,7 @@ class NormalizerTest(unittest.TestCase):
     def test_probability_and_sampler_exactness_are_explicit(self):
         for metric in METRICS:
             dist = GeneralizedMallowsDistribution([0, 1, 2], 0.8, metric, n_mc=7, seed=3)
-            with self.subTest(metric=metric):
+            with self.subTest(metric=repr(metric)):
                 self.assertTrue(dist.computation_diagnostics.normalizer_exact)
                 self.assertTrue(dist.computation_diagnostics.sampler_exact)
                 self.assertEqual(dist.computation_diagnostics.legacy_n_mc_ignored, 7)
@@ -168,7 +168,7 @@ class ValidationTest(unittest.TestCase):
         for metric in METRICS:
             dist = GeneralizedMallowsDistribution([0, 1, 2], 1.0, metric)
             draws = dist.sampler(seed=2).sample(20)
-            with self.subTest(metric=metric):
+            with self.subTest(metric=repr(metric)):
                 self.assertTrue(all(sorted(draw) == [0, 1, 2] for draw in draws))
 
     def test_accumulator_never_silently_drops_or_aliases_evidence(self):
@@ -200,7 +200,7 @@ class ValidationTest(unittest.TestCase):
             {"dim": 3, "allow_approximate_center": "false"},
         )
         for kwargs in invalid:
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 GeneralizedMallowsEstimator(**kwargs)
         with self.assertRaises(ValueError):
             base.sampler().sample(-1)

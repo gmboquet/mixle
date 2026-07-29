@@ -82,15 +82,15 @@ class PartitionContractTest(unittest.TestCase):
 class LogicalTypeContractTest(unittest.TestCase):
     def test_invalid_scalar_and_vector_observations_fail_closed(self):
         for value in (True, np.nan, np.inf):
-            with self.subTest(real=value), self.assertRaises(ValueError):
+            with self.subTest(real=repr(value)), self.assertRaises(ValueError):
                 Real().coerce(value)
         for value in (None, 2, -1, np.nan):
-            with self.subTest(boolean=value), self.assertRaises(ValueError):
+            with self.subTest(boolean=repr(value)), self.assertRaises(ValueError):
                 Boolean().coerce(value)
         with self.assertRaises(ValueError):
             Timestamp().coerce(np.datetime64("NaT"))
         for value in ([[1.0]], [], [1.0, np.nan]):
-            with self.subTest(vector=value), self.assertRaises(ValueError):
+            with self.subTest(vector=repr(value)), self.assertRaises(ValueError):
                 Vector().coerce(value)
 
     def test_schema_rejects_empty_and_duplicate_names(self):
@@ -103,7 +103,7 @@ class LogicalTypeContractTest(unittest.TestCase):
 class HashAndValidationContractTest(unittest.TestCase):
     def test_hash_limit_is_exact_and_does_not_consume_an_unhashed_record(self):
         for bad in (-1, 1.5, True, np.nan):
-            with self.subTest(max_records=bad), self.assertRaises(ValueError):
+            with self.subTest(max_records=repr(bad)), self.assertRaises(ValueError):
                 dataset_hash(iter([1, 2, 3]), max_records=bad)
         stream = iter([1, 2, 3])
         dataset_hash(stream, max_records=1)

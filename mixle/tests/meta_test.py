@@ -84,10 +84,10 @@ class ImprovementEconomicsTest(unittest.TestCase):
         # under budget=0 an option costing -5 used to RUN and report spent=-5, and a NaN cost ran too
         # because `spent + cost > budget` is false for NaN -- the hard ceiling failed open.
         for bad in (-5.0, float("nan"), float("inf")):
-            with self.subTest(cost=bad), self.assertRaises(ValueError):
+            with self.subTest(cost=repr(bad)), self.assertRaises(ValueError):
                 self._option(cost=bad)
         for bad in (float("nan"), float("inf")):
-            with self.subTest(regret=bad), self.assertRaises(ValueError):
+            with self.subTest(regret=repr(bad)), self.assertRaises(ValueError):
                 self._option(estimated_regret=bad)
 
     def test_budget_and_option_identities_are_validated(self):

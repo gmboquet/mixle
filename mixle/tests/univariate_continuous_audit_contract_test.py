@@ -41,12 +41,12 @@ class ContinuousParameterContractTest(unittest.TestCase):
         # raw label crashed the report channel under the suite's own default -n invocation.
         for index, constructor in enumerate(constructors):
             for invalid in (np.nan, np.inf, -np.inf):
-                with self.subTest(constructor=index, invalid=invalid), self.assertRaises(ValueError):
+                with self.subTest(constructor=repr(index), invalid=repr(invalid)), self.assertRaises(ValueError):
                     constructor(invalid)
 
     def test_student_moment_estimator_requires_existing_mean_and_variance(self):
         for df in (0.5, 1.0, 2.0, np.inf):
-            with self.subTest(df=df), self.assertRaises(ValueError):
+            with self.subTest(df=repr(df)), self.assertRaises(ValueError):
                 StudentTEstimator(df=df)
         StudentTEstimator(df=2.0001)
 
@@ -58,26 +58,26 @@ class ContinuousParameterContractTest(unittest.TestCase):
 
     def test_beta_estimator_rejects_invalid_controls_and_statistics(self):
         for pseudo_count in (-1.0, np.nan, np.inf, True):
-            with self.subTest(pseudo_count=pseudo_count), self.assertRaises(ValueError):
+            with self.subTest(pseudo_count=repr(pseudo_count)), self.assertRaises(ValueError):
                 BetaEstimator(pseudo_count=pseudo_count)
         for prior in ((0.0,), (0.0, np.nan)):
-            with self.subTest(prior=prior), self.assertRaises(ValueError):
+            with self.subTest(prior=repr(prior)), self.assertRaises(ValueError):
                 BetaEstimator(pseudo_count=1.0, suff_stat=prior)
         for statistics in (
             (-1.0, 0.0, 0.0, 0.0, 0.0),
             (1.0, np.nan, 0.0, 0.0, 0.0),
         ):
-            with self.subTest(statistics=statistics), self.assertRaises(ValueError):
+            with self.subTest(statistics=repr(statistics)), self.assertRaises(ValueError):
                 BetaEstimator().estimate(None, statistics)
 
     def test_gev_estimator_rejects_silently_ignored_or_incompatible_priors(self):
         for pseudo_count in (-1.0, np.nan, np.inf, True):
-            with self.subTest(pseudo_count=pseudo_count), self.assertRaises(ValueError):
+            with self.subTest(pseudo_count=repr(pseudo_count)), self.assertRaises(ValueError):
                 GeneralizedExtremeValueEstimator(pseudo_count=pseudo_count)
         with self.assertRaises(ValueError):
             GeneralizedExtremeValueEstimator(pseudo_count=1.0)
         for prior in ((0.0, 1.0), (0.0, 1.0, np.inf)):
-            with self.subTest(prior=prior), self.assertRaises(ValueError):
+            with self.subTest(prior=repr(prior)), self.assertRaises(ValueError):
                 GeneralizedExtremeValueEstimator(pseudo_count=1.0, suff_stat=prior)
         with self.assertRaises(ValueError):
             GeneralizedExtremeValueDistribution(0.0, 1.0, 1.0 / 3.0).estimator(pseudo_count=1.0)
@@ -99,7 +99,10 @@ class ContinuousObservationContractTest(unittest.TestCase):
         for distribution in distributions:
             encoder = distribution.dist_to_encoder()
             for invalid in ([0.0, np.nan], [np.inf], [-np.inf]):
-                with self.subTest(distribution=repr(distribution), invalid=invalid), self.assertRaises(ValueError):
+                with (
+                    self.subTest(distribution=repr(distribution), invalid=repr(invalid)),
+                    self.assertRaises(ValueError),
+                ):
                     encoder.seq_encode(invalid)
 
     def test_nonnegative_amplitude_models_reject_negative_or_nonfinite_evidence(self):
@@ -107,11 +110,20 @@ class ContinuousObservationContractTest(unittest.TestCase):
             encoder = distribution.dist_to_encoder()
             accumulator = distribution.estimator().accumulator_factory().make()
             for invalid in (-1.0, np.nan, np.inf):
-                with self.subTest(distribution=repr(distribution), invalid=invalid), self.assertRaises(ValueError):
+                with (
+                    self.subTest(distribution=repr(distribution), invalid=repr(invalid)),
+                    self.assertRaises(ValueError),
+                ):
                     encoder.seq_encode([invalid])
-                with self.subTest(distribution=repr(distribution), invalid=invalid), self.assertRaises(ValueError):
+                with (
+                    self.subTest(distribution=repr(distribution), invalid=repr(invalid)),
+                    self.assertRaises(ValueError),
+                ):
                     accumulator.update(invalid, 1.0, distribution)
-                with self.subTest(distribution=repr(distribution), invalid=invalid), self.assertRaises(ValueError):
+                with (
+                    self.subTest(distribution=repr(distribution), invalid=repr(invalid)),
+                    self.assertRaises(ValueError),
+                ):
                     accumulator.seq_update(np.asarray([invalid]), np.ones(1), distribution)
 
     def test_generalized_pareto_fitting_and_encoding_respect_threshold_and_endpoint(self):
@@ -119,7 +131,7 @@ class ContinuousObservationContractTest(unittest.TestCase):
         encoder = distribution.dist_to_encoder()
         np.testing.assert_allclose(encoder.seq_encode([1.0, 3.0, 5.0]), [1.0, 3.0, 5.0])
         for invalid in ([0.999], [5.001], [np.nan], [np.inf]):
-            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+            with self.subTest(invalid=repr(invalid)), self.assertRaises(ValueError):
                 encoder.seq_encode(invalid)
 
         estimator = distribution.estimator()
@@ -213,7 +225,7 @@ class ContinuousResourceAndWeightContractTest(unittest.TestCase):
         encoded = distribution.dist_to_encoder().seq_encode([1.5, 3.0])
         for method in ("seq_update", "seq_update_engine"):
             accumulator = distribution.estimator().accumulator_factory().make()
-            with self.subTest(method=method), self.assertRaises(ValueError):
+            with self.subTest(method=repr(method)), self.assertRaises(ValueError):
                 if method == "seq_update":
                     accumulator.seq_update(encoded, np.asarray([1.0, -0.5]), distribution)
                 else:

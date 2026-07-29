@@ -125,7 +125,7 @@ class GradientPriorAlignmentTest(unittest.TestCase):
     def test_dirichlet_concentrations_require_exact_positive_finite_shape(self):
         logits = np.zeros(2)
         for alpha in ([1.0], [1.0, 0.0], [1.0, -1.0], [1.0, np.inf], [1.0, np.nan]):
-            with self.subTest(alpha=alpha):
+            with self.subTest(alpha=repr(alpha)):
                 with self.assertRaises(ValueError):
                     dirichlet_alpha_tensor(alpha, None, logits, np, np)
         with self.assertRaises(TypeError):
@@ -137,7 +137,7 @@ class GradientPriorAlignmentTest(unittest.TestCase):
 
     def test_scalar_hyperparameters_reject_invalid_and_unreceipted_improper_values(self):
         for value in (0.0, -1.0, np.inf, np.nan):
-            with self.subTest(value=value):
+            with self.subTest(value=repr(value)):
                 with self.assertRaises(ValueError):
                     validated_prior_scalar({"family": "gamma", "shape": value}, "shape")
         with self.assertRaises(TypeError):
@@ -170,7 +170,7 @@ class GradientPriorAlignmentTest(unittest.TestCase):
         for key, value in (("alpha", 0.0), ("beta", -1.0), ("kappa", np.inf), ("mu0", np.nan)):
             malformed = dict(valid)
             malformed[key] = value
-            with self.subTest(key=key, value=value):
+            with self.subTest(key=repr(key), value=repr(value)):
                 with self.assertRaises(ValueError):
                     normal_gamma_log_prior(1.0, 2.0, malformed, np)
         missing = dict(valid)

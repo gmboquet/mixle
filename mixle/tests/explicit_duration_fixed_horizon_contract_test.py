@@ -89,7 +89,7 @@ class ExplicitDurationFixedHorizonTest(unittest.TestCase):
     def test_sampler_length_is_an_exact_positive_integer(self):
         sampler = self._categorical_model().sampler(seed=1)
         for length in (0, -1, 1.5, True):
-            with self.subTest(length=length), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(length=repr(length)), self.assertRaises((TypeError, ValueError)):
                 sampler.sample(length)
 
 
@@ -115,7 +115,7 @@ class ExplicitDurationSchemaTest(unittest.TestCase):
             (emissions, pi, transition, durations, 2.0),
         )
         for args in invalid:
-            with self.subTest(args=args), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(args=repr(args)), self.assertRaises((TypeError, ValueError)):
                 ExplicitDurationHMM(*args)
 
     def test_constructor_owns_all_probability_arrays(self):

@@ -105,7 +105,7 @@ class ScalarizeTest(unittest.TestCase):
     def test_negative_nonfinite_and_boolean_augmentation_is_rejected(self):
         y = np.array([[0.0, 0.0], [1.0, 1.0]])
         for rho in (-1.0, np.nan, np.inf, True, np.bool_(False)):
-            with self.subTest(rho=rho):
+            with self.subTest(rho=repr(rho)):
                 with self.assertRaises((TypeError, ValueError)):
                     _scalarize(y, weights=np.array([0.5, 0.5]), rho=rho)
 
@@ -136,7 +136,7 @@ class MultiMinimizeBudgetValidationTest(unittest.TestCase):
             {"n_candidates": True},
         )
         for kwargs in invalid:
-            with self.subTest(kwargs=kwargs):
+            with self.subTest(kwargs=repr(kwargs)):
                 with self.assertRaises((TypeError, ValueError)):
                     multi_minimize(self.objectives, [(0.0, 1.0)], **kwargs)
 

@@ -685,7 +685,7 @@ class ParameterPosteriorTestCase(unittest.TestCase):
             {"a": 0.5, "b": 0.5},
         )
         for state in invalid:
-            with self.subTest(state=state), self.assertRaises(ValueError):
+            with self.subTest(state=repr(state)), self.assertRaises(ValueError):
                 bridge.to_unconstrained(state)
 
     def test_parameter_mapping_preserves_driver_specific_diagnostics(self):

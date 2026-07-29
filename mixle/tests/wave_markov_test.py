@@ -460,7 +460,7 @@ class GrammarTestCase(unittest.TestCase):
         exposed.rule_dict[2][0].frequency = 0.0
         self.assertEqual(dist.log_density(self._edge("A", "B")), before)
         for kwargs in ({"mix_p": 0.1}, {"decomp_level": 1}, {"lhs_delta": 1}):
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 VertexReplacementGrammarDistribution(self._grammar(), **kwargs)
 
 

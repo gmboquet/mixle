@@ -52,7 +52,7 @@ class HierarchicalDirichletProcessStateContractTestCase(unittest.TestCase):
             ([gaussian], [1.0], 1.0, np.inf),
         )
         for args in cases:
-            with self.subTest(args=args), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(args=repr(args)), self.assertRaises((TypeError, ValueError)):
                 HierarchicalDirichletProcessMixtureDistribution(*args)
         with self.assertRaises(ValueError):
             HierarchicalDirichletProcessMixtureDistribution(
@@ -76,7 +76,7 @@ class HierarchicalDirichletProcessStateContractTestCase(unittest.TestCase):
             },
         )
         for kwargs in cases:
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 HierarchicalDirichletProcessMixtureDistribution(
                     components,
                     [0.5, 0.5],
@@ -120,7 +120,7 @@ class HierarchicalDirichletProcessStateContractTestCase(unittest.TestCase):
             ([GaussianEstimator()], 0.0, 1.0),
             ([GaussianEstimator()], 1.0, np.nan),
         ):
-            with self.subTest(args=args), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(args=repr(args)), self.assertRaises((TypeError, ValueError)):
                 HierarchicalDirichletProcessMixtureEstimator(
                     args[0],
                     gamma=args[1],
@@ -251,7 +251,7 @@ class HierarchicalDirichletProcessIdentityContractTestCase(unittest.TestCase):
             np.asarray([1.0, -1.0]),
             np.asarray([1.0, np.nan]),
         ):
-            with self.subTest(weights=weights), self.assertRaises(ValueError):
+            with self.subTest(weights=repr(weights)), self.assertRaises(ValueError):
                 accumulator.seq_update(encoded, weights, self.model)
             self.assertEqual(accumulator.value()[0], before[0])
 
@@ -296,7 +296,7 @@ class HierarchicalDirichletProcessEstimatorContractTestCase(unittest.TestCase):
             (valid[0], None, None, None, valid[4][:-1], valid[5]),
         )
         for value in malformed:
-            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(value=repr(value)), self.assertRaises((TypeError, ValueError)):
                 estimator.estimate(None, value)
 
     def test_zero_previous_beta_is_handled_without_flooring_or_nan(self):

@@ -65,7 +65,7 @@ class FitSeedTest(unittest.TestCase):
         # rng=None must resolve to a FIXED seed: two identical un-seeded calls, bitwise-equal fits.
         # Before the fixed default this failed for 'mixture' and 'hmm' (fresh OS entropy per call).
         for name, dist in _catalog():
-            with self.subTest(family=name):
+            with self.subTest(family=repr(name)):
                 data = dist.sampler(seed=1).sample(150)
                 a = optimize(data, dist.estimator(), max_its=8, out=None)
                 b = optimize(data, dist.estimator(), max_its=8, out=None)
@@ -73,7 +73,7 @@ class FitSeedTest(unittest.TestCase):
 
     def test_seeded_fit_is_repeatable(self):
         for name, dist in _catalog():
-            with self.subTest(family=name):
+            with self.subTest(family=repr(name)):
                 data = dist.sampler(seed=2).sample(150)
                 a = optimize(data, dist.estimator(), max_its=8, out=None, rng=np.random.RandomState(7))
                 b = optimize(data, dist.estimator(), max_its=8, out=None, rng=np.random.RandomState(7))

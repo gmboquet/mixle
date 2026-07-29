@@ -40,7 +40,7 @@ class _Scorer:
 class SaddleAndEvaluationTest(unittest.TestCase):
     def test_saddle_validation_rejects_malformed_posteriors(self):
         for posterior in ([np.nan], [0.5], [0.6, 0.6], [-0.1, 1.1]):
-            with self.subTest(posterior=posterior), self.assertRaises(ValueError):
+            with self.subTest(posterior=repr(posterior)), self.assertRaises(ValueError):
                 saddle_suspect(_PosteriorModel(posterior), [1])
 
     def test_saddle_sampling_does_not_consume_beyond_bound(self):
@@ -58,7 +58,7 @@ class SaddleAndEvaluationTest(unittest.TestCase):
         for scores in (3.0, [1.0], [1.0, 2.0, 3.0, 4.0], [1.0, np.nan, 2.0]):
             model = Model()
             model.fitted = _Scorer(scores)
-            with self.subTest(scores=scores), self.assertRaises(ValueError):
+            with self.subTest(scores=repr(scores)), self.assertRaises(ValueError):
                 model.evaluate([1, 2, 3])
         model = Model()
         model.fitted = _Scorer([1.0, 2.0, 3.0])
@@ -91,7 +91,7 @@ class ReplayAndProposalTest(unittest.TestCase):
     def test_invalid_candidate_budget_is_rejected_before_proposer_work(self):
         with patch("mixle.task.recommend_model") as recommend:
             for value in (True, 0.5, np.nan, -1):
-                with self.subTest(max_candidates=value), self.assertRaises(ValueError):
+                with self.subTest(max_candidates=repr(value)), self.assertRaises(ValueError):
                     propose([1, 2, 3], max_candidates=value)
             recommend.assert_not_called()
 

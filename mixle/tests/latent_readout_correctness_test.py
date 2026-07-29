@@ -184,7 +184,7 @@ class HierarchicalMixtureMonotoneEMTest(unittest.TestCase):
         # Seeds 13/15/17 produce genuine LL decreases (up to ~1e-2/iteration) under the token-level
         # outer-weight M-step; 0/1/2 are unremarkable controls.
         for seed in (13, 15, 17, 0, 1, 2):
-            with self.subTest(seed=seed):
+            with self.subTest(seed=repr(seed)):
                 trace = self._em_trace(seed)
                 deltas = np.diff(trace)
                 self.assertGreaterEqual(
@@ -279,7 +279,7 @@ class TausMixtureEmissionTest(unittest.TestCase):
             seq_ll = np.asarray(hmm.seq_log_density(enc))
             for s, seq in enumerate(seqs):
                 expected = _brute_force_log_density(hmm, seq)
-                with self.subTest(use_numba=use_numba, seq=s):
+                with self.subTest(use_numba=repr(use_numba), seq=repr(s)):
                     self.assertAlmostEqual(hmm.log_density(seq), expected, places=9)
                     self.assertAlmostEqual(float(seq_ll[s]), expected, places=9)
 

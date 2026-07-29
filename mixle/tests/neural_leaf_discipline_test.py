@@ -97,14 +97,14 @@ class NeuralGaussianScoringPurityTest(unittest.TestCase):
             {"lr": 0.0},
             {"lr": np.nan},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 NeuralGaussian(module, **kwargs)
 
     def test_scoring_rejects_row_and_output_width_broadcasting(self):
         leaf = NeuralGaussian(torch.nn.Linear(2, 1))
         x = np.zeros((3, 2))
         for y in (np.zeros((1, 1)), np.zeros((3, 2)), np.zeros(3)):
-            with self.subTest(shape=np.asarray(y).shape), self.assertRaisesRegex(ValueError, "shape|rows"):
+            with self.subTest(shape=repr(np.asarray(y).shape)), self.assertRaisesRegex(ValueError, "shape|rows"):
                 leaf.seq_log_density((x, y))
 
         class _FlatOutput(torch.nn.Module):
@@ -127,7 +127,7 @@ class NeuralGaussianScoringPurityTest(unittest.TestCase):
         x = np.zeros((3, 2))
         y = np.zeros((3, 1))
         for weights in (np.ones(2), np.ones((3, 1)), [1.0, -1.0, 1.0], [0.0, 0.0, np.nan]):
-            with self.subTest(weights=np.asarray(weights).shape), self.assertRaises(ValueError):
+            with self.subTest(weights=repr(np.asarray(weights).shape)), self.assertRaises(ValueError):
                 accumulator.seq_update((x, y), weights, leaf)
 
         with self.assertRaisesRegex(ValueError, "positive effective weight"):
@@ -169,7 +169,7 @@ class NeuralCategoricalScoringPurityTest(unittest.TestCase):
         leaf = NeuralCategorical(torch.nn.Linear(2, 3))
         x = np.zeros((3, 2))
         for labels in ([-1, 0, 1], [0, 1, 3], [0.0, 1.0, 2.0], [0, 1]):
-            with self.subTest(labels=labels), self.assertRaises(ValueError):
+            with self.subTest(labels=repr(labels)), self.assertRaises(ValueError):
                 leaf.seq_log_density((x, labels))
         self.assertEqual(leaf.seq_log_density((np.zeros((0, 2)), np.zeros(0, dtype=int))).shape, (0,))
 
@@ -196,7 +196,7 @@ class NeuralCategoricalScoringPurityTest(unittest.TestCase):
             {"batch_size": True},
             {"max_optimizer_steps": 0},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 NeuralCategorical(module, **kwargs)
 
         leaf = NeuralCategorical(module, m_steps=1)
@@ -204,7 +204,7 @@ class NeuralCategoricalScoringPurityTest(unittest.TestCase):
         x = np.zeros((3, 2))
         y = np.array([0, 1, 2])
         for weights in (np.ones(2), np.ones((3, 1)), [1.0, -1.0, 1.0], [1.0, np.nan, 1.0]):
-            with self.subTest(weights=np.asarray(weights).shape), self.assertRaises(ValueError):
+            with self.subTest(weights=repr(np.asarray(weights).shape)), self.assertRaises(ValueError):
                 accumulator.seq_update((x, y), weights, leaf)
         with self.assertRaisesRegex(ValueError, "positive effective weight"):
             leaf.estimator().estimate(None, (x, y, np.zeros(3)))

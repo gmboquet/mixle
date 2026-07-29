@@ -67,7 +67,7 @@ class TreeHmmLenTest(unittest.TestCase):
             d = self._dist(self.len_dist, use_numba)
             d_null = self._dist(NullDistribution(), use_numba)
             for tree in self.trees:
-                with self.subTest(use_numba=use_numba, tree=tree):
+                with self.subTest(use_numba=repr(use_numba), tree=repr(tree)):
                     old = d_null.log_density(tree)
                     expected = old + self._len_term(tree)
                     self.assertAlmostEqual(d.log_density(tree), expected, places=9)
@@ -88,7 +88,7 @@ class TreeHmmLenTest(unittest.TestCase):
         """
         d = self._dist(self.len_dist, use_numba=False)
         for tree in self.trees:
-            with self.subTest(tree=tree):
+            with self.subTest(tree=repr(tree)):
                 enc = d.dist_to_encoder().seq_encode([tree])
                 self.assertAlmostEqual(d.log_density(tree), float(d.seq_log_density(enc)[0]), places=9)
 
@@ -97,7 +97,7 @@ class TreeHmmLenTest(unittest.TestCase):
         d_nb = self._dist(self.len_dist, use_numba=True)
         d_np = self._dist(self.len_dist, use_numba=False)
         for tree in self.trees:
-            with self.subTest(tree=tree):
+            with self.subTest(tree=repr(tree)):
                 self.assertAlmostEqual(d_nb.log_density(tree), d_np.log_density(tree), places=9)
 
     def test_null_length_unchanged(self):
@@ -105,7 +105,7 @@ class TreeHmmLenTest(unittest.TestCase):
         for use_numba in (True, False):
             d_null = self._dist(NullDistribution(), use_numba)
             for tree in self.trees:
-                with self.subTest(use_numba=use_numba, tree=tree):
+                with self.subTest(use_numba=repr(use_numba), tree=repr(tree)):
                     # NullDistribution.log_density is identically 0, so the per-node length term is 0.
                     self.assertAlmostEqual(self._null_len_term(), 0.0, places=12)
                     # Score must match a hand-evaluated length-free total via seq_log_density.

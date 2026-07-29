@@ -96,7 +96,7 @@ class FusedKernelRuntimeContractTest(unittest.TestCase):
             np.ones((3, 1)),
             np.ones(6),
         ):
-            with self.subTest(shape=invalid.shape):
+            with self.subTest(shape=repr(invalid.shape)):
                 with self.assertRaisesRegex(ValueError, r"gamma must have shape \(3, 2\)"):
                     self.compiled.weighted_suff_stats(self.encoding, invalid)
 
@@ -104,7 +104,7 @@ class FusedKernelRuntimeContractTest(unittest.TestCase):
             np.array([[0.5, 0.5], [np.nan, 0.0], [0.5, 0.5]]),
             np.array([[0.5, 0.5], [-0.1, 1.1], [0.5, 0.5]]),
         ):
-            with self.subTest(values=invalid):
+            with self.subTest(values=repr(invalid)):
                 with self.assertRaises(ValueError):
                     self.compiled.weighted_suff_stats(self.encoding, invalid)
 
@@ -114,7 +114,7 @@ class FusedKernelRuntimeContractTest(unittest.TestCase):
             np.array([1.0, np.nan, 1.0]),
             np.array([1.0, -1.0, 1.0]),
         ):
-            with self.subTest(weights=invalid):
+            with self.subTest(weights=repr(invalid)):
                 with self.assertRaises(ValueError):
                     self.compiled.em_step(self.encoding, object(), weights=invalid)
 
@@ -143,7 +143,7 @@ class FusedKernelRuntimeContractTest(unittest.TestCase):
 
     def test_thread_count_must_be_a_positive_integer(self):
         for invalid in (0, -1, 1.5, True):
-            with self.subTest(n_threads=invalid):
+            with self.subTest(n_threads=repr(invalid)):
                 with self.assertRaises((TypeError, ValueError)):
                     self.compiled.seq_component_log_density(self.encoding, n_threads=invalid)
 

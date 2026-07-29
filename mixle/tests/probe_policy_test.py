@@ -86,7 +86,7 @@ class HeadToHeadTest(unittest.TestCase):
     def test_seed_panel_must_be_nonempty_unique_valid_integers(self):
         invalid_panels = ([], [1, 1], [True], [1.5], [-1], [2**32])
         for panel in invalid_panels:
-            with self.subTest(panel=panel), self.assertRaisesRegex(ValueError, "held_out_seeds"):
+            with self.subTest(panel=repr(panel)), self.assertRaisesRegex(ValueError, "held_out_seeds"):
                 head_to_head_probe(
                     self.decomposer.plan_model,
                     held_out_seeds=panel,

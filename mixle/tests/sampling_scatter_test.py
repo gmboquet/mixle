@@ -29,14 +29,14 @@ class ComponentScatterContractTest(unittest.TestCase):
             ([[0, 0]], 2, "one-dimensional"),
         )
         for state, size, message in invalid:
-            with self.subTest(state=state), self.assertRaisesRegex(ValueError, message):
+            with self.subTest(state=repr(state)), self.assertRaisesRegex(ValueError, message):
                 scatter_component_draws(state, [sampler], size)
         self.assertEqual(sampler.calls, [])
 
     def test_size_must_be_a_positive_exact_integer(self):
         sampler = _Sampler([1])
         for size in (0, -1, 1.5, True):
-            with self.subTest(size=size), self.assertRaisesRegex(ValueError, "positive integer"):
+            with self.subTest(size=repr(size)), self.assertRaisesRegex(ValueError, "positive integer"):
                 scatter_component_draws([0], [sampler], size)
         self.assertEqual(sampler.calls, [])
 

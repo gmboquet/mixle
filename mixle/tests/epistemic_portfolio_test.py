@@ -177,7 +177,7 @@ class LikelihoodDomainTest(unittest.TestCase):
     def test_surprise_score_refuses_out_of_range_producing_likelihoods(self):
         portfolio = _toy_portfolio()
         for bad in (-1.0, -2.0, float("nan"), float("inf")):
-            with self.subTest(likelihood=bad), self.assertRaises(ValueError):
+            with self.subTest(likelihood=repr(bad)), self.assertRaises(ValueError):
                 portfolio.surprise_score("o", lambda h, o, v=bad: v)
 
     def test_surprise_score_stays_in_range_for_valid_likelihoods(self):
@@ -210,13 +210,13 @@ class ResampleValidationTest(unittest.TestCase):
     def test_out_of_domain_thresholds_are_rejected(self):
         portfolio = _toy_portfolio()
         for bad in (-0.5, 1.5, float("nan"), float("inf"), -float("inf")):
-            with self.subTest(ess_threshold=bad), self.assertRaises(ValueError):
+            with self.subTest(ess_threshold=repr(bad)), self.assertRaises(ValueError):
                 portfolio.resample(ess_threshold=bad, rng=np.random.RandomState(0))
 
     def test_boundary_thresholds_are_accepted(self):
         portfolio = _toy_portfolio()
         for good in (0.0, 0.5, 1.0):
-            with self.subTest(ess_threshold=good):
+            with self.subTest(ess_threshold=repr(good)):
                 out = portfolio.resample(ess_threshold=good, rng=np.random.RandomState(0))
                 self.assertAlmostEqual(float(out.weights.sum()) + out.w_open, 1.0, places=8)
 

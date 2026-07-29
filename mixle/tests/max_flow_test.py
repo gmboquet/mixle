@@ -29,7 +29,7 @@ class MaxFlowTest(unittest.TestCase):
             value, flow = max_flow(cap, src, snk)
             scipy_val = maximum_flow(csr_matrix(cap.astype(np.int64)), src, snk).flow_value
             cut_cap, _, _ = min_cut(cap, src, snk)
-            with self.subTest(seed=seed):
+            with self.subTest(seed=repr(seed)):
                 self.assertAlmostEqual(value, float(scipy_val), places=9)  # vs scipy
                 self.assertAlmostEqual(cut_cap, value, places=9)  # max-flow min-cut theorem
                 for k in range(n):  # flow conservation

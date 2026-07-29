@@ -132,7 +132,7 @@ class LeafExponentialFamilyTest(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(estimate.error_estimate)))
 
         for invalid in (0.0, -1.0, np.inf, np.nan):
-            with self.subTest(eps=invalid):
+            with self.subTest(eps=repr(invalid)):
                 with self.assertRaises(ValueError):
                     form.finite_difference_mean_parameters(invalid)
         with self.assertRaises(TypeError):

@@ -36,14 +36,14 @@ class TreeHmmTopologyContractTest(unittest.TestCase):
     def test_input_entry_order_is_canonicalized_by_node_id(self):
         shuffled = [CANONICAL[3], CANONICAL[1], CANONICAL[0], CANONICAL[2]]
         for use_numba in (False, True):
-            with self.subTest(use_numba=use_numba):
+            with self.subTest(use_numba=repr(use_numba)):
                 model = _model(use_numba)
                 self.assertAlmostEqual(model.log_density(shuffled), model.log_density(CANONICAL), places=12)
                 np.testing.assert_array_equal(model.viterbi(shuffled), model.viterbi(CANONICAL))
 
     def test_encoder_reports_tree_rows_for_both_layouts(self):
         for use_numba in (False, True):
-            with self.subTest(use_numba=use_numba):
+            with self.subTest(use_numba=repr(use_numba)):
                 encoder = _model(use_numba).dist_to_encoder()
                 self.assertEqual(encoder.row_count(encoder.seq_encode([])), 0)
                 self.assertEqual(encoder.row_count(encoder.seq_encode([CANONICAL, CANONICAL])), 2)
@@ -58,7 +58,10 @@ class TreeHmmTopologyContractTest(unittest.TestCase):
         for use_numba in (False, True):
             encoder = _model(use_numba).dist_to_encoder()
             for tree in invalid:
-                with self.subTest(use_numba=use_numba, tree=tree), self.assertRaises((TypeError, ValueError)):
+                with (
+                    self.subTest(use_numba=repr(use_numba), tree=repr(tree)),
+                    self.assertRaises((TypeError, ValueError)),
+                ):
                     encoder.seq_encode([tree])
 
     def test_exactly_one_node_zero_root_is_required(self):
@@ -72,7 +75,10 @@ class TreeHmmTopologyContractTest(unittest.TestCase):
         for use_numba in (False, True):
             encoder = _model(use_numba).dist_to_encoder()
             for tree in invalid:
-                with self.subTest(use_numba=use_numba, tree=tree), self.assertRaises((TypeError, ValueError)):
+                with (
+                    self.subTest(use_numba=repr(use_numba), tree=repr(tree)),
+                    self.assertRaises((TypeError, ValueError)),
+                ):
                     encoder.seq_encode([tree])
 
     def test_parents_must_exist_and_precede_children(self):
@@ -85,7 +91,7 @@ class TreeHmmTopologyContractTest(unittest.TestCase):
         for use_numba in (False, True):
             encoder = _model(use_numba).dist_to_encoder()
             for tree in invalid:
-                with self.subTest(use_numba=use_numba, tree=tree), self.assertRaises(ValueError):
+                with self.subTest(use_numba=repr(use_numba), tree=repr(tree)), self.assertRaises(ValueError):
                     encoder.seq_encode([tree])
 
     def test_malformed_entries_fail_before_numeric_lowering(self):
@@ -97,7 +103,7 @@ class TreeHmmTopologyContractTest(unittest.TestCase):
         for use_numba in (False, True):
             encoder = _model(use_numba).dist_to_encoder()
             for tree in invalid:
-                with self.subTest(use_numba=use_numba, tree=tree), self.assertRaises(TypeError):
+                with self.subTest(use_numba=repr(use_numba), tree=repr(tree)), self.assertRaises(TypeError):
                     encoder.seq_encode([tree])
 
 
@@ -228,7 +234,7 @@ class TreeHmmPosteriorContractTest(unittest.TestCase):
     def test_seq_posterior_matches_brute_force_node_marginals(self):
         expected = [self._brute_force(tree) for tree in self.TREES]
         for use_numba in (False, True):
-            with self.subTest(use_numba=use_numba):
+            with self.subTest(use_numba=repr(use_numba)):
                 model = self._model(use_numba)
                 encoded = model.dist_to_encoder().seq_encode(self.TREES)
                 for got, want in zip(model.seq_posterior(encoded), expected, strict=True):
@@ -244,7 +250,7 @@ class TreeHmmPosteriorContractTest(unittest.TestCase):
 
     def test_seq_posterior_rows_are_normalized(self):
         for use_numba in (False, True):
-            with self.subTest(use_numba=use_numba):
+            with self.subTest(use_numba=repr(use_numba)):
                 model = self._model(use_numba)
                 encoded = model.dist_to_encoder().seq_encode(self.TREES)
                 for got in model.seq_posterior(encoded):

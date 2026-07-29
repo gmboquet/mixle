@@ -21,7 +21,7 @@ class SmokeManifestContractTest(unittest.TestCase):
 
     def test_manifest_rejects_globs_and_repository_escape(self):
         for target in ("mixle/tests/*_test.py", "../outside_test.py"):
-            with self.subTest(target=target), tempfile.NamedTemporaryFile("w", encoding="utf-8") as stream:
+            with self.subTest(target=repr(target)), tempfile.NamedTemporaryFile("w", encoding="utf-8") as stream:
                 stream.write(target + "\n")
                 stream.flush()
                 with self.assertRaises(ValueError):

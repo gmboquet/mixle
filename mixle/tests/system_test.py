@@ -529,7 +529,7 @@ class TeacherAnswerContractTest(unittest.TestCase):
         # captured cache forever. In the None case the public return was indistinguishable from a
         # refusal or a failure unless every caller also read the receipt.
         for bad in (None, {"answer": "x"}, "", "   "):
-            with self.subTest(reply=bad):
+            with self.subTest(reply=repr(bad)):
                 system = System(SystemConfig(teacher=lambda p, _bad=bad: _bad))
                 reply, receipt = system.answer(Query("q"), budget=5)
                 self.assertIsNone(reply)

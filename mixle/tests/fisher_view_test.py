@@ -628,7 +628,7 @@ class FisherViewTestCase(unittest.TestCase):
         child_probs = dict(enumerate(child.p_vec))
 
         for len_normalized in (False, True):
-            with self.subTest(len_normalized=len_normalized):
+            with self.subTest(len_normalized=repr(len_normalized)):
                 dist = SequenceDistribution(child, length, len_normalized=len_normalized)
                 data = [[]]
                 probs = [length.p_vec[0]]

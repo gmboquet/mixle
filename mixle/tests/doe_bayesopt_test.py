@@ -209,12 +209,12 @@ class AcquisitionInputValidationTest(unittest.TestCase):
 
     def test_negative_std_rejected_by_every_builtin_acquisition(self):
         for name, fn, kw in self._ACQUISITIONS:
-            with self.subTest(acquisition=name), self.assertRaises(ValueError):
+            with self.subTest(acquisition=repr(name)), self.assertRaises(ValueError):
                 fn(mean=np.array([0.0]), std=np.array([-1.0]), best=0.0, **kw)
 
     def test_nonfinite_std_rejected(self):
         for value in (np.nan, np.inf, -np.inf):
-            with self.subTest(std=value), self.assertRaises(ValueError):
+            with self.subTest(std=repr(value)), self.assertRaises(ValueError):
                 expected_improvement(mean=np.array([0.0]), std=np.array([value]), best=0.0)
 
     def test_nonfinite_mean_rejected(self):
@@ -223,7 +223,7 @@ class AcquisitionInputValidationTest(unittest.TestCase):
 
     def test_nonfinite_best_rejected(self):
         for value in (float("nan"), float("inf")):
-            with self.subTest(best=value), self.assertRaises(ValueError):
+            with self.subTest(best=repr(value)), self.assertRaises(ValueError):
                 expected_improvement(mean=np.array([0.0]), std=np.array([1.0]), best=value)
 
     def test_mismatched_mean_std_shapes_rejected(self):
@@ -234,7 +234,7 @@ class AcquisitionInputValidationTest(unittest.TestCase):
 
     def test_negative_xi_rejected(self):
         for fn in (expected_improvement, log_expected_improvement, probability_of_improvement):
-            with self.subTest(fn=fn.__name__), self.assertRaises(ValueError):
+            with self.subTest(fn=repr(fn.__name__)), self.assertRaises(ValueError):
                 fn(mean=np.array([0.0]), std=np.array([1.0]), best=0.0, xi=-0.1)
 
     def test_nonfinite_xi_rejected(self):
@@ -247,7 +247,7 @@ class AcquisitionInputValidationTest(unittest.TestCase):
 
     def test_invalid_rng_rejected(self):
         for bad_rng in ("banana", 42, object()):
-            with self.subTest(rng=bad_rng), self.assertRaises(ValueError):
+            with self.subTest(rng=repr(bad_rng)), self.assertRaises(ValueError):
                 thompson_sampling(mean=np.array([0.0]), std=np.array([1.0]), best=0.0, rng=bad_rng)
 
     def test_valid_rng_types_accepted(self):
@@ -262,7 +262,7 @@ class AcquisitionInputValidationTest(unittest.TestCase):
         # Ordinary, valid calls to every built-in acquisition keep computing exactly as before.
         mean, std, best = np.array([-1.0, 0.0, 1.0]), np.array([1.0, 1.0, 1.0]), 0.0
         for name, fn, kw in self._ACQUISITIONS:
-            with self.subTest(acquisition=name):
+            with self.subTest(acquisition=repr(name)):
                 out = fn(mean=mean, std=std, best=best, **kw)
                 self.assertEqual(out.shape, (3,))
                 self.assertTrue(np.all(np.isfinite(out)))
@@ -639,7 +639,7 @@ class ThompsonSamplingRngThreadingTest(unittest.TestCase):
         mean = np.array([-1.0, 0.0, 1.0, 2.0, -2.0])
         std = np.array([1.0, 0.5, 0.2, 0.1, 0.3])
         for fn in (expected_improvement, log_expected_improvement, probability_of_improvement, upper_confidence_bound):
-            with self.subTest(fn=fn.__name__):
+            with self.subTest(fn=repr(fn.__name__)):
                 without_rng = fn(mean=mean, std=std, best=0.0)
                 with_rng = fn(mean=mean, std=std, best=0.0, rng=np.random.RandomState(0))
                 np.testing.assert_array_equal(without_rng, with_rng)

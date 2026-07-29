@@ -55,7 +55,7 @@ class GumbelFitTest(unittest.TestCase):
         # still works for non-degenerate cases beyond the single-candidate audit scenario below,
         # including a negative loc and a large-scale case.
         for loc0, scale0 in [(2.0, 3.0), (-1.5, 0.7), (0.0, 1.0), (100.0, 25.0)]:
-            with self.subTest(loc0=loc0, scale0=scale0):
+            with self.subTest(loc0=repr(loc0), scale0=repr(scale0)):
                 y25 = float(_gumbel_quantile(loc0, scale0, 0.25))
                 y50 = float(_gumbel_quantile(loc0, scale0, 0.50))
                 y75 = float(_gumbel_quantile(loc0, scale0, 0.75))
@@ -114,7 +114,7 @@ class MesValidationTest(unittest.TestCase):
 
     def test_sample_max_values_rejects_nonpositive_n_samples(self):
         for bad in (0, -3, 2.5):
-            with self.subTest(n_samples=bad):
+            with self.subTest(n_samples=repr(bad)):
                 with self.assertRaises(ValueError):
                     sample_max_values(np.array([0.0]), np.array([1.0]), bad, seed=0)
 

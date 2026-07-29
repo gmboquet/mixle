@@ -133,11 +133,11 @@ class SequenceContractTest(unittest.TestCase):
     def test_estimation_rejects_false_chunk_metadata(self):
         encoded = self.model.dist_to_encoder().seq_encode([1.0, 2.0])
         for declared in (3, -1):
-            with self.subTest(declared=declared):
+            with self.subTest(declared=repr(declared)):
                 with self.assertRaises(ValueError):
                     seq_estimate([(declared, encoded)], GaussianEstimator(), self.model)
         for declared in (True, 2.0):
-            with self.subTest(declared=declared):
+            with self.subTest(declared=repr(declared)):
                 with self.assertRaises(TypeError):
                     seq_estimate([(declared, encoded)], GaussianEstimator(), self.model)
 

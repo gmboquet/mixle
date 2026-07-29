@@ -70,7 +70,7 @@ class CopulaShapeAndParameterContractTest(unittest.TestCase):
             (FrankCopulaDistribution, 1.0),
             (GumbelCopulaDistribution, 2.0),
         ):
-            with self.subTest(constructor=constructor.__name__):
+            with self.subTest(constructor=repr(constructor.__name__)):
                 with self.assertRaises(TypeError):
                     constructor(2.9, theta)
 
@@ -83,7 +83,7 @@ class CopulaShapeAndParameterContractTest(unittest.TestCase):
             lambda: GumbelCopulaDistribution(2, np.nan),
             lambda: StudentTCopulaDistribution(np.eye(2), np.inf),
         ):
-            with self.subTest(call=call), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(call=repr(call)), self.assertRaises((TypeError, ValueError)):
                 call()
 
     def test_extreme_finite_archimedean_scores_do_not_become_nan(self):
@@ -135,7 +135,7 @@ class CopulaFitContractTest(unittest.TestCase):
             ([0.2, 0.3], -1.0),
             ([0.2, 0.3], np.inf),
         ):
-            with self.subTest(row=row, weight=weight), self.assertRaises(ValueError):
+            with self.subTest(row=repr(row), weight=repr(weight)), self.assertRaises(ValueError):
                 accumulator.update(np.asarray(row), weight, None)
         with self.assertRaises(ValueError):
             accumulator.seq_update(np.array([[0.2, 0.3], [0.4, 0.5]]), np.ones(1), None)
@@ -156,7 +156,7 @@ class CopulaFitContractTest(unittest.TestCase):
 
     def test_elliptical_controls_and_statistics_fail_closed(self):
         for constructor in (GaussianCopulaEstimator, StudentTCopulaEstimator):
-            with self.subTest(constructor=constructor.__name__):
+            with self.subTest(constructor=repr(constructor.__name__)):
                 for min_eig in (0.0, -1.0, np.inf, 1.0):
                     with self.assertRaises(ValueError):
                         constructor(2, min_eig=min_eig)
@@ -169,7 +169,7 @@ class CopulaFitContractTest(unittest.TestCase):
             (np.zeros(2), np.array([[1.0, np.nan], [np.nan, 1.0]]), 1.0),
         )
         for statistic in invalid_gaussian_stats:
-            with self.subTest(statistic=statistic), self.assertRaises(ValueError):
+            with self.subTest(statistic=repr(statistic)), self.assertRaises(ValueError):
                 gaussian.estimate(None, statistic)
         student = StudentTCopulaEstimator(2)
         with self.assertRaises(ValueError):
@@ -195,7 +195,7 @@ class VineSelectionContractTest(unittest.TestCase):
                 (pair.h, np.nan, 0.4),
                 (pair.h_inv, 0.4, 1.2),
             ):
-                with self.subTest(family=pair.family, method=method.__name__):
+                with self.subTest(family=repr(pair.family), method=repr(method.__name__)):
                     with self.assertRaises(ValueError):
                         method(first, second)
 
@@ -210,7 +210,7 @@ class VineSelectionContractTest(unittest.TestCase):
             lambda: StudentTPairCopula(0.2, np.nan),
         )
         for constructor in invalid:
-            with self.subTest(constructor=constructor), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(constructor=repr(constructor)), self.assertRaises((TypeError, ValueError)):
                 constructor()
 
     def test_candidate_sets_are_nonempty_known_and_unique(self):
@@ -220,7 +220,7 @@ class VineSelectionContractTest(unittest.TestCase):
                 lambda c=candidates: DVineCopulaDistribution(2, {}, candidates=c),
                 lambda c=candidates: RVineCopulaDistribution.independence(2, candidates=c),
             ):
-                with self.subTest(candidates=candidates, constructor=constructor):
+                with self.subTest(candidates=repr(candidates), constructor=repr(constructor)):
                     with self.assertRaises(ValueError):
                         constructor()
 
