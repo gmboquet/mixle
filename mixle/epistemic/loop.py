@@ -111,6 +111,38 @@ class EpistemicStep:
     next_action: Any | None
     next_action_eig: float | None
 
+    def __post_init__(self) -> None:
+        """Reject metrics that cannot mean anything, at the point they are recorded.
+
+        A step is what the journal attests to, and the journal's job is to make a decision trail
+        auditable. Nothing checked these numbers, so a step carrying ``surprise=NaN`` and
+        ``next_action_eig=inf`` journaled cleanly, serialized as strict JSON, round-tripped, and
+        passed ``verify()`` -- fully certified evidence for a measurement that never happened.
+        Hash-chain integrity says the record was not altered after the fact; it says nothing about
+        whether the number was meaningful when written, and only this constructor is positioned to.
+
+        ``surprise`` is a bounded score in ``[0, 1]`` (see
+        :meth:`~mixle.epistemic.portfolio.HypothesisPortfolio.surprise_score`). ``next_action_eig``
+        is an expected information gain in nats: non-negative and finite, or ``None`` when no action
+        was scored -- which is the honest way to record "not measured", unlike NaN.
+        """
+        # Both bounds carry the same 1e-9 slack the portfolio's own invariants use. Surprise and EIG
+        # are computed as differences of entropies in floating point, so a quantity that is
+        # mathematically exactly 0 or exactly 1 routinely lands a few ulp outside -- a real EIG probe
+        # here produced -1.4e-17. Rejecting that would be refusing arithmetic, not catching an error;
+        # the guard is for values that are genuinely not measurements.
+        tol = 1e-9
+        surprise = float(self.surprise)
+        if not math.isfinite(surprise) or not -tol <= surprise <= 1.0 + tol:
+            raise ValueError(f"surprise must be a finite score in [0, 1], got {self.surprise!r}")
+        if self.next_action_eig is not None:
+            eig = float(self.next_action_eig)
+            if not math.isfinite(eig) or eig < -tol:
+                raise ValueError(
+                    f"next_action_eig must be a finite non-negative information gain (or None when "
+                    f"no action was scored), got {self.next_action_eig!r}"
+                )
+
 
 def _add_hypothesis(
     portfolio: HypothesisPortfolio, new_hypothesis: Hypothesis, *, floor_weight: float = 1e-3

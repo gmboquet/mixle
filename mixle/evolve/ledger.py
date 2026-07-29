@@ -26,7 +26,7 @@ from typing import Any
 LEDGER_SCHEMA_VERSION = 1
 """Version of the row schema, stamped on every row so a later reader can detect an older layout."""
 
-FLOAT_CODEC_VERSION = 1
+FLOATENVELOPE_VERSION = 1
 """Version of the non-finite-float encoding :meth:`EvolutionLedger.to_json` writes (see :data:`_FLOAT_TAG`)."""
 
 _FLOAT_TAG = "__mixle_float__"
@@ -68,7 +68,7 @@ def _encode_floats(obj: Any) -> Any:
     """Rewrite non-finite floats into the tagged form above; everything else passes through unchanged."""
     if isinstance(obj, float) and not math.isfinite(obj):
         token = "NaN" if math.isnan(obj) else ("Infinity" if obj > 0 else "-Infinity")
-        return {_FLOAT_TAG: token, "codec_version": FLOAT_CODEC_VERSION}
+        return {_FLOAT_TAG: token, "codec_version": FLOATENVELOPE_VERSION}
     if isinstance(obj, dict):
         return {k: _encode_floats(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
@@ -81,10 +81,10 @@ def _decode_floats(obj: Any) -> Any:
     if isinstance(obj, dict):
         if _FLOAT_TAG in obj:
             version = obj.get("codec_version")
-            if version != FLOAT_CODEC_VERSION:
+            if version != FLOATENVELOPE_VERSION:
                 raise ValueError(
                     f"EvolutionLedger: {_FLOAT_TAG} has codec_version {version!r}, expected "
-                    f"{FLOAT_CODEC_VERSION!r} -- written by an incompatible codec version"
+                    f"{FLOATENVELOPE_VERSION!r} -- written by an incompatible codec version"
                 )
             token = obj[_FLOAT_TAG]
             if token in ("nan", "NaN"):
@@ -99,6 +99,9 @@ def _decode_floats(obj: Any) -> Any:
         return [_decode_floats(v) for v in obj]
     return obj
 
+
+ENVELOPE_VERSION = 1
+"""Version of the anchored document :meth:`EvolutionLedger.to_json` writes."""
 
 _GENESIS_HASH = "0" * 64
 """``prev_hash`` of the first row: a fixed anchor, so truncating the ledger from the front is visible."""
@@ -224,12 +227,51 @@ class EvolutionLedger:
         :meth:`from_json`, digests included.
         """
         dumps_kwargs.pop("allow_nan", None)
-        return json.dumps(_encode_floats(self._rows), default=_json_default, allow_nan=False, **dumps_kwargs)
+        # The document carries its own anchor. A hash chain cannot detect truncation from the end --
+        # a prefix of a valid chain is a valid chain -- so head()/verify(expect_head=) exist to close
+        # that with an external fact. An anchor nobody supplies closes nothing, and serialization is
+        # the moment the records leave this process's control, so the length and tip travel with
+        # them and :meth:`from_json` checks both. Truncating the array now fails on load.
+        payload = {
+            "codec_version": ENVELOPE_VERSION,
+            "length": len(self._rows),
+            "head": self.head(),
+            "rows": _encode_floats(self._rows),
+        }
+        return json.dumps(payload, default=_json_default, allow_nan=False, **dumps_kwargs)
 
     @classmethod
     def from_json(cls, s: str) -> EvolutionLedger:
-        """Rebuild a ledger from :meth:`to_json` output. Call :meth:`verify` to check its integrity."""
-        return cls(list(_decode_floats(json.loads(s))))
+        """Rebuild a ledger from :meth:`to_json` output, checking the anchor it carries.
+
+        A document written by :meth:`to_json` is an envelope holding the rows plus the length and
+        chain tip they had when written; both are verified here, so a row deleted from the end --
+        which :meth:`verify` alone cannot see -- is caught on load.
+
+        A bare JSON array is still accepted for documents written before the envelope existed. Those
+        carry no anchor, so loading one proves only that the rows are internally consistent; pass a
+        separately stored ``expect_head`` to :meth:`verify` for the stronger check.
+        """
+        doc = json.loads(s)
+        if isinstance(doc, list):
+            return cls(list(_decode_floats(doc)))
+        version = doc.get("codec_version")
+        if version != ENVELOPE_VERSION:
+            raise ValueError(f"ledger document has codec_version {version!r}, expected {ENVELOPE_VERSION!r}")
+        led = cls(list(_decode_floats(doc["rows"])))
+        # Only the ANCHOR is checked here -- the count and tip the document declares against what was
+        # read back. That is the one fact loading can establish and verify() cannot, since a
+        # truncated chain is still a valid chain. Chain validity stays verify()'s job and the
+        # caller's decision: a ledger whose rows are internally inconsistent must still load so it
+        # can be inspected, not become unreadable exactly when someone needs to see what happened.
+        length, head = int(doc["length"]), str(doc["head"])
+        if len(led._rows) != length or led.head() != head:
+            raise ValueError(
+                f"ledger does not match the anchor it was written with: the document declares "
+                f"{length} row(s) ending at {head[:12]}..., and {len(led._rows)} row(s) ending at "
+                f"{led.head()[:12]}... were read back -- rows were added or removed after it was written"
+            )
+        return led
 
     def __len__(self) -> int:
         return len(self._rows)
@@ -264,4 +306,4 @@ def _json_default(obj: Any) -> Any:
     return str(obj)
 
 
-__all__ = ["EvolutionLedger", "LEDGER_SCHEMA_VERSION", "FLOAT_CODEC_VERSION"]
+__all__ = ["EvolutionLedger", "LEDGER_SCHEMA_VERSION", "FLOATENVELOPE_VERSION"]

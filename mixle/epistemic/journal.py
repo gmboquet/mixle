@@ -49,6 +49,8 @@ from mixle.epistemic.loop import EpistemicStep
 from mixle.epistemic.portfolio import HypothesisPortfolio
 
 _CODEC_VERSION = 1
+_ENVELOPE_VERSION = 1
+"""Version of the anchored document :meth:`EpistemicJournal.to_json` writes."""
 _TAG_KEY = "__type__"
 _TUPLE_TAG = "tuple"
 _NDARRAY_TAG = "ndarray"
@@ -421,12 +423,53 @@ class EpistemicJournal:
         """
         if "allow_nan" in dumps_kwargs:
             raise TypeError("EpistemicJournal.to_json does not accept allow_nan: the output must be valid JSON")
-        return json.dumps([_tag_encode(asdict(r)) for r in self._records], allow_nan=False, **dumps_kwargs)
+        # The document carries its own anchor. A hash chain cannot detect truncation from the end --
+        # a prefix of a valid chain is a valid chain -- which is why head()/verify(expect_head=)
+        # exist. An anchor nobody supplies closes nothing, and serialization is the moment the
+        # records leave this process's control, so the length and chain tip travel with them and
+        # :meth:`from_json` checks both. Deleting a record from the end now fails on load.
+        payload = {
+            "envelope_version": _ENVELOPE_VERSION,
+            "length": len(self._records),
+            "head": self.head(),
+            "records": [_tag_encode(asdict(r)) for r in self._records],
+        }
+        return json.dumps(payload, allow_nan=False, **dumps_kwargs)
 
     @classmethod
     def from_json(cls, s: str) -> EpistemicJournal:
-        rows = json.loads(s)
-        return cls([DecisionRecord(**_tag_decode(row)) for row in rows])
+        """Rebuild a journal from :meth:`to_json` output, checking the anchor it carries.
+
+        A document written by :meth:`to_json` is an envelope holding the records plus the length and
+        chain tip they had when written; both are verified here, so a record deleted from the end --
+        which :meth:`verify` alone cannot see -- is caught on load.
+
+        A bare JSON array is still accepted for documents written before the envelope existed. Those
+        carry no anchor, so loading one proves only that the records are internally consistent; pass
+        a separately stored ``expect_head`` to :meth:`verify` for the stronger check.
+        """
+        doc = json.loads(s)
+        if isinstance(doc, list):
+            return cls([DecisionRecord(**_tag_decode(row)) for row in doc])
+        version = doc.get("envelope_version")
+        if version != _ENVELOPE_VERSION:
+            raise ValueError(f"journal document has envelope_version {version!r}, expected {_ENVELOPE_VERSION!r}")
+        journal = cls([DecisionRecord(**_tag_decode(row)) for row in doc["records"]])
+        # Only the ANCHOR is checked here -- the count and tip the document declares against what was
+        # actually read back. That is the one fact loading can establish and verify() cannot, because
+        # a truncated chain is still a valid chain. Chain validity itself stays verify()'s job and
+        # the caller's decision: a journal whose records are internally inconsistent must still load
+        # so it can be inspected and reported on, rather than becoming unreadable at the moment
+        # someone is trying to find out what went wrong with it.
+        length, head = int(doc["length"]), str(doc["head"])
+        if len(journal) != length or journal.head() != head:
+            raise ValueError(
+                f"journal does not match the anchor it was written with: the document declares "
+                f"{length} record(s) ending at {head[:12]}..., and {len(journal)} record(s) ending "
+                f"at {journal.head()[:12]}... were read back -- records were added or removed after "
+                "it was written"
+            )
+        return journal
 
     def __len__(self) -> int:
         return len(self._records)
