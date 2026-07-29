@@ -211,8 +211,14 @@ def _as_assignments(assignments: Any | None, n: int) -> np.ndarray | None:
 
 
 def _coerce_graph_observation(x: Any, directed: bool, fallback_assignments: Any | None) -> GraphObservation:
+    # An already-typed GraphObservation was the one input form that did NOT pick up the source's
+    # fallback_assignments -- every other handler here falls back when the row carries none. A source
+    # fed a mix of typed observations and raw adjacencies therefore produced block assignments for
+    # some rows and None for others under one configured fallback, and the block model saw an
+    # inconsistent stream from a single configured source.
+    assignments = x.block_assignments if x.block_assignments is not None else fallback_assignments
     adj = _as_adjacency(x.adjacency)
-    return GraphObservation(adj, _as_assignments(x.block_assignments, adj.shape[0]))
+    return GraphObservation(adj, _as_assignments(assignments, adj.shape[0]))
 
 
 def _coerce_mapping(x: Any, directed: bool, fallback_assignments: Any | None) -> GraphObservation:
