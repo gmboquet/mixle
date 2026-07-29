@@ -22,7 +22,7 @@ from typing import Any
 
 import numpy as np
 
-from mixle.inference.mcmc.samplers import MCMCResult
+from mixle.inference.mcmc.samplers import MCMCResult, _validated_nuts_controls
 
 
 def _make_value_and_grad(logp: Callable[[Any], Any], theta0: Any, use_compile: bool):
@@ -93,8 +93,9 @@ def nuts_torch(
     """
     import torch
 
-    if num_samples < 0 or warmup < 0 or thin <= 0:
-        raise ValueError("require num_samples>=0, warmup>=0, thin>0.")
+    num_samples, warmup, thin, target_accept, max_tree_depth = _validated_nuts_controls(
+        num_samples, warmup, thin, target_accept, max_tree_depth
+    )
     rng = np.random.RandomState(seed)
     dtype = dtype or torch.float64
     if isinstance(initial, torch.Tensor):
@@ -140,6 +141,12 @@ def nuts_torch(
     cur_lp = float(cur_lp_t.detach())
     if not math.isfinite(cur_lp):
         raise ValueError("initial state has non-finite log target.")
+    # The numpy sampler refuses a non-finite gradient at a finite target state; this backend did not.
+    # A NaN gradient there does not stop the chain -- every leapfrog step produces NaN positions that
+    # then fail the divergence test, so the run "completes" with draws that never left the initial
+    # point and a step size adapted against nothing.
+    if not bool(torch.isfinite(cur_grad).all()):
+        raise ValueError("gradient contains non-finite values at a finite target state.")
     eps = _find_reasonable_eps(cur, cur_lp, cur_grad, leapfrog, kinetic, sqrt_m, shape, gen, dtype, device)
     mu = math.log(10.0 * eps)
     log_eps_bar, h_bar, gamma, t0, kappa = 0.0, 0.0, 0.05, 10.0, 0.75

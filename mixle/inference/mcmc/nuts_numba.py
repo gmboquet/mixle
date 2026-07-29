@@ -25,7 +25,7 @@ from typing import Any
 
 import numpy as np
 
-from mixle.inference.mcmc.samplers import MCMCResult
+from mixle.inference.mcmc.samplers import MCMCResult, _validated_nuts_controls
 from mixle.utils.optional_deps import numba
 
 njit = numba.njit
@@ -226,8 +226,9 @@ def nuts_numba(
         :class:`~mixle.inference.mcmc.samplers.MCMCResult` with numpy ``samples``, plus ``step_size``
         and ``num_target_evals`` attributes.
     """
-    if num_samples < 0 or warmup < 0 or thin <= 0:
-        raise ValueError("require num_samples>=0, warmup>=0, thin>0.")
+    num_samples, warmup, thin, target_accept, max_tree_depth = _validated_nuts_controls(
+        num_samples, warmup, thin, target_accept, max_tree_depth
+    )
     theta0 = np.asarray(initial, dtype=np.float64).reshape(-1)
     d = theta0.shape[0]
     mass_arr = np.broadcast_to(np.asarray(mass, dtype=np.float64), (d,)).copy()
@@ -236,17 +237,23 @@ def nuts_numba(
     lp0, g0 = value_and_grad(theta0)
     if not np.isfinite(float(lp0)):
         raise ValueError("initial state has non-finite log target.")
+    # The numpy sampler refuses a non-finite gradient at a finite target state; this backend did not,
+    # and a NaN gradient there does not stop the chain -- it silently makes every leapfrog step
+    # produce NaN positions that then fail the divergence test, so the run "completes" with draws
+    # that never left the initial point.
+    if not np.all(np.isfinite(np.asarray(g0, dtype=np.float64))):
+        raise ValueError("gradient contains non-finite values at a finite target state.")
     seed = int(np.random.randint(1, 2**31 - 1)) if seed is None else int(seed)
 
     samples, log_probs, accepted, eps, num_evals = _nuts_core(
         value_and_grad,
         theta0,
-        int(num_samples),
-        int(warmup),
+        num_samples,
+        warmup,
         mass_arr,
-        float(target_accept),
-        int(max_tree_depth),
-        int(thin),
+        target_accept,
+        max_tree_depth,
+        thin,
         seed,
     )
     sample_list = [samples[i].copy() for i in range(samples.shape[0])]
