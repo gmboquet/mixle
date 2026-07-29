@@ -395,6 +395,14 @@ def _fit_surrogate(x: np.ndarray, y: np.ndarray, gp: Surrogate | None, fit_kwarg
         scale = std if std > 0.0 else 1.0
         gp = GaussianProcessRegressor(lengthscale=1.0, amplitude=scale, noise=0.1 * scale + 1.0e-6)
     kwargs = {"out": None, **(fit_kwargs or {})}
+    # With no observations there is no log marginal likelihood to maximize, and GaussianProcessRegressor
+    # .fit validates its inputs first, so it raises "x must contain at least one row" -- turning the
+    # documented empty path noted above into a crash instead of the NaN it used to produce. Fitting is
+    # hyperparameter tuning only (predict takes the training data as arguments, so the model carries no
+    # fitted data state), and the prior amplitude/noise chosen just above are already the right answer
+    # for zero evidence: the prior IS the posterior. Skip the fit and hand that GP back.
+    if np.asarray(y).size == 0:
+        return gp
     gp.fit(x, y, **kwargs)
     return gp
 
