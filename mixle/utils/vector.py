@@ -64,6 +64,13 @@ def validate_initialization_probability(p: object) -> float:
         raise TypeError("initialization probability must be a real scalar") from exc
     if not np.isfinite(value) or value < 0.0 or value > 1.0:
         raise ValueError("initialization probability must be finite and in [0, 1]")
+    if value == 0.0:
+        # p == 0.0 keeps no observation BY CONSTRUCTION, so no amount of data can initialize
+        # anything -- that is impossible evidence, and every backend should say so identically.
+        # Deliberately checked on the control rather than on the resulting count: p is a subsampling
+        # probability, so a small p over few records can select zero purely by chance, and that is an
+        # ordinary random outcome the caller may retry, not a contract violation.
+        raise ImpossibleEvidenceError("initialization probability of 0 selects no observations")
     return value
 
 
