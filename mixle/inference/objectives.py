@@ -668,6 +668,14 @@ def _run_objective_optimization(
         # Loop exhausted: score the final iterate once (the old loop's last post-step evaluation).
         if record(_objective_scalar(eval_fn())):
             converged = True
+    if history and not any(np.isfinite(value) for value in history):
+        # Individual non-finite evaluations are tolerated (see _objective_scalar), but a trajectory
+        # with no finite value anywhere never scored the objective: best_value is NaN, best_state is
+        # still the initialization, and returning it would present an unfitted model as a fit.
+        raise GradientFitError(
+            "%s objective was non-finite at every one of the %d evaluations; no value was scored."
+            % (label, len(history))
+        )
     return history, best_value, best_iteration, best_state, iterations, converged
 
 
@@ -679,10 +687,21 @@ def _make_optimizer(torch: Any, optimizer: str, parameters: Sequence[Any], lr: f
 
 
 def _objective_scalar(value: Any) -> float:
-    result = float(value.detach().cpu().item())
-    if not np.isfinite(result):
-        raise GradientFitError(f"objective returned a non-finite scalar value: {result!r}.")
-    return result
+    """Read one objective evaluation as a Python float, non-finite values included.
+
+    A single non-finite evaluation is a normal transient, not a failed fit: an L-BFGS line search
+    overshoots into a region where a log-density underflows, a variance parameter momentarily leaves
+    its constrained range, an initialization sits on a singularity. The optimizer is expected to step
+    away from it. Everything downstream is already written for that -- ``_objective_is_better``
+    documents that "a non-finite candidate never wins, and a non-finite incumbent always loses", and
+    ``_objective_best_entry`` has an explicit branch for a history with no finite entry at all.
+
+    Raising here made every one of those paths unreachable, and turned the exact scenario they were
+    written for -- a NaN at the very first, pre-step evaluation -- into an aborted fit. The verdict
+    that the fit established nothing belongs where the whole trajectory is known, so it is taken
+    once, after the loop, in ``_run_objective_optimization``.
+    """
+    return float(value.detach().cpu().item())
 
 
 def _objective_best_entry(history: Sequence[float], maximize: bool = True) -> tuple[float, int]:
