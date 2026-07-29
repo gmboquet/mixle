@@ -20,6 +20,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
@@ -210,7 +211,20 @@ class Space:
         for name, dim in dims.items():
             if not isinstance(dim, (Real, Integer, Categorical)):
                 raise TypeError(f"dimension {name!r} must be a Real / Integer / Categorical, got {type(dim).__name__}.")
-        self.dims: dict[str, Dimension] = dict(dims)
+        self._dims: dict[str, Dimension] = dict(dims)
+
+    @property
+    def dims(self) -> MappingProxyType:
+        """The named dimensions, read-only.
+
+        This was a plain public dict. ``__init__`` validates that a space is non-empty and that every
+        dimension has a supported type, and then the caller could ``space.dims.clear()`` and get an
+        object reporting ``ndim == 0`` and ``sample() == {}`` -- a space that the constructor would
+        have refused to build, reached by mutating one it had just approved. Checks that run once
+        only hold if the thing they checked cannot change afterwards. Build a new ``Space`` to
+        change the dimensions.
+        """
+        return MappingProxyType(self._dims)
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -222,7 +236,7 @@ class Space:
         ``dims`` reported it as present. Deriving the order removes the possibility rather than
         documenting it.
         """
-        return tuple(self.dims)
+        return tuple(self._dims)
 
     @property
     def ndim(self) -> int:
