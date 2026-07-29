@@ -7,6 +7,7 @@ from scipy.sparse import csr_matrix
 import mixle.stats as stats
 from mixle.enumeration.algorithms import freeze
 from mixle.stats.combinator.transform import AffineTransform
+from mixle.stats.latent.probabilistic_circuit import _Node as _circuit_node
 
 
 def _canonical(x):
@@ -518,6 +519,54 @@ def _stats_public_distribution_catalog():
         "RandomDotProductGraphDistribution": stats.RandomDotProductGraphDistribution(
             [[0.7, 0.1], [0.6, 0.2], [0.1, 0.7], [0.2, 0.6], [0.5, 0.5], [0.3, 0.3]]
         ),
+        "GaussianMixtureDistribution": stats.GaussianMixtureDistribution(
+            [[0.0, 0.0], [2.0, 2.0]], [[1.0, 1.0], [1.5, 1.5]], [0.6, 0.4]
+        ),
+        "AitchisonNormalDistribution": stats.AitchisonNormalDistribution(
+            np.array([0.0, 0.5]), np.array([[1.0, 0.0], [0.0, 1.0]])
+        ),
+        "HierarchicalNormalDistribution": stats.HierarchicalNormalDistribution(0.0, 1.0, 2.0),
+        "SemiSupervisedHiddenMarkovModelDistribution": stats.SemiSupervisedHiddenMarkovModelDistribution(
+            [stats.GaussianDistribution(0.0, 1.0), stats.GaussianDistribution(3.0, 1.0)],
+            [[0.7, 0.3], [0.4, 0.6]],
+            len_dist=stats.CategoricalDistribution({4: 1.0}),
+        ),
+        "LookbackHiddenMarkovModelDistribution": stats.LookbackHiddenMarkovModelDistribution(
+            [
+                stats.SequenceDistribution(
+                    stats.IntegerCategoricalDistribution(0, p), len_dist=stats.CategoricalDistribution({1: 1.0})
+                )
+                for p in ([0.7, 0.2, 0.1], [0.1, 0.3, 0.6])
+            ],
+            w=[0.6, 0.4],
+            transitions=[[0.8, 0.2], [0.3, 0.7]],
+            lag=0,
+            len_dist=stats.CategoricalDistribution({4: 1.0}),
+        ),
+        # alphas is a matrix: one row per label value, one column per topic.
+        "LabeledLDADistribution": stats.LabeledLDADistribution(
+            [stats.CategoricalDistribution({"a": 0.6, "b": 0.4}), stats.CategoricalDistribution({"a": 0.3, "b": 0.7})],
+            [[1.0, 1.0], [1.0, 1.0]],
+            set_dist=stats.CategoricalDistribution({(0, 1): 1.0}),
+            len_dist=stats.CategoricalDistribution({4: 1.0}),
+        ),
+        # trans/accept are sequences of mappings indexed by state, not mappings keyed by state.
+        "DeterminizedSequenceDistribution": stats.DeterminizedSequenceDistribution(
+            [{"a": (math.log(0.5), 0)}], [{"$": math.log(0.5)}]
+        ),
+        # _Node's log_w takes probabilities despite the name; a sum over two scalar leaves.
+        "ProbabilisticCircuitDistribution": stats.ProbabilisticCircuitDistribution(
+            _circuit_node(
+                "sum",
+                children=[
+                    _circuit_node("leaf", dist=stats.GaussianDistribution(0.0, 1.0), scope={0}),
+                    _circuit_node("leaf", dist=stats.GaussianDistribution(3.0, 1.0), scope={0}),
+                ],
+                log_w=np.array([0.5, 0.5]),
+                scope={0},
+            ),
+            1,
+        ),
     }
 
 
@@ -591,6 +640,16 @@ class SamplerSeedTestCase(unittest.TestCase):
         catalog = {**_stats_public_distribution_catalog(), **_bayes_only_distribution_catalog()}
         self.assert_catalog_matches_exports(stats, catalog)
         for name, dist in sorted(catalog.items()):
+            if name == "HierarchicalNormalDistribution":
+                # Grouped two-level model: sample(sizes) takes GROUP SIZES positionally, so the
+                # standard sample(size=n) contract does not apply -- draw one group of n instead.
+                with self.subTest(name=name, mode="grouped"):
+                    self.assertEqual(
+                        _canonical(dist.sampler(seed=314159).sample(6)),
+                        _canonical(dist.sampler(seed=314159).sample(6)),
+                    )
+                    self.assertEqual(len(dist.sampler(seed=123).sample(4)), 4)
+                continue
             if name == "GatedMixtureDistribution":
                 # Conditional p(y|z): .sampler().sample() raises NotImplementedError by design
                 # (there's no marginal over z to sample from) -- exercise sample_given(z) instead.
