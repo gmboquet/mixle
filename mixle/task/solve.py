@@ -35,6 +35,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.task._teacher import TeacherCaller, as_batch_view
 from mixle.task.calibrate import CalibratedTaskModel
 from mixle.task.cascade import Cascade
 from mixle.task.density import DensityGate
@@ -44,23 +45,18 @@ from mixle.task.tune import RecipeSpace
 
 
 def _label_with(teacher: Callable[..., Any], items: list) -> list:
-    """Label ``items`` with either a per-item or batched teacher callable."""
-    try:
-        out = teacher(items)
-        if isinstance(out, (list, tuple)) and len(out) == len(items):
-            return list(out)
-    except Exception:  # noqa: BLE001
-        pass
-    return [teacher(x) for x in items]
+    """Label ``items`` with either a per-item or batched teacher callable.
+
+    Prefer holding a :class:`TeacherCaller` where the same teacher is used more than once: this
+    shim re-discovers the calling convention on every call, which costs the teacher an extra
+    invocation each time.
+    """
+    return _batch_view(teacher)(list(items))
 
 
-def _batch_view(teacher: Callable[..., Any]) -> Callable[[list], list]:
+def _batch_view(teacher: Callable[..., Any]) -> TeacherCaller:
     """Return a strict ``list -> list`` teacher view for cascade probes."""
-
-    def batched(batch: list) -> list:
-        return _label_with(teacher, list(batch))
-
-    return batched
+    return as_batch_view(teacher)
 
 
 def _evidence_digest(inputs: Sequence[Any], labels: Sequence[Any]) -> str:
@@ -250,9 +246,23 @@ class Solution:
     propose_budget: int = 8  # edge-search effort improve() reuses when re-searching under device
     verification_digest: str | None = None
 
+    def _teacher_call(self) -> TeacherCaller:
+        """The teacher view this Solution routes through, resolved once and kept.
+
+        A demoted Solution runs the teacher on *every* request, so rediscovering the calling
+        convention per call would cost an extra teacher invocation per request forever.
+        """
+        caller = self.__dict__.get("_teacher_caller")
+        if caller is None:
+            # the cascade already holds a resolved view of the same teacher when there is one
+            escalate = getattr(self.cascade, "teacher", None)
+            caller = escalate if isinstance(escalate, TeacherCaller) else TeacherCaller(self.teacher)
+            self.__dict__["_teacher_caller"] = caller
+        return caller
+
     def __call__(self, x: Any) -> Any:
         if not self.promoted:
-            return _label_with(self.teacher, [x])[0]
+            return self._teacher_call().one(x)
         return self.cascade(x)
 
     def report(self) -> dict:
@@ -399,8 +409,7 @@ class Solution:
                     "n_calibration": len(self.cal_inputs),
                     "synthesized_inputs": self.synthesized,
                     "verified_at": time.time(),
-                    "evidence_sha256": self.verification_digest
-                    or _evidence_digest(self.cal_inputs, self.cal_labels),
+                    "evidence_sha256": self.verification_digest or _evidence_digest(self.cal_inputs, self.cal_labels),
                     # Task artifacts bind the entire manifest (including this decision) and payload with
                     # SHA-256. Loading may promote only when this marker and the strict evidence record
                     # survive that integrity check.
@@ -545,7 +554,10 @@ def solve(
     if len(items) < 8:
         raise ValueError("solve() needs at least 8 example inputs to train and calibrate honestly")
     k = kind or _input_kind(items[0])
-    labels = [str(y) for y in _label_with(teacher, items)]
+    # one view for the whole call: the calling convention is discovered once, not per labeling pass,
+    # and the same resolved view is handed to the Cascade so escalation never re-probes either.
+    call = as_batch_view(teacher)
+    labels = [str(y) for y in call(items)]
 
     rng = np.random.RandomState(seed)
     order = rng.permutation(len(items))
@@ -574,7 +586,7 @@ def solve(
         synth = _synthesize_inputs(train_inputs, int(synthesize), seed)
         if synth:
             train_inputs = train_inputs + synth
-            train_labels = train_labels + [str(y) for y in _label_with(teacher, synth)]
+            train_labels = train_labels + [str(y) for y in call(synth)]
             n_synth = len(synth)
 
     distill_kw.setdefault("seed", seed)
@@ -596,7 +608,7 @@ def solve(
         promoted = False  # nothing fit the device: serve the teacher, never a budget-busting student
 
     return Solution(
-        cascade=Cascade(cal, _batch_view(teacher), cost=cost),
+        cascade=Cascade(cal, call, cost=cost),
         teacher=teacher,
         kind=k,
         train_inputs=train_inputs,

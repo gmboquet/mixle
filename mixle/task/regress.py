@@ -26,8 +26,9 @@ from typing import Any
 
 import numpy as np
 
+from mixle.task._teacher import TeacherCaller, as_batch_view
 from mixle.task.model import HashedNGram, HashedRecord
-from mixle.task.solve import _input_kind, _label_with
+from mixle.task.solve import _input_kind
 
 
 class RecordRegressionFeaturizer:
@@ -218,6 +219,18 @@ class RegressionSolution:
             raise ValueError("regression prediction is non-finite after restoring target scale")
         return out
 
+    def _teacher_call(self) -> TeacherCaller:
+        """The teacher view escalation routes through, resolved once and kept.
+
+        Escalation runs the teacher on every escalated request, so rediscovering whether it is
+        per-item or batched per call would cost an extra invocation per request forever.
+        """
+        caller = self.__dict__.get("_teacher_caller")
+        if caller is None:
+            caller = as_batch_view(self.teacher)
+            self.__dict__["_teacher_caller"] = caller
+        return caller
+
     def interval(self, x: Any) -> tuple[float, float, float]:
         """Return ``(yhat, lo, hi)`` with calibrated teacher-answer coverage."""
         yhat = float(self._predict([x])[0])
@@ -244,7 +257,7 @@ class RegressionSolution:
         if self.answers_locally:
             return float(self._predict([x])[0])
         self.n_escalated += 1
-        y = float(_label_with(self.teacher, [x])[0])
+        y = float(self._teacher_call().one(x))
         self.harvested_inputs.append(x)
         self.harvested_ys.append(y)
         return y
@@ -427,7 +440,9 @@ def solve_regression(
     if len(items) < 12:
         raise ValueError("solve_regression needs at least 12 example inputs")
     k = kind or _input_kind(items[0])
-    ys = _validated_finite_values(_label_with(teacher, items), name="teacher targets")
+    # one view for the whole call: the per-item/batched convention is resolved once, not per pass
+    call = as_batch_view(teacher)
+    ys = _validated_finite_values(call(items), name="teacher targets")
 
     rng = np.random.RandomState(seed)
     order = rng.permutation(len(items))
@@ -436,9 +451,7 @@ def solve_regression(
         raise ValueError("holdout leaves no regression training examples")
     min_cal = int(np.ceil(1.0 / alpha)) - 1
     if n_cal < min_cal:
-        raise ValueError(
-            f"holdout yields {n_cal} calibration examples, but alpha={alpha} requires at least {min_cal}"
-        )
+        raise ValueError(f"holdout yields {n_cal} calibration examples, but alpha={alpha} requires at least {min_cal}")
     cal_idx, train_idx = order[:n_cal], order[n_cal:]
     train_inputs = [items[i] for i in train_idx]
     train_ys = [ys[i] for i in train_idx]
