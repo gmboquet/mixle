@@ -1119,6 +1119,15 @@ class CategoricalEstimator(ParameterEstimator):
         if self.has_conj_prior:
             return self._estimate_conjugate(suff_stat)
 
+        if not suff_stat:
+            # Return the empty categorical HERE, before any per-level arithmetic. Every smoothing
+            # branch below divides by a level count, so reaching them with no levels raised
+            # ZeroDivisionError instead of producing the no-evidence estimate this method documents
+            # directly above -- an HMM whose emission component drew zero weight for an iteration
+            # crashed the whole fit rather than recovering on the next E-step. A pseudo_count has
+            # nothing to spread over when there are no levels, so there is no smoothing to apply.
+            return CategoricalDistribution({}, default_value=0.0, name=self.name, keys=self.keys)
+
         stats_sum = sum(suff_stat.values())
 
         if self.default_value:

@@ -565,7 +565,9 @@ class ArraySourceSchemaConformanceTest(unittest.TestCase):
     def test_patch_sampler_encode_applies_schema_per_batch(self):
         vol = np.arange(10 * 10 * 10, dtype="int32").reshape(10, 10, 10)
         arr = _CountingArray(vol)
-        schema = Schema(fields=(Field("patch", Vector()), Field("coords", Categorical())))
+        # A (2, 2, 2) patch is rectangular; its model-facing form is the flat length-8 vector, and
+        # declaring dim=8 is what authorizes Vector.coerce to reshape it rather than refuse it.
+        schema = Schema(fields=(Field("patch", Vector(dim=8)), Field("coords", Categorical())))
         sampler = PatchSampler(arr, patch_size=(2, 2, 2), num_patches=12, seed=1, schema=schema)
         encoder = _RecordingEncoder(arr)
 
