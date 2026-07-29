@@ -454,8 +454,22 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         return self.pmap.get(x, self.default_value) / (1.0 + self.default_value)
 
     def density_semantics(self):
-        """Declare scoring-only objects as factors rather than generative laws."""
-        if self.scoring_only:
+        """Report ``EXACT`` only for instances that really are normalized probability laws.
+
+        This used to key off ``scoring_only`` alone, so an instance whose pmap does not sum to one --
+        ``{"a": 0.8, "b": 0.8}``, or the empty pmap an EM component gets when it wins zero
+        responsibility -- declared itself ``EXACT`` while ``is_normalized_probability`` said
+        ``False``. Two attributes on the same object disagreeing about the same fact is worse than
+        either answer alone: a caller that checks the flag gets the truth, a caller that checks
+        semantics gets a claim of exactness, and both are documented as the way to ask.
+
+        ``is_normalized_probability`` is computed at construction and already folds in
+        ``scoring_only``, so it is the single fact to report from. Unnormalized instances stay
+        constructible on purpose (see the constructor) -- what changes is that they now describe
+        themselves as :attr:`~mixle.stats.compute.pdist.DensitySemantics.LIKELIHOOD_FACTOR`: an
+        exact score factor, not a normalized generative law.
+        """
+        if not self.is_normalized_probability:
             from mixle.stats.compute.pdist import DensitySemantics
 
             return DensitySemantics.LIKELIHOOD_FACTOR

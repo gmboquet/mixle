@@ -494,6 +494,7 @@ def solve(
     device_space: Any = None,
     cost: Any = None,
     seed: int = 0,
+    teacher_mode: str = "auto",
     **distill_kw: Any,
 ) -> Solution:
     """Replace ``teacher`` (the code currently doing the job) with a calibrated, self-improving model.
@@ -556,7 +557,7 @@ def solve(
     k = kind or _input_kind(items[0])
     # one view for the whole call: the calling convention is discovered once, not per labeling pass,
     # and the same resolved view is handed to the Cascade so escalation never re-probes either.
-    call = as_batch_view(teacher)
+    call = as_batch_view(teacher, teacher_mode)
     labels = [str(y) for y in call(items)]
 
     rng = np.random.RandomState(seed)

@@ -98,12 +98,23 @@ def _loss_samples(
     else:
         try:
             values, mode = _vector_losses(loss, action, draws), True
-        except Exception as probe_error:  # noqa: BLE001 -- the probe is speculative; any failure means "not vectorized"
+        except ValueError:
+            # _vector_losses' own "wrong number of values" complaint: the loss ran fine, it just is
+            # not vectorized. That is exactly what the probe is asking, so fall through.
+            values, mode = _scalar_losses(loss, action, draws, context=context), False
+        except TypeError as probe_error:
+            # TypeError is what a per-draw loss raises when handed the whole array -- a bad index, a
+            # bad attribute, a bad arity -- and it is the ordinary "not vectorized" signal. Anything
+            # else is not: a ConnectionError from a pricing service, a RuntimeError from a solver,
+            # used to be absorbed identically and the loss then called once per draw, returning
+            # numbers that decide which action gets taken as though nothing had failed.
             try:
                 values, mode = _scalar_losses(loss, action, draws, context=context), False
             except Exception as exc:
-                # Do not let the discarded probe hide why the loss cannot be evaluated at all.
-                exc.add_note(f"the vectorized-call probe first failed with: {probe_error!r}")
+                exc.add_note(
+                    f"the vectorized-call probe first failed with: {probe_error!r} -- pass "
+                    "vectorized=True/False (or set loss.vectorized) to skip this discovery"
+                )
                 raise
     unit, caller = ("posterior draw", "bayes_action") if context == "bayes_action" else ("outcome", context)
     return _validated_losses(values, action, unit=unit, caller=caller), mode
@@ -278,6 +289,11 @@ def bayes_action(
         "expected_loss": expected[best],
         "risk_profile": profiles[best].as_dict(),
         "alternatives": [{"action": a, "expected_loss": e} for a, e in zip(actions, expected)],
+        # The convention this call resolved, so a caller that goes on to evaluate the same loss --
+        # decision_regret_objective scoring the chosen action against real data, say -- can pass it
+        # straight back instead of probing the loss a second time. A probe is a real invocation of
+        # user code; discovering the same fact twice is one wasted call per decision, forever.
+        "vectorized": mode,
     }
 
 

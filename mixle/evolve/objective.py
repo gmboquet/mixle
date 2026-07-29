@@ -311,8 +311,12 @@ def decision_regret_objective(
 
     def sc(model: Any, data: Any) -> float:
         post = _posterior(model, over="predictive")
-        chosen = bayes_action(post, loss, list(actions), n=n, seed=seed, vectorized=mode[0])["action"]
-        score, mode[0] = _realized_loss(loss, chosen, data, vectorized=mode[0])
+        decision = bayes_action(post, loss, list(actions), n=n, seed=seed, vectorized=mode[0])
+        # bayes_action reports the convention it resolved; take it rather than probing again. The
+        # realized-loss pass used to rediscover the same fact, so an undeclared loss was invoked one
+        # extra time per model scored purely to learn something already known one line above.
+        mode[0] = decision.get("vectorized", mode[0])
+        score, mode[0] = _realized_loss(loss, decision["action"], data, vectorized=mode[0])
         return score
 
     return _ScalarObjective("decision_regret", True, pw, sc)

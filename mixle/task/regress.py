@@ -401,6 +401,7 @@ def solve_regression(
     dim: int = 256,
     prelabeled: tuple[Sequence[Any], Sequence[float]] | None = None,
     seed: int = 0,
+    teacher_mode: str = "auto",
 ) -> RegressionSolution:
     """Replace a numeric routine with a conformally-calibrated student (see module docstring).
 
@@ -441,7 +442,7 @@ def solve_regression(
         raise ValueError("solve_regression needs at least 12 example inputs")
     k = kind or _input_kind(items[0])
     # one view for the whole call: the per-item/batched convention is resolved once, not per pass
-    call = as_batch_view(teacher)
+    call = as_batch_view(teacher, teacher_mode)
     ys = _validated_finite_values(call(items), name="teacher targets")
 
     rng = np.random.RandomState(seed)

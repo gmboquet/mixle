@@ -22,6 +22,20 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+TEACHER_MODES = ("auto", "batch", "item")
+"""How a teacher wants to be called. ``"auto"`` discovers it; the others declare it."""
+
+
+def _teacher_name(teacher: Any) -> str:
+    return getattr(teacher, "__name__", None) or type(teacher).__name__
+
+
+def batched_from_mode(teacher_mode: str) -> bool | None:
+    """Map a public ``teacher_mode`` onto :class:`TeacherCaller`'s ``batched`` flag."""
+    if teacher_mode not in TEACHER_MODES:
+        raise ValueError(f"teacher_mode must be one of {TEACHER_MODES}, got {teacher_mode!r}")
+    return None if teacher_mode == "auto" else teacher_mode == "batch"
+
 
 class TeacherCaller:
     """A ``list -> list`` view over a teacher of either calling convention.
@@ -65,12 +79,37 @@ class TeacherCaller:
         return [self.teacher(x) for x in items]
 
     def _resolve(self, items: list) -> list:
-        """Discover the convention from the first real labeling pass, and remember it."""
+        """Discover the convention from the first real labeling pass, and remember it.
+
+        Only ``TypeError`` counts as "not batched". That is what a per-item teacher raises when
+        handed a list -- from a bad index (``item["kind"]`` on a list), a bad attribute, a bad
+        arity -- and it is the ordinary signal, not an anomaly. Everything else propagates.
+
+        The distinction matters because the two look identical from here and are not: a
+        ``ConnectionError`` from a metered API, a ``RuntimeError`` from a model server, a
+        ``TimeoutError`` -- these used to be absorbed exactly like a shape rejection, and the teacher
+        was then called ``len(items)`` more times, returning labels as though the outage had not
+        happened. Narrowing to ``TypeError`` keeps the discovery that works while letting a real
+        failure be a real failure.
+
+        The remaining ambiguity -- a teacher whose own body raises ``TypeError`` for its own
+        reasons -- is why ``teacher_mode`` exists. Declaring ``"batch"`` or ``"item"`` skips
+        discovery entirely, and the note attached below makes the discarded probe visible if the
+        per-item retry fails too.
+        """
         try:
             out = self.teacher(items)
-        except Exception:  # noqa: BLE001 - how a teacher rejects a batch shape is not part of any contract
+        except TypeError as probe_error:
             self._batched = False
-            return [self.teacher(x) for x in items]
+            try:
+                return [self.teacher(x) for x in items]
+            except Exception as exc:
+                # Never let the discarded probe hide why the teacher cannot label at all.
+                exc.add_note(
+                    f"the batch-call probe on {_teacher_name(self.teacher)} first failed with: "
+                    f"{probe_error!r} -- pass teacher_mode='item' or 'batch' to skip this discovery"
+                )
+                raise
         if isinstance(out, (list, tuple)):
             # a sequence answer to a batch means batched; a *wrong-length* one is a broken batched
             # teacher rather than a per-item one, so it is reported instead of silently relabeled
@@ -89,6 +128,13 @@ class TeacherCaller:
         return list(out)
 
 
-def as_batch_view(teacher: Callable[..., Any]) -> TeacherCaller:
-    """A strict ``list -> list`` teacher view (e.g. for cascade escalation)."""
-    return teacher if isinstance(teacher, TeacherCaller) else TeacherCaller(teacher)
+def as_batch_view(teacher: Callable[..., Any], teacher_mode: str = "auto") -> TeacherCaller:
+    """A strict ``list -> list`` teacher view (e.g. for cascade escalation).
+
+    ``teacher_mode`` declares the calling convention -- ``"batch"``, ``"item"``, or ``"auto"``
+    to discover it. Declaring skips discovery entirely, which is what a teacher that keeps
+    state, costs money per call, or rejects a batch from inside its own body should do.
+    """
+    if isinstance(teacher, TeacherCaller):
+        return teacher
+    return TeacherCaller(teacher, batched=batched_from_mode(teacher_mode))

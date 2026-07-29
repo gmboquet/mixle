@@ -391,7 +391,7 @@ class GradTarget:
                 )
             return self._logtarget_batch(u)
 
-        mean_np, scale_np, U, objective, _chol = _advi_optimize(
+        mean_np, scale_np, U, objective, chol = _advi_optimize(
             self._torch,
             log_p_fn,
             u0,
@@ -410,7 +410,11 @@ class GradTarget:
         # non-centered back-transform ``value = loc + scale * z`` (``reparam == "loc_scale"``),
         # so the returned draws are parameter values, never z-space latents.
         vals = _u_to_vals(self.slots, U)
-        return vals, mean_np, scale_np, objective
+        # The Cholesky factor is the whole point of family='fullrank': the correlations live in its
+        # off-diagonals, and `scale_np` is only the marginal standard deviations -- exactly what the
+        # meanfield fit already gives. Dropping it here meant vi_fit could report a full-rank
+        # algorithm while exposing a posterior indistinguishable from the diagonal one.
+        return vals, mean_np, scale_np, objective, chol
 
 
 class MixtureGradTarget(GradTarget):

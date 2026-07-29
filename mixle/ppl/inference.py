@@ -2326,6 +2326,7 @@ class _VIResult:
         alpha=1.0,
         family="meanfield",
         batch_size=None,
+        cholesky=None,
         *,
         algorithm,
         iterations,
@@ -2339,6 +2340,13 @@ class _VIResult:
         self.batch_size = None if batch_size is None else int(batch_size)
         self.variational_mean = mean
         self.variational_std = std
+        self.variational_cholesky = cholesky
+        """Cholesky factor of the fitted covariance for ``family='fullrank'``; ``None`` otherwise.
+
+        ``variational_std`` holds only the marginal standard deviations, which a meanfield fit
+        supplies too -- the correlations a full-rank fit exists to learn are entirely in this
+        factor's off-diagonals. Without it, a full-rank result was reportable as full-rank while
+        being indistinguishable from the diagonal posterior it was meant to improve on."""
         self.acceptance_rate = None
         self.algorithm = str(algorithm)
         self.iterations = int(iterations)
@@ -2411,7 +2419,7 @@ def vi_fit(
         slots, build = ag.slots, ag.build
         u0 = _init_u(slots, ag.dmean, ag.dstd)
         s0 = _init_scale(slots, ag.dstd, len(data))
-        vals, mean, std, objective = ag.advi(
+        vals, mean, std, objective, cholesky = ag.advi(
             u0,
             s0,
             samples=samples,
@@ -2458,6 +2466,7 @@ def vi_fit(
         if not bool(res.success) or not np.isfinite(res.fun) or not np.all(np.isfinite(res.x)):
             raise RuntimeError(f"variational optimization failed: {res.message}")
         mean, std = res.x[:d], np.exp(res.x[d:])
+        cholesky = None  # this backend is meanfield-only (checked above); there is no factor to report
         Z = rng.standard_normal((samples, d))
         U = mean + std * Z
         # map unconstrained samples back per slot support (exp/sigmoid/identity); the old hand-rolled
@@ -2480,6 +2489,7 @@ def vi_fit(
             objective,
             mean,
             std,
+            cholesky=cholesky,
             objective_kind=objective_kind,
             alpha=alpha,
             family=family,
