@@ -1,7 +1,7 @@
 Large-Module Audit
 ==================
 
-Eighteen modules in ``mixle`` exceed 1,500 lines. Size alone is not a defect, and this audit is **not** a
+Twenty-nine modules in ``mixle`` exceed 1,500 lines. Size alone is not a defect, and this audit is **not** a
 mandate to split them. Its purpose (worklist A1.7) is to record, for each large module, what it owns, the
 state it carries, the optional dependencies it touches, its hot paths, its serialization hooks, and where a
 *safe* extraction boundary lies — so that a future change can be scoped without a blind refactor.
@@ -125,6 +125,77 @@ encoder are the only clean seams; the distribution/estimator pair is a single nu
     * **Extraction boundary:** the labeled vs unlabeled variant families are separable, but they share the
       motif and alignment helpers; split only if a variant grows an independent defect surface.
 
+``mixle/stats/latent/integer_hidden_association.py`` (1,842)
+    * **Responsibilities:** integer hidden-association models over grouped-count word sets.
+    * **Stateful globals:** encoding/statistic ``TypeVar``\s (``E0``--``E4``, ``SS1``, ``SS2``) only, plus
+      the engine-kernel registration performed by ``_register_int_hidden_association_engine_kernel``.
+    * **Optional imports:** Numba, reached through the compute layer.
+    * **Hot paths:** ``seq_log_density``, ``seq_update``, ``seq_update_engine``, and the
+      ``numba_seq_log_density`` / ``numba_seq_update`` pair.
+    * **Serialization:** ``dist_to_encoder`` / ``seq_encode``.
+    * **Extraction boundary:** the ``numba_*`` kernels are the only clean seam, as elsewhere in this
+      section; the distribution/estimator pair is one numerical unit. Leave as-is absent a defect.
+
+``mixle/stats/latent/integer_probabilistic_latent_semantic_indexing.py`` (1,719)
+    * **Responsibilities:** integer PLSI — the EM fixed point over document/topic/word factors.
+    * **Stateful globals:** ``T1``/``SS1`` aliases, plus ``_register_int_plsi_engine_kernel``'s registration.
+    * **Optional imports:** Numba, through the compute layer.
+    * **Hot paths:** ``fast_seq_log_density`` / ``fast_seq_update`` and their ``seq_*`` entry points.
+    * **Serialization:** ``dist_to_encoder`` / ``seq_encode``; ``IntegerPLSIEncodedData`` is the payload.
+    * **Extraction boundary:** ``IntegerPLSIEncodedData`` and the ``fast_*`` kernels separate cleanly from
+      the estimator; a real seam, worth taking only with a defect that localizes there.
+
+``mixle/stats/latent/heterogeneous_pcfg.py`` (1,828)
+    * **Responsibilities:** PCFG with heterogeneous terminal emissions — inside/outside recursions,
+      termination certification, quantized index construction.
+    * **Stateful globals:** none.
+    * **Optional imports:** none at this layer.
+    * **Hot paths:** ``seq_log_density``, ``seq_update``, ``backend_seq_log_density``.
+    * **Serialization:** ``dist_to_encoder`` / ``seq_encode``.
+    * **Extraction boundary:** ``PCFGTerminationCertificate`` and
+      ``_HeterogeneousPCFGQuantizedIndexBuilder`` are already self-contained and are the seam if one is
+      ever needed; the recursions themselves are a single unit.
+
+``mixle/stats/sequences/integer_markov_chain.py`` (1,971)
+    * **Responsibilities:** integer Markov chains with optional lagged transitions, including the
+      explicitly non-generative scoring mode (``NonGenerativeIntegerMarkovChainError``).
+    * **Stateful globals:** ``E1``/``E2``/``SS1``/``SS2`` aliases only.
+    * **Optional imports:** none.
+    * **Hot paths:** ``seq_log_density``, ``seq_update``, ``seq_update_engine``, ``backend_seq_log_density``.
+    * **Serialization:** ``dist_to_encoder`` / ``seq_encode``.
+    * **Extraction boundary:** leave as-is. The lag handling threads through encode, score and update
+      together; separating it would split one contract across two modules.
+
+``mixle/stats/multivariate/integer_multinomial.py`` (1,576)
+    * **Responsibilities:** integer-keyed multinomial over a bounded support.
+    * **Stateful globals:** ``SS0``/``D``/``E0``/``E`` aliases only.
+    * **Optional imports:** none.
+    * **Hot paths:** ``seq_log_density``, ``seq_update``, ``seq_update_engine``.
+    * **Serialization:** ``dist_to_encoder`` / ``seq_encode``.
+    * **Extraction boundary:** leave as-is; the six-type contract is already the minimum unit here.
+
+``mixle/stats/combinator/sequence.py`` (1,666)
+    * **Responsibilities:** iid sequence laws plus the explicitly non-generative sequence score modes
+      (``NonGenerativeSequenceError``), including the length-support reasoning.
+    * **Stateful globals:** ``T``/``E1``/``E2``/``E`` aliases and the two proof limits
+      ``_INFINITE_INTEGER_LENGTH_SUPPORTS``, ``_FINITE_LENGTH_PROOF_LIMIT`` (constants, not mutable state).
+    * **Optional imports:** none.
+    * **Hot paths:** ``seq_log_density``, ``seq_update``, ``backend_seq_log_density``,
+      ``backend_stacked_log_density``, ``expected_log_density``.
+    * **Serialization:** ``dist_to_encoder`` / ``seq_encode``.
+    * **Extraction boundary:** the length-support proof helpers are the one separable piece; the
+      generative and score-only paths must stay together, since their divergence is the contract.
+
+``mixle/stats/bayes/conjugate.py`` (1,669)
+    * **Responsibilities:** conjugate-prior posteriors derived from the exponential-family map, one class
+      per conjugate pair, plus the ``_NO_CLOSED_FORM`` fallback marker.
+    * **Stateful globals:** ``_NO_CLOSED_FORM`` (a sentinel).
+    * **Optional imports:** ``scipy`` (special functions), reached lazily.
+    * **Hot paths:** posterior updates and ``point_estimate``; per-observation, not per-batch.
+    * **Serialization:** posterior parameters round-trip through the owning distribution.
+    * **Extraction boundary:** one module per conjugate family would be a clean split, but the shared
+      exponential-family derivation is what keeps them consistent — leave as-is.
+
 Probabilistic-programming surface
 ---------------------------------
 
@@ -226,3 +297,45 @@ Infrastructure and facade
     * **Optional imports:** none.
     * **Extraction boundary:** the Numba-lowering tables and their validation are separable from the spec
       dataclasses; split when the lowering rules next grow.
+
+``mixle/stats/compute/pdist.py`` (1,689)
+    * **Responsibilities:** the root contracts — the six-type ABCs, ``DensitySemantics``, and the error
+      types (``ContractError``, ``EnumerationError``, ``KeyValidationError``).
+    * **Stateful globals:** ``SS`` alias and ``_KEY_ATTRS``.
+    * **Optional imports:** ``inspect`` and ``mixle`` submodules, deferred to avoid import cycles.
+    * **Hot paths:** none of its own; it defines the signatures every hot path implements.
+    * **Serialization:** ``from_json`` and the ``dist_to_encoder`` / ``seq_encode`` contract itself.
+    * **Extraction boundary:** **do not split.** Nearly every module in the tree imports this one, so a
+      split multiplies the import-cycle surface that ``doe_task_models_clean_import_test`` guards. The
+      error classes could move if that test ever forces it, and nothing else should.
+
+``mixle/stats/compute/fused_kernels.py`` (1,759)
+    * **Responsibilities:** fused Numba kernels for mixture estimation over heterogeneous data, and the
+      per-leaf builders that generate them.
+    * **Stateful globals:** ``_BUILDERS`` (the leaf-builder registry) and ``_NEG_INF``.
+    * **Optional imports:** Numba via the compute layer, ``scipy``, ``concurrent`` (parallel build), ``os``.
+    * **Hot paths:** ``build_kernel``, ``seq_log_density``, ``seq_component_log_density``, and the
+      ``_pair_kernels`` / ``_sequence_kernel`` / ``_optional_kernel`` generators.
+    * **Serialization:** ``CompiledEncoding`` is the compiled-payload boundary, not a schema surface.
+    * **Extraction boundary:** the ``_LeafBuilder`` subclasses are one clean seam per leaf family and the
+      registry makes the split mechanical; the codegen core should stay whole.
+
+``mixle/ppl/field.py`` (1,931)
+    * **Responsibilities:** latent Gaussian fields observed through many proxies — kernels
+      (RBF/Matern/great-circle/anisotropic), the field system, proxy likelihoods, and posterior readout.
+    * **Stateful globals:** ``_SPARSE_SOLVE_DETECTORS`` (a detector registry).
+    * **Optional imports:** ``torch`` and ``scipy``-backed sparse solves, both reached lazily.
+    * **Hot paths:** kernel assembly and the sparse/dense posterior solve.
+    * **Serialization:** field and proxy parameters round-trip through the owning system.
+    * **Extraction boundary:** the ``FieldKernel`` hierarchy is fully separable from ``FieldSystem`` and
+      the ``Proxy`` family; a genuine three-way seam, and the first place to split if this module grows.
+
+``mixle/relations.py`` (1,558)
+    * **Responsibilities:** relations over structured spaces enumerated by residual — shortest path,
+      assignment, spanning tree, edit distance, Viterbi path, best-subset regression.
+    * **Stateful globals:** none.
+    * **Optional imports:** ``scipy`` (sparse/optimization routines), lazily.
+    * **Hot paths:** each relation's enumeration loop; the residual ordering is the shared contract.
+    * **Serialization:** ``Solution`` / ``Design`` carry the round-tripped state.
+    * **Extraction boundary:** one module per relation is a clean, obvious split, held together only by
+      the shared ``Relation`` base and its ordering guarantee. Defect-neutral; do it when one grows.
