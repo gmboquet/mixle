@@ -88,8 +88,12 @@ class BinomialEvidenceContractTest(unittest.TestCase):
         encoded = BinomialDataEncoder().seq_encode([value])
         self.assertEqual(encoded[2].dtype, np.dtype(np.int64))
         self.assertEqual(int(encoded[2][0]), value)
+        # subTest labels are repr()'d, not passed raw: xdist ships every subtest report through
+        # execnet, whose integer wire format is 32-bit, so a raw 2**63 label crashes the report
+        # channel (struct.error) even when the assertion itself passes. Same reason objects are
+        # labelled by repr elsewhere in this file.
         for invalid in (2**63, -(2**63) - 1, np.inf):
-            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+            with self.subTest(invalid=repr(invalid)), self.assertRaises(ValueError):
                 BinomialDataEncoder().seq_encode([invalid])
 
     def test_zero_weight_does_not_expand_inferred_support(self):
@@ -136,7 +140,7 @@ class DiscreteVariationalAndCountContractTest(unittest.TestCase):
             ),
         )
         for distribution, encoded in distributions_and_encoded:
-            with self.subTest(distribution=distribution):
+            with self.subTest(distribution=repr(distribution)):
                 self.assertEqual(distribution.expected_log_density(0.5), -np.inf)
                 scored = distribution.seq_expected_log_density(encoded)
                 self.assertEqual(scored[1], -np.inf)
@@ -149,7 +153,7 @@ class DiscreteVariationalAndCountContractTest(unittest.TestCase):
             PoissonDistribution(2.0),
         )
         for distribution in distributions:
-            with self.subTest(distribution=distribution), self.assertRaises(ValueError):
+            with self.subTest(distribution=repr(distribution)), self.assertRaises(ValueError):
                 distribution.dist_to_encoder().seq_encode([np.inf])
 
     def test_negative_binomial_rejects_nan_probability(self):
@@ -196,7 +200,7 @@ class CategoricalEvidenceContractTest(unittest.TestCase):
             IntegerCategoricalAccumulator(),
             IntegerUniformSpikeAccumulator(None, None),
         ):
-            with self.subTest(accumulator=accumulator):
+            with self.subTest(accumulator=type(accumulator).__name__):
                 accumulator.update(2, 1.0, None)
                 accumulator.update(100, 0.0, None)
                 self.assertEqual((accumulator.min_val, accumulator.max_val), (2, 2))
@@ -204,11 +208,21 @@ class CategoricalEvidenceContractTest(unittest.TestCase):
 
 
 class DiscreteProbabilityLawContractTest(unittest.TestCase):
-    def test_empty_categorical_fit_requires_explicit_support(self):
-        with self.assertRaises(ValueError):
-            CategoricalEstimator().estimate(None, {})
+    def test_empty_categorical_fit_widens_a_declared_support_and_otherwise_stays_empty(self):
+        """A zero-evidence fit is a state EM legitimately reaches, so it estimates rather than raises.
+
+        A mixture or HMM component can win zero responsibility for an iteration and recover on the
+        next one; aborting the whole fit there would lose a model the very next E-step repairs. So
+        the contract is: a declared support (prior or ``suff_stat``) is widened into with zero
+        counts, and with no declared support the honest estimate is the empty categorical -- which
+        reports itself unnormalized, deferring refusal to the point of use.
+        """
         fitted = CategoricalEstimator(suff_stat={"known": 1.0}).estimate(None, {})
         self.assertEqual(fitted.pmap, {"known": 1.0})
+
+        empty = CategoricalEstimator().estimate(None, {})
+        self.assertEqual(empty.pmap, {})
+        self.assertFalse(empty.is_normalized_probability)
 
     def test_unnormalized_categorical_constructs_but_reports_itself_unnormalized(self):
         # An unnormalized pmap (with or without a positive fallback) is a legal construction by
@@ -277,7 +291,7 @@ class DiscreteProbabilityLawContractTest(unittest.TestCase):
             IntegerCategoricalAccumulator(),
             IntegerUniformSpikeAccumulator(None, None),
         ):
-            with self.subTest(accumulator=accumulator):
+            with self.subTest(accumulator=type(accumulator).__name__):
                 donor = np.asarray([1.0, 2.0])
                 accumulator.combine((4, donor))
                 donor[0] = 99.0
