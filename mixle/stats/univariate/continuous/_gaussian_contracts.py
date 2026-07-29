@@ -86,8 +86,12 @@ def scalar_gaussian_moments(value: Any) -> tuple[float, float, float]:
     )
     if count != count2:
         raise ValueError("Gaussian first- and second-moment counts must match")
-    if count == 0.0 and (sum_x != 0.0 or sum_xx != 0.0):
-        raise ValueError("zero-count Gaussian sufficient statistics require zero moments")
+    # A zero-count component is a starved one, which is a normal EM state and the whole reason the
+    # mixture weight floor exists. Its moments are never read: the estimator sees count == 0 and
+    # returns the floor defaults whatever they hold, so rejecting them fails closed on dead data and
+    # turns a component the floor was built to revive into a hard crash. Finiteness and
+    # non-negativity were both still checked above, unconditionally. Same reasoning as the
+    # multivariate sibling in stats/multivariate/_vector_contracts.py.
     return sum_x, sum_xx, count
 
 
