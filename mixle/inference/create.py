@@ -119,6 +119,17 @@ def create(
         rng = np.random.RandomState(seed)
         order = rng.permutation(len(rows))
         n_hold = max(1, int(round(frac * len(rows))))
+        # The floor guarantees a holdout row; nothing guaranteed a *fit* row. calibrate=0.9 on four
+        # rows reserved all four and handed optimize() an empty list, which failed with
+        # "optimize() received empty data" -- an error naming neither calibrate nor the split, so the
+        # one parameter responsible for it was the one the message did not mention. Refuse here,
+        # where the arithmetic that caused it is visible, rather than silently shrinking the holdout
+        # to something the caller did not ask for.
+        if n_hold >= len(rows):
+            raise ValueError(
+                f"calibrate={frac} reserves {n_hold} of {len(rows)} row(s) as the calibration holdout, "
+                "leaving no rows to fit on; lower calibrate or supply more rows"
+            )
         hold_idx, fit_idx = order[:n_hold], order[n_hold:]
         fit_rows = [rows[i] for i in fit_idx]
         holdout = [rows[i] for i in hold_idx]
