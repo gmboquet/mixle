@@ -159,7 +159,14 @@ class DistributionDeclaration:
                     raise ValueError("%s expected choice-statistics schema version 1." % self.name)
                 suff_stat = suff_stat.branches
             return {spec.name: suff_stat}
-        if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != len(self.statistics):
+        # Any Sequence, not just tuple/list. A statistics record that carries extra bookkeeping
+        # beside its child statistics (HiddenAssociationStatistics and its integer twin keep mass
+        # totals and a schema version) subclasses Sequence and reports the declared child count from
+        # __len__ precisely so it can be read positionally here; restricting to the two concrete
+        # builtin types rejected exactly the records that opted into the protocol. str/bytes are
+        # Sequences too and are never a statistics record.
+        positional = isinstance(suff_stat, Sequence) and not isinstance(suff_stat, (str, bytes, bytearray))
+        if not positional or len(suff_stat) != len(self.statistics):
             raise ValueError(
                 "%s expected %d statistic entries, got %s."
                 % (self.name, len(self.statistics), type(suff_stat).__name__)
