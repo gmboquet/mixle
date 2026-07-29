@@ -33,7 +33,7 @@ from typing import Any
 
 import numpy as np
 
-from mixle.inference.precision_plan import _FP32_SAFE
+from mixle.inference.precision_plan import _FP32_SAFE, _has_non_finite
 
 # An executable subtree remains reduced only when its observed absolute
 # per-row log-score error is within this validation tolerance.
@@ -152,6 +152,14 @@ def _data_magnitude_safe(data: Any, max_magnitude: float, sample_size: int) -> t
             sample = data
     else:
         sample = data
+    # Check the RECORDS for non-finiteness before reducing them to a numeric sample. Composite and
+    # mixture data is record-shaped -- tuples, dicts -- and _numeric_data_sample flattens to whatever
+    # numeric leaves it can find, so a NaN sitting in one field of one record could be dropped on the
+    # way in. The gate is documented as applying uniformly to every node, and it cannot do that on a
+    # sample the NaN never reached: the fallback then happened only where a leaf was independently
+    # unsafe, leaving otherwise-safe leaves reduced on data containing a NaN.
+    if any(_has_non_finite(record) for record in sample):
+        return False, "non-finite data (NaN/Inf) -> float64", None
     s = _numeric_data_sample(sample, sample_size)
     if s is None or s.size == 0:
         return False, "non-numeric / empty data -> float64", None

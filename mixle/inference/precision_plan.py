@@ -66,6 +66,32 @@ class PrecisionPlan:
         self.fallback = fallback
 
 
+def _has_non_finite(value: Any, _depth: int = 0) -> bool:
+    """Whether ``value`` contains a NaN or infinity anywhere in a record-shaped structure.
+
+    Reduced precision cannot be *validated* against data the reference path itself cannot score, and
+    non-finite input is the common way that happens. Without this the fallback still occurred, but
+    the rationale reported whatever incidental exception fired first -- for a Gaussian leaf, a
+    support ContractError naming ``x in (-inf,inf)`` -- which tells a caller nothing about the
+    actual problem being a NaN in their data.
+    """
+    if _depth > 8:  # records nest shallowly; bail rather than walk a cycle
+        return False
+    if isinstance(value, (bool, np.bool_)) or value is None:
+        return False
+    if isinstance(value, (int, np.integer)):
+        return False
+    if isinstance(value, (float, np.floating)):
+        return not np.isfinite(value)
+    if isinstance(value, np.ndarray):
+        return value.dtype.kind in "fc" and not bool(np.isfinite(value).all())
+    if isinstance(value, dict):
+        return any(_has_non_finite(v, _depth + 1) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_has_non_finite(v, _depth + 1) for v in value)
+    return False
+
+
 def _leaf_components(model: Any) -> list[Any]:
     """Flatten a model to its leaf component distributions (through mixtures and composites)."""
     t = type(model).__name__
@@ -195,6 +221,14 @@ def recommend_compute_precision(
         f"{type(model).__module__}.{type(model).__qualname__}|{repr(model)}|{repr(sample_records)}"
     ).encode()
     context_digest = hashlib.sha256(digest_payload).hexdigest()
+    if any(_has_non_finite(record) for record in sample_records):
+        return plan(
+            np.float64,
+            "sample data contains non-finite values, so float32 agreement cannot be validated -> float64",
+            count=len(sample_records),
+            digest=context_digest,
+            fallback="non_finite_data",
+        )
     try:
         from mixle.stats.compute.fused_codegen import fused_seq_log_density
 
@@ -210,9 +244,14 @@ def recommend_compute_precision(
             raise RuntimeError("precision validation produced non-finite scores")
         observed_error = float(np.max(np.abs(reduced - reference) / np.maximum(np.abs(reference), 1.0)))
     except Exception as error:  # noqa: BLE001 - any failed validation must fail closed to float64
+        # Carry the exception's own message, not just its class. Falling back to float64 is right
+        # either way, but the rationale is what a caller reads to find out *why* their model cannot
+        # run reduced -- and "ContractError" alone does not distinguish non-finite scores from a
+        # shape mismatch from an unsupported leaf. The raises above go to the trouble of saying
+        # which; discarding that left the plan reporting a fallback nobody could act on.
         return plan(
             np.float64,
-            f"float32 validation did not execute successfully ({type(error).__name__}) -> float64",
+            f"float32 validation did not execute successfully ({type(error).__name__}: {error}) -> float64",
             count=len(sample_records),
             digest=context_digest,
             fallback="validation_failed",
