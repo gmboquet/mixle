@@ -67,19 +67,21 @@ def _vector_losses(loss: Loss, action: Any, draws: Sequence[Any]) -> np.ndarray:
     return arr
 
 
-def _scalar_losses(loss: Loss, action: Any, draws: Sequence[Any]) -> np.ndarray:
+def _scalar_losses(loss: Loss, action: Any, draws: Sequence[Any], *, context: str = "bayes_action") -> np.ndarray:
     """Evaluate a scalar loss exactly once per draw, reporting which draw failed."""
     out = np.empty(len(draws), dtype=float)
     for i, draw in enumerate(draws):
         try:
             out[i] = float(loss(action, draw))
         except Exception as exc:
-            exc.add_note(f"raised by loss(action={action!r}, draw #{i} of {len(draws)}) in bayes_action")
+            exc.add_note(f"raised by loss(action={action!r}, draw #{i} of {len(draws)}) in {context}")
             raise
     return out
 
 
-def _loss_samples(loss: Loss, action: Any, draws: Sequence[Any], *, vectorized: bool | None) -> tuple[np.ndarray, bool]:
+def _loss_samples(
+    loss: Loss, action: Any, draws: Sequence[Any], *, vectorized: bool | None, context: str = "bayes_action"
+) -> tuple[np.ndarray, bool]:
     """Evaluate the loss over posterior draws; return the losses and the resolved calling convention.
 
     ``vectorized`` is the caller's declaration: ``True`` calls the loss once with the whole draw array,
@@ -92,21 +94,24 @@ def _loss_samples(loss: Loss, action: Any, draws: Sequence[Any], *, vectorized: 
     if vectorized is True:
         values, mode = _vector_losses(loss, action, draws), True
     elif vectorized is False:
-        values, mode = _scalar_losses(loss, action, draws), False
+        values, mode = _scalar_losses(loss, action, draws, context=context), False
     else:
         try:
             values, mode = _vector_losses(loss, action, draws), True
         except Exception as probe_error:  # noqa: BLE001 -- the probe is speculative; any failure means "not vectorized"
             try:
-                values, mode = _scalar_losses(loss, action, draws), False
+                values, mode = _scalar_losses(loss, action, draws, context=context), False
             except Exception as exc:
                 # Do not let the discarded probe hide why the loss cannot be evaluated at all.
                 exc.add_note(f"the vectorized-call probe first failed with: {probe_error!r}")
                 raise
-    return _validated_losses(values, action), mode
+    unit, caller = ("posterior draw", "bayes_action") if context == "bayes_action" else ("outcome", context)
+    return _validated_losses(values, action, unit=unit, caller=caller), mode
 
 
-def _validated_losses(values: np.ndarray, action: Any) -> np.ndarray:
+def _validated_losses(
+    values: np.ndarray, action: Any, *, unit: str = "posterior draw", caller: str = "bayes_action"
+) -> np.ndarray:
     """Reject NaN losses, which ``argmin`` would otherwise rank ahead of every real candidate.
 
     A NaN means the loss could not be evaluated, not that the action is attractive: NaN fails every
@@ -117,8 +122,8 @@ def _validated_losses(values: np.ndarray, action: Any) -> np.ndarray:
     bad = np.flatnonzero(np.isnan(values))
     if bad.size:
         raise ValueError(
-            f"loss for action {action!r} is NaN on {bad.size} of {values.size} posterior draw(s) "
-            f"(first at draw #{int(bad[0])}); bayes_action cannot rank an unscored action."
+            f"loss for action {action!r} is NaN on {bad.size} of {values.size} {unit}(s) "
+            f"(first at #{int(bad[0])}); {caller} cannot use an unscored action."
         )
     return values
 
