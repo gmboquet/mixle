@@ -197,7 +197,10 @@ def submit(
     this exact job, with a status in :data:`POOL_STATUSES` and a finite non-negative ``cost`` and
     ``duration_s`` that settles within ``job.budget``. A response failing any of those is returned as
     an ``"error"`` result instead of being passed through, so ``.ok`` is never true for work whose
-    identity or economics do not check out.
+    identity or economics do not check out. A backend that *raises* rather than responding is
+    likewise an ``"error"`` result naming the backend and the exception, not an exception out of
+    ``submit``: the return contract and the telemetry guarantee both have to hold on the path where
+    the pool is down, which is the path an operator most needs a record of.
 
     Submission is NOT idempotent and deliberately keeps no durable job state: submitting the same
     :class:`PoolJob` twice runs it twice, even when its ``id`` is a caller-supplied constant rather
@@ -225,7 +228,20 @@ def submit(
             ),
         )
     else:
-        result = _settle(job, backend.submit(job))
+        try:
+            response = backend.submit(job)
+        except Exception as exc:  # noqa: BLE001 - a backend that fails is an outcome, not a crash of the submitter
+            # LocalBackend already turns a raising *job* into an error result; a raising *backend*
+            # -- an unreachable GPU pool, an expired credential, a driver fault -- had no such path,
+            # so it escaped submit() entirely. Two documented guarantees broke at once: callers were
+            # promised a PoolResult to check .ok on and got an exception instead, and "every
+            # submission emits a pool_job telemetry event" silently excluded the failures most worth
+            # recording -- including a billable dispatch that may already have incurred spend.
+            result = PoolResult(
+                job.id, "error", reason=f"backend {type(backend).__name__} raised {type(exc).__name__}: {exc}"
+            )
+        else:
+            result = _settle(job, response)
 
     _emit(telemetry, job, backend, result)
     return result
