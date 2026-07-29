@@ -19,6 +19,7 @@ the sufficient-statistic level: their fit is not bit-stable to a 1e-15 perturbat
 identical sufficient statistic, which is a property of the solver, not of weight handling.
 """
 
+import re
 import unittest
 
 import numpy as np
@@ -72,6 +73,33 @@ def _flatten(value):
 
     rec(value)
     return np.asarray(out, dtype=float)
+
+
+_NUMBER_RE = re.compile(r"-?\d+\.\d+(?:[eE][-+]?\d+)?|-?\d+(?:[eE][-+]?\d+)?")
+
+
+def _assert_same_fit(case, a, b, message):
+    """Assert two fitted distributions match, comparing their numbers numerically.
+
+    ``str(dist)`` is constructor-style, so an exact string comparison also compares every float
+    digit-for-digit. That is stronger than these families can promise: they reduce to sufficient
+    statistics whose scatter term is the cancellation-prone ``sum_xx - mean * sum_x`` (see the
+    "classic cancellation-prone form" comment in stats/univariate/continuous/gaussian.py), so
+    rescaling the weights by a non-power-of-two re-rounds every product and the fit can land a
+    couple of ULPs away. The Gaussian variance did exactly that: 0.816326530612245 against
+    0.8163265306122448, two ULPs apart.
+
+    Structure -- class name, parameter names and order, keys -- is still compared exactly; only the
+    numeric literals get a tolerance, and it is tight enough that a genuinely dropped or normalized
+    weight still fails.
+    """
+    sa, sb = str(a), str(b)
+    if sa == sb:
+        return
+    case.assertEqual(_NUMBER_RE.sub("#", sa), _NUMBER_RE.sub("#", sb), f"{message} (structure differs)")
+    na = np.asarray([float(t) for t in _NUMBER_RE.findall(sa)])
+    nb = np.asarray([float(t) for t in _NUMBER_RE.findall(sb)])
+    case.assertTrue(np.allclose(na, nb, rtol=1e-12, atol=1e-12), f"{message}: {sa} != {sb}")
 
 
 def _weighted_suffstat(est, xs, ws):
@@ -138,7 +166,7 @@ class WeightedFitTest(unittest.TestCase):
                 est = dist.estimator()
                 base = _weighted_fit(est, xs, _WEIGHTS)
                 scaled = _weighted_fit(est, xs, [5.0 * v for v in _WEIGHTS])
-                self.assertEqual(str(base), str(scaled), f"{name}: fit changed under uniform weight scaling")
+                _assert_same_fit(self, base, scaled, f"{name}: fit changed under uniform weight scaling")
 
 
 if __name__ == "__main__":
