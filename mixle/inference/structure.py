@@ -44,6 +44,32 @@ def _is_discrete(column: Sequence[Any], *, max_levels: int = 64) -> bool:
     return True
 
 
+def _density_transparent_optional(est: Any) -> Any:
+    """Return ``est`` with missingness-rate estimation off, for dependency SCORING only.
+
+    The automatic detector fits the rate for a genuinely optional field so the model it returns is
+    samplable, which is right for a model a caller will use and wrong for scoring a dependency. A
+    fitted rate adds log(p)/log(1-p) to the density and a free parameter to the count, and both are
+    exactly what a dependency score compares -- while saying nothing about whether a parent helps,
+    since the rate is a property of the field alone. Measured on the heterogeneous Adult flagship,
+    leaving it in cost the planted workclass -> hours.per.week effect outright; it recovers at a
+    coefficient of 4.46 with the rate held out of the search. Callers score against this form and
+    fit the delivered model with the original.
+    """
+    from mixle.stats.combinator.optional import OptionalEstimator
+
+    if isinstance(est, OptionalEstimator) and est.est_prob:
+        return OptionalEstimator(
+            estimator=est.estimator,
+            missing_value=est.missing_value,
+            est_prob=False,
+            pseudo_count=est.pseudo_count,
+            name=est.name,
+            keys=est.keys,
+        )
+    return est
+
+
 def _field_estimator(column: Sequence[Any]) -> Any:
     """Infer a single mixle estimator template for a field from its values (via the automatic detector)."""
     from mixle.utils.automatic import get_estimator
