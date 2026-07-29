@@ -809,6 +809,7 @@ def nuts(
     log_probs: list[float] = []
     depths: list[int] = []
     divergences: list[bool] = []
+    accepted: list[bool] = []
     div_this = [False]  # set by build_tree when a leapfrog step diverges (energy error / non-finite)
     total = warmup + num_samples * thin
 
@@ -857,6 +858,7 @@ def nuts(
         gm = gp = cur_grad  # cached endpoint gradients shared with the next doubling
         theta_new, lp_new, grad_new, n, s, j = cur, cur_lp, cur_grad, 1, 1, 0
         alpha, n_alpha = 0.0, 0
+        moved = False  # did any doubling actually adopt its proposal?
         while s == 1 and j < max_tree_depth:
             v = -1 if rng.random_sample() < 0.5 else 1
             if v == -1:
@@ -875,6 +877,7 @@ def nuts(
             n_alpha += na_p
             if s_p == 1 and rng.random_sample() < min(1.0, n_p / max(n, 1)):
                 theta_new, lp_new, grad_new = tpr, lpr, gpr  # carry the proposal's cached gradient
+                moved = True
             n += n_p
             s = s_p if no_uturn(tm, tp, rm, rp) else 0
             j += 1
@@ -919,11 +922,16 @@ def nuts(
             log_probs.append(cur_lp)
             depths.append(j)
             divergences.append(bool(div_this[0]))
+            accepted.append(moved)
 
     res = MCMCResult(
         samples=samples,
         log_probs=np.asarray(log_probs, dtype=float),
-        accepted=np.ones(len(samples), dtype=bool),  # NUTS always moves (multinomial over the tree)
+        # Whether the chain actually moved, not an assumption that it did. A doubling only adopts
+        # its proposal when that subtree stayed valid (s_p == 1), so a trajectory that diverges
+        # immediately keeps the previous state -- reporting those draws as accepted made a stuck,
+        # divergent chain indistinguishable from a perfectly mixing one.
+        accepted=np.asarray(accepted, dtype=bool),
         transition_labels=tuple("nuts" for _ in samples),
     )
     object.__setattr__(res, "tree_depth", np.asarray(depths, dtype=int))  # frozen dataclass
