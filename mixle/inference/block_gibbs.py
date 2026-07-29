@@ -130,7 +130,24 @@ class MetropolisBlock:
         """
         cur = state[self.name]
         prop = cur + self.scale * rng.standard_normal(np.shape(cur))
-        log_alpha = self._logp(prop, state) - self._logp(cur, state)
+        # A NaN anywhere in the Metropolis ratio makes `log(u) < log_alpha` false, so a broken target
+        # was indistinguishable from a chain that legitimately never moved: the run completed with
+        # every draw equal to the initial state and an acceptance rate of 0.0, which reads as a badly
+        # tuned proposal rather than a target that cannot be evaluated. -inf on the *proposal* is
+        # different and stays a plain rejection -- that is how a target says "zero probability here".
+        cur_lp = float(self._logp(cur, state))
+        if not np.isfinite(cur_lp):
+            raise ValueError(
+                f"block {self.name!r}: the log conditional at the current state is {cur_lp!r}; "
+                "the chain cannot occupy a state the target does not admit"
+            )
+        prop_lp = float(self._logp(prop, state))
+        if np.isnan(prop_lp):
+            raise ValueError(
+                f"block {self.name!r}: the log conditional returned NaN for a proposal; "
+                "use -inf to reject a state outside the support"
+            )
+        log_alpha = prop_lp - cur_lp
         self._tot += 1
         accept = np.log(rng.uniform()) < log_alpha
         if accept:
