@@ -23,7 +23,14 @@ from typing import Any
 import numpy as np
 
 from mixle.inference.estimation import fit
-from mixle.inference.structure import _clone, _columns, _field_estimator, _is_discrete, _num_free_params
+from mixle.inference.structure import (
+    _clone,
+    _columns,
+    _density_transparent_optional,
+    _field_estimator,
+    _is_discrete,
+    _num_free_params,
+)
 
 _LOG_2PI = float(np.log(2.0 * np.pi))
 
@@ -1019,6 +1026,15 @@ def learn_bayesian_network(
         None if i in vec_dims else (_field_estimator(cols[i]) if discrete[i] else st.GaussianEstimator())
         for i in range(n_fields)
     ]
+    # SEARCH against the density-transparent form of an optional field, then refit the chosen
+    # structure with these originals before returning. A fitted missingness rate makes the returned
+    # model samplable -- which the network's own sampler and JSON round-trip require -- but during
+    # the search it adds log(p)/log(1-p) to every candidate's log-likelihood, refitted per parent
+    # configuration, so it moves the gain without saying anything about whether the parent helps.
+    # Measured on the heterogeneous Adult flagship, that was enough to lose the planted
+    # workclass -> hours.per.week effect entirely; it recovers at a coefficient of 4.46 when the
+    # rate is kept out of the search. See mixle.inference.structure._density_transparent_optional.
+    search_templates = [None if t is None else _density_transparent_optional(t) for t in templates]
     # key=repr (not bare comparison): a discrete column may carry a missing sentinel (``None``) beside
     # str/int/bool levels, and ``None`` has no ``<`` against those types (TypeError). repr gives a total,
     # deterministic order regardless of level type mix -- same guard `_GLMFactor.fit` already applies below.
@@ -1031,7 +1047,7 @@ def learn_bayesian_network(
     factors: list[Any] = [None] * n_fields
     base_ll = np.zeros(n_fields)
     for c in range(n_fields):
-        factors[c] = _fit_factor(c, [], cols, discrete, levels, templates[c], max_its, w, vec_dims)
+        factors[c] = _fit_factor(c, [], cols, discrete, levels, search_templates[c], max_its, w, vec_dims)
         base_ll[c] = _wsum(factors[c].seq_log_density(cols))
 
     # global greedy: each round add the single best-penalized-gain edge over the whole graph, so the cheaper
@@ -1052,7 +1068,7 @@ def learn_bayesian_network(
                         cols,
                         discrete,
                         levels,
-                        templates[c],
+                        search_templates[c],
                         max_its,
                         w,
                         vec_dims,
@@ -1075,7 +1091,13 @@ def learn_bayesian_network(
         factors[c] = cand
         base_ll[c] = _wsum(cand.seq_log_density(cols))
 
-    return HeterogeneousBayesianNetwork(factors)
+    # Deliver the generative fit of the structure the search chose. Only the templates differ; the
+    # parent sets are exactly the ones selected above, so this re-estimates parameters rather than
+    # revisiting any edge decision.
+    final = [
+        _fit_factor(c, parents[c], cols, discrete, levels, templates[c], max_its, w, vec_dims) for c in range(n_fields)
+    ]
+    return HeterogeneousBayesianNetwork(final)
 
 
 def _is_vector_col(col: Sequence[Any]) -> bool:
