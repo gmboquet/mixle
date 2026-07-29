@@ -170,9 +170,23 @@ class HashedRecord:
 
     def _items(self, record: Any) -> list[tuple[str, Any]]:
         if self.record_kind == "dict":
-            if not isinstance(record, dict) or set(record) != set(self.field_keys or ()):
-                raise ValueError(f"record must have exactly the schema {list(self.field_keys or ())!r}.")
-            return [(key, record[key]) for key in self.field_keys or ()]
+            if not isinstance(record, dict):
+                raise ValueError(f"record must be a mapping with the schema {list(self.field_keys or ())!r}.")
+            # A record whose keys do not match the fitted schema is featurized, not refused. Schema
+            # agreement is enforced where it is a real contract -- from_records, over the training
+            # set -- but at inference an off-schema record is precisely what the density gate exists
+            # to catch, and raising here made the gate unreachable for the inputs it is meant to
+            # escalate. Missing fields hash as `key=None` and the mismatch itself is hashed as its
+            # own token, so the row lands far from the training manifold and the gate sees it.
+            keys = tuple(self.field_keys or ())
+            items: list[tuple[str, Any]] = [(key, record.get(key)) for key in keys]
+            extra = sorted(str(key) for key in record if key not in keys)
+            if extra:
+                items.append(("__schema__", "extra:" + ",".join(extra)))
+            missing = [key for key in keys if key not in record]
+            if missing:
+                items.append(("__schema__", "missing:" + ",".join(missing)))
+            return items
         if self.record_kind == "sequence":
             if not isinstance(record, (list, tuple)) or len(record) != self.record_width:
                 raise ValueError(f"record must be a sequence of width {self.record_width}.")
