@@ -172,20 +172,23 @@ class HashedRecord:
         if self.record_kind == "dict":
             if not isinstance(record, dict):
                 raise ValueError(f"record must be a mapping with the schema {list(self.field_keys or ())!r}.")
-            # A record whose keys do not match the fitted schema is featurized, not refused. Schema
-            # agreement is enforced where it is a real contract -- from_records, over the training
-            # set -- but at inference an off-schema record is precisely what the density gate exists
-            # to catch, and raising here made the gate unreachable for the inputs it is meant to
-            # escalate. Missing fields hash as `key=None` and the mismatch itself is hashed as its
-            # own token, so the row lands far from the training manifold and the gate sees it.
+            # An UNKNOWN EXTRA field is featurized; a MISSING declared field is still refused. The
+            # asymmetry is the point. A hashed featurizer absorbs a token it has never seen -- and an
+            # unfamiliar field is exactly what the density gate exists to catch, so refusing it made
+            # the gate unreachable for the very inputs it should escalate. A field the schema
+            # declares but the record omits is different: there is no value to hash, the row would
+            # silently take a bucket it did not earn, and RecordClassifierIO publishes that schema as
+            # part of its serving contract. So the mismatch is hashed as its own token -- putting the
+            # row far from the training manifold where the gate can see it -- and an incomplete
+            # record raises.
             keys = tuple(self.field_keys or ())
-            items: list[tuple[str, Any]] = [(key, record.get(key)) for key in keys]
+            missing = [key for key in keys if key not in record]
+            if missing:
+                raise ValueError(f"record is missing schema {sorted(missing)!r}; the fixed schema is {list(keys)!r}.")
+            items: list[tuple[str, Any]] = [(key, record[key]) for key in keys]
             extra = sorted(str(key) for key in record if key not in keys)
             if extra:
                 items.append(("__schema__", "extra:" + ",".join(extra)))
-            missing = [key for key in keys if key not in record]
-            if missing:
-                items.append(("__schema__", "missing:" + ",".join(missing)))
             return items
         if self.record_kind == "sequence":
             if not isinstance(record, (list, tuple)) or len(record) != self.record_width:
