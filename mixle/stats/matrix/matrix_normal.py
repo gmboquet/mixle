@@ -95,8 +95,19 @@ def _validated_matrix_normal_statistics(
         raise ValueError("matrix-normal sufficient-statistic count must be finite and non-negative")
     if count == 0.0 and (np.any(sum_x != 0.0) or np.any(moment != 0.0)):
         raise ValueError("empty matrix-normal sufficient statistics must have zero moments")
-    if not np.array_equal(moment, moment.transpose(1, 0, 3, 2)):
-        raise ValueError("matrix-normal second moment must have exact paired symmetry")
+    # T[a,b,c,d] = sum_i w_i X_i[a,c] X_i[b,d] is paired-symmetric under (1,0,3,2) in exact
+    # arithmetic, but the batch accumulator pre-scales one factor -- einsum("iac,ibd->abcd", xw, xx)
+    # with xw = xx * w -- so the two paired entries are (w*X_ac)*X_bd and (w*X_bd)*X_ac: the same
+    # value, rounded differently. Requiring bitwise equality therefore rejected statistics this
+    # accumulator's own seq_update had just produced (the scalar update path scales the product
+    # instead and stays exact, so only pooled/batched fits tripped it). Refuse asymmetry too large
+    # to be rounding, then symmetrize the remainder -- the same relative tolerance the Gaussian
+    # sufficient-statistic contract already applies for this reason.
+    paired = moment.transpose(1, 0, 3, 2)
+    scale = max(float(np.max(np.abs(moment), initial=0.0)), 1.0)
+    if np.max(np.abs(moment - paired), initial=0.0) > 1.0e-6 * scale:
+        raise ValueError("matrix-normal second moment must have paired symmetry")
+    moment = 0.5 * (moment + paired)
     return sum_x.copy(), moment.copy(), count
 
 
