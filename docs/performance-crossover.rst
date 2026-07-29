@@ -34,6 +34,19 @@ is what lets the *same* mixture compose into an HMM state, a record field, or a
 neural mixture. scikit-learn's ``GaussianMixture`` is a single fused, specialized
 kernel with none of that generality to pay for.
 
+Said plainly, because the paragraph above describes this without ever conceding it:
+**for a standalone Gaussian mixture, scikit-learn wins.** Its ``GaussianMixture`` is
+faster than mixle's general path, and mixle does not claim to overtake it on that
+comparison. The same holds for hmmlearn on a standalone HMM. That is the expected
+outcome of the design, not a defect to be explained away -- a fused single-purpose
+kernel should beat a composable one at the single purpose it was fused for. What
+mixle offers instead is that the *same* mixture drops into an HMM state, a record
+field, or a neural mixture unchanged, which neither of those packages offers at all.
+
+Naming the loss is the point. A comparison document that only lists methodological
+caveats reads as an argument that the comparison cannot be made, and a reader is
+right to discount it.
+
 So the honest framing is:
 
 * **specialized cases:** for a standalone GMM or HMM, make no performance
