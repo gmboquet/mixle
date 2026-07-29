@@ -269,11 +269,29 @@ class DeployFamilyEndToEndTest(unittest.TestCase):
         )
 
     def test_family_actually_shrank(self):
-        # sanity on the fixture itself: the ladder did produce a real, non-increasing size sequence.
-        self.assertGreaterEqual(len(self.family.rungs), 1)
-        n_params = [self.family.headline_n_params] + [r.n_params for r in self.family.rungs]
+        """Sanity on the fixture: the family the ladder ACCEPTED is a real, non-increasing sequence.
+
+        ``family.rungs`` is the audit trail, not the family. build_checkpoint_family appends a rung
+        that failed its gate and then halts, so the list can end with one refused entry -- and
+        ``resource_increased`` is one of the gate's own refusal conditions, which means the last
+        entry is sometimes larger BECAUSE it was refused. Walking the whole list therefore asserts
+        the opposite of the ladder's contract. A single coarsen() pass bottoms out at
+        ``ceil(n_layer / 2)`` blocks (see the module docstring), so once two rungs both reach that
+        depth floor their sizes differ only by which pairs merged, in either direction; refusing the
+        second is exactly right. Assert the accepted sequence shrinks, and that any terminal refusal
+        is recorded with a reason -- which is stronger than the original check, not weaker.
+        """
+        accepted = [rung for rung in self.family.rungs if rung.within_eval_budget]
+        self.assertGreaterEqual(len(accepted), 1)
+        n_params = [self.family.headline_n_params] + [rung.n_params for rung in accepted]
         for a, b in zip(n_params, n_params[1:]):
             self.assertLessEqual(b, a)
+
+        refused = [rung for rung in self.family.rungs if not rung.within_eval_budget]
+        self.assertLessEqual(len(refused), 1, "the ladder halts at the first failing rung")
+        for rung in refused:
+            self.assertTrue(rung.reason, "a refused rung must record why")
+            self.assertEqual(self.family.halted_at, rung.name)
 
     def test_serve_receipt_has_one_point_per_family_member(self):
         print("\n" + self.serve_receipt.summary())
