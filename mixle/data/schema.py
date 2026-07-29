@@ -166,10 +166,23 @@ class Vector(FieldType):
             raise ValueError(f"dim must be a positive integer or None, got {self.dim!r}")
 
     def coerce(self, value: Any) -> np.ndarray:
-        """Coerce ``value`` to a one-dimensional ``float64`` array and validate ``dim`` when set."""
+        """Coerce ``value`` to a one-dimensional ``float64`` array and validate ``dim`` when set.
+
+        A multi-dimensional input is flattened in C order ONLY when ``dim`` is set and the element
+        count matches it. Declaring the flat length is what makes the reshape explicit rather than
+        silent: sources that emit blocks -- PatchSampler hands back a ``patch_size``-shaped patch --
+        have a genuinely rectangular observation whose model-facing form is the flat vector, and
+        with no field kind for N-D arrays the alternative was to refuse them outright. Without a
+        declared ``dim`` the shape is still an error, because then nothing states what length the
+        caller expected and a silent flatten could hide a transposed or mis-sliced block.
+        """
         arr = np.asarray(value, dtype=np.float64)
         if arr.ndim != 1:
-            raise ValueError(f"expected a one-dimensional vector, got shape {arr.shape}")
+            if self.dim is not None and arr.size == self.dim:
+                arr = arr.reshape(-1)
+            else:
+                expected = "" if self.dim is None else f" (declare dim={arr.size} to flatten it)"
+                raise ValueError(f"expected a one-dimensional vector, got shape {arr.shape}{expected}")
         if arr.size == 0:
             raise ValueError("vector observations must contain at least one value")
         if self.dim is not None and arr.shape != (self.dim,):
