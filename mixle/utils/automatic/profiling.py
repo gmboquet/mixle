@@ -2546,7 +2546,18 @@ def normalize_input(data, *, rdd_cap: int = 200000):
             data = list(data)
     except TypeError:
         pass  # not iterable -- leave it to the caller's own validation
-    return [_freeze_observation(value) for value in data]
+    # Both the docstring above and the comment below promise a reusable sequence is returned
+    # UNCHANGED, but freezing rebuilt one unconditionally, so a plain list came back as a copy and
+    # `normalize_input(xs) is xs` was false. Freezing still has to happen -- nested observations must
+    # become immutable value graphs -- so rebuild only when it actually changed something. Flat
+    # numeric records (the common case) freeze to themselves, so the original object is handed back.
+    if isinstance(data, np.ndarray):
+        return data  # numeric/structured array: nothing to freeze, and iterating it would rebox
+    frozen = [_freeze_observation(value) for value in data]
+    if isinstance(data, (list, tuple)) and len(frozen) == len(data):
+        if all(new_value is old_value for new_value, old_value in zip(frozen, data, strict=True)):
+            return data
+    return frozen
 
 
 def _freeze_observation(value: Any) -> Any:
