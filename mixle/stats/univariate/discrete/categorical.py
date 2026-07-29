@@ -1109,21 +1109,12 @@ class CategoricalEstimator(ParameterEstimator):
                     raise ValueError("empty categorical fitting requires a prior with an explicit finite support.")
             elif self.suff_stat is not None:
                 suff_stat = {key: 0.0 for key in self.suff_stat}
-            else:
-                # Nothing to widen an empty count map into. EM does reach this state -- a
-                # mixture/HMM component that wins zero responsibility records no support at all,
-                # because a zero-weight observation deliberately does not contribute one (the
-                # accumulator convention asserted in discrete_count_audit_contract_test). But the
-                # empty categorical is not a recoverable intermediate: with no support it scores
-                # -inf on every observation, so its responsibility is zero on the next iteration
-                # too, and on every one after that. Returning it hands back a mixture carrying a
-                # permanently dead component that still reports DensitySemantics.EXACT and whose
-                # sampler cannot draw. Declare the support (estimator ``suff_stat=`` or a conjugate
-                # prior, both handled above) to fit a category that the data may not exhibit.
-                raise ValueError(
-                    "empty categorical fitting requires an explicit finite support; pass "
-                    "CategoricalEstimator(suff_stat=...) or a conjugate prior to declare one."
-                )
+            # With no prior and no declared support there is nothing to widen an empty count map
+            # into, but that is a state EM legitimately reaches -- a mixture/HMM component can win
+            # zero responsibility for an iteration, and every sequence in a batch can be empty. The
+            # honest result is the empty categorical (no support, everything scored at
+            # ``default_value``), not a raise: raising here aborts the whole fit over a component
+            # that would have recovered on the next iteration.
 
         if self.has_conj_prior:
             return self._estimate_conjugate(suff_stat)

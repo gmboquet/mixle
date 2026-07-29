@@ -26,10 +26,7 @@ from mixle.stats.compute.pdist import (
     validate_estimator_keys,
 )
 from mixle.utils.optional_deps import RDD_TYPES, pyspark
-from mixle.utils.vector import (
-    require_initialized_observations,
-    validate_initialization_probability,
-)
+from mixle.utils.vector import validate_initialization_probability, validated_initialized_observations
 
 T = TypeVar("T")
 T_D = TypeVar("T_D", bound=SequenceEncodableProbabilityDistribution)
@@ -526,7 +523,7 @@ def seq_initialize(
             accumulator.key_merge(stats_dict)
             accumulator.key_replace(stats_dict)
 
-            return estimator.estimate(require_initialized_observations(nobs), accumulator.value())
+            return estimator.estimate(validated_initialized_observations(nobs), accumulator.value())
         finally:
             _release_broadcasts(seeds_broadcast, estimator_broadcast)
 
@@ -544,7 +541,7 @@ def seq_initialize(
         accumulator.key_merge(stats_dict)
         accumulator.key_replace(stats_dict)
 
-        return estimator.estimate(require_initialized_observations(nobs), accumulator.value())
+        return estimator.estimate(validated_initialized_observations(nobs), accumulator.value())
 
 
 def initialize(
@@ -609,7 +606,7 @@ def initialize(
             accumulator.key_merge(stats_dict)
             accumulator.key_replace(stats_dict)
 
-            return estimator.estimate(require_initialized_observations(nobs), accumulator.value())
+            return estimator.estimate(validated_initialized_observations(nobs), accumulator.value())
         finally:
             _release_broadcasts(seeds_broadcast, estimator_broadcast)
 
@@ -628,7 +625,7 @@ def initialize(
         accumulator.key_merge(stats_dict)
         accumulator.key_replace(stats_dict)
 
-        return estimator.estimate(require_initialized_observations(nobs), accumulator.value())
+        return estimator.estimate(validated_initialized_observations(nobs), accumulator.value())
 
 
 def estimate(
