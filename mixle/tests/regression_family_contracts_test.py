@@ -63,8 +63,7 @@ class GLMContractsTest(unittest.TestCase):
             * (
                 np.log(2.0 * np.pi * result.dispersion)
                 + 3.0 * np.log(y)
-                + (y - result.fitted) ** 2
-                / (result.dispersion * y * result.fitted**2)
+                + (y - result.fitted) ** 2 / (result.dispersion * y * result.fitted**2)
             )
         )
         self.assertAlmostEqual(result.log_likelihood, expected)

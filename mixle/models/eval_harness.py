@@ -216,9 +216,7 @@ class EvalReport:
 # ---------------------------------------------------------------------------
 
 
-def _held_out_perplexity_task(
-    model: Any, vocab: int, block: int, rng: Any, n_examples: int, device: Any
-) -> TaskResult:
+def _held_out_perplexity_task(model: Any, vocab: int, block: int, rng: Any, n_examples: int, device: Any) -> TaskResult:
     """Cross-entropy / perplexity against a fixed order-1 Markov chain over the vocabulary.
 
     See :func:`markov_transition_matrix`: the chain itself is a fixed benchmark distribution; ``rng`` (seeded

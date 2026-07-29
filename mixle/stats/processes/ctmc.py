@@ -96,9 +96,7 @@ def _nonnegative_scalar(value: Any, *, label: str) -> float:
 def _state(value: Any, *, num_states: int, label: str) -> int:
     result = _exact_integer(value, label=label)
     if not 0 <= result < num_states:
-        raise ValueError(
-            f"{label} {result} is out of range for {num_states} states"
-        )
+        raise ValueError(f"{label} {result} is out of range for {num_states} states")
     return result
 
 
@@ -108,36 +106,23 @@ def _validated_statistics(
     num_states: int,
 ) -> ContinuousTimeMarkovChainStatistics:
     if not isinstance(value, (tuple, list)) or len(value) != 2:
-        raise ValueError(
-            "CTMC sufficient statistics must be (transition_counts, dwell_times)"
-        )
+        raise ValueError("CTMC sufficient statistics must be (transition_counts, dwell_times)")
     try:
         counts = np.asarray(value[0], dtype=np.float64)
         dwell = np.asarray(value[1], dtype=np.float64)
     except (TypeError, ValueError) as exc:
         raise ValueError("CTMC sufficient statistics must be numeric") from exc
     if counts.shape != (num_states, num_states):
-        raise ValueError(
-            f"CTMC transition counts must have shape ({num_states}, {num_states})"
-        )
+        raise ValueError(f"CTMC transition counts must have shape ({num_states}, {num_states})")
     if dwell.shape != (num_states,):
         raise ValueError(f"CTMC dwell times must have shape ({num_states},)")
-    if (
-        np.any(~np.isfinite(counts))
-        or np.any(counts < 0.0)
-        or np.any(~np.isfinite(dwell))
-        or np.any(dwell < 0.0)
-    ):
-        raise ValueError(
-            "CTMC counts and dwell times must be finite and non-negative"
-        )
+    if np.any(~np.isfinite(counts)) or np.any(counts < 0.0) or np.any(~np.isfinite(dwell)) or np.any(dwell < 0.0):
+        raise ValueError("CTMC counts and dwell times must be finite and non-negative")
     if np.any(np.diag(counts) != 0.0):
         raise ValueError("CTMC transition-count diagonal must be zero")
     outgoing = counts.sum(axis=1)
     if np.any((outgoing > 0.0) & (dwell == 0.0)):
-        raise ValueError(
-            "CTMC positive transition counts require positive source-state dwell"
-        )
+        raise ValueError("CTMC positive transition counts require positive source-state dwell")
     checked_counts = counts.copy()
     np.fill_diagonal(checked_counts, 0.0)
     return ContinuousTimeMarkovChainStatistics(
@@ -155,9 +140,7 @@ def _validated_encoded_rows(
         rows = tuple(value)
     except TypeError as exc:
         raise TypeError("CTMC encoded data must be iterable") from exc
-    return tuple(
-        _validated_statistics(row, num_states=num_states) for row in rows
-    )
+    return tuple(_validated_statistics(row, num_states=num_states) for row in rows)
 
 
 def _validated_weights(value: Any, rows: int) -> np.ndarray:
@@ -195,13 +178,9 @@ def _prior_matrix(
         except (TypeError, ValueError) as exc:
             raise ValueError(f"CTMC {label} must be numeric") from exc
         if matrix.shape != (num_states, num_states):
-            raise ValueError(
-                f"CTMC {label} must have shape ({num_states}, {num_states})"
-            )
+            raise ValueError(f"CTMC {label} must have shape ({num_states}, {num_states})")
     if np.any(~np.isfinite(matrix)) or np.any(matrix < minimum):
-        raise ValueError(
-            f"CTMC {label} must be finite and at least {minimum}"
-        )
+        raise ValueError(f"CTMC {label} must be finite and at least {minimum}")
     if not np.allclose(np.diag(matrix), diagonal, rtol=0.0, atol=0.0):
         raise ValueError(f"CTMC {label} diagonal must equal {diagonal}")
     matrix.setflags(write=False)
@@ -218,9 +197,7 @@ def _trajectory_stats(traj: Any, k: int) -> tuple[np.ndarray, np.ndarray]:
     try:
         trajectory = tuple(traj)
     except TypeError as exc:
-        raise TypeError(
-            "CTMC trajectory must be an iterable three-field record"
-        ) from exc
+        raise TypeError("CTMC trajectory must be an iterable three-field record") from exc
     if len(trajectory) != 3:
         raise ValueError(
             "CTMC trajectory must be (initial_state, horizon, jumps); got a "
@@ -250,13 +227,9 @@ def _trajectory_stats(traj: Any, k: int) -> tuple[np.ndarray, np.ndarray]:
         try:
             fields = tuple(jump)
         except TypeError as exc:
-            raise TypeError(
-                f"CTMC jump {index} must be a two-field record"
-            ) from exc
+            raise TypeError(f"CTMC jump {index} must be a two-field record") from exc
         if len(fields) != 2:
-            raise ValueError(
-                f"CTMC jump {index} must contain dwell time and next state"
-            )
+            raise ValueError(f"CTMC jump {index} must contain dwell time and next state")
         dt = _nonnegative_scalar(
             fields[0],
             label=f"CTMC jump {index} dwell time",
@@ -294,11 +267,7 @@ class ContinuousTimeMarkovChainDistribution(SequenceEncodableProbabilityDistribu
         prior_rate: Any = 0.0,
     ) -> None:
         rates = np.asarray(rates, dtype=np.float64)
-        if (
-            rates.ndim != 2
-            or rates.shape[0] != rates.shape[1]
-            or rates.shape[0] == 0
-        ):
+        if rates.ndim != 2 or rates.shape[0] != rates.shape[1] or rates.shape[0] == 0:
             raise ValueError("rates must be a square (K, K) matrix of off-diagonal jump rates")
         if np.any(rates < 0.0) or not np.all(np.isfinite(rates)):
             raise ValueError("CTMC rates must be finite and >= 0")
@@ -584,12 +553,8 @@ class ContinuousTimeMarkovChainEstimator(ParameterEstimator):
             num_states,
             label="CTMC estimator state count",
         )
-        if pseudo_count is not None and (
-            prior_shape is not None or prior_rate is not None
-        ):
-            raise ValueError(
-                "CTMC pseudo_count cannot be combined with explicit Gamma priors"
-            )
+        if pseudo_count is not None and (prior_shape is not None or prior_rate is not None):
+            raise ValueError("CTMC pseudo_count cannot be combined with explicit Gamma priors")
         self.pseudo_count = (
             None
             if pseudo_count is None
@@ -655,8 +620,7 @@ class ContinuousTimeMarkovChainEstimator(ParameterEstimator):
         }
         if set(state) != required:
             raise ValueError(
-                "invalid CTMC estimator state fields: expected %r, got %r"
-                % (sorted(required), sorted(state))
+                "invalid CTMC estimator state fields: expected %r, got %r" % (sorted(required), sorted(state))
             )
         self.__init__(
             state["num_states"],
@@ -686,8 +650,7 @@ class ContinuousTimeMarkovChainEstimator(ParameterEstimator):
         denominator = dwell[:, None] + self.prior_rate
         if np.any((numerator > 0.0) & (denominator == 0.0)):
             raise ValueError(
-                "CTMC positive transition evidence or prior shape requires "
-                "positive dwell exposure or prior rate"
+                "CTMC positive transition evidence or prior shape requires positive dwell exposure or prior rate"
             )
         rates = np.zeros_like(numerator)
         np.divide(

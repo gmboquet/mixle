@@ -67,9 +67,7 @@ class EMTransactionStateTest(unittest.TestCase):
 
     def test_direct_monotonic_rejection_restores_nested_strategy_state(self):
         base = _RejectingStatefulStrategy()
-        result = MonotonicEM(base).step(
-            self.enc, self.estimator, self.model, objective=self.objective
-        )
+        result = MonotonicEM(base).step(self.enc, self.estimator, self.model, objective=self.objective)
         self.assertFalse(result.accepted)
         self.assertEqual(base.iteration, 0)
         self.assertEqual(base.state, {"values": []})
@@ -105,9 +103,7 @@ class EMTransactionStateTest(unittest.TestCase):
     def test_mcem_explicit_result_carries_nobs(self):
         estimator = _RecordingEstimator()
         statistic = ("left", "right")
-        MonteCarloEM(lambda *args: SampledSufficientStatistics(statistic, nobs=3)).step(
-            self.enc, estimator, self.model
-        )
+        MonteCarloEM(lambda *args: SampledSufficientStatistics(statistic, nobs=3)).step(self.enc, estimator, self.model)
         self.assertEqual(estimator.args, (3, statistic))
 
     def test_restarts_receive_independent_strategy_state(self):

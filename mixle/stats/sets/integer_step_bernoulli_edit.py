@@ -91,10 +91,7 @@ class IntegerStepBernoulliEditDistribution(IntegerBernoulliEditDistribution):
         s2 = repr(self.init_dist)
         s3 = repr(self.name)
         s4 = repr(self.keys)
-        return (
-            "IntegerStepBernoulliEditDistribution(%s, init_dist=%s, name=%s, keys=%s)"
-            % (s1, s2, s3, s4)
-        )
+        return "IntegerStepBernoulliEditDistribution(%s, init_dist=%s, name=%s, keys=%s)" % (s1, s2, s3, s4)
 
     def sampler(self, seed: int | None = None) -> "IntegerStepBernoulliEditSampler":
         """Create a sampler for this integer step Bernoulli edit distribution.
@@ -124,9 +121,7 @@ class IntegerStepBernoulliEditDistribution(IntegerBernoulliEditDistribution):
                 pseudo_count=pseudo_count,
             ),
             pseudo_count=pseudo_count,
-            suff_stat=(
-                None if pseudo_count is None else np.exp(self.log_edit_pmat)
-            ),
+            suff_stat=(None if pseudo_count is None else np.exp(self.log_edit_pmat)),
             name=self.name,
             keys=self.keys,
         )
@@ -376,17 +371,11 @@ class IntegerStepBernoulliEditDataEncoder(IntegerBernoulliEditDataEncoder):
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the encoder."""
-        return (
-            "IntegerStepBernoulliEditDataEncoder(init_encoder=%s, num_vals=%r)"
-            % (self.init_encoder, self.num_vals)
-        )
+        return "IntegerStepBernoulliEditDataEncoder(init_encoder=%s, num_vals=%r)" % (self.init_encoder, self.num_vals)
 
     def __eq__(self, other: object) -> bool:
         """Return true when ``other`` is an equivalent integer step Bernoulli-edit encoder."""
         if isinstance(other, IntegerStepBernoulliEditDataEncoder):
-            return (
-                other.init_encoder == self.init_encoder
-                and other.num_vals == self.num_vals
-            )
+            return other.init_encoder == self.init_encoder and other.num_vals == self.num_vals
         else:
             return False

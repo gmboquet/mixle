@@ -284,9 +284,7 @@ def test_well_formed_cohort_still_fits_normally_after_validation():
         ),
     ],
 )
-def test_unidentified_cohorts_are_rejected_instead_of_returning_exact_nulls(
-    covariates, time, event, kwargs, match
-):
+def test_unidentified_cohorts_are_rejected_instead_of_returning_exact_nulls(covariates, time, event, kwargs, match):
     with pytest.raises(ValueError, match=match):
         cohort_attribution(covariates, time, event, n_boot=40, rng=0, **kwargs)
 

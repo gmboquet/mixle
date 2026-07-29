@@ -165,9 +165,7 @@ class RenewalProcessTest(unittest.TestCase):
                 _FixedGapExponential(gap),
                 window=1.0,
             )
-            with self.subTest(gap=gap), self.assertRaises(
-                (TypeError, ValueError)
-            ):
+            with self.subTest(gap=gap), self.assertRaises((TypeError, ValueError)):
                 dist.sampler(seed=1).sample()
 
         dist = RenewalProcessDistribution(

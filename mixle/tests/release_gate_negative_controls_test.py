@@ -29,9 +29,7 @@ def test_real_fit_boundary_rejects_nonfinite_data() -> None:
 
     rng = np.random.RandomState(0)
     data = [list(row) for row in np.vstack([rng.randn(100, 2), rng.randn(100, 2) + 5.0])]
-    estimator = GaussianMixtureEstimator(
-        [MultivariateGaussianEstimator(dim=2), MultivariateGaussianEstimator(dim=2)]
-    )
+    estimator = GaussianMixtureEstimator([MultivariateGaussianEstimator(dim=2), MultivariateGaussianEstimator(dim=2)])
     model = optimize(data, estimator=estimator, max_its=10, out=None)
     assert np.isfinite(float(model.seq_log_density(model.dist_to_encoder().seq_encode(data)).mean()))
     data[7] = [float("nan"), 0.0]
@@ -82,9 +80,7 @@ def test_real_reproducibility_gate_rejects_changed_artifact(tmp_path: Path) -> N
 
 def test_real_license_gate_rejects_current_pending_record() -> None:
     verifier = _load("verify_license_provenance.py")
-    record = json.loads(
-        (ROOT / "release-checklists" / "0.8.0-license-provenance.json").read_text(encoding="utf-8")
-    )
+    record = json.loads((ROOT / "release-checklists" / "0.8.0-license-provenance.json").read_text(encoding="utf-8"))
     assert verifier.validate(record) == []
     assert verifier.validate(record, require_approved=True)
 

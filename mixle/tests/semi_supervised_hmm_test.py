@@ -53,9 +53,11 @@ class SemiSupervisedHMMTestCase(unittest.TestCase):
         prior = np.zeros((5, 3))
         for t, z in enumerate(forced):
             prior[t, z] = 1.0
-        single = sum(_TOPICS[forced[t]].log_density(self.em[t]) for t in range(5)) + sum(
-            np.log(_A[forced[t - 1], forced[t]]) for t in range(1, 5)
-        ) - np.log(3)
+        single = (
+            sum(_TOPICS[forced[t]].log_density(self.em[t]) for t in range(5))
+            + sum(np.log(_A[forced[t - 1], forced[t]]) for t in range(1, 5))
+            - np.log(3)
+        )
         self.assertAlmostEqual(self.d.log_density((self.em, prior)), single, places=9)
 
     def test_shared_prior_row_broadcasts(self):

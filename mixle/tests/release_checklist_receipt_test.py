@@ -38,6 +38,4 @@ def test_done_receipt_must_match_candidate_and_measure_result(tmp_path: Path) ->
     }
     (tmp_path / "build.json").write_text(json.dumps(receipt), encoding="utf-8")
     assert _module().validate(checklist, tmp_path, "a" * 40, require_final=True) == []
-    assert _module().validate(checklist, tmp_path, "b" * 40, require_final=True) == [
-        "Build: receipt commit differs"
-    ]
+    assert _module().validate(checklist, tmp_path, "b" * 40, require_final=True) == ["Build: receipt commit differs"]

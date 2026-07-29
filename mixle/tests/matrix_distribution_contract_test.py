@@ -98,15 +98,11 @@ class MatrixEventGeometryContractTestCase(unittest.TestCase):
 
     def test_encoders_bind_event_dimensions_and_finiteness(self):
         with self.assertRaises(ValueError):
-            self.matrix_normal.dist_to_encoder().seq_encode(
-                [np.zeros((2, 3)), np.full((2, 3), np.nan)]
-            )
+            self.matrix_normal.dist_to_encoder().seq_encode([np.zeros((2, 3)), np.full((2, 3), np.nan)])
         with self.assertRaises(ValueError):
             self.wishart.dist_to_encoder().seq_encode([np.eye(3)])
         with self.assertRaises(ValueError):
-            self.inverse.dist_to_encoder().seq_encode(
-                [np.asarray([[1.0, 0.2], [0.1, 1.0]])]
-            )
+            self.inverse.dist_to_encoder().seq_encode([np.asarray([[1.0, 0.2], [0.1, 1.0]])])
         self.assertEqual(
             self.matrix_normal.dist_to_encoder().seq_encode([]).shape,
             (0, 2, 3),
@@ -202,9 +198,7 @@ class MatrixFitContractTestCase(unittest.TestCase):
             distribution.estimator()
         with self.assertRaises(InverseWishartMomentFitError):
             InverseWishartEstimator(2, 3.0)
-        lower_df_draw = InverseWishartDistribution(1.5, np.eye(2)).sampler(
-            seed=7
-        ).sample()
+        lower_df_draw = InverseWishartDistribution(1.5, np.eye(2)).sampler(seed=7).sample()
         self.assertTrue(np.all(np.linalg.eigvalsh(lower_df_draw) > 0.0))
 
     def test_inverse_wishart_fit_is_labeled_as_a_moment_method(self):

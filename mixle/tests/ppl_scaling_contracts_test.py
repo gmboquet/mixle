@@ -94,9 +94,7 @@ class ScalingFitContractTest(unittest.TestCase):
         expected = float(np.mean(fit.predict_samples(100.0, 200.0)))
         self.assertAlmostEqual(fit.predict_mean(100.0, 200.0), expected)
         plug_in = (
-            fit.mean("E")
-            + fit.mean("A") * 10.0 ** (-fit.mean("alpha"))
-            + fit.mean("B") * 10.0 ** (-fit.mean("beta"))
+            fit.mean("E") + fit.mean("A") * 10.0 ** (-fit.mean("alpha")) + fit.mean("B") * 10.0 ** (-fit.mean("beta"))
         )
         self.assertNotAlmostEqual(fit.predict_mean(100.0, 200.0), plug_in)
 

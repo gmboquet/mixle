@@ -192,8 +192,7 @@ def recommend_compute_precision(
 
     sample_records = list(sample)
     digest_payload = (
-        f"{type(model).__module__}.{type(model).__qualname__}|{repr(model)}|"
-        f"{repr(sample_records)}"
+        f"{type(model).__module__}.{type(model).__qualname__}|{repr(model)}|{repr(sample_records)}"
     ).encode()
     context_digest = hashlib.sha256(digest_payload).hexdigest()
     try:

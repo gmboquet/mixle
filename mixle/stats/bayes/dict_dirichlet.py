@@ -76,31 +76,23 @@ class DictDirichletDistribution(SequenceEncodableProbabilityDistribution):
                 Dirichlet of unspecified dimension.
 
         """
-        is_scalar = np.isscalar(params) or (
-            isinstance(params, np.ndarray) and params.ndim == 0
-        )
+        is_scalar = np.isscalar(params) or (isinstance(params, np.ndarray) and params.ndim == 0)
         if is_scalar and not isinstance(params, (bool, np.bool_)):
             try:
                 a = float(params)
             except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "DictDirichletDistribution requires a positive finite concentration alpha."
-                ) from exc
+                raise ValueError("DictDirichletDistribution requires a positive finite concentration alpha.") from exc
             if not np.isfinite(a) or a <= 0.0:
                 raise ValueError("DictDirichletDistribution requires a positive finite concentration alpha.")
             self.alpha = a
             self.is_unbounded = True
         else:
             if not isinstance(params, dict):
-                raise TypeError(
-                    "DictDirichletDistribution alpha must be a positive scalar or non-empty dictionary."
-                )
+                raise TypeError("DictDirichletDistribution alpha must be a positive scalar or non-empty dictionary.")
             try:
                 vals = np.asarray(list(params.values()), dtype=np.float64)
             except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "DictDirichletDistribution concentration values must be numeric."
-                ) from exc
+                raise ValueError("DictDirichletDistribution concentration values must be numeric.") from exc
             if vals.size == 0 or not np.all(np.isfinite(vals)) or not np.all(vals > 0.0):
                 raise ValueError(
                     "DictDirichletDistribution requires a non-empty dict of positive finite concentration values."
@@ -210,9 +202,7 @@ class DictDirichletDistribution(SequenceEncodableProbabilityDistribution):
                 aa = dist_alpha * np.ones(len(a))
             else:
                 if set(self_alpha) != set(dist_alpha):
-                    raise ValueError(
-                        "DictDirichletDistribution cross-entropy requires identical dictionary support."
-                    )
+                    raise ValueError("DictDirichletDistribution cross-entropy requires identical dictionary support.")
                 keys = list(self_alpha)
                 a = np.asarray([self_alpha[k] for k in keys], dtype=np.float64)
                 aa = np.asarray([dist_alpha[k] for k in keys], dtype=np.float64)

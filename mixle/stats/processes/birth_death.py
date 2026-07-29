@@ -96,22 +96,14 @@ def _validated_rows(value: Any) -> np.ndarray:
     if rows.shape == (0,):
         rows = rows.reshape((0, 6))
     if rows.ndim != 2 or rows.shape[1] != 6:
-        raise ValueError(
-            "BirthDeathSampling encoded data must have exact shape (N, 6)"
-        )
+        raise ValueError("BirthDeathSampling encoded data must have exact shape (N, 6)")
     if np.any(~np.isfinite(rows)) or np.any(rows < 0.0):
-        raise ValueError(
-            "BirthDeathSampling encoded statistics must be finite and non-negative"
-        )
+        raise ValueError("BirthDeathSampling encoded statistics must be finite and non-negative")
     counts = rows[:, :3]
     if np.any(counts != np.floor(counts)):
-        raise ValueError(
-            "BirthDeathSampling per-trajectory event counts must be exact integers"
-        )
+        raise ValueError("BirthDeathSampling per-trajectory event counts must be exact integers")
     if np.any((counts.sum(axis=1) > 0.0) & (rows[:, 3] == 0.0)):
-        raise ValueError(
-            "BirthDeathSampling positive event counts require population exposure"
-        )
+        raise ValueError("BirthDeathSampling positive event counts require population exposure")
     return rows.copy()
 
 
@@ -121,21 +113,15 @@ def _validated_weights(value: Any, rows: int) -> np.ndarray:
     except (TypeError, ValueError) as exc:
         raise ValueError("BirthDeathSampling weights must be numeric") from exc
     if weights.shape != (rows,):
-        raise ValueError(
-            f"BirthDeathSampling weights must have exact shape ({rows},)"
-        )
+        raise ValueError(f"BirthDeathSampling weights must have exact shape ({rows},)")
     if np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
-        raise ValueError(
-            "BirthDeathSampling weights must be finite and non-negative"
-        )
+        raise ValueError("BirthDeathSampling weights must be finite and non-negative")
     return weights
 
 
 def _validated_statistics(value: Any) -> BirthDeathSamplingStatistics:
     if not isinstance(value, (tuple, list)) or len(value) != 6:
-        raise ValueError(
-            "BirthDeathSampling sufficient statistics must contain six fields"
-        )
+        raise ValueError("BirthDeathSampling sufficient statistics must contain six fields")
     fields = tuple(
         _nonnegative_scalar(
             item,
@@ -144,17 +130,10 @@ def _validated_statistics(value: Any) -> BirthDeathSamplingStatistics:
         for index, item in enumerate(value)
     )
     births, deaths, samplings, integral, count, horizon_sum = fields
-    if count == 0.0 and any(
-        item != 0.0
-        for item in (births, deaths, samplings, integral, horizon_sum)
-    ):
-        raise ValueError(
-            "Zero BirthDeathSampling trajectory weight requires zero statistics"
-        )
+    if count == 0.0 and any(item != 0.0 for item in (births, deaths, samplings, integral, horizon_sum)):
+        raise ValueError("Zero BirthDeathSampling trajectory weight requires zero statistics")
     if births + deaths + samplings > 0.0 and integral == 0.0:
-        raise ValueError(
-            "BirthDeathSampling positive events require population exposure"
-        )
+        raise ValueError("BirthDeathSampling positive events require population exposure")
     return BirthDeathSamplingStatistics(*fields)
 
 
@@ -170,25 +149,17 @@ def _prior_vector(
         try:
             scalar = float(value)
         except (TypeError, ValueError) as exc:
-            raise TypeError(
-                f"BirthDeathSampling {label} must be real-valued"
-            ) from exc
+            raise TypeError(f"BirthDeathSampling {label} must be real-valued") from exc
         result = np.full(3, scalar, dtype=np.float64)
     else:
         try:
             result = np.asarray(value, dtype=np.float64).copy()
         except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"BirthDeathSampling {label} must be numeric"
-            ) from exc
+            raise ValueError(f"BirthDeathSampling {label} must be numeric") from exc
         if result.shape != (3,):
-            raise ValueError(
-                f"BirthDeathSampling {label} must have shape (3,)"
-            )
+            raise ValueError(f"BirthDeathSampling {label} must have shape (3,)")
     if np.any(~np.isfinite(result)) or np.any(result < minimum):
-        raise ValueError(
-            f"BirthDeathSampling {label} must be finite and at least {minimum}"
-        )
+        raise ValueError(f"BirthDeathSampling {label} must be finite and at least {minimum}")
     result.setflags(write=False)
     return result
 
@@ -198,13 +169,9 @@ def _trajectory_row(traj: Any) -> np.ndarray:
     try:
         fields = tuple(traj)
     except TypeError as exc:
-        raise TypeError(
-            "BirthDeathSampling trajectory must be an iterable record"
-        ) from exc
+        raise TypeError("BirthDeathSampling trajectory must be an iterable record") from exc
     if len(fields) != 3:
-        raise ValueError(
-            "BirthDeathSampling trajectory must be (n0, horizon, events)"
-        )
+        raise ValueError("BirthDeathSampling trajectory must be (n0, horizon, events)")
     n = _initial_population(
         fields[0],
         label="BirthDeathSampling trajectory initial population",
@@ -216,9 +183,7 @@ def _trajectory_row(traj: Any) -> np.ndarray:
     try:
         events = tuple(fields[2])
     except TypeError as exc:
-        raise TypeError(
-            "BirthDeathSampling trajectory events must be iterable"
-        ) from exc
+        raise TypeError("BirthDeathSampling trajectory events must be iterable") from exc
     t_prev = 0.0
     integral = 0.0
     sum_log_n = 0.0
@@ -227,13 +192,9 @@ def _trajectory_row(traj: Any) -> np.ndarray:
         try:
             event_fields = tuple(event)
         except TypeError as exc:
-            raise TypeError(
-                f"BirthDeathSampling event {index} must be a two-field record"
-            ) from exc
+            raise TypeError(f"BirthDeathSampling event {index} must be a two-field record") from exc
         if len(event_fields) != 2:
-            raise ValueError(
-                f"BirthDeathSampling event {index} must contain time and type"
-            )
+            raise ValueError(f"BirthDeathSampling event {index} must contain time and type")
         time = _nonnegative_scalar(
             event_fields[0],
             label=f"BirthDeathSampling event {index} time",
@@ -243,15 +204,9 @@ def _trajectory_row(traj: Any) -> np.ndarray:
             label=f"BirthDeathSampling event {index} type",
         )
         if etype not in (_BIRTH, _DEATH, _SAMPLING):
-            raise ValueError(
-                "BirthDeathSampling event type must be 0 (birth), "
-                "1 (death), or 2 (sampling)"
-            )
+            raise ValueError("BirthDeathSampling event type must be 0 (birth), 1 (death), or 2 (sampling)")
         if time <= t_prev or time > horizon:
-            raise ValueError(
-                "BirthDeathSampling events must have strictly increasing "
-                "times in (0, T]"
-            )
+            raise ValueError("BirthDeathSampling events must have strictly increasing times in (0, T]")
         if n <= 0:
             raise ValueError("BirthDeathSampling event occurred at zero population.")
         integral += n * (time - t_prev)
@@ -346,16 +301,19 @@ class BirthDeathSamplingDistribution(SequenceEncodableProbabilityDistribution):
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the birth-death sampling distribution."""
-        return "BirthDeathSamplingDistribution(%s, %s, %s, initial_population=%s, horizon=%s, name=%s, keys=%s, prior_shape=%s, prior_rate=%s)" % (
-            repr(self.birth_rate),
-            repr(self.death_rate),
-            repr(self.sampling_rate),
-            repr(self.initial_population),
-            repr(self.horizon),
-            repr(self.name),
-            repr(self.keys),
-            repr(self.prior_shape.tolist()),
-            repr(self.prior_rate.tolist()),
+        return (
+            "BirthDeathSamplingDistribution(%s, %s, %s, initial_population=%s, horizon=%s, name=%s, keys=%s, prior_shape=%s, prior_rate=%s)"
+            % (
+                repr(self.birth_rate),
+                repr(self.death_rate),
+                repr(self.sampling_rate),
+                repr(self.initial_population),
+                repr(self.horizon),
+                repr(self.name),
+                repr(self.keys),
+                repr(self.prior_shape.tolist()),
+                repr(self.prior_rate.tolist()),
+            )
         )
 
     def density(self, x: Any) -> float:
@@ -449,9 +407,7 @@ class BirthDeathSamplingSampler(DistributionSampler):
             label="BirthDeathSampling sample size",
         )
         if checked_size < 0:
-            raise ValueError(
-                "BirthDeathSampling sample size must be non-negative"
-            )
+            raise ValueError("BirthDeathSampling sample size must be non-negative")
         return [self._sample_one() for _ in range(checked_size)]
 
 
@@ -597,13 +553,8 @@ class BirthDeathSamplingEstimator(ParameterEstimator):
         prior_shape: Any | None = None,
         prior_rate: Any | None = None,
     ) -> None:
-        if pseudo_count is not None and (
-            prior_shape is not None or prior_rate is not None
-        ):
-            raise ValueError(
-                "BirthDeathSampling pseudo_count cannot be combined with "
-                "explicit Gamma priors"
-            )
+        if pseudo_count is not None and (prior_shape is not None or prior_rate is not None):
+            raise ValueError("BirthDeathSampling pseudo_count cannot be combined with explicit Gamma priors")
         self.pseudo_count = (
             None
             if pseudo_count is None
@@ -684,9 +635,7 @@ class BirthDeathSamplingEstimator(ParameterEstimator):
         """Estimate per-capita rates while preserving fixed sampling configuration."""
         checked = _validated_statistics(suff_stat)
         if checked.trajectory_weight <= 0.0:
-            raise ValueError(
-                "Cannot estimate BirthDeathSampling without positive trajectory weight"
-            )
+            raise ValueError("Cannot estimate BirthDeathSampling without positive trajectory weight")
         if nobs is not None:
             _nonnegative_scalar(
                 nobs,
@@ -700,8 +649,7 @@ class BirthDeathSamplingEstimator(ParameterEstimator):
         denominator = checked.population_exposure + self.prior_rate
         if np.any((numerator > 0.0) & (denominator == 0.0)):
             raise ValueError(
-                "BirthDeathSampling positive event evidence or prior shape "
-                "requires population exposure or prior rate"
+                "BirthDeathSampling positive event evidence or prior shape requires population exposure or prior rate"
             )
         rates = np.zeros(3, dtype=np.float64)
         np.divide(
@@ -735,11 +683,7 @@ class BirthDeathSamplingDataEncoder(DataSequenceEncoder):
     def seq_encode(self, x: Sequence[Any]) -> np.ndarray:
         """Encode trajectories as sufficient-statistic rows."""
         rows = [_trajectory_row(traj) for traj in x]
-        return (
-            np.asarray(rows, dtype=np.float64)
-            if rows
-            else np.zeros((0, 6), dtype=np.float64)
-        )
+        return np.asarray(rows, dtype=np.float64) if rows else np.zeros((0, 6), dtype=np.float64)
 
     def row_count(self, x: np.ndarray) -> int:
         """Return the number of validated encoded trajectory rows."""

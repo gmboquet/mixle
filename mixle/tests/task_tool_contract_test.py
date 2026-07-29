@@ -74,8 +74,9 @@ class ToolSpecContractTest(unittest.TestCase):
             selector=_sequence_selector("first", "second", "__stop__"),
             extractors={},
             tools=tools,
-            teacher=lambda request: teacher_calls.append(request)
-            or [{"tool": "first", "args": {}}, {"tool": "second", "args": {}}],
+            teacher=lambda request: (
+                teacher_calls.append(request) or [{"tool": "first", "args": {}}, {"tool": "second", "args": {}}]
+            ),
             plan_agreement=1.0,
             max_steps=3,
         )

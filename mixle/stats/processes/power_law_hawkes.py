@@ -103,10 +103,7 @@ def _mark_mgf(mark_dist: Any, argument: float) -> float:
         )
 
         if isinstance(mark_dist, GaussianDistribution):
-            value = math.exp(
-                mark_dist.mu * argument
-                + 0.5 * mark_dist.sigma2 * argument * argument
-            )
+            value = math.exp(mark_dist.mu * argument + 0.5 * mark_dist.sigma2 * argument * argument)
         elif isinstance(mark_dist, ExponentialDistribution):
             denominator = 1.0 - mark_dist.beta * argument
             value = 1.0 / denominator if denominator > 0.0 else np.inf
@@ -117,9 +114,7 @@ def _mark_mgf(mark_dist: Any, argument: float) -> float:
                 "mark law"
             )
     if value <= 0.0 or not np.isfinite(value):
-        raise ValueError(
-            "mark distribution must have a finite positive MGF at alpha"
-        )
+        raise ValueError("mark distribution must have a finite positive MGF at alpha")
     return value
 
 
@@ -133,9 +128,7 @@ def _validated_realization(
     try:
         if isinstance(value, tuple):
             if len(value) != 2:
-                raise ValueError(
-                    "PowerLawHawkes realization must be (times, marks)"
-                )
+                raise ValueError("PowerLawHawkes realization must be (times, marks)")
             times = np.asarray(value[0], dtype=np.float64)
             marks = np.asarray(value[1], dtype=np.float64)
         else:
@@ -143,20 +136,11 @@ def _validated_realization(
             marks = np.zeros(times.shape, dtype=np.float64)
     except (TypeError, ValueError) as exc:
         if fail_closed:
-            raise ValueError(
-                "PowerLawHawkes times and marks must be numeric"
-            ) from exc
+            raise ValueError("PowerLawHawkes times and marks must be numeric") from exc
         return None
-    structural = (
-        times.ndim != 1
-        or marks.ndim != 1
-        or times.shape != marks.shape
-    )
+    structural = times.ndim != 1 or marks.ndim != 1 or times.shape != marks.shape
     if structural:
-        raise ValueError(
-            "PowerLawHawkes times and marks must be aligned "
-            "one-dimensional arrays"
-        )
+        raise ValueError("PowerLawHawkes times and marks must be aligned one-dimensional arrays")
     invalid = (
         np.any(~np.isfinite(times))
         or np.any(~np.isfinite(marks))
@@ -178,9 +162,7 @@ def _validated_realization(
             score = float(mark_dist.log_density(float(mark)))
             if np.isnan(score) or score == np.inf or score == -np.inf:
                 if fail_closed:
-                    raise ValueError(
-                        "PowerLawHawkes mark lies outside the mark law support"
-                    )
+                    raise ValueError("PowerLawHawkes mark lies outside the mark law support")
                 return None
     owned_times = times.copy()
     owned_marks = marks.copy()
@@ -216,13 +198,9 @@ def _validated_weights(value: Any, rows: int) -> np.ndarray:
     except (TypeError, ValueError) as exc:
         raise ValueError("PowerLawHawkes weights must be numeric") from exc
     if weights.shape != (rows,):
-        raise ValueError(
-            f"PowerLawHawkes weights must have exact shape ({rows},)"
-        )
+        raise ValueError(f"PowerLawHawkes weights must have exact shape ({rows},)")
     if np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
-        raise ValueError(
-            "PowerLawHawkes weights must be finite and non-negative"
-        )
+        raise ValueError("PowerLawHawkes weights must be finite and non-negative")
     return weights
 
 
@@ -255,9 +233,7 @@ def _validated_statistics(
         rel_tol=0.0,
         abs_tol=_WINDOW_TOLERANCE * max(1.0, window),
     ):
-        raise ValueError(
-            "PowerLawHawkes statistic window does not match estimator"
-        )
+        raise ValueError("PowerLawHawkes statistic window does not match estimator")
     checked_alpha = (
         None
         if raw_alpha is None
@@ -267,17 +243,10 @@ def _validated_statistics(
         )
     )
     if checked_alpha != alpha_fixed:
-        raise ValueError(
-            "PowerLawHawkes statistic alpha constraint does not match "
-            "estimator"
-        )
-    expected_signature = (
-        None if mark_dist is None else str(mark_dist)
-    )
+        raise ValueError("PowerLawHawkes statistic alpha constraint does not match estimator")
+    expected_signature = None if mark_dist is None else str(mark_dist)
     if raw_mark_signature != expected_signature:
-        raise ValueError(
-            "PowerLawHawkes statistic mark law does not match estimator"
-        )
+        raise ValueError("PowerLawHawkes statistic mark law does not match estimator")
     if not isinstance(raw_realizations, (tuple, list)):
         raise ValueError("PowerLawHawkes realizations must be a sequence")
     realizations = tuple(
@@ -342,29 +311,14 @@ class PowerLawHawkesDistribution(SequenceEncodableProbabilityDistribution):
                 ("mu", "A", "alpha", "c", "p", "window"),
             )
         )
-        if not (
-            self.mu > 0
-            and self.A >= 0
-            and self.c > 0
-            and self.p > 1
-            and self.window > 0
-        ):
-            raise ValueError(
-                "PowerLawHawkes requires finite mu>0, A>=0, c>0, p>1, "
-                "and window>0"
-            )
+        if not (self.mu > 0 and self.A >= 0 and self.c > 0 and self.p > 1 and self.window > 0):
+            raise ValueError("PowerLawHawkes requires finite mu>0, A>=0, c>0, p>1, and window>0")
         if mark_dist is None and self.alpha != 0.0:
-            raise ValueError(
-                "unmarked PowerLawHawkes requires alpha=0 because every mark "
-                "is identically zero"
-            )
+            raise ValueError("unmarked PowerLawHawkes requires alpha=0 because every mark is identically zero")
         if mark_dist is not None:
             for method in ("log_density", "sampler"):
                 if not callable(getattr(mark_dist, method, None)):
-                    raise TypeError(
-                        "PowerLawHawkes mark distribution must expose "
-                        f"{method}()"
-                    )
+                    raise TypeError(f"PowerLawHawkes mark distribution must expose {method}()")
             _mark_mgf(mark_dist, self.alpha)
         self.mark_dist = mark_dist
         self.max_events = _exact_integer(
@@ -376,9 +330,7 @@ class PowerLawHawkesDistribution(SequenceEncodableProbabilityDistribution):
             label="PowerLawHawkes maximum branching work",
         )
         if self.max_events < 0 or self.max_work < 0:
-            raise ValueError(
-                "PowerLawHawkes sampling budgets must be non-negative"
-            )
+            raise ValueError("PowerLawHawkes sampling budgets must be non-negative")
         self.name = name
         self.keys = keys
 
@@ -404,9 +356,7 @@ class PowerLawHawkesDistribution(SequenceEncodableProbabilityDistribution):
     def _unpack(x) -> tuple[np.ndarray, np.ndarray]:
         if isinstance(x, tuple):
             if len(x) != 2:
-                raise ValueError(
-                    "PowerLawHawkes realization must be (times, marks)"
-                )
+                raise ValueError("PowerLawHawkes realization must be (times, marks)")
             t, m = x
             return np.asarray(t, dtype=float), np.asarray(m, dtype=float)
         t = np.asarray(x, dtype=float)
@@ -419,9 +369,7 @@ class PowerLawHawkesDistribution(SequenceEncodableProbabilityDistribution):
             label="PowerLawHawkes query time",
         )
         if query > self.window:
-            raise ValueError(
-                "PowerLawHawkes query time must lie inside [0, window]"
-            )
+            raise ValueError("PowerLawHawkes query time must lie inside [0, window]")
         times, marks = _validated_history(
             times,
             marks,
@@ -429,15 +377,9 @@ class PowerLawHawkesDistribution(SequenceEncodableProbabilityDistribution):
             mark_dist=self.mark_dist,
         )
         past = times < query
-        trig = (
-            self.A
-            * np.exp(self.alpha * marks[past])
-            * (1.0 + (query - times[past]) / self.c) ** (-self.p)
-        )
+        trig = self.A * np.exp(self.alpha * marks[past]) * (1.0 + (query - times[past]) / self.c) ** (-self.p)
         if np.any(~np.isfinite(trig)):
-            raise OverflowError(
-                "PowerLawHawkes productivity overflowed for query history"
-            )
+            raise OverflowError("PowerLawHawkes productivity overflowed for query history")
         return float(self.mu + trig.sum())
 
     def expected_count(self, t_start: float, t_end: float, times, marks=None) -> float:
@@ -451,10 +393,7 @@ class PowerLawHawkesDistribution(SequenceEncodableProbabilityDistribution):
             label="PowerLawHawkes interval end",
         )
         if start > end or end > self.window:
-            raise ValueError(
-                "PowerLawHawkes interval must satisfy "
-                "0 <= start <= end <= window"
-            )
+            raise ValueError("PowerLawHawkes interval must satisfy 0 <= start <= end <= window")
         times, marks = _validated_history(
             times,
             marks,
@@ -465,22 +404,14 @@ class PowerLawHawkesDistribution(SequenceEncodableProbabilityDistribution):
         tp, mp = times[rel], marks[rel]
         prod = self.A * np.exp(self.alpha * mp) * self.c / (self.p - 1.0)
         if np.any(~np.isfinite(prod)):
-            raise OverflowError(
-                "PowerLawHawkes productivity overflowed for query history"
-            )
+            raise OverflowError("PowerLawHawkes productivity overflowed for query history")
         lo = np.maximum(start, tp)
-        omori = (1.0 + (lo - tp) / self.c) ** (
-            1.0 - self.p
-        ) - (1.0 + (end - tp) / self.c) ** (1.0 - self.p)
+        omori = (1.0 + (lo - tp) / self.c) ** (1.0 - self.p) - (1.0 + (end - tp) / self.c) ** (1.0 - self.p)
         return float(self.mu * (end - start) + np.sum(prod * omori))
 
     def branching_ratio(self) -> float:
         """Return exact expected direct offspring using the mark-law MGF."""
-        mark_factor = (
-            1.0
-            if self.mark_dist is None
-            else _mark_mgf(self.mark_dist, self.alpha)
-        )
+        mark_factor = 1.0 if self.mark_dist is None else _mark_mgf(self.mark_dist, self.alpha)
         return self.A * self.c / (self.p - 1.0) * mark_factor
 
     def density(self, x) -> float:
@@ -564,8 +495,7 @@ class PowerLawHawkesSampler(DistributionSampler):
         self.last_receipt: dict[str, Any] | None = None
         if dist.branching_ratio() >= 1.0:
             warnings.warn(
-                "super-critical PowerLawHawkes process may exhaust its "
-                "explicit simulation budgets",
+                "super-critical PowerLawHawkes process may exhaust its explicit simulation budgets",
                 stacklevel=2,
             )
 
@@ -578,19 +508,14 @@ class PowerLawHawkesSampler(DistributionSampler):
         )
         score = float(self.dist.mark_dist.log_density(mark))
         if not np.isfinite(score):
-            raise ValueError(
-                "PowerLawHawkes mark sampler produced a value outside its "
-                "declared mark law"
-            )
+            raise ValueError("PowerLawHawkes mark sampler produced a value outside its declared mark law")
         return mark
 
     def _sample_one(self):
         d = self.dist
         background_mean = d.mu * d.window
         if not np.isfinite(background_mean):
-            raise OverflowError(
-                "PowerLawHawkes background event expectation overflowed"
-            )
+            raise OverflowError("PowerLawHawkes background event expectation overflowed")
         background_count = int(self.rng.poisson(background_mean))
         if background_count > d.max_events:
             self.last_receipt = {
@@ -602,24 +527,15 @@ class PowerLawHawkesSampler(DistributionSampler):
                 "branching_ratio": d.branching_ratio(),
                 "termination_reason": "background_event_budget_exhausted",
             }
-            raise RuntimeError(
-                "PowerLawHawkes background draw exceeded the event budget"
-            )
-        times = list(
-            self.rng.uniform(0, d.window, background_count)
-        )
+            raise RuntimeError("PowerLawHawkes background draw exceeded the event budget")
+        times = list(self.rng.uniform(0, d.window, background_count))
         marks = [self._draw_mark() for _ in times]
         queue = list(zip(times, marks))
         work = 0
         while queue:
             ti, mi = queue.pop()
             try:
-                expected = (
-                    d.A
-                    * math.exp(d.alpha * mi)
-                    * d.c
-                    / (d.p - 1.0)
-                )
+                expected = d.A * math.exp(d.alpha * mi) * d.c / (d.p - 1.0)
             except OverflowError:
                 expected = np.inf
             if not np.isfinite(expected):
@@ -632,9 +548,7 @@ class PowerLawHawkesSampler(DistributionSampler):
                     "branching_ratio": d.branching_ratio(),
                     "termination_reason": "offspring_intensity_overflow",
                 }
-                raise RuntimeError(
-                    "PowerLawHawkes offspring expectation overflowed"
-                )
+                raise RuntimeError("PowerLawHawkes offspring expectation overflowed")
             offspring = int(self.rng.poisson(expected))
             if work + offspring > d.max_work:
                 self.last_receipt = {
@@ -646,9 +560,7 @@ class PowerLawHawkesSampler(DistributionSampler):
                     "branching_ratio": d.branching_ratio(),
                     "termination_reason": "work_budget_exhausted",
                 }
-                raise RuntimeError(
-                    "PowerLawHawkes branching work budget exhausted"
-                )
+                raise RuntimeError("PowerLawHawkes branching work budget exhausted")
             work += offspring
             for _ in range(offspring):
                 tau = d.c * ((1 - self.rng.uniform()) ** (-1.0 / (d.p - 1.0)) - 1.0)  # power-law inter-time
@@ -664,9 +576,7 @@ class PowerLawHawkesSampler(DistributionSampler):
                             "branching_ratio": d.branching_ratio(),
                             "termination_reason": "event_budget_exhausted",
                         }
-                        raise RuntimeError(
-                            "PowerLawHawkes event budget exhausted"
-                        )
+                        raise RuntimeError("PowerLawHawkes event budget exhausted")
                     mc = self._draw_mark()
                     times.append(tc)
                     marks.append(mc)
@@ -692,9 +602,7 @@ class PowerLawHawkesSampler(DistributionSampler):
             label="PowerLawHawkes sample size",
         )
         if checked_size < 0:
-            raise ValueError(
-                "PowerLawHawkes sample size must be non-negative"
-            )
+            raise ValueError("PowerLawHawkes sample size must be non-negative")
         return [self._sample_one() for _ in range(checked_size)]
 
 
@@ -707,9 +615,7 @@ class PowerLawHawkesDataEncoder(DataSequenceEncoder):
             label="PowerLawHawkes encoder window",
         )
         if self.window <= 0.0:
-            raise ValueError(
-                "PowerLawHawkes encoder requires a window > 0"
-            )
+            raise ValueError("PowerLawHawkes encoder requires a window > 0")
         self.mark_dist = mark_dist
 
     def __str__(self) -> str:
@@ -766,9 +672,7 @@ class PowerLawHawkesEstimator(ParameterEstimator):
             label="PowerLawHawkes estimator window",
         )
         if self.window <= 0.0:
-            raise ValueError(
-                "PowerLawHawkes estimator requires a window > 0"
-            )
+            raise ValueError("PowerLawHawkes estimator requires a window > 0")
         self.alpha_fixed = (
             None
             if alpha_fixed is None
@@ -779,9 +683,7 @@ class PowerLawHawkesEstimator(ParameterEstimator):
         )
         self.mark_dist = mark_dist
         if self.mark_dist is None and self.alpha_fixed is None:
-            raise ValueError(
-                "unmarked PowerLawHawkes estimation must fix alpha=0"
-            )
+            raise ValueError("unmarked PowerLawHawkes estimation must fix alpha=0")
         self.name = name
         self.keys = keys
         self.max_events = _exact_integer(
@@ -793,9 +695,7 @@ class PowerLawHawkesEstimator(ParameterEstimator):
             label="PowerLawHawkes maximum branching work",
         )
         if self.max_events < 0 or self.max_work < 0:
-            raise ValueError(
-                "PowerLawHawkes sampling budgets must be non-negative"
-            )
+            raise ValueError("PowerLawHawkes sampling budgets must be non-negative")
 
     def accumulator_factory(self):
         """Return a factory for raw-realization Hawkes accumulators."""
@@ -831,13 +731,10 @@ class PowerLawHawkesEstimator(ParameterEstimator):
         )
         total_weight = float(np.sum(checked.weights))
         if total_weight <= 0.0:
-            raise ValueError(
-                "PowerLawHawkes fitting requires positive realization weight"
-            )
+            raise ValueError("PowerLawHawkes fitting requires positive realization weight")
         if n_total <= 0.0:
             raise ValueError(
-                "PowerLawHawkes evidence with no positively weighted events "
-                "has no finite interior baseline-rate MLE"
+                "PowerLawHawkes evidence with no positively weighted events has no finite interior baseline-rate MLE"
             )
 
         def negll(theta):
@@ -862,31 +759,14 @@ class PowerLawHawkesEstimator(ParameterEstimator):
                 intensity = np.full(times.size, mu)
                 for index in range(1, times.size):
                     intensity[index] += np.sum(
-                        productivity[:index]
-                        * (
-                            1.0
-                            + (times[index] - times[:index]) / c
-                        )
-                        ** (-(1.0 + pm1))
+                        productivity[:index] * (1.0 + (times[index] - times[:index]) / c) ** (-(1.0 + pm1))
                     )
                 if np.any(~np.isfinite(intensity)) or np.any(intensity <= 0.0):
                     return np.inf
                 compensator = mu * self.window + np.sum(
-                    productivity
-                    * c
-                    / pm1
-                    * (
-                        1.0
-                        - (
-                            1.0
-                            + (self.window - times) / c
-                        )
-                        ** (-pm1)
-                    )
+                    productivity * c / pm1 * (1.0 - (1.0 + (self.window - times) / c) ** (-pm1))
                 )
-                total += float(weight) * (
-                    float(np.sum(np.log(intensity))) - compensator
-                )
+                total += float(weight) * (float(np.sum(np.log(intensity))) - compensator)
             return -total if np.isfinite(total) else np.inf
 
         empirical_rate = n_total / (total_weight * self.window)
@@ -942,10 +822,7 @@ class PowerLawHawkesEstimator(ParameterEstimator):
             if result.success and np.isfinite(result.fun):
                 candidates.append(result)
         if not candidates:
-            raise RuntimeError(
-                "PowerLawHawkes likelihood optimization failed: "
-                + "; ".join(messages)
-            )
+            raise RuntimeError("PowerLawHawkes likelihood optimization failed: " + "; ".join(messages))
         res = min(candidates, key=lambda result: float(result.fun))
         mu, a, c, pm1 = np.exp(res.x[[0, 1, 3, 4]])
         alpha = alpha_fixed if unmarked else res.x[2]
@@ -987,9 +864,7 @@ class PowerLawHawkesAccumulator(SequenceEncodableStatisticAccumulator):
             label="PowerLawHawkes accumulator window",
         )
         if self.window <= 0.0:
-            raise ValueError(
-                "PowerLawHawkes accumulator requires a window > 0"
-            )
+            raise ValueError("PowerLawHawkes accumulator requires a window > 0")
         self.alpha_fixed = alpha_fixed
         self.mark_dist = mark_dist
         self.realizations: list[tuple[np.ndarray, np.ndarray]] = []

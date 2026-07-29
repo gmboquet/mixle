@@ -67,9 +67,7 @@ class IntegerChowLiuTreeTestCase(unittest.TestCase):
 
     def test_constructor_owns_immutable_probability_tables(self):
         root = np.log(np.asarray([0.6, 0.4]))
-        conditional = np.log(
-            np.asarray([[0.7, 0.3], [0.2, 0.8]])
-        )
+        conditional = np.log(np.asarray([[0.7, 0.3], [0.2, 0.8]]))
         dist = IntegerChowLiuTreeDistribution(
             [None, 0],
             [root, conditional],
@@ -114,12 +112,8 @@ class IntegerChowLiuTreeTestCase(unittest.TestCase):
             scalar_value.marginal_counts,
             batch_value.marginal_counts,
         )
-        self.assertTrue(
-            np.all(scalar_value.counts[1, 0] == 0.0)
-        )
-        self.assertTrue(
-            np.all(scalar_value.counts[0, 0] == 0.0)
-        )
+        self.assertTrue(np.all(scalar_value.counts[1, 0] == 0.0))
+        self.assertTrue(np.all(scalar_value.counts[0, 0] == 0.0))
 
     def test_accumulator_rejects_bad_batches_before_mutation(self):
         estimator = IntegerChowLiuTreeEstimator(
@@ -177,9 +171,7 @@ class IntegerChowLiuTreeTestCase(unittest.TestCase):
             {"pseudo_count": -1.0},
             {"pseudo_count": np.nan},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises(
-                (TypeError, ValueError)
-            ):
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
                 IntegerChowLiuTreeEstimator(**kwargs)
 
         estimator = IntegerChowLiuTreeEstimator(

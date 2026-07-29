@@ -76,14 +76,8 @@ def _validate_statistics(suff_stat: Any) -> tuple[float, float]:
     return total, successes
 
 
-def _require_matching_configuration(
-    left: ErdosRenyiGraphAccumulator, right: ErdosRenyiGraphAccumulator
-) -> None:
-    if (
-        left.directed != right.directed
-        or left.self_loops != right.self_loops
-        or left.num_nodes != right.num_nodes
-    ):
+def _require_matching_configuration(left: ErdosRenyiGraphAccumulator, right: ErdosRenyiGraphAccumulator) -> None:
+    if left.directed != right.directed or left.self_loops != right.self_loops or left.num_nodes != right.num_nodes:
         raise ValueError("cannot share Erdos-Renyi statistics across incompatible graph configurations.")
 
 

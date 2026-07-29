@@ -109,17 +109,13 @@ def _resolve_feature(
     if version is None:
         matches = [registration for (candidate, _), registration in _FEATURE_FNS.items() if candidate == name]
         if len(matches) != 1:
-            raise KeyError(
-                f"feature {name!r} has {len(matches)} registered versions; specify an exact version"
-            )
+            raise KeyError(f"feature {name!r} has {len(matches)} registered versions; specify an exact version")
         registration = matches[0]
     else:
         try:
             registration = _FEATURE_FNS[(name, version)]
         except KeyError:
-            raise KeyError(
-                f"no feature function registered under name={name!r}, version={version!r}"
-            ) from None
+            raise KeyError(f"no feature function registered under name={name!r}, version={version!r}") from None
     identity = registration.identity
     if digest is not None and digest != identity.digest:
         raise ValueError(
@@ -156,9 +152,7 @@ def _feature_vector(identity: FeatureIdentity, raw_item: Any) -> np.ndarray:
             f"({identity.feature_dim},), got {vector.shape}"
         )
     if not np.all(np.isfinite(vector)):
-        raise ValueError(
-            f"feature {identity.name!r} version {identity.version!r} returned non-finite values"
-        )
+        raise ValueError(f"feature {identity.name!r} version {identity.version!r} returned non-finite values")
     return vector
 
 

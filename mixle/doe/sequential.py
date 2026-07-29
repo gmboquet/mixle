@@ -298,28 +298,20 @@ def sequential_design(
         try:
             this_round.summary = _canonical_json_dict(summary, "summarize()")
         except Exception as exc:  # noqa: BLE001 - record-contract failure follows the selected policy
-            return _handle_callback_failure(
-                result, i, "summary_validation", exc, on_error, existing_round=this_round
-            )
+            return _handle_callback_failure(result, i, "summary_validation", exc, on_error, existing_round=this_round)
 
         try:
             decision_history = _copy_safe_history(result.rounds)
         except Exception as exc:  # noqa: BLE001 - history materialization is an auditable stage
-            return _handle_callback_failure(
-                result, i, "decision_history", exc, on_error, existing_round=this_round
-            )
+            return _handle_callback_failure(result, i, "decision_history", exc, on_error, existing_round=this_round)
         try:
             decision = should_continue(decision_history)
         except Exception as exc:  # noqa: BLE001 - callback failure is recorded with its exact stage
-            return _handle_callback_failure(
-                result, i, "should_continue", exc, on_error, existing_round=this_round
-            )
+            return _handle_callback_failure(result, i, "should_continue", exc, on_error, existing_round=this_round)
         try:
             this_round.decision = _validate_decision(decision)
         except Exception as exc:  # noqa: BLE001 - side effects remain gated behind decision validation
-            return _handle_callback_failure(
-                result, i, "decision_validation", exc, on_error, existing_round=this_round
-            )
+            return _handle_callback_failure(result, i, "decision_validation", exc, on_error, existing_round=this_round)
 
         if not this_round.decision["keep_going"]:
             result.stopped_reason = "controller_stop"
@@ -331,9 +323,7 @@ def sequential_design(
         try:
             proposal_history = _copy_safe_history(result.rounds)
         except Exception as exc:  # noqa: BLE001 - history materialization is an auditable stage
-            return _handle_callback_failure(
-                result, i, "proposal_history", exc, on_error, existing_round=this_round
-            )
+            return _handle_callback_failure(result, i, "proposal_history", exc, on_error, existing_round=this_round)
         try:
             action = propose(state, proposal_history)
         except Exception as exc:  # noqa: BLE001 - a callback's exception type is unknown; record+policy decide next

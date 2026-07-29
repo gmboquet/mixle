@@ -64,9 +64,7 @@ class FaultInjectionReceipt:
             raise ValueError("fault receipt must identify target state before and after interception.")
         if self.kind is None and self.applied:
             raise ValueError("ordinary delivery receipts cannot claim a fault was applied.")
-        if self.kind is not None and (
-            not self.applied or self.target_state_before == self.target_state_after
-        ):
+        if self.kind is not None and (not self.applied or self.target_state_before == self.target_state_after):
             raise ValueError("an injected fault must demonstrate a target-state transition.")
 
     def as_dict(self) -> dict[str, Any]:

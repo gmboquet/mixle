@@ -137,9 +137,7 @@ def stationary_kernel(
     x1 = _point_matrix(x1, "x1")
     x2 = _point_matrix(x2, "x2")
     if x1.shape[1] != x2.shape[1]:
-        raise ValueError(
-            f"x1 and x2 must have the same feature width, got {x1.shape[1]} and {x2.shape[1]}"
-        )
+        raise ValueError(f"x1 and x2 must have the same feature width, got {x1.shape[1]} and {x2.shape[1]}")
     lengthscale = _positive_finite_scalar(lengthscale, "lengthscale")
     amplitude = _positive_finite_scalar(amplitude, "amplitude")
     if name not in {"rbf", "matern32", "matern52"}:

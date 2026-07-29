@@ -125,7 +125,9 @@ class HashedRecord:
         if record_kind == "dict":
             if not isinstance(field_keys, list) or not field_keys:
                 raise ValueError("dict record schemas require non-empty field_keys.")
-            if any(not isinstance(key, str) or not key for key in field_keys) or len(set(field_keys)) != len(field_keys):
+            if any(not isinstance(key, str) or not key for key in field_keys) or len(set(field_keys)) != len(
+                field_keys
+            ):
                 raise ValueError("field_keys must be unique non-empty strings.")
             if record_width is not None:
                 raise ValueError("dict record schemas do not use record_width.")
@@ -301,8 +303,7 @@ class _ClassifierIO:
                 module.train(was_training)
         if result.shape != (len(raw_inputs), len(self.labels)) or np.any(~np.isfinite(result)):
             raise ValueError(
-                f"classifier module must return finite logits with shape "
-                f"({len(raw_inputs)}, {len(self.labels)})."
+                f"classifier module must return finite logits with shape ({len(raw_inputs)}, {len(self.labels)})."
             )
         return np.asarray(result)
 
@@ -360,6 +361,7 @@ class RecordClassifierIO(_ClassifierIO):
             raise ValueError("record classifier featurizers must declare a fixed record schema.")
         super().__init__(featurizer, labels)
 
+
 class StructuredClassifierIO:
     """``record -> label`` through a *structured probabilistic* model instead of a neural net.
 
@@ -401,9 +403,7 @@ class StructuredClassifierIO:
             self.field_count = len(field_keys)
         else:
             self.field_keys = None
-            self.field_count = (
-                _exact_positive_int(field_count, "field_count") if field_count is not None else None
-            )
+            self.field_count = _exact_positive_int(field_count, "field_count") if field_count is not None else None
         if self.field_count is not None and self.label_index > self.field_count:
             raise ValueError("label_index cannot exceed the number of non-label fields.")
 

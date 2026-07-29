@@ -46,26 +46,15 @@ class IntegerBernoulliEditBruteForceTestCase(unittest.TestCase):
 
     def test_conditional_density_sums_to_one_over_all_next_sets(self):
         for x0 in _all_subsets(self.num_vals):
-            total = sum(
-                np.exp(self.dist.conditional_log_density(x0, x1))
-                for x1 in _all_subsets(self.num_vals)
-            )
+            total = sum(np.exp(self.dist.conditional_log_density(x0, x1)) for x1 in _all_subsets(self.num_vals))
             self.assertAlmostEqual(total, 1.0, places=10)
 
     def test_default_joint_density_is_normalized(self):
         total = sum(
-            self.dist.density((x0, x1))
-            for x0 in _all_subsets(self.num_vals)
-            for x1 in _all_subsets(self.num_vals)
+            self.dist.density((x0, x1)) for x0 in _all_subsets(self.num_vals) for x1 in _all_subsets(self.num_vals)
         )
         self.assertAlmostEqual(total, 1.0, places=10)
-        self.assertTrue(
-            all(
-                self.dist.log_density((x0, [])) == -np.inf
-                for x0 in _all_subsets(self.num_vals)
-                if x0
-            )
-        )
+        self.assertTrue(all(self.dist.log_density((x0, [])) == -np.inf for x0 in _all_subsets(self.num_vals) if x0))
 
     def test_seq_log_density_matches_scalar_log_density(self):
         data = [(x0, x1) for x0 in _all_subsets(self.num_vals) for x1 in _all_subsets(self.num_vals)]
@@ -80,9 +69,7 @@ class IntegerBernoulliEditBruteForceTestCase(unittest.TestCase):
         expected = np.asarray([self.dist.log_density(row) for row in data])
         np.testing.assert_array_equal(self.dist.seq_log_density(encoded), expected)
         np.testing.assert_array_equal(
-            NumpyEngine().to_numpy(
-                self.dist.backend_seq_log_density(encoded, NumpyEngine())
-            ),
+            NumpyEngine().to_numpy(self.dist.backend_seq_log_density(encoded, NumpyEngine())),
             expected,
         )
 
@@ -105,22 +92,18 @@ class IntegerBernoulliEditContractTestCase(unittest.TestCase):
             with self.subTest(kernel=kernel), self.assertRaises(ValueError):
                 IntegerBernoulliEditDistribution(kernel)
         with self.assertRaises(ValueError):
-            IntegerBernoulliEditDistribution(
-                np.log([[0.2, 0.8, 0.2, 0.8]])
-            )
+            IntegerBernoulliEditDistribution(np.log([[0.2, 0.8, 0.2, 0.8]]))
 
     def test_constructor_copies_freezes_and_canonicalizes_kernel(self):
         source = np.log([[0.2, 0.7], [0.8, 0.3]])
         dist = IntegerBernoulliEditDistribution(source)
         source[:] = np.log(0.5)
         np.testing.assert_allclose(
-            np.exp(dist.log_edit_pmat[:, 0])
-            + np.exp(dist.log_edit_pmat[:, 2]),
+            np.exp(dist.log_edit_pmat[:, 0]) + np.exp(dist.log_edit_pmat[:, 2]),
             1.0,
         )
         np.testing.assert_allclose(
-            np.exp(dist.log_edit_pmat[:, 1])
-            + np.exp(dist.log_edit_pmat[:, 3]),
+            np.exp(dist.log_edit_pmat[:, 1]) + np.exp(dist.log_edit_pmat[:, 3]),
             1.0,
         )
         with self.assertRaises(ValueError):
@@ -159,9 +142,7 @@ class IntegerBernoulliEditContractTestCase(unittest.TestCase):
         self.assertEqual(scalar, -np.inf)
         self.assertEqual(dists[0].seq_log_density(encoded)[0], -np.inf)
         self.assertEqual(
-            NumpyEngine().to_numpy(
-                dists[0].backend_seq_log_density(encoded, NumpyEngine())
-            )[0],
+            NumpyEngine().to_numpy(dists[0].backend_seq_log_density(encoded, NumpyEngine()))[0],
             -np.inf,
         )
         params = IntegerBernoulliEditDistribution.backend_stacked_params(

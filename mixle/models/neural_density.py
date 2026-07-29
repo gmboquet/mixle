@@ -166,9 +166,7 @@ class NeuralDensitySampler(DistributionSampler):
         self.dist.module.to(dev)
         seed = int(self.rng.randint(0, 2**31 - 1))
         with _module_mode(self.dist.module, train=False), torch.no_grad():
-            out = _call_sample_with_seed(
-                self.dist.module.sample, n, torch=torch, device=dev, seed=seed
-            ).cpu().numpy()
+            out = _call_sample_with_seed(self.dist.module.sample, n, torch=torch, device=dev, seed=seed).cpu().numpy()
         return out if (size is not None) else out[0]
 
 

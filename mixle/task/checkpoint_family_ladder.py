@@ -217,9 +217,7 @@ def build_checkpoint_family(
             raise ValueError("eval_data must be a rectangular numeric array")
         contiguous = np.ascontiguousarray(array)
         return hashlib.sha256(
-            contiguous.tobytes()
-            + str(tuple(contiguous.shape)).encode()
-            + str(contiguous.dtype).encode()
+            contiguous.tobytes() + str(tuple(contiguous.shape)).encode() + str(contiguous.dtype).encode()
         ).hexdigest()
 
     evaluation_set_digest = data_digest(eval_data)

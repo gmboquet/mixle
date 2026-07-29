@@ -250,8 +250,7 @@ def plan_placement(
                     b.name,
                     b.kind,
                     "pool",
-                    f"gradient residual ~{tflop:.1f} TFLOP -- plan pool "
-                    f"(assumed {pool.pool_speedup:.0f}x speedup)",
+                    f"gradient residual ~{tflop:.1f} TFLOP -- plan pool (assumed {pool.pool_speedup:.0f}x speedup)",
                     tflop,
                     round(cost, 4),
                     estimate_source="block_reason_hint",

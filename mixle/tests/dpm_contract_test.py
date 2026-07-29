@@ -92,15 +92,11 @@ class DirichletProcessStateContractTestCase(unittest.TestCase):
         model = _fixed_model([0.0, -1.0])
         original_score = model.log_density(0.0)
         with self.assertRaises(ValueError):
-            model.set_parameters(
-                (2.0, [0.25, 0.25], [_FixedScoreGaussian(2.0), _FixedScoreGaussian(3.0)])
-            )
+            model.set_parameters((2.0, [0.25, 0.25], [_FixedScoreGaussian(2.0), _FixedScoreGaussian(3.0)]))
         self.assertEqual(model.a, 1.5)
         self.assertAlmostEqual(model.log_density(0.0), original_score)
 
-        model.set_parameters(
-            (2.0, [0.25, 0.75], [_FixedScoreGaussian(2.0), _FixedScoreGaussian(3.0)])
-        )
+        model.set_parameters((2.0, [0.25, 0.75], [_FixedScoreGaussian(2.0), _FixedScoreGaussian(3.0)]))
         self.assertEqual(model.a, 2.0)
         np.testing.assert_allclose(model.w, [0.25, 0.75])
         snapshot = model.get_parameters()
@@ -192,9 +188,7 @@ class DirichletProcessEvidenceContractTestCase(unittest.TestCase):
 
     def test_impossible_rows_do_not_create_accumulator_counts(self):
         model = _fixed_model([-np.inf, -np.inf])
-        accumulator = DirichletProcessMixtureAccumulator(
-            [GaussianAccumulator(), GaussianAccumulator()]
-        )
+        accumulator = DirichletProcessMixtureAccumulator([GaussianAccumulator(), GaussianAccumulator()])
         accumulator.update(0.0, 2.0, model)
         encoded = model.dist_to_encoder().seq_encode([0.0, 1.0])
         accumulator.seq_update(encoded, np.asarray([3.0, 4.0]), model)
@@ -205,9 +199,7 @@ class DirichletProcessEvidenceContractTestCase(unittest.TestCase):
 
 class DirichletProcessInitializationAndElboContractTestCase(unittest.TestCase):
     def test_zero_weight_initialization_creates_no_counts(self):
-        accumulator = DirichletProcessMixtureAccumulator(
-            [GaussianAccumulator(), GaussianAccumulator()]
-        )
+        accumulator = DirichletProcessMixtureAccumulator([GaussianAccumulator(), GaussianAccumulator()])
         encoded = GaussianDistribution(0.0, 1.0).dist_to_encoder().seq_encode([0.0])
         accumulator.seq_initialize(encoded, np.asarray([0.0]), RandomState(2))
         component_counts, beta_counts, *_ = accumulator.value()
@@ -215,9 +207,7 @@ class DirichletProcessInitializationAndElboContractTestCase(unittest.TestCase):
         np.testing.assert_array_equal(beta_counts, np.zeros((2, 2)))
 
     def test_initialization_validates_weight_geometry(self):
-        accumulator = DirichletProcessMixtureAccumulator(
-            [GaussianAccumulator(), GaussianAccumulator()]
-        )
+        accumulator = DirichletProcessMixtureAccumulator([GaussianAccumulator(), GaussianAccumulator()])
         encoded = GaussianDistribution(0.0, 1.0).dist_to_encoder().seq_encode([0.0, 1.0])
         for weights in ([1.0], [[1.0], [1.0]], [1.0, -1.0], [1.0, np.nan]):
             with self.subTest(weights=weights), self.assertRaises(ValueError):
@@ -258,9 +248,7 @@ class DirichletProcessInitializationAndElboContractTestCase(unittest.TestCase):
         self.assertAlmostEqual(estimator.model_log_density(model), expected, places=12)
 
     def test_serialized_count_geometry_is_rejected_atomically(self):
-        accumulator = DirichletProcessMixtureAccumulator(
-            [GaussianAccumulator(), GaussianAccumulator()]
-        )
+        accumulator = DirichletProcessMixtureAccumulator([GaussianAccumulator(), GaussianAccumulator()])
         before = accumulator.value()
         malformed = (
             (np.ones(3), np.ones((2, 2)), 1.0, 0.0, (None, None)),

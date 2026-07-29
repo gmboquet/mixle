@@ -52,12 +52,7 @@ def _fit(arr: np.ndarray):
         shape, fitted_loc, scale = stats.genpareto.fit(arr, floc=loc)
     except Exception:  # noqa: BLE001
         return None
-    if (
-        not math.isfinite(shape)
-        or not math.isfinite(fitted_loc)
-        or not math.isfinite(scale)
-        or not scale > 0.0
-    ):
+    if not math.isfinite(shape) or not math.isfinite(fitted_loc) or not math.isfinite(scale) or not scale > 0.0:
         return None
     return float(fitted_loc), float(scale), float(shape)
 

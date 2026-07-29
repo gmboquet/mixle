@@ -244,9 +244,7 @@ def test_apply_mup_init_scales_live_readout_values_and_gradients_across_widths()
         scaled_gradient = torch.autograd.grad(scaled_logits.sum(), model.blocks[0].attn.proj.weight)[0]
 
         assert torch.allclose(scaled_logits, raw_logits * expected, rtol=1.0e-6, atol=1.0e-7)
-        assert torch.allclose(
-            scaled_all_logits, raw_all_logits * expected, rtol=1.0e-6, atol=1.0e-7
-        )
+        assert torch.allclose(scaled_all_logits, raw_all_logits * expected, rtol=1.0e-6, atol=1.0e-7)
         assert torch.allclose(scaled_gradient, raw_gradient * expected, rtol=1.0e-5, atol=1.0e-7)
         assert "mup_output_multiplier" in model.state_dict()
         restored = build_causal_lm(vocab=VOCAB, d_model=width, n_layer=1, n_head=2, block=BLOCK)

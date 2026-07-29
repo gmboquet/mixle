@@ -65,8 +65,8 @@ class RVineCopulaTest(unittest.TestCase):
         # chain dependence 0-1-2-...-5: the best vine is a path; a fixed-root C-vine is a poor fit.
         u = GaussianCopulaDistribution(_chain_corr(6)).sampler(0).sample(4000)
         cand = ("gaussian", "independence")
-        rvine = RVineCopulaDistribution.independence(6, candidates=cand).estimator().estimate(
-            None, (u, np.ones(len(u)))
+        rvine = (
+            RVineCopulaDistribution.independence(6, candidates=cand).estimator().estimate(None, (u, np.ones(len(u))))
         )
         cvine = CVineCopulaDistribution(6, {}, candidates=cand).estimator().estimate(None, (u, np.ones(len(u))))
         ll_r = float(np.sum(rvine.seq_log_density(u)))
@@ -89,8 +89,8 @@ class RVineCopulaTest(unittest.TestCase):
     def test_sampling_recovers_a_nongaussian_joint_with_tail_dependence(self):
         u = ClaytonCopulaDistribution(4, theta=2.5).sampler(0).sample(5000)
         cand = ("clayton", "gaussian", "frank", "independence")
-        rvine = RVineCopulaDistribution.independence(4, candidates=cand).estimator().estimate(
-            None, (u, np.ones(len(u)))
+        rvine = (
+            RVineCopulaDistribution.independence(4, candidates=cand).estimator().estimate(None, (u, np.ones(len(u))))
         )
         s = rvine.sampler(1).sample(6000)
         worst = max(

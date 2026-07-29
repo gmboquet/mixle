@@ -197,9 +197,12 @@ class OptionalExtensionLoaderTest(unittest.TestCase):
     def test_absence_and_loader_incompatibility_fall_back_with_diagnostics(self):
         absent = ModuleNotFoundError("missing", name="example.extension")
         for error, status in ((absent, "absent"), (OSError("bad ABI"), "incompatible")):
-            with self.subTest(status=status), patch(
-                "mixle.engines._optional_extension.importlib.import_module",
-                side_effect=error,
+            with (
+                self.subTest(status=status),
+                patch(
+                    "mixle.engines._optional_extension.importlib.import_module",
+                    side_effect=error,
+                ),
             ):
                 result = load_optional_extension("example.extension", ("run",))
             self.assertFalse(result.available)

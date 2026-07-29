@@ -166,8 +166,7 @@ class CommonNeighbourMotif:
         self.bins = tuple(checked)
         self.directed = bool(directed)
         self.names = tuple(
-            f"cn>={self.bins[-1]}" if i == len(self.bins) - 1 else f"cn={b}"
-            for i, b in enumerate(self.bins)
+            f"cn>={self.bins[-1]}" if i == len(self.bins) - 1 else f"cn={b}" for i, b in enumerate(self.bins)
         )
 
     @property
@@ -273,11 +272,7 @@ def _capped_poisson_subset_log_prob(selected: int, candidates: int, rate: float)
     if rate == 0.0:
         return 0.0 if selected == 0 else float("-inf")
     if selected < candidates:
-        log_count = (
-            math.lgamma(candidates + 1)
-            - math.lgamma(selected + 1)
-            - math.lgamma(candidates - selected + 1)
-        )
+        log_count = math.lgamma(candidates + 1) - math.lgamma(selected + 1) - math.lgamma(candidates - selected + 1)
         return -rate + selected * math.log(rate) - math.lgamma(selected + 1) - log_count
     return float(poisson.logsf(candidates - 1, rate))
 
@@ -385,9 +380,7 @@ class TemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution)
         if bins.ndim != 1 or candidates.shape != (self.motif.num_motifs,):
             raise ValueError("temporal edit components have incompatible motif shapes.")
         if bins.size and (
-            not np.issubdtype(bins.dtype, np.integer)
-            or int(bins.min()) < 0
-            or int(bins.max()) >= self.motif.num_motifs
+            not np.issubdtype(bins.dtype, np.integer) or int(bins.min()) < 0 or int(bins.max()) >= self.motif.num_motifs
         ):
             raise ValueError("temporal edit bins must be in motif support.")
         if np.any(~np.isfinite(candidates)) or np.any(candidates < 0.0) or np.any(candidates != np.floor(candidates)):
@@ -927,10 +920,7 @@ class TemporalGraphGrammarDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[Sequence[np.ndarray]]) -> Sequence[Sequence[np.ndarray]]:
         """Validate and own every adjacency in a temporal graph batch."""
-        return tuple(
-            tuple(_binarize(snapshot, directed=self.directed) for snapshot in sequence)
-            for sequence in x
-        )
+        return tuple(tuple(_binarize(snapshot, directed=self.directed) for snapshot in sequence) for sequence in x)
 
     def row_count(self, x: Any) -> int:
         """Return the number of temporal sequences in an encoded payload."""
@@ -987,9 +977,7 @@ def _validate_labeled_observation(
         for transition, (prev, cur, group) in enumerate(zip(snaps, snaps[1:], edge_features)):
             num_added = len(_edge_diff(prev, cur, structure.directed)[0])
             if len(group) != num_added:
-                raise ValueError(
-                    "edge feature group %d must contain exactly one record per added edge." % transition
-                )
+                raise ValueError("edge feature group %d must contain exactly one record per added edge." % transition)
     else:
         try:
             edge_features = tuple(raw_edges)
@@ -1383,12 +1371,8 @@ class LabeledTemporalGraphGrammarEstimator(ParameterEstimator):
             raise ValueError("cannot estimate edge attributes without aligned edge records.")
         return LabeledTemporalGraphGrammarDistribution(
             self.structure_estimator.estimate(nobs, suff_stat.structure),
-            None
-            if self.node_estimator is None
-            else self.node_estimator.estimate(node_weight, suff_stat.node),
-            None
-            if self.edge_estimator is None
-            else self.edge_estimator.estimate(edge_weight, suff_stat.edge),
+            None if self.node_estimator is None else self.node_estimator.estimate(node_weight, suff_stat.node),
+            None if self.edge_estimator is None else self.edge_estimator.estimate(edge_weight, suff_stat.edge),
             name=self.name,
         )
 
@@ -2890,9 +2874,7 @@ class LatentTemporalGraphGrammarEstimator(ParameterEstimator):
         state_weights = checked.init_counts + checked.trans_counts.sum(axis=0)
         states = [
             estimator.estimate(float(state_weights[index]), state_value)
-            for index, (estimator, state_value) in enumerate(
-                zip(self.state_estimators, checked.state_values)
-            )
+            for index, (estimator, state_value) in enumerate(zip(self.state_estimators, checked.state_values))
         ]
         return LatentTemporalGraphGrammarDistribution(states, ip, tm, name=self.name)
 
@@ -2906,9 +2888,7 @@ def _validate_latent_attributed_observation(
     has_edge_dists: bool,
 ) -> tuple[tuple[Any, ...], tuple[tuple[Any, ...], ...], tuple[tuple[Any, ...], ...]]:
     if not isinstance(x, (tuple, list)) or len(x) != 3:
-        raise ValueError(
-            "latent attributed observations must be (snapshots, node_features, edge_features)."
-        )
+        raise ValueError("latent attributed observations must be (snapshots, node_features, edge_features).")
     raw_snaps, raw_nodes, raw_edges = x
     if isinstance(raw_snaps, ApproximateTemporalGraphSample):
         raise ValueError("approximate scalable samples must be explicitly unwrapped before attribution.")
@@ -2940,14 +2920,10 @@ def _validate_latent_attributed_observation(
         if new_nodes < 0:
             raise ValueError("latent attributed temporal graphs do not support node removal.")
         if has_node_dists and len(node_features[transition]) != new_nodes:
-            raise ValueError(
-                "node feature group %d must contain exactly one record per added node." % transition
-            )
+            raise ValueError("node feature group %d must contain exactly one record per added node." % transition)
         num_added = len(_edge_diff(previous, current, structure.directed)[0])
         if has_edge_dists and len(edge_features[transition]) != num_added:
-            raise ValueError(
-                "edge feature group %d must contain exactly one record per added edge." % transition
-            )
+            raise ValueError("edge feature group %d must contain exactly one record per added edge." % transition)
     return snaps, node_features, edge_features
 
 
@@ -2989,8 +2965,7 @@ class LatentAttributedTemporalGraphGrammarDistribution(SequenceEncodableProbabil
                 return None
             result = tuple(value)
             if len(result) != self.k or any(
-                not isinstance(distribution, SequenceEncodableProbabilityDistribution)
-                for distribution in result
+                not isinstance(distribution, SequenceEncodableProbabilityDistribution) for distribution in result
             ):
                 raise ValueError(f"{label} must contain exactly one sequence-encodable distribution per regime.")
             return result
@@ -3469,12 +3444,8 @@ class LatentAttributedTemporalGraphGrammarAccumulator(SequenceEncodableStatistic
             self.init_counts.copy(),
             self.trans_counts.copy(),
             tuple(accumulator.value() for accumulator in self.struct_accs),
-            None
-            if self.node_accs is None
-            else tuple(accumulator.value() for accumulator in self.node_accs),
-            None
-            if self.edge_accs is None
-            else tuple(accumulator.value() for accumulator in self.edge_accs),
+            None if self.node_accs is None else tuple(accumulator.value() for accumulator in self.node_accs),
+            None if self.edge_accs is None else tuple(accumulator.value() for accumulator in self.edge_accs),
             self.node_weights.copy(),
             self.edge_weights.copy(),
             self.accepted_weight,
@@ -3605,9 +3576,7 @@ class LatentAttributedTemporalGraphGrammarEstimator(ParameterEstimator):
             has_edge_models=self.edge_estimators is not None,
         )
         if checked.rejected_weight > 0.0:
-            raise ValueError(
-                "cannot estimate a latent attributed grammar after rejecting zero-probability evidence."
-            )
+            raise ValueError("cannot estimate a latent attributed grammar after rejecting zero-probability evidence.")
         if checked.accepted_weight <= 0.0:
             raise ValueError("cannot estimate a latent attributed grammar without accepted transition evidence.")
         pc = 0.0 if self.pseudo_count is None else float(self.pseudo_count)
@@ -3618,9 +3587,7 @@ class LatentAttributedTemporalGraphGrammarEstimator(ParameterEstimator):
         structure_weights = checked.init_counts + checked.trans_counts.sum(axis=0)
         structures = [
             estimator.estimate(float(structure_weights[index]), value)
-            for index, (estimator, value) in enumerate(
-                zip(self.structure_estimators, checked.structure_values)
-            )
+            for index, (estimator, value) in enumerate(zip(self.structure_estimators, checked.structure_values))
         ]
         node_dists = None
         if self.node_estimators is not None:
@@ -3628,9 +3595,7 @@ class LatentAttributedTemporalGraphGrammarEstimator(ParameterEstimator):
                 raise ValueError("every latent node model requires aligned effective record weight.")
             node_dists = [
                 estimator.estimate(float(checked.node_weights[index]), value)
-                for index, (estimator, value) in enumerate(
-                    zip(self.node_estimators, checked.node_values)
-                )
+                for index, (estimator, value) in enumerate(zip(self.node_estimators, checked.node_values))
             ]
         edge_dists = None
         if self.edge_estimators is not None:
@@ -3638,9 +3603,7 @@ class LatentAttributedTemporalGraphGrammarEstimator(ParameterEstimator):
                 raise ValueError("every latent edge model requires aligned effective record weight.")
             edge_dists = [
                 estimator.estimate(float(checked.edge_weights[index]), value)
-                for index, (estimator, value) in enumerate(
-                    zip(self.edge_estimators, checked.edge_values)
-                )
+                for index, (estimator, value) in enumerate(zip(self.edge_estimators, checked.edge_values))
             ]
         return LatentAttributedTemporalGraphGrammarDistribution(
             structures,
@@ -4201,9 +4164,7 @@ class LatentChurningTemporalGraphGrammarEstimator(ParameterEstimator):
             raise ValueError("every latent transition row requires evidence or a positive pseudo_count.")
         states = [
             estimator.estimate(float(checked.steps[index]), state_value)
-            for index, (estimator, state_value) in enumerate(
-                zip(self.state_estimators, checked.state_values)
-            )
+            for index, (estimator, state_value) in enumerate(zip(self.state_estimators, checked.state_values))
         ]
         rates = checked.removed / checked.steps
         return LatentChurningTemporalGraphGrammarDistribution(
@@ -4297,9 +4258,7 @@ def _records_mean(
     for record in records:
         if feature_map is None:
             if isinstance(record, (bool, np.bool_)) or not isinstance(record, (int, float, np.number)):
-                raise ValueError(
-                    f"structured {label} records require an explicit {label} feature map."
-                )
+                raise ValueError(f"structured {label} records require an explicit {label} feature map.")
             value = float(record)
         else:
             try:
@@ -4391,8 +4350,7 @@ def regime_moment_init(
         raise ValueError("k must agree with both the estimator and prototype regime counts.")
     if feature_maps is not None:
         if not isinstance(feature_maps, dict) or any(
-            key not in {"node", "edge"} or not callable(value)
-            for key, value in feature_maps.items()
+            key not in {"node", "edge"} or not callable(value) for key, value in feature_maps.items()
         ):
             raise ValueError("feature_maps must map 'node' and/or 'edge' to scalar callables.")
     observations = tuple(data)

@@ -97,7 +97,9 @@ class AmplifyAndCaptureTest(unittest.TestCase):
             candidate_pool_size=1,
             seed=7,
         )
-        self.assertEqual(len({report.seeds.search, report.seeds.baseline, report.seeds.permutation, report.seeds.round2_pool}), 4)
+        self.assertEqual(
+            len({report.seeds.search, report.seeds.baseline, report.seeds.permutation, report.seeds.round2_pool}), 4
+        )
         self.assertFalse(np.array_equal(report.round1.xs[0], report.baseline.xs[0]))
 
     def test_invalid_policy_and_underfilled_pool_fail_before_oracle_calls(self):
@@ -213,9 +215,7 @@ class AmplifyAndCaptureTest(unittest.TestCase):
         # round should clear a conventional 0.05 gate only at its nominal rate; relying on a fixed seed
         # to pass at 0.05 would recreate the same-seed coupling this audit batch removed.
         oracle = _quadratic_bowl_oracle(target=np.array([2.0, -1.0]))
-        report = amplify_and_capture(
-            oracle, _BOUNDS, n_init=12, n_iter=0, significance=0.99, degree=2, seed=7
-        )
+        report = amplify_and_capture(oracle, _BOUNDS, n_init=12, n_iter=0, significance=0.99, degree=2, seed=7)
         self.assertIsNotNone(report.round2)
         self.assertEqual(len(report.round2.run.history), len(report.round1.run.history))
         round1_xs = {tuple(np.round(x, 12)) for x in report.round1.xs}
@@ -235,9 +235,7 @@ class AmplifyAndCaptureTest(unittest.TestCase):
         all, which is what makes this a real demonstration of round 2 losing, not a case that never
         got the chance to win."""
         oracle = _quadratic_bowl_oracle(target=np.array([2.0, -1.0]))
-        report = amplify_and_capture(
-            oracle, _BOUNDS, n_init=12, n_iter=0, degree=1, significance=0.99, seed=7
-        )
+        report = amplify_and_capture(oracle, _BOUNDS, n_init=12, n_iter=0, degree=1, significance=0.99, seed=7)
 
         self.assertTrue(report.beats_baseline)
         self.assertIsNotNone(report.round2)
@@ -255,9 +253,7 @@ class AmplifyAndCaptureTest(unittest.TestCase):
         round2_beats_round1 must still be able to report True honestly. The fix must not make this
         metric impossible to satisfy, only stop guaranteeing it by construction."""
         oracle = _quadratic_bowl_oracle(target=np.array([2.0, -1.0]))
-        report = amplify_and_capture(
-            oracle, _BOUNDS, n_init=12, n_iter=0, degree=2, significance=0.99, seed=7
-        )
+        report = amplify_and_capture(oracle, _BOUNDS, n_init=12, n_iter=0, degree=2, significance=0.99, seed=7)
 
         self.assertTrue(report.beats_baseline)
         self.assertIsNotNone(report.round2)
@@ -267,9 +263,7 @@ class AmplifyAndCaptureTest(unittest.TestCase):
 
     def test_collapse_monitor_is_run_and_reused_not_reimplemented(self):
         oracle = _quadratic_bowl_oracle(target=np.array([2.0, -1.0]))
-        report = amplify_and_capture(
-            oracle, _BOUNDS, n_init=12, n_iter=0, degree=2, significance=0.99, seed=7
-        )
+        report = amplify_and_capture(oracle, _BOUNDS, n_init=12, n_iter=0, degree=2, significance=0.99, seed=7)
 
         self.assertIsNotNone(report.collapse)
         self.assertTrue(report.collapse.ok)

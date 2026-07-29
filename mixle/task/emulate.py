@@ -386,8 +386,7 @@ def _fit_multi_fidelity(
             raise ValueError("costs must be one-dimensional")
         if cost_arr.size != fids.size:
             raise ValueError(
-                f"costs must have exactly one entry per fidelity: got {cost_arr.size} "
-                f"costs for {fids.size} fidelities"
+                f"costs must have exactly one entry per fidelity: got {cost_arr.size} costs for {fids.size} fidelities"
             )
     if not np.all(np.isfinite(cost_arr)) or np.any(cost_arr <= 0.0):
         raise ValueError("every fidelity cost must be finite and positive")

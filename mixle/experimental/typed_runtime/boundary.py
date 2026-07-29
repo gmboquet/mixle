@@ -270,7 +270,9 @@ class BoundaryInbox:
             required_dependencies = self._required_dependencies(message.node_id)
             missing_runtime = sorted(required_dependencies - set(versions.node_versions))
             if missing_runtime:
-                raise ValueError("runtime version vector is missing graph dependencies: %s" % ", ".join(missing_runtime))
+                raise ValueError(
+                    "runtime version vector is missing graph dependencies: %s" % ", ".join(missing_runtime)
+                )
             current_dependencies = tuple(
                 sorted((node_id, versions.node_versions[node_id]) for node_id in required_dependencies)
             )

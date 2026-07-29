@@ -152,9 +152,7 @@ _EXPLICIT_MODEL_STRUCTURES: dict[str, frozenset[str]] = {
         {"partially_exchangeable", "exchangeable", "iid"}
     ),
     "mixle.stats.latent.lda.LDAEstimator": frozenset({"partially_exchangeable", "exchangeable", "iid"}),
-    "mixle.stats.latent.labeled_lda.LabeledLDAEstimator": frozenset(
-        {"partially_exchangeable", "exchangeable", "iid"}
-    ),
+    "mixle.stats.latent.labeled_lda.LabeledLDAEstimator": frozenset({"partially_exchangeable", "exchangeable", "iid"}),
 }
 
 

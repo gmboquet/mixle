@@ -376,8 +376,10 @@ class ConformalLinkPredictor:
         nodes = _labels([i], 1, self.P.shape[0], "node")
         i = int(nodes[0])
         row = self.P[i]
-        cand = np.arange(row.size) if candidates is None else _labels(
-            candidates, len(np.asarray(candidates)), row.size, "candidates"
+        cand = (
+            np.arange(row.size)
+            if candidates is None
+            else _labels(candidates, len(np.asarray(candidates)), row.size, "candidates")
         )
         if not self.allow_self_loops:
             cand = cand[cand != i]
@@ -433,10 +435,7 @@ class ConformalKnowledgeGraph:
         self.slot = slot
         self.alpha = _alpha(alpha)
         triples = self._triples(calibration, "calibration")
-        scores = [
-            1.0 - float(np.exp(self._posterior(h, r, t)[self._truth(h, r, t)]))
-            for h, r, t in triples
-        ]
+        scores = [1.0 - float(np.exp(self._posterior(h, r, t)[self._truth(h, r, t)])) for h, r, t in triples]
         self.tau = conformal_quantile(scores, self.alpha)
 
     def _triples(self, value: Any, name: str) -> np.ndarray:

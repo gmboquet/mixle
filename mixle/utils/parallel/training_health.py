@@ -339,9 +339,7 @@ class TrainingHealthMonitor:
         """Record one step; returns any anomalies raised at this step (also appended to ``self.anomalies``)."""
         step = _exact_int(step, "step", minimum=0)
         if self.records and step <= self.records[-1].step:
-            raise ValueError(
-                f"step must increase strictly; previous={self.records[-1].step} current={step}"
-            )
+            raise ValueError(f"step must increase strictly; previous={self.records[-1].step} current={step}")
         if isinstance(loss, bool) or not isinstance(loss, Real):
             raise TypeError("loss must be a real number")
         loss = float(loss)

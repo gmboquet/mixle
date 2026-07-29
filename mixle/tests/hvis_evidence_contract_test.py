@@ -46,9 +46,11 @@ class AutomaticAffinityFallbackTest(unittest.TestCase):
 
     def test_auto_surfaces_invalid_input_and_implementation_failures(self):
         for error in (ValueError("invalid field weights"), RuntimeError("broken statistics")):
-            with self.subTest(error=type(error).__name__), patch(
-                "mixle.utils.hvis.affinity.local_factors", side_effect=error
-            ), self.assertRaises(type(error)):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch("mixle.utils.hvis.affinity.local_factors", side_effect=error),
+                self.assertRaises(type(error)),
+            ):
                 _resolve_affinity("auto", self.model, [0.0, 1.0], None)
 
     def test_auto_surfaces_nonfinite_field_weights(self):

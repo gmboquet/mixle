@@ -32,9 +32,7 @@ class DatetimeParsingTest(unittest.TestCase):
         self.assertTrue(np.all((phi >= 0) & (phi < 2 * np.pi)))
 
     def test_nat_and_none_remain_missing(self):
-        converted = to_unix_seconds(
-            [np.datetime64("NaT"), None]
-        )
+        converted = to_unix_seconds([np.datetime64("NaT"), None])
         self.assertTrue(np.all(np.isnan(converted)))
 
 
@@ -77,9 +75,7 @@ class PeriodicTimeTest(unittest.TestCase):
         for period in (0.0, -1.0, np.inf, np.nan):
             with self.subTest(period=period), self.assertRaises(ValueError):
                 PeriodicTimeDistribution(period)
-            with self.subTest(
-                encoder_period=period
-            ), self.assertRaises(ValueError):
+            with self.subTest(encoder_period=period), self.assertRaises(ValueError):
                 SeasonalTimeSeries(periods=[period])
 
     def test_missing_timestamp_fails_closed(self):
@@ -186,9 +182,7 @@ class SeasonalTimeSeriesTest(unittest.TestCase):
             np.arange(100, dtype=float) * 3600.0,
             np.sin(np.arange(100, dtype=float)) + np.arange(100) * 0.01,
         )
-        decomposition = model.decompose(
-            np.arange(20, dtype=float) * 3600.0
-        )
+        decomposition = model.decompose(np.arange(20, dtype=float) * 3600.0)
         reconstructed = np.sum(
             np.stack(list(decomposition.values())),
             axis=0,

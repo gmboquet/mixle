@@ -276,9 +276,7 @@ def quantize_family_artifacts(model: Any, *, name: str, bits: int = 8, seed: int
         if arr.size == 0:
             continue
         try:
-            payload: QuantizedTensor | DenseParameter = quantize_tensor(
-                arr, method="auto", bits=bits, seed=seed + i
-            )
+            payload: QuantizedTensor | DenseParameter = quantize_tensor(arr, method="auto", bits=bits, seed=seed + i)
         except QuantizationBudgetError:
             payload = DenseParameter(arr)
         payloads.append(QuantizedParameter(parameter_name, payload))

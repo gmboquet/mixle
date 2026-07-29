@@ -156,6 +156,7 @@ def _validate_select_encoding(
         raise ValueError("%s positions must partition every encoded row exactly once." % label)
     return len(joined)
 
+
 # Friendly type-name aliases -> numpy-aware isinstance predicate tuples, so routing a "number" also
 # catches numpy scalars (isinstance(np.int64(5), int) is False, but it is a numbers.Number).
 _TYPE_ALIASES: dict[str, tuple[type, ...]] = {
@@ -362,8 +363,7 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
         if unresolved and self.router_identity[1] is None:
             raise ValueError(
                 "weighted SelectDistribution cannot prove routing for infinite-support children %s; "
-                "use TypeDispatch/by_type or certify_select_routing with a stable contract id."
-                % unresolved
+                "use TypeDispatch/by_type or certify_select_routing with a stable contract id." % unresolved
             )
 
     @classmethod
@@ -617,10 +617,7 @@ class SelectDistribution(SequenceEncodableProbabilityDistribution):
                     child_counts[component],
                     child_stats_by_component[component],
                 )
-        return tuple(
-            SelectStatistics(1, tuple(component_statistics))
-            for component_statistics in per_component
-        )
+        return tuple(SelectStatistics(1, tuple(component_statistics)) for component_statistics in per_component)
 
     def gradient_fit_state(self, engine: Any, torch: Any, leaves: list[Any], recurse: Any, tensor_param: Any) -> Any:
         """Return distribution-owned state for autograd fitting."""
@@ -748,9 +745,7 @@ class SelectSampler(DistributionSampler):
 
         """
         if dist.weights is None:
-            raise NonGenerativeSelectError(
-                "conditional SelectDistribution has no branch law and cannot be sampled."
-            )
+            raise NonGenerativeSelectError("conditional SelectDistribution has no branch law and cannot be sampled.")
         self.dist = dist
         self.rng = RandomState(seed)
         self.dist_samplers = [d.sampler(seed=self.rng.randint(maxint)) for d in dist.dists]
@@ -848,9 +843,7 @@ class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         return len(self.accumulators)
 
     def _validate_estimate(self, estimate: SelectDistribution | None) -> None:
-        if estimate is not None and (
-            estimate.count != self.count or estimate.router_identity != self.router_identity
-        ):
+        if estimate is not None and (estimate.count != self.count or estimate.router_identity != self.router_identity):
             raise ValueError("select estimate structure or routing does not match its accumulator.")
 
     def _validate_encoding(self, value: Any) -> int:
@@ -1045,10 +1038,7 @@ class SelectEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         checked = _validate_select_statistics(x, self.count)
-        restored = [
-            self.accumulators[i].from_value(checked.branches[i][1])
-            for i in range(self.count)
-        ]
+        restored = [self.accumulators[i].from_value(checked.branches[i][1]) for i in range(self.count)]
         self.accumulators[:] = restored
         self.weights[:] = [branch[0] for branch in checked.branches]
 
@@ -1196,10 +1186,7 @@ class SelectEstimator(ParameterEstimator):
         total = float(counts.sum())
         if self.estimate_weights and total <= 0.0:
             raise ValueError("cannot estimate select branch weights from zero total routed weight.")
-        dists = [
-            est.estimate(branch[0], branch[1])
-            for est, branch in zip(self.estimators, checked.branches)
-        ]
+        dists = [est.estimate(branch[0], branch[1]) for est, branch in zip(self.estimators, checked.branches)]
         if not self.estimate_weights:
             return SelectDistribution(dists, self.choice_function)
         # The branch is observed via the choice function, so the MLE weights are simply the routed

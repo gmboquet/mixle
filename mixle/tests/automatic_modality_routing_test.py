@@ -52,9 +52,7 @@ class TorchAbsentFallbackTest(unittest.TestCase):
 
     def test_embedding_fallback_is_recorded(self):
         with patch("mixle.utils.automatic.profiling._has_torch", return_value=False):
-            profile = analyze_structure(
-                _vectors(20), pairwise=False, validate_marginals=False, modality="embedding"
-            )
+            profile = analyze_structure(_vectors(20), pairwise=False, validate_marginals=False, modality="embedding")
         self.assertTrue(any("explicit modality: embedding" in w and "fell back" in w for w in profile.warnings))
 
     def test_image_fallback_is_recorded(self):
@@ -89,9 +87,7 @@ class HybridRoutingTest(unittest.TestCase):
 
     def test_image_routing_is_recorded(self):
         profile = analyze_structure(_images(), pairwise=False, validate_marginals=False, modality="image")
-        self.assertTrue(
-            any("explicit modality: image" in w and "hybrid neural density" in w for w in profile.warnings)
-        )
+        self.assertTrue(any("explicit modality: image" in w and "hybrid neural density" in w for w in profile.warnings))
 
     def test_embedding_field_fits_and_scores_finite(self):
         from mixle.inference import optimize

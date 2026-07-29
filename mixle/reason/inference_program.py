@@ -349,7 +349,9 @@ def _validate_program(evidence: Mapping[str, Any], hops: Sequence[InferenceHop])
         if set(hop.carry) != previous_target:
             missing = previous_target - set(hop.carry)
             unknown = set(hop.carry) - previous_target
-            raise ValueError(f"hop {index} carry must consume every prior target exactly; missing={missing}, unknown={unknown}.")
+            raise ValueError(
+                f"hop {index} carry must consume every prior target exactly; missing={missing}, unknown={unknown}."
+            )
         destinations = list(hop.carry.values())
         if len(set(destinations)) != len(destinations):
             raise ValueError(f"hop {index} carry destinations must be unique.")
@@ -401,8 +403,7 @@ def _joint_identity(joint: CrossModalJoint) -> dict[str, Any]:
         "names": joint.names,
         "weights": np.asarray(joint.joint.w, dtype=float),
         "components": [
-            [_object_identity(distribution) for distribution in component.dists]
-            for component in joint.joint.components
+            [_object_identity(distribution) for distribution in component.dists] for component in joint.joint.components
         ],
     }
 

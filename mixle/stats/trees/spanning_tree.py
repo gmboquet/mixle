@@ -64,9 +64,7 @@ def _validated_nonnegative_scalar(value: object, *, label: str) -> float:
     except (TypeError, ValueError) as exc:
         raise TypeError(f"Spanning-tree {label} must be a real scalar") from exc
     if not np.isfinite(result) or result < 0.0:
-        raise ValueError(
-            f"Spanning-tree {label} must be finite and non-negative"
-        )
+        raise ValueError(f"Spanning-tree {label} must be finite and non-negative")
     return result
 
 
@@ -95,9 +93,7 @@ def _validated_sample_size(value: object) -> int:
     try:
         result = operator.index(value)
     except TypeError as exc:
-        raise TypeError(
-            "Spanning-tree sample size must be a non-negative integer"
-        ) from exc
+        raise TypeError("Spanning-tree sample size must be a non-negative integer") from exc
     if result < 0:
         raise ValueError("Spanning-tree sample size must be non-negative")
     return result
@@ -116,15 +112,11 @@ def _validated_weight_matrix(
     if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
         raise ValueError(f"Spanning-tree {label} must be square")
     if dim is not None and matrix.shape != (dim, dim):
-        raise ValueError(
-            f"Spanning-tree {label} must have exact shape ({dim}, {dim})"
-        )
+        raise ValueError(f"Spanning-tree {label} must have exact shape ({dim}, {dim})")
     if matrix.shape[0] < 2:
         raise ValueError(f"Spanning-tree {label} must have dimension at least two")
     if np.any(~np.isfinite(matrix)) or np.any(matrix < 0.0):
-        raise ValueError(
-            f"Spanning-tree {label} must contain finite non-negative values"
-        )
+        raise ValueError(f"Spanning-tree {label} must contain finite non-negative values")
     if not np.array_equal(matrix, matrix.T):
         raise ValueError(f"Spanning-tree {label} must be exactly symmetric")
     if np.any(np.diag(matrix) != 0.0):
@@ -139,16 +131,11 @@ def _validated_candidate_support(
 ) -> np.ndarray:
     candidate = np.asarray(value)
     if candidate.shape != (dim, dim):
-        raise ValueError(
-            "Spanning-tree candidate support must have exact shape (%d, %d)"
-            % (dim, dim)
-        )
+        raise ValueError("Spanning-tree candidate support must have exact shape (%d, %d)" % (dim, dim))
     if candidate.dtype.kind != "b":
         raise TypeError("Spanning-tree candidate support must be boolean")
     if not np.array_equal(candidate, candidate.T) or np.any(np.diag(candidate)):
-        raise ValueError(
-            "Spanning-tree candidate support must be symmetric with a false diagonal"
-        )
+        raise ValueError("Spanning-tree candidate support must be symmetric with a false diagonal")
     checked = candidate.copy()
     _log_partition(checked.astype(np.float64))
     return checked
@@ -160,9 +147,7 @@ def _validated_encoded_batch(
     dim: int,
 ) -> tuple[np.ndarray, ...]:
     if isinstance(value, np.ndarray) and value.ndim == 2:
-        raise ValueError(
-            "Spanning-tree batch scoring requires a sequence of tree edge arrays"
-        )
+        raise ValueError("Spanning-tree batch scoring requires a sequence of tree edge arrays")
     try:
         trees = tuple(value)
     except TypeError as exc:
@@ -176,13 +161,9 @@ def _validated_weights(value: object, rows: int) -> np.ndarray:
     except (TypeError, ValueError) as exc:
         raise ValueError("Spanning-tree weights must be numeric") from exc
     if weights.shape != (rows,):
-        raise ValueError(
-            "Spanning-tree weights must have exact shape (%d,)" % rows
-        )
+        raise ValueError("Spanning-tree weights must have exact shape (%d,)" % rows)
     if np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
-        raise ValueError(
-            "Spanning-tree weights must be finite and non-negative"
-        )
+        raise ValueError("Spanning-tree weights must be finite and non-negative")
     return weights
 
 
@@ -193,34 +174,24 @@ def _validated_statistics(
     candidate: np.ndarray | None = None,
 ) -> tuple[float, np.ndarray]:
     if not isinstance(value, (tuple, list)) or len(value) != 2:
-        raise ValueError(
-            "Spanning-tree sufficient statistics must contain two items"
-        )
+        raise ValueError("Spanning-tree sufficient statistics must contain two items")
     count = _validated_nonnegative_scalar(value[0], label="total weight")
     try:
         edge_counts = np.asarray(value[1], dtype=np.float64)
     except (TypeError, ValueError) as exc:
         raise ValueError("Spanning-tree edge counts must be numeric") from exc
     if edge_counts.shape != (dim, dim):
-        raise ValueError(
-            "Spanning-tree edge counts must have exact shape (%d, %d)"
-            % (dim, dim)
-        )
+        raise ValueError("Spanning-tree edge counts must have exact shape (%d, %d)" % (dim, dim))
     if (
         np.any(~np.isfinite(edge_counts))
         or np.any(edge_counts < 0.0)
         or not np.array_equal(edge_counts, edge_counts.T)
         or np.any(np.diag(edge_counts) != 0.0)
     ):
-        raise ValueError(
-            "Spanning-tree edge counts must be finite, non-negative, symmetric, "
-            "and have a zero diagonal"
-        )
+        raise ValueError("Spanning-tree edge counts must be finite, non-negative, symmetric, and have a zero diagonal")
     tolerance = _COUNT_ATOL * max(1.0, count)
     if np.any(edge_counts > count + tolerance):
-        raise ValueError(
-            "Spanning-tree edge counts cannot exceed total tree weight"
-        )
+        raise ValueError("Spanning-tree edge counts cannot exceed total tree weight")
     expected_edge_mass = count * (dim - 1)
     if not np.isclose(
         float(edge_counts.sum() / 2.0),
@@ -228,13 +199,9 @@ def _validated_statistics(
         rtol=0.0,
         atol=_COUNT_ATOL * max(1.0, expected_edge_mass),
     ):
-        raise ValueError(
-            "Spanning-tree edge counts do not contain exactly n-1 edges per tree"
-        )
+        raise ValueError("Spanning-tree edge counts do not contain exactly n-1 edges per tree")
     if candidate is not None and np.any(edge_counts[~candidate] != 0.0):
-        raise ValueError(
-            "Spanning-tree edge counts include structurally forbidden edges"
-        )
+        raise ValueError("Spanning-tree edge counts include structurally forbidden edges")
     return count, edge_counts.copy()
 
 
@@ -275,15 +242,9 @@ def _smoothed_edge_target(
     else:
         target = np.zeros_like(edge_counts)
     if pseudo_count is not None and pseudo_count > 0.0:
-        prior = (
-            np.where(candidate, 1.0, 0.0)
-            if prior_weights is None
-            else prior_weights
-        )
+        prior = np.where(candidate, 1.0, 0.0) if prior_weights is None else prior_weights
         prior_marginals = _edge_marginals(prior)
-        target = (
-            count * target + pseudo_count * prior_marginals
-        ) / (count + pseudo_count)
+        target = (count * target + pseudo_count * prior_marginals) / (count + pseudo_count)
     return target * candidate
 
 
@@ -361,10 +322,7 @@ class SpanningTreeDistribution(SequenceEncodableProbabilityDistribution):
         """Return vectorized log-probabilities for a validated sequence of edge arrays."""
         trees = _validated_encoded_batch(x, dim=self.dim)
         return np.asarray(
-            [
-                self._edge_log_weight_sum(edges) - self.log_z
-                for edges in trees
-            ],
+            [self._edge_log_weight_sum(edges) - self.log_z for edges in trees],
             dtype=float,
         )
 
@@ -418,13 +376,9 @@ class SpanningTreeEnumerator(DistributionEnumerator):
             try:
                 checked_limit = operator.index(max_edge_subsets)
             except TypeError as exc:
-                raise TypeError(
-                    "max_edge_subsets must be a non-negative integer or None"
-                ) from exc
+                raise TypeError("max_edge_subsets must be a non-negative integer or None") from exc
             if checked_limit < 0:
-                raise ValueError(
-                    "max_edge_subsets must be a non-negative integer or None"
-                )
+                raise ValueError("max_edge_subsets must be a non-negative integer or None")
             self.max_edge_subsets = checked_limit
         self.items_yielded = 0
         self.truncated = False
@@ -435,10 +389,7 @@ class SpanningTreeEnumerator(DistributionEnumerator):
         self._log_z = dist.log_z
 
     def __next__(self) -> tuple[list[tuple[int, int]], float]:
-        if (
-            self.max_edge_subsets is not None
-            and self.items_yielded >= self.max_edge_subsets
-        ):
+        if self.max_edge_subsets is not None and self.items_yielded >= self.max_edge_subsets:
             self.truncated = True
             self.termination_reason = "item_budget_exhausted"
             raise StopIteration
@@ -615,8 +566,7 @@ class SpanningTreeEstimator(ParameterEstimator):
         )
         self.tol = _validated_positive_scalar(tol, label="tolerance")
         self.candidate_support = (
-            np.ones((self.dim, self.dim), dtype=bool)
-            ^ np.eye(self.dim, dtype=bool)
+            np.ones((self.dim, self.dim), dtype=bool) ^ np.eye(self.dim, dtype=bool)
             if candidate_support is None
             else _validated_candidate_support(
                 candidate_support,
@@ -639,9 +589,7 @@ class SpanningTreeEstimator(ParameterEstimator):
                 checked_prior > 0.0,
                 self.candidate_support,
             ):
-                raise ValueError(
-                    "Spanning-tree prior weights must be positive exactly on candidate support"
-                )
+                raise ValueError("Spanning-tree prior weights must be positive exactly on candidate support")
             _log_partition(checked_prior)
             self.prior_weights = checked_prior
         self.name = name
@@ -662,9 +610,7 @@ class SpanningTreeEstimator(ParameterEstimator):
         )
         prior_weight = 0.0 if self.pseudo_count is None else self.pseudo_count
         if count == 0.0 and prior_weight == 0.0:
-            raise SpanningTreeFitError(
-                "Spanning-tree fitting requires positive observation or prior weight"
-            )
+            raise SpanningTreeFitError("Spanning-tree fitting requires positive observation or prior weight")
 
         candidate = self.candidate_support
         target = _smoothed_edge_target(
@@ -749,27 +695,19 @@ class SpanningTreeDataEncoder(DataSequenceEncoder):
         dim = self.dim
         if dim is None:
             if not trees:
-                raise ValueError(
-                    "Cannot infer spanning-tree dimension from an empty batch"
-                )
+                raise ValueError("Cannot infer spanning-tree dimension from an empty batch")
             maximum = -1
             for tree in trees:
                 for edge in tree:
                     if not isinstance(edge, (tuple, list, np.ndarray)) or len(edge) != 2:
-                        raise ValueError(
-                            "Spanning-tree edges must be endpoint pairs"
-                        )
+                        raise ValueError("Spanning-tree edges must be endpoint pairs")
                     for endpoint in edge:
                         if isinstance(endpoint, (bool, np.bool_)):
-                            raise TypeError(
-                                "Spanning-tree endpoints must be exact integers"
-                            )
+                            raise TypeError("Spanning-tree endpoints must be exact integers")
                         try:
                             checked = operator.index(endpoint)
                         except TypeError as exc:
-                            raise TypeError(
-                                "Spanning-tree endpoints must be exact integers"
-                            ) from exc
+                            raise TypeError("Spanning-tree endpoints must be exact integers") from exc
                         maximum = max(maximum, checked)
             dim = _validated_dim(maximum + 1)
         return list(_validated_encoded_batch(trees, dim=dim))
@@ -799,12 +737,8 @@ def _canonical_edges(tree: Sequence[Sequence[int]], n: int) -> np.ndarray:
             try:
                 endpoints.append(operator.index(endpoint))
             except TypeError as exc:
-                raise TypeError(
-                    "Spanning-tree endpoints must be exact integers"
-                ) from exc
-        canonical.append(
-            (min(endpoints[0], endpoints[1]), max(endpoints[0], endpoints[1]))
-        )
+                raise TypeError("Spanning-tree endpoints must be exact integers") from exc
+        canonical.append((min(endpoints[0], endpoints[1]), max(endpoints[0], endpoints[1])))
     edges = np.asarray(canonical, dtype=np.int64)
     if edges.size == 0:
         edges = np.empty((0, 2), dtype=np.int64)
@@ -812,11 +746,7 @@ def _canonical_edges(tree: Sequence[Sequence[int]], n: int) -> np.ndarray:
         raise ValueError("Spanning-tree edges must be endpoint pairs")
     if edges.shape[0] != checked_dim - 1:
         raise ValueError("SpanningTreeDistribution requires exactly n-1 edges.")
-    if (
-        np.any(edges[:, 0] == edges[:, 1])
-        or np.any(edges < 0)
-        or np.any(edges >= checked_dim)
-    ):
+    if np.any(edges[:, 0] == edges[:, 1]) or np.any(edges < 0) or np.any(edges >= checked_dim):
         raise ValueError("SpanningTreeDistribution edges must be valid node pairs without self-loops.")
     # Union-find connectivity / acyclicity check.
     parent = list(range(checked_dim))

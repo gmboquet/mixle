@@ -216,11 +216,14 @@ class SparseGaussianProcessRegressor:
                     "sparse GP hyperparameter optimization failed: "
                     f"status={res.status}, message={res.message!s}, objective={objective!r}"
                 )
-            lengthscale, amplitude, noise = (_positive_finite(value, name) for value, name in zip(
-                np.exp(res.x),
-                ("optimized lengthscale", "optimized amplitude", "optimized noise"),
-                strict=True,
-            ))
+            lengthscale, amplitude, noise = (
+                _positive_finite(value, name)
+                for value, name in zip(
+                    np.exp(res.x),
+                    ("optimized lengthscale", "optimized amplitude", "optimized noise"),
+                    strict=True,
+                )
+            )
 
         try:
             self._fitc_terms(x, y, lengthscale, amplitude, noise, z=z)

@@ -197,9 +197,9 @@ class NeuralCategorical(SequenceEncodableProbabilityDistribution):
         out = []
         with _module_mode(self.module, train=False), torch.no_grad():
             xt = torch.as_tensor(x, dtype=torch.float32)
-            ranges = [(0, 0)] if xt.shape[0] == 0 else [
-                (k, min(k + 4096, xt.shape[0])) for k in range(0, xt.shape[0], 4096)
-            ]
+            ranges = (
+                [(0, 0)] if xt.shape[0] == 0 else [(k, min(k + 4096, xt.shape[0])) for k in range(0, xt.shape[0], 4096)]
+            )
             for start, stop in ranges:
                 value = self.module(xt[start:stop].to(self.device))
                 if not isinstance(value, torch.Tensor):

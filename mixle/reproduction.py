@@ -191,9 +191,7 @@ def claim_checks() -> dict[str, Any]:
         "gaussian_fit_mu": round(float(fitted.mu), 4),
         "gaussian_fit_sigma": round(float(np.sqrt(fitted.sigma2)), 4),
         "scalar_vectorized_agree": bool(np.allclose(seq, scalar, atol=1e-9)),
-        "serialization_score_equal": (
-            round(float(back.log_density(0.5)), 6) == round(float(g.log_density(0.5)), 6)
-        ),
+        "serialization_score_equal": (round(float(back.log_density(0.5)), 6) == round(float(g.log_density(0.5)), 6)),
         "auto_selects": type(get_estimator(np.random.RandomState(1).normal(0, 1, 1500).tolist())).__name__,
         "deterministic_sample": round(float(st.GammaDistribution(2.0, 1.5).sampler(seed=7).sample(1)[0]), 6),
     }
@@ -243,8 +241,10 @@ def build_receipt(*, wheel: Path | None, allow_source_tree: bool) -> tuple[dict[
         }
     checks = evaluate_claims(claim_checks())
     installed = environment()
-    passed = bool(artifact.get("verified")) and bool(installed["installed_content"].get("verified")) and all(
-        check["passed"] for check in checks.values()
+    passed = (
+        bool(artifact.get("verified"))
+        and bool(installed["installed_content"].get("verified"))
+        and all(check["passed"] for check in checks.values())
     )
     return (
         {

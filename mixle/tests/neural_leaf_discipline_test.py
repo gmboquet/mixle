@@ -231,12 +231,10 @@ class NeuralCategoricalScoringPurityTest(unittest.TestCase):
         x, labels = _xc(n=12, classes=3, seed=12)
         weights = np.ones(len(x))
 
-        staged = NeuralCategorical(staged_module, m_steps=1, lr=0.01).estimator().estimate(
-            None, (x, labels, weights)
-        )
+        staged = NeuralCategorical(staged_module, m_steps=1, lr=0.01).estimator().estimate(None, (x, labels, weights))
         staged = staged.estimator().estimate(None, (x, labels, weights))
-        uninterrupted = NeuralCategorical(uninterrupted_module, m_steps=2, lr=0.01).estimator().estimate(
-            None, (x, labels, weights)
+        uninterrupted = (
+            NeuralCategorical(uninterrupted_module, m_steps=2, lr=0.01).estimator().estimate(None, (x, labels, weights))
         )
 
         self.assertIsInstance(staged.optimizer_state, dict)
@@ -401,13 +399,9 @@ class DataBufferFanInTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "expected 2 fields"):
             acc.seq_update(x, np.ones(3), None)
         with self.assertRaisesRegex(ValueError, "same row count"):
-            DataBufferAccumulatorFactory(GradLeafEncoder()).make().seq_update(
-                (x, y[:2]), np.ones(3), None
-            )
+            DataBufferAccumulatorFactory(GradLeafEncoder()).make().seq_update((x, y[:2]), np.ones(3), None)
         with self.assertRaisesRegex(ValueError, "weights for 3 rows"):
-            DataBufferAccumulatorFactory(GradLeafEncoder()).make().seq_update(
-                x, np.ones(2), None
-            )
+            DataBufferAccumulatorFactory(GradLeafEncoder()).make().seq_update(x, np.ones(2), None)
         with self.assertRaisesRegex(ValueError, "expected 2 fields"):
             acc.combine((x, y, np.zeros((3, 1)), np.ones(3)))
 

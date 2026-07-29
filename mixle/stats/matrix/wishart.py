@@ -85,9 +85,7 @@ def _validated_df(value: Any, dim: int, name: str = "df") -> float:
     except (TypeError, ValueError) as exc:
         raise TypeError("%s must be a real scalar" % name) from exc
     if not np.isfinite(result) or result < dim:
-        raise ValueError(
-            "%s must be a finite value >= the matrix dimension p" % name
-        )
+        raise ValueError("%s must be a finite value >= the matrix dimension p" % name)
     return result
 
 
@@ -121,9 +119,7 @@ def _matrix_batch(value: Any, dim: int, name: str = "matrix observations") -> np
     if result.shape == (0,):
         return np.empty((0, dim, dim), dtype=np.float64)
     if result.ndim != 3 or result.shape[1:] != (dim, dim):
-        raise ValueError(
-            "%s must have exact shape (N, %d, %d)" % (name, dim, dim)
-        )
+        raise ValueError("%s must have exact shape (N, %d, %d)" % (name, dim, dim))
     return result
 
 
@@ -186,10 +182,7 @@ def _validated_spd_batch(
     result = _matrix_batch(value, dim, name)
     valid, logdet = _support_mask_and_logdet(result)
     if not np.all(valid):
-        raise ValueError(
-            "%s must contain only finite, exactly symmetric positive-definite matrices"
-            % name
-        )
+        raise ValueError("%s must contain only finite, exactly symmetric positive-definite matrices" % name)
     return result.copy(), logdet
 
 
@@ -207,23 +200,16 @@ def _validated_mean_scatter_statistics(
     except (TypeError, ValueError) as exc:
         raise ValueError("matrix sufficient statistics must be numeric") from exc
     if scatter.shape != (dim, dim) or np.any(~np.isfinite(scatter)):
-        raise ValueError(
-            "matrix sufficient-statistic scatter must be finite with exact shape (%d, %d)"
-            % (dim, dim)
-        )
+        raise ValueError("matrix sufficient-statistic scatter must be finite with exact shape (%d, %d)" % (dim, dim))
     if not _is_symmetric(scatter):
         raise ValueError("matrix sufficient-statistic scatter must be exactly symmetric")
     if not np.isfinite(count) or count < 0.0:
-        raise ValueError(
-            "matrix sufficient-statistic count must be finite and non-negative"
-        )
+        raise ValueError("matrix sufficient-statistic count must be finite and non-negative")
     if count == 0.0:
         if np.any(scatter != 0.0):
             raise ValueError("empty matrix sufficient statistics must have zero scatter")
     elif cholesky_logdet(scatter) is None:
-        raise ValueError(
-            "non-empty matrix sufficient-statistic scatter must be positive definite"
-        )
+        raise ValueError("non-empty matrix sufficient-statistic scatter must be positive definite")
     return scatter.copy(), count
 
 
@@ -241,9 +227,7 @@ def _validated_wishart_statistics(
     if not np.isfinite(sum_logdet):
         raise ValueError("Wishart log-determinant statistic must be finite")
     if count == 0.0 and sum_logdet != 0.0:
-        raise ValueError(
-            "empty Wishart sufficient statistics must have zero log determinant"
-        )
+        raise ValueError("empty Wishart sufficient statistics must have zero log determinant")
     return scatter, count, sum_logdet
 
 
@@ -543,16 +527,12 @@ def _solve_wishart_df(
     """
     p = _validated_dimension(dim, "Wishart dimension")
     if not np.isfinite(mean_logdet) or not np.isfinite(logdet_scatter):
-        raise WishartFitError(
-            "Wishart degree-of-freedom fit requires finite determinant statistics."
-        )
+        raise WishartFitError("Wishart degree-of-freedom fit requires finite determinant statistics.")
     if mean_logdet > logdet_scatter + 1.0e-10 * max(
         1.0,
         abs(logdet_scatter),
     ):
-        raise WishartFitError(
-            "Wishart determinant statistics violate log-determinant concavity."
-        )
+        raise WishartFitError("Wishart determinant statistics violate log-determinant concavity.")
     if df0 is not None:
         _validated_df(df0, p, "initial df")
 
@@ -594,9 +574,7 @@ def _solve_wishart_df(
     if not np.isfinite(upper_score):
         raise WishartFitError("Wishart profile score became non-finite while bracketing.")
     if upper_score > 0.0:
-        raise WishartFitError(
-            "Wishart profile likelihood has no certified finite degrees-of-freedom optimum."
-        )
+        raise WishartFitError("Wishart profile likelihood has no certified finite degrees-of-freedom optimum.")
 
     left, right = lower, upper
     score = lower_score

@@ -84,9 +84,7 @@ class AttentionCandidate:
         if (
             not isinstance(self.token_ids, tuple)
             or not self.token_ids
-            or any(
-                isinstance(token, bool) or not isinstance(token, Integral) or token < 0 for token in self.token_ids
-            )
+            or any(isinstance(token, bool) or not isinstance(token, Integral) or token < 0 for token in self.token_ids)
         ):
             raise ValueError("attention candidates require a non-empty sequence of non-negative token IDs.")
         if not isinstance(self.tokenizer_id, str) or not self.tokenizer_id:
@@ -226,7 +224,9 @@ def bounded_context_attention(
 ) -> ContextAttentionResult:
     """Attend to recent/retrieved nodes under hard node, token, and vector-work caps."""
 
-    if not isinstance(candidates, tuple) or any(not isinstance(candidate, AttentionCandidate) for candidate in candidates):
+    if not isinstance(candidates, tuple) or any(
+        not isinstance(candidate, AttentionCandidate) for candidate in candidates
+    ):
         raise TypeError("context attention candidates must be a tuple of AttentionCandidate values.")
     if not isinstance(graph, ContextGraph) or not isinstance(config, ContextAttentionConfig):
         raise TypeError("context attention requires a ContextGraph and ContextAttentionConfig.")

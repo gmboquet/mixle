@@ -336,9 +336,7 @@ class AitchisonNormalEstimator(ParameterEstimator):
         self.gaussian_estimator = MultivariateGaussianEstimator(
             dim=dim,
             pseudo_count=(
-                (None, None)
-                if checked_pseudo_count is None
-                else (checked_pseudo_count, checked_pseudo_count)
+                (None, None) if checked_pseudo_count is None else (checked_pseudo_count, checked_pseudo_count)
             ),
             suff_stat=suff_stat,
             name=name,

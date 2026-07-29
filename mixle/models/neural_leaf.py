@@ -106,8 +106,7 @@ def _validate_regression_batch(x: Any, y: Any, where: str) -> tuple[np.ndarray, 
     y_matrix = _matrix(y, f"{where} (y)")
     if x_matrix.shape[0] != y_matrix.shape[0]:
         raise ValueError(
-            f"{where} requires x and y to have the same number of rows; "
-            f"got {x_matrix.shape[0]} and {y_matrix.shape[0]}"
+            f"{where} requires x and y to have the same number of rows; got {x_matrix.shape[0]} and {y_matrix.shape[0]}"
         )
     return x_matrix, y_matrix
 

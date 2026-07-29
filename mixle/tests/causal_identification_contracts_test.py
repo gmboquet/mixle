@@ -55,9 +55,7 @@ def test_average_causal_effect_requires_an_identification_receipt():
     with pytest.raises(ValueError, match="CausalIdentification"):
         average_causal_effect(_network(), 0, 1.0, 0.0, 1, n=20)
 
-    effect = average_causal_effect(
-        _network(), 0, 1.0, 0.0, 1, identification=_causal_receipt(), n=2000, seed=3
-    )
+    effect = average_causal_effect(_network(), 0, 1.0, 0.0, 1, identification=_causal_receipt(), n=2000, seed=3)
     assert effect == pytest.approx(2.0, abs=0.02)
 
 

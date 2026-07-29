@@ -324,9 +324,7 @@ class StreamingHvis:
             dtype=np.float64,
         )
         if embedded.shape != (len(self.landmark_data), self.emb_dim):
-            raise ValueError(
-                f"landmark embedding must have shape ({len(self.landmark_data)}, {self.emb_dim})."
-            )
+            raise ValueError(f"landmark embedding must have shape ({len(self.landmark_data)}, {self.emb_dim}).")
         if not np.all(np.isfinite(embedded)):
             raise FloatingPointError("landmark embedding produced non-finite coordinates.")
         return embedded

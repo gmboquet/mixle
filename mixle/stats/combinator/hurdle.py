@@ -257,9 +257,7 @@ class HurdleAccumulator(SequenceEncodableStatisticAccumulator):
         """Replace base and hurdle statistics from a keyed statistics dictionary."""
         self.base_accumulator.key_replace(stats_dict)
         if self.keys is not None and self.keys in stats_dict:
-            self.zero_count, self.total = require_component_counts(
-                *stats_dict[self.keys], name="zero count"
-            )
+            self.zero_count, self.total = require_component_counts(*stats_dict[self.keys], name="zero count")
 
     def acc_to_encoder(self) -> "HurdleDataEncoder":
         """Return an encoder that augments the base encoding with a zero mask."""
@@ -300,9 +298,7 @@ class HurdleEstimator(ParameterEstimator):
         trunc_threshold: float = 1.0e-10,
     ) -> None:
         self.base_estimator = base_estimator
-        self.pseudo_count = (
-            None if pseudo_count is None else require_nonnegative(pseudo_count, name="pseudo_count")
-        )
+        self.pseudo_count = None if pseudo_count is None else require_nonnegative(pseudo_count, name="pseudo_count")
         self.name = name
         self.keys = keys
         self.trunc_max_iter = require_positive_integer(trunc_max_iter, name="trunc_max_iter")

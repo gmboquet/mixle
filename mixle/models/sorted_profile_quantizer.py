@@ -82,6 +82,7 @@ DEFAULT_GOF_THRESHOLD = 0.05
 DEFAULT_ANOMALY_RATIO = 2.0
 DEFAULT_ANOMALY_ABS_MARGIN = 0.02
 
+
 def _index_dtype(n: int) -> np.dtype:
     """Smallest unsigned integer dtype that can address ``n`` distinct positions -- the honest per-index
     storage cost of a literal permutation array (R1: "arbitrary permutations are gather ops", stored as
@@ -206,25 +207,15 @@ class SortedProfileEncoding:
             top_indices = np.asarray(self.top_k_indices)
             permutation = np.asarray(self.permutation_indices)
             if top_values.shape != (top_count,) or top_values.dtype != source_dtype:
-                raise ValueError(
-                    f"top_k_values must have shape {(top_count,)} and source dtype {source_dtype}"
-                )
+                raise ValueError(f"top_k_values must have shape {(top_count,)} and source dtype {source_dtype}")
             if top_indices.shape != (top_count,) or top_indices.dtype != index_dtype:
-                raise ValueError(
-                    f"top_k_indices must have shape {(top_count,)} and dtype {index_dtype}"
-                )
+                raise ValueError(f"top_k_indices must have shape {(top_count,)} and dtype {index_dtype}")
             if permutation.shape != (n_tail,) or permutation.dtype != index_dtype:
-                raise ValueError(
-                    f"permutation_indices must have shape {(n_tail,)} and dtype {index_dtype}"
-                )
+                raise ValueError(f"permutation_indices must have shape {(n_tail,)} and dtype {index_dtype}")
             if not np.all(np.isfinite(top_values)):
                 raise ValueError("top_k_values must be finite")
             all_indices = np.concatenate((top_indices.astype(np.int64), permutation.astype(np.int64)))
-            if (
-                np.any(all_indices < 0)
-                or np.any(all_indices >= size)
-                or np.unique(all_indices).size != size
-            ):
+            if np.any(all_indices < 0) or np.any(all_indices >= size) or np.unique(all_indices).size != size:
                 raise ValueError("head and tail indices must form a disjoint permutation of the source")
             if not callable(getattr(self.tail_distribution, "quantile", None)):
                 raise TypeError("tail_distribution must provide quantile(probability)")

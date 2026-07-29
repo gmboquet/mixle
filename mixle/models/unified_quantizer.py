@@ -74,6 +74,7 @@ METHODS: tuple[str, ...] = ("int8", "int4", "lns", "sorted_profile")
 
 _LNS_EPS = 1e-12
 
+
 class QuantizationBudgetError(ValueError):
     """No candidate satisfies the caller's literal serialized-byte budget."""
 
@@ -138,9 +139,7 @@ class SymmetricQuantPayload:
         expected = n if bits == 8 else (n + 1) // 2
         expected_dtype = np.int8 if bits == 8 else np.uint8
         if codes.shape != (expected,) or codes.dtype != expected_dtype:
-            raise ValueError(
-                f"int{bits} codes must have shape {(expected,)} and dtype {np.dtype(expected_dtype)}"
-            )
+            raise ValueError(f"int{bits} codes must have shape {(expected,)} and dtype {np.dtype(expected_dtype)}")
         scale = np.float64(self.scale)
         if not np.isfinite(scale) or scale <= 0.0:
             raise ValueError("quantization scale must be positive and finite")

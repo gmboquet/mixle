@@ -230,8 +230,7 @@ def amplify_and_capture(
     budget = n_init + n_iter
     if candidate_pool_size < budget:
         raise ValueError(
-            f"candidate_pool_size must be at least the matched evaluation budget {budget}, "
-            f"got {candidate_pool_size}."
+            f"candidate_pool_size must be at least the matched evaluation budget {budget}, got {candidate_pool_size}."
         )
     try:
         significance = float(significance)
@@ -242,11 +241,7 @@ def amplify_and_capture(
 
     root_sequence = np.random.SeedSequence(seed)
     child_sequences = root_sequence.spawn(4 if seed is None else 3)
-    search_seed = (
-        int(child_sequences[0].generate_state(1, dtype=np.uint32)[0])
-        if seed is None
-        else int(seed)
-    )
+    search_seed = int(child_sequences[0].generate_state(1, dtype=np.uint32)[0]) if seed is None else int(seed)
     offset = 1 if seed is None else 0
     seeds = AmplificationSeeds(
         search=search_seed,

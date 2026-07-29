@@ -219,10 +219,7 @@ class ProcessClassificationTest(unittest.TestCase):
         rng = np.random.RandomState(0)
         data = [
             values[values <= 15.0].tolist()
-            for values in (
-                np.cumsum(rng.exponential(1.0, rng.poisson(12) + 1))
-                for _ in range(40)
-            )
+            for values in (np.cumsum(rng.exponential(1.0, rng.poisson(12) + 1)) for _ in range(40))
         ]
         model = optimize(data, RPE(st.ExponentialEstimator(), window=15.0), out=None, max_its=5)
         block = certify(model).blocks[0]

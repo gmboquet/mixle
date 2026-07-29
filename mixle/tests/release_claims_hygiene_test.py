@@ -12,9 +12,7 @@ def test_documentation_does_not_suppress_all_docutils_warnings() -> None:
 
 
 def test_vision_verifier_authenticates_restricted_tensor_loads() -> None:
-    verifier = (ROOT / "examples" / "vision_edge_distillation" / "verify_on_laptop.py").read_text(
-        encoding="utf-8"
-    )
+    verifier = (ROOT / "examples" / "vision_edge_distillation" / "verify_on_laptop.py").read_text(encoding="utf-8")
     assert verifier.count("weights_only=True") == 2
     assert verifier.count("_authenticate(") >= 4
     assert verifier.index("_authenticate(student_path") < verifier.index("torch.load(student_path")

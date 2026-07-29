@@ -37,12 +37,7 @@ class CostModel:
     def __post_init__(self) -> None:
         for name in ("c_frontier", "c_local", "c_label", "train_cost"):
             value = getattr(self, name)
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, Real)
-                or not math.isfinite(value)
-                or value < 0.0
-            ):
+            if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or value < 0.0:
                 raise ValueError(f"{name} must be a finite non-negative number")
             object.__setattr__(self, name, float(value))
 

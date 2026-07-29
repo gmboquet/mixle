@@ -60,6 +60,7 @@ def _canonical(value: Any) -> str:
     except (TypeError, ValueError) as exc:
         raise ValueError("replay identity must be canonical JSON data") from exc
 
+
 @dataclass
 class TraceStep:
     """One recorded step: the tool name, the args it ran with, the seed (if any), and its result."""

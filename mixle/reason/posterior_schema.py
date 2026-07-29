@@ -332,10 +332,7 @@ def _log_moments_to_linear(
     result_mean = mean.copy()
     result_cov = cov.copy()
     transformed = set(indices)
-    linear_means = {
-        index: float(np.exp(source_mean[index] + 0.5 * source_cov[index, index]))
-        for index in indices
-    }
+    linear_means = {index: float(np.exp(source_mean[index] + 0.5 * source_cov[index, index])) for index in indices}
     for index, value in linear_means.items():
         result_mean[index] = value
     for i in indices:

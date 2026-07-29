@@ -74,18 +74,14 @@ def _bessel_ratio(kappa: float) -> float:
 def _solve_kappa(r: float) -> float:
     """Invert ``I1(kappa)/I0(kappa)`` with an adaptive certified bracket."""
     if not np.isfinite(r) or r < 0.0 or r >= 1.0:
-        raise VonMisesFitError(
-            "von Mises resultant must lie in [0, 1) for a finite fit"
-        )
+        raise VonMisesFitError("von Mises resultant must lie in [0, 1) for a finite fit")
     if r == 0.0:
         return 0.0
     upper = max(1.0, 1.0 / max(2.0 * (1.0 - r), 1.0e-12))
     while _bessel_ratio(upper) < r:
         upper *= 2.0
         if upper > 1.0e12:
-            raise VonMisesFitError(
-                "von Mises concentration could not be bracketed"
-            )
+            raise VonMisesFitError("von Mises concentration could not be bracketed")
     try:
         result = brentq(
             lambda value: _bessel_ratio(value) - r,
@@ -98,9 +94,7 @@ def _solve_kappa(r: float) -> float:
     except (RuntimeError, ValueError) as exc:
         raise VonMisesFitError("von Mises concentration solve failed") from exc
     if not np.isfinite(result):
-        raise VonMisesFitError(
-            "von Mises concentration solve returned a non-finite value"
-        )
+        raise VonMisesFitError("von Mises concentration solve returned a non-finite value")
     return float(result)
 
 
@@ -214,9 +208,7 @@ class VonMisesDistribution(SequenceEncodableProbabilityDistribution):
         checked_mu = validated_angle(mu, "von Mises mean direction")
         if checked_kappa < 0.0:
             raise ValueError("VonMisesDistribution requires kappa >= 0.")
-        self.mu = float(
-            math.atan2(math.sin(checked_mu), math.cos(checked_mu))
-        )
+        self.mu = float(math.atan2(math.sin(checked_mu), math.cos(checked_mu)))
         self.kappa = checked_kappa
         self.eta1 = self.kappa * math.cos(self.mu)
         self.eta2 = self.kappa * math.sin(self.mu)
@@ -400,9 +392,7 @@ class VonMisesAccumulator(SequenceEncodableStatisticAccumulator):
             self.sum_cos + sum_cos,
             self.sum_sin + sum_sin,
         )
-        self.count, self.sum_cos, self.sum_sin = (
-            validated_circular_statistics(combined, count_index=0)
-        )
+        self.count, self.sum_cos, self.sum_sin = validated_circular_statistics(combined, count_index=0)
         return self
 
     def value(self) -> tuple[float, float, float]:
@@ -411,9 +401,7 @@ class VonMisesAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x: tuple[float, float, float]) -> "VonMisesAccumulator":
         """Replace accumulator contents from circular-moment statistics."""
-        self.count, self.sum_cos, self.sum_sin = (
-            validated_circular_statistics(x, count_index=0)
-        )
+        self.count, self.sum_cos, self.sum_sin = validated_circular_statistics(x, count_index=0)
         return self
 
     def scale(self, c: float) -> "VonMisesAccumulator":
@@ -461,20 +449,13 @@ class VonMisesEstimator(ParameterEstimator):
     ) -> None:
         if pseudo_count is None:
             if suff_stat is not None:
-                raise ValueError(
-                    "von Mises prior moments require a pseudo-count"
-                )
+                raise ValueError("von Mises prior moments require a pseudo-count")
             self.pseudo_count = None
             self.suff_stat = None
         else:
             self.pseudo_count = validated_weight(pseudo_count)
-            if (
-                not isinstance(suff_stat, (tuple, list))
-                or len(suff_stat) != 2
-            ):
-                raise ValueError(
-                    "von Mises pseudo-count requires two prior moments"
-                )
+            if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != 2:
+                raise ValueError("von Mises pseudo-count requires two prior moments")
             mean_cos = validated_angle(
                 suff_stat[0],
                 "von Mises prior cosine moment",
@@ -484,9 +465,7 @@ class VonMisesEstimator(ParameterEstimator):
                 "von Mises prior sine moment",
             )
             if math.hypot(mean_cos, mean_sin) > 1.0 + 1.0e-8:
-                raise ValueError(
-                    "von Mises prior resultant cannot exceed one"
-                )
+                raise ValueError("von Mises prior resultant cannot exceed one")
             self.suff_stat = (mean_cos, mean_sin)
         self.name = name
         self.keys = keys
@@ -512,9 +491,7 @@ class VonMisesEstimator(ParameterEstimator):
             count_index=0,
         )
         if count == 0.0:
-            raise VonMisesFitError(
-                "von Mises fitting requires positive observation weight"
-            )
+            raise VonMisesFitError("von Mises fitting requires positive observation weight")
 
         mean_cos = sum_cos / count
         mean_sin = sum_sin / count

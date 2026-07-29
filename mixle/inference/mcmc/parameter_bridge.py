@@ -504,30 +504,19 @@ def _unit_interval_map_block(
 
     def to_u(prob_map: Any) -> np.ndarray:
         if not isinstance(prob_map, Mapping) or set(prob_map) != set(labels):
-            raise ValueError(
-                f"{name} initial state must contain exactly the declared labels."
-            )
+            raise ValueError(f"{name} initial state must contain exactly the declared labels.")
         probabilities = np.asarray(
             [float(prob_map[label]) for label in labels],
             dtype=float,
         )
-        if (
-            np.any(~np.isfinite(probabilities))
-            or np.any(probabilities <= 0.0)
-            or np.any(probabilities >= 1.0)
-        ):
-            raise ValueError(
-                f"{name} initial probabilities must lie strictly inside (0, 1)."
-            )
+        if np.any(~np.isfinite(probabilities)) or np.any(probabilities <= 0.0) or np.any(probabilities >= 1.0):
+            raise ValueError(f"{name} initial probabilities must lie strictly inside (0, 1).")
         return np.log(probabilities) - np.log1p(-probabilities)
 
     def from_u(phi: np.ndarray) -> dict[Any, float]:
         values = np.asarray(phi, dtype=float)
         probabilities = 1.0 / (1.0 + np.exp(-values))
-        return {
-            label: float(probabilities[index])
-            for index, label in enumerate(labels)
-        }
+        return {label: float(probabilities[index]) for index, label in enumerate(labels)}
 
     def log_det(phi: np.ndarray) -> float:
         values = np.asarray(phi, dtype=float)

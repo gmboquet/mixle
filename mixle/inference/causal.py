@@ -50,17 +50,13 @@ class CausalIdentification:
             raise ValueError("estimand must be a non-empty description")
         if not self.evidence or any(not isinstance(item, str) or not item.strip() for item in self.evidence):
             raise ValueError("evidence must contain at least one non-empty design or domain reference")
-        if not self.assumptions or any(
-            not isinstance(item, str) or not item.strip() for item in self.assumptions
-        ):
+        if not self.assumptions or any(not isinstance(item, str) or not item.strip() for item in self.assumptions):
             raise ValueError("assumptions must contain at least one non-empty identification assumption")
 
     @property
     def identified(self) -> bool:
         """Whether all common treatment-effect identification assumptions were declared."""
-        return bool(
-            self.exchangeability and self.positivity and self.consistency and self.no_interference
-        )
+        return bool(self.exchangeability and self.positivity and self.consistency and self.no_interference)
 
     @classmethod
     def domain_asserted(

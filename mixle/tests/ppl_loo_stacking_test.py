@@ -95,9 +95,7 @@ class LooStackingTest(unittest.TestCase):
         self.assertEqual(result["iterations"], 1)
         self.assertFalse(result["converged"])
         self.assertEqual(result["reason"], "iteration_limit")
-        expected = np.log(
-            np.exp(lpd[:, 0]) * result["weights"][0] + np.exp(lpd[:, 1]) * result["weights"][1]
-        ).sum()
+        expected = np.log(np.exp(lpd[:, 0]) * result["weights"][0] + np.exp(lpd[:, 1]) * result["weights"][1]).sum()
         self.assertAlmostEqual(result["objective"], expected)
 
     def test_stack_rejects_empty_misaligned_and_single_draw_models(self):

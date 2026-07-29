@@ -105,9 +105,7 @@ if _HAS_TORCH:
             self, vocab: int, d_model: int, n_layer: int, n_head: int, block: int, embedding: Any = None
         ) -> None:
             super().__init__()
-            vocab, d_model, n_layer, n_head, block = _validate_architecture(
-                vocab, d_model, n_layer, n_head, block
-            )
+            vocab, d_model, n_layer, n_head, block = _validate_architecture(vocab, d_model, n_layer, n_head, block)
             if embedding is not None:
                 if not isinstance(embedding, nn.Embedding):
                     raise TypeError("embedding must be a torch.nn.Embedding")
@@ -154,9 +152,7 @@ if _HAS_TORCH:
             if not isinstance(policy, (list, tuple)):
                 raise ValueError("gradient_checkpointing must be a bool or a per-block list/tuple of bools")
             if len(policy) != len(self.blocks):
-                raise ValueError(
-                    f"gradient_checkpointing has {len(policy)} entries; expected {len(self.blocks)}"
-                )
+                raise ValueError(f"gradient_checkpointing has {len(policy)} entries; expected {len(self.blocks)}")
             if any(not isinstance(value, bool) for value in policy):
                 raise ValueError("every per-block gradient_checkpointing entry must be a bool")
 
@@ -174,9 +170,7 @@ if _HAS_TORCH:
                 expected = " or ".join(str(shape) for shape in expected_shapes)
                 raise ValueError(f"{name} must have shape {expected}, got {tuple(value.shape)}")
             if value.device != self.tok.weight.device:
-                raise ValueError(
-                    f"{name} is on {value.device}; model token embeddings are on {self.tok.weight.device}"
-                )
+                raise ValueError(f"{name} is on {value.device}; model token embeddings are on {self.tok.weight.device}")
             if value.dtype == torch.bool or (not value.is_floating_point() and not value.dtype.is_signed):
                 raise ValueError(f"{name} must use a signed integer or floating-point dtype")
             if value.is_floating_point():

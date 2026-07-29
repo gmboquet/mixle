@@ -54,9 +54,10 @@ def _fit_wider_single_gaussian(data):
 
 def _has_separated_mixture(model):
     components = getattr(model, "components", ())
-    return len(components) >= 2 and max(component.mu for component in components) - min(
-        component.mu for component in components
-    ) > 2.0
+    return (
+        len(components) >= 2
+        and max(component.mu for component in components) - min(component.mu for component in components) > 2.0
+    )
 
 
 class ParadigmShiftCeilingTest(unittest.TestCase):

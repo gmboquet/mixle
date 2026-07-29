@@ -67,7 +67,7 @@ def test_no_release_archive_labels_main_as_development(tmp_path: Path) -> None:
     assemble.assemble(_docs(tmp_path / "development", "development"), tmp_path / "empty", site)
     root = (site / "index.html").read_text(encoding="utf-8")
     assert "development documentation" in root
-    assert "http-equiv=\"refresh\"" not in root
+    assert 'http-equiv="refresh"' not in root
 
 
 def test_changed_bytes_and_archive_traversal_fail_closed(tmp_path: Path) -> None:

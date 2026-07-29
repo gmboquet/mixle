@@ -102,8 +102,7 @@ def test_scanner_distinguishes_sibling_classes_and_nested_functions(tmp_path: Pa
     pkg.mkdir(parents=True)
     (tmp_path / "mixle" / "models").mkdir(parents=True)
     (pkg / "siblings.py").write_text(
-        f"class A:\n    def run(self):\n{statements}\n\n"
-        f"class B:\n    def run(self):\n{statements}\n",
+        f"class A:\n    def run(self):\n{statements}\n\nclass B:\n    def run(self):\n{statements}\n",
         encoding="utf-8",
     )
     groups = scanner.scan(root=tmp_path)

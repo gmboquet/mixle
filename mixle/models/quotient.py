@@ -135,9 +135,7 @@ def _validate_image_batch(x: Any, in_channels: int, spatial_size: int | None = N
     if x.shape[1] != in_channels:
         raise ValueError(f"x has {x.shape[1]} channels; expected {in_channels}")
     if spatial_size is not None and tuple(x.shape[-2:]) != (spatial_size, spatial_size):
-        raise ValueError(
-            f"x spatial shape must be ({spatial_size}, {spatial_size}), got {tuple(x.shape[-2:])}"
-        )
+        raise ValueError(f"x spatial shape must be ({spatial_size}, {spatial_size}), got {tuple(x.shape[-2:])}")
     if not x.is_floating_point() or not bool(torch.isfinite(x).all()):
         raise ValueError("x must contain finite floating-point values")
 

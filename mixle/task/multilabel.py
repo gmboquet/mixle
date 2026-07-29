@@ -292,9 +292,9 @@ class MultiLabelSolution:
         unknown = sorted({tag for tags in fresh_sets for tag in tags} - set(self.labels))
         if unknown:
             raise ValueError(f"fresh evidence contains labels outside the fitted support: {unknown}")
-        order = np.random.RandomState(self.seed + len(self.calibration_receipt.get("improvements", [])) + 1).permutation(
-            len(fresh_inputs)
-        )
+        order = np.random.RandomState(
+            self.seed + len(self.calibration_receipt.get("improvements", [])) + 1
+        ).permutation(len(fresh_inputs))
         cal_idx, eval_idx = order[:min_cal], order[min_cal:]
         fresh_cal_inputs = [fresh_inputs[i] for i in cal_idx]
         fresh_cal_sets = [fresh_sets[i] for i in cal_idx]

@@ -561,9 +561,7 @@ class MultinomialDistribution(SequenceEncodableProbabilityDistribution):
                 "len_dist must not be a SequenceEncodableProbabilityDistribution with support of non-negative integers."
             )
         if self.len_normalized:
-            raise ValueError(
-                "len_normalized multinomial scores are geometric-mean scores, not a sampling law"
-            )
+            raise ValueError("len_normalized multinomial scores are geometric-mean scores, not a sampling law")
         return MultinomialSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> MultinomialEstimator:
@@ -720,9 +718,7 @@ class MultinomialEnumerator(DistributionEnumerator):
         super().__init__(dist)
         raise EnumerationError(
             dist,
-            reason=(
-                "exact normalized enumeration requires a finite, deduplicated category support manifest"
-            ),
+            reason=("exact normalized enumeration requires a finite, deduplicated category support manifest"),
         )
 
     def __next__(self) -> tuple[Any, float]:
@@ -842,11 +838,7 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         if estimate is not None and not isinstance(estimate, MultinomialDistribution):
             raise TypeError("multinomial accumulator estimate must be a MultinomialDistribution")
         value_estimate = None if estimate is None else estimate.dist
-        value_weight = (
-            checked_weight / total
-            if self.len_normalized and total > 0
-            else checked_weight
-        )
+        value_weight = checked_weight / total if self.len_normalized and total > 0 else checked_weight
         for value, count in pairs:
             self.accumulator.update(value, value_weight * count, value_estimate)
         self.len_accumulator.update(
@@ -883,11 +875,7 @@ class MultinomialAccumulator(SequenceEncodableStatisticAccumulator):
 
         pairs, total = canonical_bag(x)
         checked_weight = finite_weight(weight, label="multinomial observation weight")
-        value_weight = (
-            checked_weight / total
-            if self.len_normalized and total > 0
-            else checked_weight
-        )
+        value_weight = checked_weight / total if self.len_normalized and total > 0 else checked_weight
         for value, count in pairs:
             self.accumulator.initialize(value, value_weight * count, self._acc_rng)
         self.len_accumulator.initialize(total, checked_weight, self._len_rng)

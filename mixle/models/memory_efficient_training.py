@@ -494,9 +494,7 @@ class CompressedMomentEncoding:
         elif self.method == "dense":
             state["dense_values"] = torch.from_numpy(np.asarray(self.dense_values).copy())
         else:
-            state["g4_payload"] = torch.from_numpy(
-                np.frombuffer(self.g4_encoding.to_bytes(), dtype=np.uint8).copy()
-            )
+            state["g4_payload"] = torch.from_numpy(np.frombuffer(self.g4_encoding.to_bytes(), dtype=np.uint8).copy())
         return state
 
     @classmethod
@@ -763,9 +761,7 @@ def decompress_moment(encoding: CompressedMomentEncoding) -> np.ndarray:
             raise ValueError("dense compressed-moment payload is missing.")
         flat = np.asarray(encoding.dense_values)
         if flat.dtype != source_dtype:
-            raise ValueError(
-                f"dense compressed-moment dtype {flat.dtype} does not match declared {source_dtype}."
-            )
+            raise ValueError(f"dense compressed-moment dtype {flat.dtype} does not match declared {source_dtype}.")
         flat = flat.reshape(-1)
     if flat.size != expected_size:
         raise ValueError(
@@ -811,8 +807,7 @@ class CompressedOptimizerState:
         **compress_kwargs: Any,
     ) -> None:
         if not isinstance(shape, tuple) or any(
-            isinstance(dim, (bool, np.bool_)) or not isinstance(dim, (int, np.integer)) or int(dim) < 0
-            for dim in shape
+            isinstance(dim, (bool, np.bool_)) or not isinstance(dim, (int, np.integer)) or int(dim) < 0 for dim in shape
         ):
             raise ValueError("optimizer-state shape must contain non-negative integer dimensions.")
         if method not in {"auto", "g4", "int8", "dense"}:
@@ -1169,9 +1164,7 @@ class SelectiveRecomputePolicy:
         memory_value_per_byte: float = _DEFAULT_MEMORY_VALUE_PER_BYTE,
         flop_cost_per_unit: float = _DEFAULT_FLOP_COST_PER_UNIT,
     ) -> None:
-        self.memory_value_per_byte = _finite_float(
-            memory_value_per_byte, "memory_value_per_byte", minimum=0.0
-        )
+        self.memory_value_per_byte = _finite_float(memory_value_per_byte, "memory_value_per_byte", minimum=0.0)
         self.flop_cost_per_unit = _finite_float(flop_cost_per_unit, "flop_cost_per_unit", minimum=0.0)
 
     def decide_block(self, block_index: int, activation_bytes: float, recompute_flops: float) -> RecomputeDecision:
@@ -1229,9 +1222,7 @@ class SelectiveRecomputePolicy:
             parameter_count = sum(parameter.numel() for parameter in block.parameters())
             linear_flops = 2.0 * float(batch) * float(seq_len) * float(parameter_count)
             attention_flops = (
-                4.0 * float(batch) * float(seq_len) ** 2 * float(d_model)
-                if hasattr(block, "attn")
-                else 0.0
+                4.0 * float(batch) * float(seq_len) ** 2 * float(d_model) if hasattr(block, "attn") else 0.0
             )
             recompute_flops = linear_flops + attention_flops
             decisions.append(self.decide_block(i, activation_bytes, recompute_flops))

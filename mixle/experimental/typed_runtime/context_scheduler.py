@@ -25,10 +25,7 @@ class ContextBudget:
     maximum_actions: int = 2**31 - 1
 
     def __post_init__(self) -> None:
-        if any(
-            math.isnan(value) or value < 0.0
-            for value in (self.latency_seconds, self.monetary_cost)
-        ):
+        if any(math.isnan(value) or value < 0.0 for value in (self.latency_seconds, self.monetary_cost)):
             raise ValueError("context latency and monetary budgets must be non-negative and not NaN.")
         counts = (self.materialized_tokens, self.tool_calls, self.maximum_actions)
         if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts):
@@ -136,25 +133,13 @@ class ValueOfInformationScheduler:
             return "missing-resource-limits"
         if self.actions_completed + len(self._reservations) + 1 > self.budget.maximum_actions:
             return "action-budget"
-        if (
-            self.latency_spent + self._reserved_latency + limits.latency_seconds
-            > self.budget.latency_seconds
-        ):
+        if self.latency_spent + self._reserved_latency + limits.latency_seconds > self.budget.latency_seconds:
             return "latency-budget"
-        if (
-            self.tokens_spent + self._reserved_tokens + limits.materialized_tokens
-            > self.budget.materialized_tokens
-        ):
+        if self.tokens_spent + self._reserved_tokens + limits.materialized_tokens > self.budget.materialized_tokens:
             return "token-budget"
-        if (
-            self.money_spent + self._reserved_money + limits.monetary_cost
-            > self.budget.monetary_cost
-        ):
+        if self.money_spent + self._reserved_money + limits.monetary_cost > self.budget.monetary_cost:
             return "monetary-budget"
-        if (
-            self.tool_calls_spent + self._reserved_tool_calls + limits.tool_calls
-            > self.budget.tool_calls
-        ):
+        if self.tool_calls_spent + self._reserved_tool_calls + limits.tool_calls > self.budget.tool_calls:
             return "tool-call-budget"
         return None
 
@@ -190,10 +175,7 @@ class ValueOfInformationScheduler:
         net: dict[str, float] = {}
         inadmissible: dict[str, str] = {}
         for action in actions:
-            if (
-                action.expected_graph_version is not None
-                and action.expected_graph_version != graph.version
-            ):
+            if action.expected_graph_version is not None and action.expected_graph_version != graph.version:
                 inadmissible[action.action_id] = "stale-graph-version"
                 continue
             missing = sorted(set(action.input_nodes) - set(graph.nodes))

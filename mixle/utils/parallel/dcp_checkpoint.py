@@ -128,8 +128,7 @@ def _safe_encode(value: Any) -> Any:
             "items": [[_safe_encode(key), _safe_encode(item)] for key, item in value.items()],
         }
     raise TypeError(
-        "checkpoint metadata type %s.%s is not safely serializable"
-        % (type(value).__module__, type(value).__qualname__)
+        "checkpoint metadata type %s.%s is not safely serializable" % (type(value).__module__, type(value).__qualname__)
     )
 
 
@@ -464,10 +463,7 @@ def _load_metadata_from_generation(
     source: Path,
     manifest: dict[str, Any],
     *,
-    rank_local_transform: Callable[
-        [tuple[dict[str, Any], ...], int, int, int], dict[str, Any]
-    ]
-    | None = None,
+    rank_local_transform: Callable[[tuple[dict[str, Any], ...], int, int, int], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Load global metadata and only topology-compatible or explicitly transformed local state."""
     rank, world_size = _rank_world()
@@ -497,9 +493,7 @@ def _load_metadata_from_generation(
             rank_local_metadata = {field: None for field in _RANK_LOCAL_METADATA_FIELDS}
             status = "transform_required"
         else:
-            rank_local_metadata = rank_local_transform(
-                tuple(rank_local_states), saved_world_size, rank, world_size
-            )
+            rank_local_metadata = rank_local_transform(tuple(rank_local_states), saved_world_size, rank, world_size)
             if not isinstance(rank_local_metadata, dict):
                 raise TypeError("rank_local_transform must return a metadata dictionary")
             missing = set(_RANK_LOCAL_METADATA_FIELDS) - set(rank_local_metadata)
@@ -525,10 +519,7 @@ def _load_metadata_from_generation(
 def load_training_metadata(
     path: str,
     *,
-    rank_local_transform: Callable[
-        [tuple[dict[str, Any], ...], int, int, int], dict[str, Any]
-    ]
-    | None = None,
+    rank_local_transform: Callable[[tuple[dict[str, Any], ...], int, int, int], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Decode metadata without ever assigning an old rank's local state to a new rank."""
     source, manifest = _resolve_and_validate_generation(Path(path))
@@ -548,10 +539,7 @@ def load_training_state(
     scaler: Any = None,
     restore_rng: bool = True,
     allow_world_size_change: bool = False,
-    rank_local_transform: Callable[
-        [tuple[dict[str, Any], ...], int, int, int], dict[str, Any]
-    ]
-    | None = None,
+    rank_local_transform: Callable[[tuple[dict[str, Any], ...], int, int, int], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Restore complete training state and return its non-tensor metadata."""
 

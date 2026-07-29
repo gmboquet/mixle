@@ -72,7 +72,7 @@ class _SparkContext:
 class _ScoreModel:
     @staticmethod
     def log_density(value):
-        return -float(value) ** 2
+        return -(float(value) ** 2)
 
 
 class PublicPPLBoundaryContractTest(unittest.TestCase):

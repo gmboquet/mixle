@@ -23,9 +23,7 @@ class _BadParameterDistribution:
 
 class FusedGeometryValidationTest(unittest.TestCase):
     def test_composite_factors_must_have_equal_row_counts(self):
-        model = CompositeDistribution(
-            (GaussianDistribution(0.0, 1.0), GaussianDistribution(1.0, 1.0))
-        )
+        model = CompositeDistribution((GaussianDistribution(0.0, 1.0), GaussianDistribution(1.0, 1.0)))
         encoded = (np.asarray([0.0, 1.0]), np.asarray([0.0]))
         with self.assertRaisesRegex(ValueError, "has 1 rows.*has 2"):
             fc.fused_seq_log_density(model, encoded)
@@ -37,9 +35,7 @@ class FusedGeometryValidationTest(unittest.TestCase):
             fc.fused_seq_log_density(model, encoded)
 
     def test_bridge_score_columns_must_align_with_other_factors(self):
-        model = CompositeDistribution(
-            (GaussianDistribution(0.0, 1.0), LaplaceDistribution(0.0, 1.0))
-        )
+        model = CompositeDistribution((GaussianDistribution(0.0, 1.0), LaplaceDistribution(0.0, 1.0)))
         encoded = (np.asarray([0.0, 1.0]), np.asarray([0.0]))
         with self.assertRaisesRegex(ValueError, "bridge factor 1 component 0 has 1 rows.*has 2"):
             fc.fused_seq_log_density(model, encoded)
@@ -68,9 +64,7 @@ class FusedGeometryValidationTest(unittest.TestCase):
             params=lambda components: {"bad": np.zeros(0, dtype=np.float64)},
             expr=lambda values, params: values[0],
             acc_names=("sx",),
-            acc_stmt=lambda values, accumulators, weight: (
-                f"{accumulators['sx']}[k] += {weight} * {values[0]}"
-            ),
+            acc_stmt=lambda values, accumulators, weight: f"{accumulators['sx']}[k] += {weight} * {values[0]}",
             to_value=lambda stats, count: (count, stats[0]),
         )
         with patch.object(fc, "_TEMPLATES", list(fc._TEMPLATES)):

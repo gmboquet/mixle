@@ -57,9 +57,7 @@ class GridWorld:
             raw_obstacles = frozenset(self.obstacles)
         except TypeError as exc:
             raise ValueError("obstacles must be an iterable of grid coordinates") from exc
-        self.obstacles = frozenset(
-            self._validate_state(obstacle, name="obstacle") for obstacle in raw_obstacles
-        )
+        self.obstacles = frozenset(self._validate_state(obstacle, name="obstacle") for obstacle in raw_obstacles)
         if self.goal in self.obstacles:
             raise ValueError("goal cannot be an obstacle")
         if (0, 0) in self.obstacles:

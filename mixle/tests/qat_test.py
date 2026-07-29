@@ -129,7 +129,9 @@ class QATWrapperTest(unittest.TestCase):
         apply_qat(model, bits=4)
         self.assertEqual([id(module) for module in model.modules() if isinstance(module, QATWrapper)], wrapper_ids)
         self.assertEqual(tuple(model.state_dict()), state_keys)
-        self.assertFalse(any(isinstance(module.base, QATWrapper) for module in model.modules() if isinstance(module, QATWrapper)))
+        self.assertFalse(
+            any(isinstance(module.base, QATWrapper) for module in model.modules() if isinstance(module, QATWrapper))
+        )
 
         with self.assertRaisesRegex(ValueError, "reconfigure=True"):
             apply_qat(model, bits=8)

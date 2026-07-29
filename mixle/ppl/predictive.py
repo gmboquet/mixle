@@ -87,9 +87,7 @@ def _statistic_value(name: str, function: Callable, values: np.ndarray, source: 
         raise ValueError(f"statistic {name!r} failed on {source}: {error}") from error
     array = np.asarray(raw)
     if array.ndim != 0:
-        raise ValueError(
-            f"statistic {name!r} must return one scalar for {source}; got shape {array.shape}"
-        )
+        raise ValueError(f"statistic {name!r} must return one scalar for {source}; got shape {array.shape}")
     try:
         result = float(array)
     except (TypeError, ValueError) as error:
@@ -104,10 +102,7 @@ def _evaluate_statistics(
     values: np.ndarray,
     source: str,
 ) -> dict[str, float]:
-    return {
-        name: _statistic_value(name, function, values, source)
-        for name, function in statistics.items()
-    }
+    return {name: _statistic_value(name, function, values, source) for name, function in statistics.items()}
 
 
 def _draw_one_prior_parameter(
@@ -126,8 +121,7 @@ def _draw_one_prior_parameter(
         draw = draws[0]
     else:
         raise ValueError(
-            f"prior parameter {prior._name or '<unnamed>'!r} ignored sample size 1; "
-            f"got shape {draws.shape}"
+            f"prior parameter {prior._name or '<unnamed>'!r} ignored sample size 1; got shape {draws.shape}"
         )
     try:
         numeric = np.asarray(draw, dtype=float)
@@ -234,9 +228,7 @@ def prior_predictive(
         if replicate_shape is None:
             replicate_shape = sim.shape
         elif sim.shape != replicate_shape:
-            raise ValueError(
-                f"prior predictive replicate {r} changed shape from {replicate_shape} to {sim.shape}"
-            )
+            raise ValueError(f"prior predictive replicate {r} changed shape from {replicate_shape} to {sim.shape}")
         sample_replicates.append(sim)
         values = _evaluate_statistics(stats, sim, f"prior predictive replicate {r}")
         for name, value in values.items():

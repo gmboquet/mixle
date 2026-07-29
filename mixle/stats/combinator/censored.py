@@ -219,15 +219,7 @@ class CensoredDistribution(SequenceEncodableProbabilityDistribution):
             return result
         fa = 0.0 if a == -math.inf else float(self.base.cdf(a))
         fb = 1.0 if b == math.inf else float(self.base.cdf(b))
-        if (
-            not np.isfinite(fa)
-            or not np.isfinite(fb)
-            or fa < 0.0
-            or fa > 1.0
-            or fb < 0.0
-            or fb > 1.0
-            or fb < fa
-        ):
+        if not np.isfinite(fa) or not np.isfinite(fb) or fa < 0.0 or fa > 1.0 or fb < 0.0 or fb > 1.0 or fb < fa:
             raise ValueError("base CDF values must be finite, in [0, 1], and monotone.")
         mass = fb - fa
         if mass > 0.0:
@@ -676,9 +668,7 @@ class CensoredLikelihoodEstimator(ParameterEstimator):
         if not isinstance(base, SequenceEncodableProbabilityDistribution) or not hasattr(base, "cdf"):
             raise ValueError("censored likelihood fit callback must return a CDF-capable probability distribution.")
         censored_weight = sum(
-            weight
-            for observation, weight in zip(accumulator.observations, weights)
-            if _is_interval(observation)
+            weight for observation, weight in zip(accumulator.observations, weights) if _is_interval(observation)
         )
         total = float(weights.sum())
         receipt = CensoredExactOnlyFitReceipt(total - censored_weight, censored_weight, censored_weight / total, True)

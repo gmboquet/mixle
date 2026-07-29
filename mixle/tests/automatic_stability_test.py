@@ -26,9 +26,7 @@ from mixle.utils.automatic.profiling import _value_array_from_vdict
 
 class BoundedValueArrayTest(unittest.TestCase):
     def test_high_cardinality_expansion_respects_cap_and_receipts_approximation(self):
-        values, receipt = _value_array_from_vdict(
-            {value: 1.0 for value in range(1000)}, cap=17, return_receipt=True
-        )
+        values, receipt = _value_array_from_vdict({value: 1.0 for value in range(1000)}, cap=17, return_receipt=True)
         self.assertEqual(values.size, 17)
         self.assertEqual(receipt.input_cardinality, 1000)
         self.assertEqual(receipt.output_count, 17)

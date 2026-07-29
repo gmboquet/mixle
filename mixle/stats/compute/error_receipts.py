@@ -96,9 +96,7 @@ class CompensatedAccumulator:
     compensated: bool = True
 
     def __post_init__(self) -> None:
-        self.n, self.abs_total, self.compensated = _validated_receipt_inputs(
-            self.n, self.abs_total, self.compensated
-        )
+        self.n, self.abs_total, self.compensated = _validated_receipt_inputs(self.n, self.abs_total, self.compensated)
         for label in ("total", "compensation"):
             try:
                 value = float(getattr(self, label))
@@ -270,8 +268,7 @@ def conditioning_receipt(covar: np.ndarray, degenerate_ratio: float = 1.0e-6) ->
     symmetry_tolerance = 64.0 * EPS * max(1.0, float(np.max(np.abs(covar))))
     if symmetry_error > symmetry_tolerance:
         raise ValueError(
-            f"covariance must be symmetric within {symmetry_tolerance:.6g}; "
-            f"maximum asymmetry is {symmetry_error:.6g}."
+            f"covariance must be symmetric within {symmetry_tolerance:.6g}; maximum asymmetry is {symmetry_error:.6g}."
         )
     # Project only an already-certified round-off-sized asymmetry, retaining its measured size.
     symmetric_covar = 0.5 * (covar + covar.T)

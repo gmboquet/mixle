@@ -116,8 +116,7 @@ def _require_recurrence_budget(dim: int, n: int, limit: int, *, operation: str, 
     cells = multiplier * dim * max(n, 1)
     if cells > limit:
         raise DirichletMultinomialResourceError(
-            "%s requires %d recurrence cells, exceeding max_recurrence_cells=%d"
-            % (operation, cells, limit)
+            "%s requires %d recurrence cells, exceeding max_recurrence_cells=%d" % (operation, cells, limit)
         )
 
 
@@ -128,12 +127,7 @@ def _count_event(value: Any, dim: int, n: int, *, label: str) -> np.ndarray:
         raise ValueError("%s must be a numeric count vector" % label) from exc
     if raw.shape != (dim,):
         raise ValueError("%s must have exact shape (%d,)" % (label, dim))
-    if (
-        np.any(~np.isfinite(raw))
-        or np.any(raw < 0.0)
-        or np.any(np.floor(raw) != raw)
-        or raw.sum() != n
-    ):
+    if np.any(~np.isfinite(raw)) or np.any(raw < 0.0) or np.any(np.floor(raw) != raw) or raw.sum() != n:
         raise ValueError("%s must contain non-negative integer counts summing to %d" % (label, n))
     return raw.astype(np.int64, copy=True)
 
@@ -145,15 +139,8 @@ def _count_batch(value: Any, dim: int, n: int, *, label: str) -> np.ndarray:
         raise ValueError("%s must be a numeric count matrix" % label) from exc
     if raw.ndim != 2 or raw.shape[1] != dim:
         raise ValueError("%s must have exact shape (N, %d)" % (label, dim))
-    if (
-        np.any(~np.isfinite(raw))
-        or np.any(raw < 0.0)
-        or np.any(np.floor(raw) != raw)
-        or np.any(raw.sum(axis=1) != n)
-    ):
-        raise ValueError(
-            "%s must contain non-negative integer count rows summing to %d" % (label, n)
-        )
+    if np.any(~np.isfinite(raw)) or np.any(raw < 0.0) or np.any(np.floor(raw) != raw) or np.any(raw.sum(axis=1) != n):
+        raise ValueError("%s must contain non-negative integer count rows summing to %d" % (label, n))
     return raw.astype(np.int64, copy=True)
 
 
@@ -176,9 +163,7 @@ def _recurrence_statistic(
     n: int,
 ) -> tuple[np.ndarray, float, int]:
     if not isinstance(value, tuple) or len(value) != 3:
-        raise ValueError(
-            "Dirichlet-multinomial sufficient statistic must be a (recurrence, weight, n) tuple"
-        )
+        raise ValueError("Dirichlet-multinomial sufficient statistic must be a (recurrence, weight, n) tuple")
     logical_n = _trial_count(value[2], label="serialized Dirichlet-multinomial trial count")
     if logical_n != n:
         raise ValueError("serialized Dirichlet-multinomial trial count does not match the configured model")
@@ -188,9 +173,7 @@ def _recurrence_statistic(
         raise ValueError("Dirichlet-multinomial recurrence statistic must be numeric") from exc
     expected_shape = (dim, max(n, 1))
     if recurrence.shape != expected_shape:
-        raise ValueError(
-            "Dirichlet-multinomial recurrence statistic must have exact shape %r" % (expected_shape,)
-        )
+        raise ValueError("Dirichlet-multinomial recurrence statistic must have exact shape %r" % (expected_shape,))
     count = _finite_scalar(
         value[1],
         label="Dirichlet-multinomial total weight",
@@ -286,13 +269,9 @@ class DirichletMultinomialDistribution(SequenceEncodableProbabilityDistribution)
         try:
             xx = np.asarray(x, dtype=np.float64)
         except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError(
-                "Dirichlet-multinomial observations must be a numeric count matrix"
-            ) from exc
+            raise ValueError("Dirichlet-multinomial observations must be a numeric count matrix") from exc
         if xx.ndim != 2 or xx.shape[1] != self.dim:
-            raise ValueError(
-                "Dirichlet-multinomial observations must have exact shape (N, %d)" % self.dim
-            )
+            raise ValueError("Dirichlet-multinomial observations must have exact shape (N, %d)" % self.dim)
         bad = (
             ~np.all(np.isfinite(xx), axis=1)
             | (xx < 0).any(axis=1)
@@ -336,12 +315,8 @@ class DirichletMultinomialDistribution(SequenceEncodableProbabilityDistribution)
         """Return an enumerator over count vectors summing to ``n`` in descending probability order."""
         return DirichletMultinomialEnumerator(
             self,
-            max_recurrence_cells=self.max_recurrence_cells
-            if max_recurrence_cells is None
-            else max_recurrence_cells,
-            max_frontier_entries=self.max_frontier_entries
-            if max_frontier_entries is None
-            else max_frontier_entries,
+            max_recurrence_cells=self.max_recurrence_cells if max_recurrence_cells is None else max_recurrence_cells,
+            max_frontier_entries=self.max_frontier_entries if max_frontier_entries is None else max_frontier_entries,
         )
 
 
@@ -400,8 +375,7 @@ class DirichletMultinomialEnumerator(DistributionEnumerator):
     def _push(self, item: tuple[float, int, tuple[int, ...], float]) -> None:
         if len(self._heap) >= self._max_frontier_entries:
             raise DirichletMultinomialResourceError(
-                "Dirichlet-multinomial enumeration exceeded max_frontier_entries=%d"
-                % self._max_frontier_entries
+                "Dirichlet-multinomial enumeration exceeded max_frontier_entries=%d" % self._max_frontier_entries
             )
         heapq.heappush(self._heap, item)
 
@@ -679,10 +653,7 @@ class DirichletMultinomialEstimator(ParameterEstimator):
 
     def _objective(self, alpha: np.ndarray, recurrence: np.ndarray, count: float) -> float:
         j = np.arange(self.n, dtype=np.float64)
-        return float(
-            np.sum(recurrence * np.log(alpha[:, None] + j[None, :]))
-            - count * np.sum(np.log(alpha.sum() + j))
-        )
+        return float(np.sum(recurrence * np.log(alpha[:, None] + j[None, :])) - count * np.sum(np.log(alpha.sum() + j)))
 
     def estimate(
         self,
@@ -757,11 +728,7 @@ class DirichletMultinomialDataEncoder(DataSequenceEncoder):
         return "DirichletMultinomialDataEncoder(dim=%d, n=%d)" % (self.dim, self.n)
 
     def __eq__(self, other: object) -> bool:
-        return (
-            isinstance(other, DirichletMultinomialDataEncoder)
-            and other.dim == self.dim
-            and other.n == self.n
-        )
+        return isinstance(other, DirichletMultinomialDataEncoder) and other.dim == self.dim and other.n == self.n
 
     def seq_encode(self, x: Sequence[np.ndarray]) -> np.ndarray:
         """Validate and encode count vectors as an integral matrix."""

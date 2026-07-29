@@ -68,6 +68,7 @@ __all__ = [
 if _HAS_TORCH:
     __all__[:0] = ["MoEBlock", "MoEMLP", "SharedResidualMoEBlock", "SharedResidualMoEMLP"]
 
+
 def _positive_int(value: Any, name: str) -> int:
     if isinstance(value, (bool, np.bool_)):
         raise TypeError(f"{name} must be an integer, not a boolean")
@@ -103,7 +104,6 @@ def _nonnegative_float(value: Any, name: str) -> float:
 
 if _HAS_TORCH:
 
-
     @contextmanager
     def _module_modes(module: Any) -> Any:
         states = [(part, part.training) for part in module.modules()]
@@ -112,7 +112,6 @@ if _HAS_TORCH:
         finally:
             for part, training in states:
                 part.training = training
-
 
     class MoEMLP(nn.Module):
         """``N`` expert MLPs (same shape as :class:`~mixle.models.transformer.Block`'s dense MLP) plus a
@@ -183,9 +182,7 @@ if _HAS_TORCH:
             # Forward-normalize selected weights so identical copied experts preserve the dense
             # function exactly. Detaching the denominator retains a straight-through main-loss
             # gradient to the selected gate probabilities, including top_k=1.
-            combine_w = top_w / top_w.sum(dim=-1, keepdim=True).detach().clamp_min(
-                torch.finfo(top_w.dtype).tiny
-            )
+            combine_w = top_w / top_w.sum(dim=-1, keepdim=True).detach().clamp_min(torch.finfo(top_w.dtype).tiny)
             out = flat.new_zeros(n_tokens, self.d_model)
             for e, expert in enumerate(self.experts):
                 # tokens that picked expert e in ANY of their top_k slots

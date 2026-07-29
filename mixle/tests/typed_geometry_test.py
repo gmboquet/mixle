@@ -181,7 +181,9 @@ def test_measured_time_to_target_forces_and_avoids_fallback():
             (baseline, slow),
             target_name="loss<=1",
             model_version=4,
-        ).routes[0].family
+        )
+        .routes[0]
+        .family
         is OptimizerFamily.ADAMW
     )
     assert (
@@ -190,7 +192,9 @@ def test_measured_time_to_target_forces_and_avoids_fallback():
             (baseline, fast),
             target_name="loss<=1",
             model_version=4,
-        ).routes[0].family
+        )
+        .routes[0]
+        .family
         is OptimizerFamily.MUON
     )
     missing = apply_optimizer_evidence(

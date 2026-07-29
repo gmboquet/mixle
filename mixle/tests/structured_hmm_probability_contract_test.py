@@ -83,8 +83,9 @@ class TransitionProbabilityContractTest(unittest.TestCase):
             (2, [(0, 0), (1, 1)], [1.0, 0.0]),
         )
         for n_states, edges, values in invalid_calls:
-            with self.subTest(n_states=n_states, edges=edges, values=values), self.assertRaises(
-                (TypeError, ValueError)
+            with (
+                self.subTest(n_states=n_states, edges=edges, values=values),
+                self.assertRaises((TypeError, ValueError)),
             ):
                 SparseTransition(n_states, edges, values)
 

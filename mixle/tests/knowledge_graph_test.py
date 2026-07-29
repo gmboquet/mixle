@@ -71,12 +71,7 @@ class KnowledgeGraphTestCase(unittest.TestCase):
             rng.normal(0, 0.3, (3, 2)),
             rng.normal(0, 0.3, (2, 2)),
         )
-        total = sum(
-            np.exp(model.log_density((h, r, t)))
-            for h in range(3)
-            for r in range(2)
-            for t in range(3)
-        )
+        total = sum(np.exp(model.log_density((h, r, t))) for h in range(3) for r in range(2) for t in range(3))
         self.assertAlmostEqual(total, 1.0)
 
     def test_embeddings_and_triples_are_strict_owned_state(self):
@@ -97,9 +92,7 @@ class KnowledgeGraphTestCase(unittest.TestCase):
             (0, 1, 1),
             (0, 0, 1, 2),
         ):
-            with self.subTest(triple=triple), self.assertRaises(
-                (TypeError, ValueError)
-            ):
+            with self.subTest(triple=triple), self.assertRaises((TypeError, ValueError)):
                 model.log_density(triple)
 
     def test_accumulator_validation_and_warm_start(self):
@@ -158,9 +151,7 @@ class KnowledgeGraphTestCase(unittest.TestCase):
             {"pseudo_count": 1.0},
         )
         for controls in invalid:
-            with self.subTest(controls=controls), self.assertRaises(
-                (TypeError, ValueError, NotImplementedError)
-            ):
+            with self.subTest(controls=controls), self.assertRaises((TypeError, ValueError, NotImplementedError)):
                 KnowledgeGraphEstimator(3, 1, dim=2, **controls)
 
 
@@ -260,10 +251,7 @@ class KnowledgeGraphPatternTestCase(unittest.TestCase):
 
     def test_binding_probabilities_are_normalized(self):
         pattern = self.m.pattern([("?x", 0, "?x")])
-        total = sum(
-            np.exp(pattern.log_density((entity,)))
-            for entity in range(self.nE)
-        )
+        total = sum(np.exp(pattern.log_density((entity,))) for entity in range(self.nE))
         self.assertAlmostEqual(total, 1.0)
 
 

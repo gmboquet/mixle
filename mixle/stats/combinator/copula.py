@@ -115,11 +115,7 @@ def _validate_weights(value: Any, rows: int) -> np.ndarray:
         weights = np.asarray(value, dtype=np.float64)
     except (TypeError, ValueError, OverflowError) as exc:
         raise TypeError("copula weights must be a finite non-negative vector.") from exc
-    if (
-        weights.shape != (rows,)
-        or np.any(~np.isfinite(weights))
-        or np.any(weights < 0.0)
-    ):
+    if weights.shape != (rows,) or np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
         raise ValueError("copula weights must be a finite non-negative vector aligned with the buffered rows.")
     return weights
 
@@ -330,9 +326,7 @@ class CopulaSampler(DistributionSampler):
         if size is not None and (n != size or n < 0):
             raise ValueError("size must be a non-negative integer or None.")
         u = np.atleast_2d(self._cop_sampler.sample(n)).reshape(n, self.dist.dim)
-        out = [
-            tuple(self._invert(i, float(u[r, i])) for i in range(self.dist.dim)) for r in range(n)
-        ]
+        out = [tuple(self._invert(i, float(u[r, i])) for i in range(self.dist.dim)) for r in range(n)]
         return out[0] if size is None else out
 
 
@@ -519,9 +513,7 @@ class CopulaEstimator(ParameterEstimator):
             [e.accumulator_factory() for e in self.marginal_estimators], self.dim, keys=self.keys
         )
 
-    def estimate(
-        self, nobs: float | None, suff_stat: CopulaIFMStatistics
-    ) -> CopulaDistribution:
+    def estimate(self, nobs: float | None, suff_stat: CopulaIFMStatistics) -> CopulaDistribution:
         """Estimate marginals, transform buffered data by PIT, and estimate the copula core."""
         checked = _validate_ifm_statistics(suff_stat, self.dim)
         marginals = [

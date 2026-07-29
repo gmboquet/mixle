@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 # call time, once every module in the cycle has finished loading normally -- mirroring the
 # erdos_renyi_graph.py fix for the same shape of cycle.
 
+
 class RandomDotProductGraphDistribution(SequenceEncodableProbabilityDistribution):
     """Random Dot Product Graph over n nodes with d-dimensional latent positions X (edge prob X X^T)."""
 

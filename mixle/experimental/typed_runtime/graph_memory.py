@@ -192,11 +192,7 @@ def _canonical_partition(
     measured_tokens = sum(graph.nodes[node_id].token_count for node_id in partition.node_ids)
     source_ids = tuple(
         sorted(
-            {
-                provenance.source_id
-                for node_id in partition.node_ids
-                for provenance in graph.nodes[node_id].provenance
-            }
+            {provenance.source_id for node_id in partition.node_ids for provenance in graph.nodes[node_id].provenance}
         )
     )
     if partition.token_count != measured_tokens:
@@ -209,9 +205,7 @@ def _canonical_partition(
     owned = set(partition.node_ids)
     boundary_edge_ids = tuple(
         sorted(
-            edge.edge_id
-            for edge in graph.edges.values()
-            if (edge.source_node in owned) != (edge.target_node in owned)
+            edge.edge_id for edge in graph.edges.values() if (edge.source_node in owned) != (edge.target_node in owned)
         )
     )
     return measured_tokens, source_ids, boundary_edge_ids
@@ -340,16 +334,10 @@ class GraphMemoryCache:
             owned = {node_id for partition in plan.partitions for node_id in partition.node_ids}
             if owned != set(graph.nodes):
                 raise ValueError("graph partition plan must own every current graph node exactly once.")
-            owner = {
-                node_id: partition.partition_id
-                for partition in plan.partitions
-                for node_id in partition.node_ids
-            }
+            owner = {node_id: partition.partition_id for partition in plan.partitions for node_id in partition.node_ids}
             boundary = tuple(
                 sorted(
-                    edge.edge_id
-                    for edge in graph.edges.values()
-                    if owner[edge.source_node] != owner[edge.target_node]
+                    edge.edge_id for edge in graph.edges.values() if owner[edge.source_node] != owner[edge.target_node]
                 )
             )
             if boundary != plan.boundary_edge_ids:

@@ -111,8 +111,10 @@ def _canonical_statistic_bytes(value: Any) -> bytes:
             )
             for key, item in value.items()
         )
-        return b"D" + len(pairs).to_bytes(8, "big") + b"".join(
-            len(key).to_bytes(8, "big") + key + len(item).to_bytes(8, "big") + item for key, item in pairs
+        return (
+            b"D"
+            + len(pairs).to_bytes(8, "big")
+            + b"".join(len(key).to_bytes(8, "big") + key + len(item).to_bytes(8, "big") + item for key, item in pairs)
         )
     raise TypeError(f"unsupported statistic type {type(value).__module__}.{type(value).__qualname__}")
 
@@ -576,10 +578,7 @@ class AuditedMPEncodedData(ResilientMPEncodedData):
         shard_ids = sorted(shard for owned in assignments.values() for shard in owned)
         if len(shard_ids) != len(set(shard_ids)):
             return "deferred:ambiguous_shard_ownership"
-        placement = {
-            shard_id: survivors[index % len(survivors)]
-            for index, shard_id in enumerate(shard_ids)
-        }
+        placement = {shard_id: survivors[index % len(survivors)] for index, shard_id in enumerate(shard_ids)}
         if any(shard_id in self._worker_shards.get(target, set()) for shard_id, target in placement.items()):
             return "deferred:duplicate_survivor_placement"
 

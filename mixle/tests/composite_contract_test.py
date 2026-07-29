@@ -71,9 +71,7 @@ class _Estimator:
 
 
 def _distribution() -> CompositeDistribution:
-    return CompositeDistribution(
-        (GaussianDistribution(0.0, 1.0), GaussianDistribution(1.0, 2.0))
-    )
+    return CompositeDistribution((GaussianDistribution(0.0, 1.0), GaussianDistribution(1.0, 2.0)))
 
 
 def test_empty_composite_structures_are_rejected_consistently() -> None:
@@ -173,9 +171,7 @@ def test_scalar_and_batch_initialization_use_the_same_persistent_child_streams()
         np.ones(2),
         np.random.RandomState(91),
     )
-    assert [child.draws for child in scalar_children] == [
-        child.draws for child in batch_children
-    ]
+    assert [child.draws for child in scalar_children] == [child.draws for child in batch_children]
 
 
 def test_encoder_and_estimator_copy_their_structural_children() -> None:

@@ -460,10 +460,7 @@ register_leaf_template(
         data=_arr0,
         params=_inverse_gaussian_params,
         expr=lambda v, p: _on_support(
-            (
-                f"{p['lognorm']}[k] - 1.5 * np.log({v[0]}) "
-                f"+ {p['c1']}[k] * {v[0]} + {p['c2']}[k] / {v[0]}"
-            ),
+            (f"{p['lognorm']}[k] - 1.5 * np.log({v[0]}) + {p['c1']}[k] * {v[0]} + {p['c2']}[k] / {v[0]}"),
             f"np.isfinite({v[0]}) and {v[0]} > 0.0",
         ),
         acc_names=("sx", "s1x"),
@@ -1237,10 +1234,7 @@ def _validated_fused_weights(weights: Any, n_rows: int) -> np.ndarray:
     if result.ndim != 1:
         raise ValueError("fused accumulation weights must be one-dimensional.")
     if result.shape[0] != int(n_rows):
-        raise ValueError(
-            "fused accumulation has %d encoded rows but %d weights."
-            % (n_rows, result.shape[0])
-        )
+        raise ValueError("fused accumulation has %d encoded rows but %d weights." % (n_rows, result.shape[0]))
     if not np.all(np.isfinite(result)):
         raise ValueError("fused accumulation weights must contain only finite values.")
     return np.ascontiguousarray(result)
@@ -1813,10 +1807,7 @@ def _validated_fused_log_weights(model: Any, num_components: int) -> np.ndarray:
     """Return a one-dimensional component log-weight vector with safe values."""
     result = np.asarray(getattr(model, "log_w", np.zeros(1)), dtype=np.float64)
     if result.shape != (int(num_components),):
-        raise ValueError(
-            "fused model has %d components but log_w has shape %s."
-            % (num_components, result.shape)
-        )
+        raise ValueError("fused model has %d components but log_w has shape %s." % (num_components, result.shape))
     if np.any(np.isnan(result)) or np.any(np.isposinf(result)):
         raise ValueError("fused model log weights may contain only finite values or -inf.")
     return np.ascontiguousarray(result)
@@ -1841,8 +1832,7 @@ def _data_and_params(
     factor_lists = _component_factor_lists(model, plan)
     if len(factor_lists) != plan.num_components:
         raise ValueError(
-            "fused plan expects %d components but the model exposes %d."
-            % (plan.num_components, len(factor_lists))
+            "fused plan expects %d components but the model exposes %d." % (plan.num_components, len(factor_lists))
         )
     for component, factors in enumerate(factor_lists):
         if factors is None or len(factors) != len(plan.leaf_templates):
@@ -1876,15 +1866,14 @@ def _data_and_params(
         if not isinstance(raw_arrays, (tuple, list)) or len(raw_arrays) != t.arity:
             count = len(raw_arrays) if isinstance(raw_arrays, (tuple, list)) else -1
             raise ValueError(
-                "fused factor %d (%s) produced %d data arrays but its arity is %d."
-                % (i, t.name, count, t.arity)
+                "fused factor %d (%s) produced %d data arrays but its arity is %d." % (i, t.name, count, t.arity)
             )
-        arrs = tuple(_fused_array(value, "fused factor %d (%s) data[%d]" % (i, t.name, j)) for j, value in enumerate(raw_arrays))
+        arrs = tuple(
+            _fused_array(value, "fused factor %d (%s) data[%d]" % (i, t.name, j)) for j, value in enumerate(raw_arrays)
+        )
         if t.kind in ("scalar", "tabulated", "categorical") and any(array.ndim != 1 for array in arrs):
             raise ValueError("fused factor %d (%s) requires one-dimensional data arrays." % (i, t.name))
-        if t.kind in ("vector", "matrix") and (
-            len(arrs) != 1 or arrs[0].ndim != 2
-        ):
+        if t.kind in ("vector", "matrix") and (len(arrs) != 1 or arrs[0].ndim != 2):
             raise ValueError("fused factor %d (%s) requires one two-dimensional data array." % (i, t.name))
         if t.kind == "chain" and any(array.ndim != 1 for array in arrs):
             raise ValueError("fused factor %d (%s) requires one-dimensional scatter arrays." % (i, t.name))
@@ -1926,8 +1915,7 @@ def _data_and_params(
             pdict = t.params(comps_i)
         except (IndexError, TypeError, ValueError) as exc:
             raise ValueError(
-                "fused factor %d (%s) has incompatible component parameter geometry: %s"
-                % (i, t.name, exc)
+                "fused factor %d (%s) has incompatible component parameter geometry: %s" % (i, t.name, exc)
             ) from exc
         if not isinstance(pdict, dict) or any(not isinstance(name, str) or not name.isidentifier() for name in pdict):
             raise TypeError("fused factor %d (%s) params must be a mapping with identifier keys." % (i, t.name))
@@ -1972,8 +1960,7 @@ def _data_and_params(
             table = np.ascontiguousarray(np.stack(cols, axis=1))  # (n, K)
             if table.shape != (int(n_rows), plan.num_components):
                 raise ValueError(
-                    "fused bridge table has shape %s; expected (%d, %d)."
-                    % (table.shape, n_rows, plan.num_components)
+                    "fused bridge table has shape %s; expected (%d, %d)." % (table.shape, n_rows, plan.num_components)
                 )
             param_arrays.append(table)
             tab_ctx[i] = (factor_encs[i], 0)  # the factor's own encoding, for the wrapper's native updates
@@ -1997,7 +1984,9 @@ def _data_and_params(
         if t.kind == "tabulated":
             x = arrs[0]
             if np.any(~np.isfinite(x)) or np.any(np.floor(x) != x) or np.any(x < 0):
-                raise ValueError("fused tabulated factor %d (%s) requires finite non-negative integer data." % (i, t.name))
+                raise ValueError(
+                    "fused tabulated factor %d (%s) requires finite non-negative integer data." % (i, t.name)
+                )
             mx = int(np.rint(x.max())) if x.size else 0
             mn = int(np.rint(x.min())) if x.size else 0
             table = _fused_array(t.tab_table(comps_i, mx), "fused factor %d (%s) table" % (i, t.name))  # type: ignore[misc]

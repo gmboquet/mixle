@@ -364,9 +364,7 @@ def tsne_exact(
 
         if i > early_its and (i % check_every) == 0:
             kl = _kl(P, Q)
-            converged, last_kl, worsening_checks = _convergence_update(
-                last_kl, kl, tol, worsening_checks
-            )
+            converged, last_kl, worsening_checks = _convergence_update(last_kl, kl, tol, worsening_checks)
             if converged:
                 break
 
@@ -900,9 +898,7 @@ def _tsne_barnes_hut_from_p(
                 exact_threshold=exact_repulsion_threshold,
             )
             kl = _sparse_tsne_kl_from_edges(p_rows, p_cols, p_data, Y, kl_z_sum)
-            converged, last_kl, worsening_checks = _convergence_update(
-                last_kl, kl, tol, worsening_checks
-            )
+            converged, last_kl, worsening_checks = _convergence_update(last_kl, kl, tol, worsening_checks)
             if converged:
                 break
 

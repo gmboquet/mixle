@@ -89,12 +89,8 @@ class CategoricalMultinomialProbabilityContractTest(unittest.TestCase):
 
 class CategoricalMultinomialEncodingContractTest(unittest.TestCase):
     def setUp(self):
-        self.first = MultinomialDistribution(
-            CategoricalDistribution({"a": 0.25, "b": 0.75})
-        )
-        self.second = MultinomialDistribution(
-            CategoricalDistribution({"a": 0.6, "b": 0.4})
-        )
+        self.first = MultinomialDistribution(CategoricalDistribution({"a": 0.25, "b": 0.75}))
+        self.second = MultinomialDistribution(CategoricalDistribution({"a": 0.6, "b": 0.4}))
         self.data = [[], [("a", 1), ("b", 1)], [("a", 2), ("a", 1)]]
 
     def test_encoder_identity_includes_both_children_and_normalization(self):

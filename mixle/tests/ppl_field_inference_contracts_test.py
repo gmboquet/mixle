@@ -75,9 +75,8 @@ class FieldInferenceContractTest(unittest.TestCase):
 
     def test_map_exhaustion_is_a_failure_not_a_posterior(self):
         proxy = CustomProxy(
-            lambda field, params, torch: -(
-                (1.0 - params["x"][0]) ** 2
-                + 100.0 * (params["x"][1] - params["x"][0] ** 2) ** 2
+            lambda field, params, torch: (
+                -((1.0 - params["x"][0]) ** 2 + 100.0 * (params["x"][1] - params["x"][0] ** 2) ** 2)
             ),
             param_specs=[("x", "real", np.array([-1.2, 1.0]))],
         )
@@ -99,9 +98,7 @@ class FieldInferenceContractTest(unittest.TestCase):
 
     def test_vi_uses_reproducible_unconstrained_coordinates_and_exact_lognormal_moments(self):
         proxy = CustomProxy(
-            lambda field, params, torch: (
-                -0.5 * (torch.log(params["x"]) / 0.5) ** 2 - torch.log(params["x"])
-            ),
+            lambda field, params, torch: -0.5 * (torch.log(params["x"]) / 0.5) ** 2 - torch.log(params["x"]),
             param_specs=[("x", "positive", 1.0)],
         )
         options = dict(how="vi", vi_steps=40, vi_samples=3, rng=7)

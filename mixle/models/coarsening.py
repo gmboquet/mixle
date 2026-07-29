@@ -206,9 +206,7 @@ if _HAS_TORCH:
             self.n_layer = len(blocks)
             self.n_head = int(base_model.n_head)
             self.block = int(base_model.block)
-            self.gradient_checkpointing = copy.deepcopy(
-                getattr(base_model, "gradient_checkpointing", False)
-            )
+            self.gradient_checkpointing = copy.deepcopy(getattr(base_model, "gradient_checkpointing", False))
             if hasattr(owned, "mup_output_multiplier"):
                 self.register_buffer(
                     "mup_output_multiplier",
@@ -229,9 +227,7 @@ if _HAS_TORCH:
             if not isinstance(policy, (list, tuple)):
                 raise ValueError("gradient_checkpointing must be a bool or a per-block list/tuple of bools")
             if len(policy) != len(self.blocks):
-                raise ValueError(
-                    f"gradient_checkpointing has {len(policy)} entries; expected {len(self.blocks)}"
-                )
+                raise ValueError(f"gradient_checkpointing has {len(policy)} entries; expected {len(self.blocks)}")
             if any(not isinstance(value, bool) for value in policy):
                 raise ValueError("every per-block gradient_checkpointing entry must be a bool")
 
@@ -249,9 +245,7 @@ if _HAS_TORCH:
                 expected = " or ".join(str(shape) for shape in expected_shapes)
                 raise ValueError(f"{name} must have shape {expected}, got {tuple(value.shape)}")
             if value.device != self.tok.weight.device:
-                raise ValueError(
-                    f"{name} is on {value.device}; model token embeddings are on {self.tok.weight.device}"
-                )
+                raise ValueError(f"{name} is on {value.device}; model token embeddings are on {self.tok.weight.device}")
             if value.dtype == torch.bool or (not value.is_floating_point() and not value.dtype.is_signed):
                 raise ValueError(f"{name} must use a signed integer or floating-point dtype")
             if value.is_floating_point():
@@ -277,9 +271,7 @@ if _HAS_TORCH:
                 raise ValueError("x must have non-empty shape (batch, sequence)")
             batch, sequence = x.shape
             if sequence > self.block:
-                raise ValueError(
-                    f"x sequence length {sequence} exceeds configured block size {self.block}"
-                )
+                raise ValueError(f"x sequence length {sequence} exceeds configured block size {self.block}")
             if not isinstance(return_all_logits, bool):
                 raise ValueError("return_all_logits must be a boolean")
             self._validate_checkpoint_policy()
@@ -950,12 +942,7 @@ def _propagate_entry_law(law: GaussianLaw, entry: Any) -> GaussianLaw:
         branch_mean = f_mean + g_mean + j_g @ f_mean
         branch_jacobian = j_f + j_g + j_g @ j_f
         cross_fg = j_f @ law.covar @ j_g.T
-        branch_cov = (
-            a_mat @ f_cov @ a_mat.T
-            + g_cov
-            + a_mat @ cross_fg
-            + (a_mat @ cross_fg).T
-        )
+        branch_cov = a_mat @ f_cov @ a_mat.T + g_cov + a_mat @ cross_fg + (a_mat @ cross_fg).T
         cross = law.covar @ branch_jacobian.T
         return _residual_add(law, branch_mean, branch_cov, cross)
     branch_mean, branch_cov, _jacobian, cross, _sigmas = _block_branch(law, entry)

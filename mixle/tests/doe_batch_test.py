@@ -234,15 +234,11 @@ class BatchDriverInputValidationTest(unittest.TestCase):
                     self.x, self.y, self.bounds, q=bad, n_candidates=10, mc_samples=32, gp=_StubSurrogate()
                 )
             with self.assertRaises((TypeError, ValueError)):
-                propose_local_penalization(
-                    self.x, self.y, self.bounds, q=bad, n_candidates=10, gp=_StubSurrogate()
-                )
+                propose_local_penalization(self.x, self.y, self.bounds, q=bad, n_candidates=10, gp=_StubSurrogate())
 
     def test_propose_qei_batch_rejects_batch_larger_than_candidates(self):
         with self.assertRaisesRegex(ValueError, "q <= n_candidates"):
-            propose_qei_batch(
-                self.x, self.y, self.bounds, q=3, n_candidates=2, mc_samples=16, gp=_StubSurrogate()
-            )
+            propose_qei_batch(self.x, self.y, self.bounds, q=3, n_candidates=2, mc_samples=16, gp=_StubSurrogate())
 
     def test_propose_local_penalization_rejects_nonpositive_or_fractional_q(self):
         for bad_q in (0, -1, 2.5):

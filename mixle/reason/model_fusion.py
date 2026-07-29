@@ -247,7 +247,9 @@ def _cross_covariance(
     else:
         return np.zeros((dimension, dimension))
     if value.shape != (dimension, dimension) or not np.isfinite(value).all():
-        raise ValueError(f"cross-covariance for {first!r}, {second!r} must be finite with shape {(dimension, dimension)}.")
+        raise ValueError(
+            f"cross-covariance for {first!r}, {second!r} must be finite with shape {(dimension, dimension)}."
+        )
     return value
 
 

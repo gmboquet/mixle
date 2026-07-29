@@ -376,9 +376,9 @@ class GrammarTestCase(unittest.TestCase):
         grammar.add_rule(VertexReplacementRule("A", recursive, 1.0))
         grammar.add_rule(VertexReplacementRule("A", terminal, 1.0))
         steps = [
-            generate_graph(grammar.rule_dict, target_n=1, rng=np.random.RandomState(seed), start_symbol="A", with_receipt=True)[
-                2
-            ].steps
+            generate_graph(
+                grammar.rule_dict, target_n=1, rng=np.random.RandomState(seed), start_symbol="A", with_receipt=True
+            )[2].steps
             for seed in range(20)
         ]
         self.assertIn(1, steps)

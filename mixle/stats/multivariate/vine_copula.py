@@ -492,11 +492,7 @@ def _validated_candidates(candidates: Any) -> tuple[str, ...]:
 def _validated_pair_map(dim: int, pairs: Any, *, vine_name: str) -> dict[tuple[int, int], Any]:
     if not isinstance(pairs, dict):
         raise TypeError("%s pairs must be a mapping from (tree, position) to pair copulas" % vine_name)
-    expected = {
-        (tree, position)
-        for tree in range(1, dim)
-        for position in range(1, dim - tree + 1)
-    }
+    expected = {(tree, position) for tree in range(1, dim) for position in range(1, dim - tree + 1)}
     extra = set(pairs) - expected
     if extra:
         raise ValueError("%s contains invalid pair edge key(s): %s" % (vine_name, sorted(extra)))
@@ -675,9 +671,7 @@ class CVineCopulaEstimator(ParameterEstimator):
         return CVineCopulaDistribution(self.dim, pairs, name=self.name, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray]) -> CVineCopulaDistribution:
-        u, w = validated_buffered_statistic(
-            suff_stat, self.dim, minimum_rows=2, require_positive_weight=True
-        )
+        u, w = validated_buffered_statistic(suff_stat, self.dim, minimum_rows=2, require_positive_weight=True)
         d = self.dim
         pairs: dict[tuple[int, int], Any] = {}
         v = {1: [u[:, k] for k in range(d)]}
@@ -864,9 +858,7 @@ class DVineCopulaEstimator(ParameterEstimator):
         return BufferedUScoreAccumulatorFactory(self.dim, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray]) -> DVineCopulaDistribution:
-        u, w = validated_buffered_statistic(
-            suff_stat, self.dim, minimum_rows=2, require_positive_weight=True
-        )
+        u, w = validated_buffered_statistic(suff_stat, self.dim, minimum_rows=2, require_positive_weight=True)
         _, pairs = _dvine_walk(u, w, None, self.candidates)
         return DVineCopulaDistribution(
             self.dim,

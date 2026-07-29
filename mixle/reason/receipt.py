@@ -90,11 +90,7 @@ def _to_plain(value: Any) -> dict[str, Any]:
 def _posterior_reference(posterior_ref: Any) -> tuple[str, dict[str, Any], str]:
     """Resolve and verify a posterior artifact, returning location, metadata, and byte digest."""
     if isinstance(posterior_ref, dict):
-        ref = (
-            posterior_ref.get("artifact_ref")
-            or posterior_ref.get("ref")
-            or posterior_ref.get("path")
-        )
+        ref = posterior_ref.get("artifact_ref") or posterior_ref.get("ref") or posterior_ref.get("path")
         if not isinstance(ref, (str, os.PathLike)):
             raise ValueError("posterior metadata must include a filesystem artifact_ref, ref, or path.")
         meta = dict(posterior_ref)

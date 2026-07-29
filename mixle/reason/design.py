@@ -73,11 +73,7 @@ def select_evidence_batch(
     if not np.isfinite(min_gain) or min_gain < 0.0:
         raise ValueError("min_gain must be finite and non-negative.")
     if max_items is not None:
-        if (
-            isinstance(max_items, (bool, np.bool_))
-            or not isinstance(max_items, (int, np.integer))
-            or max_items < 0
-        ):
+        if isinstance(max_items, (bool, np.bool_)) or not isinstance(max_items, (int, np.integer)) or max_items < 0:
             raise ValueError("max_items must be an exact non-negative integer or None.")
         max_items = int(max_items)
     cost_of = {"coarse": float(coarse_cost), "fine": float(fine_cost)}

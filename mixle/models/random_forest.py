@@ -103,9 +103,7 @@ class RandomForestConditional(SequenceEncodableProbabilityDistribution):
             n_features = getattr(forest, "n_features_in_", None)
         if isinstance(n_features, bool) or not isinstance(n_features, (int, np.integer)) or int(n_features) <= 0:
             raise ValueError("n_features must be a positive integer")
-        if task == "regression" and (
-            sigma is None or not np.isfinite(float(sigma)) or float(sigma) <= 0.0
-        ):
+        if task == "regression" and (sigma is None or not np.isfinite(float(sigma)) or float(sigma) <= 0.0):
             raise ValueError("regression sigma must be finite and positive")
         self.forest = forest
         self.task = task
@@ -195,9 +193,7 @@ class RandomForestAccumulator(SequenceEncodableStatisticAccumulator):
     """Buffers the weighted (x, y) design matrix; combine() concatenates partition buffers into the full training
     set that estimate() fits the forest on."""
 
-    def __init__(
-        self, keys: str | None = None, name: str | None = None, n_features: int | None = None
-    ) -> None:
+    def __init__(self, keys: str | None = None, name: str | None = None, n_features: int | None = None) -> None:
         self.keys = keys
         self.name = name
         self.n_features = n_features
@@ -233,9 +229,7 @@ class RandomForestAccumulator(SequenceEncodableStatisticAccumulator):
             if raw_X.ndim != 2 or raw_X.shape[0] != 0:
                 raise ValueError("empty batches must contain an empty two-dimensional feature matrix and target vector")
             if self.n_features is not None and raw_X.shape[1] != self.n_features:
-                raise ValueError(
-                    f"features must contain exactly {self.n_features} columns, got {raw_X.shape[1]}"
-                )
+                raise ValueError(f"features must contain exactly {self.n_features} columns, got {raw_X.shape[1]}")
             _validated_weights(weights, 0)
             return
         X = _validated_features(X, n_features=self.n_features)
@@ -296,9 +290,7 @@ class RandomForestAccumulator(SequenceEncodableStatisticAccumulator):
 class RandomForestAccumulatorFactory(StatisticAccumulatorFactory):
     """Factory for random-forest accumulators."""
 
-    def __init__(
-        self, name: str | None = None, keys: str | None = None, n_features: int | None = None
-    ) -> None:
+    def __init__(self, name: str | None = None, keys: str | None = None, n_features: int | None = None) -> None:
         self.name = name
         self.keys = keys
         self.n_features = n_features
@@ -348,9 +340,7 @@ class RandomForestEstimator(ParameterEstimator):
         if not np.isfinite(float(min_sigma)) or float(min_sigma) <= 0.0:
             raise ValueError("min_sigma must be finite and positive")
         if n_features is not None and (
-            isinstance(n_features, bool)
-            or not isinstance(n_features, (int, np.integer))
-            or int(n_features) <= 0
+            isinstance(n_features, bool) or not isinstance(n_features, (int, np.integer)) or int(n_features) <= 0
         ):
             raise ValueError("n_features must be a positive integer or None")
         self.task = task

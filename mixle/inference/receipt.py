@@ -190,11 +190,10 @@ def verify_receipt(
                 checks["executables_match"] = "unobserved"
             else:
                 actual_executables = {name: implementation_digest(tools[name]) for name in sorted(step_tools)}
-                checks["executables_match"] = (
-                    "pass" if actual_executables == receipt.executables else "fail"
-                )
+                checks["executables_match"] = "pass" if actual_executables == receipt.executables else "fail"
                 checks["trace_replayable"] = (
-                    "pass" if checks["executables_match"] == "pass" and is_bit_identical_replay(receipt.trace, tools)
+                    "pass"
+                    if checks["executables_match"] == "pass" and is_bit_identical_replay(receipt.trace, tools)
                     else "fail"
                 )
     else:
@@ -210,9 +209,7 @@ def verify_receipt(
         if observations is None:
             checks["calibration_observed"] = "unobserved"
         else:
-            checks["calibration_observed"] = (
-                "pass" if canonical_digest(observations) == observed_digest else "fail"
-            )
+            checks["calibration_observed"] = "pass" if canonical_digest(observations) == observed_digest else "fail"
     else:
         checks["calibration_named"] = "absent"
         checks["calibration_observed"] = "absent"
@@ -232,9 +229,7 @@ def verify_receipt(
             if content is None:
                 source_statuses.append("unobserved")
             else:
-                source_statuses.append(
-                    "pass" if canonical_digest(content) == source.get("digest") else "fail"
-                )
+                source_statuses.append("pass" if canonical_digest(content) == source.get("digest") else "fail")
         checks["provenance_observed"] = (
             "fail"
             if "fail" in source_statuses

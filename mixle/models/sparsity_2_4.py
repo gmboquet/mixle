@@ -345,10 +345,7 @@ class Compressed2to4:
         if values.dtype not in self._DTYPE_TO_CODE:
             raise TypeError("Compressed2to4 values must use float16, float32, or float64")
         if values.shape != (d_out, n_groups, 2):
-            raise ValueError(
-                "Compressed2to4 values must have shape "
-                f"{(d_out, n_groups, 2)}; got {values.shape}"
-            )
+            raise ValueError(f"Compressed2to4 values must have shape {(d_out, n_groups, 2)}; got {values.shape}")
         if not np.all(np.isfinite(values)):
             raise ValueError("Compressed2to4 values must be finite")
 
@@ -423,9 +420,7 @@ class Compressed2to4:
         values = np.frombuffer(view[values_start : values_start + values_bytes], dtype=dtype).reshape(
             d_out, n_groups, 2
         )
-        indices = np.frombuffer(view[values_start + values_bytes :], dtype=np.uint8).reshape(
-            d_out, (n_groups + 1) // 2
-        )
+        indices = np.frombuffer(view[values_start + values_bytes :], dtype=np.uint8).reshape(d_out, (n_groups + 1) // 2)
         return cls(values, indices, (d_out, d_in), format_version=version)
 
 

@@ -143,8 +143,7 @@ def _validate_length_distribution(length_dist: SequenceEncodableProbabilityDistr
 
     if not supports(length_dist, Discrete) or support not in _INFINITE_INTEGER_LENGTH_SUPPORTS:
         raise TypeError(
-            "length distribution must prove support on non-negative integers; got declared support %r."
-            % support
+            "length distribution must prove support on non-negative integers; got declared support %r." % support
         )
 
 
@@ -328,9 +327,7 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
 
         if self.null_len_dist or self.len_normalized:
             return DensitySemantics.LIKELIHOOD_FACTOR
-        return join_density_semantics(
-            child.density_semantics() for child in (self.dist, self.len_dist)
-        )
+        return join_density_semantics(child.density_semantics() for child in (self.dist, self.len_dist))
 
     def log_density(self, x: Sequence[T]) -> float:
         """Evaluate the log-density of SequenceDistribution at observed sequence x.
@@ -496,10 +493,9 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         element_by_component = unstack_component_stats(element_stats, num_components)
         element_counts = engine.sum(element_weights, axis=0)
         length_counts = engine.sum(ww, axis=0)
-        if (
-            tuple(getattr(element_counts, "shape", ())) != (num_components,)
-            or tuple(getattr(length_counts, "shape", ())) != (num_components,)
-        ):
+        if tuple(getattr(element_counts, "shape", ())) != (num_components,) or tuple(
+            getattr(length_counts, "shape", ())
+        ) != (num_components,):
             raise ValueError("stacked sequence effective counts have incompatible component geometry.")
 
         if params["length_route"] is None or enc_nseq is None:
@@ -828,8 +824,7 @@ class SequenceSampler(DistributionSampler):
         if sampled.shape != (size,):
             raise ValueError("length sampler must return exactly one scalar length per requested sequence.")
         lengths = [
-            _checked_length(value, label="sampled sequence length %d" % index)
-            for index, value in enumerate(sampled)
+            _checked_length(value, label="sampled sequence length %d" % index) for index, value in enumerate(sampled)
         ]
         total = sum(lengths)
         if total > np.iinfo(np.intp).max:
@@ -962,9 +957,7 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
 
         if not self.null_len_accumulator:
             self.len_accumulator.initialize(len(x), checked_weight, self._len_rng)
-        self.element_nobs += (
-            checked_weight if self.len_normalized and len(x) > 0 else checked_weight * len(x)
-        )
+        self.element_nobs += checked_weight if self.len_normalized and len(x) > 0 else checked_weight * len(x)
         self.length_nobs += checked_weight
 
     def seq_initialize(self, x: E, weights: np.ndarray, rng: RandomState) -> None:
@@ -1501,12 +1494,7 @@ class SequenceDataEncoder(DataSequenceEncoder):
         if inverse_lengths.ndim != 1:
             raise ValueError("sequence inverse lengths must be one-dimensional.")
         nseq = len(inverse_lengths)
-        if (
-            idx.ndim != 1
-            or not np.issubdtype(idx.dtype, np.integer)
-            or np.any(idx < 0)
-            or np.any(idx >= nseq)
-        ):
+        if idx.ndim != 1 or not np.issubdtype(idx.dtype, np.integer) or np.any(idx < 0) or np.any(idx >= nseq):
             raise ValueError("sequence element indices must reference valid outer rows.")
         if nonempty.shape != (nseq,) or nonempty.dtype.kind != "b":
             raise ValueError("sequence nonempty mask must be boolean and aligned with outer rows.")

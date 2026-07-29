@@ -78,9 +78,7 @@ def _validated_probability_map(
         except (TypeError, ValueError) as exc:
             raise TypeError("Bernoulli-set probabilities must be real scalars") from exc
         if not np.isfinite(checked) or checked < 0.0 or checked > 1.0:
-            raise ValueError(
-                "Bernoulli-set probabilities must be finite values in [0, 1]"
-            )
+            raise ValueError("Bernoulli-set probabilities must be finite values in [0, 1]")
         if min_prob > 0.0:
             upper = 1.0 - min_prob
             if upper == 1.0:
@@ -138,12 +136,7 @@ def _validated_encoded_sets(
     row_index = np.asarray(value[1])
     labels = np.asarray(value[2], dtype=object)
     label_index = np.asarray(value[3])
-    if (
-        row_index.ndim != 1
-        or labels.ndim != 1
-        or label_index.ndim != 1
-        or row_index.shape != label_index.shape
-    ):
+    if row_index.ndim != 1 or labels.ndim != 1 or label_index.ndim != 1 or row_index.shape != label_index.shape:
         raise ValueError("encoded Bernoulli-set arrays have invalid geometry")
     if row_index.dtype.kind not in "iu" or label_index.dtype.kind not in "iu":
         raise TypeError("encoded Bernoulli-set indices must be integer arrays")
@@ -216,9 +209,7 @@ def _validated_statistics(
         _canonical_set((label,), support=support)
         count = _validated_weight(raw_count)
         if count > total + tolerance:
-            raise ValueError(
-                "Bernoulli-set inclusion count cannot exceed total weight"
-            )
+            raise ValueError("Bernoulli-set inclusion count cannot exceed total weight")
         counts[label] = count
     return counts, total
 
@@ -344,29 +335,16 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
             checked_posteriors = {}
             for label, parameters in posteriors.items():
                 if label not in self.support:
-                    raise ValueError(
-                        "Bernoulli-set posterior label is outside configured support"
-                    )
-                if (
-                    not isinstance(parameters, (tuple, list))
-                    or len(parameters) != 2
-                ):
-                    raise ValueError(
-                        "Bernoulli-set posterior parameters must be (a, b) pairs"
-                    )
+                    raise ValueError("Bernoulli-set posterior label is outside configured support")
+                if not isinstance(parameters, (tuple, list)) or len(parameters) != 2:
+                    raise ValueError("Bernoulli-set posterior parameters must be (a, b) pairs")
                 a = _validated_weight(parameters[0])
                 b = _validated_weight(parameters[1])
                 if a == 0.0 or b == 0.0:
-                    raise ValueError(
-                        "Bernoulli-set posterior Beta parameters must be positive"
-                    )
+                    raise ValueError("Bernoulli-set posterior Beta parameters must be positive")
                 checked_posteriors[label] = (a, b)
         self.prior = prior
-        self.posteriors = (
-            None
-            if checked_posteriors is None
-            else MappingProxyType(checked_posteriors)
-        )
+        self.posteriors = None if checked_posteriors is None else MappingProxyType(checked_posteriors)
         if prior is not None:
             self.has_conj_prior = True
             a0, b0 = prior.get_parameters()
@@ -528,9 +506,7 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
     def backend_stacked_params(cls, dists: Sequence["BernoulliSetDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked Bernoulli-set parameters for shared label support."""
         if not dists:
-            raise ValueError(
-                "Stacked BernoulliSetDistribution parameters require at least one component."
-            )
+            raise ValueError("Stacked BernoulliSetDistribution parameters require at least one component.")
         labels = tuple(dists[0].pmap.keys())
         min_prob = float(dists[0].min_prob)
         if any(tuple(dist.pmap.keys()) != labels or float(dist.min_prob) != min_prob for dist in dists):
@@ -593,14 +569,9 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         )
         expected_shape = (sz, int(params["num_components"]))
         if weights_np.shape != expected_shape:
-            raise ValueError(
-                "Stacked Bernoulli-set weights must have exact shape %r"
-                % (expected_shape,)
-            )
+            raise ValueError("Stacked Bernoulli-set weights must have exact shape %r" % (expected_shape,))
         if np.any(~np.isfinite(weights_np)) or np.any(weights_np < 0.0):
-            raise ValueError(
-                "Stacked Bernoulli-set weights must be finite and non-negative"
-            )
+            raise ValueError("Stacked Bernoulli-set weights must be finite and non-negative")
         ww = engine.asarray(weights_np)
         count_rows = []
         if len(xs) > 0:
@@ -786,11 +757,7 @@ class BernoulliSetAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.pmap = defaultdict(float)
         self.tot_sum = 0.0
-        self.support = (
-            None
-            if support is None
-            else frozenset(_canonical_set(support))
-        )
+        self.support = None if support is None else frozenset(_canonical_set(support))
         self.name = name
         self.keys = keys
 
@@ -1025,36 +992,22 @@ class BernoulliSetEstimator(ParameterEstimator):
 
         """
         self.min_prob = _validated_min_prob(min_prob)
-        self.support = (
-            None
-            if support is None
-            else tuple(_canonical_set(support))
-        )
-        self.support_set = (
-            None if self.support is None else frozenset(self.support)
-        )
+        self.support = None if support is None else tuple(_canonical_set(support))
+        self.support_set = None if self.support is None else frozenset(self.support)
         if pseudo_count is None:
             if suff_stat is not None:
-                raise ValueError(
-                    "Bernoulli-set prior probabilities require a pseudo-count"
-                )
+                raise ValueError("Bernoulli-set prior probabilities require a pseudo-count")
             self.pseudo_count = None
             self.suff_stat = None
         else:
             self.pseudo_count = _validated_weight(pseudo_count)
-            self.suff_stat = (
-                None
-                if suff_stat is None
-                else MappingProxyType(_validated_probability_map(suff_stat))
-            )
+            self.suff_stat = None if suff_stat is None else MappingProxyType(_validated_probability_map(suff_stat))
             if (
                 self.support_set is not None
                 and self.suff_stat is not None
                 and not set(self.suff_stat).issubset(self.support_set)
             ):
-                raise ValueError(
-                    "Bernoulli-set prior probabilities exceed configured support"
-                )
+                raise ValueError("Bernoulli-set prior probabilities exceed configured support")
         self.keys = keys
         self.name = name
         if prior is not None and not isinstance(prior, BetaDistribution):
@@ -1098,9 +1051,7 @@ class BernoulliSetEstimator(ParameterEstimator):
         posteriors = dict()
         labels = self.support if self.support is not None else tuple(obs_cnt)
         if tot_cnt == 0.0 and not labels:
-            raise BernoulliSetFitError(
-                "Bernoulli-set fitting requires evidence or configured support"
-            )
+            raise BernoulliSetFitError("Bernoulli-set fitting requires evidence or configured support")
         for k in labels:
             v = obs_cnt.get(k, 0.0)
             post_a = a0 + v
@@ -1146,30 +1097,19 @@ class BernoulliSetEstimator(ParameterEstimator):
         labels.update(dict.fromkeys(counts))
         if self.suff_stat is not None:
             labels.update(dict.fromkeys(self.suff_stat))
-        if total == 0.0 and (
-            self.pseudo_count is None or self.pseudo_count == 0.0
-        ):
-            raise BernoulliSetFitError(
-                "Bernoulli-set fitting requires positive observation or prior weight"
-            )
+        if total == 0.0 and (self.pseudo_count is None or self.pseudo_count == 0.0):
+            raise BernoulliSetFitError("Bernoulli-set fitting requires positive observation or prior weight")
 
         if self.pseudo_count is not None and self.suff_stat is not None:
             pmap = {
-                k: (
-                    self.suff_stat.get(k, 0.0) * self.pseudo_count
-                    + counts.get(k, 0.0)
-                )
-                / (self.pseudo_count + total)
+                k: (self.suff_stat.get(k, 0.0) * self.pseudo_count + counts.get(k, 0.0)) / (self.pseudo_count + total)
                 for k in labels
             }
 
         elif self.pseudo_count is not None and self.suff_stat is None:
             p = self.pseudo_count
             cnt = float(p + total)
-            pmap = {
-                k: (counts.get(k, 0.0) + (p / 2.0)) / cnt
-                for k in labels
-            }
+            pmap = {k: (counts.get(k, 0.0) + (p / 2.0)) / cnt for k in labels}
 
         else:
             pmap = {k: counts.get(k, 0.0) / total for k in labels}
@@ -1218,9 +1158,7 @@ class BernoulliSetDataEncoder(DataSequenceEncoder):
         try:
             rows = tuple(x)
         except TypeError as exc:
-            raise TypeError(
-                "Bernoulli-set batches must be iterable collections of sets"
-            ) from exc
+            raise TypeError("Bernoulli-set batches must be iterable collections of sets") from exc
         row_index = []
         label_index = []
         labels = []

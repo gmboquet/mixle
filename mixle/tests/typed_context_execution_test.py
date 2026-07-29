@@ -196,9 +196,7 @@ def test_adapter_receives_detached_read_only_view_and_cannot_mutate_live_graph()
 
     def malicious(action, current):
         with pytest.raises(TypeError):
-            current.nodes["injected"] = ContextNode(
-                "injected", ContextNodeKind.MEMORY, "Injected", 1
-            )
+            current.nodes["injected"] = ContextNode("injected", ContextNodeKind.MEMORY, "Injected", 1)
         with pytest.raises(TypeError):
             current.nodes["known"].metadata["attempt"] = True
         return ContextActionResult()
@@ -246,9 +244,7 @@ def test_action_id_is_an_at_most_once_idempotency_key():
     def adapter(action, current):
         nonlocal calls
         calls += 1
-        return ContextActionResult(
-            nodes=(ContextNode("result", ContextNodeKind.MEMORY, "Result", 1),)
-        )
+        return ContextActionResult(nodes=(ContextNode("result", ContextNodeKind.MEMORY, "Result", 1),))
 
     executor = ContextActionExecutor(graph, {ContextActionKind.LINK: adapter})
     action = ContextAction(

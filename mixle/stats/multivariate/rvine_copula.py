@@ -195,8 +195,7 @@ def _select_and_fit(u: np.ndarray, w: np.ndarray, candidates: tuple[str, ...]) -
                 ib,
                 w,
                 candidates,
-                edge_context="R-vine tree %d variables (%d, %d) conditioned on %s"
-                % (t + 1, a, b, sorted(shared)),
+                edge_context="R-vine tree %d variables (%d, %d) conditioned on %s" % (t + 1, a, b, sorted(shared)),
             )
             tree_t.append(_Edge(a, b, shared, pc, {a: (px, a), b: (py, b)}))
             vals_t.append({a: pc.h(ia, ib), b: pc.h(ib, ia)})
@@ -312,9 +311,7 @@ def _validated_trees(dim: int, trees: Any) -> tuple[list[list[_Edge]], tuple[int
             raise TypeError("R-vine tree %d must be an edge sequence" % (tree_index + 1))
         expected_edges = dim - tree_index - 1
         if len(raw_tree) != expected_edges:
-            raise ValueError(
-                "R-vine tree %d must contain exactly %d edges" % (tree_index + 1, expected_edges)
-            )
+            raise ValueError("R-vine tree %d must contain exactly %d edges" % (tree_index + 1, expected_edges))
         tree: list[_Edge] = []
         topology_edges: list[tuple[int, int]] = []
         for edge_index, raw_edge in enumerate(raw_tree):
@@ -338,12 +335,7 @@ def _validated_trees(dim: int, trees: Any) -> tuple[list[list[_Edge]], tuple[int
                 len(cond) != tree_index
                 or raw_edge.a in cond
                 or raw_edge.b in cond
-                or any(
-                    not isinstance(value, int)
-                    or isinstance(value, bool)
-                    or not 0 <= value < dim
-                    for value in cond
-                )
+                or any(not isinstance(value, int) or isinstance(value, bool) or not 0 <= value < dim for value in cond)
             ):
                 raise ValueError(
                     "R-vine tree %d edge conditioning set must contain exactly %d other valid variables"
@@ -386,9 +378,7 @@ def _validated_trees(dim: int, trees: Any) -> tuple[list[list[_Edge]], tuple[int
                         raise ValueError("R-vine parent references must be valid (edge_index, variable) pairs")
                     parent = previous[reference[0]]
                     if parent.constraint() != cond | {variable} or variable not in (parent.a, parent.b):
-                        raise ValueError(
-                            "R-vine parent reference violates the proximity/conditioning contract"
-                        )
+                        raise ValueError("R-vine parent reference violates the proximity/conditioning contract")
                     parent_nodes.append(reference[0])
                     normalized_parents[variable] = reference
                 if parent_nodes[0] == parent_nodes[1]:
@@ -539,8 +529,6 @@ class RVineCopulaEstimator(ParameterEstimator):
         return BufferedUScoreAccumulatorFactory(self.dim, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray]) -> RVineCopulaDistribution:
-        u, w = validated_buffered_statistic(
-            suff_stat, self.dim, minimum_rows=2, require_positive_weight=True
-        )
+        u, w = validated_buffered_statistic(suff_stat, self.dim, minimum_rows=2, require_positive_weight=True)
         trees = _select_and_fit(u, w, self.candidates)
         return RVineCopulaDistribution(self.dim, trees, candidates=self.candidates, name=self.name, keys=self.keys)

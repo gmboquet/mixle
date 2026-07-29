@@ -87,15 +87,13 @@ def _validated_posterior(
     asymmetry = float(np.linalg.norm(cov - cov.T, ord=np.inf))
     if asymmetry > tolerance:
         raise ValueError(
-            f"{label} posterior covariance must be symmetric within {tolerance:.6g}; "
-            f"asymmetry is {asymmetry:.6g}."
+            f"{label} posterior covariance must be symmetric within {tolerance:.6g}; asymmetry is {asymmetry:.6g}."
         )
     cov = 0.5 * (cov + cov.T)
     eigvals = np.linalg.eigvalsh(cov)
     if eigvals[0] < -tolerance:
         raise ValueError(
-            f"{label} posterior covariance must be positive-semidefinite; "
-            f"smallest eigenvalue is {eigvals[0]:.6g}."
+            f"{label} posterior covariance must be positive-semidefinite; smallest eigenvalue is {eigvals[0]:.6g}."
         )
     if eigvals[0] < 0.0:
         eigvecs = np.linalg.eigh(cov)[1]
@@ -356,9 +354,7 @@ def expected_information_gain_linear(
     if not np.all(np.isfinite(m)):
         raise ValueError("linear information matrix became non-finite from the supplied finite inputs.")
     matrix_scale = (
-        max(float(np.linalg.norm(m, ord=np.inf)), np.finfo(np.float64).tiny)
-        if m.size
-        else np.finfo(np.float64).tiny
+        max(float(np.linalg.norm(m, ord=np.inf)), np.finfo(np.float64).tiny) if m.size else np.finfo(np.float64).tiny
     )
     matrix_tolerance = 64.0 * np.finfo(np.float64).eps * matrix_scale * max(m.shape[0], 1)
     if m.size and float(np.linalg.norm(m - m.T, ord=np.inf)) > matrix_tolerance:
@@ -458,8 +454,7 @@ def expected_information_gain_nmc_estimate(
         ll_true_arr = np.asarray(log_likelihood(theta_i[None, :], y_i), dtype=np.float64)
         if ll_true_arr.shape != (1,):
             raise ValueError(
-                "log_likelihood(theta[None, :], y) must return shape (1,), got "
-                f"{ll_true_arr.shape} (outer draw {i})."
+                f"log_likelihood(theta[None, :], y) must return shape (1,), got {ll_true_arr.shape} (outer draw {i})."
             )
         ll_true = float(ll_true_arr[0])
         if not np.isfinite(ll_true):

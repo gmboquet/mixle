@@ -55,9 +55,7 @@ def _as_batched(teacher: Callable[..., Any], *, teacher_mode: str = "batch") -> 
             raise ValueError("a batch teacher must return a sequence with one label per input")
         labels = list(result)
         if len(labels) != len(items):
-            raise ValueError(
-                f"batch teacher returned {len(labels)} labels for {len(items)} inputs"
-            )
+            raise ValueError(f"batch teacher returned {len(labels)} labels for {len(items)} inputs")
         return labels
 
     return adapted
@@ -748,12 +746,17 @@ def _fit_mlp(x: np.ndarray, y: np.ndarray, n_labels: int, hidden, epochs, lr, se
     if best_state is None:
         raise RuntimeError("distillation did not produce a valid checkpoint")
     fit_module.load_state_dict(best_state)
-    return fit_module, cfg, steps_run, {
-        "name": "auto",
-        "plan": best_optimizer_receipt,
-        "best_step": best_step,
-        "best_loss": best_loss,
-    }
+    return (
+        fit_module,
+        cfg,
+        steps_run,
+        {
+            "name": "auto",
+            "plan": best_optimizer_receipt,
+            "best_step": best_step,
+            "best_loss": best_loss,
+        },
+    )
 
 
 def _student(module, cfg, adapter, task, n_examples, label_list, recipe) -> TaskModel:

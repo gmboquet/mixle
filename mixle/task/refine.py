@@ -103,9 +103,7 @@ def _try_edge(
     )
 
 
-def _verification_slices(
-    held_out: Sequence[tuple], n_trials: int, seed: int
-) -> list[tuple[list[tuple], list[int]]]:
+def _verification_slices(held_out: Sequence[tuple], n_trials: int, seed: int) -> list[tuple[list[tuple], list[int]]]:
     rows = list(held_out)
     if n_trials <= 0:
         return []

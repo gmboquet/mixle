@@ -96,9 +96,7 @@ class NormalWishartDistribution(SequenceEncodableProbabilityDistribution):
             raise ValueError("NormalWishartDistribution requires mu to be finite.")
         dimension = len(mu)
         if w_mat.shape != (dimension, dimension):
-            raise ValueError(
-                "NormalWishartDistribution requires w_mat shape (%d, %d)." % (dimension, dimension)
-            )
+            raise ValueError("NormalWishartDistribution requires w_mat shape (%d, %d)." % (dimension, dimension))
         if np.any(~np.isfinite(w_mat)):
             raise ValueError("NormalWishartDistribution requires a finite scale matrix w_mat.")
         if not np.allclose(w_mat, w_mat.T, rtol=1.0e-10, atol=1.0e-12):
@@ -115,18 +113,13 @@ class NormalWishartDistribution(SequenceEncodableProbabilityDistribution):
             raise ValueError("NormalWishartDistribution requires finite kappa > 0.")
         if not nu > dimension - 1 or not np.isfinite(nu):
             raise ValueError(
-                "NormalWishartDistribution requires a finite nu > dim - 1 (got nu=%s, dim=%d)."
-                % (nu, dimension)
+                "NormalWishartDistribution requires a finite nu > dim - 1 (got nu=%s, dim=%d)." % (nu, dimension)
             )
         log_det_w = cholesky_logdet(w_mat)
         if log_det_w is None:
             raise ValueError("NormalWishartDistribution requires a positive-definite scale matrix w_mat.")
         w_inv = np.linalg.inv(w_mat)
-        log_z = (
-            (nu * dimension / 2.0) * np.log(2.0)
-            + (nu / 2.0) * log_det_w
-            + _multigammaln(nu / 2.0, dimension)
-        )
+        log_z = (nu * dimension / 2.0) * np.log(2.0) + (nu / 2.0) * log_det_w + _multigammaln(nu / 2.0, dimension)
         if not np.isfinite(log_z):
             raise ValueError("NormalWishartDistribution parameters produced a non-finite normalizer.")
         return (
@@ -154,8 +147,7 @@ class NormalWishartDistribution(SequenceEncodableProbabilityDistribution):
             raise ValueError("NormalWishartDistribution observations must be numeric.") from exc
         if mu.shape != (dimension,) or np.any(~np.isfinite(mu)):
             raise ValueError(
-                "NormalWishartDistribution observation mu must be a finite vector of length %d."
-                % dimension
+                "NormalWishartDistribution observation mu must be a finite vector of length %d." % dimension
             )
         if precision.shape != (dimension, dimension) or np.any(~np.isfinite(precision)):
             raise ValueError(
@@ -249,11 +241,7 @@ class NormalWishartDistribution(SequenceEncodableProbabilityDistribution):
         e_quad = d / self_kappa + self_nu * float(np.dot(diff, np.dot(self_w, diff)))
 
         c_norm = (d / 2.0) * np.log(dist_kappa / (2.0 * np.pi)) + 0.5 * e_log_det - 0.5 * dist_kappa * e_quad
-        c_wish = (
-            ((dist_nu - d - 1.0) / 2.0) * e_log_det
-            - 0.5 * float(np.trace(np.dot(dist_w_inv, e_lam)))
-            - dist_log_z
-        )
+        c_wish = ((dist_nu - d - 1.0) / 2.0) * e_log_det - 0.5 * float(np.trace(np.dot(dist_w_inv, e_lam))) - dist_log_z
 
         return -(c_norm + c_wish)
 
@@ -349,7 +337,4 @@ class NormalWishartDataEncoder(DataSequenceEncoder):
                 raise ValueError("NormalWishartDataEncoder observation means must be vectors.") from exc
         else:
             dimension = self.dimension
-        return [
-            NormalWishartDistribution._validated_observation(value, dimension)
-            for value in values
-        ]
+        return [NormalWishartDistribution._validated_observation(value, dimension) for value in values]

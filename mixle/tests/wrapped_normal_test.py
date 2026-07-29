@@ -86,9 +86,7 @@ class WrappedNormalTest(unittest.TestCase):
             (0.0, 0.0, 1.0),
             (1.0, 0.0, 1.0),
         ):
-            with self.subTest(statistics=statistics), self.assertRaises(
-                WrappedNormalFitError
-            ):
+            with self.subTest(statistics=statistics), self.assertRaises(WrappedNormalFitError):
                 estimator.estimate(None, statistics)
         for statistics in (
             (2.0, 0.0, 1.0),

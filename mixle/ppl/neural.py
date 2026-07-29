@@ -83,9 +83,7 @@ def _responses(value: Any, rows: int) -> np.ndarray:
     if result.ndim == 1:
         result = result[:, None]
     if result.ndim != 2 or result.shape[0] != rows or result.shape[1] == 0:
-        raise ValueError(
-            f"normal responses must have shape ({rows}, outputs) with a non-empty output axis"
-        )
+        raise ValueError(f"normal responses must have shape ({rows}, outputs) with a non-empty output axis")
     if not np.all(np.isfinite(result)):
         raise ValueError("normal responses must contain only finite values")
     return result
@@ -156,8 +154,7 @@ def _validated_module(
         raise TypeError("neural predictor module must return a torch.Tensor")
     if probe.ndim != 2 or probe.shape[0] != min(2, len(x)) or probe.shape[1] != expected_outputs:
         raise ValueError(
-            "neural predictor output must have shape "
-            f"(rows, {expected_outputs}); got {tuple(probe.shape)}"
+            f"neural predictor output must have shape (rows, {expected_outputs}); got {tuple(probe.shape)}"
         )
     if not bool(torch.isfinite(probe).all()):
         raise ValueError("neural predictor output must contain only finite values")

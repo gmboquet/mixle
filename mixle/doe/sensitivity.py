@@ -161,9 +161,7 @@ def sobol_indices(
     n_bootstrap = _require_exact_positive_int(n_bootstrap, "n_bootstrap", minimum=2)
     confidence = _validate_confidence(confidence)
     names_out = _validate_names(names, d)
-    a_unit, sampling_method = _sobol_unit(
-        n, 2 * d, seed
-    )  # split one 2d-dimensional Sobol block into A and B
+    a_unit, sampling_method = _sobol_unit(n, 2 * d, seed)  # split one 2d-dimensional Sobol block into A and B
     a, b = a_unit[:, :d], a_unit[:, d:]
     ya = _eval_model(func, _scale(a, bounds), label="sobol_indices's func")
     yb = _eval_model(func, _scale(b, bounds), label="sobol_indices's func")

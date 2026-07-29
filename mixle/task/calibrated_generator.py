@@ -205,9 +205,7 @@ class CalibratedGenerator:
             "proposal_count": split,
             "certification_count": len(prompts) - split,
             "thresholds_tested": len(thresholds),
-            "threshold": (
-                "inf" if np.isposinf(self.qhat) else "-inf" if np.isneginf(self.qhat) else self.qhat
-            ),
+            "threshold": ("inf" if np.isposinf(self.qhat) else "-inf" if np.isneginf(self.qhat) else self.qhat),
             "statistic": "top_score",
             "candidate_count": self.k,
             "seed": rng_seed,

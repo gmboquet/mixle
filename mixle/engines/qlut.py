@@ -41,8 +41,7 @@ def _validate_grid(step: Any, lo: Any, hi: Any) -> tuple[float, int, int]:
     hi_code = int(round(hi / step))
     if hi_code - lo_code < 1:
         raise ValueError(
-            f"step={step} is too coarse for span [{lo}, {hi}]: rounds to a single code "
-            "(need at least two grid entries)"
+            f"step={step} is too coarse for span [{lo}, {hi}]: rounds to a single code (need at least two grid entries)"
         )
     return step, lo_code, hi_code
 
@@ -90,7 +89,9 @@ class QuantizedFunction:
         codes = np.arange(self.lo_code, self.hi_code + 1, dtype=np.int64)
         values = np.asarray(func(codes * self.step))
         if values.shape != codes.shape:
-            raise ValueError(f"func must return one value per grid code: expected shape {codes.shape}, got {values.shape}")
+            raise ValueError(
+                f"func must return one value per grid code: expected shape {codes.shape}, got {values.shape}"
+            )
         table = np.ascontiguousarray(values, dtype=np.float64)
         if not np.isfinite(table).all():
             raise ValueError("func produced non-finite values over the tabulated range")

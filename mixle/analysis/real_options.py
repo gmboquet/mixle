@@ -320,9 +320,7 @@ def real_option_value(
             f"intrinsic values at step {step}",
         )
         choose_intrinsic = intrinsic > continuation
-        exercise = choose_intrinsic & _exercise_is_economic(
-            v, kind, expand_fraction, expansion_cost, salvage_value
-        )
+        exercise = choose_intrinsic & _exercise_is_economic(v, kind, expand_fraction, expansion_cost, salvage_value)
         option = np.where(choose_intrinsic, intrinsic, continuation)
         if np.any(exercise):
             exercised_v = v[exercise]
@@ -543,9 +541,7 @@ def _require_decision_value(value: Any, *, replicate: int, side: str) -> float:
             f"voi_dollars: decision_fn returned a non-scalar value for replicate {replicate} ({side})"
         ) from exc
     if not np.isfinite(result):
-        raise ValueError(
-            f"voi_dollars: decision_fn returned a non-finite value for replicate {replicate} ({side})"
-        )
+        raise ValueError(f"voi_dollars: decision_fn returned a non-finite value for replicate {replicate} ({side})")
     return result
 
 

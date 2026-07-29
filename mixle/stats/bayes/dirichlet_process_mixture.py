@@ -95,9 +95,7 @@ def _validated_weights(value: Any, component_count: int) -> np.ndarray:
     except (TypeError, ValueError) as exc:
         raise ValueError("Dirichlet-process weights must be numeric.") from exc
     if weights.shape != (component_count,):
-        raise ValueError(
-            "Dirichlet-process weights must have exact shape (%d,)." % component_count
-        )
+        raise ValueError("Dirichlet-process weights must have exact shape (%d,)." % component_count)
     if np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
         raise ValueError("Dirichlet-process weights must be finite and non-negative.")
     if not np.isclose(
@@ -116,10 +114,7 @@ def _validated_sticks(value: Any, component_count: int) -> np.ndarray:
     except (TypeError, ValueError) as exc:
         raise ValueError("Dirichlet-process stick parameters must be numeric.") from exc
     if sticks.shape != (component_count, 2):
-        raise ValueError(
-            "Dirichlet-process stick parameters must have exact shape (%d, 2)."
-            % component_count
-        )
+        raise ValueError("Dirichlet-process stick parameters must have exact shape (%d, 2)." % component_count)
     if np.any(~np.isfinite(sticks)) or np.any(sticks <= 0.0):
         raise ValueError("Dirichlet-process stick parameters must be finite and positive.")
     return sticks.copy()
@@ -149,14 +144,10 @@ def _compatible_component_encoder(components: Sequence[Any]) -> DataSequenceEnco
             compatible = reference == encoder and encoder == reference
         except Exception as exc:
             raise ValueError(
-                "Dirichlet-process component encoder compatibility check failed at component %d."
-                % index
+                "Dirichlet-process component encoder compatibility check failed at component %d." % index
             ) from exc
         if not compatible:
-            raise ValueError(
-                "Dirichlet-process components must use compatible encoders; component %d differs."
-                % index
-            )
+            raise ValueError("Dirichlet-process components must use compatible encoders; component %d differs." % index)
     return reference
 
 
@@ -176,14 +167,10 @@ def _validated_component_priors(components: Sequence[Any], priors: Any) -> list[
         raise TypeError("Dirichlet-process component_priors must be a sequence.")
     result = list(priors)
     if len(result) != len(components):
-        raise ValueError(
-            "Dirichlet-process component_priors must contain exactly one entry per component."
-        )
+        raise ValueError("Dirichlet-process component_priors must contain exactly one entry per component.")
     for index, (component, prior) in enumerate(zip(components, result)):
         if _prior_structure(component.get_prior()) != _prior_structure(prior):
-            raise ValueError(
-                "Dirichlet-process component prior structure differs at component %d." % index
-            )
+            raise ValueError("Dirichlet-process component prior structure differs at component %d." % index)
     return result
 
 
@@ -193,9 +180,7 @@ def _validated_observation_weight(value: Any) -> float:
     try:
         result = float(value)
     except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "Dirichlet-process observation weight must be a finite non-negative scalar."
-        ) from exc
+        raise ValueError("Dirichlet-process observation weight must be a finite non-negative scalar.") from exc
     if not np.isfinite(result) or result < 0.0:
         raise ValueError("Dirichlet-process observation weight must be a finite non-negative scalar.")
     return result
@@ -207,9 +192,7 @@ def _validated_observation_weights(value: Any, row_count: int) -> np.ndarray:
     except (TypeError, ValueError) as exc:
         raise ValueError("Dirichlet-process observation weights must be numeric.") from exc
     if result.shape != (row_count,):
-        raise ValueError(
-            "Dirichlet-process observation weights must have exact shape (%d,)." % row_count
-        )
+        raise ValueError("Dirichlet-process observation weights must have exact shape (%d,)." % row_count)
     if np.any(~np.isfinite(result)) or np.any(result < 0.0):
         raise ValueError("Dirichlet-process observation weights must be finite and non-negative.")
     return result
@@ -235,15 +218,9 @@ def _validated_dpm_statistics(
     except (TypeError, ValueError) as exc:
         raise ValueError("Dirichlet-process count statistics must be numeric.") from exc
     if component_counts.shape != (component_count,):
-        raise ValueError(
-            "Dirichlet-process component counts must have exact shape (%d,)."
-            % component_count
-        )
+        raise ValueError("Dirichlet-process component counts must have exact shape (%d,)." % component_count)
     if beta_counts.shape != (component_count, 2):
-        raise ValueError(
-            "Dirichlet-process beta counts must have exact shape (%d, 2)."
-            % component_count
-        )
+        raise ValueError("Dirichlet-process beta counts must have exact shape (%d, 2)." % component_count)
     if np.any(~np.isfinite(component_counts)) or np.any(component_counts < 0.0):
         raise ValueError("Dirichlet-process component counts must be finite and non-negative.")
     if np.any(~np.isfinite(beta_counts)) or np.any(beta_counts < 0.0):
@@ -263,9 +240,7 @@ def _validated_dpm_statistics(
         rtol=_SIMPLEX_RTOL,
         atol=_SIMPLEX_ATOL,
     ):
-        raise ValueError(
-            "Dirichlet-process beta failure counts violate remaining-stick conservation."
-        )
+        raise ValueError("Dirichlet-process beta failure counts violate remaining-stick conservation.")
     concentration = _validated_concentration(value[2])
     if np.ndim(value[3]) != 0:
         raise ValueError("Dirichlet-process previous log-stick statistic must be finite.")
@@ -279,9 +254,7 @@ def _validated_dpm_statistics(
         raise TypeError("Dirichlet-process component statistics must be a sequence.")
     component_statistics = tuple(value[4])
     if len(component_statistics) != component_count:
-        raise ValueError(
-            "Dirichlet-process component statistics must match the component count."
-        )
+        raise ValueError("Dirichlet-process component statistics must match the component count.")
     return (
         component_counts.copy(),
         beta_counts.copy(),
@@ -452,18 +425,11 @@ class DirichletProcessMixtureDistribution(SequenceEncodableProbabilityDistributi
 
     def _assert_structure(self) -> None:
         """Reject externally mutated component geometry before it reaches inference."""
-        if (
-            self.num_components != len(self.components)
-            or self.max_components != self.num_components
-        ):
-            raise RuntimeError(
-                "Dirichlet-process component structure changed after model construction."
-            )
+        if self.num_components != len(self.components) or self.max_components != self.num_components:
+            raise RuntimeError("Dirichlet-process component structure changed after model construction.")
         current = _component_structure_fingerprint(self.components)
         if current != self._structure_fingerprint:
-            raise RuntimeError(
-                "Dirichlet-process component structure changed after model construction."
-            )
+            raise RuntimeError("Dirichlet-process component structure changed after model construction.")
         _validated_component_priors(self.components, self.component_priors)
         checked_weights = _validated_weights(self.w, self.num_components)
         _validated_sticks(self.g, self.num_components)
@@ -499,9 +465,7 @@ class DirichletProcessMixtureDistribution(SequenceEncodableProbabilityDistributi
         checked_w = _validated_weights(w, self.num_components)
         checked_components = _validated_component_sequence(components, "components")
         if len(checked_components) != self.num_components:
-            raise ValueError(
-                "Dirichlet-process replacement components must match the component count."
-            )
+            raise ValueError("Dirichlet-process replacement components must match the component count.")
         checked_components = copy.deepcopy(checked_components)
         if _component_structure_fingerprint(checked_components) != self._structure_fingerprint:
             raise ValueError("Dirichlet-process replacement components changed model structure.")
@@ -593,9 +557,7 @@ class DirichletProcessMixtureDistribution(SequenceEncodableProbabilityDistributi
         ``DirichletProcessMixtureEstimator.model_log_density``.
         """
         self._assert_structure()
-        component_scores = np.asarray(
-            [u.seq_expected_log_density(x) for u in self.components]
-        ).T
+        component_scores = np.asarray([u.seq_expected_log_density(x) for u in self.components]).T
         weighted = component_scores + _expected_log_stick_weights(self.g)
         return normalize_mixture_log_scores(weighted).log_evidence
 
@@ -689,9 +651,7 @@ class DirichletProcessMixtureSampler(DistributionSampler):
             try:
                 size = operator.index(size)
             except TypeError as exc:
-                raise TypeError(
-                    "Dirichlet-process sample size must be a non-negative integer."
-                ) from exc
+                raise TypeError("Dirichlet-process sample size must be a non-negative integer.") from exc
             if size < 0:
                 raise ValueError("Dirichlet-process sample size must be non-negative.")
         comp_state = self.rng.choice(
@@ -761,23 +721,14 @@ class DirichletProcessMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         if estimate.num_components != self.num_components:
             raise ValueError("Dirichlet-process accumulator and estimate component counts differ.")
         exp_ll = _weighted_scores(
-            np.asarray(
-                [
-                    estimate.components[i].expected_log_density(x)
-                    for i in range(self.num_components)
-                ]
-            ),
+            np.asarray([estimate.components[i].expected_log_density(x) for i in range(self.num_components)]),
             estimate.log_w,
             estimate.w,
         )
         phi = normalize_mixture_log_scores(exp_ll[None, :]).responsibilities[0]
         weighted_phi = phi * checked_weight
         possible = float(phi.sum()) > 0.0
-        remaining = (
-            np.maximum(0.0, 1.0 - np.cumsum(phi))
-            * checked_weight
-            * float(possible)
-        )
+        remaining = np.maximum(0.0, 1.0 - np.cumsum(phi)) * checked_weight * float(possible)
         remaining[-1] = 0.0
 
         self.comp_counts += weighted_phi
@@ -806,10 +757,7 @@ class DirichletProcessMixtureAccumulator(SequenceEncodableStatisticAccumulator):
         checked_weights = _validated_observation_weights(weights, phi.shape[0])
         weighted_phi = phi * checked_weights[:, None]
         possible = phi.sum(axis=1) > 0.0
-        remaining = (
-            np.maximum(0.0, 1.0 - np.cumsum(phi, axis=1))
-            * possible[:, None]
-        )
+        remaining = np.maximum(0.0, 1.0 - np.cumsum(phi, axis=1)) * possible[:, None]
         remaining[:, -1] = 0.0
         weighted_remaining = remaining * checked_weights[:, None]
 
@@ -878,23 +826,19 @@ class DirichletProcessMixtureAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat: tuple) -> "DirichletProcessMixtureAccumulator":
         """Add another accumulator's sufficient-statistic value into this one."""
-        comp_counts, beta_counts, concentration, prev_nw, component_stats = (
-            _validated_dpm_statistics(suff_stat, self.num_components)
+        comp_counts, beta_counts, concentration, prev_nw, component_stats = _validated_dpm_statistics(
+            suff_stat, self.num_components
         )
         if self.comp_counts.sum() > 0.0 and comp_counts.sum() > 0.0:
             if not np.isclose(self.a, concentration, rtol=_SIMPLEX_RTOL, atol=_SIMPLEX_ATOL):
-                raise ValueError(
-                    "Cannot merge Dirichlet-process statistics from different concentrations."
-                )
+                raise ValueError("Cannot merge Dirichlet-process statistics from different concentrations.")
             if not np.isclose(
                 self.prev_nw,
                 prev_nw,
                 rtol=_SIMPLEX_RTOL,
                 atol=_SIMPLEX_ATOL,
             ):
-                raise ValueError(
-                    "Cannot merge Dirichlet-process statistics from different stick states."
-                )
+                raise ValueError("Cannot merge Dirichlet-process statistics from different stick states.")
         new_accumulators = copy.deepcopy(self.accumulators)
         for i in range(self.num_components):
             new_accumulators[i].combine(component_stats[i])
@@ -929,8 +873,8 @@ class DirichletProcessMixtureAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x: tuple) -> "DirichletProcessMixtureAccumulator":
         """Set the sufficient statistics from a value() tuple."""
-        comp_counts, beta_counts, concentration, prev_nw, component_stats = (
-            _validated_dpm_statistics(x, self.num_components)
+        comp_counts, beta_counts, concentration, prev_nw, component_stats = _validated_dpm_statistics(
+            x, self.num_components
         )
         new_accumulators = copy.deepcopy(self.accumulators)
         for i in range(self.num_components):
@@ -1002,13 +946,9 @@ class DirichletProcessMixtureAccumulatorFactory(StatisticAccumulatorFactory):
         try:
             checked_dim = operator.index(dim)
         except TypeError as exc:
-            raise TypeError(
-                "Dirichlet-process factory dimension must be a positive integer."
-            ) from exc
+            raise TypeError("Dirichlet-process factory dimension must be a positive integer.") from exc
         if checked_dim <= 0 or checked_dim != len(self.factories):
-            raise ValueError(
-                "Dirichlet-process factory dimension must match its non-empty factory list."
-            )
+            raise ValueError("Dirichlet-process factory dimension must match its non-empty factory list.")
         if (
             not isinstance(keys, tuple)
             or len(keys) != 2
@@ -1098,33 +1038,23 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
         gams = gam[:, 0] + gam[:, 1]
         if self.prior is None:
             if model.prior is not None:
-                raise ValueError(
-                    "A point-estimated concentration model cannot carry a variational hyper-posterior."
-                )
+                raise ValueError("A point-estimated concentration model cannot carry a variational hyper-posterior.")
             expected_alpha = model.a
             expected_log_alpha = float(np.log(model.a))
             concentration_term = 0.0
         else:
             if not isinstance(model.prior, GammaDistribution):
-                raise ValueError(
-                    "Gamma concentration prior requires a Gamma variational hyper-posterior."
-                )
+                raise ValueError("Gamma concentration prior requires a Gamma variational hyper-posterior.")
             expected_alpha = model.prior.k * model.prior.theta
-            expected_log_alpha = float(
-                digamma(model.prior.k) + np.log(model.prior.theta)
-            )
-            concentration_term = float(
-                -model.prior.cross_entropy(self.prior) + model.prior.entropy()
-            )
+            expected_log_alpha = float(digamma(model.prior.k) + np.log(model.prior.theta))
+            concentration_term = float(-model.prior.cross_entropy(self.prior) + model.prior.entropy())
 
         if gam.shape[0] == 0:
             stick_prior_term = 0.0
             stick_entropy = 0.0
         else:
             expected_log_remaining = digamma(gam[:, 1]) - digamma(gams)
-            stick_prior_term = float(
-                np.sum(expected_log_alpha + (expected_alpha - 1.0) * expected_log_remaining)
-            )
+            stick_prior_term = float(np.sum(expected_log_alpha + (expected_alpha - 1.0) * expected_log_remaining))
             stick_entropy = float(
                 np.sum(
                     betaln(gam[:, 0], gam[:, 1])
@@ -1168,9 +1098,7 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
 
         """
         num_components = self.num_components
-        comp_counts, beta_counts, alpha, prev_nw, comp_suff_stats = (
-            _validated_dpm_statistics(suff_stat, num_components)
-        )
+        comp_counts, beta_counts, alpha, prev_nw, comp_suff_stats = _validated_dpm_statistics(suff_stat, num_components)
 
         component_priors = [u.get_prior() for u in self.estimators]
         components = [self.estimators[i].estimate(comp_counts[i], comp_suff_stats[i]) for i in range(num_components)]
@@ -1206,15 +1134,8 @@ class DirichletProcessMixtureEstimator(ParameterEstimator):
 
             gw1 = s1 + num_components - 1.0
             gw2 = s2 - expected_log_remaining
-            if (
-                not np.isfinite(gw1)
-                or not np.isfinite(gw2)
-                or gw1 <= 0.0
-                or gw2 <= 0.0
-            ):
-                raise ValueError(
-                    "Dirichlet-process concentration update produced invalid Gamma parameters."
-                )
+            if not np.isfinite(gw1) or not np.isfinite(gw2) or gw1 <= 0.0 or gw2 <= 0.0:
+                raise ValueError("Dirichlet-process concentration update produced invalid Gamma parameters.")
             new_alpha = gw1 / gw2
             _validated_concentration(new_alpha)
 

@@ -104,8 +104,7 @@ class AgentTraces:
         if not candidates:
             return None
         signatures = {
-            json.dumps({"plan": trace.plan, "reply": trace.reply}, sort_keys=True, default=repr)
-            for trace in candidates
+            json.dumps({"plan": trace.plan, "reply": trace.reply}, sort_keys=True, default=repr) for trace in candidates
         }
         if len(signatures) != 1:
             ids = [trace.trace_id for trace in candidates]
@@ -273,13 +272,9 @@ def parse_conversation(
         plan: list[dict] = []
         reply = ""
         j = i + 1
-        while j < len(messages) and (
-            not isinstance(messages[j], dict) or messages[j].get("role") != "user"
-        ):
+        while j < len(messages) and (not isinstance(messages[j], dict) or messages[j].get("role") != "user"):
             if isinstance(messages[j], dict) and messages[j].get("role") == "assistant":
-                plan.extend(
-                    _tool_uses(messages[j], source=source, message_index=j, rejections=rejections)
-                )
+                plan.extend(_tool_uses(messages[j], source=source, message_index=j, rejections=rejections))
                 text = _text_of(messages[j], source=source, message_index=j, rejections=rejections)
                 if text:
                     reply = text

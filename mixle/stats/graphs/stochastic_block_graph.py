@@ -515,9 +515,7 @@ def _validate_sbm_statistics(
         raise ValueError("SBM total_nodes and num_graphs must be finite and non-negative.")
     if not np.isclose(float(np.sum(counts)), total_nodes, rtol=1.0e-12, atol=1.0e-12):
         raise ValueError("SBM block_counts must sum to total_nodes.")
-    if not directed and (
-        not np.array_equal(successes, successes.T) or not np.array_equal(totals, totals.T)
-    ):
+    if not directed and (not np.array_equal(successes, successes.T) or not np.array_equal(totals, totals.T)):
         raise ValueError("undirected SBM edge statistics must be symmetric.")
     return StochasticBlockGraphStatistics(
         1,

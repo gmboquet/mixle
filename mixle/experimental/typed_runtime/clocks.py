@@ -60,9 +60,7 @@ class UpdateCadence:
             raise ValueError("an update cadence requires at least one trigger.")
         for name in ("every_steps", "every_tokens", "max_staleness_steps"):
             value = getattr(self, name)
-            if value is not None and (
-                isinstance(value, bool) or not isinstance(value, Integral) or value <= 0
-            ):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, Integral) or value <= 0):
                 raise ValueError(f"{name} must be a positive integer when supplied.")
         if self.every_observations is not None and (
             isinstance(self.every_observations, bool)

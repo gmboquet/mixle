@@ -96,9 +96,7 @@ class EncodedData:
 
         measured_nbytes = encoded_nbytes(self.payload)
         if declared_nbytes != measured_nbytes:
-            raise ValueError(
-                f"nbytes={declared_nbytes} does not match final encoded payload size {measured_nbytes}"
-            )
+            raise ValueError(f"nbytes={declared_nbytes} does not match final encoded payload size {measured_nbytes}")
         if self.encoder is None:
             from mixle.stats.compute.pdist import _infer_encoded_row_count
 

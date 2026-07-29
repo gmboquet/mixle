@@ -82,8 +82,7 @@ def _concentrations(alpha: Any) -> list[Any]:
     else:
         raise TypeError("Dirichlet alpha must be a non-empty one-dimensional sequence or mapping.")
     if not values or any(
-        isinstance(value, Mapping)
-        or (isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)))
+        isinstance(value, Mapping) or (isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)))
         for value in values
     ):
         raise ValueError("Dirichlet alpha must be a non-empty one-dimensional concentration vector.")
@@ -513,9 +512,7 @@ def gamma(
     )
 
 
-def composite(
-    children: Sequence[Any], alignment_receipt: PriorAlignmentReceipt | None = None
-) -> CompositePrior:
+def composite(children: Sequence[Any], alignment_receipt: PriorAlignmentReceipt | None = None) -> CompositePrior:
     """Create a Composite prior from child prior specifications."""
     return CompositePrior(children=children, alignment_receipt=alignment_receipt)
 
@@ -564,9 +561,7 @@ def optional(observed: Any | None = None, missing: Any | None = None) -> Optiona
     return OptionalPrior(observed=observed, missing=missing)
 
 
-def record(
-    fields: Mapping[Any, Any], alignment_receipt: PriorAlignmentReceipt | None = None
-) -> RecordPrior:
+def record(fields: Mapping[Any, Any], alignment_receipt: PriorAlignmentReceipt | None = None) -> RecordPrior:
     """Create a Record prior from field-name prior specifications."""
     return RecordPrior(fields=fields, alignment_receipt=alignment_receipt)
 

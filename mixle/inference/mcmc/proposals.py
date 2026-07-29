@@ -239,9 +239,7 @@ class AdaptiveCovarianceProposal(Proposal):
 class IndependentProposal(Proposal):
     """Independence proposal with the density required for its Hastings correction."""
 
-    def __init__(
-        self, sampler: Callable[[np.random.RandomState], Any], log_density: Callable[[Any], float]
-    ) -> None:
+    def __init__(self, sampler: Callable[[np.random.RandomState], Any], log_density: Callable[[Any], float]) -> None:
         if not callable(sampler):
             raise TypeError("sampler must be callable.")
         if not callable(log_density):

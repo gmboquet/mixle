@@ -339,9 +339,7 @@ def fit_objective(
     best objective value seen, not necessarily the last attempted optimizer
     step.
     """
-    max_its, lr, tol, print_iter = _validate_objective_controls(
-        max_its, lr, tol, print_iter, maximize, restore_best
-    )
+    max_its, lr, tol, print_iter = _validate_objective_controls(max_its, lr, tol, print_iter, maximize, restore_best)
     torch, engine = _torch_for_gradient_fit(engine, precision=precision)
     if hasattr(enc, "payload"):
         enc = enc.payload
@@ -462,9 +460,7 @@ def optimize_torch_objective(
     supervised neural-network losses.  When ``restore_best`` is true, supplied
     tensors are copied back to their best seen values before returning.
     """
-    max_its, lr, tol, print_iter = _validate_objective_controls(
-        max_its, lr, tol, print_iter, maximize, restore_best
-    )
+    max_its, lr, tol, print_iter = _validate_objective_controls(max_its, lr, tol, print_iter, maximize, restore_best)
     torch, _ = _torch_for_gradient_fit(engine, precision=precision)
     params = [p for p in parameters if getattr(p, "requires_grad", False)]
     if not params:
@@ -525,9 +521,7 @@ def fit_parameter_objective(
     constrained engine tensors.  When ``restore_best`` is true, returned
     detached values are the best seen named parameters.
     """
-    max_its, lr, tol, print_iter = _validate_objective_controls(
-        max_its, lr, tol, print_iter, maximize, restore_best
-    )
+    max_its, lr, tol, print_iter = _validate_objective_controls(max_its, lr, tol, print_iter, maximize, restore_best)
     if isinstance(parameters, ObjectiveParameterSet):
         param_set = parameters
         torch = param_set.torch

@@ -262,9 +262,7 @@ class ParameterLayout:
             seen_axes.add(axis)
             canonical_placements.append((axis, value))
         object.__setattr__(self, "placements", tuple(canonical_placements))
-        if self.shared_group is not None and (
-            not isinstance(self.shared_group, str) or not self.shared_group.strip()
-        ):
+        if self.shared_group is not None and (not isinstance(self.shared_group, str) or not self.shared_group.strip()):
             raise ValueError("shared_group must be a non-empty string or None.")
         if not isinstance(self.optimizer_state, StateLayout):
             raise TypeError("optimizer_state must be a StateLayout.")

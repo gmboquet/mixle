@@ -462,9 +462,7 @@ def design_diagnostics(design, model, *, ref=None) -> dict:
     """
     design_array = np.asarray(design, dtype=np.float64)
     if design_array.ndim != 2 or design_array.shape[0] == 0 or design_array.shape[1] == 0:
-        raise ValueError(
-            f"design must be a non-empty two-dimensional (n, d) array; got shape {design_array.shape}."
-        )
+        raise ValueError(f"design must be a non-empty two-dimensional (n, d) array; got shape {design_array.shape}.")
     if not np.all(np.isfinite(design_array)):
         raise ValueError("design must contain only finite values.")
     f = np.asarray(model(design_array), dtype=np.float64)

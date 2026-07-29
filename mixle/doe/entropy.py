@@ -221,8 +221,7 @@ def propose_mes(
     cand = latin_hypercube(b, n_candidates, rng)
     if cand.shape != (n_candidates, b.shape[0]) or not np.all(np.isfinite(cand)):
         raise ValueError(
-            f"latin_hypercube must return a finite ({n_candidates}, {b.shape[0]}) candidate matrix; "
-            f"got {cand.shape}."
+            f"latin_hypercube must return a finite ({n_candidates}, {b.shape[0]}) candidate matrix; got {cand.shape}."
         )
     mean_raw, cov_raw = gp.predict(xs, ys, cand, return_cov=True)
     mean = np.asarray(mean_raw, dtype=np.float64)
@@ -236,9 +235,7 @@ def propose_mes(
         raise ValueError("MES posterior mean must be finite.")
     cov = np.asarray(cov_raw, dtype=np.float64)
     if cov.shape != (n_candidates, n_candidates):
-        raise ValueError(
-            f"MES posterior covariance must have shape ({n_candidates}, {n_candidates}), got {cov.shape}."
-        )
+        raise ValueError(f"MES posterior covariance must have shape ({n_candidates}, {n_candidates}), got {cov.shape}.")
     _safe_cholesky(cov)
     variance = np.diag(cov)
     if np.any(variance < 0.0):

@@ -217,17 +217,20 @@ class SpanningTreeTestCase(unittest.TestCase):
             accumulator.value(),
         )
         self.assertGreater(fitted.weights[0, 2], 0.0)
-        self.assertEqual(set(fitted.fit_metadata), {
-            "converged",
-            "solver",
-            "iterations",
-            "max_steps",
-            "residual",
-            "tolerance",
-            "regularized",
-            "candidate_edges",
-            "repairs",
-        })
+        self.assertEqual(
+            set(fitted.fit_metadata),
+            {
+                "converged",
+                "solver",
+                "iterations",
+                "max_steps",
+                "residual",
+                "tolerance",
+                "regularized",
+                "candidate_edges",
+                "repairs",
+            },
+        )
         self.assertTrue(np.isfinite(fitted.fit_metadata["residual"]))
 
     def test_estimator_rejects_bad_controls_no_data_and_infeasible_stats(self):

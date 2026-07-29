@@ -141,9 +141,7 @@ def marginal_coverage(sampler, x_test, y_test, *, n_draws: int = 200):
         y_batch = np.repeat(np.atleast_2d(np.asarray(y_test[i], dtype=float)), n_draws, axis=0)
         draws = np.asarray(sampler.sample_given_batch(y_batch), dtype=float)
         if draws.shape != (n_draws, d) or not np.isfinite(draws).all():
-            raise ValueError(
-                f"edge sampler must return finite draws with shape {(n_draws, d)}, got {draws.shape}"
-            )
+            raise ValueError(f"edge sampler must return finite draws with shape {(n_draws, d)}, got {draws.shape}")
         lo = np.quantile(draws, ALPHA / 2, axis=0)
         hi = np.quantile(draws, 1 - ALPHA / 2, axis=0)
         for dim in range(d):
@@ -304,10 +302,7 @@ def _binomial_lower_bound(hits: int, total: int, *, error_rate: float = 0.05) ->
 def _conditional_subgroup_coverage(covered: list[list[bool]], y_test: np.ndarray) -> list[list[float]]:
     order = np.argsort(y_test[:, 0], kind="stable")
     groups = np.array_split(order, 2)
-    return [
-        [float(np.mean(np.asarray(dim_covered, dtype=bool)[group])) for dim_covered in covered]
-        for group in groups
-    ]
+    return [[float(np.mean(np.asarray(dim_covered, dtype=bool)[group])) for dim_covered in covered] for group in groups]
 
 
 def _verdict(

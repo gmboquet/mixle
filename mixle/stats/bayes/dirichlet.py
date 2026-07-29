@@ -180,8 +180,10 @@ def _validated_dirichlet_statistics(
     if np.any(sum_v < -tolerance) or np.any(sum_v2 < -tolerance):
         raise ValueError("Dirichlet moment statistics cannot be negative.")
     if count == 0.0:
-        if np.any(np.abs(sum_of_logs) > tolerance) or np.any(np.abs(sum_v) > tolerance) or np.any(
-            np.abs(sum_v2) > tolerance
+        if (
+            np.any(np.abs(sum_of_logs) > tolerance)
+            or np.any(np.abs(sum_v) > tolerance)
+            or np.any(np.abs(sum_v2) > tolerance)
         ):
             raise ValueError("Zero-count Dirichlet sufficient statistics must contain zero vectors.")
     else:
@@ -291,11 +293,7 @@ def dirichlet_param_solve(
     alpha = np.clip(alpha.copy(), _MIN_DIRICHLET_ALPHA, _MAX_DIRICHLET_ALPHA)
 
     def objective(candidate: np.ndarray) -> float:
-        return float(
-            gammaln(candidate.sum())
-            - gammaln(candidate).sum()
-            + np.dot(candidate - 1.0, mlp)
-        )
+        return float(gammaln(candidate.sum()) - gammaln(candidate).sum() + np.dot(candidate - 1.0, mlp))
 
     for count in range(1, max_iterations + 1):
         old_alpha = alpha.copy()
@@ -310,9 +308,7 @@ def dirichlet_param_solve(
             or not np.isfinite(denominator)
             or denominator == 0.0
         ):
-            raise DirichletConvergenceError(
-                "Dirichlet Newton solver produced invalid derivatives."
-            )
+            raise DirichletConvergenceError("Dirichlet Newton solver produced invalid derivatives.")
         adjustment = np.sum(gradient / diagonal) / denominator
         step = (gradient - adjustment) / diagonal
         old_objective = objective(old_alpha)
@@ -334,18 +330,13 @@ def dirichlet_param_solve(
         if not accepted:
             if float(np.max(np.abs(gradient))) <= tolerance:
                 return old_alpha, count
-            raise DirichletConvergenceError(
-                "Dirichlet Newton solver could not find a finite improving step."
-            )
+            raise DirichletConvergenceError("Dirichlet Newton solver could not find a finite improving step.")
         denom = max(_MIN_DIRICHLET_ALPHA, float(alpha.sum()))
         d_alpha = float(np.abs(alpha - old_alpha).sum() / denom)
         if d_alpha <= tolerance:
             return alpha, count
 
-    raise DirichletConvergenceError(
-        "Dirichlet Newton solver did not converge within %d iterations."
-        % max_iterations
-    )
+    raise DirichletConvergenceError("Dirichlet Newton solver did not converge within %d iterations." % max_iterations)
 
 
 def mpe(
@@ -404,10 +395,7 @@ def mpe(
         its_cnt += 1
 
     if res > tolerance:
-        raise DirichletConvergenceError(
-            "Dirichlet MPE solver did not converge within %d iterations."
-            % max_iterations
-        )
+        raise DirichletConvergenceError("Dirichlet MPE solver did not converge within %d iterations." % max_iterations)
     return s, its_cnt
 
 
@@ -719,10 +707,7 @@ class DirichletDistribution(SequenceEncodableProbabilityDistribution):
         valid = (
             (engine.sum(~finite, axis=-1) == 0)
             & (engine.sum(raw < zero_value, axis=-1) == 0)
-            & (
-                engine.abs(engine.sum(raw, axis=-1) - one)
-                <= engine.asarray(_SIMPLEX_SUM_ATOL + _SIMPLEX_SUM_RTOL)
-            )
+            & (engine.abs(engine.sum(raw, axis=-1) - one) <= engine.asarray(_SIMPLEX_SUM_ATOL + _SIMPLEX_SUM_RTOL))
         )
         return engine.where(valid, result, engine.asarray(-np.inf))
 
@@ -771,8 +756,7 @@ class DirichletDistribution(SequenceEncodableProbabilityDistribution):
         component_count = int(np.asarray(engine.to_numpy(params["alpha"])).shape[0])
         if weights_np.shape != (raw.shape[0], component_count):
             raise ValueError(
-                "Stacked Dirichlet weights must have exact shape (%d, %d)."
-                % (raw.shape[0], component_count)
+                "Stacked Dirichlet weights must have exact shape (%d, %d)." % (raw.shape[0], component_count)
             )
         if np.any(~np.isfinite(weights_np)) or np.any(weights_np < 0.0):
             raise ValueError("Stacked Dirichlet weights must be finite and non-negative.")
@@ -908,10 +892,7 @@ class DirichletAccumulator(SequenceEncodableStatisticAccumulator):
             self.sum = np.zeros(self.dim)
             self.sum2 = np.zeros(self.dim)
         elif self.dim != dimension:
-            raise ValueError(
-                "Dirichlet accumulator dimension changed from %d to %d."
-                % (self.dim, dimension)
-            )
+            raise ValueError("Dirichlet accumulator dimension changed from %d to %d." % (self.dim, dimension))
 
     def update(self, x: np.ndarray | list[float], weight: float, estimate: Optional["DirichletDistribution"]) -> None:
         """Update sufficient statistics with a single weighted observation.
@@ -1173,9 +1154,7 @@ class DirichletEstimator(ParameterEstimator):
                 or np.any(~np.isfinite(checked_suff_stat))
                 or np.any(checked_suff_stat > 0.0)
             ):
-                raise ValueError(
-                    "DirichletEstimator suff_stat must be a non-empty finite non-positive vector."
-                )
+                raise ValueError("DirichletEstimator suff_stat must be a non-empty finite non-positive vector.")
             if configured_dim is None:
                 configured_dim = len(checked_suff_stat)
             elif checked_suff_stat.shape != (configured_dim,):
@@ -1226,9 +1205,7 @@ class DirichletEstimator(ParameterEstimator):
         )
         if statistic_dim is None:
             if self.dim is None:
-                raise ValueError(
-                    "DirichletEstimator cannot infer a dimension from an unsized empty accumulator."
-                )
+                raise ValueError("DirichletEstimator cannot infer a dimension from an unsized empty accumulator.")
             dim = self.dim
             sum_of_logs = np.zeros(dim, dtype=np.float64)
             sum_v = np.zeros(dim, dtype=np.float64)
@@ -1291,11 +1268,7 @@ class DirichletEstimator(ParameterEstimator):
 
             mean_log_p = sum_of_logs / nobs
 
-        if (
-            mean_log_p.shape != (dim,)
-            or np.any(~np.isfinite(mean_log_p))
-            or np.any(mean_log_p > 0.0)
-        ):
+        if mean_log_p.shape != (dim,) or np.any(~np.isfinite(mean_log_p)) or np.any(mean_log_p > 0.0):
             raise ValueError("DirichletEstimator produced invalid mean-log sufficient statistics.")
 
         if nobs <= 1.0 and self.pseudo_count is None:
@@ -1339,10 +1312,7 @@ class DirichletDataEncoder(DataSequenceEncoder):
 
     def __eq__(self, other: object) -> bool:
         """Return true when ``other`` is a Dirichlet data encoder."""
-        return (
-            isinstance(other, DirichletDataEncoder)
-            and self.dimension == other.dimension
-        )
+        return isinstance(other, DirichletDataEncoder) and self.dimension == other.dimension
 
     def seq_encode(self, x: Sequence[Sequence[float]]):
         """Encode a sequence of iid probability-vector observations for vectorized 'seq_' calls.
@@ -1365,10 +1335,7 @@ class DirichletDataEncoder(DataSequenceEncoder):
         if rv.shape[1] == 0:
             raise ValueError("DirichletDataEncoder observations cannot have zero dimension.")
         if self.dimension is not None and rv.shape[1] != self.dimension:
-            raise ValueError(
-                "DirichletDataEncoder observations must have %d columns."
-                % self.dimension
-            )
+            raise ValueError("DirichletDataEncoder observations must have %d columns." % self.dimension)
         with np.errstate(divide="ignore", invalid="ignore"):
             log_rv = np.log(rv)
         return log_rv, rv, rv * rv

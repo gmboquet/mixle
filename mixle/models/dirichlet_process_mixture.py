@@ -394,9 +394,7 @@ def _truncated_dpm_elbo(
     gam = _as_gamma(gamma, len(components))
     expected_log_weights = expected_log_stick_weights(gam)
     entropy = -float(np.sum(np.where(r > 0.0, r * np.log(np.clip(r, _EPS, 1.0)), 0.0)))
-    expected_complete_log_likelihood = float(
-        np.sum(r * (log_scores + expected_log_weights[None, :]))
-    )
+    expected_complete_log_likelihood = float(np.sum(r * (log_scores + expected_log_weights[None, :])))
     stick_kl = sum(_beta_kl(gam[index, 0], gam[index, 1], 1.0, alpha) for index in range(len(gam) - 1))
     elbo = expected_complete_log_likelihood + entropy - stick_kl
     if not np.isfinite(elbo):

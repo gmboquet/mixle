@@ -95,12 +95,16 @@ class StateSpaceTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             AR1().fit([np.nan, np.nan], missing="marginalize")
 
-        result = AR1().fit(
-            [np.nan, 0.0, 0.2, np.nan, -0.1],
-            missing="marginalize",
-            max_its=2,
-            delta=0.0,
-        ).result
+        result = (
+            AR1()
+            .fit(
+                [np.nan, 0.0, 0.2, np.nan, -0.1],
+                missing="marginalize",
+                max_its=2,
+                delta=0.0,
+            )
+            .result
+        )
         self.assertEqual(result.smoothed.shape, (5,))
         self.assertTrue(np.all(np.isfinite(result.smoothed)))
 

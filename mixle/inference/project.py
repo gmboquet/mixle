@@ -71,7 +71,10 @@ def _validated_gaussian_components(
     if covs.shape != (w.size, mus.shape[1], mus.shape[1]):
         raise ValueError("Gaussian component covariances must have shape (k, d, d)")
     checked_covariances = np.stack(
-        [_spd_matrix(covariance, mus.shape[1], f"component covariance {index}") for index, covariance in enumerate(covs)]
+        [
+            _spd_matrix(covariance, mus.shape[1], f"component covariance {index}")
+            for index, covariance in enumerate(covs)
+        ]
     )
     return w / total, mus, checked_covariances, univariate
 

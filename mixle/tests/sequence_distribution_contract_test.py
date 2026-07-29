@@ -88,10 +88,13 @@ def test_length_support_is_proved_at_construction() -> None:
         (PoissonDistribution(1.0), PoissonDistribution(4.0)),
         (0.25, 0.75),
     )
-    assert SequenceDistribution(
-        BernoulliDistribution(0.5),
-        mixture_length,
-    ).density_semantics() is DensitySemantics.EXACT
+    assert (
+        SequenceDistribution(
+            BernoulliDistribution(0.5),
+            mixture_length,
+        ).density_semantics()
+        is DensitySemantics.EXACT
+    )
 
 
 def test_sampler_rejects_invalid_lengths_and_sample_sizes_before_allocation() -> None:

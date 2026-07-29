@@ -217,10 +217,7 @@ class DepthCutAcceptanceTest(unittest.TestCase):
         self.assertEqual(final_receipt.artifact_digest, constrained.artifact_digest)
         self.assertEqual(len(constrained.artifact_digest), 64)
         self.assertTrue(
-            all(
-                receipt.artifact_digest == constrained.artifact_digest
-                for receipt in constrained.receipt_map.values()
-            )
+            all(receipt.artifact_digest == constrained.artifact_digest for receipt in constrained.receipt_map.values())
         )
 
         metrics = constrained.metrics
@@ -363,11 +360,14 @@ class WidthMergeAndStructureProjectSmokeTest(unittest.TestCase):
         self.assertEqual(receipt.divergence_basis, "singular_support")
         self.assertTrue(np.isfinite(receipt.regularized_kl_divergence))
         self.assertGreater(receipt.regularized_kl_divergence, 0.0)
-        self.assertEqual(set(receipt.sensitivity), {
-            "isotropic_noise_x0.5",
-            "isotropic_noise_x1",
-            "isotropic_noise_x2",
-        })
+        self.assertEqual(
+            set(receipt.sensitivity),
+            {
+                "isotropic_noise_x0.5",
+                "isotropic_noise_x1",
+                "isotropic_noise_x2",
+            },
+        )
         self.assertTrue(receipt.assumptions)
 
     def test_width_merge_identity_width_has_zero_receipt(self):

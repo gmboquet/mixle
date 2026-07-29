@@ -78,9 +78,7 @@ def spark_em_step(sc: Any, estimator: Any, model: Any, data: Any, n_shards: int 
     rdd = sc.parallelize(shards, len(shards))
     count, value = rdd.map(estep).treeReduce(combine, depth=depth)
     if count != len(replayable):
-        raise RuntimeError(
-            f"Spark reduction processed {count} observations, expected exactly {len(replayable)}"
-        )
+        raise RuntimeError(f"Spark reduction processed {count} observations, expected exactly {len(replayable)}")
     return estimator.estimate(float(count), value)
 
 

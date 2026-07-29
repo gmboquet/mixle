@@ -67,21 +67,16 @@ class MultivariateNormalGammaDistribution(SequenceEncodableProbabilityDistributi
     @staticmethod
     def _validated_parameters(value: Any) -> ParamType:
         if not isinstance(value, (tuple, list)) or len(value) != 4:
-            raise ValueError(
-                "MultivariateNormalGammaDistribution parameters must be a four-item tuple of vectors."
-            )
+            raise ValueError("MultivariateNormalGammaDistribution parameters must be a four-item tuple of vectors.")
         converted: list[np.ndarray] = []
         for name, raw in zip(("mu", "lam", "a", "b"), value):
             try:
                 vector = np.asarray(raw, dtype=np.float64)
             except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "MultivariateNormalGammaDistribution %s must be a numeric vector." % name
-                ) from exc
+                raise ValueError("MultivariateNormalGammaDistribution %s must be a numeric vector." % name) from exc
             if vector.ndim != 1 or vector.size == 0:
                 raise ValueError(
-                    "MultivariateNormalGammaDistribution %s must be a non-empty one-dimensional vector."
-                    % name
+                    "MultivariateNormalGammaDistribution %s must be a non-empty one-dimensional vector." % name
                 )
             converted.append(vector.copy())
         expected = converted[0].shape
@@ -92,25 +87,19 @@ class MultivariateNormalGammaDistribution(SequenceEncodableProbabilityDistributi
             raise ValueError("MultivariateNormalGammaDistribution requires finite means.")
         for name, vector in (("lam", lam), ("a", a), ("b", b)):
             if np.any(~np.isfinite(vector)) or np.any(vector <= 0.0):
-                raise ValueError(
-                    "MultivariateNormalGammaDistribution requires finite positive %s values." % name
-                )
+                raise ValueError("MultivariateNormalGammaDistribution requires finite positive %s values." % name)
         return mu, lam, a, b
 
     @staticmethod
     def _validated_observation(value: Any, dimension: int) -> DatumType:
         if not isinstance(value, (tuple, list, np.ndarray)) or len(value) != 2:
-            raise ValueError(
-                "MultivariateNormalGammaDistribution observations must be (mu, tau) vector pairs."
-            )
+            raise ValueError("MultivariateNormalGammaDistribution observations must be (mu, tau) vector pairs.")
         converted: list[np.ndarray] = []
         for name, raw in zip(("mu", "tau"), value):
             try:
                 vector = np.asarray(raw, dtype=np.float64)
             except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "MultivariateNormalGammaDistribution observation %s must be numeric." % name
-                ) from exc
+                raise ValueError("MultivariateNormalGammaDistribution observation %s must be numeric." % name) from exc
             if vector.shape != (dimension,) or np.any(~np.isfinite(vector)):
                 raise ValueError(
                     "MultivariateNormalGammaDistribution observation %s must be a finite vector "
@@ -118,9 +107,7 @@ class MultivariateNormalGammaDistribution(SequenceEncodableProbabilityDistributi
                 )
             converted.append(vector)
         if np.any(converted[1] <= 0.0):
-            raise ValueError(
-                "MultivariateNormalGammaDistribution observation precisions tau must be positive."
-            )
+            raise ValueError("MultivariateNormalGammaDistribution observation precisions tau must be positive.")
         return converted[0], converted[1]
 
     def _validated_state(self) -> ParamType:
@@ -162,9 +149,7 @@ class MultivariateNormalGammaDistribution(SequenceEncodableProbabilityDistributi
             m, l, a, b = self._validated_state()
             mm, ll, aa, bb = dist._validated_state()
             if m.shape != mm.shape:
-                raise ValueError(
-                    "MultivariateNormalGammaDistribution cross-entropy requires equal dimensions."
-                )
+                raise ValueError("MultivariateNormalGammaDistribution cross-entropy requires equal dimensions.")
 
             c1 = np.log(bb) * aa + 0.5 * np.log(ll) - gammaln(aa) - 0.5 * np.log(2 * np.pi)
             c2 = (aa - 0.5) * (digamma(a) - np.log(b)) - bb * (a / b)
@@ -269,10 +254,7 @@ class MultivariateNormalGammaDataEncoder(DataSequenceEncoder):
         return "MultivariateNormalGammaDataEncoder"
 
     def __eq__(self, other: object) -> bool:
-        return (
-            isinstance(other, MultivariateNormalGammaDataEncoder)
-            and self.dimension == other.dimension
-        )
+        return isinstance(other, MultivariateNormalGammaDataEncoder) and self.dimension == other.dimension
 
     def seq_encode(self, x: Any) -> Any:
         """Encode multivariate Normal-Gamma observations as a list payload."""
@@ -280,21 +262,12 @@ class MultivariateNormalGammaDataEncoder(DataSequenceEncoder):
         dimension = self.dimension
         if dimension is None:
             if not values:
-                raise ValueError(
-                    "MultivariateNormalGammaDataEncoder needs a dimension to encode an empty batch."
-                )
+                raise ValueError("MultivariateNormalGammaDataEncoder needs a dimension to encode an empty batch.")
             first = values[0]
             if not isinstance(first, (tuple, list, np.ndarray)) or len(first) != 2:
-                raise ValueError(
-                    "MultivariateNormalGammaDataEncoder observations must be (mu, tau) pairs."
-                )
+                raise ValueError("MultivariateNormalGammaDataEncoder observations must be (mu, tau) pairs.")
             try:
                 dimension = len(first[0])
             except TypeError as exc:
-                raise ValueError(
-                    "MultivariateNormalGammaDataEncoder observation means must be vectors."
-                ) from exc
-        return [
-            MultivariateNormalGammaDistribution._validated_observation(value, dimension)
-            for value in values
-        ]
+                raise ValueError("MultivariateNormalGammaDataEncoder observation means must be vectors.") from exc
+        return [MultivariateNormalGammaDistribution._validated_observation(value, dimension) for value in values]

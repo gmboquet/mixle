@@ -30,8 +30,8 @@ def test_external_example_dependencies_are_declared_and_hosted() -> None:
         assert package in examples
     workflow = (ROOT / ".github" / "workflows" / "extras-matrix.yml").read_text(encoding="utf-8")
     assert "          - examples\n" in workflow
-    profiles = json.loads(
-        (ROOT / "release-checklists" / "0.8.0-extra-profiles.json").read_text(encoding="utf-8")
-    )["profiles"]
+    profiles = json.loads((ROOT / "release-checklists" / "0.8.0-extra-profiles.json").read_text(encoding="utf-8"))[
+        "profiles"
+    ]
     assert set(profiles) >= {"all", "examples", "gmpy2", "kernels"}
     assert len(profiles) == len(set(profiles)) == 24

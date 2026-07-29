@@ -168,9 +168,7 @@ def _validate_markov_prior(
     row_priors = tuple(prior[2])
     if not isinstance(init_prior, DirichletDistribution):
         raise TypeError("Markov initial prior must be a DirichletDistribution.")
-    if len(row_priors) != len(states) or any(
-        not isinstance(row, DirichletDistribution) for row in row_priors
-    ):
+    if len(row_priors) != len(states) or any(not isinstance(row, DirichletDistribution) for row in row_priors):
         raise ValueError("Markov prior must contain one Dirichlet transition prior per state.")
     for label, distribution in (
         ("initial", init_prior),
@@ -388,14 +386,10 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
         except (TypeError, ValueError, OverflowError) as exc:
             raise TypeError("default_value must be zero for a closed finite-state Markov chain.") from exc
         if not math.isfinite(checked_default) or checked_default != 0.0:
-            raise ValueError(
-                "default_value must be 0; unknown labels require an explicit state and probability row."
-            )
+            raise ValueError("default_value must be 0; unknown labels require an explicit state and probability row.")
 
         states = _canonical_states(
-            set(raw_initial)
-            .union(raw_transitions)
-            .union(value for row in raw_transitions.values() for value in row),
+            set(raw_initial).union(raw_transitions).union(value for row in raw_transitions.values() for value in row),
             label="Markov state space",
         )
         if not states:
@@ -413,9 +407,7 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
             transitions[state] = {next_state: row.get(next_state, 0.0) for next_state in states}
 
         self.init_prob_map = MappingProxyType(initial)
-        self.transition_map = MappingProxyType(
-            {state: MappingProxyType(row) for state, row in transitions.items()}
-        )
+        self.transition_map = MappingProxyType({state: MappingProxyType(row) for state, row in transitions.items()})
         self.len_dist = len_dist if len_dist is not None else NullDistribution()
         if not supports(self.len_dist, Neutral):
             from mixle.stats.combinator.sequence import _validate_length_distribution
@@ -424,7 +416,10 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
 
         self.all_vals = frozenset(states)
         self.loginit_prob_map = MappingProxyType(
-            {state: -np.inf if probability == 0.0 else float(np.log(probability)) for state, probability in initial.items()}
+            {
+                state: -np.inf if probability == 0.0 else float(np.log(probability))
+                for state, probability in initial.items()
+            }
         )
         self.log_transition_map = MappingProxyType(
             {
@@ -1383,9 +1378,7 @@ class MarkovChainSampler(DistributionSampler):
             self.trans_prob[k] = (loc_keys, loc_probs)
 
         self.len_sampler = (
-            None
-            if supports(dist.len_dist, Neutral)
-            else dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
+            None if supports(dist.len_dist, Neutral) else dist.len_dist.sampler(seed=self.rng.randint(0, maxrandint))
         )
 
         # --- batched-sampling tables (built lazily) ---
@@ -1970,9 +1963,7 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
         """Return initial-state, transition, and length sufficient statistics."""
         states = self._states()
         if not states:
-            raise ValueError(
-                "Markov statistics have no declared or observed states; configure estimator levels."
-            )
+            raise ValueError("Markov statistics have no declared or observed states; configure estimator levels.")
         return MarkovChainStatistics(
             1,
             states,
@@ -2156,9 +2147,7 @@ class MarkovChainEstimator(ParameterEstimator):
         """
         self.name = name
         self.pseudo_count = (
-            None
-            if pseudo_count is None
-            else _finite_nonnegative(pseudo_count, label="Markov pseudo_count")
+            None if pseudo_count is None else _finite_nonnegative(pseudo_count, label="Markov pseudo_count")
         )
         self.levels = None if levels is None else _canonical_states(levels, label="Markov estimator levels")
         if self.levels == ():
@@ -2341,10 +2330,7 @@ class MarkovChainEstimator(ParameterEstimator):
         initial_total = float(np.sum(init_counts))
         if initial_total <= 0.0:
             raise ValueError("Markov MLE requires positive initial-state evidence or a declared prior.")
-        init_prob_map = {
-            state: float(init_counts[index] / initial_total)
-            for index, state in enumerate(checked.states)
-        }
+        init_prob_map = {state: float(init_counts[index] / initial_total) for index, state in enumerate(checked.states)}
 
         trans_map = {}
         for index, state in enumerate(checked.states):
@@ -2352,12 +2338,10 @@ class MarkovChainEstimator(ParameterEstimator):
             total = float(np.sum(row))
             if total <= 0.0:
                 raise ValueError(
-                    "Markov MLE row %r requires transition evidence, pseudo-count smoothing, or a prior."
-                    % (state,)
+                    "Markov MLE row %r requires transition evidence, pseudo-count smoothing, or a prior." % (state,)
                 )
             trans_map[state] = {
-                next_state: float(row[next_index] / total)
-                for next_index, next_state in enumerate(checked.states)
+                next_state: float(row[next_index] / total) for next_index, next_state in enumerate(checked.states)
             }
 
         len_dist = self.len_estimator.estimate(checked.length_nobs, checked.length)
@@ -2398,15 +2382,13 @@ class MarkovChainEstimator(ParameterEstimator):
         per_state = pseudo_count / len(checked.states)
         init_counts = np.asarray(checked.initial_counts, dtype=float) + per_state
         init_prob_map = {
-            state: float(init_counts[index] / np.sum(init_counts))
-            for index, state in enumerate(checked.states)
+            state: float(init_counts[index] / np.sum(init_counts)) for index, state in enumerate(checked.states)
         }
         trans_map = {}
         for index, state in enumerate(checked.states):
             row = np.asarray(checked.transition_counts[index], dtype=float) + per_state
             trans_map[state] = {
-                next_state: float(row[next_index] / np.sum(row))
-                for next_index, next_state in enumerate(checked.states)
+                next_state: float(row[next_index] / np.sum(row)) for next_index, next_state in enumerate(checked.states)
             }
         len_dist = self.len_estimator.estimate(checked.length_nobs, checked.length)
         return MarkovChainDistribution(init_prob_map, trans_map, len_dist=len_dist, name=self.name)
@@ -2532,10 +2514,7 @@ class MarkovChainDataEncoder(DataSequenceEncoder):
             # dtype=object for heterogeneous state types: a bare asarray COERCES [1, "1"] into two
             # equal strings, silently merging states the dict walk (and every downstream key_map
             # lookup) keeps distinct -- a pre-existing hazard of the original encoder, fixed here.
-            safe_scalar_type = (
-                len(state_types) == 1
-                and issubclass(next(iter(state_types)), _SAFE_STATE_TYPES)
-            )
+            safe_scalar_type = len(state_types) == 1 and issubclass(next(iter(state_types)), _SAFE_STATE_TYPES)
             if safe_scalar_type:
                 inv_key_map = np.asarray(inv_key_map)
             else:

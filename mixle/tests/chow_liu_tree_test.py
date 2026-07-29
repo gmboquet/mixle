@@ -181,9 +181,7 @@ class ChowLiuTreeTestCase(unittest.TestCase):
             conditional_dists=[
                 {},
                 {
-                    freeze("root"): CategoricalDistribution(
-                        {"conditional-only": 1.0}
-                    ),
+                    freeze("root"): CategoricalDistribution({"conditional-only": 1.0}),
                 },
             ],
         )

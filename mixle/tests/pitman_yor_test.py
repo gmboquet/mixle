@@ -128,9 +128,7 @@ class PitmanYorContractTestCase(unittest.TestCase):
         reference = dist.log_density([0, 1, 0])
         self.assertAlmostEqual(dist.log_density([0.1, 0.9, 0.1]), reference)
         self.assertAlmostEqual(dist.log_density(["left", "right", "left"]), reference)
-        encoded = dist.dist_to_encoder().seq_encode(
-            [[0.1, 0.9, 0.1], ["left", "right", "left"]]
-        )
+        encoded = dist.dist_to_encoder().seq_encode([[0.1, 0.9, 0.1], ["left", "right", "left"]])
         np.testing.assert_array_equal(encoded[0], [2, 1])
         np.testing.assert_array_equal(encoded[1], [2, 1])
 

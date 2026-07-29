@@ -240,9 +240,7 @@ class EstimatorBandit(_BanditBase):
         fitted = self.estimators[arm].estimate(float(weights[b]), self._replicates[arm][b].value())
         if self.mean_fn is not None:
             return _finite_real(self.mean_fn(fitted), "mean_fn score")
-        draws = np.asarray(
-            fitted.sampler(seed=int(self.rng.randint(2**31 - 1))).sample(size=self.mc_draws)
-        )
+        draws = np.asarray(fitted.sampler(seed=int(self.rng.randint(2**31 - 1))).sample(size=self.mc_draws))
         if draws.size != self.mc_draws or draws.dtype.kind not in {"i", "u", "f"}:
             raise ValueError(f"estimator sampler must return exactly {self.mc_draws} real draws")
         if not np.all(np.isfinite(draws)):

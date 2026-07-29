@@ -201,12 +201,7 @@ def propagate_uncertainty(
     if not np.all(np.isfinite(s)):
         raise ValueError("samples must contain only finite values")
     levels = np.asarray(quantiles, dtype=float)
-    if (
-        levels.ndim != 1
-        or levels.size < 1
-        or not np.all(np.isfinite(levels))
-        or np.any((levels < 0) | (levels > 1))
-    ):
+    if levels.ndim != 1 or levels.size < 1 or not np.all(np.isfinite(levels)) or np.any((levels < 0) | (levels > 1)):
         raise ValueError("quantiles must be a non-empty finite one-dimensional sequence in [0, 1]")
     # Matching the outer shape is NECESSARY but not SUFFICIENT to prove `func` is genuinely
     # vectorised (row-independent): a per-draw function written with a numpy reduction that forgot

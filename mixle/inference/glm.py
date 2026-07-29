@@ -321,11 +321,7 @@ def _loglik(family: Family, y: np.ndarray, mu: np.ndarray, phi: float, weights: 
         theta = family.extra
         return float(np.sum(weights * stats.nbinom.logpmf(y, theta, theta / (theta + mu))))
     if name == "inverse_gaussian":
-        log_density = -0.5 * (
-            np.log(2.0 * np.pi * phi)
-            + 3.0 * np.log(y)
-            + (y - mu) ** 2 / (phi * y * mu**2)
-        )
+        log_density = -0.5 * (np.log(2.0 * np.pi * phi) + 3.0 * np.log(y) + (y - mu) ** 2 / (phi * y * mu**2))
         return float(np.sum(weights * log_density))
     return None
 

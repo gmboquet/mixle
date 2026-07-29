@@ -226,12 +226,10 @@ class CopulaDistributionTest(unittest.TestCase):
         calls = []
         for index, marginal in enumerate(marginals):
             original = marginal.estimator
-            marginal.estimator = (
-                lambda pseudo_count=None, original=original, index=index: (
-                    calls.append(("marginal", index, pseudo_count)),
-                    original(pseudo_count=pseudo_count),
-                )[1]
-            )
+            marginal.estimator = lambda pseudo_count=None, original=original, index=index: (
+                calls.append(("marginal", index, pseudo_count)),
+                original(pseudo_count=pseudo_count),
+            )[1]
         original_core = core.estimator
         core.estimator = lambda pseudo_count=None: (
             calls.append(("copula", pseudo_count)),

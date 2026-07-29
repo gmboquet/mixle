@@ -80,10 +80,7 @@ def marginalize_estimator_leaves(estimator: Any, missing_value: Any = MISSING) -
 
     if isinstance(estimator, CompositeEstimator):
         wrapped = copy.copy(estimator)
-        children = [
-            marginalize_estimator_leaves(child, missing_value)
-            for child in estimator.estimators
-        ]
+        children = [marginalize_estimator_leaves(child, missing_value) for child in estimator.estimators]
         wrapped.estimators = tuple(children)
         return wrapped
     wrapped = OptionalEstimator(estimator, missing_value=missing_value, est_prob=False)
@@ -103,9 +100,7 @@ def unwrap_marginalized(dist: Any) -> Any:
         children = [unwrap_marginalized(child) for child in dist.dists]
         unwrapped.dists = tuple(children)
         return unwrapped
-    if isinstance(dist, OptionalDistribution) and getattr(
-        dist, "_marginalized_by_helper", False
-    ):
+    if isinstance(dist, OptionalDistribution) and getattr(dist, "_marginalized_by_helper", False):
         return unwrap_marginalized(dist.dist)
     return dist
 

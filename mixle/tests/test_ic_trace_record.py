@@ -54,8 +54,6 @@ def test_execution_trace_conversion_preserves_steps_results_and_seeds():
 
 def test_validate_rejects_unknown_keys_and_bad_container_types():
     with pytest.raises(ValueError):
-        validate_trace_record(
-            {"prompt": "p", "steps": [], "outcome": None, "provenance": {}, "unexpected": True}
-        )
+        validate_trace_record({"prompt": "p", "steps": [], "outcome": None, "provenance": {}, "unexpected": True})
     with pytest.raises(ValueError):
         validate_trace_record({"prompt": "p", "steps": {}, "outcome": None, "provenance": {}})

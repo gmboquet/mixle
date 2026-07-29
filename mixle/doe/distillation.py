@@ -387,6 +387,8 @@ def _standardized_feature_space(x: np.ndarray, reference_features: Any | None) -
     scale[scale <= 1e-12] = 1.0
     z = (both - mean) / scale
     return z[: x.shape[0]], z[x.shape[0] :]
+
+
 def _standardize_with_missing(x: np.ndarray, present: np.ndarray) -> np.ndarray:
     arr = np.asarray(x, dtype=np.float64).copy()
     if np.any(present):

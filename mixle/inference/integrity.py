@@ -46,7 +46,9 @@ def _code_descriptor(code: types.CodeType) -> dict[str, Any]:
         "stacksize": code.co_stacksize,
         "flags": code.co_flags,
         "code": code.co_code,
-        "consts": [_code_descriptor(value) if isinstance(value, types.CodeType) else _stable(value) for value in code.co_consts],
+        "consts": [
+            _code_descriptor(value) if isinstance(value, types.CodeType) else _stable(value) for value in code.co_consts
+        ],
         "names": list(code.co_names),
         "varnames": list(code.co_varnames),
         "freevars": list(code.co_freevars),

@@ -218,8 +218,7 @@ def hierarchical_event_study(
     identified = bool(identification is not None and identification.identified)
     if identification is not None and not identified:
         raise ValueError(
-            "identification must affirm exchangeability, positivity, consistency, no interference, "
-            "and no anticipation"
+            "identification must affirm exchangeability, positivity, consistency, no interference, and no anticipation"
         )
     if identified:
         estimand = "difference-in-differences average treatment effect on the treated"

@@ -228,9 +228,7 @@ class MarkovChainLatentPosterior(LatentPosterior):
         transition_norms = logsumexp(log_A, axis=1)
         if not np.isfinite(pi_norm) or not np.isclose(pi_norm, 0.0, rtol=0.0, atol=1.0e-10):
             raise ValueError("log_pi must encode a normalized probability vector.")
-        if not np.isfinite(transition_norms).all() or not np.allclose(
-            transition_norms, 0.0, rtol=0.0, atol=1.0e-10
-        ):
+        if not np.isfinite(transition_norms).all() or not np.allclose(transition_norms, 0.0, rtol=0.0, atol=1.0e-10):
             raise ValueError("each log_A row must encode a normalized transition probability vector.")
         self.log_pi = np.array(log_pi - pi_norm, copy=True)
         self.log_A = np.array(log_A - transition_norms[:, None], copy=True)
@@ -241,9 +239,7 @@ class MarkovChainLatentPosterior(LatentPosterior):
         self.t, self.k = self.log_b.shape
         self._log_alpha = self._forward()  # alpha_t(k) = log p(z_t=k, x_{1:t}), the FFBS filter
         impossible_at = (
-            None
-            if self.t == 0
-            else next((t for t in range(self.t) if np.isneginf(self._log_alpha[t]).all()), None)
+            None if self.t == 0 else next((t for t in range(self.t) if np.isneginf(self._log_alpha[t]).all()), None)
         )
         self.impossibility = (
             None
@@ -405,8 +401,7 @@ class MeanFieldLDAPosterior(LatentPosterior):
             raise TypeError("counts must contain exact non-negative integers, not booleans.")
         if np.issubdtype(raw_counts.dtype, np.integer):
             if np.any(raw_counts < 0) or (
-                np.issubdtype(raw_counts.dtype, np.unsignedinteger)
-                and np.any(raw_counts > np.iinfo(np.int64).max)
+                np.issubdtype(raw_counts.dtype, np.unsignedinteger) and np.any(raw_counts > np.iinfo(np.int64).max)
             ):
                 raise ValueError("counts must contain exact non-negative integers representable as int64.")
             integer_counts = np.asarray(raw_counts, dtype=np.int64)

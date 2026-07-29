@@ -54,8 +54,7 @@ def _rank_window_schedule(
     """Return real target counts per rank and one equal step count for every rank."""
     if shard_by_rank and world_size > 1:
         shard_lengths = tuple(
-            ((rank + 1) * n_tokens // world_size) - (rank * n_tokens // world_size)
-            for rank in range(world_size)
+            ((rank + 1) * n_tokens // world_size) - (rank * n_tokens // world_size) for rank in range(world_size)
         )
     else:
         shard_lengths = (n_tokens,) * world_size
@@ -136,14 +135,10 @@ class StreamingTokenEncodedData(EncodedDataHandle):
             shard_by_rank=shard_by_rank,
         )
         self.local_target_tokens = self._window_counts[self.rank]
-        self.masked_target_tokens = (
-            self.steps_per_epoch * self.batch_size - self.local_target_tokens
-        ) * self.epochs
+        self.masked_target_tokens = (self.steps_per_epoch * self.batch_size - self.local_target_tokens) * self.epochs
         global_unsharded_targets = max(0, n_tokens - self.block)
         self.excluded_target_tokens = (
-            max(0, global_unsharded_targets - sum(self._window_counts)) * self.epochs
-            if shard_by_rank
-            else 0
+            max(0, global_unsharded_targets - sum(self._window_counts)) * self.epochs if shard_by_rank else 0
         )
         self.schedule_receipt = {
             "world_size": self.world,
@@ -282,9 +277,7 @@ class StreamingTokenEncodedData(EncodedDataHandle):
                         torch.as_tensor(padded_y, dtype=torch.long).to(device),
                         reduction="none",
                     )
-                    local_sum = (
-                        per_target * torch.as_tensor(mask, dtype=per_target.dtype).to(device)
-                    ).sum()
+                    local_sum = (per_target * torch.as_tensor(mask, dtype=per_target.dtype).to(device)).sum()
                     # DDP/FSDP averages rank gradients. Scaling each local sum by world/global
                     # count makes the post-collective gradient the exact global target mean.
                     loss = local_sum * (distributed_scale / float(global_targets))

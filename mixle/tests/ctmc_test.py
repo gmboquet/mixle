@@ -189,17 +189,13 @@ class CTMCTest(unittest.TestCase):
     def test_configuration_requires_exact_states_and_sampling_bounds(self):
         rates = np.array([[0.0, 2.0], [3.0, 0.0]])
         for initial_state in (True, 0.5, -1, 2):
-            with self.subTest(initial_state=initial_state), self.assertRaises(
-                (TypeError, ValueError)
-            ):
+            with self.subTest(initial_state=initial_state), self.assertRaises((TypeError, ValueError)):
                 st.ContinuousTimeMarkovChainDistribution(
                     rates,
                     initial_state=initial_state,
                 )
         for horizon in (True, -1.0, np.nan, np.inf):
-            with self.subTest(horizon=horizon), self.assertRaises(
-                (TypeError, ValueError)
-            ):
+            with self.subTest(horizon=horizon), self.assertRaises((TypeError, ValueError)):
                 st.ContinuousTimeMarkovChainDistribution(
                     rates,
                     horizon=horizon,
@@ -217,17 +213,13 @@ class CTMCTest(unittest.TestCase):
             (0, 1.0, [(0.5,)]),
         )
         for trajectory in malformed:
-            with self.subTest(trajectory=trajectory), self.assertRaises(
-                (TypeError, ValueError)
-            ):
+            with self.subTest(trajectory=trajectory), self.assertRaises((TypeError, ValueError)):
                 dist.log_density(trajectory)
 
     def test_encoded_statistics_fail_closed_before_accumulation(self):
         from mixle.stats.processes.ctmc import ContinuousTimeMarkovChainAccumulator
 
-        dist = st.ContinuousTimeMarkovChainDistribution(
-            np.array([[0.0, 2.0], [3.0, 0.0]])
-        )
+        dist = st.ContinuousTimeMarkovChainDistribution(np.array([[0.0, 2.0], [3.0, 0.0]]))
         valid = (np.array([[0.0, 1.0], [0.0, 0.0]]), np.array([1.0, 0.0]))
         malformed = (
             (np.zeros((3, 3)), np.zeros(3)),

@@ -56,9 +56,7 @@ class DensityGateTest(unittest.TestCase):
         self.assertEqual(clone.calibration_receipt, gate.calibration_receipt)
         self.assertEqual(gate.calibration_receipt["kind"], "seeded_internal")
         self.assertTrue(
-            set(gate.calibration_receipt["fit_indices"]).isdisjoint(
-                gate.calibration_receipt["calibration_indices"]
-            )
+            set(gate.calibration_receipt["fit_indices"]).isdisjoint(gate.calibration_receipt["calibration_indices"])
         )
 
     def test_fit_contracts_and_explicit_held_out_calibration(self):

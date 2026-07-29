@@ -25,9 +25,7 @@ def _template(expression, cache_version="1"):
         params=lambda components: {},
         expr=expression,
         acc_names=("sx",),
-        acc_stmt=lambda values, accumulators, weight: (
-            f"{accumulators['sx']}[k] += {weight} * {values[0]}"
-        ),
+        acc_stmt=lambda values, accumulators, weight: f"{accumulators['sx']}[k] += {weight} * {values[0]}",
         to_value=lambda stats, count: (count, stats[0]),
         cache_version=cache_version,
     )
