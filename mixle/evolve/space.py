@@ -211,7 +211,18 @@ class Space:
             if not isinstance(dim, (Real, Integer, Categorical)):
                 raise TypeError(f"dimension {name!r} must be a Real / Integer / Categorical, got {type(dim).__name__}.")
         self.dims: dict[str, Dimension] = dict(dims)
-        self.names: tuple[str, ...] = tuple(dims.keys())
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        """The fixed dimension order, always read straight from :attr:`dims`.
+
+        This was a tuple snapshotted in ``__init__`` while ``dims`` stayed a public mutable dict, so
+        adding or removing a dimension afterwards left the two disagreeing: ``ndim`` and every
+        encode/decode kept using the old order and silently ignored the new dimension, while
+        ``dims`` reported it as present. Deriving the order removes the possibility rather than
+        documenting it.
+        """
+        return tuple(self.dims)
 
     @property
     def ndim(self) -> int:
@@ -231,6 +242,14 @@ class Space:
         missing = set(self.names) - set(config)
         if missing:
             raise ValueError(f"config is missing dimensions {sorted(missing)}.")
+        # An unknown key is almost always a misspelled dimension or a config from a different space,
+        # and it was silently discarded: the caller's setting never reached the search and nothing
+        # said so. Naming the space's own dimensions makes the typo obvious.
+        unknown = set(config) - set(self.names)
+        if unknown:
+            raise ValueError(
+                f"config has dimensions {sorted(unknown)} that this space does not define {list(self.names)}."
+            )
         return np.asarray([self.dims[name].encode(config[name]) for name in self.names], dtype=float)
 
     def decode(self, vector: Sequence[float]) -> dict[str, Any]:

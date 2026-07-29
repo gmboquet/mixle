@@ -241,7 +241,15 @@ class HypothesisPortfolio:
         return HypothesisPortfolio(new_hyps, new_weights, self.w_open)
 
     def prune(self, *, min_weight: float) -> HypothesisPortfolio:
-        """Deactivate (never delete) active hypotheses below ``min_weight``; their mass folds into ``w_open``."""
+        """Deactivate (never delete) active hypotheses below ``min_weight``; their mass folds into ``w_open``.
+
+        ``min_weight`` must be finite and non-negative. ``weight < NaN`` is false for every weight,
+        so a NaN threshold pruned nothing at all and returned an unchanged portfolio -- outwardly
+        identical to "no hypothesis was below the threshold", which is the one reading that makes a
+        caller move on.
+        """
+        if not np.isfinite(min_weight) or float(min_weight) < 0.0:
+            raise ValueError(f"min_weight must be a finite non-negative threshold, got {min_weight!r}")
         new_hyps = list(self.hypotheses)
         new_weights = self.weights.copy()
         freed = 0.0

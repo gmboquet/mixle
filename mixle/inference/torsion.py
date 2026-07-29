@@ -78,6 +78,12 @@ class CyclicGroup:
         period = float(self.period)
         if not np.isfinite(period) or period <= 0.0:
             raise ValueError(f"CyclicGroup period must be finite and positive; got {self.period!r}.")
+        # Store what was validated. Both values were coerced, checked, and then dropped, so the
+        # instance kept the raw input: CyclicGroup(3, "1.0") constructed happily and then failed
+        # somewhere else entirely the first time the period was used as a number. Validation that
+        # does not commit its result only moves the error.
+        object.__setattr__(self, "order", order)
+        object.__setattr__(self, "period", period)
 
     def element(self, k: Any) -> int:
         """Validate ``k`` as a declared group element and return it as a plain ``int``."""
