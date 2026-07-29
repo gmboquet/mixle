@@ -1595,11 +1595,26 @@ class MixtureEstimator(ParameterEstimator):
                 "pass the 2-tuple produced by MixtureAccumulator.value(), not a bare component sufficient statistic.",
             )
         counts, comp_suff_stats = suff_stat
-        counts = validated_count_array(
-            counts,
-            (num_components,),
-            "mixture component counts",
-        )
+        try:
+            counts = validated_count_array(
+                counts,
+                (num_components,),
+                "mixture component counts",
+            )
+        except (TypeError, ValueError) as exc:
+            # validated_count_array is a shared leaf helper and raises a bare TypeError/ValueError
+            # with no idea which field it was validating. Every other check at this boundary raises
+            # a path-annotated ContractError, so a malformed count vector was the one way into
+            # estimate() that produced an unannotated error -- and it is the check that fires
+            # first, so it masked the annotated component-count check just below on the common
+            # "wrong number of components" mistake.
+            raise ContractError(
+                "MixtureEstimator.estimate(suff_stat)",
+                "%d finite non-negative component weight counts" % num_components,
+                str(exc),
+                "pass the 2-tuple produced by MixtureAccumulator.value() for this "
+                "%d-component mixture." % num_components,
+            ) from exc
         if not isinstance(comp_suff_stats, (tuple, list)) or len(comp_suff_stats) != num_components:
             raise ContractError(
                 "MixtureEstimator.estimate(suff_stat)",
