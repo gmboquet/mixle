@@ -632,7 +632,7 @@ class NormalWishartTestCase(unittest.TestCase):
         # (subTest is keyed on the list form, not the ndarray: xdist can't serialize an ndarray
         # subtest report from worker to controller.)
         for bad_mu in ([np.nan, 0.0], [np.inf, 0.0], [0.0, -np.inf]):
-            with self.subTest(mu=bad_mu):
+            with self.subTest(mu=repr(bad_mu)):
                 with self.assertRaises(ValueError):
                     NormalWishartDistribution(np.array(bad_mu), 1.0, np.eye(2), 4.0)
 
@@ -642,7 +642,7 @@ class NormalWishartTestCase(unittest.TestCase):
         # sampler() inverts kappa*Lambda and numpy's multivariate_normal does not hard-fail on a
         # non-PSD covariance.
         for bad_kappa in (-1.0, 0.0):
-            with self.subTest(kappa=bad_kappa):
+            with self.subTest(kappa=repr(bad_kappa)):
                 with self.assertRaises(ValueError):
                     NormalWishartDistribution(np.zeros(2), bad_kappa, np.eye(2), 4.0)
 
@@ -652,7 +652,7 @@ class NormalWishartTestCase(unittest.TestCase):
         # np.isfinite directly, matching the idiom used for other positive scalar concentration
         # parameters in this codebase (e.g. KentDistribution's / LKJDistribution's kappa/eta).
         for bad_kappa in (float("nan"), float("inf"), float("-inf")):
-            with self.subTest(kappa=bad_kappa):
+            with self.subTest(kappa=repr(bad_kappa)):
                 with self.assertRaises(ValueError):
                     NormalWishartDistribution(np.zeros(2), bad_kappa, np.eye(2), 4.0)
 
@@ -690,7 +690,7 @@ class NormalWishartTestCase(unittest.TestCase):
             [[np.nan, 0.0], [0.0, 1.0]],
             [[np.inf, 0.0], [0.0, 1.0]],
         ):
-            with self.subTest(w_mat=bad_w):
+            with self.subTest(w_mat=repr(bad_w)):
                 with self.assertRaises(ValueError):
                     NormalWishartDistribution(np.zeros(2), 1.0, np.array(bad_w), 4.0)
 

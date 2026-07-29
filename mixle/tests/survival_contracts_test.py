@@ -82,7 +82,7 @@ class CoxStructureContractsTest(unittest.TestCase):
             lambda: cox_ph(x, time, event, max_iter=0),
         ]
         for call in invalid:
-            with self.subTest(call=call), self.assertRaises(ValueError):
+            with self.subTest(call=repr(call)), self.assertRaises(ValueError):
                 call()
 
 

@@ -45,7 +45,7 @@ class FeaturizerTest(unittest.TestCase):
 
     def test_invalid_geometry_is_rejected_at_construction(self):
         for kwargs in ({"n": 0}, {"n": 1.5}, {"dim": 0}, {"dim": True}, {"seed": 1.5}):
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 HashedNGram(**kwargs)
 
 
@@ -75,7 +75,7 @@ class TaskModelCallTest(unittest.TestCase):
     def test_labels_must_be_nonempty_and_unique(self):
         feature = HashedNGram()
         for labels in ([], ["x", "x"], [""]):
-            with self.subTest(labels=labels), self.assertRaises(ValueError):
+            with self.subTest(labels=repr(labels)), self.assertRaises(ValueError):
                 TextClassifierIO(feature, labels)
 
 

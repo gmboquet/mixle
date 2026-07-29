@@ -52,7 +52,7 @@ class PPCAParameterOwnershipTest(unittest.TestCase):
             ([[1.0], [0.0]], [0.0, 0.0], "1"),
         )
         for args in invalid:
-            with self.subTest(args=args), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(args=repr(args)), self.assertRaises((TypeError, ValueError)):
                 ProbabilisticPCADistribution(*args)
 
 
@@ -62,16 +62,16 @@ class PPCAEventShapeTest(unittest.TestCase):
 
     def test_scalar_routes_require_one_exact_finite_event(self):
         for event in ([0.1], [0.1, 0.2, 0.3], [[0.1, 0.2]], [0.1, np.nan]):
-            with self.subTest(event=event), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(event=repr(event)), self.assertRaises((TypeError, ValueError)):
                 self.model.log_density(event)
-            with self.subTest(event=event), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(event=repr(event)), self.assertRaises((TypeError, ValueError)):
                 self.model.density(event)
 
     def test_transform_distinguishes_one_event_from_an_exact_event_batch(self):
         self.assertEqual(self.model.transform([0.1, 0.2]).shape, (1,))
         self.assertEqual(self.model.transform([[0.1, 0.2], [0.3, 0.4]]).shape, (1, 2))
         for events in ([0.1], [[0.1]], [[[0.1, 0.2]]], [[0.1, np.nan]]):
-            with self.subTest(events=events), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(events=repr(events)), self.assertRaises((TypeError, ValueError)):
                 self.model.transform(events)
 
     def test_vectorized_and_backend_routes_require_n_by_d(self):
@@ -81,7 +81,7 @@ class PPCAEventShapeTest(unittest.TestCase):
             self.model.seq_log_density(valid),
         )
         for events in ([0.1, 0.2], [[0.1]], [[0.1, 0.2, 0.3]], [[0.1, np.nan]]):
-            with self.subTest(events=events), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(events=repr(events)), self.assertRaises((TypeError, ValueError)):
                 self.model.seq_log_density(events)
         for events in (
             np.array([0.1, 0.2]),
@@ -89,7 +89,7 @@ class PPCAEventShapeTest(unittest.TestCase):
             np.array([[0.1, 0.2, 0.3]]),
             np.array([[0.1, np.nan]]),
         ):
-            with self.subTest(events=events), self.assertRaises(ValueError):
+            with self.subTest(events=repr(events)), self.assertRaises(ValueError):
                 self.model.backend_seq_log_density(events, NUMPY_ENGINE)
 
     def test_encoder_preserves_event_geometry_and_dimension_identity(self):
@@ -99,7 +99,7 @@ class PPCAEventShapeTest(unittest.TestCase):
         self.assertEqual(encoder.seq_encode([]).shape, (0, 2))
         self.assertNotEqual(encoder, ProbabilisticPCADistribution([[1.0]], [0.0], 1.0).dist_to_encoder())
         for events in ([0.1, 0.2], [[0.1]], [[0.1, 0.2, 0.3]], [[0.1, np.nan]]):
-            with self.subTest(events=events), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(events=repr(events)), self.assertRaises((TypeError, ValueError)):
                 encoder.seq_encode(events)
 
     def test_accumulator_routes_enforce_the_same_shapes_and_weights(self):

@@ -197,7 +197,7 @@ class PINNRegressionTest(unittest.TestCase):
         ]
         for controls in constructor_cases:
             kwargs = {"domain": ([-1.0], [1.0]), **controls}
-            with self.subTest(controls=controls), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(controls=repr(controls)), self.assertRaises((TypeError, ValueError)):
                 PINNRegression(_mlp([1, 4, 1]), _ode_residual, problem=_problem(), **kwargs)
 
         model = PINNRegression(
@@ -218,7 +218,7 @@ class PINNRegressionTest(unittest.TestCase):
             (np.ones((2, 1)), np.ones((2, 1)), np.zeros(2)),
         ]
         for stats in invalid_stats:
-            with self.subTest(shapes=[value.shape for value in stats]), self.assertRaises(ValueError):
+            with self.subTest(shapes=repr([value.shape for value in stats])), self.assertRaises(ValueError):
                 estimator.estimate(None, stats)
 
     def test_residual_shape_finiteness_and_module_dtype_are_enforced(self):
@@ -236,7 +236,7 @@ class PINNRegressionTest(unittest.TestCase):
                 n_collocation=4,
                 m_steps=1,
             )
-            with self.subTest(residual=residual), self.assertRaises(ValueError):
+            with self.subTest(residual=repr(residual)), self.assertRaises(ValueError):
                 model.estimator().estimate(None, (np.zeros((0, 1)), np.zeros((0, 1)), np.zeros(0)))
 
         observed_dtypes = []

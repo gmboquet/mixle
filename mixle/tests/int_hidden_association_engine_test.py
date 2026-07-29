@@ -44,7 +44,7 @@ class IntHiddenAssociationEngineTestCase(unittest.TestCase):
         hv = host.value()
         # value(): (init_count, weight_count, state_count, prev_ss, size_ss)
         for name, engine in self.engines:
-            with self.subTest(engine=name):
+            with self.subTest(engine=repr(name)):
                 kernel = self.dist.kernel(engine=engine, estimator=self.est)
                 self.assertEqual(type(kernel).__name__, "IntegerHiddenAssociationKernel")
                 value = kernel.accumulate(enc, self.weights)

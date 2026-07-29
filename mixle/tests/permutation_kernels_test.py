@@ -119,11 +119,11 @@ class PermutationKernelTest(unittest.TestCase):
         )
         for value in malformed:
             for function in one_argument:
-                with self.subTest(value=value, function=function.__name__):
+                with self.subTest(value=repr(value), function=repr(function.__name__)):
                     with self.assertRaises((TypeError, ValueError)):
                         function(value)
             for metric in K.METRICS:
-                with self.subTest(value=value, metric=metric):
+                with self.subTest(value=repr(value), metric=repr(metric)):
                     with self.assertRaises((TypeError, ValueError)):
                         K.permutation_distance(value, np.arange(3), metric)
 
@@ -151,7 +151,7 @@ class AssignmentKernelContractTest(unittest.TestCase):
             np.asarray([[1.0, np.inf], [1.0, 1.0]]),
         )
         for matrix in invalid:
-            with self.subTest(matrix=matrix):
+            with self.subTest(matrix=repr(matrix)):
                 with self.assertRaises(ValueError):
                     K.ryser_log_permanent(matrix)
 
@@ -159,7 +159,7 @@ class AssignmentKernelContractTest(unittest.TestCase):
         for scale in (1.0e-200, 1.0e200):
             matrix = np.full((3, 3), scale)
             expected = math.log(math.factorial(3)) + 3.0 * math.log(scale)
-            with self.subTest(scale=scale):
+            with self.subTest(scale=repr(scale)):
                 self.assertAlmostEqual(K.ryser_log_permanent(matrix), expected, places=10)
         self.assertEqual(K.ryser_log_permanent(np.zeros((2, 2))), -np.inf)
 
@@ -182,11 +182,11 @@ class AssignmentKernelContractTest(unittest.TestCase):
             np.asarray([[0.0, -np.inf], [0.0, -np.inf]]),
         )
         for scores in invalid_scores:
-            with self.subTest(scores=scores):
+            with self.subTest(scores=repr(scores)):
                 with self.assertRaises((ValueError, FloatingPointError)):
                     K.sinkhorn_bethe(scores, 10)
         for iterations in (0, -1, 1.5, np.nan, True):
-            with self.subTest(iterations=iterations):
+            with self.subTest(iterations=repr(iterations)):
                 with self.assertRaises((TypeError, ValueError)):
                     K.sinkhorn_bethe(np.zeros((2, 2)), iterations)
 
@@ -196,7 +196,7 @@ class AssignmentKernelContractTest(unittest.TestCase):
             np.asarray([[-1.0e300, 0.0], [0.0, -1.0e300]]),
         ):
             plan, logz = K.sinkhorn_bethe(scores, 20)
-            with self.subTest(scores=scores):
+            with self.subTest(scores=repr(scores)):
                 self.assertTrue(np.all(np.isfinite(plan)))
                 self.assertTrue(np.isfinite(logz))
                 np.testing.assert_allclose(plan.sum(axis=0), 1.0)

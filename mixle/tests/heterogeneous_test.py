@@ -56,7 +56,7 @@ class HeterogeneousPlanTest(unittest.TestCase):
         # deliberately not the binary height (which would be 2 for 4 workers and 4 for 16), so nothing
         # downstream should read this field as a binary tree height.
         for n_workers, expected in ((2, 1), (4, 1), (5, 2), (16, 2), (17, 3)):
-            with self.subTest(n_workers=n_workers):
+            with self.subTest(n_workers=repr(n_workers)):
                 workers = [Worker("w%d" % i, "cpu", ("float64",)) for i in range(n_workers)]
                 plan = plan_heterogeneous(workers, 1000)
                 self.assertEqual(plan.reduce_depth, expected)
@@ -197,7 +197,7 @@ class WorkerValidationTest(unittest.TestCase):
 
     def test_non_finite_throughput_rejected(self):
         for bad in (float("nan"), float("inf"), float("-inf"), True):
-            with self.subTest(base_throughput=bad):
+            with self.subTest(base_throughput=repr(bad)):
                 with self.assertRaises(ValueError):
                     Worker(name="w0", device="cpu", precisions=("float32",), base_throughput=bad)
 
@@ -222,7 +222,7 @@ class WorkerAssignmentValidationTest(unittest.TestCase):
 
     def test_nonpositive_or_non_finite_effective_throughput_rejected(self):
         for bad in (0.0, -1.0, float("nan"), float("inf"), True):
-            with self.subTest(effective_throughput=bad):
+            with self.subTest(effective_throughput=repr(bad)):
                 with self.assertRaises(ValueError):
                     WorkerAssignment(name="w0", rows=10, precision="float32", effective_throughput=bad)
 
@@ -296,7 +296,7 @@ class PlanInputValidationTest(unittest.TestCase):
 
     def test_invalid_target_rel_error_rejected(self):
         for bad in (-1e-6, 0.0, float("nan"), float("inf"), True):
-            with self.subTest(target_rel_error=bad):
+            with self.subTest(target_rel_error=repr(bad)):
                 with self.assertRaises(ValueError):
                     plan_heterogeneous([self._worker()], 100, target_rel_error=bad)
 

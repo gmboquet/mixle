@@ -124,7 +124,7 @@ class KeyedProtocolSweepTest(unittest.TestCase):
     def test_every_scalar_keyed_family_pools_across_sites(self):
         swept, skipped = [], {}
         for name, dist in sorted(_CATALOG.items()):
-            with self.subTest(family=name):
+            with self.subTest(family=repr(name)):
                 outcome = self._check_family(name, dist)
                 if outcome is None:
                     swept.append(name)

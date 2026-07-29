@@ -18,7 +18,7 @@ from mixle.utils.automatic.factories import (
 class FactoryMassValidationTest(unittest.TestCase):
     def test_categorical_requires_positive_observed_mass(self):
         for values in ({}, {"a": 0.0}):
-            with self.subTest(values=values), self.assertRaisesRegex(ValueError, "positive total mass"):
+            with self.subTest(values=repr(values)), self.assertRaisesRegex(ValueError, "positive total mass"):
                 get_categorical_estimator(values)
 
     def test_invalid_masses_are_rejected_consistently(self):
@@ -35,12 +35,15 @@ class FactoryMassValidationTest(unittest.TestCase):
         for mass in (-1.0, float("nan"), float("inf")):
             for factory in factories:
                 key = 1 if factory in (get_integer_categorical_estimator, get_poisson_estimator) else 1.0
-                with self.subTest(factory=factory.__name__, mass=mass), self.assertRaisesRegex(ValueError, "masses"):
+                with (
+                    self.subTest(factory=repr(factory.__name__), mass=repr(mass)),
+                    self.assertRaisesRegex(ValueError, "masses"),
+                ):
                     factory({key: mass})
 
     def test_invalid_pseudo_counts_are_rejected_consistently(self):
         for pseudo_count in (-1.0, float("nan"), float("inf")):
-            with self.subTest(pseudo_count=pseudo_count), self.assertRaisesRegex(ValueError, "pseudo_count"):
+            with self.subTest(pseudo_count=repr(pseudo_count)), self.assertRaisesRegex(ValueError, "pseudo_count"):
                 get_gaussian_estimator({1.0: 1.0}, pseudo_count=pseudo_count)
 
 
@@ -57,7 +60,7 @@ class BayesianFactoryContractTest(unittest.TestCase):
 
     def test_unsupported_bayesian_families_fail_explicitly(self):
         for factory in (get_gamma_estimator, get_student_t_estimator):
-            with self.subTest(factory=factory.__name__), self.assertRaisesRegex(NotImplementedError, "conjugate"):
+            with self.subTest(factory=repr(factory.__name__)), self.assertRaisesRegex(NotImplementedError, "conjugate"):
                 factory({1.0: 1.0, 2.0: 1.0}, use_bstats=True)
 
 
@@ -72,7 +75,7 @@ class DpmControlValidationTest(unittest.TestCase):
             {"pseudo_count": -1.0},
         )
         for kwargs in controls:
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 get_dpm_mixture([0.0, 1.0], out=None, **kwargs)
 
     def test_empty_data_is_rejected_before_component_construction(self):

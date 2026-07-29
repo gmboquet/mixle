@@ -34,17 +34,17 @@ class ProxySchemaContractTest(unittest.TestCase):
             lambda: GaussianProxy([1.0, 2.0], slope=np.inf),
         ]
         for call in invalid:
-            with self.subTest(call=call):
+            with self.subTest(call=repr(call)):
                 with self.assertRaises(ValueError):
                     call()
 
     def test_niche_poisson_and_custom_support_are_strict(self):
         for value in ([0.0, 1.0], [[0.0, 2.0]], [[0.0, np.nan]]):
-            with self.subTest(value=value):
+            with self.subTest(value=repr(value)):
                 with self.assertRaises(ValueError):
                     LogisticNicheProxy(value)
         for value in ([-1], [1.5], [np.inf]):
-            with self.subTest(value=value):
+            with self.subTest(value=repr(value)):
                 with self.assertRaises(ValueError):
                     PoissonProxy(value)
         with self.assertRaises(ValueError):
@@ -104,7 +104,7 @@ class FieldLayoutContractTest(unittest.TestCase):
         fitted_override = fit_field(None, [proxy], how="map", max_iter=1, init={"rate": 4.0})
         self.assertAlmostEqual(fitted_override.mean("rate"), 4.0)
         for init in ({"rate": 0.0}, {"rate": [1.0, 2.0]}, {"unknown": 1.0}):
-            with self.subTest(init=init):
+            with self.subTest(init=repr(init)):
                 with self.assertRaises(ValueError):
                     fit_field(None, [proxy], how="map", max_iter=1, init=init)
 

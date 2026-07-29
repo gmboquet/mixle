@@ -38,7 +38,7 @@ class PosteriorPredictiveCheckTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             posterior_predictive_check(fitted, [], n_rep=1)
         for value in (0, -1):
-            with self.subTest(n_rep=value), self.assertRaises(ValueError):
+            with self.subTest(n_rep=repr(value)), self.assertRaises(ValueError):
                 posterior_predictive_check(fitted, [0.0], n_rep=value)
         with self.assertRaises(TypeError):
             posterior_predictive_check(fitted, [0.0], n_rep=1.5)
@@ -100,7 +100,7 @@ class PriorPredictiveTest(unittest.TestCase):
             ({"size": 1, "n_rep": 0}, ValueError),
             ({"size": 1.5, "n_rep": 1}, TypeError),
         ]:
-            with self.subTest(kwargs=kwargs), self.assertRaises(error):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(error):
                 prior_predictive(model, **kwargs)
 
 

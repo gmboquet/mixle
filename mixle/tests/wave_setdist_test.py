@@ -189,17 +189,17 @@ class BernoulliSetContractTestCase(unittest.TestCase):
         with self.assertRaises(TypeError):
             dist.pmap["a"] = 0.4
         for pmap in ({"a": np.nan}, {"a": -0.1}, {"a": 1.1}):
-            with self.subTest(pmap=pmap), self.assertRaises(ValueError):
+            with self.subTest(pmap=repr(pmap)), self.assertRaises(ValueError):
                 BernoulliSetDistribution(pmap)
         for min_prob in (-0.1, 0.51, np.inf):
-            with self.subTest(min_prob=min_prob), self.assertRaises(ValueError):
+            with self.subTest(min_prob=repr(min_prob)), self.assertRaises(ValueError):
                 BernoulliSetDistribution({"a": 0.2}, min_prob=min_prob)
 
     def test_duplicate_and_unknown_labels_are_rejected_consistently(self):
         dist = BernoulliSetDistribution({"a": 0.4}, prior=BetaDistribution(2.0, 3.0))
         encoder = BernoulliSetDataEncoder()
         for observation in (["a", "a"], ["unknown"]):
-            with self.subTest(observation=observation):
+            with self.subTest(observation=repr(observation)):
                 with self.assertRaises(ValueError):
                     dist.log_density(observation)
                 with self.assertRaises(ValueError):
@@ -231,7 +231,7 @@ class BernoulliSetContractTestCase(unittest.TestCase):
         acc.update(["a"], 2.0, None)
         before = acc.value()
         for observation, weight in ((["a", "a"], 1.0), (["c"], 1.0), (["b"], -1.0), (["b"], np.nan)):
-            with self.subTest(observation=observation, weight=weight), self.assertRaises(ValueError):
+            with self.subTest(observation=repr(observation), weight=repr(weight)), self.assertRaises(ValueError):
                 acc.update(observation, weight, None)
             self.assertEqual(acc.value(), before)
         with self.assertRaises(ValueError):
@@ -255,7 +255,7 @@ class BernoulliSetContractTestCase(unittest.TestCase):
             np.asarray([[1.0, -1.0], [1.0, 1.0]]),
             np.asarray([[1.0, np.nan], [1.0, 1.0]]),
         ):
-            with self.subTest(weights=weights), self.assertRaises(ValueError):
+            with self.subTest(weights=repr(weights)), self.assertRaises(ValueError):
                 BernoulliSetDistribution.backend_stacked_sufficient_statistics(
                     encoded,
                     weights,

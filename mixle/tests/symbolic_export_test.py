@@ -223,7 +223,7 @@ class SymbolicSageExportTestCase(unittest.TestCase):
             (">=", x >= 5.0, a_val),  # non-strict: boundary is TRUE -> then-branch
         ]
         for name, cond, expected in boundary_cases:
-            with self.subTest(op=name):
+            with self.subTest(op=repr(name)):
                 expr = SYMBOLIC_ENGINE.where(cond, a_val, b_val)
                 # sanity: the native (non-sage) reference agrees on the expected branch
                 self.assertEqual(float(expr.evaluate({"x": 5.0})), expected)
@@ -242,7 +242,7 @@ class SymbolicSageExportTestCase(unittest.TestCase):
             expr = SYMBOLIC_ENGINE.where(cond, a_val, b_val)
             sym = to_sage(expr)
             for xv in (4.0, 6.0):  # strictly below / strictly above the boundary
-                with self.subTest(op=name, x=xv):
+                with self.subTest(op=repr(name), x=repr(xv)):
                     expected = float(expr.evaluate({"x": xv}))
                     via_sage = float(sym.subs({xs: xv}))
                     self.assertEqual(via_sage, expected)

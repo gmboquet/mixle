@@ -12,7 +12,7 @@ from mixle.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
 class SymmetricDirichletContractTest(unittest.TestCase):
     def test_dimension_must_be_a_positive_integer(self):
         for dimension in (0, -1, True, 1.5, np.nan):
-            with self.subTest(dimension=dimension):
+            with self.subTest(dimension=repr(dimension)):
                 with self.assertRaises((TypeError, ValueError)):
                     SymmetricDirichletDistribution(1.0, dim=dimension)
         self.assertEqual(SymmetricDirichletDistribution(1.0, dim=np.int64(3)).dim, 3)
@@ -27,7 +27,7 @@ class SymmetricDirichletContractTest(unittest.TestCase):
             np.empty((1, 0)),
         )
         for values in invalid:
-            with self.subTest(shape=values.shape):
+            with self.subTest(shape=repr(values.shape)):
                 with self.assertRaises(ValueError):
                     dist.seq_log_density(values)
                 with self.assertRaises(ValueError):
@@ -41,7 +41,7 @@ class SymmetricDirichletContractTest(unittest.TestCase):
         dist = SymmetricDirichletDistribution(2.0, dim=3)
         sampler = dist.sampler(seed=1)
         for size in (True, 1.5, -1):
-            with self.subTest(size=size):
+            with self.subTest(size=repr(size)):
                 with self.assertRaises((TypeError, ValueError)):
                     sampler.sample(size)
         dist.dim = 0
@@ -106,7 +106,7 @@ class DictDirichletContractTest(unittest.TestCase):
         dist = DictDirichletDistribution({"a": 2.0, "b": 3.0})
         sampler = dist.sampler(seed=1)
         for size in (True, 1.5, -1):
-            with self.subTest(size=size):
+            with self.subTest(size=repr(size)):
                 with self.assertRaises((TypeError, ValueError)):
                     sampler.sample(size)
         dist.alpha["a"] = 0.0

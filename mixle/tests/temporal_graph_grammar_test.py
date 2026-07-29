@@ -135,16 +135,16 @@ class TemporalGraphGrammarContractTest(unittest.TestCase):
             np.zeros((2, 3)),
         ]
         for adjacency in invalid:
-            with self.subTest(kind="dense", adjacency=adjacency):
+            with self.subTest(kind="dense", adjacency=repr(adjacency)):
                 with self.assertRaises(ValueError):
                     dist.log_density([adjacency])
-            with self.subTest(kind="sparse", adjacency=adjacency):
+            with self.subTest(kind="sparse", adjacency=repr(adjacency)):
                 with self.assertRaises(ValueError):
                     dist.log_density([sp.csr_array(adjacency)])
 
     def test_motif_partition_and_distribution_parameters_are_owned_and_validated(self):
         for bins in ((), (1,), (0, 0), (0, 1.5), (0, -1), (0, True)):
-            with self.subTest(bins=bins):
+            with self.subTest(bins=repr(bins)):
                 with self.assertRaises(ValueError):
                     stats.CommonNeighbourMotif(bins)
         with self.assertRaises(ValueError):
@@ -158,12 +158,12 @@ class TemporalGraphGrammarContractTest(unittest.TestCase):
             dist.motif_weights[0] = 0.5
 
         for bad_weights in ([0, 0, 0, 0], [-1, 1, 1, 1], [np.nan, 1, 1, 1], [1, 1]):
-            with self.subTest(weights=bad_weights):
+            with self.subTest(weights=repr(bad_weights)):
                 with self.assertRaises(ValueError):
                     stats.TemporalGraphGrammarDistribution(bad_weights)
         for keyword in ("edge_rate", "node_rate", "edge_remove_rate"):
             for value in (-1.0, np.nan, np.inf):
-                with self.subTest(keyword=keyword, value=value):
+                with self.subTest(keyword=repr(keyword), value=repr(value)):
                     with self.assertRaises(ValueError):
                         stats.TemporalGraphGrammarDistribution([1, 1, 1, 1], **{keyword: value})
         with self.assertRaises(ValueError):
@@ -324,7 +324,7 @@ class LabeledTemporalGraphGrammarTest(unittest.TestCase):
             ([empty, edge], [0.0, 1.0], [3]),
         ]
         for value in invalid:
-            with self.subTest(value=value):
+            with self.subTest(value=repr(value)):
                 with self.assertRaises(ValueError):
                     dist.log_density(value)
 
@@ -406,11 +406,11 @@ class HomophilyTemporalGraphGrammarTest(unittest.TestCase):
             np.array([[[0.0, np.nan], [np.nan, 0.0]]]),
         ]
         for bad_rate in bad_rates:
-            with self.subTest(rate=bad_rate):
+            with self.subTest(rate=repr(bad_rate)):
                 with self.assertRaises(ValueError):
                     stats.HomophilyTemporalGraphGrammarDistribution(bad_rate, [0.5, 0.5], motif=motif)
         for bad_weights in ([0.0, 0.0], [-1.0, 2.0], [np.nan, 1.0], []):
-            with self.subTest(weights=bad_weights):
+            with self.subTest(weights=repr(bad_weights)):
                 with self.assertRaises(ValueError):
                     stats.HomophilyTemporalGraphGrammarDistribution(
                         np.zeros((1, len(bad_weights), len(bad_weights))),
@@ -419,7 +419,7 @@ class HomophilyTemporalGraphGrammarTest(unittest.TestCase):
                     )
 
         for bad_types in ([0], [0, 2], [0.0, 1.0]):
-            with self.subTest(types=bad_types):
+            with self.subTest(types=repr(bad_types)):
                 with self.assertRaises(ValueError):
                     dist.log_density(([empty, empty], bad_types))
         zero_cross = stats.HomophilyTemporalGraphGrammarDistribution(
@@ -603,7 +603,7 @@ class ChurningTemporalGraphGrammarTest(unittest.TestCase):
             [(np.array([[1.0]]), ["node"])],
         ]
         for sequence in invalid:
-            with self.subTest(sequence=sequence):
+            with self.subTest(sequence=repr(sequence)):
                 with self.assertRaises(ValueError):
                     dist.log_density(sequence)
 
@@ -689,7 +689,7 @@ class LatentRegimeTemporalGraphGrammarTest(unittest.TestCase):
 
         invalid_initial = ([1.0], [-1.0, 2.0], [np.nan, 1.0], [0.0, 0.0])
         for initial in invalid_initial:
-            with self.subTest(initial=initial):
+            with self.subTest(initial=repr(initial)):
                 with self.assertRaises(ValueError):
                     stats.LatentTemporalGraphGrammarDistribution([fixed, removal], initial)
         invalid_transition = (
@@ -699,7 +699,7 @@ class LatentRegimeTemporalGraphGrammarTest(unittest.TestCase):
             [[1.0, np.nan], [0.0, 1.0]],
         )
         for transition in invalid_transition:
-            with self.subTest(transition=transition):
+            with self.subTest(transition=repr(transition)):
                 with self.assertRaises(ValueError):
                     stats.LatentTemporalGraphGrammarDistribution(
                         [fixed, removal],
@@ -831,7 +831,7 @@ class RegimeSwitchingAttributesTest(unittest.TestCase):
             ([previous, current], [[0.5]], [[2], []]),
         ]
         for value in invalid:
-            with self.subTest(value=value):
+            with self.subTest(value=repr(value)):
                 with self.assertRaises(ValueError):
                     dist.log_density(value)
 
@@ -1005,7 +1005,7 @@ class LatentChurningTemporalGraphGrammarTest(unittest.TestCase):
         self.assertAlmostEqual(np.exp(dist.log_density(keep)) + np.exp(dist.log_density(drop)), 1.0, places=12)
 
         for bad_rates in ([], [1.0, 2.0], [-1.0], [np.nan]):
-            with self.subTest(rates=bad_rates):
+            with self.subTest(rates=repr(bad_rates)):
                 with self.assertRaises(ValueError):
                     stats.LatentChurningTemporalGraphGrammarDistribution([fixed], bad_rates)
         with self.assertRaises(ValueError):

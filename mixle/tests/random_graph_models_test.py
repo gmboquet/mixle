@@ -76,9 +76,9 @@ class RandomGraphModelsTestCase(unittest.TestCase):
             lambda adj: ErdosRenyiGraphModel.fit_mle(adj),
             lambda adj: StochasticBlockGraphModel.fit_mle(adj, [0, 0], num_blocks=1),
         ):
-            with self.subTest(model=fit), self.assertRaisesRegex(ValueError, "symmetric"):
+            with self.subTest(model=repr(fit)), self.assertRaisesRegex(ValueError, "symmetric"):
                 fit(asymmetric)
-            with self.subTest(model=fit), self.assertRaisesRegex(ValueError, "diagonal"):
+            with self.subTest(model=repr(fit)), self.assertRaisesRegex(ValueError, "diagonal"):
                 fit(self_loop)
 
     def test_stochastic_block_mle_recovers_block_edge_frequencies(self):
@@ -187,9 +187,9 @@ class RandomGraphModelsTestCase(unittest.TestCase):
             {"directed": 1},
             {"self_loops": 0},
         ):
-            with self.subTest(family="erdos", kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(family="erdos", kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 ErdosRenyiGraphModel.fit_mle(adjacency, **kwargs)
-            with self.subTest(family="sbm", kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(family="sbm", kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 StochasticBlockGraphModel.fit_mle(adjacency, [0, 0], num_blocks=1, **kwargs)
 
         for assignments, num_blocks in (
@@ -199,7 +199,10 @@ class RandomGraphModelsTestCase(unittest.TestCase):
             ([0, -1], 1),
             ([0, 1], 1),
         ):
-            with self.subTest(assignments=assignments, num_blocks=num_blocks), self.assertRaises(ValueError):
+            with (
+                self.subTest(assignments=repr(assignments), num_blocks=repr(num_blocks)),
+                self.assertRaises(ValueError),
+            ):
                 StochasticBlockGraphModel.fit_mle(adjacency, assignments, num_blocks=num_blocks)
 
         for controls in (
@@ -215,19 +218,19 @@ class RandomGraphModelsTestCase(unittest.TestCase):
             {"pseudo_count": np.inf},
             {"prior_p": np.nan},
         ):
-            with self.subTest(controls=controls), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(controls=repr(controls)), self.assertRaises((TypeError, ValueError)):
                 hard_em_stochastic_block_model(adjacency, num_blocks=1, **controls)
 
     def test_model_construction_and_sampling_validate_exact_schema(self):
         for assignments in ([[0, 0]], [0.0, 0.0], ["0", "0"], [0, 1]):
-            with self.subTest(assignments=assignments), self.assertRaises(ValueError):
+            with self.subTest(assignments=repr(assignments)), self.assertRaises(ValueError):
                 StochasticBlockGraphModel([[0.5]], assignments)
         with self.assertRaises(ValueError):
             StochasticBlockGraphModel(np.empty((0, 0)), [])
 
         model = ErdosRenyiGraphModel(0.5)
         for num_nodes in (1.5, True, -1):
-            with self.subTest(num_nodes=num_nodes), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(num_nodes=repr(num_nodes)), self.assertRaises((TypeError, ValueError)):
                 model.sample(num_nodes)
         with self.assertRaises(ValueError):
             model.sample(1, seed=2**32)

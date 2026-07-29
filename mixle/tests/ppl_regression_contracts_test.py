@@ -24,7 +24,7 @@ class RegressionRoutingAndDataContractTest(unittest.TestCase):
             ([0.0, np.nan], {"x": [0.0, 1.0]}),
             ([0.0, 1.0], {"x": [0.0, np.inf]}),
         ):
-            with self.subTest(data=data, given=given):
+            with self.subTest(data=repr(data), given=repr(given)):
                 with self.assertRaises(ValueError):
                     model.fit(data, given=given)
         grouped = Normal(free + Group("g"), free)

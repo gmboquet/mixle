@@ -119,7 +119,7 @@ class ConfirmRailTest(unittest.TestCase):
         # MXR-080-1738: the gate used ordinary truthiness, so the string "false" -- an entirely
         # ordinary way to spell "no" across JSON/CLI/form boundaries -- confirmed billable execution.
         for value in ("false", "0", "no", 1, [0], object()):
-            with self.subTest(confirm=value):
+            with self.subTest(confirm=repr(value)):
                 gpu = self._FakeGPU()
                 res = submit(PoolJob(run=lambda: 1, est_cost=0.5, budget=10.0), gpu, confirm=value)
                 self.assertEqual(res.status, "rejected")

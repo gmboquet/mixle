@@ -21,7 +21,7 @@ class ExponentialFamilyFisherTest(unittest.TestCase):
     def test_sample_budget_and_error_receipt(self):
         form = to_exponential_family(ExponentialDistribution(1.0))
         for invalid in (0, 1, -1):
-            with self.subTest(n_samples=invalid):
+            with self.subTest(n_samples=repr(invalid)):
                 with self.assertRaises(ValueError):
                     form.fisher_information(n_samples=invalid)
         with self.assertRaises(TypeError):

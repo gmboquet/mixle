@@ -73,7 +73,7 @@ class BradleyTerryTest(unittest.TestCase):
         dist = BradleyTerryDistribution(np.zeros(3))
         invalid = ((0, 0), (-1, 0), (0, 3), (0.5, 1), (0, 1, 2))
         for value in invalid:
-            with self.subTest(value=value):
+            with self.subTest(value=repr(value)):
                 with self.assertRaises((TypeError, ValueError)):
                     dist.log_density(value)
                 with self.assertRaises((TypeError, ValueError)):
@@ -118,7 +118,7 @@ class BradleyTerryTest(unittest.TestCase):
             {"dim": 3, "max_iter": 2.5},
             {"dim": 3, "tol": 0.0},
         ):
-            with self.subTest(kwargs=kwargs):
+            with self.subTest(kwargs=repr(kwargs)):
                 with self.assertRaises((TypeError, ValueError)):
                     BradleyTerryEstimator(**kwargs)
         estimator = BradleyTerryEstimator(3)

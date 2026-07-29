@@ -31,7 +31,7 @@ class SegmentalHmmDistributionContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not be empty"):
             _model(emissions=[], w=[])
         for weights in ([[0.6, 0.4]], [0.6, 0.5], [-0.1, 1.1], [np.nan, np.nan]):
-            with self.subTest(weights=weights), self.assertRaises(ValueError):
+            with self.subTest(weights=repr(weights)), self.assertRaises(ValueError):
                 _model(w=weights)
 
     def test_transition_matrix_is_not_reshaped_or_normalized(self):
@@ -42,7 +42,7 @@ class SegmentalHmmDistributionContractTest(unittest.TestCase):
             [[0.8, 0.2], [np.inf, 0.0]],
         )
         for transitions in invalid:
-            with self.subTest(transitions=transitions), self.assertRaises(ValueError):
+            with self.subTest(transitions=repr(transitions)), self.assertRaises(ValueError):
                 _model(transitions=transitions)
 
     def test_reachable_nonterminal_zero_row_is_rejected(self):
@@ -77,7 +77,7 @@ class SegmentalHmmDistributionContractTest(unittest.TestCase):
 class SegmentalHmmTrainingContractTest(unittest.TestCase):
     def test_estimator_controls_and_terminal_ids_are_exact(self):
         for invalid in (True, -1.0, np.inf, (1.0,), (1.0, 2.0, 3.0)):
-            with self.subTest(invalid=invalid), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(invalid=repr(invalid)), self.assertRaises((TypeError, ValueError)):
                 SegmentalHiddenMarkovEstimator([NullEstimator()], pseudo_count=invalid)
         with self.assertRaises(TypeError):
             SegmentalHiddenMarkovEstimator([NullEstimator()], terminal_states={0.5})
@@ -101,7 +101,7 @@ class SegmentalHmmTrainingContractTest(unittest.TestCase):
             (*valid[:4], [None], valid[5]),
         )
         for value in malformed:
-            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(value=repr(value)), self.assertRaises((TypeError, ValueError)):
                 estimator.estimate(None, value)
 
     def test_zero_count_rows_become_self_loops_not_uniform_fabrication(self):

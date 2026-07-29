@@ -21,7 +21,7 @@ from mixle.stats.univariate.discrete.integer_categorical import IntegerCategoric
 class IntegerCategoricalExponentialFamilyTest(unittest.TestCase):
     def test_reconstruction_positive_probs(self):
         for min_val, p in [(0, [0.2, 0.3, 0.5]), (-2, [0.1, 0.4, 0.25, 0.25]), (3, [0.6, 0.4])]:
-            with self.subTest(min_val=min_val, p=p):
+            with self.subTest(min_val=repr(min_val), p=repr(p)):
                 d = IntegerCategoricalDistribution(p_vec=p, min_val=min_val)
                 self.assertTrue(is_exponential_family(d))
                 form = to_exponential_family(d)

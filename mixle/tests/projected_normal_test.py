@@ -15,7 +15,7 @@ class ProjectedNormalTest(unittest.TestCase):
     def test_density_integrates_to_one(self):
         for mu in [(0.0, 0.0), (2.0, 0.0), (1.5, -1.0), (3.0, 2.0)]:
             integral, _ = quad(lambda t, d=PN(*mu): d.density(t), -np.pi, np.pi)
-            with self.subTest(mu=mu):
+            with self.subTest(mu=repr(mu)):
                 self.assertAlmostEqual(integral, 1.0, places=5)
 
     def test_seq_matches_scalar(self):
@@ -42,7 +42,7 @@ class ProjectedNormalTest(unittest.TestCase):
         from mixle.engines import NUMPY_ENGINE
 
         for mu_x, theta in ((40.0, 0.0), (40.0, np.pi)):
-            with self.subTest(mu_x=mu_x, theta=theta):
+            with self.subTest(mu_x=repr(mu_x), theta=repr(theta)):
                 d = PN(mu_x, 0.0)
                 encoded = d.dist_to_encoder().seq_encode([theta])
                 scalar = d.log_density(theta)
@@ -60,7 +60,7 @@ class ProjectedNormalTest(unittest.TestCase):
 
     def test_parameters_and_angles_must_be_finite(self):
         for parameters in ((np.nan, 0.0), (0.0, np.inf), (np.inf, 0.0)):
-            with self.subTest(parameters=parameters), self.assertRaises(ValueError):
+            with self.subTest(parameters=repr(parameters)), self.assertRaises(ValueError):
                 PN(*parameters)
         d = PN(1.0, 0.0)
         with self.assertRaises(ValueError):
@@ -77,7 +77,7 @@ class ProjectedNormalTest(unittest.TestCase):
             (np.asarray([1.0, 0.0]), np.asarray([0.0])),
             (np.asarray([np.nan]), np.asarray([0.0])),
         ):
-            with self.subTest(encoded=encoded), self.assertRaises(ValueError):
+            with self.subTest(encoded=repr(encoded)), self.assertRaises(ValueError):
                 d.seq_log_density(encoded)
             with self.assertRaises(ValueError):
                 d.backend_seq_log_density(encoded, NUMPY_ENGINE)
@@ -89,7 +89,7 @@ class ProjectedNormalTest(unittest.TestCase):
         accumulator.update(0.0, 1.0, None)
         before = accumulator.value()
         for weight in (-1.0, np.nan, np.inf):
-            with self.subTest(weight=weight), self.assertRaises(ValueError):
+            with self.subTest(weight=repr(weight)), self.assertRaises(ValueError):
                 accumulator.update(1.0, weight, None)
             self.assertEqual(accumulator.value(), before)
         with self.assertRaises(ProjectedNormalFitError):
@@ -99,7 +99,7 @@ class ProjectedNormalTest(unittest.TestCase):
             (0.0, 0.0, -1.0),
             (1.0, 0.0, 0.0),
         ):
-            with self.subTest(statistics=statistics), self.assertRaises(ValueError):
+            with self.subTest(statistics=repr(statistics)), self.assertRaises(ValueError):
                 estimator.estimate(None, statistics)
         with self.assertRaises(ValueError):
             d.estimator(pseudo_count=1.0)

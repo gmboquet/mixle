@@ -45,7 +45,7 @@ class KDETest(unittest.TestCase):
         data = np.array([0.25, 0.75])
         grid = np.linspace(0.0, 1.0, 4001)
         for bandwidth in (0.05, 0.2, 1.0, 10.0, 100.0):
-            with self.subTest(bandwidth=bandwidth):
+            with self.subTest(bandwidth=repr(bandwidth)):
                 fitted = kde(data, bandwidth=bandwidth, bounds=(0.0, 1.0))
                 self.assertAlmostEqual(trapezoid(fitted(grid), grid), 1.0, delta=2e-4)
 
@@ -171,7 +171,7 @@ class DegenerateInputTest(unittest.TestCase):
     def test_bandwidth_selectors_require_exact_positive_joint_dimension(self):
         sample = np.array([0.0, 1.0, 2.0])
         for bad_dimension in (0, -4, 1.5, True):
-            with self.subTest(d=bad_dimension):
+            with self.subTest(d=repr(bad_dimension)):
                 with self.assertRaises(ValueError):
                     silverman_bandwidth(sample, d=bad_dimension)
                 with self.assertRaises(ValueError):
@@ -332,7 +332,7 @@ class DegenerateInputTest(unittest.TestCase):
             np.ones((2, 2)),
             np.array([]),
         ):
-            with self.subTest(shape=bad_grid.shape):
+            with self.subTest(shape=repr(bad_grid.shape)):
                 with self.assertRaises(ValueError):
                     intensity(events, bad_grid, bandwidth=0.5)
 

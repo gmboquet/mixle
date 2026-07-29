@@ -162,7 +162,7 @@ class DPMModelHelpersTestCase(unittest.TestCase):
             {"sort_components": 1},
             {"alpha": True},
         ):
-            with self.subTest(controls=controls), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(controls=repr(controls)), self.assertRaises((TypeError, ValueError)):
                 fit_truncated_dpm([0.0], [component], GaussianEstimator(), **controls)
 
 
@@ -258,7 +258,7 @@ class PartiallyObservableMarkovDecisionProcessModelHelpersTestCase(unittest.Test
             (np.empty((1, 0, 0)), np.empty((1, 0, 1))),
             (np.ones((1, 2, 2)) / 2.0, np.empty((1, 2, 0))),
         ):
-            with self.subTest(transition=transition.shape, observation=observation.shape):
+            with self.subTest(transition=repr(transition.shape), observation=repr(observation.shape)):
                 with self.assertRaises(ValueError):
                     PartiallyObservableMarkovDecisionProcessModel(transition, observation)
 
@@ -279,11 +279,11 @@ class PartiallyObservableMarkovDecisionProcessModelHelpersTestCase(unittest.Test
             ([0.5], [0]),
             (["0"], [0]),
         ):
-            with self.subTest(actions=actions, observations=observations):
+            with self.subTest(actions=repr(actions), observations=repr(observations)):
                 with self.assertRaises((TypeError, ValueError)):
                     model.filter(actions, observations)
         for action in (True, "0", 0.5):
-            with self.subTest(action=action), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(action=repr(action)), self.assertRaises((TypeError, ValueError)):
                 model.predict_observation([1.0], action)
 
     def test_baum_welch_controls_and_schema_are_not_coerced(self):
@@ -308,7 +308,7 @@ class PartiallyObservableMarkovDecisionProcessModelHelpersTestCase(unittest.Test
                 "num_observations": 1,
                 **controls,
             }
-            with self.subTest(controls=controls), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(controls=repr(controls)), self.assertRaises((TypeError, ValueError)):
                 baum_welch_pomdp(**kwargs)
 
         with self.assertRaisesRegex(ValueError, "at least one"):
@@ -348,12 +348,12 @@ class KnowledgeGraphHelpersTestCase(unittest.TestCase):
             {"num_entities": 1.5, "num_relations": 1},
             {"num_entities": 2, "num_relations": 1, "scale": 0},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 TransEKnowledgeGraphModel.random(**kwargs)
 
         model = TransEKnowledgeGraphModel.random(3, 1, entity_names=["a", "b", "c"], relation_names=["r"])
         for kwargs in ({"margin": 0}, {"lr": np.nan}, {"max_its": 1.5}):
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 model.fit_margin([("a", "r", "b")], **kwargs)
 
     def test_negative_sampling_filters_all_known_truths(self):
@@ -411,10 +411,10 @@ class GrammarLearningHelpersTestCase(unittest.TestCase):
     def test_fit_rejects_invalid_budget_data_and_schema(self):
         estimator = CategoricalDistribution({"a": 0.5, "b": 0.5}).estimator(pseudo_count=1.0)
         for max_its in (0, -1, 1.5, True):
-            with self.subTest(max_its=max_its), self.assertRaises(ValueError):
+            with self.subTest(max_its=repr(max_its)), self.assertRaises(ValueError):
                 fit_induced_pcfg([["a"]], [estimator], 2, max_its=max_its)
         for data in ([], [[]], ["ab"]):
-            with self.subTest(data=data), self.assertRaises(ValueError):
+            with self.subTest(data=repr(data)), self.assertRaises(ValueError):
                 fit_induced_pcfg(data, [estimator], 2)
         with self.assertRaises(TypeError):
             fit_induced_pcfg([["a"]], [object()], 2)
@@ -494,7 +494,7 @@ class DependenceAndCausalityHelpersTestCase(unittest.TestCase):
             (0, 3, ()),
         )
         for x, y, given in invalid:
-            with self.subTest(x=x, y=y, given=given), self.assertRaises(ValueError):
+            with self.subTest(x=repr(x), y=repr(y), given=repr(given)), self.assertRaises(ValueError):
                 gaussian_conditional_independence(data, x, y, given=given)
         with self.assertRaises(ValueError):
             gaussian_conditional_independence(data, 0, 1, ridge=0)

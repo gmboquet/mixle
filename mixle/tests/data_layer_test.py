@@ -29,7 +29,7 @@ class DataLayerTest(unittest.TestCase):
         for nc in (1, 3, 8):
             a = seq_encode(data, model=g, num_chunks=nc)
             b = seq_encode(MaterializedSource(data, EXCHANGEABLE), model=g, num_chunks=nc)
-            with self.subTest(num_chunks=nc):
+            with self.subTest(num_chunks=repr(nc)):
                 self.assertEqual(len(a), len(b))
                 self.assertTrue(all(ca == cb and np.array_equal(pa, pb) for (ca, pa), (cb, pb) in zip(a, b)))
 
@@ -75,7 +75,7 @@ class DataLayerTest(unittest.TestCase):
                     num_chunks_for(100, **kwargs)
 
         for n in (0, -2, 2.5, False):
-            with self.subTest(n=n):
+            with self.subTest(n=repr(n)):
                 with self.assertRaises(ValueError):
                     partition_records(list(range(10)), EXCHANGEABLE, n)
 
@@ -151,7 +151,7 @@ class StructureCapabilityTest(unittest.TestCase):
         from mixle.data.structure import SampleStructure
 
         for kind in ("totally_bogus_kind", "", "IID", "Exchangeable"):  # closed vocabulary is case-sensitive
-            with self.subTest(kind=kind):
+            with self.subTest(kind=repr(kind)):
                 with self.assertRaises(ValueError):
                     SampleStructure(kind=kind)
 
@@ -162,7 +162,7 @@ class StructureCapabilityTest(unittest.TestCase):
         from mixle.data.structure import SampleStructure
 
         for by in (None, 123, [], {"a": 1}):
-            with self.subTest(by=by):
+            with self.subTest(by=repr(by)):
                 with self.assertRaises(ValueError):
                     SampleStructure(kind="partially_exchangeable", by=by)
         with self.assertRaises(ValueError):
@@ -174,7 +174,7 @@ class StructureCapabilityTest(unittest.TestCase):
         from mixle.data.structure import SampleStructure
 
         for kind in ("iid", "exchangeable", "sequential"):
-            with self.subTest(kind=kind):
+            with self.subTest(kind=repr(kind)):
                 self.assertTrue(SampleStructure(kind=kind).strides_records)
 
         recs = [{"g": i % 4, "x": float(i)} for i in range(12)]
@@ -182,7 +182,7 @@ class StructureCapabilityTest(unittest.TestCase):
             ("string", "g"),
             ("callable", grouping_policy("test.direct.group", "1", lambda r: r["g"])),
         ):
-            with self.subTest(by=label):
+            with self.subTest(by=repr(label)):
                 structure = SampleStructure(kind="partially_exchangeable", by=by)
                 self.assertFalse(structure.strides_records)
                 parts = partition_records(recs, structure, 4)

@@ -181,7 +181,7 @@ class GMMTest(unittest.TestCase):
             {"dim": 3, "allow_approximate_center": "false"},
         )
         for kwargs in invalid:
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 GeneralizedMallowsModelEstimator(**kwargs)
         sampler = GeneralizedMallowsModelDistribution([0, 1, 2]).sampler()
         with self.assertRaises(ValueError):

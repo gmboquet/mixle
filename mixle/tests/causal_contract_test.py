@@ -82,7 +82,7 @@ class CausalContractTest(unittest.TestCase):
                 identifying_expression="E[Y|X]",
             )
         for status in (IdentificationStatus.IDENTIFIED, IdentificationStatus.PARTIALLY_IDENTIFIED):
-            with self.subTest(status=status), self.assertRaisesRegex(CausalContractError, "prediction-only"):
+            with self.subTest(status=repr(status)), self.assertRaisesRegex(CausalContractError, "prediction-only"):
                 IdentificationResult(
                     estimand_ref=self.estimand.identity,
                     status=status,

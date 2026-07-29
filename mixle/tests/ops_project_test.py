@@ -43,7 +43,7 @@ class OpsProjectTest(unittest.TestCase):
         # something else entirely. The budget is the accuracy of an empirical projection; a
         # nonsensical one is refused where it was given.
         for bad in (2.9, 0, -5, True, "20000"):
-            with self.subTest(n_samples=bad):
+            with self.subTest(n_samples=repr(bad)):
                 with self.assertRaises(ValueError):
                     project(GaussianDistribution(0.0, 1.0), GaussianDistribution(0.0, 1.0), n_samples=bad)
         with self.assertRaises(ValueError):

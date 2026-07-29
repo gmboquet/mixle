@@ -328,7 +328,7 @@ class QuantizedHmmEngineTestCase(unittest.TestCase):
         host.seq_update(enc, np.ones(len(self.data)), self.dist)
         host_value = host.value()
         for name, engine in self.engines:
-            with self.subTest(engine=name):
+            with self.subTest(engine=repr(name)):
                 self.assertTrue(self.dist.supports_engine(engine))
                 got = np.asarray(engine.to_numpy(backend_seq_log_density(self.dist, enc, engine)))
                 self.assertTrue(np.allclose(got, ref, atol=1.0e-9))

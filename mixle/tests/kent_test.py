@@ -32,7 +32,7 @@ class KentTest(unittest.TestCase):
                 ),
                 [0, mp.pi],
             )
-            with self.subTest(kappa=kappa, beta=beta):
+            with self.subTest(kappa=repr(kappa), beta=repr(beta)):
                 self.assertTrue(mp.almosteq(integ, 1, 1e-9))
 
     def test_moment_identities(self):
@@ -64,7 +64,7 @@ class KentTest(unittest.TestCase):
             acc = est.accumulator_factory().make()
             acc.seq_update(true.dist_to_encoder().seq_encode(data), np.ones(len(data)), None)
             m = est.estimate(len(data), acc.value())
-            with self.subTest(kappa=kappa, beta=beta):
+            with self.subTest(kappa=repr(kappa), beta=repr(beta)):
                 self.assertAlmostEqual(m.kappa, kappa, delta=1.0)
                 self.assertAlmostEqual(m.beta, beta, delta=0.6)
                 self.assertAlmostEqual(abs(m.gamma[:, 0] @ g[:, 0]), 1.0, delta=1e-2)
@@ -84,7 +84,7 @@ class KentTest(unittest.TestCase):
         # rejection loop spin forever: an all-NaN, therefore always-False, accept mask every iteration,
         # with nothing that would ever change between iterations.
         for bad_beta in (float("nan"), float("inf"), float("-inf")):
-            with self.subTest(beta=bad_beta):
+            with self.subTest(beta=repr(bad_beta)):
                 with self.assertRaises(ValueError):
                     Kent(np.eye(3), 5.0, bad_beta)
 
@@ -122,7 +122,7 @@ class KentTest(unittest.TestCase):
         accumulator.update([1.0, 0.0, 0.0], 1.0, None)
         before = accumulator.value()
         for weight in (-1.0, np.nan, np.inf):
-            with self.subTest(weight=weight), self.assertRaises(ValueError):
+            with self.subTest(weight=repr(weight)), self.assertRaises(ValueError):
                 accumulator.update([0.0, 1.0, 0.0], weight, None)
             actual = accumulator.value()
             self.assertEqual(actual[0], before[0])
@@ -135,7 +135,7 @@ class KentTest(unittest.TestCase):
             (1.0, np.zeros(3), np.eye(3)),
             (1.0, np.zeros(3), np.diag([2.0, -1.0, 0.0])),
         ):
-            with self.subTest(statistics=statistics), self.assertRaises(ValueError):
+            with self.subTest(statistics=repr(statistics)), self.assertRaises(ValueError):
                 estimator.estimate(None, statistics)
 
     def test_capabilities(self):

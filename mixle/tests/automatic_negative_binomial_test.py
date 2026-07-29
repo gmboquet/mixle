@@ -14,7 +14,7 @@ class AutomaticNegativeBinomialTest(unittest.TestCase):
         for r, p in [(3.0, 0.3), (5.0, 0.5)]:  # var = mean/p > mean
             data = list(rng.negative_binomial(r, p, size=6000))
             m = fit(data, get_estimator(data), max_its=30, out=None)
-            with self.subTest(r=r, p=p):
+            with self.subTest(r=repr(r), p=repr(p)):
                 self.assertEqual(type(m).__name__, "NegativeBinomialDistribution")
 
     def test_poisson_counts_not_stolen(self):

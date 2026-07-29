@@ -155,7 +155,7 @@ class QuantizeMLPTest(unittest.TestCase):
             [(valid_w, 1.0, valid_b), (np.ones((2, 4), dtype=np.int8), 1.0, valid_b)],
         )
         for layers in invalid_layers:
-            with self.subTest(layers=layers), self.assertRaises(ValueError):
+            with self.subTest(layers=repr(layers)), self.assertRaises(ValueError):
                 QuantizedMLP(layers)
         with self.assertRaisesRegex(ValueError, "finite"):
             quantize_dequantize_array(np.asarray([1.0, np.nan]))

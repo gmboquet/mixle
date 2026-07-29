@@ -64,11 +64,11 @@ class EwensTest(unittest.TestCase):
         dist = EwensDistribution(3)
         malformed = ([0, 0, 1], [0, 1], [0, 1, 4], [0.5, 1.0, 2.0])
         for value in malformed:
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 dist.log_density(value)
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 dist.seq_log_density(np.asarray([value]))
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 dist.dist_to_encoder().seq_encode([value])
 
     def test_encoder_identity_includes_dimension(self):

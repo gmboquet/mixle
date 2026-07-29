@@ -48,7 +48,7 @@ class LeafEngineTestCase(unittest.TestCase):
         host.seq_update(enc, weights, dist)
         hv = _flatten(host.value())
         for name, engine in engines:
-            with self.subTest(dist=type(dist).__name__, engine=name):
+            with self.subTest(dist=type(dist).__name__, engine=repr(name)):
                 kernel = dist.kernel(engine=engine, estimator=est)
                 value = kernel.accumulate(enc, weights)
                 self.assertTrue(

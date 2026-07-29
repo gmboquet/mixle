@@ -161,13 +161,13 @@ class BoundsAndCountValidationTest(unittest.TestCase):
         )
         for bad_bounds in bad_bounds_cases:
             for fn in (latin_hypercube, random_design, sobol_design, halton_design, maxpro_design):
-                with self.subTest(bounds=bad_bounds, fn=fn.__name__):
+                with self.subTest(bounds=repr(bad_bounds), fn=repr(fn.__name__)):
                     with self.assertRaises(ValueError):
                         fn(bad_bounds, 4)
-            with self.subTest(bounds=bad_bounds, fn="maximin_latin_hypercube"):
+            with self.subTest(bounds=repr(bad_bounds), fn="maximin_latin_hypercube"):
                 with self.assertRaises(ValueError):
                     maximin_latin_hypercube(bad_bounds, 4)
-            with self.subTest(bounds=bad_bounds, fn="full_factorial"):
+            with self.subTest(bounds=repr(bad_bounds), fn="full_factorial"):
                 with self.assertRaises(ValueError):
                     full_factorial(bad_bounds, levels=2)
 
@@ -233,7 +233,7 @@ class BoundsAndCountValidationTest(unittest.TestCase):
             maxpro_design(bounds, 4, seed=1, restarts=1, swaps=0, maxiter=0),
         )
         for design in designs:
-            with self.subTest(design=design):
+            with self.subTest(design=repr(design)):
                 self.assertTrue(np.all(np.isfinite(design)))
                 self.assertTrue(_within_bounds(design, bounds))
 

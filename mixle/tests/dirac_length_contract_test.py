@@ -42,14 +42,14 @@ class DiracLengthContractTestCase(unittest.TestCase):
     def test_dirac_support_and_observations_require_exact_integers(self):
         length = IntegerCategoricalDistribution(0, [1.0])
         for invalid in (0.5, True, np.nan, np.inf, "0"):
-            with self.subTest(location=invalid), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(location=repr(invalid)), self.assertRaises((TypeError, ValueError)):
                 DiracLengthMixtureDistribution(length, p=0.5, v=invalid)
 
         model = DiracLengthMixtureDistribution(length, p=0.5, v=0)
         for invalid in (0.5, True, np.nan, np.inf, "0"):
-            with self.subTest(observation=invalid), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(observation=repr(invalid)), self.assertRaises((TypeError, ValueError)):
                 model.log_density(invalid)
-            with self.subTest(encoded_observation=invalid), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(encoded_observation=repr(invalid)), self.assertRaises((TypeError, ValueError)):
                 model.dist_to_encoder().seq_encode([invalid])
 
     def test_fixed_zero_probability_is_preserved(self):
@@ -92,14 +92,14 @@ class DiracLengthContractTestCase(unittest.TestCase):
     def test_probability_weights_and_estimator_statistics_are_validated(self):
         length = IntegerCategoricalDistribution(0, [1.0])
         for invalid in (-0.1, 1.1, np.nan, np.inf, True):
-            with self.subTest(probability=invalid), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(probability=repr(invalid)), self.assertRaises((TypeError, ValueError)):
                 DiracLengthMixtureDistribution(length, p=invalid)
 
         model = DiracLengthMixtureDistribution(length, p=0.5)
         encoded = model.dist_to_encoder().seq_encode([0])
         accumulator = model.estimator().accumulator_factory().make()
         for invalid in ([-1.0], [np.nan], [np.inf], [True]):
-            with self.subTest(weight=invalid), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(weight=repr(invalid)), self.assertRaises((TypeError, ValueError)):
                 accumulator.seq_update(encoded, invalid, model)
 
         estimator = DiracLengthMixtureEstimator(NullEstimator())
@@ -108,7 +108,7 @@ class DiracLengthContractTestCase(unittest.TestCase):
             (np.asarray([-1.0, 1.0]), None),
             (np.asarray([np.nan, 1.0]), None),
         ):
-            with self.subTest(statistics=invalid[0]), self.assertRaises(ValueError):
+            with self.subTest(statistics=repr(invalid[0])), self.assertRaises(ValueError):
                 estimator.estimate(None, invalid)
 
 

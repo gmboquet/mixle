@@ -186,7 +186,7 @@ class SqlCursorSourceStreamingTest(unittest.TestCase):
         ref_records = [(i, float(i)) for i in range(n)]
 
         for nc in (1, 3, 8):
-            with self.subTest(num_chunks=nc):
+            with self.subTest(num_chunks=repr(nc)):
                 src = read_sql(f"sqlite:///{path}", "SELECT id, val FROM t ORDER BY id", batch_size=5)
                 encoder = _RecordingEncoder([])
                 result = src.encode(encoder, num_chunks=nc)

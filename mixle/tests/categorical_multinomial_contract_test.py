@@ -40,7 +40,7 @@ class CategoricalMultinomialProbabilityContractTest(unittest.TestCase):
             [(["unhashable"], 1)],
             [("not-a-pair",)],
         ):
-            with self.subTest(invalid=invalid), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(invalid=repr(invalid)), self.assertRaises((TypeError, ValueError)):
                 self.dist.log_density(invalid)
 
     def test_zero_total_normalized_semantics_match_scalar_batch_and_backend(self):
@@ -83,7 +83,7 @@ class CategoricalMultinomialProbabilityContractTest(unittest.TestCase):
             len_dist=PointMassDistribution(1),
         ).sampler(seed=2)
         for invalid in (1.5, -1, True):
-            with self.subTest(invalid=invalid), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(invalid=repr(invalid)), self.assertRaises((TypeError, ValueError)):
                 sampler.sample(size=invalid)
 
 
@@ -204,10 +204,10 @@ class MultisetProductEnumeratorContractTest(unittest.TestCase):
 
     def test_size_and_child_scores_are_validated(self):
         for invalid in (1.5, -1, True):
-            with self.subTest(invalid=invalid), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(invalid=repr(invalid)), self.assertRaises((TypeError, ValueError)):
                 MultisetProductEnumerator(BufferedStream(iter([("a", -0.1)])), invalid)
         for invalid_score in (np.nan, np.inf, -np.inf, 0.1):
-            with self.subTest(invalid_score=invalid_score), self.assertRaises(ValueError):
+            with self.subTest(invalid_score=repr(invalid_score)), self.assertRaises(ValueError):
                 MultisetProductEnumerator(
                     BufferedStream(iter([("a", invalid_score)])),
                     1,

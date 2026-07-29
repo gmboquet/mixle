@@ -50,10 +50,10 @@ class BoundedValueArrayTest(unittest.TestCase):
 
     def test_invalid_cap_and_counts_are_rejected(self):
         for cap in (0, -1, 1.5, True):
-            with self.subTest(cap=cap), self.assertRaisesRegex(ValueError, "positive integer"):
+            with self.subTest(cap=repr(cap)), self.assertRaisesRegex(ValueError, "positive integer"):
                 _value_array_from_vdict({1: 1}, cap=cap)
         for count in (-1.0, float("nan"), float("inf")):
-            with self.subTest(count=count), self.assertRaisesRegex(ValueError, "finite and nonnegative"):
+            with self.subTest(count=repr(count)), self.assertRaisesRegex(ValueError, "finite and nonnegative"):
                 _value_array_from_vdict({1: count})
 
 

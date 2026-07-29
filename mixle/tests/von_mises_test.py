@@ -74,7 +74,7 @@ class VonMisesTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             VonMisesDistribution(0.0, -1.0)
         for parameters in ((np.nan, 1.0), (0.0, np.nan), (0.0, np.inf)):
-            with self.subTest(parameters=parameters), self.assertRaises(ValueError):
+            with self.subTest(parameters=repr(parameters)), self.assertRaises(ValueError):
                 VonMisesDistribution(*parameters)
 
     def test_forged_encoded_observations_are_rejected(self):
@@ -86,7 +86,7 @@ class VonMisesTestCase(unittest.TestCase):
             (np.asarray([1.0, 0.0]), np.asarray([0.0])),
             (np.asarray([np.nan]), np.asarray([0.0])),
         ):
-            with self.subTest(encoded=encoded), self.assertRaises(ValueError):
+            with self.subTest(encoded=repr(encoded)), self.assertRaises(ValueError):
                 dist.seq_log_density(encoded)
             with self.assertRaises(ValueError):
                 dist.backend_seq_log_density(encoded, NUMPY_ENGINE)
@@ -98,7 +98,7 @@ class VonMisesTestCase(unittest.TestCase):
         accumulator.update(0.0, 1.0, None)
         before = accumulator.value()
         for weight in (-1.0, np.nan, np.inf):
-            with self.subTest(weight=weight), self.assertRaises(ValueError):
+            with self.subTest(weight=repr(weight)), self.assertRaises(ValueError):
                 accumulator.update(1.0, weight, None)
             self.assertEqual(accumulator.value(), before)
         with self.assertRaises(VonMisesFitError):
@@ -110,7 +110,7 @@ class VonMisesTestCase(unittest.TestCase):
             (1.0, np.nan, 0.0),
             (-1.0, 0.0, 0.0),
         ):
-            with self.subTest(statistics=statistics), self.assertRaises(ValueError):
+            with self.subTest(statistics=repr(statistics)), self.assertRaises(ValueError):
                 estimator.estimate(None, statistics)
 
     def test_uniform_fit_records_non_identifiable_direction(self):

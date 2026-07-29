@@ -27,7 +27,7 @@ class BayesianNetworkWeightedContractTest(unittest.TestCase):
         data = [(0.0,), (1.0,)]
         invalid = ([], [1.0], [-1.0, 2.0], [np.nan, 1.0], [0.0, 0.0])
         for weights in invalid:
-            with self.subTest(weights=weights), self.assertRaises(ValueError):
+            with self.subTest(weights=repr(weights)), self.assertRaises(ValueError):
                 learn_bayesian_network(data, weights=weights)
 
     def test_multinomial_optimizer_failure_is_not_a_fitted_factor(self):
@@ -62,7 +62,7 @@ class BayesianNetworkMixtureContractTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             MixtureOfBayesianNetworks([], [])
         for weights in ([1.0], [0.4, 0.4], [1.1, -0.1], [np.nan, np.nan]):
-            with self.subTest(weights=weights), self.assertRaises(ValueError):
+            with self.subTest(weights=repr(weights)), self.assertRaises(ValueError):
                 MixtureOfBayesianNetworks([network, network], weights)
         model = MixtureOfBayesianNetworks([network, network], [0.5, 0.5])
         with self.assertRaisesRegex(ValueError, "zero probability"):

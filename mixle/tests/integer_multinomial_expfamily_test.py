@@ -26,7 +26,7 @@ class IntegerMultinomialExponentialFamilyTest(unittest.TestCase):
             (3, [0.6, 0.4], [[(3, 5.0)], [(4, 2.0), (3, 1.0)]]),
         ]
         for min_val, p, x in cases:
-            with self.subTest(min_val=min_val, p=p):
+            with self.subTest(min_val=repr(min_val), p=repr(p)):
                 d = IntegerMultinomialDistribution(min_val=min_val, p_vec=p)  # len_dist defaults to Null
                 self.assertTrue(is_exponential_family(d))
                 form = to_exponential_family(d)

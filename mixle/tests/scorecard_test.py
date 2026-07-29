@@ -239,7 +239,7 @@ class DefaultJudgeContractTest(unittest.TestCase):
     def test_a_blank_reference_answer_is_not_scorable(self):
         system = System(SystemConfig(teacher=lambda p: "anything at all"))
         for blank in ("", "   "):
-            with self.subTest(expected=blank), self.assertRaisesRegex(ValueError, "non-empty reference"):
+            with self.subTest(expected=repr(blank)), self.assertRaisesRegex(ValueError, "non-empty reference"):
                 evaluate(system, [(Query("q1"), blank)])
         with self.assertRaises(ValueError):
             _default_scorer("anything at all", "")

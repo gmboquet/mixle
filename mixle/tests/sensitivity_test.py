@@ -241,7 +241,7 @@ class MorrisTrajectoryTest(unittest.TestCase):
         # derivation (see morris_screening's docstring) of why the design is unbiased.
         idxs = np.argmin(np.abs(self.all_points[:, :, None] - self.grid[None, None, :]), axis=2)
         for j in range(self.D):
-            with self.subTest(dim=j):
+            with self.subTest(dim=repr(j)):
                 counts = np.bincount(idxs[:, j], minlength=self.LEVELS)
                 frac = counts / counts.sum()
                 np.testing.assert_allclose(frac, 1.0 / self.LEVELS, atol=0.05)
@@ -265,7 +265,7 @@ class MorrisTrajectoryTest(unittest.TestCase):
             return 2.0 * x[:, 0] + 5.0 * x[:, 1] - 3.0 * x[:, 2]
 
         for levels in (2, 4, 6, 8):
-            with self.subTest(levels=levels):
+            with self.subTest(levels=repr(levels)):
                 res = morris_screening(linear3, [(0.0, 1.0)] * 3, trajectories=15, levels=levels, seed=levels)
                 np.testing.assert_allclose(res["mu_star"], [2.0, 5.0, 3.0], atol=1e-9)
                 np.testing.assert_allclose(res["sigma"], [0.0, 0.0, 0.0], atol=1e-9)
@@ -309,17 +309,17 @@ class SharedValidationContractTest(unittest.TestCase):
 
     def test_bad_bounds_shape_is_rejected(self):
         for func, kwargs in self.ESTIMATORS:
-            with self.subTest(func=func.__name__), self.assertRaises(ValueError):
+            with self.subTest(func=repr(func.__name__)), self.assertRaises(ValueError):
                 func(_linear, [(0, 1, 2), (0, 1, 2)], **kwargs)  # (d, 3), not (d, 2)
 
     def test_non_finite_bounds_are_rejected(self):
         for func, kwargs in self.ESTIMATORS:
-            with self.subTest(func=func.__name__), self.assertRaises(ValueError):
+            with self.subTest(func=repr(func.__name__)), self.assertRaises(ValueError):
                 func(_linear, [(0, np.inf), (0, 1)], **kwargs)
 
     def test_reversed_bounds_are_rejected(self):
         for func, kwargs in self.ESTIMATORS:
-            with self.subTest(func=func.__name__), self.assertRaises(ValueError):
+            with self.subTest(func=repr(func.__name__)), self.assertRaises(ValueError):
                 func(_linear, [(1, 0), (0, 1)], **kwargs)  # lower > upper
 
     def test_fractional_count_is_rejected(self):
@@ -330,7 +330,7 @@ class SharedValidationContractTest(unittest.TestCase):
             (dgsm, {"n": 32.5}),
         )
         for func, kwargs in cases:
-            with self.subTest(func=func.__name__), self.assertRaises(ValueError):
+            with self.subTest(func=repr(func.__name__)), self.assertRaises(ValueError):
                 func(_linear, [(0, 1), (0, 1)], **kwargs)
 
     def test_fractional_harmonics_and_levels_are_also_rejected(self):
@@ -342,17 +342,17 @@ class SharedValidationContractTest(unittest.TestCase):
 
     def test_wrong_length_names_are_rejected(self):
         for func, kwargs in self.ESTIMATORS:
-            with self.subTest(func=func.__name__), self.assertRaises(ValueError):
+            with self.subTest(func=repr(func.__name__)), self.assertRaises(ValueError):
                 func(_linear, [(0, 1), (0, 1)], names=["only_one"], **kwargs)
 
     def test_wrong_cardinality_model_output_is_rejected(self):
         for func, kwargs in self.ESTIMATORS:
-            with self.subTest(func=func.__name__), self.assertRaises(ValueError):
+            with self.subTest(func=repr(func.__name__)), self.assertRaises(ValueError):
                 func(_wrong_cardinality, [(0, 1), (0, 1)], **kwargs)
 
     def test_non_finite_model_output_is_rejected(self):
         for func, kwargs in self.ESTIMATORS:
-            with self.subTest(func=func.__name__), self.assertRaises(ValueError):
+            with self.subTest(func=repr(func.__name__)), self.assertRaises(ValueError):
                 func(_non_finite_output, [(0, 1), (0, 1)], **kwargs)
 
     def test_zero_count_is_rejected_before_any_computation_not_nan(self):
@@ -377,7 +377,7 @@ class SharedValidationContractTest(unittest.TestCase):
     def test_well_formed_inputs_still_work_for_every_estimator(self):
         # Negative control: the new validation must not reject a normal, well-posed call.
         for func, kwargs in self.ESTIMATORS:
-            with self.subTest(func=func.__name__):
+            with self.subTest(func=repr(func.__name__)):
                 res = func(_linear, [(0, 1), (0, 1)], seed=0, **kwargs)
                 self.assertEqual(len(res["names"]), 2)
                 self.assertEqual(res["names"], ["x0", "x1"])

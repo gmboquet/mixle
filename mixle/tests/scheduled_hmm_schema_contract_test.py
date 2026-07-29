@@ -58,14 +58,17 @@ class ScheduledHmmScheduleContractTest(unittest.TestCase):
     def test_phase_counts_are_exact_positive_integers(self):
         for schedule_type in (ByPosition, ByRelativePosition):
             for invalid in (True, 1.5, "2"):
-                with self.subTest(schedule_type=schedule_type, invalid=invalid), self.assertRaises(TypeError):
+                with (
+                    self.subTest(schedule_type=repr(schedule_type), invalid=repr(invalid)),
+                    self.assertRaises(TypeError),
+                ):
                     schedule_type(invalid)
             with self.assertRaises(ValueError):
                 schedule_type(0)
 
     def test_length_boundaries_are_exact_nonnegative_and_increasing(self):
         for invalid in ([1.5], [True], ["2"]):
-            with self.subTest(invalid=invalid), self.assertRaises(TypeError):
+            with self.subTest(invalid=repr(invalid)), self.assertRaises(TypeError):
                 ByLength(invalid)
         with self.assertRaises(ValueError):
             ByLength([-1])
@@ -97,7 +100,7 @@ class ScheduledHmmProbabilityContractTest(unittest.TestCase):
             [[np.nan, np.nan]],
         )
         for value in invalid:
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 _model(inits=value)
 
     def test_transition_probabilities_are_exact_row_simplexes(self):
@@ -108,7 +111,7 @@ class ScheduledHmmProbabilityContractTest(unittest.TestCase):
             [[[0.8, 0.2], [np.inf, 0.0]]],
         )
         for value in invalid:
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 _model(transitions=value)
 
     def test_emission_grid_geometry_is_exact(self):
@@ -132,7 +135,7 @@ class ScheduledHmmEstimatorContractTest(unittest.TestCase):
     def test_estimator_controls_are_exact_and_bounded(self):
         model = _model()
         for invalid in (True, -1.0, np.inf):
-            with self.subTest(invalid=invalid), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(invalid=repr(invalid)), self.assertRaises((TypeError, ValueError)):
                 model.estimator(pseudo_count=invalid)
 
     def test_distribution_estimator_preserves_every_emission_family(self):

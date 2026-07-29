@@ -132,7 +132,7 @@ class EvaluateCheckpointTest(unittest.TestCase):
             {"checkpoint_id": ""},
             {"metadata": []},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 evaluate_checkpoint(model, **kwargs)
 
 
@@ -212,7 +212,7 @@ class RegressionTrackingTest(unittest.TestCase):
         )
         for report in cases:
             with (
-                self.subTest(schema=[task.name for task in report.tasks]),
+                self.subTest(schema=repr([task.name for task in report.tasks])),
                 self.assertRaisesRegex(ValueError, "schema"),
             ):
                 track_regression([baseline, report])
@@ -244,7 +244,7 @@ class RegressionTrackingTest(unittest.TestCase):
 
     def test_rejects_non_finite_threshold(self):
         for threshold in (-0.1, np.nan, np.inf, True):
-            with self.subTest(threshold=threshold), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(threshold=repr(threshold)), self.assertRaises((TypeError, ValueError)):
                 track_regression([], threshold=threshold)
 
 

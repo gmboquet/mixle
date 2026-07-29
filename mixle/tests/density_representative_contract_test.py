@@ -34,23 +34,23 @@ class DensityRepresentativeContractTest(unittest.TestCase):
 
     def test_quantile_rejects_invalid_index_and_sample_budgets(self):
         for q in (np.nan, np.inf, -0.1, 1.1):
-            with self.subTest(q=q):
+            with self.subTest(q=repr(q)):
                 with self.assertRaises(ValueError):
                     self.dist.density_quantile(q, n_samples=2)
         with self.assertRaises(TypeError):
             self.dist.density_quantile(True, n_samples=2)
         for budget in (0, -1):
-            with self.subTest(n_samples=budget):
+            with self.subTest(n_samples=repr(budget)):
                 with self.assertRaises(ValueError):
                     self.dist.density_quantile(0.5, n_samples=budget)
         for budget in (True, 1.5):
-            with self.subTest(n_samples=budget):
+            with self.subTest(n_samples=repr(budget)):
                 with self.assertRaises(TypeError):
                     self.dist.density_quantile(0.5, n_samples=budget)
 
     def test_enumeration_rejects_invalid_or_incoherent_budgets(self):
         for points in (0, -1):
-            with self.subTest(num_points=points):
+            with self.subTest(num_points=repr(points)):
                 with self.assertRaises(ValueError):
                     self.dist.density_enumeration(points, n_samples=2)
         with self.assertRaises(TypeError):
@@ -111,17 +111,17 @@ class DensityRepresentativeContractTest(unittest.TestCase):
     def test_top_p_validates_controls_before_consuming(self):
         categorical = CategoricalDistribution({"a": 0.6, "b": 0.4})
         for target in (np.nan, np.inf, -0.1, 1.1):
-            with self.subTest(p=target):
+            with self.subTest(p=repr(target)):
                 with self.assertRaises(ValueError):
                     categorical.enumerator().top_p(target)
         with self.assertRaises(TypeError):
             categorical.enumerator().top_p(True)
         for cap in (0, -1):
-            with self.subTest(max_items=cap):
+            with self.subTest(max_items=repr(cap)):
                 with self.assertRaises(ValueError):
                     categorical.enumerator().top_p(0.0, max_items=cap)
         for cap in (True, 1.5):
-            with self.subTest(max_items=cap):
+            with self.subTest(max_items=repr(cap)):
                 with self.assertRaises(TypeError):
                     categorical.enumerator().top_p(0.0, max_items=cap)
         with self.assertRaisesRegex(ValueError, "requires max_items"):
@@ -143,7 +143,7 @@ class DensityRepresentativeContractTest(unittest.TestCase):
 
     def test_top_p_rejects_invalid_enumerated_log_masses(self):
         for log_prob in (np.nan, np.inf, -np.inf, 0.1):
-            with self.subTest(log_prob=log_prob):
+            with self.subTest(log_prob=repr(log_prob)):
                 enum = _ListEnumerator([("x", log_prob)], support_size=1)
                 with self.assertRaises(ValueError):
                     enum.top_p(0.5)

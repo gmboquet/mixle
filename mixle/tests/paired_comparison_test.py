@@ -96,7 +96,7 @@ class PairedComparisonContractTest(unittest.TestCase):
         pair_dist = ThurstoneMostellerDistribution(np.zeros(3))
         invalid_pairs = ((0, 0), (-1, 0), (0, 3), (0.5, 1), (0, 1, 2))
         for value in invalid_pairs:
-            with self.subTest(value=value):
+            with self.subTest(value=repr(value)):
                 with self.assertRaises((TypeError, ValueError)):
                     pair_dist.log_density(value)
                 with self.assertRaises((TypeError, ValueError)):
@@ -107,7 +107,7 @@ class PairedComparisonContractTest(unittest.TestCase):
         tie_dist = DavidsonDistribution(np.zeros(3))
         invalid_ties = ((0, 0, 0), (-1, 1, 0), (0, 3, 0), (0, 1, 3), (0, 1, 0.5))
         for value in invalid_ties:
-            with self.subTest(value=value):
+            with self.subTest(value=repr(value)):
                 with self.assertRaises((TypeError, ValueError)):
                     tie_dist.log_density(value)
                 with self.assertRaises((TypeError, ValueError)):
@@ -150,7 +150,7 @@ class PairedComparisonContractTest(unittest.TestCase):
             lambda: DavidsonDistribution(np.zeros(3), nu=np.nan),
             lambda: RaoKupperDistribution(np.zeros(3), nu=np.inf),
         ):
-            with self.subTest(factory=factory):
+            with self.subTest(factory=repr(factory)):
                 with self.assertRaises((TypeError, ValueError)):
                     factory()
 
@@ -161,7 +161,7 @@ class PairedComparisonContractTest(unittest.TestCase):
             RaoKupperDistribution(np.zeros(3)),
         ):
             for size in (-1, 1.5):
-                with self.subTest(distribution=type(distribution).__name__, size=size):
+                with self.subTest(distribution=type(distribution).__name__, size=repr(size)):
                     with self.assertRaises((TypeError, ValueError)):
                         distribution.sampler(seed=1).sample(size)
 

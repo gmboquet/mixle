@@ -50,7 +50,7 @@ class WatsonTest(unittest.TestCase):
 
     def test_large_finite_concentrations_remain_finite(self):
         for kappa in (-10000.0, 10000.0):
-            with self.subTest(kappa=kappa):
+            with self.subTest(kappa=repr(kappa)):
                 d = WatsonDistribution(self.mu, kappa)
                 self.assertTrue(np.isfinite(d._log_const))
                 self.assertTrue(np.isfinite(_kummer_ratio(kappa, self.p)))
@@ -68,10 +68,10 @@ class WatsonTest(unittest.TestCase):
             [2.0, 0.0, 0.0],
             [np.nan, 0.0, 0.0],
         ):
-            with self.subTest(mu=bad_mu), self.assertRaises(ValueError):
+            with self.subTest(mu=repr(bad_mu)), self.assertRaises(ValueError):
                 WatsonDistribution(bad_mu, 4.0)
         for bad_kappa in (np.nan, np.inf, -np.inf):
-            with self.subTest(kappa=bad_kappa), self.assertRaises(ValueError):
+            with self.subTest(kappa=repr(bad_kappa)), self.assertRaises(ValueError):
                 WatsonDistribution(self.mu, bad_kappa)
 
     def test_all_scoring_paths_reject_off_sphere_observations(self):
@@ -113,7 +113,7 @@ class WatsonTest(unittest.TestCase):
         accumulator.update([1.0, 0.0, 0.0], 1.0, None)
         before = accumulator.value()
         for weight in (-1.0, np.nan, np.inf):
-            with self.subTest(weight=weight), self.assertRaises(ValueError):
+            with self.subTest(weight=repr(weight)), self.assertRaises(ValueError):
                 accumulator.update([0.0, 1.0, 0.0], weight, None)
             actual = accumulator.value()
             np.testing.assert_array_equal(actual[0], before[0])
@@ -127,7 +127,7 @@ class WatsonTest(unittest.TestCase):
             (np.diag([2.0, -1.0, 0.0]), 1.0),
             (np.full((3, 3), np.nan), 1.0),
         ):
-            with self.subTest(statistics=statistics), self.assertRaises(ValueError):
+            with self.subTest(statistics=repr(statistics)), self.assertRaises(ValueError):
                 estimator.estimate(None, statistics)
 
     def test_isotropic_fit_is_explicitly_non_identifiable(self):

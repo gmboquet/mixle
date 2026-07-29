@@ -96,11 +96,11 @@ class LowRankPermutationTest(unittest.TestCase):
         dist = LowRankPermutationDistribution(np.ones((3, 1)), np.ones((3, 1)))
         malformed = ([0, 0, 1], [0, 1], [0, 1, 4], [0.5, 1.0, 2.0])
         for value in malformed:
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 dist.log_density(value)
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 dist.seq_log_density(np.asarray([value]))
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 dist.dist_to_encoder().seq_encode([value])
         self.assertEqual(LowRankPermutationDataEncoder(3), LowRankPermutationDataEncoder(3))
         self.assertNotEqual(LowRankPermutationDataEncoder(3), LowRankPermutationDataEncoder(4))
@@ -138,7 +138,7 @@ class LowRankPermutationTest(unittest.TestCase):
             {"dim": 3, "require_convergence": "false"},
         )
         for kwargs in invalid:
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 LowRankPermutationEstimator(**kwargs)
 
         uniform = LowRankPermutationDistribution(np.zeros((3, 1)), np.zeros((3, 1)))

@@ -114,7 +114,7 @@ class Lag0LogDensityTestCase(unittest.TestCase):
 
     def test_log_density_matches_hand_forward(self):
         for mod in MODULES:
-            with self.subTest(module=mod.__name__):
+            with self.subTest(module=repr(mod.__name__)):
                 dist = make_lag0_dist(mod, self.len_dist)
                 for seq in self.sequences:
                     expected = forward_log_density(seq, W, TRANSITIONS, EMISSION_PROBS, LEN_PROBS)
@@ -128,14 +128,14 @@ class Lag0LogDensityTestCase(unittest.TestCase):
             len_dist=self.len_dist,
         )
         for mod in MODULES:
-            with self.subTest(module=mod.__name__):
+            with self.subTest(module=repr(mod.__name__)):
                 dist = make_lag0_dist(mod, self.len_dist)
                 for seq in self.sequences:
                     self.assertAlmostEqual(dist.log_density(seq), hmm.log_density(seq), places=10)
 
     def test_seq_log_density_matches_log_density(self):
         for mod in MODULES:
-            with self.subTest(module=mod.__name__):
+            with self.subTest(module=repr(mod.__name__)):
                 dist = make_lag0_dist(mod, self.len_dist)
                 enc = dist.seq_encode(self.sequences)
                 ld_seq = dist.seq_log_density(enc)
@@ -145,7 +145,7 @@ class Lag0LogDensityTestCase(unittest.TestCase):
 
     def test_viterbi_sequence_has_one_state_per_observation(self):
         for mod in MODULES:
-            with self.subTest(module=mod.__name__):
+            with self.subTest(module=repr(mod.__name__)):
                 dist = make_lag0_dist(mod, self.len_dist)
                 for seq in self.sequences:
                     states = dist.viterbi_sequence(seq)
@@ -164,7 +164,7 @@ class Lag0SamplerTestCase(unittest.TestCase):
     def test_deterministic_lengths_emit_exactly_n_observations(self):
         for mod in MODULES:
             for n in (0, 1, 5):
-                with self.subTest(module=mod.__name__, n=n):
+                with self.subTest(module=repr(mod.__name__), n=repr(n)):
                     dist = self.make_sampler_dist(mod, CategoricalDistribution({n: 1.0}))
                     data = dist.sampler(seed=42).sample(25)
                     self.assertTrue(all(len(seq) == n for seq in data))
@@ -182,7 +182,7 @@ class Lag0SamplerTestCase(unittest.TestCase):
         expected_lens = [len_sampler.sample() for _ in range(n_samp)]
 
         for mod in MODULES:
-            with self.subTest(module=mod.__name__):
+            with self.subTest(module=repr(mod.__name__)):
                 dist = self.make_sampler_dist(mod, len_dist)
                 data = dist.sampler(seed=seed).sample(n_samp)
                 self.assertEqual([len(seq) for seq in data], expected_lens)
@@ -190,7 +190,7 @@ class Lag0SamplerTestCase(unittest.TestCase):
     def test_sampled_values_are_in_emission_support(self):
         len_dist = CategoricalDistribution({3: 0.5, 4: 0.5})
         for mod in MODULES:
-            with self.subTest(module=mod.__name__):
+            with self.subTest(module=repr(mod.__name__)):
                 dist = self.make_sampler_dist(mod, len_dist)
                 data = dist.sampler(seed=7).sample(50)
                 for seq in data:
@@ -204,7 +204,7 @@ class Lag0EstimationTestCase(unittest.TestCase):
 
     def test_em_iteration_returns_finite_parameters(self):
         for mod in MODULES:
-            with self.subTest(module=mod.__name__):
+            with self.subTest(module=repr(mod.__name__)):
                 dist = make_lag0_dist(mod, CategoricalDistribution(dict(LEN_PROBS)))
                 data = self.make_data(40, RandomState(11))
                 est = make_lag0_estimator(mod)
@@ -236,7 +236,7 @@ class Lag0EstimationTestCase(unittest.TestCase):
 
     def test_update_matches_seq_update(self):
         for mod in MODULES:
-            with self.subTest(module=mod.__name__):
+            with self.subTest(module=repr(mod.__name__)):
                 dist = make_lag0_dist(mod, CategoricalDistribution(dict(LEN_PROBS)))
                 data = self.make_data(8, RandomState(5))
                 est = make_lag0_estimator(mod, with_len=False)
@@ -260,7 +260,7 @@ class Lag0EstimationTestCase(unittest.TestCase):
 
     def test_initialize_counts_one_position_per_observation(self):
         for mod in MODULES:
-            with self.subTest(module=mod.__name__):
+            with self.subTest(module=repr(mod.__name__)):
                 data = self.make_data(10, RandomState(3))
                 est = make_lag0_estimator(mod, with_len=False)
 

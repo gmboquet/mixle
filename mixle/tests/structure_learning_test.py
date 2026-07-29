@@ -140,7 +140,7 @@ class MixtureOfDependencyTreesValidationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             MixtureOfDependencyTrees([], [])
         for weights in ([1.0], [0.4, 0.4], [1.1, -0.1], [np.nan, np.nan]):
-            with self.subTest(weights=weights), self.assertRaises(ValueError):
+            with self.subTest(weights=repr(weights)), self.assertRaises(ValueError):
                 MixtureOfDependencyTrees([self.tree, self.tree], weights)
 
     def test_impossible_rows_do_not_produce_nan_responsibilities(self):

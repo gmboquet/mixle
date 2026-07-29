@@ -131,7 +131,7 @@ class WeightedSufficientStatisticTest(unittest.TestCase):
 
     def test_weight_equals_replication(self):
         for name, dist, xs in _CLOSED_FORM + _SUFFSTAT_ONLY:
-            with self.subTest(family=name):
+            with self.subTest(family=repr(name)):
                 est = dist.estimator()
                 w = _flatten(_weighted_suffstat(est, xs, _WEIGHTS))
                 r = _flatten(_replicated_suffstat(est, xs, _WEIGHTS))
@@ -140,7 +140,7 @@ class WeightedSufficientStatisticTest(unittest.TestCase):
 
     def test_zero_weight_is_a_no_op(self):
         for name, dist, xs in _CLOSED_FORM + _SUFFSTAT_ONLY:
-            with self.subTest(family=name):
+            with self.subTest(family=repr(name)):
                 est = dist.estimator()
                 base = _flatten(_weighted_suffstat(est, xs, _WEIGHTS))
                 padded = _flatten(_weighted_suffstat(est, xs + [xs[0]], _WEIGHTS + [0.0]))
@@ -152,7 +152,7 @@ class WeightedFitTest(unittest.TestCase):
 
     def test_weighted_fit_equals_replicated_fit(self):
         for name, dist, xs in _CLOSED_FORM:
-            with self.subTest(family=name):
+            with self.subTest(family=repr(name)):
                 est = dist.estimator()
                 self.assertEqual(
                     str(_weighted_fit(est, xs, _WEIGHTS)),
@@ -162,7 +162,7 @@ class WeightedFitTest(unittest.TestCase):
 
     def test_fit_is_weight_scale_invariant(self):
         for name, dist, xs in _CLOSED_FORM:
-            with self.subTest(family=name):
+            with self.subTest(family=repr(name)):
                 est = dist.estimator()
                 base = _weighted_fit(est, xs, _WEIGHTS)
                 scaled = _weighted_fit(est, xs, [5.0 * v for v in _WEIGHTS])

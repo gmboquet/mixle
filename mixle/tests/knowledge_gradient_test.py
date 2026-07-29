@@ -30,7 +30,7 @@ class KnowledgeGradientTest(unittest.TestCase):
             cov = a @ a.T / n + 0.1 * np.eye(n)
             mean = rng.randn(n)
             kg = knowledge_gradient(mean, cov)
-            with self.subTest(seed=seed):
+            with self.subTest(seed=repr(seed)):
                 self.assertTrue(np.all(kg >= -1e-9))  # KG is non-negative
                 self.assertTrue(np.allclose(kg, _kg_mc(mean, cov), atol=0.02))
 

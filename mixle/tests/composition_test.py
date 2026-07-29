@@ -44,10 +44,10 @@ class LogratioTransformTest(unittest.TestCase):
         )
         for value in invalid_compositions:
             for transform in (closure, clr, ilr):
-                with self.subTest(value=value, transform=transform.__name__), self.assertRaises(ValueError):
+                with self.subTest(value=repr(value), transform=repr(transform.__name__)), self.assertRaises(ValueError):
                     transform(value)
         for total in (0.0, -1.0, np.nan, np.inf):
-            with self.subTest(total=total), self.assertRaises(ValueError):
+            with self.subTest(total=repr(total)), self.assertRaises(ValueError):
                 closure([1.0, 1.0], total=total)
         with self.assertRaises(ValueError):
             ilr([1.0, 1.0, 1.0], basis=np.eye(3))
@@ -122,9 +122,9 @@ class AitchisonNormalTest(unittest.TestCase):
             [0.25, 0.25, 0.25, np.nan],
         )
         for value in invalid:
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 self.true.log_density(value)
-            with self.subTest(encoded=value), self.assertRaises(ValueError):
+            with self.subTest(encoded=repr(value)), self.assertRaises(ValueError):
                 encoder.seq_encode([value])
         self.assertEqual(encoder, self.true.dist_to_encoder())
         self.assertIn("n_parts=4", str(encoder))

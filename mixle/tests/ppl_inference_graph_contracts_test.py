@@ -213,7 +213,7 @@ class MultiChainContractTest(unittest.TestCase):
 
     def test_parallel_workers_receive_the_declared_missing_data_policy(self):
         for worker in (_mcmc_worker, _hmc_worker, _nuts_worker, _ensemble_worker):
-            with self.subTest(worker=worker.__name__):
+            with self.subTest(worker=repr(worker.__name__)):
                 with patch("mixle.ppl.inference._prepare_target", side_effect=RuntimeError("stop")) as prepare:
                     with self.assertRaisesRegex(RuntimeError, "stop"):
                         worker(7, Normal(free, 1.0), [0.0], {"missing": "marginalize"})
@@ -239,7 +239,10 @@ class InferenceControlContractTest(unittest.TestCase):
             (ensemble_fit, {"walkers": 5}),
         ]
         for fitter, controls in invalid:
-            with self.subTest(fitter=fitter.__name__, controls=controls), self.assertRaises((TypeError, ValueError)):
+            with (
+                self.subTest(fitter=repr(fitter.__name__), controls=repr(controls)),
+                self.assertRaises((TypeError, ValueError)),
+            ):
                 fitter(self.model, self.data, **controls)
 
     def test_map_controls_and_unsuccessful_termination_are_enforced(self):
@@ -292,7 +295,7 @@ class ConjugateSupportContractTest(unittest.TestCase):
             (Categorical(Dirichlet(np.ones(3))), [1.2]),
         ]
         for model, data in invalid:
-            with self.subTest(model=model._family.name), self.assertRaisesRegex(ValueError, "requires"):
+            with self.subTest(model=repr(model._family.name)), self.assertRaisesRegex(ValueError, "requires"):
                 model.fit(data, how="conjugate")
 
     def test_all_free_normal_uses_a_proper_default_prior(self):
@@ -332,7 +335,7 @@ class IndexedLatentContractTest(unittest.TestCase):
         theta = free(2, name="theta")
         model = Normal(theta[Field("group")], 1.0)
         for labels in ([0.0, 1.2], [0, -1], [0, 2]):
-            with self.subTest(labels=labels), self.assertRaisesRegex(ValueError, "exact integer|outside"):
+            with self.subTest(labels=repr(labels)), self.assertRaisesRegex(ValueError, "exact integer|outside"):
                 model.fit([0.0, 1.0], given={"group": labels})
 
     def test_symbolic_labels_and_original_vector_handle_survive_map(self):

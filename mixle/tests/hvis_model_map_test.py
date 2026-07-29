@@ -81,7 +81,7 @@ class DeterminismAndPlacementTest(unittest.TestCase):
             {"occlusion_margin": -1.0},
             {"edge_threshold": 2.0},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 model_map(data, mix_model=_MODEL3, **kwargs)
 
     def test_model_map_constructor_rejects_invalid_responsibilities(self):

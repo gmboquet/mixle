@@ -43,7 +43,7 @@ class SchemaManifestTest(unittest.TestCase):
 
     def test_every_type_has_an_explicit_schema_classification(self):
         for profile_name, profile in self.manifest["profiles"].items():
-            with self.subTest(profile=profile_name):
+            with self.subTest(profile=repr(profile_name)):
                 self.assertEqual(set(profile["registered_types"]), set(profile["schemas"]))
                 for type_id, schema in profile["schemas"].items():
                     self.assertEqual(schema["state_version"], OBJECT_SCHEMA_VERSION, type_id)

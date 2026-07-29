@@ -189,13 +189,13 @@ class CTMCTest(unittest.TestCase):
     def test_configuration_requires_exact_states_and_sampling_bounds(self):
         rates = np.array([[0.0, 2.0], [3.0, 0.0]])
         for initial_state in (True, 0.5, -1, 2):
-            with self.subTest(initial_state=initial_state), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(initial_state=repr(initial_state)), self.assertRaises((TypeError, ValueError)):
                 st.ContinuousTimeMarkovChainDistribution(
                     rates,
                     initial_state=initial_state,
                 )
         for horizon in (True, -1.0, np.nan, np.inf):
-            with self.subTest(horizon=horizon), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(horizon=repr(horizon)), self.assertRaises((TypeError, ValueError)):
                 st.ContinuousTimeMarkovChainDistribution(
                     rates,
                     horizon=horizon,
@@ -213,7 +213,7 @@ class CTMCTest(unittest.TestCase):
             (0, 1.0, [(0.5,)]),
         )
         for trajectory in malformed:
-            with self.subTest(trajectory=trajectory), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(trajectory=repr(trajectory)), self.assertRaises((TypeError, ValueError)):
                 dist.log_density(trajectory)
 
     def test_encoded_statistics_fail_closed_before_accumulation(self):
@@ -229,7 +229,7 @@ class CTMCTest(unittest.TestCase):
             (np.zeros((2, 2)), np.array([np.nan, 0.0])),
         )
         for statistic in malformed:
-            with self.subTest(statistic=statistic):
+            with self.subTest(statistic=repr(statistic)):
                 with self.assertRaises(ValueError):
                     dist.seq_log_density([statistic])
                 with self.assertRaises(ValueError):
@@ -240,7 +240,7 @@ class CTMCTest(unittest.TestCase):
         accumulator = ContinuousTimeMarkovChainAccumulator(2)
         before = accumulator.value()
         for weights in ([], [-1.0], [np.nan]):
-            with self.subTest(weights=weights), self.assertRaises(ValueError):
+            with self.subTest(weights=repr(weights)), self.assertRaises(ValueError):
                 accumulator.seq_update([valid], weights, None)
             np.testing.assert_array_equal(
                 accumulator.counts,

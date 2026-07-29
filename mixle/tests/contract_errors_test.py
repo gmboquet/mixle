@@ -230,7 +230,7 @@ class ContractErrorsTestCase(unittest.TestCase):
 
     def test_malformed_input_raises_field_path_annotated_contract_error(self):
         for family, malformation, thunk, expected_path_substring in CATALOG:
-            with self.subTest(family=family, malformation=malformation):
+            with self.subTest(family=repr(family), malformation=repr(malformation)):
                 with self.assertRaises(ContractError) as ctx:
                     thunk()
                 err = ctx.exception

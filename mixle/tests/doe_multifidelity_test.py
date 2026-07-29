@@ -196,7 +196,7 @@ class BudgetEnforcementTest(unittest.TestCase):
             {"n_candidates": 0.9},
             {"n_candidates": True},
         ):
-            with self.subTest(kwargs=kwargs):
+            with self.subTest(kwargs=repr(kwargs)):
                 with self.assertRaises((TypeError, ValueError)):
                     multi_fidelity_minimize(
                         self._obj,

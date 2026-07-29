@@ -31,7 +31,7 @@ class OperatorTest(unittest.TestCase):
 
     def test_each_operator_returns_a_valid_fitted_model(self):
         for op in [Refit(), OnlineUpdate(mode="streaming"), OnlineUpdate(mode="incremental"), AutoSelect()]:
-            with self.subTest(op=op.name):
+            with self.subTest(op=repr(op.name)):
                 self.assertTrue(op.applicable(self.champion, self.data, ctx=self.ctx))
                 cand = op.propose(self.champion, self.data, ctx=self.ctx)
                 self.assertEqual(cand.parent_hash, "parent0")
@@ -112,7 +112,7 @@ class RecalibratedEncodedScoringTest(unittest.TestCase):
         rng = np.random.RandomState(0)
         xs = rng.normal(1.5, 3.0, 25)
         for temperature, center in [(0.6, 1.5), (1.0, 0.0), (3.3, -2.0)]:
-            with self.subTest(temperature=temperature, center=center):
+            with self.subTest(temperature=repr(temperature), center=repr(center)):
                 recal = _RecalibratedModel(base, temperature=temperature, center=center)
                 scalars = np.array([recal.log_density(float(x)) for x in xs])
                 enc = recal.dist_to_encoder().seq_encode(list(xs))
@@ -152,21 +152,21 @@ class RecalibrationFiniteControlsTest(unittest.TestCase):
         from mixle.evolve.operators import _RecalibratedModel
 
         for bad in (float("nan"), float("inf"), float("-inf")):
-            with self.subTest(temperature=bad), self.assertRaises(ValueError):
+            with self.subTest(temperature=repr(bad)), self.assertRaises(ValueError):
                 _RecalibratedModel(self.base, temperature=bad, center=0.0)
 
     def test_non_positive_temperature_is_still_rejected(self):
         from mixle.evolve.operators import _RecalibratedModel
 
         for bad in (0.0, -1.0):
-            with self.subTest(temperature=bad), self.assertRaises(ValueError):
+            with self.subTest(temperature=repr(bad)), self.assertRaises(ValueError):
                 _RecalibratedModel(self.base, temperature=bad, center=0.0)
 
     def test_non_finite_center_is_rejected(self):
         from mixle.evolve.operators import _RecalibratedModel
 
         for bad in (float("nan"), float("inf")):
-            with self.subTest(center=bad), self.assertRaises(ValueError):
+            with self.subTest(center=repr(bad)), self.assertRaises(ValueError):
                 _RecalibratedModel(self.base, temperature=1.0, center=bad)
 
     def test_an_empty_grid_cannot_report_an_unevaluated_temperature(self):
@@ -307,7 +307,7 @@ class OperatorGeneratorDataTest(unittest.TestCase):
     def test_applicable_then_propose_on_a_generator_still_sees_the_data(self):
         ops = [Refit(), OnlineUpdate(mode="streaming"), AutoSelect(), Recalibrate(), Recompose(), Mutate()]
         for op in ops:
-            with self.subTest(op=op.name):
+            with self.subTest(op=repr(op.name)):
                 gen = self._generator()
                 ctx = {"parent_hash": None, "seed": 0}
                 self.assertTrue(op.applicable(self.champion, gen, ctx=ctx))
@@ -321,7 +321,7 @@ class OperatorGeneratorDataTest(unittest.TestCase):
         gen = self._generator()
         ctx = {"parent_hash": None, "seed": 0}
         for op in [Refit(), OnlineUpdate(mode="streaming"), AutoSelect(), Recalibrate()]:
-            with self.subTest(op=op.name):
+            with self.subTest(op=repr(op.name)):
                 self.assertTrue(op.applicable(self.champion, gen, ctx=ctx))
                 cand = op.propose(self.champion, gen, ctx=ctx)
                 self._assert_really_used_the_data(cand.model)

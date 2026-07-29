@@ -146,7 +146,7 @@ class StochasticDepthCorrectnessTest(unittest.TestCase):
         model = build_causal_lm(vocab=7, d_model=8, n_layer=1, n_head=2, block=4)
         x = torch.zeros((2, 4), dtype=torch.long)
         for value in (-0.1, 1.1, np.nan):
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 stochastic_depth_forward(model, x, value)
 
 
@@ -200,7 +200,7 @@ class SelfDistillationContractTest(unittest.TestCase):
             (np.ones((1, 4), dtype=bool), np.array([1])),
         ]
         for batch in invalid_batches:
-            with self.subTest(batch=batch), self.assertRaises(ValueError):
+            with self.subTest(batch=repr(batch)), self.assertRaises(ValueError):
                 train_with_self_distillation(model, data=[batch], steps=1)
             self.assertFalse(model.training)
 
@@ -218,7 +218,7 @@ class SelfDistillationContractTest(unittest.TestCase):
             {"steps": 1, "consistency_mode": "unknown"},
         ]
         for controls in cases:
-            with self.subTest(controls=controls), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(controls=repr(controls)), self.assertRaises((TypeError, ValueError)):
                 train_with_self_distillation(model, data=self._data, **controls)
 
 

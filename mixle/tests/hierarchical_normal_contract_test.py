@@ -71,7 +71,7 @@ class HierarchicalNormalWeightContractTest(unittest.TestCase):
     def test_weight_domain_is_finite_nonnegative_and_aligned(self):
         encoded = HierarchicalNormalDataEncoder().seq_encode([[0.0, 1.0]])
         for weights in ([], [-1.0], [np.nan], [1.0, 2.0]):
-            with self.subTest(weights=weights), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(weights=repr(weights)), self.assertRaises((TypeError, ValueError)):
                 HierarchicalNormalAccumulator().seq_update(encoded, weights, None)
 
 
@@ -85,14 +85,14 @@ class HierarchicalNormalBoundaryContractTest(unittest.TestCase):
             (0.0, 1.0, np.inf),
         )
         for args in invalid_models:
-            with self.subTest(args=args), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(args=repr(args)), self.assertRaises((TypeError, ValueError)):
                 HierarchicalNormalDistribution(*args)
 
         model = HierarchicalNormalDistribution(0.0, 1.0, 1.0)
         for size in (0, -1, 1.5, True):
-            with self.subTest(size=size), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(size=repr(size)), self.assertRaises((TypeError, ValueError)):
                 model.group_posterior(0.0, size)
-            with self.subTest(size=size), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(size=repr(size)), self.assertRaises((TypeError, ValueError)):
                 model.shrinkage(size)
         with self.assertRaises(ValueError):
             model.group_posterior(np.nan, 1)
@@ -100,7 +100,7 @@ class HierarchicalNormalBoundaryContractTest(unittest.TestCase):
     def test_group_and_encoder_geometry_is_explicit(self):
         model = HierarchicalNormalDistribution(0.0, 1.0, 1.0)
         for group in ([], [[0.0, 1.0]], [0.0, np.nan]):
-            with self.subTest(group=group), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(group=repr(group)), self.assertRaises((TypeError, ValueError)):
                 model.log_density(group)
         encoder = model.dist_to_encoder()
         empty = encoder.seq_encode([])
@@ -127,7 +127,7 @@ class HierarchicalNormalBoundaryContractTest(unittest.TestCase):
             {"tol": np.nan},
             {"max_group_sizes": 0},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 HierarchicalNormalEstimator(**kwargs)
 
         estimator = HierarchicalNormalEstimator()
@@ -139,7 +139,7 @@ class HierarchicalNormalBoundaryContractTest(unittest.TestCase):
             ([1.0], [1.0, 2.0], [0.0], [0.0], [0.0]),
         )
         for statistics in malformed:
-            with self.subTest(statistics=statistics), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(statistics=repr(statistics)), self.assertRaises((TypeError, ValueError)):
                 estimator.estimate(1.0, statistics)
 
     def test_fit_receipt_tracks_a_finite_monotone_objective(self):

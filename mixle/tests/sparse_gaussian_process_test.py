@@ -77,7 +77,7 @@ class SparseGPTest(unittest.TestCase):
             {"n_inducing": 1.5},
             {"kernel": "unknown"},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 SGPR(**kwargs)
 
         gp = SGPR()
@@ -89,7 +89,7 @@ class SparseGPTest(unittest.TestCase):
             ([0.0, 1.0], [[0.0], [1.0]]),
         )
         for x, y in invalid_problems:
-            with self.subTest(x=x, y=y), self.assertRaises(ValueError):
+            with self.subTest(x=repr(x), y=repr(y)), self.assertRaises(ValueError):
                 gp.fit(x, y, optimize=False)
         with self.assertRaisesRegex(ValueError, "max_iter"):
             gp.fit([0.0], [0.0], max_iter=0)

@@ -50,10 +50,10 @@ class ThurstoneTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ThurstoneDistribution([1.0])  # K >= 2
         for n_mc in (0, -1, 1.5, True):
-            with self.subTest(n_mc=n_mc), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(n_mc=repr(n_mc)), self.assertRaises((TypeError, ValueError)):
                 ThurstoneDistribution([1.0, -1.0], n_mc=n_mc)
         for smoothing in (0.0, -1.0, np.nan):
-            with self.subTest(smoothing=smoothing), self.assertRaises(ValueError):
+            with self.subTest(smoothing=repr(smoothing)), self.assertRaises(ValueError):
                 ThurstoneDistribution([1.0, -1.0], smoothing=smoothing)
 
     def test_score_is_batch_invariant_and_support_checked(self):
@@ -64,7 +64,7 @@ class ThurstoneTest(unittest.TestCase):
         self.assertEqual(alone, together[1])
         self.assertEqual(together[1], together[2])
         for invalid in ([0, 0, 1], [0, 1], [0, 1, 3], [0.0, 1.5, 2.0]):
-            with self.subTest(invalid=invalid), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(invalid=repr(invalid)), self.assertRaises((TypeError, ValueError)):
                 d.log_density(invalid)
 
     def test_parameters_are_owned_and_approximation_is_labelled(self):

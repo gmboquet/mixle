@@ -269,7 +269,7 @@ class MongoCursorSourceStreamingTest(unittest.TestCase):
         ref_records = [(i, float(i)) for i in range(n)]
 
         for nc in (1, 3, 8):
-            with self.subTest(num_chunks=nc):
+            with self.subTest(num_chunks=repr(nc)):
                 src = read_mongo(_MOCK_URI, _DB, _COLL, columns=["id", "val"], batch_size=5, sort=[("id", 1)])
                 encoder = _RecordingEncoder([])
                 result = src.encode(encoder, num_chunks=nc)

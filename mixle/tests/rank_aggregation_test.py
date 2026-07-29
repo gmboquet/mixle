@@ -185,11 +185,11 @@ class PermutationValidationTest(unittest.TestCase):
     def test_empty_rankings_and_item_sets_are_rejected_everywhere(self):
         for rankings in (np.array([]), np.empty((0, 3)), np.empty((2, 0))):
             for aggregate in (borda_count, copeland, kemeny_consensus, mallows_fit):
-                with self.subTest(shape=rankings.shape, aggregate=aggregate.__name__):
+                with self.subTest(shape=repr(rankings.shape), aggregate=repr(aggregate.__name__)):
                     with self.assertRaises(ValueError):
                         aggregate(rankings)
         for distance in (kendall_distance, spearman_footrule, cayley_distance):
-            with self.subTest(distance=distance.__name__):
+            with self.subTest(distance=repr(distance.__name__)):
                 with self.assertRaises(ValueError):
                     distance(np.array([]), np.array([]))
 
@@ -203,7 +203,7 @@ class PermutationValidationTest(unittest.TestCase):
     def test_kemeny_exactness_boundary_must_be_exact_nonnegative(self):
         rankings = np.array([[0, 1, 2], [1, 0, 2]])
         for bad_boundary in (-1, 1.5, True, np.nan):
-            with self.subTest(exact_max_items=bad_boundary):
+            with self.subTest(exact_max_items=repr(bad_boundary)):
                 with self.assertRaisesRegex(ValueError, "exact_max_items"):
                     kemeny_consensus(rankings, exact_max_items=bad_boundary)
                 with self.assertRaisesRegex(ValueError, "exact_max_items"):

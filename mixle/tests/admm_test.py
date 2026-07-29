@@ -17,7 +17,7 @@ class ADMMTest(unittest.TestCase):
             b = r.randn(m)
             x = admm_bounded_least_squares(a, b, 0.0, np.inf, max_iter=8000)
             xs, _ = nnls(a, b)
-            with self.subTest(seed=seed):
+            with self.subTest(seed=repr(seed)):
                 self.assertTrue(np.all(x >= -1e-7))  # non-negative
                 self.assertAlmostEqual(np.linalg.norm(a @ x - b), np.linalg.norm(a @ xs - b), places=4)
 
@@ -29,7 +29,7 @@ class ADMMTest(unittest.TestCase):
             b = r.randn(m)
             x = admm_bounded_least_squares(a, b, -0.5, 0.5, max_iter=8000)
             ref = lsq_linear(a, b, bounds=(-0.5, 0.5)).x
-            with self.subTest(seed=seed):
+            with self.subTest(seed=repr(seed)):
                 self.assertTrue(np.all(x >= -0.5 - 1e-7) and np.all(x <= 0.5 + 1e-7))
                 self.assertTrue(np.allclose(x, ref, atol=2e-3))
 

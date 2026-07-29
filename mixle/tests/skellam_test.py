@@ -24,7 +24,7 @@ class SkellamTest(unittest.TestCase):
         for mu1, mu2 in self.cases:
             d = SkellamDistribution(mu1, mu2)
             for k in self.ks:
-                with self.subTest(mu1=mu1, mu2=mu2, k=int(k)):
+                with self.subTest(mu1=repr(mu1), mu2=repr(mu2), k=repr(int(k))):
                     self.assertAlmostEqual(d.log_density(int(k)), float(_ref.logpmf(int(k), mu1, mu2)), places=9)
 
     def test_seq_log_density_matches_scalar_and_scipy(self):

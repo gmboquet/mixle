@@ -53,20 +53,20 @@ class CalibrationContractTest(unittest.TestCase):
 
     def test_alpha_and_qhat_reject_bool_nan_negative_infinity_and_out_of_range(self):
         for alpha in (True, np.nan, -0.1, 1.1):
-            with self.subTest(alpha=alpha), self.assertRaises(ValueError):
+            with self.subTest(alpha=repr(alpha)), self.assertRaises(ValueError):
                 CalibratedTaskModel(_task(), alpha=alpha)
         for qhat in (True, np.nan, float("-inf"), -0.1, 1.1):
-            with self.subTest(qhat=qhat), self.assertRaises(ValueError):
+            with self.subTest(qhat=repr(qhat)), self.assertRaises(ValueError):
                 CalibratedTaskModel(_task(), qhat=qhat)
 
     def test_qhat_json_has_one_canonical_infinity_and_rejects_corruption(self):
         self.assertEqual(_qhat_to_json(float("inf")), "inf")
         self.assertEqual(_qhat_from_json("inf"), float("inf"))
         for value in (np.nan, float("-inf"), "nan", "-inf", "0.5", True):
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 _qhat_from_json(value)
         for value in (np.nan, float("-inf")):
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 _qhat_to_json(value)
 
 

@@ -86,7 +86,7 @@ class HmmTerminalStatesTest(unittest.TestCase):
             ({-1}, ValueError),
             ({2}, ValueError),
         ):
-            with self.subTest(terminal_states=terminal_states), self.assertRaises(error):
+            with self.subTest(terminal_states=repr(terminal_states)), self.assertRaises(error):
                 HiddenMarkovModelDistribution(self.topics, self.w, self.a, terminal_states=terminal_states)
 
     def test_reachable_nonterminal_trap_is_rejected(self):

@@ -92,7 +92,7 @@ class SparseScoreTest(unittest.TestCase):
         for x in ("a", "b", "unseen_label"):
             exact = m.log_density(x)
             sc = sparse_mixture_score(m, x, max_components=2)
-            with self.subTest(x=x):
+            with self.subTest(x=repr(x)):
                 self.assertLessEqual(sc.lower, exact + 1e-9)
                 self.assertGreaterEqual(sc.upper, exact - 1e-9)  # certified bracket must hold
 

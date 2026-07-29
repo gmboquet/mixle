@@ -622,12 +622,12 @@ class SamplerSeedTestCase(unittest.TestCase):
         self.assertEqual(expected, set(catalog))
 
     def assert_repeatable_sampler(self, name, dist):
-        with self.subTest(name=name, mode="bulk"):
+        with self.subTest(name=repr(name), mode="bulk"):
             first = _canonical(dist.sampler(seed=314159).sample(size=6))
             second = _canonical(dist.sampler(seed=314159).sample(size=6))
             self.assertEqual(first, second)
 
-        with self.subTest(name=name, mode="scalar_stream"):
+        with self.subTest(name=repr(name), mode="scalar_stream"):
             first_sampler = dist.sampler(seed=271828)
             second_sampler = dist.sampler(seed=271828)
             first = [_canonical(first_sampler.sample()) for _ in range(6)]
@@ -635,7 +635,7 @@ class SamplerSeedTestCase(unittest.TestCase):
             self.assertEqual(first, second)
 
     def assert_sized_sample_contract(self, name, dist):
-        with self.subTest(name=name, mode="size_contract"):
+        with self.subTest(name=repr(name), mode="size_contract"):
             sample = dist.sampler(seed=123).sample(size=4)
             self.assertEqual(len(sample), 4)
 
@@ -646,7 +646,7 @@ class SamplerSeedTestCase(unittest.TestCase):
             if name == "HierarchicalNormalDistribution":
                 # Grouped two-level model: sample(sizes) takes GROUP SIZES positionally, so the
                 # standard sample(size=n) contract does not apply -- draw one group of n instead.
-                with self.subTest(name=name, mode="grouped"):
+                with self.subTest(name=repr(name), mode="grouped"):
                     self.assertEqual(
                         _canonical(dist.sampler(seed=314159).sample(6)),
                         _canonical(dist.sampler(seed=314159).sample(6)),
@@ -662,7 +662,7 @@ class SamplerSeedTestCase(unittest.TestCase):
             self.assert_sized_sample_contract(name, dist)
 
     def assert_repeatable_conditional_sampler(self, name, dist, z):
-        with self.subTest(name=name, mode="conditional_stream"):
+        with self.subTest(name=repr(name), mode="conditional_stream"):
             first_sampler = dist.sampler(seed=271828)
             second_sampler = dist.sampler(seed=271828)
             first = [_canonical(first_sampler.sample_given(z)) for _ in range(6)]

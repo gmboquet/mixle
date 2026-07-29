@@ -76,7 +76,7 @@ class ProposeBudgetTest(unittest.TestCase):
         # (NaN compares false against everything), so "stop starting candidates after N seconds"
         # silently became "no budget at all" -- the one budget value that fails open.
         for bad in (float("nan"), float("inf")):
-            with self.subTest(timeout=bad):
+            with self.subTest(timeout=repr(bad)):
                 with self.assertRaises(ValueError):
                     mixle.propose(_records(), timeout=bad)
 

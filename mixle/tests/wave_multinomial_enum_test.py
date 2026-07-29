@@ -67,7 +67,7 @@ class MultinomialEnumeratorTestCase(unittest.TestCase):
             MultinomialDistribution(self.base, len_dist=GeometricDistribution(0.5)),
             MultinomialDistribution(self.base, len_dist=self.len_dist, len_normalized=True),
         ):
-            with self.subTest(dist=dist), self.assertRaises(EnumerationError):
+            with self.subTest(dist=repr(dist)), self.assertRaises(EnumerationError):
                 dist.enumerator()
 
 

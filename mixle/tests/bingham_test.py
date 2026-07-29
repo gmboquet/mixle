@@ -38,7 +38,7 @@ class BinghamTest(unittest.TestCase):
                 ),
                 [0, mp.pi],
             )
-            with self.subTest(z=z):
+            with self.subTest(z=repr(z)):
                 self.assertTrue(mp.almosteq(integ, 1, 1e-9))
 
     def test_antipodal_symmetry(self):
@@ -58,7 +58,7 @@ class BinghamTest(unittest.TestCase):
             zm = d.z.copy()
             zm[i] -= 1e-3
             grad = (np.log(_bingham_norm(zp)) - np.log(_bingham_norm(zm))) / 2e-3
-            with self.subTest(i=i):
+            with self.subTest(i=repr(i)):
                 self.assertAlmostEqual((xs[:, i] ** 2).mean(), grad, delta=0.01)
 
     def test_seq_matches_scalar(self):
@@ -124,7 +124,7 @@ class BinghamTest(unittest.TestCase):
         accumulator.update([1.0, 0.0, 0.0], 1.0, None)
         before = accumulator.value()
         for weight in (-1.0, np.nan, np.inf):
-            with self.subTest(weight=weight), self.assertRaises(ValueError):
+            with self.subTest(weight=repr(weight)), self.assertRaises(ValueError):
                 accumulator.update([0.0, 1.0, 0.0], weight, None)
             self.assertEqual(accumulator.value()[0], before[0])
             np.testing.assert_array_equal(accumulator.value()[1], before[1])
@@ -135,7 +135,7 @@ class BinghamTest(unittest.TestCase):
             (1.0, np.diag([2.0, -1.0, 0.0])),
             (1.0, np.full((3, 3), np.nan)),
         ):
-            with self.subTest(statistics=statistics), self.assertRaises(ValueError):
+            with self.subTest(statistics=repr(statistics)), self.assertRaises(ValueError):
                 estimator.estimate(None, statistics)
 
     def test_capabilities(self):

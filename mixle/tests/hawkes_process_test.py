@@ -74,7 +74,7 @@ class HawkesLikelihoodTest(unittest.TestCase):
         for field in ("mu", "alpha", "beta", "window"):
             values = dict(mu=1.0, alpha=0.5, beta=1.0, window=10.0)
             values[field] = np.inf
-            with self.subTest(field=field), self.assertRaises(ValueError):
+            with self.subTest(field=repr(field)), self.assertRaises(ValueError):
                 HawkesProcessDistribution(**values)
 
     def test_encoded_schema_is_bound_to_model(self):

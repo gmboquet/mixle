@@ -22,7 +22,7 @@ class MILPTest(unittest.TestCase):
                 c, constraints=LinearConstraint(a, -np.inf, b), integrality=np.ones(n), bounds=Bounds([0] * n, [5] * n)
             )
             sval = float(sol.fun) if sol.success else None
-            with self.subTest(seed=seed):
+            with self.subTest(seed=repr(seed)):
                 if sval is None:
                     self.assertIsNone(res)
                 else:

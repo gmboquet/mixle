@@ -163,10 +163,10 @@ class ConformalQuantileTestCase(unittest.TestCase):
 
     def test_rejects_invalid_alpha_and_scores(self):
         for alpha in (0.0, 1.0, -0.1, 1.1, np.nan, np.inf, True):
-            with self.subTest(alpha=alpha), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(alpha=repr(alpha)), self.assertRaises((TypeError, ValueError)):
                 conformal_quantile([0.1, 0.2], alpha)
         for scores in ([], [0.1, np.nan], [[0.1, 0.2]]):
-            with self.subTest(scores=scores), self.assertRaises(ValueError):
+            with self.subTest(scores=repr(scores)), self.assertRaises(ValueError):
                 conformal_quantile(scores, 0.1)
 
 
@@ -196,14 +196,14 @@ class ConformalClassifierTestCase(unittest.TestCase):
     def test_rejects_invalid_labels_and_probabilities(self):
         valid = np.array([[0.4, 0.6], [0.7, 0.3]])
         for labels in ([0.0, 1.0], [-1, 1], [0, 2], [0]):
-            with self.subTest(labels=labels), self.assertRaises(ValueError):
+            with self.subTest(labels=repr(labels)), self.assertRaises(ValueError):
                 ConformalClassifier(valid, labels)
         for probabilities in (
             [[2.0, -1.0], [0.7, 0.3]],
             [[0.2, 0.2], [0.7, 0.3]],
             [[np.nan, 0.0], [0.7, 0.3]],
         ):
-            with self.subTest(probabilities=probabilities), self.assertRaises(ValueError):
+            with self.subTest(probabilities=repr(probabilities)), self.assertRaises(ValueError):
                 ConformalClassifier(probabilities, [0, 1])
         classifier = ConformalClassifier(valid, [1, 0])
         with self.assertRaises(ValueError):
@@ -289,10 +289,10 @@ class ConformalLinkPredictorTestCase(unittest.TestCase):
             [[0.0, np.nan], [np.nan, 0.0]],
             [[0.0, 1.2], [1.2, 0.0]],
         ):
-            with self.subTest(matrix=matrix), self.assertRaises(ValueError):
+            with self.subTest(matrix=repr(matrix)), self.assertRaises(ValueError):
                 ConformalLinkPredictor(matrix, [(0, 1)])
         for edges in ([(0.0, 1.0)], [(-1, 1)], [(0, 2)], [(0, 0)]):
-            with self.subTest(edges=edges), self.assertRaises(ValueError):
+            with self.subTest(edges=repr(edges)), self.assertRaises(ValueError):
                 ConformalLinkPredictor(valid, edges)
         predictor = ConformalLinkPredictor(valid, [(0, 1)])
         self.assertNotIn(0, predictor.neighbor_set(0))
@@ -347,10 +347,10 @@ class ConformalKnowledgeGraphTestCase(unittest.TestCase):
             [[0, 2, 1]],
             [[0, 0, 3]],
         ):
-            with self.subTest(triples=triples), self.assertRaises(ValueError):
+            with self.subTest(triples=repr(triples)), self.assertRaises(ValueError):
                 ConformalKnowledgeGraph(_KnowledgeGraphStub(), triples)
         for logp in ([0.0, 0.0], [np.nan, 0.0, 0.0], np.log([0.2, 0.2, 0.2])):
-            with self.subTest(logp=logp), self.assertRaises(ValueError):
+            with self.subTest(logp=repr(logp)), self.assertRaises(ValueError):
                 ConformalKnowledgeGraph(_KnowledgeGraphStub(logp), calibration)
 
 

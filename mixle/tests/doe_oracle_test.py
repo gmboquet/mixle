@@ -236,7 +236,7 @@ class OracleResultValidationTest(unittest.TestCase):
 
     def test_abstained_requires_an_actual_boolean_and_distinct_receipt_schema(self):
         for abstained in ("false", 1, np.bool_(True)):
-            with self.subTest(abstained=abstained), self.assertRaises(TypeError):
+            with self.subTest(abstained=repr(abstained)), self.assertRaises(TypeError):
                 OracleResult(score=float("-inf"), receipt={"reason": "none"}, abstained=abstained)
         with self.assertRaises(ValueError):
             OracleResult(score=float("-inf"), receipt={}, abstained=True)
@@ -503,7 +503,7 @@ class OracleBudgetAndCircuitBreakerTest(unittest.TestCase):
             {"n_init": 1, "n_iter": 0.5},
             {"n_init": 1, "n_iter": True},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 optimize_under_oracle(oracle, [(-1.0, 1.0)], **kwargs)
 
     def test_noncooperative_timeout_opens_a_bounded_circuit(self):

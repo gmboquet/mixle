@@ -1313,7 +1313,7 @@ class EngineFeatureFlagTypeTest(unittest.TestCase):
 
     def test_numpy_fused_kernel_flag_rejects_non_bool(self):
         for bad in ("false", "0", "", 0, 1, None, 1.0):
-            with self.subTest(prefer_fused=bad), self.assertRaises(TypeError):
+            with self.subTest(prefer_fused=repr(bad)), self.assertRaises(TypeError):
                 NumpyEngine(prefer_fused=bad)
 
     def test_numpy_fused_kernel_flag_accepts_bools(self):
@@ -1324,7 +1324,7 @@ class EngineFeatureFlagTypeTest(unittest.TestCase):
     @unittest.skipUnless(HAS_TORCH, "torch is not installed")
     def test_torch_compile_flag_rejects_non_bool(self):
         for bad in ("false", "0", "", 0, 1, None, 1.0):
-            with self.subTest(compile=bad), self.assertRaises(TypeError):
+            with self.subTest(compile=repr(bad)), self.assertRaises(TypeError):
                 TorchEngine(compile=bad)
 
     @unittest.skipUnless(HAS_TORCH, "torch is not installed")
@@ -1337,7 +1337,7 @@ class EngineFeatureFlagTypeTest(unittest.TestCase):
     @unittest.skipUnless(HAS_JAX, "jax is not installed")
     def test_jax_compile_flag_rejects_non_bool(self):
         for bad in ("false", "0", "", 0, 1, None, 1.0):
-            with self.subTest(compile=bad), self.assertRaises(TypeError):
+            with self.subTest(compile=repr(bad)), self.assertRaises(TypeError):
                 JaxEngine(compile=bad)
 
     @unittest.skipUnless(HAS_JAX, "jax is not installed")

@@ -134,7 +134,7 @@ class LedoitWolfValidationTest(unittest.TestCase):
     def test_seq_update_rejects_broadcastable_or_multidimensional_weights_before_mutation(self):
         x = np.array([[0.0, 0.0], [2.0, 2.0]])
         for weights in (np.array([2.0]), np.ones((2, 1)), np.ones((1, 2))):
-            with self.subTest(shape=weights.shape):
+            with self.subTest(shape=repr(weights.shape)):
                 acc = LedoitWolfEstimator(dim=2).accumulator_factory().make()
                 with self.assertRaisesRegex(ValueError, "exact shape"):
                     acc.seq_update(x, weights, None)
@@ -144,7 +144,7 @@ class LedoitWolfValidationTest(unittest.TestCase):
     def test_seq_update_requires_a_two_dimensional_observation_matrix(self):
         acc = LedoitWolfEstimator(dim=2).accumulator_factory().make()
         for x in (np.array([1.0, 2.0]), np.ones((1, 1, 2))):
-            with self.subTest(shape=x.shape):
+            with self.subTest(shape=repr(x.shape)):
                 with self.assertRaisesRegex(ValueError, "two-dimensional"):
                     acc.seq_update(x, np.ones(x.shape[0]), None)
 

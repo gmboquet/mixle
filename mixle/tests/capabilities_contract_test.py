@@ -26,7 +26,7 @@ class CapabilitiesContractTest(unittest.TestCase):
             {"engine_ready": ("numpy", "torch"), "kernel_status": "legacy_numpy"},
         )
         for kwargs in invalid:
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 DistributionCapabilities(**kwargs)
 
     def test_hook_defects_are_not_hidden_by_fallbacks(self):

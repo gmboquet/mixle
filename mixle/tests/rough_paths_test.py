@@ -19,7 +19,7 @@ class RoughPathsTest(unittest.TestCase):
     def test_contract_rejects_coercion_nonfinite_paths_and_unbounded_requests(self):
         path = np.zeros((2, 3))
         for depth in (1.5, "2", True):
-            with self.subTest(depth=depth), self.assertRaises(TypeError):
+            with self.subTest(depth=repr(depth)), self.assertRaises(TypeError):
                 path_signature(path, depth)
         with self.assertRaises(ValueError):
             path_signature(np.array([[0.0], [np.nan]]), 2)
@@ -45,7 +45,7 @@ class RoughPathsTest(unittest.TestCase):
         a, b = np.array([0.3, -0.2, 0.5]), np.array([1.0, 0.4, -0.1])
         sig = path_signature(np.array([a, b]), 4)
         for k in range(1, 5):
-            with self.subTest(k=k):
+            with self.subTest(k=repr(k)):
                 self.assertTrue(np.allclose(sig[k], _outer_power(b - a, k) / factorial(k)))
 
     def test_chen_identity(self):
@@ -55,7 +55,7 @@ class RoughPathsTest(unittest.TestCase):
         full = path_signature(p, 4)
         comb = signature_tensor_product(path_signature(p[:5], 4), path_signature(p[4:], 4), 4)
         for k in range(5):
-            with self.subTest(k=k):
+            with self.subTest(k=repr(k)):
                 self.assertTrue(np.allclose(full[k], comb[k], atol=1e-10))
 
     def test_factorial_bound(self):
@@ -64,7 +64,7 @@ class RoughPathsTest(unittest.TestCase):
         p = np.cumsum(0.1 * rng.standard_normal((20, 2)), axis=0)
         length = float(np.sum(np.linalg.norm(np.diff(p, axis=0), axis=1)))
         for k, nrm in enumerate(signature_norms(path_signature(p, 5)), start=1):
-            with self.subTest(k=k):
+            with self.subTest(k=repr(k)):
                 self.assertLessEqual(nrm, length**k / factorial(k) + 1e-12)
 
     def test_time_reversal_inverse(self):
@@ -74,7 +74,7 @@ class RoughPathsTest(unittest.TestCase):
         prod = signature_tensor_product(path_signature(p, 3), path_signature(p[::-1], 3), 3)
         self.assertAlmostEqual(float(prod[0]), 1.0, places=10)
         for k in range(1, 4):
-            with self.subTest(k=k):
+            with self.subTest(k=repr(k)):
                 self.assertTrue(np.allclose(prod[k], 0.0, atol=1e-9))
 
 

@@ -69,7 +69,7 @@ class MatrixParameterContractTestCase(unittest.TestCase):
             wishart.scale,
             inverse.scale,
         ):
-            with self.subTest(array=array), self.assertRaises(ValueError):
+            with self.subTest(array=repr(array)), self.assertRaises(ValueError):
                 array[0, 0] = 2.0
 
 

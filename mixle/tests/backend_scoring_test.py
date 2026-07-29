@@ -1540,7 +1540,7 @@ class BackendScoringTestCase(unittest.TestCase):
             return 0
 
         for name in ("diagonal_gaussian", "multivariate_gaussian"):
-            with self.subTest(case=name):
+            with self.subTest(case=repr(name)):
                 dist, data = cases[name]
                 enc = dist.dist_to_encoder().seq_encode(data)
                 weights = np.linspace(0.25, 1.25, len(data))
@@ -1615,7 +1615,7 @@ class BackendScoringTestCase(unittest.TestCase):
             "integer_markov_chain",
         )
         for name in names:
-            with self.subTest(case=name):
+            with self.subTest(case=repr(name)):
                 dist, data = cases[name]
                 enc = dist.dist_to_encoder().seq_encode(data)
                 weights = np.linspace(0.25, 1.25, len(data))
@@ -1653,7 +1653,7 @@ class BackendScoringTestCase(unittest.TestCase):
     def test_torch_stacked_non_gaussian_mixture_kernels_match_legacy_paths(self):
         engine = TorchEngine(dtype=torch.float64)
         for name, dist, data in self.stacked_mixture_cases():
-            with self.subTest(case=name):
+            with self.subTest(case=repr(name)):
                 enc = dist.dist_to_encoder().seq_encode(data)
                 kernel = dist.kernel(engine=engine)
 
@@ -1758,7 +1758,7 @@ class BackendScoringTestCase(unittest.TestCase):
             "weighted_gaussian",
         }
         for name, dist, data in self.stacked_mixture_cases():
-            with self.subTest(case=name):
+            with self.subTest(case=repr(name)):
                 enc = dist.dist_to_encoder().seq_encode(data)
                 weights = np.linspace(0.25, 1.25, len(data))
                 est = dist.estimator()

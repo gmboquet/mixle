@@ -25,7 +25,7 @@ class SegmentContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "divisible"):
             PatchSegmenter(8).segment(np.zeros((10, 10)))
         for patch in (True, 0, -1, 1.5):
-            with self.subTest(patch=patch), self.assertRaises(ValueError):
+            with self.subTest(patch=repr(patch)), self.assertRaises(ValueError):
                 PatchSegmenter(patch)
 
     def test_window_covers_and_pads_the_final_tail(self):
@@ -35,12 +35,12 @@ class SegmentContractTest(unittest.TestCase):
             np.asarray([[1, 2, 3, 4], [5, 0, 0, 0]], dtype=np.float32),
         )
         for bad in (0, -1, 1.5, True):
-            with self.subTest(window=bad), self.assertRaises(ValueError):
+            with self.subTest(window=repr(bad)), self.assertRaises(ValueError):
                 WindowSegmenter(window=bad)
 
     def test_integer_is_not_interpreted_as_a_byte_count(self):
         for bad in (3, True, np.int64(2)):
-            with self.subTest(raw=bad), self.assertRaises(TypeError):
+            with self.subTest(raw=repr(bad)), self.assertRaises(TypeError):
                 ByteSegmenter().segment(bad)
 
     def test_generic_feature_segmenters_reject_featureless_values(self):
@@ -84,9 +84,9 @@ class ModalityContractTest(unittest.TestCase):
         # a genuinely measured zero trace is still a perfectly ordinary descriptor
         np.testing.assert_array_equal(signal_features([0.0, 0.0], dim=4), [0.0, 0.0, 0.0, 0.0])
         for bad in (0, -1, True, 1.5):
-            with self.subTest(dim=bad), self.assertRaises(ValueError):
+            with self.subTest(dim=repr(bad)), self.assertRaises(ValueError):
                 signal_features([1.0, 2.0], dim=bad)
-            with self.subTest(windows=bad), self.assertRaises(ValueError):
+            with self.subTest(windows=repr(bad)), self.assertRaises(ValueError):
                 signal_features([1.0, 2.0], dim=4, windows=bad)
 
     def test_text_vectorization_requires_one_identified_space(self):
@@ -94,7 +94,7 @@ class ModalityContractTest(unittest.TestCase):
         # separately vectorized items came back in different learned bases while being presented as a
         # common fixed-length vector.
         for kind in ("text", "record"):
-            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "requires a fitted embedder"):
+            with self.subTest(kind=repr(kind)), self.assertRaisesRegex(ValueError, "requires a fitted embedder"):
                 vectorize("alpha alpha", kind)
 
         class SharedSpace:
@@ -115,12 +115,12 @@ class QuantizerContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-empty"):
             VectorQuantizer(2, 2).fit(np.empty((0, 2)))
         for bad in (0, -1, True, 2.5):
-            with self.subTest(iters=bad), self.assertRaises(ValueError):
+            with self.subTest(iters=repr(bad)), self.assertRaises(ValueError):
                 VectorQuantizer(2, 2).fit(np.asarray([[1.0, 2.0], [4.0, 5.0]]), iters=bad)
         for bad in (0, -1, True):
-            with self.subTest(num_codes=bad), self.assertRaises(ValueError):
+            with self.subTest(num_codes=repr(bad)), self.assertRaises(ValueError):
                 VectorQuantizer(bad, 2)
-            with self.subTest(dim=bad), self.assertRaises(ValueError):
+            with self.subTest(dim=repr(bad)), self.assertRaises(ValueError):
                 VectorQuantizer(2, bad)
 
     def test_fractional_ids_are_not_silently_truncated_into_tokens(self):
@@ -146,7 +146,7 @@ class GraphContractTest(unittest.TestCase):
             (np.ones((2, 2)), np.asarray([[0.0, -1.0], [1.0, 0.0]])),
         ]
         for graph in invalid:
-            with self.subTest(shapes=(graph[0].shape, graph[1].shape)), self.assertRaises(ValueError):
+            with self.subTest(shapes=repr((graph[0].shape, graph[1].shape))), self.assertRaises(ValueError):
                 encoder.encode(graph)
 
     def test_heterogeneous_encoder_rejects_broadcastable_wrong_width(self):

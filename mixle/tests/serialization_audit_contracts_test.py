@@ -46,7 +46,7 @@ class StrictDecodeTest(unittest.TestCase):
 
     def test_nonstandard_raw_nonfinite_json_is_rejected(self):
         for text in ("NaN", "Infinity", "-Infinity", "[NaN]"):
-            with self.subTest(text=text), self.assertRaises(SerializationError):
+            with self.subTest(text=repr(text)), self.assertRaises(SerializationError):
                 from_json(text)
 
     def test_malformed_tag_fields_are_not_coerced(self):
@@ -57,7 +57,7 @@ class StrictDecodeTest(unittest.TestCase):
             {TAG: "float", "value": "nan", "extra": True},
         ]
         for payload in bad_payloads:
-            with self.subTest(payload=payload), self.assertRaises(SerializationError):
+            with self.subTest(payload=repr(payload)), self.assertRaises(SerializationError):
                 from_serializable(payload)
 
     def test_duplicate_decoded_dictionary_keys_are_rejected(self):
@@ -106,7 +106,7 @@ class ArrayCodecTest(unittest.TestCase):
             np.asarray([(1, 2.5), (3, 4.5)], dtype=[("count", "<i4"), ("value", "<f8")]),
         ]
         for array in arrays:
-            with self.subTest(dtype=array.dtype):
+            with self.subTest(dtype=repr(array.dtype)):
                 decoded = from_json(to_json(array))
                 self.assertEqual(decoded.dtype, array.dtype)
                 np.testing.assert_array_equal(decoded, array)

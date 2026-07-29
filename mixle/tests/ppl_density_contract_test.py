@@ -32,7 +32,7 @@ class DensityContractTest(unittest.TestCase):
             lambda: CondFlow(1, 1),
         ]
         for build in invalid:
-            with self.subTest(build=build), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(build=repr(build)), self.assertRaises((TypeError, ValueError)):
                 build()
 
     def test_unconditional_data_shape_finiteness_and_discrete_support(self):
@@ -46,7 +46,7 @@ class DensityContractTest(unittest.TestCase):
             [[1.0, 2.0, 3.0]],
         ]
         for data in invalid_continuous:
-            with self.subTest(data=data), self.assertRaises(ValueError):
+            with self.subTest(data=repr(data)), self.assertRaises(ValueError):
                 Flow(2).fit(data, max_its=1)
 
         for data in [
@@ -55,7 +55,7 @@ class DensityContractTest(unittest.TestCase):
             [[-1, 1]],
             [[0]],
         ]:
-            with self.subTest(data=data), self.assertRaises(ValueError):
+            with self.subTest(data=repr(data)), self.assertRaises(ValueError):
                 DiscreteAR(2, 3).fit(data, max_its=1)
 
     def test_conditional_axes_and_support_are_aligned(self):

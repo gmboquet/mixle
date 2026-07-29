@@ -38,7 +38,7 @@ class CardinalityMILPTest(unittest.TestCase):
             k = int(r.randint(1, n))
             res = cardinality_constrained_milp(c, a, b, k, bounds)
             bf = _brute(c, a, b, k, bounds)
-            with self.subTest(seed=seed):
+            with self.subTest(seed=repr(seed)):
                 self.assertIsNotNone(res)
                 value, x = res
                 self.assertAlmostEqual(value, bf, places=5)  # optimal objective

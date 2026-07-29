@@ -20,7 +20,7 @@ class WrappedNormalTest(unittest.TestCase):
             d = WN(mu, s2)
             integral, _ = quad(lambda t, dd=d: dd.density(t), -np.pi, np.pi)
             grid_min = min(d.density(t) for t in np.linspace(-np.pi, np.pi, 400))
-            with self.subTest(mu=mu, s2=s2):
+            with self.subTest(mu=repr(mu), s2=repr(s2)):
                 self.assertAlmostEqual(integral, 1.0, places=5)
                 self.assertGreater(grid_min, 0.0)  # truncated spatial sum stays strictly positive
 
@@ -62,7 +62,7 @@ class WrappedNormalTest(unittest.TestCase):
             (0.0, 0.0),
             (0.0, 1.0e6 + 1.0),
         ):
-            with self.subTest(parameters=parameters), self.assertRaises(ValueError):
+            with self.subTest(parameters=repr(parameters)), self.assertRaises(ValueError):
                 WN(*parameters)
         d = WN(0.0, 1.0)
         with self.assertRaises(ValueError):
@@ -78,7 +78,7 @@ class WrappedNormalTest(unittest.TestCase):
         accumulator.update(0.0, 1.0, None)
         before = accumulator.value()
         for weight in (-1.0, np.nan, np.inf):
-            with self.subTest(weight=weight), self.assertRaises(ValueError):
+            with self.subTest(weight=repr(weight)), self.assertRaises(ValueError):
                 accumulator.update(1.0, weight, None)
             self.assertEqual(accumulator.value(), before)
         for statistics in (
@@ -86,14 +86,14 @@ class WrappedNormalTest(unittest.TestCase):
             (0.0, 0.0, 1.0),
             (1.0, 0.0, 1.0),
         ):
-            with self.subTest(statistics=statistics), self.assertRaises(WrappedNormalFitError):
+            with self.subTest(statistics=repr(statistics)), self.assertRaises(WrappedNormalFitError):
                 estimator.estimate(None, statistics)
         for statistics in (
             (2.0, 0.0, 1.0),
             (np.nan, 0.0, 1.0),
             (0.0, 0.0, -1.0),
         ):
-            with self.subTest(statistics=statistics), self.assertRaises(ValueError):
+            with self.subTest(statistics=repr(statistics)), self.assertRaises(ValueError):
                 estimator.estimate(None, statistics)
 
     def test_unsupported_regularization_is_rejected(self):

@@ -135,7 +135,7 @@ class MallowsTestCase(unittest.TestCase):
     def test_vector_scoring_and_encoder_dimension_contracts(self):
         dist = MallowsDistribution([0, 1, 2])
         for value in ([0, 0, 1], [0, 1], [0, 1, 4], [0.5, 1.0, 2.0]):
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 dist.seq_log_density(np.asarray([value]))
         self.assertEqual(MallowsDataEncoder(3), MallowsDataEncoder(3))
         self.assertNotEqual(MallowsDataEncoder(3), MallowsDataEncoder(4))

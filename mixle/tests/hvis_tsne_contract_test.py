@@ -33,7 +33,7 @@ class JointProbabilityContractTest(unittest.TestCase):
             np.zeros((2, 2)),
         ]
         for p in invalid:
-            with self.subTest(p=p), self.assertRaises(ValueError):
+            with self.subTest(p=repr(p)), self.assertRaises(ValueError):
                 _validate_dense_joint_probability(p)
 
     def test_sparse_validation_rejects_asymmetry_before_triangle_use(self):
@@ -81,7 +81,7 @@ class OptimizerControlContractTest(unittest.TestCase):
             {"eps": -1.0},
             {"max_alpha": 0.01},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 update_alpha(self.p, self.y, 1.0, 0.1, 1.0e-128, **kwargs)
 
     def test_exact_optimizer_rejects_modulo_zero_controls(self):

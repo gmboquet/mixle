@@ -19,7 +19,7 @@ class LKJTest(unittest.TestCase):
         for eta in (0.7, 2.0, 3.5):  # incl. eta < 1 and non-integer
             d = LKJ(2, eta)
             integ = mp.e ** mp.mpf(d._log_c) * mp.quad(lambda r, e=eta: (1 - r * r) ** (e - 1), [-1, 1])
-            with self.subTest(d=2, eta=eta):
+            with self.subTest(d=2, eta=repr(eta)):
                 self.assertTrue(mp.almosteq(integ, 1, 1e-12))
 
         def z3(eta):
@@ -45,7 +45,7 @@ class LKJTest(unittest.TestCase):
             dist = LKJ(d, eta)
             samples = dist.sampler(seed=0).sample(8000)
             offs = np.array([R[0, 1] for R in samples])
-            with self.subTest(d=d, eta=eta):
+            with self.subTest(d=repr(d), eta=repr(eta)):
                 self.assertTrue(all(np.allclose(np.diag(R), 1.0) for R in samples[:200]))
                 self.assertTrue(all(np.all(np.linalg.eigvalsh(R) > -1e-9) for R in samples[:200]))
                 # exact marginal: (r+1)/2 ~ Beta(eta+(d-2)/2, eta+(d-2)/2)
@@ -155,7 +155,7 @@ class LKJTest(unittest.TestCase):
             (1.0, np.nan),
             (-1.0, 0.0),
         ):
-            with self.subTest(statistics=statistics), self.assertRaises(ValueError):
+            with self.subTest(statistics=repr(statistics)), self.assertRaises(ValueError):
                 estimator.estimate(None, statistics)
         with self.assertRaises(LKJFitError):
             estimator.estimate(None, (0.0, 0.0))
@@ -172,7 +172,7 @@ class LKJTest(unittest.TestCase):
             est = true.estimator()
             acc = est.accumulator_factory().make()
             acc.seq_update(true.dist_to_encoder().seq_encode(data), np.ones(len(data)), None)
-            with self.subTest(d=d, eta=eta):
+            with self.subTest(d=repr(d), eta=repr(eta)):
                 self.assertAlmostEqual(est.estimate(len(data), acc.value()).eta, eta, delta=0.2)
 
     def test_capabilities(self):

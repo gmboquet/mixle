@@ -42,17 +42,17 @@ class KernelGeometryContractTest(unittest.TestCase):
             lambda: AnisotropicRBF(metric=np.array([[1.0, 0.0], [0.0, -1.0]])).covariance(np.ones((4, 2))),
         ]
         for call in invalid:
-            with self.subTest(call=call):
+            with self.subTest(call=repr(call)):
                 with self.assertRaises(ValueError):
                     call()
 
     def test_geographic_coordinates_and_radius_are_not_normalized_silently(self):
         for point in ([91.0, 0.0], [0.0, 181.0], [np.nan, 0.0], [0.0], [[0.0, 0.0, 1.0]]):
-            with self.subTest(point=point):
+            with self.subTest(point=repr(point)):
                 with self.assertRaises(ValueError):
                     great_circle_distance(point, [0.0, 0.0])
         for radius in (0.0, -1.0, np.inf):
-            with self.subTest(radius=radius):
+            with self.subTest(radius=repr(radius)):
                 with self.assertRaises(ValueError):
                     great_circle_distance([0.0, 0.0], [0.0, 1.0], radius=radius)
         valid = np.array([[0.0, 0.0], [10.0, 20.0]])
@@ -62,7 +62,7 @@ class KernelGeometryContractTest(unittest.TestCase):
             GreatCircleMatern(amplitude=0.0),
             GreatCircleMatern(jitter=np.nan),
         ):
-            with self.subTest(kernel=kernel):
+            with self.subTest(kernel=repr(kernel)):
                 with self.assertRaises(ValueError):
                     kernel.covariance(valid)
 

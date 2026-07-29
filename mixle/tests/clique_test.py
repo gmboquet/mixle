@@ -27,7 +27,7 @@ class CliqueTest(unittest.TestCase):
             a = a + a.T
             mc = max_clique(a)
             mis = max_independent_set(a)
-            with self.subTest(seed=seed):
+            with self.subTest(seed=repr(seed)):
                 self.assertTrue(all(a[i, j] for i, j in itertools.combinations(mc, 2)))  # is a clique
                 self.assertEqual(len(mc), _brute_clique_size(a))  # and maximum
                 self.assertTrue(all(not a[i, j] for i, j in itertools.combinations(mis, 2)))  # is independent

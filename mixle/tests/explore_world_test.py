@@ -93,12 +93,12 @@ class InputValidationTest(unittest.TestCase):
             {"n_cells": 2.5, "n_targets": 1, "budget": 1},
         ]
         for kwargs in invalid:
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 ExplorationWorld(seed=0, **kwargs)
 
     def test_max_steps_must_be_positive_integer(self):
         for max_steps in (0, -1, 1.5, True):
-            with self.subTest(max_steps=max_steps), self.assertRaisesRegex(ValueError, "max_steps"):
+            with self.subTest(max_steps=repr(max_steps)), self.assertRaisesRegex(ValueError, "max_steps"):
                 run_episode(random_policy, n_cells=2, n_targets=1, budget=1, seed=0, max_steps=max_steps)
 
 

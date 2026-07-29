@@ -26,10 +26,10 @@ if HAS_TORCH:
 class SpatialPriorContractTest(unittest.TestCase):
     def test_grid_rejects_invalid_shape_and_spacing(self):
         for shape in ((), (0,), (-1, 2), (2.0, 3), (True, 2)):
-            with self.subTest(shape=shape), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(shape=repr(shape)), self.assertRaises((TypeError, ValueError)):
                 _grid_faces(shape, 1.0)
         for spacing in (0.0, -1.0, np.inf, np.nan, [1.0, 0.0]):
-            with self.subTest(spacing=spacing), self.assertRaises(ValueError):
+            with self.subTest(spacing=repr(spacing)), self.assertRaises(ValueError):
                 _grid_faces((2, 2), spacing)
 
     def test_degenerate_one_cell_axes_have_valid_empty_faces(self):
@@ -51,10 +51,10 @@ class SpatialPriorContractTest(unittest.TestCase):
             {"shape": (2,), "weight": np.inf, "eps": 1e-3},
             {"shape": (2,), "weight": 1.0, "eps": 0.0},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 TotalVariation(object(), **kwargs)
         for levels in ([], [1.0], [1.0, 1.0], [0.0, np.nan]):
-            with self.subTest(levels=levels), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(levels=repr(levels)), self.assertRaises((TypeError, ValueError)):
                 Potts(object(), levels)
         with self.assertRaises(ValueError):
             Potts(object(), [0.0, 1.0], weight=-1.0)

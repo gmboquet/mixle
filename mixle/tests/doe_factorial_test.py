@@ -205,13 +205,13 @@ class CentralCompositeValidationTest(unittest.TestCase):
         # NaN previously slipped through `a <= 0.0` (always False for NaN) and silently produced a
         # design with NaN axial points.
         for bad_alpha in (float("nan"), float("inf"), float("-inf"), -1.0, 0.0):
-            with self.subTest(alpha=bad_alpha):
+            with self.subTest(alpha=repr(bad_alpha)):
                 with self.assertRaises(ValueError):
                     central_composite(self.bounds, alpha=bad_alpha)
 
     def test_numeric_alpha_rejects_boolean_modes(self):
         for bad_alpha in (True, False, np.bool_(True)):
-            with self.subTest(alpha=bad_alpha):
+            with self.subTest(alpha=repr(bad_alpha)):
                 with self.assertRaises(TypeError):
                     central_composite(self.bounds, alpha=bad_alpha)
 
@@ -270,13 +270,13 @@ class SharedBoundsValidationTest(unittest.TestCase):
     def test_infinite_or_nan_bounds_rejected_everywhere(self):
         bad_bounds_cases = ([(-1.0, np.inf)] * 3, [(np.nan, 1.0)] * 3, [(-np.inf, 1.0)] * 3)
         for bad_bounds in bad_bounds_cases:
-            with self.subTest(bounds=bad_bounds, fn="central_composite"):
+            with self.subTest(bounds=repr(bad_bounds), fn="central_composite"):
                 with self.assertRaises(ValueError):
                     central_composite(bad_bounds)
-            with self.subTest(bounds=bad_bounds, fn="box_behnken"):
+            with self.subTest(bounds=repr(bad_bounds), fn="box_behnken"):
                 with self.assertRaises(ValueError):
                     box_behnken(bad_bounds)
-            with self.subTest(bounds=bad_bounds, fn="plackett_burman"):
+            with self.subTest(bounds=repr(bad_bounds), fn="plackett_burman"):
                 with self.assertRaises(ValueError):
                     plackett_burman(bad_bounds)
 

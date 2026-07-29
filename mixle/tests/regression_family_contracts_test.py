@@ -22,7 +22,7 @@ class GLMContractsTest(unittest.TestCase):
             ("inverse_gaussian", np.array([1, 2, 3, 4, 5, 6, 7, -1])),
         ]
         for family, y in cases:
-            with self.subTest(family=family), self.assertRaises(ValueError):
+            with self.subTest(family=repr(family)), self.assertRaises(ValueError):
                 glm(self.x, y, family=family)
 
     def test_data_weights_offsets_and_controls_are_validated(self):
@@ -42,7 +42,7 @@ class GLMContractsTest(unittest.TestCase):
             lambda: glm(self.x, y, link="missing"),
         ]
         for call in invalid_calls:
-            with self.subTest(call=call), self.assertRaises(ValueError):
+            with self.subTest(call=repr(call)), self.assertRaises(ValueError):
                 call()
 
     def test_unconverged_irls_is_not_returned_as_a_fit(self):
@@ -156,7 +156,7 @@ class MeasurementErrorContractsTest(unittest.TestCase):
             lambda: deming_regression([-1, 0, 1, 0], [0, 10, 0, -10]),
         ]
         for call in invalid:
-            with self.subTest(call=call), self.assertRaises(ValueError):
+            with self.subTest(call=repr(call)), self.assertRaises(ValueError):
                 call()
 
     def test_simex_validates_design_and_extrapolation(self):
@@ -171,7 +171,7 @@ class MeasurementErrorContractsTest(unittest.TestCase):
             lambda: simex(fit, x, y, 1, extrapolation="cubic"),
         ]
         for call in invalid:
-            with self.subTest(call=call), self.assertRaises(ValueError):
+            with self.subTest(call=repr(call)), self.assertRaises(ValueError):
                 call()
 
     def test_simex_rejects_inconsistent_or_nonfinite_estimates(self):
@@ -187,7 +187,7 @@ class MeasurementErrorContractsTest(unittest.TestCase):
             lambda: propagate_uncertainty(lambda value: np.nan, np.array([[1.0], [2.0]])),
         ]
         for call in invalid:
-            with self.subTest(call=call), self.assertRaises(ValueError):
+            with self.subTest(call=repr(call)), self.assertRaises(ValueError):
                 call()
 
 

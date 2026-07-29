@@ -56,7 +56,7 @@ class LabeledLDAEngineTestCase(unittest.TestCase):
         enc = self.dist.dist_to_encoder().seq_encode(self.data)
         host = self.dist.seq_log_density(enc)
         for name, engine in self.engines:
-            with self.subTest(engine=name):
+            with self.subTest(engine=repr(name)):
                 v = np.asarray(engine.to_numpy(backend_seq_log_density(self.dist, enc, engine)))
                 self.assertTrue(np.allclose(host, v, atol=1.0e-6), "%s ELBO differs" % name)
 
@@ -67,7 +67,7 @@ class LabeledLDAEngineTestCase(unittest.TestCase):
         host.seq_update(enc, self.weights, self.dist)
         hv = host.value()
         for name, engine in self.engines:
-            with self.subTest(engine=name):
+            with self.subTest(engine=repr(name)):
                 kernel = self.dist.kernel(engine=engine, estimator=self.est)
                 value = kernel.accumulate(enc, self.weights)
                 # value: (prev_alpha, set_stats, doc_counts, topic_counts, topic_accs)

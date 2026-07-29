@@ -172,7 +172,7 @@ class WholeRecordIntegrityTest(unittest.TestCase):
             ("rationale", "a rewritten justification"),
             ("step_index", 3),
         ):
-            with self.subTest(field=field_name):
+            with self.subTest(field=repr(field_name)):
                 self.assertFalse(self._mutated(**{field_name: value}).verify())
 
     def test_deleting_a_record_breaks_the_chain(self):

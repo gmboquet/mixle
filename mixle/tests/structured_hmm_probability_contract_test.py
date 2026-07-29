@@ -49,17 +49,20 @@ class TransitionProbabilityContractTest(unittest.TestCase):
             np.array([[1.0, 0.0], [0.0, 0.0]]),
         )
         for matrix in invalid:
-            with self.subTest(matrix=matrix), self.assertRaises(ValueError):
+            with self.subTest(matrix=repr(matrix)), self.assertRaises(ValueError):
                 DenseTransition(matrix)
 
     def test_dense_prior_and_hyperparameters_are_validated(self):
         matrix = np.eye(2)
         for prior in (np.ones((3, 3)), [[1.0, -1.0], [0.0, 1.0]], [[np.inf, 0.0], [0.0, 1.0]]):
-            with self.subTest(prior=prior), self.assertRaises(ValueError):
+            with self.subTest(prior=repr(prior)), self.assertRaises(ValueError):
                 DenseTransition(matrix, prior=prior)
         for constructor in (sticky_transition, dirichlet_transition):
             for value in (-1.0, np.nan, np.inf):
-                with self.subTest(constructor=constructor.__name__, value=value), self.assertRaises(ValueError):
+                with (
+                    self.subTest(constructor=repr(constructor.__name__), value=repr(value)),
+                    self.assertRaises(ValueError),
+                ):
                     constructor(matrix, value)
 
     def test_low_rank_requires_aligned_row_stochastic_factors(self):
@@ -84,7 +87,7 @@ class TransitionProbabilityContractTest(unittest.TestCase):
         )
         for n_states, edges, values in invalid_calls:
             with (
-                self.subTest(n_states=n_states, edges=edges, values=values),
+                self.subTest(n_states=repr(n_states), edges=repr(edges), values=repr(values)),
                 self.assertRaises((TypeError, ValueError)),
             ):
                 SparseTransition(n_states, edges, values)
@@ -130,7 +133,7 @@ class TransitionProbabilityContractTest(unittest.TestCase):
     def test_initial_and_operator_contracts_are_not_silently_repaired(self):
         emissions = [stats.CategoricalDistribution({0: 1.0}), stats.CategoricalDistribution({1: 1.0})]
         for probabilities in ([1.0, 1.0], [1.1, -0.1], [np.nan, np.nan]):
-            with self.subTest(probabilities=probabilities), self.assertRaises(ValueError):
+            with self.subTest(probabilities=repr(probabilities)), self.assertRaises(ValueError):
                 StructuredHMM(emissions, probabilities, DenseTransition(np.eye(2)))
         with self.assertRaises(ValueError):
             StructuredHMM(emissions, [0.5, 0.5], _InconsistentTransition())

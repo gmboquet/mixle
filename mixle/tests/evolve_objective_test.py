@@ -185,14 +185,14 @@ class EnsembleBudgetTest(unittest.TestCase):
     def test_invalid_ensemble_and_row_counts_are_rejected(self):
         model = GaussianDistribution(0.0, 1.0)
         for bad in (0, -1, 2.5, float("nan"), True):
-            with self.subTest(m=bad), self.assertRaises(ValueError):
+            with self.subTest(m=repr(bad)), self.assertRaises(ValueError):
                 sample_ensemble(model, 3, bad, seed=0)
-            with self.subTest(n=bad), self.assertRaises(ValueError):
+            with self.subTest(n=repr(bad)), self.assertRaises(ValueError):
                 sample_ensemble(model, bad, 3, seed=0)
 
     def test_objective_builders_validate_their_advertised_budgets(self):
         for bad in (0, -1, 2.5):
-            with self.subTest(ensemble=bad):
+            with self.subTest(ensemble=repr(bad)):
                 with self.assertRaises(ValueError):
                     crps_objective(ensemble=bad)
                 with self.assertRaises(ValueError):

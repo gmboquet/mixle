@@ -446,17 +446,17 @@ class GatePolicyDomainTest(unittest.TestCase):
     def test_an_alpha_outside_zero_one_cannot_promote(self):
         # alpha=2 promoted unconditionally: every valid p-value is below it.
         for bad in (2.0, 0.0, 1.0, -0.1, float("nan"), float("inf")):
-            with self.subTest(alpha=bad), self.assertRaises(ValueError):
+            with self.subTest(alpha=repr(bad)), self.assertRaises(ValueError):
                 self._gate(alpha=bad)
 
     def test_a_negative_or_nan_min_effect_is_rejected(self):
         for bad in (-1.0, float("nan"), float("inf")):
-            with self.subTest(min_effect=bad), self.assertRaises(ValueError):
+            with self.subTest(min_effect=repr(bad)), self.assertRaises(ValueError):
                 self._gate(min_effect=bad)
 
     def test_a_negative_or_nan_calib_tol_is_rejected(self):
         for bad in (-1.0, float("nan"), float("inf")):
-            with self.subTest(calib_tol=bad), self.assertRaises(ValueError):
+            with self.subTest(calib_tol=repr(bad)), self.assertRaises(ValueError):
                 self._gate(calib_tol=bad)
 
     def test_ordinary_policy_values_still_work(self):

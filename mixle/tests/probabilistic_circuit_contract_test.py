@@ -47,11 +47,11 @@ class CircuitGraphContractTest(unittest.TestCase):
     def test_builder_requires_exact_scopes_and_probability_weights(self):
         distribution = stats.CategoricalDistribution({"a": 1.0})
         for scope in (0.5, True, (), (0, 0)):
-            with self.subTest(scope=scope), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(scope=repr(scope)), self.assertRaises((TypeError, ValueError)):
                 leaf(scope, distribution)
         children = [leaf(0, distribution), leaf(0, distribution)]
         for weights in ([-1.0, 2.0], [1.0, 1.0], [np.nan, np.nan], [1.0]):
-            with self.subTest(weights=weights), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(weights=repr(weights)), self.assertRaises((TypeError, ValueError)):
                 summ(children, weights)
 
     def test_flattened_fast_path_requires_a_complete_topological_dag(self):
@@ -94,7 +94,7 @@ class CircuitGraphContractTest(unittest.TestCase):
             ),
         )
         for flattened, error in invalid:
-            with self.subTest(flattened=flattened), self.assertRaises(error):
+            with self.subTest(flattened=repr(flattened)), self.assertRaises(error):
                 ProbabilisticCircuitDistribution(flattened, num_vars=1)
 
     def test_flattened_inputs_are_owned(self):
@@ -163,13 +163,13 @@ class CircuitEMContractTest(unittest.TestCase):
         model = _one_variable_sum()
         encoded = model.dist_to_encoder().seq_encode([["a"]])
         for weights in ([], [-1.0], [np.nan], [1.0, 1.0]):
-            with self.subTest(weights=weights), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(weights=repr(weights)), self.assertRaises((TypeError, ValueError)):
                 model.estimator().accumulator_factory().make().seq_update(encoded, weights, model)
 
     def test_pseudo_counts_and_effective_sum_counts_are_validated(self):
         model = _one_variable_sum()
         for pseudo_count in (-1.0, np.nan, np.inf, "1"):
-            with self.subTest(pseudo_count=pseudo_count), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(pseudo_count=repr(pseudo_count)), self.assertRaises((TypeError, ValueError)):
                 model.estimator(pseudo_count=pseudo_count)
 
         estimator = model.estimator()
@@ -180,7 +180,7 @@ class CircuitEMContractTest(unittest.TestCase):
         root_id = len(model.nodes) - 1
         for counts in ([-1.0, 2.0], [np.nan, 1.0], [np.inf, 1.0], [1.0]):
             malformed = ({root_id: np.asarray(counts)}, leaf_values)
-            with self.subTest(counts=counts), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(counts=repr(counts)), self.assertRaises((TypeError, ValueError)):
                 estimator.estimate(1.0, malformed)
 
         zero_counts = ({root_id: np.zeros(2)}, leaf_values)

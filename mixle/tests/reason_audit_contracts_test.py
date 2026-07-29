@@ -38,7 +38,7 @@ class CrossModalSchemaTest(unittest.TestCase):
         component = CompositeDistribution([GaussianDistribution(0.0, 1.0)])
         mixture = MixtureDistribution([component], [1.0])
         for names in ((), ("",), ("x", "x"), ("x", "y")):
-            with self.subTest(names=names), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(names=repr(names)), self.assertRaises((TypeError, ValueError)):
                 CrossModalJoint(names, mixture)
 
     def test_target_must_be_unique_and_nonempty(self):
@@ -130,7 +130,7 @@ class ResonanceContractTest(unittest.TestCase):
             ([0, -1, 1], 2),
         ]
         for labels, regimes in invalid:
-            with self.subTest(labels=labels, regimes=regimes), self.assertRaises(ValueError):
+            with self.subTest(labels=repr(labels), regimes=repr(regimes)), self.assertRaises(ValueError):
                 fit_resonance_leaves(embedding, labels, regimes)
 
 

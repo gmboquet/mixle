@@ -31,7 +31,7 @@ class IISTest(unittest.TestCase):
             if sub is None:
                 self.assertTrue(_feasible(a, b, bounds))  # None only when feasible
                 continue
-            with self.subTest(seed=seed):
+            with self.subTest(seed=repr(seed)):
                 a2, b2 = a[sub], b[sub]
                 self.assertFalse(_feasible(a2, b2, bounds))  # the subset is infeasible
                 for k in range(len(sub)):  # ... and minimal

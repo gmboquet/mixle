@@ -53,7 +53,7 @@ class PriorContractTestCase(unittest.TestCase):
         )
         for value in (0.0, -1.0, float("nan"), float("inf")):
             for factory in factories:
-                with self.subTest(value=value, factory=factory), self.assertRaises(ValueError):
+                with self.subTest(value=repr(value), factory=repr(factory)), self.assertRaises(ValueError):
                     factory(value)
         with self.assertRaises(ValueError):
             NormalGammaPrior(mu0=float("nan"))
@@ -93,7 +93,7 @@ class PriorContractTestCase(unittest.TestCase):
             (0.0, 1.0, 1.0, 0.0),
             (float("nan"), 1.0, 1.0, 1.0),
         ):
-            with self.subTest(params=params), self.assertRaises(ValueError):
+            with self.subTest(params=repr(params)), self.assertRaises(ValueError):
                 NormalGammaDistribution(*params)
         prior = NormalGammaDistribution(0.0, 1.0, 1.0, 1.0)
         with self.assertRaises(ValueError):

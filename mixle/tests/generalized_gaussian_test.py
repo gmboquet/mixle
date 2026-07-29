@@ -15,7 +15,7 @@ class GeneralizedGaussianTest(unittest.TestCase):
         for mu, alpha, beta in [(1.0, 2.0, 1.5), (0.0, 1.0, 1.0), (-1.0, 0.5, 3.0)]:
             d, fr = GG(mu, alpha, beta), ss.gennorm(beta, loc=mu, scale=alpha)
             xs = np.array([mu - 2.0, mu - 0.3, mu + 0.5, mu + 2.0])
-            with self.subTest(beta=beta):
+            with self.subTest(beta=repr(beta)):
                 self.assertTrue(np.allclose([d.log_density(x) for x in xs], fr.logpdf(xs)))
                 self.assertTrue(np.allclose([d.cdf(x) for x in xs], fr.cdf(xs)))
                 self.assertTrue(np.allclose(d.seq_log_density(xs), fr.logpdf(xs)))

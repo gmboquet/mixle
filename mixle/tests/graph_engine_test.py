@@ -38,7 +38,7 @@ class GraphEngineParityTestCase(unittest.TestCase):
             enc = dist.dist_to_encoder().seq_encode(data)
             ref = np.asarray(dist.seq_log_density(enc))
             for name, engine in engines:
-                with self.subTest(family=type(dist).__name__, engine=name):
+                with self.subTest(family=type(dist).__name__, engine=repr(name)):
                     self.assertTrue(dist.supports_engine(engine))
                     got = np.asarray(engine.to_numpy(backend_seq_log_density(dist, enc, engine)))
                     self.assertTrue(

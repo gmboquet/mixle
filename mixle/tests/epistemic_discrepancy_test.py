@@ -160,7 +160,7 @@ class MMDTest(unittest.TestCase):
 
     def test_nonpositive_bandwidth_raises_instead_of_silently_using_gamma_one(self):
         for bad_bandwidth in (0.0, -1.0):
-            with self.subTest(bandwidth=bad_bandwidth), self.assertRaises(ValueError):
+            with self.subTest(bandwidth=repr(bad_bandwidth)), self.assertRaises(ValueError):
                 mmd(np.zeros(5), np.ones(5), bandwidth=bad_bandwidth)
 
 
@@ -277,7 +277,7 @@ class MMDNonNegativityTest(unittest.TestCase):
     def test_identical_samples_never_give_a_negative_discrepancy(self):
         for values in ([0.0, 1.0], [3.0], [1.0, 2.0, 3.0, 4.0]):
             arr = np.array(values)
-            with self.subTest(values=values):
+            with self.subTest(values=repr(values)):
                 self.assertGreaterEqual(mmd(arr, arr), 0.0)
 
     def test_the_squared_estimator_is_still_available_and_still_signed(self):

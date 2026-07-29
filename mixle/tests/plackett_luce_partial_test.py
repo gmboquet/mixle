@@ -22,7 +22,7 @@ class PlackettLucePartialTest(unittest.TestCase):
         # that begin with that prefix.
         d = _dist()
         for prefix in [(2, 0), (1, 3), (0,), (3, 1, 2)]:
-            with self.subTest(prefix=prefix):
+            with self.subTest(prefix=repr(prefix)):
                 partial = math.exp(d.log_density(list(prefix)))
                 brute = sum(
                     math.exp(d.log_density(list(perm)))

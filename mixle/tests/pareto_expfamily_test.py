@@ -24,7 +24,7 @@ class ParetoExponentialFamilyTest(unittest.TestCase):
 
     def test_reconstruction(self):
         for xm, alpha in [(1.0, 2.5), (2.0, 1.3), (0.5, 4.0)]:
-            with self.subTest(xm=xm, alpha=alpha):
+            with self.subTest(xm=repr(xm), alpha=repr(alpha)):
                 d = ParetoDistribution(xm, alpha)
                 self.assertTrue(is_exponential_family(d))
                 form = to_exponential_family(d)

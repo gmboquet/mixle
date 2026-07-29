@@ -62,7 +62,7 @@ class NodeReportProtocolTestCase(unittest.TestCase):
     def test_every_stock_family_reports(self):
         catalog = _representative_family_catalog()
         for name, dist in sorted(catalog.items()):
-            with self.subTest(family=name):
+            with self.subTest(family=repr(name)):
                 report = node_report(dist, seed=7)
                 self.assertIsInstance(report, NodeReport)
                 self.assertEqual(report.field_path, "root")

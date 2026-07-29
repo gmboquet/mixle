@@ -69,7 +69,7 @@ class StateSpaceTestCase(unittest.TestCase):
             ({"delta": np.nan}, ValueError),
             ({"tol": np.inf}, ValueError),
         ]:
-            with self.subTest(kwargs=kwargs), self.assertRaises(error):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(error):
                 AR1().fit(y, **kwargs)
 
         limited = AR1().fit(y, max_its=2, delta=0.0).result
@@ -111,7 +111,7 @@ class StateSpaceTestCase(unittest.TestCase):
     def test_forecast_requires_a_positive_integer_horizon(self):
         result = LocalLevel().fit([0.0, 0.1], max_its=1, delta=0.0).result
         for horizon, error in [(0, ValueError), (-1, ValueError), (1.5, TypeError), (True, TypeError)]:
-            with self.subTest(horizon=horizon), self.assertRaises(error):
+            with self.subTest(horizon=repr(horizon)), self.assertRaises(error):
                 result.forecast(horizon)
 
 

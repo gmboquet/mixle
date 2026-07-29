@@ -121,7 +121,7 @@ class ReceiptValidationTest(unittest.TestCase):
             {"rank": 0, "round": 0, "e_step_seconds": 1.0, "n_obs": 0.5},
         )
         for values in invalid:
-            with self.subTest(values=values), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(values=repr(values)), self.assertRaises((TypeError, ValueError)):
                 RankRecord(**values)
         with self.assertRaisesRegex(ValueError, "cannot override"):
             RankRecord(rank=0, round=0, e_step_seconds=1.0, extra={"rank": 7})
@@ -138,7 +138,7 @@ class ReceiptValidationTest(unittest.TestCase):
             fit_report,
         )
         for aggregate in aggregations:
-            with self.subTest(aggregate=aggregate.__name__), self.assertRaisesRegex(ValueError, "duplicate"):
+            with self.subTest(aggregate=repr(aggregate.__name__)), self.assertRaisesRegex(ValueError, "duplicate"):
                 aggregate(records)
 
 

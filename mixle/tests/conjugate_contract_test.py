@@ -36,14 +36,14 @@ class ConjugateGeometryContractTest(unittest.TestCase):
             (np.array([1.0, 2.0]), np.ones(1)),
         )
         for data, weights in invalid:
-            with self.subTest(data_shape=data.shape, weights=None if weights is None else weights.shape):
+            with self.subTest(data_shape=repr(data.shape), weights=repr(None if weights is None else weights.shape)):
                 with self.assertRaises(ValueError):
                     conjugate_posterior(dist, data, weights=weights)
 
     def test_sampling_cardinality_requires_a_non_negative_integer(self):
         posterior = conjugate_posterior(BernoulliDistribution(0.5), [0, 1])
         for size in (True, 1.5, -1):
-            with self.subTest(size=size):
+            with self.subTest(size=repr(size)):
                 with self.assertRaises((TypeError, ValueError)):
                     posterior.sample(size)
                 with self.assertRaises((TypeError, ValueError)):
@@ -62,7 +62,7 @@ class ConjugateGeometryContractTest(unittest.TestCase):
             ([[1.0, 2.0]], None, {"psi": [[1.0, 2.0], [2.0, 1.0]]}),
         )
         for data, weights, prior in invalid_calls:
-            with self.subTest(data=data, weights=weights, prior=prior):
+            with self.subTest(data=repr(data), weights=repr(weights), prior=repr(prior)):
                 with self.assertRaises(ValueError):
                     conjugate_posterior(dist, data, weights=weights, prior=prior)
 
@@ -117,7 +117,7 @@ class ConjugateSupportAndPriorContractTest(unittest.TestCase):
             (NegativeBinomialDistribution(2.0, 0.5), [0.5]),
         )
         for dist, data in invalid:
-            with self.subTest(distribution=type(dist).__name__, data=data):
+            with self.subTest(distribution=type(dist).__name__, data=repr(data)):
                 with self.assertRaises(ValueError):
                     conjugate_posterior(dist, data)
 
@@ -134,7 +134,7 @@ class ConjugateSupportAndPriorContractTest(unittest.TestCase):
             (VonMisesDistribution(0.0, 1.0), [0.0], {"R": -1.0}),
         )
         for dist, data, prior in invalid:
-            with self.subTest(distribution=type(dist).__name__, prior=prior):
+            with self.subTest(distribution=type(dist).__name__, prior=repr(prior)):
                 with self.assertRaises(ValueError):
                     conjugate_posterior(dist, data, prior=prior)
 
@@ -180,7 +180,7 @@ class ConjugatePredictiveAndMixtureContractTest(unittest.TestCase):
             conjugate_posterior(VonMisesDistribution(0.0, 1.0), [0.0, 1.0]),
         )
         for posterior in cases:
-            with self.subTest(family=posterior.family):
+            with self.subTest(family=repr(posterior.family)):
                 predictive = posterior.posterior_predictive()
                 self.assertFalse(predictive.is_exact_posterior_predictive)
                 self.assertEqual(predictive.posterior_predictive_kind, "posterior_mean_plugin")
@@ -193,7 +193,7 @@ class ConjugatePredictiveAndMixtureContractTest(unittest.TestCase):
         priors = [{"a": 1.0, "b": 1.0}, {"a": 2.0, "b": 2.0}]
         invalid_weights = ([1.0], [-1.0, 2.0], [0.0, 0.0], [np.nan, 1.0])
         for weights in invalid_weights:
-            with self.subTest(weights=weights):
+            with self.subTest(weights=repr(weights)):
                 with self.assertRaises(ValueError):
                     mixture_conjugate_posterior(
                         BernoulliDistribution(0.5),

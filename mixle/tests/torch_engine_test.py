@@ -137,13 +137,13 @@ class TorchEngineTestCase(unittest.TestCase):
         em_step.assert_not_called()
 
         for max_its in (-1, 1.5, True, "2"):
-            with self.subTest(max_its=max_its), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(max_its=repr(max_its)), self.assertRaises((TypeError, ValueError)):
                 self.tm.fit(self.enc, estimator, max_its=max_its, model=self.model)
         for delta in (-1.0, np.nan, np.inf):
-            with self.subTest(delta=delta), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(delta=repr(delta)), self.assertRaises((TypeError, ValueError)):
                 self.tm.fit(self.enc, estimator, max_its=0, delta=delta, model=self.model)
         for init_p in (-0.1, 1.1, np.nan):
-            with self.subTest(init_p=init_p), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(init_p=repr(init_p)), self.assertRaises((TypeError, ValueError)):
                 self.tm.fit(self.enc, estimator, max_its=0, init_p=init_p, model=self.model)
 
     def test_fit_map_rejects_the_previously_ignored_weight_prior_alias(self):

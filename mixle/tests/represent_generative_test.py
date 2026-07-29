@@ -57,12 +57,12 @@ class AutoencoderControlValidationTest(unittest.TestCase):
 
     def test_non_positive_or_fractional_epochs_are_rejected(self):
         for bad in (0, -2, 0.9, True):
-            with self.subTest(epochs=bad), self.assertRaisesRegex(ValueError, "epochs"):
+            with self.subTest(epochs=repr(bad)), self.assertRaisesRegex(ValueError, "epochs"):
                 fit_autoencoder(self.units, dim=3, epochs=bad)
 
     def test_non_positive_or_fractional_dims_are_rejected(self):
         for bad in (0, -1, 2.5, True):
-            with self.subTest(dim=bad), self.assertRaisesRegex(ValueError, "dim"):
+            with self.subTest(dim=repr(bad)), self.assertRaisesRegex(ValueError, "dim"):
                 fit_autoencoder(self.units, dim=bad, epochs=2)
 
     def test_hidden_widths_are_validated_too(self):

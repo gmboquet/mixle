@@ -499,9 +499,9 @@ class ObjectiveProjectionTorchTest(unittest.TestCase):
         from mixle.inference.objectives import ExpectedLogDensity, UnnormalizedLogLikelihood
 
         for weights in ([], [0.0, 0.0], [1.0, np.nan], [1.0, -0.1]):
-            with self.subTest(weights=weights), self.assertRaises(ValueError):
+            with self.subTest(weights=repr(weights)), self.assertRaises(ValueError):
                 ExpectedLogDensity(weights=weights, normalize=True)
-            with self.subTest(unnormalized_weights=weights), self.assertRaises(ValueError):
+            with self.subTest(unnormalized_weights=repr(weights)), self.assertRaises(ValueError):
                 UnnormalizedLogLikelihood(
                     lambda model, enc, engine: engine.asarray(enc),
                     log_partition=lambda model, engine: engine.asarray(0.0),

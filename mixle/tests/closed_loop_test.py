@@ -92,7 +92,7 @@ class OperatorCreditBanditTest(unittest.TestCase):
         bandit.select("ctx")
         bandit.reward("ctx", "distill", 1.0)
         for bad in (float("nan"), float("inf"), float("-inf")):
-            with self.subTest(reward=bad), self.assertRaises(ValueError):
+            with self.subTest(reward=repr(bad)), self.assertRaises(ValueError):
                 bandit.reward("ctx", "distill", bad)
         with self.assertRaises(KeyError):
             bandit.reward("ctx", "not_an_operator", 1.0)

@@ -136,7 +136,7 @@ class EstimatorTestCase(unittest.TestCase):
             (-1.0, np.zeros(3)),
             (1.0, np.zeros(2)),
         ):
-            with self.subTest(statistics=statistics), self.assertRaises(ValueError):
+            with self.subTest(statistics=repr(statistics)), self.assertRaises(ValueError):
                 estimator.estimate(None, statistics)
 
 
@@ -212,7 +212,7 @@ class EventAndAccumulatorContractTestCase(unittest.TestCase):
         accumulator.update([1.0, 0.0, 0.0], 1.0, None)
         before = accumulator.value()
         for weight in (-1.0, np.nan, np.inf):
-            with self.subTest(weight=weight), self.assertRaises(ValueError):
+            with self.subTest(weight=repr(weight)), self.assertRaises(ValueError):
                 accumulator.update([0.0, 1.0, 0.0], weight, None)
             self.assertEqual(accumulator.value()[0], before[0])
             np.testing.assert_array_equal(accumulator.value()[1], before[1])

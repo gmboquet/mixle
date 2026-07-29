@@ -92,7 +92,7 @@ class AffinityAxiomTest(unittest.TestCase):
             np.asarray([[np.nan, 1.0]]),
         )
         for posterior in invalid:
-            with self.subTest(posterior=posterior), self.assertRaises(ValueError):
+            with self.subTest(posterior=repr(posterior)), self.assertRaises(ValueError):
                 model_log_affinity(posterior)
 
     def test_negative_or_nonfinite_prebuilt_similarities_are_rejected(self):
@@ -144,7 +144,7 @@ class OptionalAndFisherGeometryContractTest(unittest.TestCase):
             {"ridge": 0.0},
             {"metric": "unknown"},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 fisher_factors(model, data=[-1.0, 1.0], **kwargs)
 
     def test_nonfinite_fisher_statistics_are_rejected_not_zero_filled(self):
@@ -179,13 +179,13 @@ class ConditionalAffinityContractTest(unittest.TestCase):
             np.ones((2, 3)),
         )
         for matrix in invalid:
-            with self.subTest(matrix=matrix), self.assertRaises(ValueError):
+            with self.subTest(matrix=repr(matrix)), self.assertRaises(ValueError):
                 conditional_pmat(matrix)
 
     def test_perplexity_must_be_reachable_without_self_mass(self):
         matrix = np.zeros((4, 4), dtype=np.float64)
         for perplexity in (0.5, 3.1, float("nan"), float("inf")):
-            with self.subTest(perplexity=perplexity), self.assertRaises(ValueError):
+            with self.subTest(perplexity=repr(perplexity)), self.assertRaises(ValueError):
                 conditional_pmat(matrix, perplexity=perplexity)
 
         probability = conditional_pmat(matrix, perplexity=3.0)
@@ -200,19 +200,19 @@ class SparseNeighborEvidenceContractTest(unittest.TestCase):
     def test_zero_total_factor_weight_is_explicitly_no_evidence(self):
         factors = [(self.features, self.features, 0.0)]
         for fn in (sparse_model_distances, model_knn, approx_sparse_model_distances):
-            with self.subTest(fn=fn.__name__), self.assertRaises(ImpossibleEvidenceError):
+            with self.subTest(fn=repr(fn.__name__)), self.assertRaises(ImpossibleEvidenceError):
                 fn(None, None, k=1, affinity=factors)
 
     def test_impossible_similarity_rows_do_not_become_epsilon_neighbors(self):
         factors = [(np.eye(3), np.eye(3))]
         for fn in (sparse_model_distances, model_knn, approx_sparse_model_distances):
-            with self.subTest(fn=fn.__name__), self.assertRaises(ImpossibleEvidenceError):
+            with self.subTest(fn=repr(fn.__name__)), self.assertRaises(ImpossibleEvidenceError):
                 fn(None, None, k=1, affinity=factors)
 
     def test_neighbor_controls_are_not_silently_clamped_or_truncated(self):
         factors = [(self.features, self.features)]
         for kwargs in ({"k": 3}, {"k": 1.5}, {"block_size": 0}, {"evidence_cap": 0.0}):
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 sparse_model_distances(None, None, affinity=factors, **kwargs)
         for kwargs in (
             {"n_trees": 0},
@@ -220,7 +220,7 @@ class SparseNeighborEvidenceContractTest(unittest.TestCase):
             {"leaf_size": 4},
             {"candidate_multiplier": 0},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 approx_sparse_model_distances(None, None, k=1, affinity=factors, **kwargs)
 
     def test_factor_row_counts_must_match(self):

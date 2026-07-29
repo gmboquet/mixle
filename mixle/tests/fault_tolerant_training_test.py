@@ -150,7 +150,7 @@ class ElasticInputAndDeadlineTest(unittest.TestCase):
             {"seed": 0, "epoch": 0, "rank": 0, "world_size": 1, "batch_idx": -1},
         )
         for coordinates in invalid_states:
-            with self.subTest(coordinates=coordinates), self.assertRaises(ValueError):
+            with self.subTest(coordinates=repr(coordinates)), self.assertRaises(ValueError):
                 LoaderState(**coordinates)
         with self.assertRaises(TypeError):
             LoaderState(seed=0, epoch=0, rank=0.5, world_size=1)

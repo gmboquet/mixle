@@ -61,7 +61,7 @@ _CASES.append(("Gaussian(constant)", st.GaussianDistribution(0.0, 1.0), [3.0] * 
 class NumericalStressPanelTest(unittest.TestCase):
     def test_no_silent_nonfinite_density_under_stress(self):
         for label, dist, data, probes in _CASES:
-            with self.subTest(case=label):
+            with self.subTest(case=repr(label)):
                 fitted = _fit(dist, data)
                 for p in probes:
                     ld = float(fitted.log_density(p))

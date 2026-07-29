@@ -281,7 +281,7 @@ class ChowLiuTreeTestCase(unittest.TestCase):
             ([(False, False)], [np.nan], "finite"),
             ([(False,)], [1.0], "feature count"),
         ):
-            with self.subTest(message=message):
+            with self.subTest(message=repr(message)):
                 accumulator = estimator.accumulator_factory().make()
                 with self.assertRaisesRegex(ValueError, message):
                     accumulator.seq_update(rows, weights, None)

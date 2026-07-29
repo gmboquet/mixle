@@ -43,7 +43,7 @@ class CrossVersionFixturesTest(unittest.TestCase):
         cases = self.manifest["cases"]
         self.assertTrue(cases, "no cross-version fixtures found")
         for case in cases:
-            with self.subTest(case=case["name"]):
+            with self.subTest(case=repr(case["name"])):
                 fixture_path = _FIXTURES / case["file"]
                 fixture_bytes = fixture_path.read_bytes()
                 self.assertEqual(hashlib.sha256(fixture_bytes).hexdigest(), case["sha256"])

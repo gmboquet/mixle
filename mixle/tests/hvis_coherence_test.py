@@ -212,10 +212,10 @@ class AffinityHealthTest(unittest.TestCase):
     def test_health_controls_are_validated_before_measurement(self):
         factor = (np.ones((3, 1)), np.ones((3, 1)))
         for max_rows in (0, 1, 1.5, True):
-            with self.subTest(max_rows=max_rows), self.assertRaisesRegex(ValueError, "at least two"):
+            with self.subTest(max_rows=repr(max_rows)), self.assertRaisesRegex(ValueError, "at least two"):
                 affinity_health(None, [], affinity=[factor], max_rows=max_rows)
         for perplexity in (0.0, -1.0, np.nan, np.inf, True):
-            with self.subTest(perplexity=perplexity), self.assertRaisesRegex(ValueError, "at least one"):
+            with self.subTest(perplexity=repr(perplexity)), self.assertRaisesRegex(ValueError, "at least one"):
                 affinity_health(None, [], affinity=[factor], perplexity=perplexity)
 
     def test_healthy_local_view_has_empty_diagnosis(self):

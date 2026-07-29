@@ -62,7 +62,7 @@ class SemiSupervisedHmmPriorContractTest(unittest.TestCase):
         )
         model = _model()
         for prior in invalid:
-            with self.subTest(prior=prior), self.assertRaises(ValueError):
+            with self.subTest(prior=repr(prior)), self.assertRaises(ValueError):
                 model.log_density((["x"], prior))
         with self.assertRaises(TypeError):
             model.log_density((["x"], [["bad", "evidence"]]))

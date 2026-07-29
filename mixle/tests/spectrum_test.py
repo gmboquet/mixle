@@ -269,7 +269,7 @@ class CastPrecisionSpellingTest(unittest.TestCase):
         x = np.array([1.0, 2.0, 3.0])
         widths = (8, 16, 32, 48, 64, 65, 96, 100, 128, 129, 200, 256, 512, 1024)
         for bits in widths:
-            with self.subTest(bits=bits):
+            with self.subTest(bits=repr(bits)):
                 by_string = cast(x, "fp%d" % bits)
                 by_int = cast(x, bits)
                 self.assertIs(type(by_string), type(by_int), msg="type mismatch at %d bits" % bits)
@@ -295,7 +295,7 @@ class CastPrecisionSpellingTest(unittest.TestCase):
         opaque 'math domain error' (math.log2 of a nonpositive number) instead of a clear rejection."""
         x = np.array([1.0, 2.0, 3.0])
         for bad in (-5, 0, -1):
-            with self.subTest(bad=bad):
+            with self.subTest(bad=repr(bad)):
                 with self.assertRaises(ValueError) as ctx:
                     cast(x, bad)
                 self.assertNotIn("math domain error", str(ctx.exception))
@@ -322,7 +322,7 @@ class CastPrecisionSpellingTest(unittest.TestCase):
     def test_nonpositive_fp_string_width_rejected(self):
         x = np.array([1.0, 2.0, 3.0])
         for bad in ("fp-5", "fp0", "fp-1"):
-            with self.subTest(bad=bad):
+            with self.subTest(bad=repr(bad)):
                 with self.assertRaises(ValueError) as ctx:
                     cast(x, bad)
                 self.assertNotIn("math domain error", str(ctx.exception))
@@ -331,7 +331,7 @@ class CastPrecisionSpellingTest(unittest.TestCase):
     def test_malformed_fp_string_rejected_cleanly(self):
         x = np.array([1.0, 2.0, 3.0])
         for bad in ("fp", "fpabc", "fp9.5"):
-            with self.subTest(bad=bad):
+            with self.subTest(bad=repr(bad)):
                 with self.assertRaises(ValueError):
                     cast(x, bad)
 
@@ -350,7 +350,7 @@ class ExactInfiniteSumTest(unittest.TestCase):
             ([-math.inf, -math.inf], -math.inf),
             ([1.0, math.inf], math.inf),
         ):
-            with self.subTest(values=values):
+            with self.subTest(values=repr(values)):
                 result = accurate_sum(values)
                 self.assertEqual(result.value, expected)
                 self.assertEqual(result.status, "ok")

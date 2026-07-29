@@ -93,7 +93,7 @@ class EngineAccumulateParityTestCase(unittest.TestCase):
             host.seq_update(enc, weights, dist)
             hv, hlabels = _flatten(host.value())
             for ename, engine in engines:
-                with self.subTest(dist=name, engine=ename):
+                with self.subTest(dist=repr(name), engine=repr(ename)):
                     kernel = dist.kernel(engine=engine, estimator=est)
                     value, vlabels = _flatten(kernel.accumulate(enc, weights))
                     self.assertEqual(hlabels, vlabels, "%s/%s suff-stat labels differ" % (name, ename))

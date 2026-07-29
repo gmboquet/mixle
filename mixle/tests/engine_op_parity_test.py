@@ -88,7 +88,7 @@ class EngineOpParityTestCase(unittest.TestCase):
     def test_required_ops_present_on_every_engine(self):
         engines = [self.numpy, self.symbolic] + ([self.torch] if self.torch is not None else [])
         for engine in engines:
-            with self.subTest(engine=engine.name):
+            with self.subTest(engine=repr(engine.name)):
                 missing = [op for op in ComputeEngine.REQUIRED_OPS if getattr(engine, op, None) is None]
                 self.assertEqual(missing, [], "%s missing required ops: %s" % (engine.name, missing))
 
@@ -111,11 +111,11 @@ class EngineOpParityTestCase(unittest.TestCase):
         for name, (build, symbolic_ok) in cases.items():
             ref = _to_np(self.numpy, build(self.numpy)).astype(np.float64)
             if self.torch is not None:
-                with self.subTest(op=name, engine="torch"):
+                with self.subTest(op=repr(name), engine="torch"):
                     got = _to_np(self.torch, build(self.torch)).astype(np.float64)
                     np.testing.assert_allclose(got, ref, rtol=1e-6, atol=1e-6, err_msg="torch op %s" % name)
             if symbolic_ok:
-                with self.subTest(op=name, engine="symbolic"):
+                with self.subTest(op=repr(name), engine="symbolic"):
                     expr = build(self.symbolic)
                     evaluated = self.symbolic.evaluate(expr, {})
                     got = np.asarray(self.symbolic.to_numpy(evaluated), dtype=np.float64)
@@ -140,7 +140,7 @@ class EngineOpParityTestCase(unittest.TestCase):
         """Concatenation preserves the selected engine and agrees numerically."""
         engines = [self.numpy, self.symbolic] + ([self.torch] if self.torch is not None else [])
         for engine in engines:
-            with self.subTest(engine=engine.name):
+            with self.subTest(engine=repr(engine.name)):
                 value = engine.concatenate(
                     (engine.asarray([[1.0], [2.0]]), engine.asarray([[3.0], [4.0]])),
                     axis=1,

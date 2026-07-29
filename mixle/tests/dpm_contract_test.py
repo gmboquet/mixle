@@ -75,7 +75,7 @@ class DirichletProcessStateContractTestCase(unittest.TestCase):
             ),
         )
         for args in cases:
-            with self.subTest(args=args), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(args=repr(args)), self.assertRaises((TypeError, ValueError)):
                 DirichletProcessMixtureDistribution(*args)
         with self.assertRaises(ValueError):
             DirichletProcessMixtureDistribution(
@@ -210,7 +210,7 @@ class DirichletProcessInitializationAndElboContractTestCase(unittest.TestCase):
         accumulator = DirichletProcessMixtureAccumulator([GaussianAccumulator(), GaussianAccumulator()])
         encoded = GaussianDistribution(0.0, 1.0).dist_to_encoder().seq_encode([0.0, 1.0])
         for weights in ([1.0], [[1.0], [1.0]], [1.0, -1.0], [1.0, np.nan]):
-            with self.subTest(weights=weights), self.assertRaises(ValueError):
+            with self.subTest(weights=repr(weights)), self.assertRaises(ValueError):
                 accumulator.seq_initialize(encoded, weights, RandomState(2))
         np.testing.assert_array_equal(accumulator.comp_counts, np.zeros(2))
 
@@ -263,7 +263,7 @@ class DirichletProcessInitializationAndElboContractTestCase(unittest.TestCase):
             ),
         )
         for value in malformed:
-            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(value=repr(value)), self.assertRaises((TypeError, ValueError)):
                 accumulator.from_value(value)
             after = accumulator.value()
             np.testing.assert_array_equal(after[0], before[0])

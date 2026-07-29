@@ -468,7 +468,7 @@ class ComputeMetadataTestCase(unittest.TestCase):
             HierarchicalMixtureDistribution,
             SegmentalHiddenMarkovModelDistribution,
         ):
-            with self.subTest(dist=dist_type.__name__):
+            with self.subTest(dist=repr(dist_type.__name__)):
                 caps = capabilities_for(dist_type)
                 self.assertEqual(caps.engine_ready, ("numpy",))
                 self.assertEqual(caps.kernel_status, "legacy_numpy")
@@ -593,7 +593,7 @@ class ComputeMetadataTestCase(unittest.TestCase):
 
     def test_registered_declarations_pass_generic_schema_validation(self):
         for dist_type in declared_distribution_types():
-            with self.subTest(dist=dist_type.__name__):
+            with self.subTest(dist=repr(dist_type.__name__)):
                 self.assertEqual(declaration_issues(dist_type), ())
                 self.assertEqual(validate_declaration(dist_type).name, declaration_for(dist_type).name)
 

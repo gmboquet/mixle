@@ -82,7 +82,7 @@ def make_estimator_with_explicit_chain_prior(mod):
 class LookbackHmmImportTestCase(unittest.TestCase):
     def test_both_modules_define_protocol_classes(self):
         for mod in MODULES:
-            with self.subTest(module=mod.__name__):
+            with self.subTest(module=repr(mod.__name__)):
                 for cls_name in (
                     "LookbackHiddenMarkovModelDistribution",
                     "LookbackHiddenMarkovModelSampler",
@@ -95,7 +95,7 @@ class LookbackHmmImportTestCase(unittest.TestCase):
 
     def test_protocol_methods_present(self):
         for mod in MODULES:
-            with self.subTest(module=mod.__name__):
+            with self.subTest(module=repr(mod.__name__)):
                 dist = make_dist(mod)
                 acc = make_estimator(mod).accumulator_factory().make()
                 for name in ("log_density", "seq_log_density", "seq_encode", "dist_to_encoder", "sampler", "estimator"):
@@ -116,7 +116,7 @@ class LookbackHmmImportTestCase(unittest.TestCase):
 class LookbackHmmEncoderTestCase(unittest.TestCase):
     def test_encoder_round_trip(self):
         for mod in MODULES:
-            with self.subTest(module=mod.__name__):
+            with self.subTest(module=repr(mod.__name__)):
                 dist = make_dist(mod)
                 data = dist.sampler(seed=7).sample(20)
 
@@ -139,7 +139,7 @@ class LookbackHmmEncoderTestCase(unittest.TestCase):
 class LookbackHmmEstimationTestCase(unittest.TestCase):
     def test_sample_seq_initialize_seq_estimate_smoke(self):
         for mod in MODULES:
-            with self.subTest(module=mod.__name__):
+            with self.subTest(module=repr(mod.__name__)):
                 dist = make_dist(mod)
                 data = dist.sampler(seed=11).sample(40)
                 est = make_estimator(mod)
@@ -166,7 +166,7 @@ class LookbackHmmEstimationTestCase(unittest.TestCase):
 
     def test_update_matches_seq_update(self):
         for mod in MODULES:
-            with self.subTest(module=mod.__name__):
+            with self.subTest(module=repr(mod.__name__)):
                 dist = make_dist(mod)
                 data = dist.sampler(seed=5).sample(8)
                 est = make_estimator(mod, with_len=False)
@@ -195,7 +195,7 @@ class LookbackHmmConjugatePriorTestCase(unittest.TestCase):
 
     def test_explicit_chain_prior_is_carried_through_estimate_and_detected_as_map(self):
         for mod in MODULES:
-            with self.subTest(module=mod.__name__):
+            with self.subTest(module=repr(mod.__name__)):
                 dist = make_dist(mod)
                 data = dist.sampler(seed=13).sample(40)
                 est = make_estimator_with_explicit_chain_prior(mod)
@@ -228,7 +228,7 @@ class LookbackHmmObjectiveResolutionTestCase(unittest.TestCase):
 
     def test_child_only_pseudo_count_regularization_still_resolves_to_map(self):
         for mod in MODULES:
-            with self.subTest(module=mod.__name__):
+            with self.subTest(module=repr(mod.__name__)):
                 dist = make_dist(mod)
                 est = make_estimator(mod)
 
@@ -237,7 +237,7 @@ class LookbackHmmObjectiveResolutionTestCase(unittest.TestCase):
 
     def test_optimize_tracks_a_monotone_objective_under_child_only_regularization(self):
         for mod in MODULES:
-            with self.subTest(module=mod.__name__):
+            with self.subTest(module=repr(mod.__name__)):
                 dist = make_dist(mod)
                 est = make_estimator(mod)
                 data = dist.sampler(seed=17).sample(60)

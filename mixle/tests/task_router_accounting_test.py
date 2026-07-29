@@ -74,7 +74,7 @@ class RouterAccountingTest(unittest.TestCase):
             [("local", valid_local, True), ("frontier", _teacher, 2.0)],
         )
         for tiers in invalid_tiers:
-            with self.subTest(tiers=tiers), self.assertRaises(ValueError):
+            with self.subTest(tiers=repr(tiers)), self.assertRaises(ValueError):
                 Router(tiers)
 
 

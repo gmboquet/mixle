@@ -81,13 +81,13 @@ class DirichletFittingContractTestCase(unittest.TestCase):
             [np.nan, 0.5, 0.5],
             [0.5, 0.5],
         ):
-            with self.subTest(row=row), self.assertRaises(ValueError):
+            with self.subTest(row=repr(row)), self.assertRaises(ValueError):
                 acc.update(row, 1.0, None)
         for weight in (-1.0, np.nan, [1.0]):
-            with self.subTest(weight=weight), self.assertRaises(ValueError):
+            with self.subTest(weight=repr(weight)), self.assertRaises(ValueError):
                 acc.update(self.rows[0], weight, None)
         for weights in ([1.0], [[1.0], [1.0]], [1.0, -1.0], [1.0, np.nan]):
-            with self.subTest(weights=weights), self.assertRaises(ValueError):
+            with self.subTest(weights=repr(weights)), self.assertRaises(ValueError):
                 acc.seq_update(self.encoded, weights, None)
         self.assertEqual(acc.counts, 0.0)
 
@@ -102,7 +102,7 @@ class DirichletFittingContractTestCase(unittest.TestCase):
             (2.0, np.zeros(3), np.ones(3), np.full(3, 2.0)),
         ]
         for value in malformed:
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 acc.combine(value)
             after = acc.value()
             for actual, expected in zip(after, before):
@@ -123,7 +123,7 @@ class DirichletEstimatorContractTestCase(unittest.TestCase):
             {"pseudo_count": 1.0, "suff_stat": [0.0, np.nan]},
             {"suff_stat": [-1.0, -1.0]},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 DirichletEstimator(**kwargs)
 
     def test_empty_statistics_require_or_preserve_dimension(self):
@@ -154,7 +154,7 @@ class DirichletEstimatorContractTestCase(unittest.TestCase):
             (1.0, np.zeros(3), np.ones(3), np.ones(3)),
         ]
         for value in malformed:
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 estimator.estimate(None, value)
 
     def test_solver_reports_invalid_input_and_nonconvergence(self):

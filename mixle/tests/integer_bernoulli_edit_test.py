@@ -89,7 +89,7 @@ class IntegerBernoulliEditContractTestCase(unittest.TestCase):
             np.zeros((1, 4)),
         )
         for kernel in invalid:
-            with self.subTest(kernel=kernel), self.assertRaises(ValueError):
+            with self.subTest(kernel=repr(kernel)), self.assertRaises(ValueError):
                 IntegerBernoulliEditDistribution(kernel)
         with self.assertRaises(ValueError):
             IntegerBernoulliEditDistribution(np.log([[0.2, 0.8, 0.2, 0.8]]))
@@ -126,7 +126,7 @@ class IntegerBernoulliEditContractTestCase(unittest.TestCase):
             ([0, 0], []),
             ([], [1, 1]),
         ):
-            with self.subTest(observation=observation):
+            with self.subTest(observation=repr(observation)):
                 with self.assertRaises((TypeError, ValueError)):
                     dist.log_density(observation)
                 with self.assertRaises((TypeError, ValueError)):
@@ -194,7 +194,7 @@ class IntegerBernoulliEditContractTestCase(unittest.TestCase):
             (([], [1]), -1.0),
             (([], [1]), np.nan),
         ):
-            with self.subTest(observation=observation, weight=weight):
+            with self.subTest(observation=repr(observation), weight=repr(weight)):
                 with self.assertRaises((TypeError, ValueError)):
                     acc.update(observation, weight, None)
                 np.testing.assert_array_equal(acc.value()[0], before[0])
@@ -206,7 +206,7 @@ class IntegerBernoulliEditContractTestCase(unittest.TestCase):
 
     def test_estimator_rejects_invalid_configuration_and_statistics(self):
         for min_prob in (-0.1, 0.51, np.nan):
-            with self.subTest(min_prob=min_prob), self.assertRaises(ValueError):
+            with self.subTest(min_prob=repr(min_prob)), self.assertRaises(ValueError):
                 IntegerBernoulliEditEstimator(2, min_prob=min_prob)
         with self.assertRaises(ValueError):
             IntegerBernoulliEditEstimator(2, pseudo_count=-1.0)

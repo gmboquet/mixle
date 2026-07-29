@@ -145,7 +145,7 @@ class StructuredVITestCase(unittest.TestCase):
             ([[0, 1]], topics, {"tol": np.inf}),
         ]
         for docs, topic_handles, kwargs in invalid:
-            with self.subTest(docs=docs, kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(docs=repr(docs), kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 admixture(docs, topic_handles, **kwargs)
 
         with self.assertRaises(ValueError):

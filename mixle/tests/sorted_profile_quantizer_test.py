@@ -170,7 +170,7 @@ class DenseFallbackTest(unittest.TestCase):
         ):
             encoding = fit_sorted_profile(source)
             restored = reconstruct(encoding)
-            with self.subTest(dtype=source.dtype):
+            with self.subTest(dtype=repr(source.dtype)):
                 self.assertTrue(encoding.used_dense_fallback)
                 self.assertEqual(restored.dtype, source.dtype)
                 np.testing.assert_array_equal(restored, source)
@@ -182,7 +182,7 @@ class DenseFallbackTest(unittest.TestCase):
         source = np.array([1.0], dtype=np.float64)
         valid = fit_sorted_profile(source)
         for payload in (valid.to_bytes()[:-1], valid.to_bytes() + b"\x00", b"BAD!" + valid.to_bytes()[4:]):
-            with self.subTest(length=len(payload)), self.assertRaises(ValueError):
+            with self.subTest(length=repr(len(payload))), self.assertRaises(ValueError):
                 SortedProfileEncoding.from_bytes(payload)
         with self.assertRaises(ValueError):
             valid.dense_values[0] = 2.0
@@ -208,12 +208,12 @@ class DenseFallbackTest(unittest.TestCase):
                 "_index_dtype": np.dtype(np.uint8),
                 **kwargs,
             }
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 SortedProfileEncoding(**values)
 
     def test_fit_and_anomaly_thresholds_fail_closed(self):
         for tensor in ([0.0, np.nan], [0.0, np.inf]):
-            with self.subTest(tensor=tensor), self.assertRaises(ValueError):
+            with self.subTest(tensor=repr(tensor)), self.assertRaises(ValueError):
                 fit_sorted_profile(tensor)
         for kwargs in (
             {"top_k": -1},
@@ -223,7 +223,7 @@ class DenseFallbackTest(unittest.TestCase):
             {"gof_threshold": np.nan},
             {"gof_threshold": 1.1},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 fit_sorted_profile([0.0, 1.0], **kwargs)
 
         reference = fit_sorted_profile(
@@ -237,7 +237,7 @@ class DenseFallbackTest(unittest.TestCase):
             {"abs_margin": -0.1},
             {"abs_margin": np.inf},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 detect_anomaly(np.zeros(64), reference, **kwargs)
 
     def test_reconstruction_rejects_non_finite_distribution_quantiles(self):

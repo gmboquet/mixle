@@ -58,7 +58,7 @@ class HeterogeneousAdultFlagshipSmokeTest(unittest.TestCase):
         # held-out log score + task-relevant metric for all three models (automatic, explicit, baseline)
         self.assertEqual(set(r["held_out"]), {"automatic", "explicit", "baseline"})
         for name, entry in r["held_out"].items():
-            with self.subTest(model=name):
+            with self.subTest(model=repr(name)):
                 self.assertTrue(math.isfinite(entry["train_mean_log_density"]))
                 self.assertTrue(math.isfinite(entry["test_mean_log_density"]))
                 # held-out density must not collapse relative to train -- the memorization/overfit tripwire

@@ -143,7 +143,7 @@ class StudentTCopulaTest(unittest.TestCase):
     def test_rejects_nonpositive_df(self):
         corr = np.array([[1.0, 0.6], [0.6, 1.0]])
         for bad_df in (0.0, -3.0):
-            with self.subTest(df=bad_df), self.assertRaises(ValueError):
+            with self.subTest(df=repr(bad_df)), self.assertRaises(ValueError):
                 StudentTCopulaDistribution(corr, bad_df)
 
     def test_rejects_out_of_range_pseudo_observations(self):

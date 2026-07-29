@@ -44,7 +44,7 @@ def _estimator(**overrides):
 class LookbackDistributionSchemaTest(unittest.TestCase):
     def test_lag_is_an_exact_nonnegative_integer(self):
         for invalid in (True, 1.5, "1"):
-            with self.subTest(invalid=invalid):
+            with self.subTest(invalid=repr(invalid)):
                 with self.assertRaises(TypeError):
                     _distribution(lag=invalid)
         with self.assertRaises(ValueError):
@@ -60,7 +60,7 @@ class LookbackDistributionSchemaTest(unittest.TestCase):
 
     def test_initial_weights_are_a_probability_simplex(self):
         for invalid in ([0.6, 0.5], [-0.1, 1.1], [np.nan, np.nan]):
-            with self.subTest(invalid=invalid):
+            with self.subTest(invalid=repr(invalid)):
                 with self.assertRaises(ValueError):
                     _distribution(w=invalid)
 
@@ -71,7 +71,7 @@ class LookbackDistributionSchemaTest(unittest.TestCase):
             [[0.8, -0.2], [0.3, 0.7]],
             [[0.8, 0.2], [np.inf, 0.0]],
         ):
-            with self.subTest(invalid=invalid):
+            with self.subTest(invalid=repr(invalid)):
                 with self.assertRaises(ValueError):
                     _distribution(transitions=invalid)
 
@@ -139,7 +139,7 @@ class LookbackTrainingSchemaTest(unittest.TestCase):
         )
         for constructor in constructors:
             for invalid in (False, 0.5):
-                with self.subTest(constructor=constructor, invalid=invalid):
+                with self.subTest(constructor=repr(constructor), invalid=repr(invalid)):
                     with self.assertRaises(TypeError):
                         constructor(invalid)
             with self.assertRaises(ValueError):
@@ -163,11 +163,11 @@ class LookbackTrainingSchemaTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exactly 2"):
             _estimator(init_estimators=[NullEstimator()])
         for invalid in ((1.0,), (1.0, 2.0, 3.0)):
-            with self.subTest(invalid=invalid):
+            with self.subTest(invalid=repr(invalid)):
                 with self.assertRaises(ValueError):
                     _estimator(pseudo_count=invalid)
         for invalid in (-1.0, np.inf, True):
-            with self.subTest(invalid=invalid):
+            with self.subTest(invalid=repr(invalid)):
                 with self.assertRaises((TypeError, ValueError)):
                     _estimator(pseudo_count=invalid)
         short_prior = (
@@ -197,7 +197,7 @@ class LookbackTrainingSchemaTest(unittest.TestCase):
             (*valid[:5], [None], *valid[6:]),
         ]
         for value in malformed:
-            with self.subTest(value=value):
+            with self.subTest(value=repr(value)):
                 with self.assertRaises((TypeError, ValueError)):
                     estimator.estimate(None, value)
 

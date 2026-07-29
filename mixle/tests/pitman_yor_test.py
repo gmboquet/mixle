@@ -135,7 +135,7 @@ class PitmanYorContractTestCase(unittest.TestCase):
     def test_raw_partitions_reject_non_sequences_and_invalid_label_equality(self):
         dist = PitmanYorProcessDistribution()
         for value in (1, "abc", [[0], [0]], [np.nan, np.nan]):
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 dist.log_density(value)
 
     def test_encoded_partitions_require_canonical_positive_integer_sizes(self):
@@ -148,7 +148,7 @@ class PitmanYorContractTestCase(unittest.TestCase):
             [[[1, 2]]],
         )
         for value in invalid:
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 dist.seq_log_density(value)
         np.testing.assert_allclose(
             dist.seq_log_density([np.asarray([2, 1]), np.asarray([], dtype=int)]),
@@ -159,7 +159,7 @@ class PitmanYorContractTestCase(unittest.TestCase):
         acc = PitmanYorProcessAccumulator()
         encoded = [np.asarray([2, 1]), np.asarray([3])]
         for weights in ([1.0], [[1.0], [1.0]], [1.0, -1.0], [1.0, np.nan]):
-            with self.subTest(weights=weights), self.assertRaises(ValueError):
+            with self.subTest(weights=repr(weights)), self.assertRaises(ValueError):
                 acc.seq_update(encoded, weights, None)
         self.assertEqual(acc.value(), (0.0, {}, {}, {}))
         acc.seq_update(encoded, np.asarray([0.5, 2.0]), None)
@@ -172,7 +172,7 @@ class PitmanYorContractTestCase(unittest.TestCase):
         acc = PitmanYorProcessAccumulator()
         before = acc.value()
         for weight in (-1.0, np.nan, [1.0]):
-            with self.subTest(weight=weight), self.assertRaises(ValueError):
+            with self.subTest(weight=repr(weight)), self.assertRaises(ValueError):
                 acc.update([0, 0, 1], weight, None)
             self.assertEqual(acc.value(), before)
 
@@ -189,7 +189,7 @@ class PitmanYorContractTestCase(unittest.TestCase):
             (1.0, {1: 1.0}, {1: 2.0}, {}),
         )
         for value in malformed:
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=repr(value)), self.assertRaises(ValueError):
                 acc.combine(value)
             self.assertEqual(acc.value(), before)
             with self.assertRaises(ValueError):
@@ -204,7 +204,7 @@ class PitmanYorContractTestCase(unittest.TestCase):
             {"max_alpha": -1.0},
             {"max_alpha": np.inf},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises((TypeError, ValueError)):
                 PitmanYorProcessEstimator(**kwargs)
         estimator = PitmanYorProcessEstimator()
         with self.assertRaises(ValueError):
@@ -227,11 +227,11 @@ class PitmanYorContractTestCase(unittest.TestCase):
 
     def test_distribution_and_sampler_validate_sizes(self):
         for value in (0, -1, 1.5, True):
-            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(value=repr(value)), self.assertRaises((TypeError, ValueError)):
                 PitmanYorProcessDistribution(num_elements=value)
         sampler = PitmanYorProcessDistribution(num_elements=3).sampler(seed=1)
         for value in (-1, 1.5, True):
-            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(value=repr(value)), self.assertRaises((TypeError, ValueError)):
                 sampler.sample(value)
         with self.assertRaises(ValueError):
             PitmanYorProcessDistribution().estimator(pseudo_count=1.0)

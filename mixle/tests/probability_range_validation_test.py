@@ -272,7 +272,7 @@ class CategoricalSamplerValidationTestCase(unittest.TestCase):
             CategoricalDistribution({"a": 0.1, "b": 0.3}, scoring_only=True),
             CategoricalDistribution({"a": 0.25, "b": 0.75}, scoring_only=True),
         ):
-            with self.subTest(distribution=distribution), self.assertRaisesRegex(ValueError, "normalized"):
+            with self.subTest(distribution=repr(distribution)), self.assertRaisesRegex(ValueError, "normalized"):
                 distribution.sampler(seed=0)
 
     def test_sampler_from_normalized_pmap_still_matches_relative_proportions(self):

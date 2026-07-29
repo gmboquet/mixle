@@ -87,7 +87,7 @@ class MarkovTransformProbabilityContractTest(unittest.TestCase):
             ([0.5, 0.5], np.full((4, 2), 0.5), 1.1),
         )
         for init, conditional, alpha in bad_cases:
-            with self.subTest(init=init, shape=np.shape(conditional), alpha=alpha):
+            with self.subTest(init=repr(init), shape=repr(np.shape(conditional)), alpha=repr(alpha)):
                 with self.assertRaises((TypeError, ValueError)):
                     MarkovTransformDistribution(init, conditional, alpha=alpha)
 
@@ -102,7 +102,7 @@ class MarkovTransformProbabilityContractTest(unittest.TestCase):
             ([], [(0, 1)], [(0, 1)]),
         )
         for observation in invalid:
-            with self.subTest(observation=observation):
+            with self.subTest(observation=repr(observation)):
                 with self.assertRaises((TypeError, ValueError)):
                     dist.log_density(observation)
 
@@ -123,7 +123,7 @@ class MarkovTransformSamplingContractTest(unittest.TestCase):
         sampler = _distribution().sampler(seed=1)
         for draw in ((1, 1), (1.5, 1, 2), (-1, 1, 2), (0, 1, 1)):
             sampler.size_sampler = self._Draw(draw)
-            with self.subTest(draw=draw):
+            with self.subTest(draw=repr(draw)):
                 with self.assertRaises((TypeError, ValueError)):
                     sampler.sample()
 
@@ -160,7 +160,7 @@ class MarkovTransformEstimationContractTest(unittest.TestCase):
             (np.ones(2), csc_matrix(([-1.0], ([0], [0])), shape=(4, 2)), None),
         )
         for value in invalid:
-            with self.subTest(value=value):
+            with self.subTest(value=repr(value)):
                 with self.assertRaises((TypeError, ValueError)):
                     estimator.estimate(None, value)
 

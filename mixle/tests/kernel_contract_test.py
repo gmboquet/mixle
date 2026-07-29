@@ -34,7 +34,7 @@ class StationaryKernelContractTest(unittest.TestCase):
             np.array([[0.0, np.nan]]),
         )
         for points in invalid:
-            with self.subTest(shape=np.shape(points)), self.assertRaises(ValueError):
+            with self.subTest(shape=repr(np.shape(points))), self.assertRaises(ValueError):
                 stationary_kernel(points, good, 1.0, 1.0, "rbf")
         self.assertEqual(stationary_kernel(np.ones(3), np.ones(2), 1.0, 1.0, "rbf").shape, (3, 2))
         with self.assertRaisesRegex(ValueError, "same feature width"):
@@ -43,9 +43,9 @@ class StationaryKernelContractTest(unittest.TestCase):
     def test_rejects_invalid_hyperparameters(self):
         x = np.ones((2, 1))
         for value in (0, -1, np.nan, np.inf, True, [1.0]):
-            with self.subTest(lengthscale=value), self.assertRaises(ValueError):
+            with self.subTest(lengthscale=repr(value)), self.assertRaises(ValueError):
                 stationary_kernel(x, x, value, 1.0, "rbf")
-            with self.subTest(amplitude=value), self.assertRaises(ValueError):
+            with self.subTest(amplitude=repr(value)), self.assertRaises(ValueError):
                 stationary_kernel(x, x, 1.0, value, "rbf")
         with self.assertRaisesRegex(ValueError, "unknown kernel"):
             stationary_kernel(x, x, 1.0, 1.0, "unknown")
@@ -58,11 +58,11 @@ class StationaryKernelContractTest(unittest.TestCase):
             exponential_from_scaled_dist,
         )
         for helper in helpers:
-            with self.subTest(helper=helper.__name__), self.assertRaises(ValueError):
+            with self.subTest(helper=repr(helper.__name__)), self.assertRaises(ValueError):
                 helper(np.array([0.0, np.nan]), 1.0)
-            with self.subTest(helper=helper.__name__), self.assertRaises(ValueError):
+            with self.subTest(helper=repr(helper.__name__)), self.assertRaises(ValueError):
                 helper(np.array([-1.0, 0.0]), 1.0)
-            with self.subTest(helper=helper.__name__), self.assertRaises(ValueError):
+            with self.subTest(helper=repr(helper.__name__)), self.assertRaises(ValueError):
                 helper(np.array([0.0]), 0.0)
 
 

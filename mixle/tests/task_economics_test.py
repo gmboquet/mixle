@@ -28,11 +28,11 @@ class CascadeCostTest(unittest.TestCase):
             {"c_frontier": 1.0, "c_local": float("inf")},
             {"c_frontier": True},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 CostModel(**kwargs)
         c = CostModel(c_frontier=1.0)
         for probability in (-0.1, 1.1, float("nan"), True):
-            with self.subTest(probability=probability), self.assertRaises(ValueError):
+            with self.subTest(probability=repr(probability)), self.assertRaises(ValueError):
                 cascade_cost_per_request(c, probability)
 
 
@@ -104,7 +104,7 @@ class RecommendTest(unittest.TestCase):
             {"volume": 1.5, "n_label": 0},
             {"volume": 1, "n_label": True},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 recommend_route(c, p_escalate=0.1, **kwargs)
 
 

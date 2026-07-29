@@ -23,7 +23,7 @@ class DiscreteCDFTest(unittest.TestCase):
     def test_cdf_equals_summed_pmf(self):
         for dist, lo, points in CASES:
             for k in points:
-                with self.subTest(dist=type(dist).__name__, k=k):
+                with self.subTest(dist=type(dist).__name__, k=repr(k)):
                     summed = sum(math.exp(dist.log_density(j)) for j in range(lo, k + 1))
                     self.assertAlmostEqual(dist.cdf(k), summed, places=8)
 

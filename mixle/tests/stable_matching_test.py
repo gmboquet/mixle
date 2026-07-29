@@ -20,7 +20,7 @@ class StableMatchingTest(unittest.TestCase):
             pp = [list(rng.permutation(n)) for _ in range(n)]
             rp = [list(rng.permutation(n)) for _ in range(n)]
             m = stable_matching(pp, rp)
-            with self.subTest(n=n):
+            with self.subTest(n=repr(n)):
                 self.assertEqual(sorted(m), list(range(n)))  # a complete bijection
                 self.assertTrue(is_stable_matching(m, pp, rp))
 

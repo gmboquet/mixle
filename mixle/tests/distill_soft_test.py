@@ -121,7 +121,7 @@ class SoftDistillTest(unittest.TestCase):
             np.asarray([[-0.1, 0.5, 0.6]]),
             np.asarray([[0.2, 0.2, 0.2]]),
         ):
-            with self.subTest(bad_probs=bad_probs), self.assertRaises(ValueError):
+            with self.subTest(bad_probs=repr(bad_probs)), self.assertRaises(ValueError):
                 distill_from_soft_labels(["one"], bad_probs, labels=_LABELS, epochs=1)
         for kwargs in (
             {"temperature": float("nan")},
@@ -131,7 +131,7 @@ class SoftDistillTest(unittest.TestCase):
             {"labels": ["A", "A", "C"]},
             {"labels": []},
         ):
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 distill_from_soft_labels(
                     self.train_texts,
                     self.train_probs,

@@ -85,13 +85,13 @@ class SkewNormalEntropyTest(unittest.TestCase):
                 return -math.exp(logf) * logf
 
             ref, _ = integrate.quad(f, -np.inf, np.inf, limit=200)
-            with self.subTest(loc=loc, scale=scale, alpha=alpha):
+            with self.subTest(loc=repr(loc), scale=repr(scale), alpha=repr(alpha)):
                 self.assertAlmostEqual(d.entropy(), ref, places=6)
 
     def test_matches_monte_carlo(self):
         for loc, scale, alpha in [(0.5, 1.5, 2.0), (2.0, 2.0, 20.0), (-1.0, 0.7, -3.0)]:
             d = SkewNormalDistribution(loc, scale, alpha)
-            with self.subTest(loc=loc, scale=scale, alpha=alpha):
+            with self.subTest(loc=repr(loc), scale=repr(scale), alpha=repr(alpha)):
                 self.assertAlmostEqual(d.entropy(), _mc_entropy(d), delta=MC_DELTA)
 
 
@@ -103,13 +103,13 @@ class NegativeBinomialEntropyTest(unittest.TestCase):
             k = np.arange(kmax + 1, dtype=np.float64)
             lp = _nb_log_pmf(k, r, p)
             ref = float(-np.sum(np.exp(lp) * lp))
-            with self.subTest(r=r, p=p):
+            with self.subTest(r=repr(r), p=repr(p)):
                 self.assertAlmostEqual(d.entropy(), ref, places=6)
 
     def test_matches_monte_carlo(self):
         for r, p in [(5.0, 0.3), (2.0, 0.05)]:
             d = NegativeBinomialDistribution(r, p)
-            with self.subTest(r=r, p=p):
+            with self.subTest(r=repr(r), p=repr(p)):
                 self.assertAlmostEqual(d.entropy(), _mc_entropy(d), delta=MC_DELTA)
 
 
@@ -123,20 +123,20 @@ class RicianEntropyTest(unittest.TestCase):
                 return 0.0 if not np.isfinite(logf) else -math.exp(logf) * logf
 
             ref, _ = integrate.quad(f, 0.0, np.inf, limit=200)
-            with self.subTest(nu=nu, sigma=sigma):
+            with self.subTest(nu=repr(nu), sigma=repr(sigma)):
                 self.assertAlmostEqual(d.entropy(), ref, places=6)
 
     def test_nu_zero_matches_rayleigh_closed_form(self):
         for sigma in [1.0, 2.5, 0.3]:
             d = RicianDistribution(0.0, sigma)
             rayleigh = 1.0 + math.log(sigma / math.sqrt(2.0)) + np.euler_gamma / 2.0
-            with self.subTest(sigma=sigma):
+            with self.subTest(sigma=repr(sigma)):
                 self.assertAlmostEqual(d.entropy(), rayleigh, places=10)
 
     def test_matches_monte_carlo(self):
         for nu, sigma in [(3.0, 1.0), (5.0, 2.0)]:
             d = RicianDistribution(nu, sigma)
-            with self.subTest(nu=nu, sigma=sigma):
+            with self.subTest(nu=repr(nu), sigma=repr(sigma)):
                 self.assertAlmostEqual(d.entropy(), _mc_entropy(d), delta=MC_DELTA)
 
 
@@ -150,7 +150,7 @@ class NakagamiEntropyTest(unittest.TestCase):
                 return -math.exp(logf) * logf
 
             ref, _ = integrate.quad(f, 0.0, np.inf, limit=200)
-            with self.subTest(m=m, omega=omega):
+            with self.subTest(m=repr(m), omega=repr(omega)):
                 self.assertAlmostEqual(d.entropy(), ref, places=6)
 
     def test_m_one_matches_rayleigh_closed_form(self):
@@ -159,13 +159,13 @@ class NakagamiEntropyTest(unittest.TestCase):
             d = NakagamiDistribution(1.0, omega)
             sigma = math.sqrt(omega / 2.0)
             rayleigh = 1.0 + math.log(sigma / math.sqrt(2.0)) + np.euler_gamma / 2.0
-            with self.subTest(omega=omega):
+            with self.subTest(omega=repr(omega)):
                 self.assertAlmostEqual(d.entropy(), rayleigh, places=10)
 
     def test_matches_monte_carlo(self):
         for m, omega in [(2.5, 2.0), (0.7, 4.5)]:
             d = NakagamiDistribution(m, omega)
-            with self.subTest(m=m, omega=omega):
+            with self.subTest(m=repr(m), omega=repr(omega)):
                 self.assertAlmostEqual(d.entropy(), _mc_entropy(d), delta=MC_DELTA)
 
 
@@ -180,13 +180,13 @@ class SkellamEntropyTest(unittest.TestCase):
             lp = _skellam_log_pmf(k, mu1, mu2)
             finite = np.isfinite(lp)
             ref = float(-np.sum(np.exp(lp[finite]) * lp[finite]))
-            with self.subTest(mu1=mu1, mu2=mu2):
+            with self.subTest(mu1=repr(mu1), mu2=repr(mu2)):
                 self.assertAlmostEqual(d.entropy(), ref, places=6)
 
     def test_matches_monte_carlo(self):
         for mu1, mu2 in [(5.0, 5.0), (15.0, 3.0)]:
             d = SkellamDistribution(mu1, mu2)
-            with self.subTest(mu1=mu1, mu2=mu2):
+            with self.subTest(mu1=repr(mu1), mu2=repr(mu2)):
                 self.assertAlmostEqual(d.entropy(), _mc_entropy(d), delta=MC_DELTA)
 
 
@@ -198,13 +198,13 @@ class LogSeriesEntropyTest(unittest.TestCase):
             k = np.arange(1, kmax + 1, dtype=np.float64)
             lp = _logseries_log_pmf(k, p)
             ref = float(-np.sum(np.exp(lp) * lp))
-            with self.subTest(p=p):
+            with self.subTest(p=repr(p)):
                 self.assertAlmostEqual(d.entropy(), ref, places=6)
 
     def test_matches_monte_carlo(self):
         for p in [0.5, 0.9]:
             d = LogSeriesDistribution(p)
-            with self.subTest(p=p):
+            with self.subTest(p=repr(p)):
                 self.assertAlmostEqual(d.entropy(), _mc_entropy(d), delta=MC_DELTA)
 
 

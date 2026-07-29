@@ -334,7 +334,7 @@ class ArrowConnectorRegistryTest(unittest.TestCase):
     def test_open_feather_and_arrow_kinds_infer_schema(self):
         path = _write_feather(self.tmpdir, "reg.feather", pa.table({"id": pa.array([1, 2, 3])}))
         for kind in ("feather", "arrow"):
-            with self.subTest(kind=kind):
+            with self.subTest(kind=repr(kind)):
                 src = sources_pkg.open(kind, path)
                 self.assertIsNotNone(src.schema)
 

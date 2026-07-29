@@ -53,7 +53,7 @@ class BudgetTest(unittest.TestCase):
             {"budget": 1.0, "max_items": 1.5},
         ]
         for kwargs in cases:
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+            with self.subTest(kwargs=repr(kwargs)), self.assertRaises(ValueError):
                 select_evidence_batch(store, _prior(), evidence_is_observed=True, **kwargs)
 
     def test_respects_the_budget(self):
