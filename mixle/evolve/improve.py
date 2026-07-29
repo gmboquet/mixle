@@ -16,6 +16,7 @@ tried and why it won or lost.
 from __future__ import annotations
 
 import copy
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -132,13 +133,34 @@ def improve(
     train, verify = _split(data, holdout, seed)
     ctx = {"parent_hash": parent_hash, "seed": seed, "objective": objective}
 
+    # The budget is a ceiling on spend, so every quantity in that comparison has to be a real,
+    # non-negative number. `spent + cost > budget` is FALSE whenever any operand is NaN, so a NaN
+    # budget removed the ceiling entirely, a NaN cost_hint let that operator through and then
+    # poisoned `spent` so every later operator ran too, and a negative cost_hint "refunded" budget
+    # that was never spent. All three fail open on a control whose only job is to fail closed.
+    if budget is not None and (not math.isfinite(budget) or budget < 0.0):
+        raise ValueError(f"budget must be a finite non-negative cost ceiling (or None), got {budget!r}")
+    costs = {}
+    for op in ops:
+        hint = getattr(op, "cost_hint", 1.0)
+        try:
+            cost = float(hint)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"operator {getattr(op, 'name', op)!r} has a non-numeric cost_hint {hint!r}") from exc
+        if not math.isfinite(cost) or cost < 0.0:
+            raise ValueError(
+                f"operator {getattr(op, 'name', op)!r} declares cost_hint={cost!r}; a cost must be "
+                "finite and non-negative for the budget to mean anything"
+            )
+        costs[id(op)] = cost
+
     # Cost-aware ordering: lower-cost operators first so a budget cuts the expensive tail.
-    ops = sorted(ops, key=lambda op: getattr(op, "cost_hint", 1.0))
+    ops = sorted(ops, key=lambda op: costs[id(op)])
 
     attempts: list[tuple[ImprovementOperator, Any, Verdict, float]] = []
     spent = 0.0
     for op in ops:
-        cost = float(getattr(op, "cost_hint", 1.0))
+        cost = costs[id(op)]
         if budget is not None and spent + cost > budget:
             continue
         try:
