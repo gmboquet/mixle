@@ -126,7 +126,10 @@ def _stats_public_distribution_catalog():
         w1=[0.6, 0.4],
         w2=[0.5, 0.5],
         taus12=[[0.7, 0.3], [0.2, 0.8]],
-        taus21=[[0.7, 0.2], [0.3, 0.8]],
+        # taus21 must describe the SAME joint law as w1/taus12, or JointMixtureDistribution warns
+        # that the reverse parameters are ambiguous and silently keeps the forward-derived law.
+        # joint = w1[:, None] * taus12 = [[0.42, 0.18], [0.08, 0.32]]; taus21 = joint / w2.
+        taus21=[[0.84, 0.36], [0.16, 0.64]],
     )
 
     segmental = stats.SegmentalHiddenMarkovModelDistribution(
