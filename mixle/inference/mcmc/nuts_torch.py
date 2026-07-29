@@ -147,6 +147,7 @@ def nuts_torch(
     samples: list[Any] = []
     log_probs: list[float] = []
     depths: list[int] = []
+    accepted: list[bool] = []
     total = warmup + num_samples * thin
 
     def build_tree(theta, r, grad, logu, v, j, eps, joint0):
@@ -180,19 +181,26 @@ def nuts_torch(
         rm = rp = r0
         gm = gp = cur_grad
         theta_new, lp_new, grad_new, n, s, j = cur, cur_lp, cur_grad, 1, 1, 0
-        alpha, n_alpha = 0.0, 1
+        alpha, n_alpha = 0.0, 0
+        moved = False  # did any doubling actually adopt its proposal?
         while s == 1 and j < max_tree_depth:
             v = -1 if rng.random_sample() < 0.5 else 1
             if v == -1:
-                tm, rm, gm, _, _, _, tpr, lpr, gpr, n_p, s_p, alpha, n_alpha = build_tree(
+                tm, rm, gm, _, _, _, tpr, lpr, gpr, n_p, s_p, a_p, na_p = build_tree(
                     tm, rm, gm, logu, v, j, eps, joint0
                 )
             else:
-                _, _, _, tp, rp, gp, tpr, lpr, gpr, n_p, s_p, alpha, n_alpha = build_tree(
+                _, _, _, tp, rp, gp, tpr, lpr, gpr, n_p, s_p, a_p, na_p = build_tree(
                     tp, rp, gp, logu, v, j, eps, joint0
                 )
+            # accept_stat must average the Metropolis probability over every leapfrog step in
+            # the trajectory, so each doubling's contribution adds to the running totals rather
+            # than replacing them. Mirrors the numpy sampler in mcmc/samplers.py.
+            alpha += a_p
+            n_alpha += na_p
             if s_p == 1 and rng.random_sample() < min(1.0, n_p / max(n, 1)):
                 theta_new, lp_new, grad_new = tpr, lpr, gpr
+                moved = True
             n += n_p
             s = s_p if no_uturn(tm, tp, rm, rp) else 0
             j += 1
@@ -216,11 +224,13 @@ def nuts_torch(
             samples.append(cur.detach().cpu().numpy())
             log_probs.append(cur_lp)
             depths.append(j)
+            accepted.append(moved)
 
     res = MCMCResult(
         samples=samples,
         log_probs=np.asarray(log_probs, dtype=float),
-        accepted=np.ones(len(samples), dtype=bool),
+        # the chain's real movement, not an assumption that NUTS always moves -- see samplers.py
+        accepted=np.asarray(accepted, dtype=bool),
         transition_labels=tuple("nuts" for _ in samples),
     )
     object.__setattr__(res, "tree_depth", np.asarray(depths, dtype=int))

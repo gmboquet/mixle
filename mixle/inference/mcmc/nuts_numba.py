@@ -125,6 +125,7 @@ def _nuts_core(value_and_grad, theta0, num_samples, warmup, mass, target_accept,
     n_keep = num_samples  # retained draws; num_samples * thin post-warmup iterations, keep every thin-th
     samples = np.empty((n_keep, d))
     log_probs = np.empty(n_keep)
+    accepted = np.zeros(n_keep, dtype=np.bool_)  # did the chain actually move on this draw?
     kept = 0
     total = warmup + num_samples * thin
 
@@ -145,22 +146,29 @@ def _nuts_core(value_and_grad, theta0, num_samples, warmup, mass, target_accept,
         s = 1
         j = 0
         alpha = 0.0
-        n_alpha = 1
+        n_alpha = 0
+        moved = False  # did any doubling actually adopt its proposal?
         while s == 1 and j < max_tree_depth:
             v = -1 if np.random.random() < 0.5 else 1
             if v == -1:
-                tm, rm, gm, _, _, _, tpr, lpr, gpr, n_p, s_p, alpha, n_alpha = _build_tree(
+                tm, rm, gm, _, _, _, tpr, lpr, gpr, n_p, s_p, a_p, na_p = _build_tree(
                     value_and_grad, tm, rm, gm, logu, v, j, eps, joint0, minv, delta_max
                 )
             else:
-                _, _, _, tp, rp, gp, tpr, lpr, gpr, n_p, s_p, alpha, n_alpha = _build_tree(
+                _, _, _, tp, rp, gp, tpr, lpr, gpr, n_p, s_p, a_p, na_p = _build_tree(
                     value_and_grad, tp, rp, gp, logu, v, j, eps, joint0, minv, delta_max
                 )
+            # accept_stat must average the Metropolis probability over every leapfrog step in
+            # the trajectory, so each doubling's contribution adds to the running totals rather
+            # than replacing them. Mirrors the numpy sampler in mcmc/samplers.py.
+            alpha += a_p
+            n_alpha += na_p
             eval_count += 2**j  # each doubling adds 2**j leapfrog evaluations
             if s_p == 1 and np.random.random() < min(1.0, n_p / max(n, 1)):
                 theta_new = tpr
                 lp_new = lpr
                 grad_new = gpr
+                moved = True
             n += n_p
             s = s_p if _no_uturn(tm, tp, rm, rp, minv) else 0
             j += 1
@@ -185,9 +193,10 @@ def _nuts_core(value_and_grad, theta0, num_samples, warmup, mass, target_accept,
         if it >= warmup and ((it - warmup) % thin == 0) and kept < n_keep:
             samples[kept] = cur
             log_probs[kept] = cur_lp
+            accepted[kept] = moved
             kept += 1
 
-    return samples[:kept], log_probs[:kept], eps, eval_count
+    return samples[:kept], log_probs[:kept], accepted[:kept], eps, eval_count
 
 
 def nuts_numba(
@@ -229,7 +238,7 @@ def nuts_numba(
         raise ValueError("initial state has non-finite log target.")
     seed = int(np.random.randint(1, 2**31 - 1)) if seed is None else int(seed)
 
-    samples, log_probs, eps, num_evals = _nuts_core(
+    samples, log_probs, accepted, eps, num_evals = _nuts_core(
         value_and_grad,
         theta0,
         int(num_samples),
@@ -244,7 +253,8 @@ def nuts_numba(
     res = MCMCResult(
         samples=sample_list,
         log_probs=np.asarray(log_probs, dtype=float),
-        accepted=np.ones(len(sample_list), dtype=bool),
+        # the chain's real movement, not an assumption that NUTS always moves -- see samplers.py
+        accepted=np.asarray(accepted, dtype=bool),
         transition_labels=tuple("nuts" for _ in sample_list),
     )
     object.__setattr__(res, "step_size", float(eps))
