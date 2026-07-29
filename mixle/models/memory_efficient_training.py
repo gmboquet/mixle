@@ -1067,6 +1067,22 @@ if _HAS_TORCH:
             super().load_state_dict(packed)
 
     __all__.append("CompressedAdam")
+else:
+    # __all__ correctly omits it here, but mixle.models.__init__ imports the name unconditionally,
+    # so leaving it undefined breaks `import mixle.models` on a torch-less install with a bare
+    # "cannot import name 'CompressedAdam'". Bind a placeholder that imports cleanly and names the
+    # missing optional dependency when anyone actually constructs it. Same treatment as the
+    # nn.Module placeholders in mixle.models.coarsening.
+    class CompressedAdam:
+        """Placeholder for the torch-only optimizer; constructing it reports the missing dependency."""
+
+        _mixle_requires = "torch"
+
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            raise ImportError(
+                "mixle.models.memory_efficient_training.CompressedAdam requires torch, which is not "
+                "installed. Install it with `pip install mixle[torch]`."
+            )
 
 
 # ---------------------------------------------------------------------------------------------
