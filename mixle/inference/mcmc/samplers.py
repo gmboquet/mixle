@@ -152,6 +152,33 @@ def _positive_int(value: Any, name: str) -> int:
     return result
 
 
+def _validated_nuts_controls(
+    num_samples: Any, warmup: int, thin: int, target_accept: Any, max_tree_depth: Any
+) -> tuple[int, int, int, float, int]:
+    """The control validation the numpy sampler performs, applied to an accelerated backend too.
+
+    These backends only checked ``num_samples < 0 or warmup < 0 or thin <= 0``, which is weaker in
+    four ways that all produce a plausible-looking result instead of an error: ``num_samples=1.5``
+    passed the comparison and then became one sample at the ``int()`` cast; ``target_accept=NaN``
+    passed every bound (NaN compares false against everything) and silently disabled dual averaging;
+    ``max_tree_depth=0`` produced a chain that could not take a single doubling and returned draws
+    identical to the initial state; and a boolean slipped through wherever an int was expected. A
+    backend is an implementation detail -- switching to it must not change which inputs are legal.
+    """
+    num_samples = _nonnegative_int(num_samples, "num_samples")
+    warmup = _nonnegative_int(warmup, "warmup")
+    thin = _positive_int(thin, "thin")
+    max_tree_depth = _positive_int(max_tree_depth, "max_tree_depth")
+    if (
+        isinstance(target_accept, (bool, np.bool_))
+        or not isinstance(target_accept, (int, float, np.integer, np.floating))
+        or not np.isfinite(target_accept)
+        or not 0.0 < float(target_accept) < 1.0
+    ):
+        raise ValueError("target_accept must be finite and strictly between zero and one.")
+    return num_samples, warmup, thin, float(target_accept), max_tree_depth
+
+
 def _finite_positive(value: Any, name: str) -> float:
     if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.integer, np.floating)):
         raise ValueError(f"{name} must be finite and positive.")
