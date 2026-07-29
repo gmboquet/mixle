@@ -205,10 +205,15 @@ class LogNumberSystem:
         """Integer Gaussian logarithm: ``logsumexp`` of two quantized log-values -> ``max + LUT[|diff|]``.
 
         ``LOG_ZERO_CODE`` (log of an exact zero) is absorbing -- zero-plus-anything is the other operand,
-        computed with no LUT lookup at all. Ordinary operands are clamped into ``[CODE_MIN, CODE_MAX]``
-        first, so the ``|k1 - k2|`` difference below can never overflow int64 even for adversarial inputs
-        (MXR-080-0138): an overflowed, wrapped-negative difference would otherwise become the LUT index
-        a few lines down.
+        computed with no LUT lookup at all. Ordinary operands must already be canonical, i.e. inside
+        ``[CODE_MIN, CODE_MAX]``: D-0129 rejects a non-canonical public code rather than saturating it,
+        so that the published rounding bound applies to every accepted value. That is what keeps the
+        ``|k1 - k2|`` difference below from overflowing int64 (MXR-080-0138) -- an overflowed,
+        wrapped-negative difference would otherwise become the LUT index a few lines down. The
+        *derived* sum does saturate to the range, since it is the library's own value, not the
+        caller's. (The compiled ``_logadd`` clamps its operands instead of rejecting them: it is a
+        boundscheck-disabled kernel reached through this validation, and clamping is its last-ditch
+        memory-safety guard, not the public contract.)
         """
         k1, k2 = np.broadcast_arrays(_exact_code_array(k1, "k1"), _exact_code_array(k2, "k2"))
         is_zero1 = k1 == LOG_ZERO_CODE

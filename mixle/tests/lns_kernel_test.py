@@ -86,13 +86,20 @@ class CompiledLnsKernelTest(unittest.TestCase):
 
     def test_logsumexp_rows_adversarial_extreme_codes_deterministic_and_crash_free(self):
         # Broad sweep directly against the compiled kernel: fresh random extreme int64 rows (some
-        # forced to the sentinel, some forced to the saturation boundary) each run, asserting no
-        # exception and an identical answer to a second call on the same input (determinism), plus
-        # exact agreement with the numpy-tree fallback (mixle.engines.lns.LogNumberSystem.logsumexp
-        # with the compiled path unavailable would take, and does take here via .logadd internally).
+        # forced to the sentinel, some to the saturation boundary) each run, asserting no exception
+        # and an identical answer to a second call on the same input. Crash-freedom is the point --
+        # boundscheck is disabled file-wide in _lns_kernel.pyx, so an out-of-range operand that
+        # reached the LUT index would read out-of-bounds memory rather than raise, and the kernel's
+        # operand clamp exists to make that structurally impossible.
+        #
+        # The kernel's clamp is a memory-safety backstop, not the public contract: D-0129 has the
+        # public entry points reject a non-canonical code instead of saturating it, so the published
+        # rounding bound applies to every accepted value. So parity with the numpy tree is asserted
+        # only where the row is canonical, and refusal is asserted where it is not.
         lns = LogNumberSystem(step=0.01)
         rng = np.random.RandomState(123)
         mismatches = 0
+        canonical_rows = 0
         for t in range(4000):
             n = rng.randint(2, 9)
             row = rng.randint(np.iinfo(np.int64).min, np.iinfo(np.int64).max, size=(1, n), dtype=np.int64)
@@ -106,10 +113,17 @@ class CompiledLnsKernelTest(unittest.TestCase):
             out1 = logsumexp_rows(row, lns.lut, lns.dmax, LOG_ZERO_CODE, CODE_MIN, CODE_MAX)
             out2 = logsumexp_rows(row, lns.lut, lns.dmax, LOG_ZERO_CODE, CODE_MIN, CODE_MAX)
             self.assertEqual(int(out1[0]), int(out2[0]))  # deterministic
-            ref = lns.logsumexp(row, axis=1)  # Python-level: same self.logadd-based tree, independently
-            if int(out1[0]) != int(ref[0]):
-                mismatches += 1
+            canonical = bool(np.all((row == LOG_ZERO_CODE) | ((row >= CODE_MIN) & (row <= CODE_MAX))))
+            if canonical:
+                canonical_rows += 1
+                ref = lns.logsumexp(row, axis=1)  # same logadd-based tree, independently
+                if int(out1[0]) != int(ref[0]):
+                    mismatches += 1
+            else:
+                with self.assertRaises(ValueError):
+                    lns.logsumexp(row, axis=1)
         self.assertEqual(mismatches, 0)
+        self.assertGreater(canonical_rows, 0, "the sweep must actually reach the parity branch")
 
     def test_logsumexp_rows_sentinel_matches_independent_numpy_reference(self):
         # MXR-080-0138 at the compiled entry point, against an INDEPENDENT reference implementation
