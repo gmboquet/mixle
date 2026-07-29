@@ -381,12 +381,18 @@ class Registry:
         """
         p = os.path.join(self._model_dir(name, create=False), _safe_segment(alias, "alias") + ".alias")
         # the version READ FROM the alias file is still resolved against the known version list by get(),
-        # so a tampered alias file cannot traverse either.
-        if os.path.exists(p):
-            with open(p, encoding="utf-8") as f:
-                version = f.read().strip()
-        else:
+        # so a tampered alias file cannot traverse either. O_NOFOLLOW for the same reason as the
+        # registration lock and _load_payload: a symlinked alias would otherwise be followed and its
+        # target read as the pointer, so a planted link could redirect "production" at whatever file
+        # it names. Opening with O_NOFOLLOW instead of testing os.path.exists first also closes the
+        # TOCTOU window between the check and the open.
+        try:
+            fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
             version = "latest"
+        else:
+            with os.fdopen(fd, encoding="utf-8") as f:
+                version = f.read().strip()
         return self.get(name, version, trust_code=trust_code)
 
     def verify_chain(self, name: str, *, trust_code: bool = False) -> bool:
