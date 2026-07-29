@@ -1,7 +1,6 @@
 import unittest
 
 import numpy as np
-import pytest
 import scipy.sparse
 
 from mixle.utils.hvis.embed import htsne, humap
@@ -13,7 +12,6 @@ from mixle.utils.hvis.tsne import (
     tsne_exact,
     update_alpha,
 )
-
 
 
 class JointProbabilityContractTest(unittest.TestCase):

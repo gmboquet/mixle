@@ -1,7 +1,6 @@
 import unittest
 
 import numpy as np
-import pytest
 
 from mixle.utils.parallel.training_contracts import (
     CollectiveKind,
@@ -19,7 +18,6 @@ from mixle.utils.parallel.training_launchers import (
     _TopologyBoundFabric,
     attest_worker_coordinate,
 )
-
 
 
 class ParallelPlanContractTest(unittest.TestCase):
@@ -87,10 +85,7 @@ class TrainingReceiptContractTest(unittest.TestCase):
 class LauncherTopologyContractTest(unittest.TestCase):
     def test_every_rank_maps_to_one_unique_planned_coordinate(self):
         plan = ParallelPlan(dp_replicate=2, tp=2)
-        attestations = [
-            attest_worker_coordinate(plan, actual_world_size=4, rank=rank)
-            for rank in range(4)
-        ]
+        attestations = [attest_worker_coordinate(plan, actual_world_size=4, rank=rank) for rank in range(4)]
         self.assertEqual(len({attestation.coordinate for attestation in attestations}), 4)
         with self.assertRaises(ValueError):
             attest_worker_coordinate(plan, actual_world_size=2, rank=0)
