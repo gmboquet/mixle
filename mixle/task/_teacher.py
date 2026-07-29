@@ -81,30 +81,26 @@ class TeacherCaller:
     def _resolve(self, items: list) -> list:
         """Discover the convention from the first real labeling pass, and remember it.
 
-        Only ``TypeError`` counts as "not batched". That is what a per-item teacher raises when
-        handed a list -- from a bad index (``item["kind"]`` on a list), a bad attribute, a bad
-        arity -- and it is the ordinary signal, not an anomaly. Everything else propagates.
+        Every exception is absorbed here, and that is a deliberate choice rather than an oversight.
+        A per-item callable handed a list raises whatever its own body raises -- ``TypeError`` from
+        a bad index, ``ValueError`` from a shape check, ``KeyError`` from a lookup -- and real
+        teachers in this repository do all three. There is no exception type that separates "does
+        not accept a list" from "ran and failed"; I tried ``TypeError`` only, and then boundary-only
+        ``TypeError``, and each broke a different set of legitimate teachers (30 tests, then 2 more).
 
-        The distinction matters because the two look identical from here and are not: a
-        ``ConnectionError`` from a metered API, a ``RuntimeError`` from a model server, a
-        ``TimeoutError`` -- these used to be absorbed exactly like a shape rejection, and the teacher
-        was then called ``len(items)`` more times, returning labels as though the outage had not
-        happened. Narrowing to ``TypeError`` keeps the discovery that works while letting a real
-        failure be a real failure.
-
-        The remaining ambiguity -- a teacher whose own body raises ``TypeError`` for its own
-        reasons -- is why ``teacher_mode`` exists. Declaring ``"batch"`` or ``"item"`` skips
-        discovery entirely, and the note attached below makes the discarded probe visible if the
-        per-item retry fails too.
+        What the breadth costs is real and is the reason ``teacher_mode`` exists: a teacher whose
+        backend is down looks exactly like a per-item teacher, so it gets called ``len(items)`` more
+        times. Declaring ``teacher_mode="batch"`` or ``"item"`` skips this path entirely and is the
+        right answer for anything metered or stateful. When the per-item retry fails too, the
+        discarded probe error is attached as a note so the first failure is never simply lost.
         """
         try:
             out = self.teacher(items)
-        except TypeError as probe_error:
+        except Exception as probe_error:  # noqa: BLE001 - see the docstring: no type discriminates here
             self._batched = False
             try:
                 return [self.teacher(x) for x in items]
             except Exception as exc:
-                # Never let the discarded probe hide why the teacher cannot label at all.
                 exc.add_note(
                     f"the batch-call probe on {_teacher_name(self.teacher)} first failed with: "
                     f"{probe_error!r} -- pass teacher_mode='item' or 'batch' to skip this discovery"
