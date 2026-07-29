@@ -17,11 +17,35 @@ the encoding policy that bridges categoricals into it is an ``evolve`` concern.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+
+
+def _real_coordinate(value: Any, *, dim: str, what: str) -> float:
+    """Coerce ``value`` to a float, rejecting NaN with a message that says which dimension.
+
+    Clipping is how every dimension handles an out-of-range coordinate, and it is well defined for
+    any real number including the infinities: ``clip(+inf, lo, hi)`` is ``hi``, the correct
+    projection onto the box. It is not defined for NaN -- ``np.clip(nan, lo, hi)`` is ``nan`` -- so
+    a NaN went in and came back out as a legitimate-looking parameter value or optimizer
+    coordinate. Integer and Categorical did reject it, but only incidentally, from ``int()``
+    refusing to convert, with the bare message "cannot convert float NaN to integer" and no
+    indication of which dimension; Real had no such accident and passed it through, so the one
+    dimension whose own bounds check already insists on finiteness was the one accepting a
+    non-finite value. Only NaN is rejected here: turning away an infinity the clip handles
+    correctly would remove working behavior rather than fix anything.
+    """
+    try:
+        out = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{dim} {what} must be a real number, got {value!r}") from exc
+    if math.isnan(out):
+        raise ValueError(f"{dim} {what} must not be NaN (it has no position in the interval)")
+    return out
 
 
 @dataclass(frozen=True)
@@ -53,11 +77,11 @@ class Real:
 
     def encode(self, value: Any) -> float:
         """Clip and encode ``value`` as a floating-point coordinate."""
-        return float(np.clip(float(value), self.lo, self.hi))
+        return float(np.clip(_real_coordinate(value, dim="Real", what="value"), self.lo, self.hi))
 
     def decode(self, x: float) -> float:
         """Clip a numeric optimizer coordinate back into the interval."""
-        return float(np.clip(float(x), self.lo, self.hi))
+        return float(np.clip(_real_coordinate(x, dim="Real", what="coordinate"), self.lo, self.hi))
 
     def neighbors(self, value: Any) -> list[float]:
         """A coarse local move: +/- 10% of the range, clipped to bounds."""
@@ -92,11 +116,11 @@ class Integer:
 
     def encode(self, value: Any) -> float:
         """Round, clip, and encode ``value`` as a numeric coordinate."""
-        return float(int(np.clip(round(float(value)), self.lo, self.hi)))
+        return float(round(np.clip(_real_coordinate(value, dim="Integer", what="value"), self.lo, self.hi)))
 
     def decode(self, x: float) -> int:
         """Round and clip a numeric optimizer coordinate to an integer value."""
-        return int(np.clip(int(round(float(x))), self.lo, self.hi))
+        return int(round(np.clip(_real_coordinate(x, dim="Integer", what="coordinate"), self.lo, self.hi)))
 
     def neighbors(self, value: Any) -> list[int]:
         """Return adjacent integer values within the range."""
@@ -157,8 +181,8 @@ class Categorical:
 
     def decode(self, x: float) -> Any:
         """Round and clip an optimizer coordinate back to a choice."""
-        idx = int(np.clip(int(round(float(x))), 0, len(self.choices) - 1))
-        return self.choices[idx]
+        coord = _real_coordinate(x, dim="Categorical", what="coordinate")
+        return self.choices[int(round(np.clip(coord, 0, len(self.choices) - 1)))]
 
     def neighbors(self, value: Any) -> list[Any]:
         """Return all choices except ``value``."""
