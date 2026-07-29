@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import warnings
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
@@ -52,7 +53,34 @@ _TAG_KEY = "__type__"
 _TUPLE_TAG = "tuple"
 _NDARRAY_TAG = "ndarray"
 _NP_SCALAR_TAG = "np_scalar"
+_NONFINITE_TAG = "nonfinite_float"
 _JSON_SCALAR_TYPES = (str, int, float, bool)
+_NONFINITE_BY_NAME = {"nan": float("nan"), "inf": float("inf"), "-inf": float("-inf")}
+
+
+def _nonfinite_encoded(x: float) -> dict:
+    """Tagged form of a non-finite float.
+
+    JSON has no NaN or Infinity. Python's ``json`` emits the bare tokens ``NaN``/``Infinity``
+    anyway, which every strict parser rejects -- so a journal holding one non-finite surprise or
+    EIG serialized to text that says it is JSON and is not, and only an external reader would ever
+    find out. Round-tripping through the same versioned tag scheme the other non-JSON-native types
+    use keeps the value exact and the document valid.
+    """
+    return {
+        _TAG_KEY: _NONFINITE_TAG,
+        "codec_version": _CODEC_VERSION,
+        "value": ("nan" if math.isnan(x) else ("inf" if x > 0 else "-inf")),
+    }
+
+
+def _encode_nonfinite(value: Any) -> Any:
+    """Rewrite non-finite floats inside an already-plain-Python nested list structure."""
+    if isinstance(value, list):
+        return [_encode_nonfinite(v) for v in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return _nonfinite_encoded(value)
+    return value
 
 
 def _all_json_native(value: Any) -> bool:
@@ -112,13 +140,22 @@ def _tag_encode(obj: Any) -> Any:
     if isinstance(obj, np.ndarray):
         values = obj.tolist()
         if _all_json_native(values):
+            # the vectorized finiteness test keeps the common all-finite array on its original
+            # zero-copy path; only an array that really holds a NaN/inf pays for the rewrite
+            if obj.dtype.kind in "fc" and not np.isfinite(obj).all():
+                values = _encode_nonfinite(values)
             return {_TAG_KEY: _NDARRAY_TAG, "codec_version": _CODEC_VERSION, "dtype": str(obj.dtype), "value": values}
         return _encode_opaque(obj)
     if isinstance(obj, np.generic):
         item = obj.item()
         if _all_json_native(item):
+            item = _encode_nonfinite(item)
             return {_TAG_KEY: _NP_SCALAR_TAG, "codec_version": _CODEC_VERSION, "dtype": str(obj.dtype), "value": item}
         return _encode_opaque(obj)
+    # below the numpy branches on purpose: np.float64 subclasses float, and it has to keep reaching
+    # the np_scalar tag or a numpy nan would come back as a plain Python float
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return _nonfinite_encoded(obj)
     if isinstance(obj, dict):
         if _TAG_KEY in obj or not all(isinstance(k, str) for k in obj):
             return _encode_opaque(obj)
@@ -153,10 +190,15 @@ def _tag_decode(obj: Any) -> Any:
             )
         if tag == _TUPLE_TAG:
             return tuple(_tag_decode(x) for x in obj["value"])
+        if tag == _NONFINITE_TAG:
+            name = obj["value"]
+            if name not in _NONFINITE_BY_NAME:
+                raise ValueError(f"EpistemicJournal: unrecognized non-finite float {name!r} -- corrupted data")
+            return _NONFINITE_BY_NAME[name]
         if tag == _NDARRAY_TAG:
-            return np.array(obj["value"], dtype=obj["dtype"])
+            return np.array(_tag_decode(obj["value"]), dtype=obj["dtype"])
         if tag == _NP_SCALAR_TAG:
-            return np.dtype(obj["dtype"]).type(obj["value"])
+            return np.dtype(obj["dtype"]).type(_tag_decode(obj["value"]))
         raise ValueError(f"EpistemicJournal: unrecognized codec tag {tag!r} -- corrupted or foreign data")
     if isinstance(obj, list):
         return [_tag_decode(x) for x in obj]
@@ -339,7 +381,20 @@ class EpistemicJournal:
         return True
 
     def to_json(self, **dumps_kwargs: Any) -> str:
-        return json.dumps([_tag_encode(asdict(r)) for r in self._records], **dumps_kwargs)
+        """Serialize the journal as JSON that a strict parser actually accepts.
+
+        ``allow_nan`` is forced off rather than left at Python's default. json.dumps otherwise
+        writes bare ``NaN``/``Infinity``/``-Infinity`` tokens, which no JSON grammar admits: the
+        journal round-tripped fine inside Python (json.loads reads those tokens back) while being
+        unreadable to every other consumer -- and an audit trail nobody else can read is the one
+        thing this class exists to prevent. :func:`_tag_encode` now carries non-finite floats
+        through the versioned tag scheme, so this switch should never fire; it is here so that a
+        value that escapes the codec fails loudly instead of writing a document that lies about
+        being JSON.
+        """
+        if "allow_nan" in dumps_kwargs:
+            raise TypeError("EpistemicJournal.to_json does not accept allow_nan: the output must be valid JSON")
+        return json.dumps([_tag_encode(asdict(r)) for r in self._records], allow_nan=False, **dumps_kwargs)
 
     @classmethod
     def from_json(cls, s: str) -> EpistemicJournal:
