@@ -46,14 +46,26 @@ class FusedGeometryValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "category indices.*\\[0, 2\\)"):
             fc.fused_seq_log_density(model, encoded)
 
-    def test_chain_scatter_indices_are_range_checked(self):
+    def test_a_lengthless_chain_is_refused_rather_than_scattered(self):
+        """A chain with no length model reaches no fused path at all, so no geometry is checked.
+
+        dd294198 took the chain leaf template out of service: a Null length model makes the chain a
+        conditional likelihood factor rather than a law over finite sequences, and the template also
+        emitted the superseded mutable-map statistic layout. ``_markov_chain_matches`` still requires
+        a Null length model *and* LAW semantics -- conditions the docstring itself calls mutually
+        exclusive -- which is how it stays dormant until a template carrying an explicit length law
+        exists. A proper chain law (one with a len_dist) goes through the native bridge instead; that
+        parity is fused_chain_test's subject. The scatter range check this test used to exercise is
+        retained for the future template, and ``_validate_fused_indices`` itself stays covered by the
+        categorical case above.
+        """
         model = MarkovChainDistribution(
             {"a": 0.5, "b": 0.5},
             {"a": {"a": 0.5, "b": 0.5}, "b": {"a": 0.5, "b": 0.5}},
         )
         encoded = list(model.dist_to_encoder().seq_encode([["a"], ["b"]]))
         encoded[1] = np.asarray([0, 2])
-        with self.assertRaisesRegex(ValueError, "initial row indices.*\\[0, 2\\)"):
+        with self.assertRaisesRegex(ValueError, "MarkovChainDistribution is not fusible on any path"):
             fc.fused_seq_log_density(model, tuple(encoded))
 
     def test_template_parameter_component_width_is_checked(self):
