@@ -22,7 +22,11 @@ import numpy as np
 from mixle.engines import NUMPY_ENGINE, NumpyEngine, auto_precision, engine_with_precision, precision_name
 from mixle.stats import ResidentEncodedPayload, move_encoded_payload
 from mixle.stats.compute.pdist import DataSequenceEncoder
-from mixle.utils.vector import validate_initialization_probability, validated_initialized_observations
+from mixle.utils.vector import (
+    require_initialized_observations,
+    validate_initialization_probability,
+    validated_initialized_observations,
+)
 
 __all__ = [
     "CalibrationCatalog",
@@ -1358,7 +1362,11 @@ class LocalEncodedData(EncodedDataHandle):
                 local_acc.seq_initialize(getattr(enc, "host_payload", enc), weights, rng_loc)
                 accumulator.combine(local_acc.value())
         _global_key_merge(accumulator)
-        return estimator.estimate(validated_initialized_observations(nobs), accumulator.value())
+        # nobs here is the total over EVERY shard and chunk this handle owns, not one shard's share,
+        # so a zero means the whole initialization selected nothing -- which is what
+        # require_initialized_observations exists to reject (see its docstring). The MPI, torchrun and
+        # model-parallel drivers already use it on their equivalent totals.
+        return estimator.estimate(require_initialized_observations(nobs), accumulator.value())
 
     def pysp_stream_accumulate(self, estimator: Any, model: Any) -> tuple[float, Any]:
         """Return globally tied batch sufficient statistics for streaming EM."""
