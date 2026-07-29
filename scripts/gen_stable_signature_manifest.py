@@ -106,11 +106,33 @@ def render() -> str:
     return json.dumps(build_manifest(), indent=2, sort_keys=True, allow_nan=False) + "\n"
 
 
+# Must track pyproject's requires-python. inspect.formatannotation's output is version-dependent --
+# 3.14 renders Optional[X] as "X | None" and Optional[ForwardRef('X')] as "ForwardRef('X') | None",
+# where 3.11 and 3.12 render both the other way -- so a manifest built outside the supported range
+# records annotation spellings no supported interpreter can reproduce. Since the manifest declares
+# "annotations: exact" and the gate compares it verbatim against a fresh build, that makes the gate
+# unpassable everywhere it actually runs. 3.11 and 3.12 agree with each other, so one artifact does
+# cover the whole supported range; it just has to be built inside it.
+SUPPORTED_PYTHON = ((3, 11), (3, 13))
+
+
+def _require_supported_interpreter() -> None:
+    """Refuse to build or check the manifest on an out-of-support interpreter."""
+    low, high = SUPPORTED_PYTHON
+    if not (low <= sys.version_info[:2] < high):
+        raise RuntimeError(
+            "stable API signatures must be generated on Python >=%d.%d,<%d.%d (this is %d.%d): "
+            "annotation rendering differs outside that range, so the manifest would not match on "
+            "any supported interpreter." % (low + high + sys.version_info[:2])
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args(argv)
     try:
+        _require_supported_interpreter()
         text = render()
         if args.check:
             if MANIFEST.read_text(encoding="utf-8") != text:
