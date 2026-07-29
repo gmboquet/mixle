@@ -518,7 +518,14 @@ def get_student_t_estimator(
                     math.isfinite(float(fit_df))
                     and math.isfinite(float(fit_loc))
                     and math.isfinite(float(fit_scale))
-                    and fit_df > 0.0
+                    # StudentTEstimator does a MOMENT fit, which needs a finite variance and so
+                    # requires df > 2 -- it rejects anything less in its constructor. Accepting a
+                    # fitted df > 0 here handed it df in (0, 2] and crashed with "moment fit
+                    # requires finite df > 2", which is exactly what scipy returns on genuinely
+                    # heavy-tailed data. A df that low is a real fit, just not one this estimator
+                    # can use, so it falls through to the df = 5.0 default the same way an
+                    # unusable (non-finite, non-positive-scale) fit already does.
+                    and fit_df > 2.0
                     and fit_scale > 0.0
                 ):
                     df, loc, scale = float(fit_df), float(fit_loc), float(fit_scale)
