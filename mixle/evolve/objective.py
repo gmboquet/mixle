@@ -39,7 +39,7 @@ import numpy as np
 
 from mixle.inference import calibration as _cal
 from mixle.inference import scoring as _scoring
-from mixle.inference.decision import bayes_action
+from mixle.inference.decision import _declared_vectorized, _loss_samples, bayes_action
 
 
 @runtime_checkable
@@ -244,22 +244,25 @@ def calibration_objective(*, ensemble: int = 256, seed: int = 0, bins: int = 10)
     return _ScalarObjective("calibration", True, pw, sc)
 
 
-def _realized_loss(loss: Callable[[Any, Any], float], action: Any, data: Any) -> float:
-    """Mean loss of a fixed ``action`` against the actual observed ``data`` (vectorized-or-loop).
+def _realized_loss(
+    loss: Callable[[Any, Any], float], action: Any, data: Any, *, vectorized: bool | None
+) -> tuple[float, bool]:
+    """Mean loss of a fixed ``action`` against the actual observed ``data``, plus the resolved
+    calling convention.
 
-    Mirrors the vectorized-fast-path-with-loop-fallback of
-    :func:`mixle.inference.decision._loss_samples`, but reduces over real outcomes rather than
-    posterior draws -- this is what makes :func:`decision_regret_objective` check a chosen action
-    against reality instead of against the same model's own beliefs.
+    Delegates to :func:`mixle.inference.decision._loss_samples` -- the same evaluation the Bayes
+    action itself is chosen with -- but reduces over real outcomes rather than posterior draws,
+    which is what makes :func:`decision_regret_objective` check a chosen action against reality
+    instead of against the same model's own beliefs.
+
+    This used to re-implement that evaluation, and the re-implementation swallowed every exception
+    from the array call before retrying the loss once per outcome. A loss that was simply broken --
+    or a backend that was down -- was therefore called ``len(data) + 1`` times per model scored
+    instead of failing, and the original error was discarded. Returning the resolved convention
+    lets the caller probe at most once for the whole search rather than once per candidate model.
     """
-    y = _as_array(data)
-    try:
-        vals = np.asarray(loss(action, y), dtype=float).reshape(-1)
-        if vals.size == y.size:
-            return float(vals.mean())
-    except Exception:  # noqa: BLE001
-        pass
-    return float(np.mean([float(loss(action, d)) for d in y]))
+    values, mode = _loss_samples(loss, action, list(_as_array(data)), vectorized=vectorized, context="decision_regret")
+    return float(values.mean()), mode
 
 
 def decision_regret_objective(
@@ -268,6 +271,7 @@ def decision_regret_objective(
     *,
     n: int = 2000,
     seed: int = 0,
+    vectorized: bool | None = None,
 ) -> Objective:
     """Realized decision regret of a model's chosen action against actual ``data`` (scalar-only, lower
     is better).
@@ -288,16 +292,28 @@ def decision_regret_objective(
         n: posterior draws used only to pick the Bayes-optimal action under the model's own predictive
             belief; the reported score is the realized loss of that action on ``data``.
         seed: RNG seed for the action-selection draws.
+        vectorized: the loss's calling convention, forwarded to :func:`bayes_action` and used for
+            the realized-loss evaluation. ``True`` -> called once with the whole outcome array;
+            ``False`` -> called once per outcome; ``None`` (default) -> read ``loss.vectorized`` if
+            the loss declares it, else auto-detect by probing the array call once. A probe is a
+            real invocation of the loss, and a search scores many models against the same loss, so
+            the resolved convention is reused for the rest of the search rather than re-probed per
+            model. A loss that keeps state or has side effects should declare its convention.
     """
     from mixle.inference.posterior import posterior as _posterior
+
+    # resolved once for the whole search: every model scored shares this loss, so re-probing per
+    # model would charge the loss one wasted call per candidate for as long as the search runs
+    mode: list[bool | None] = [vectorized if vectorized is not None else _declared_vectorized(loss)]
 
     def pw(model: Any, data: Any) -> None:
         return None
 
     def sc(model: Any, data: Any) -> float:
         post = _posterior(model, over="predictive")
-        chosen = bayes_action(post, loss, list(actions), n=n, seed=seed)["action"]
-        return _realized_loss(loss, chosen, data)
+        chosen = bayes_action(post, loss, list(actions), n=n, seed=seed, vectorized=mode[0])["action"]
+        score, mode[0] = _realized_loss(loss, chosen, data, vectorized=mode[0])
+        return score
 
     return _ScalarObjective("decision_regret", True, pw, sc)
 
