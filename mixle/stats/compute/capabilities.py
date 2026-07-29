@@ -44,6 +44,24 @@ def delegated_engine_ready(child_engine_ready: tuple[str, ...]) -> tuple[str, ..
     return tuple(name for name in COMPOSITION_ENGINES if name in have)
 
 
+def _declarable_engine_names() -> frozenset[str]:
+    """Engine names a distribution may legitimately claim: the ones mixle ships plus any registered.
+
+    Imported lazily and defensively: mixle.engines pulls in the optional torch/jax backends, and
+    capability metadata is declared at class-definition time all over mixle.stats, so this must not
+    turn a backend import problem into an import-time failure of the whole stats package. If the
+    registry cannot be read, fall back to the names mixle itself ships rather than to accepting
+    anything -- the shipped names are always declarable.
+    """
+    try:
+        from mixle.engines import _ARRAY_ENGINE_REGISTRY
+
+        registered = {getattr(engine, "name", None) for engine in _ARRAY_ENGINE_REGISTRY.values()}
+    except Exception:  # noqa: BLE001 - a missing/failing optional backend must not break declaration
+        registered = set()
+    return frozenset(KNOWN_COMPUTE_ENGINES | {name for name in registered if isinstance(name, str) and name})
+
+
 @dataclass(frozen=True)
 class DistributionCapabilities:
     """Runtime capability metadata for a distribution family."""
@@ -59,14 +77,23 @@ class DistributionCapabilities:
             raise ValueError("engine_ready must contain non-empty engine names.")
         if len(self.engine_ready) != len(set(self.engine_ready)):
             raise ValueError("engine_ready must not contain duplicate engine names.")
-        # Deliberately NOT closed over KNOWN_COMPUTE_ENGINES. That frozenset names the engines mixle
-        # itself ships and verifies -- it is the right gate for composition capping (COMPOSITION_ENGINES)
-        # but the wrong gate for what a distribution may *declare*. Kernel dispatch is an advertised
-        # extension point: register_kernel_factory lets a third party add a backend, and dispatch routes
-        # on the engine's capability flags rather than its name, so adding one is supposed to need no
-        # core edit. Rejecting any name not in a hardcoded literal made that impossible -- a custom
-        # engine could be registered and dispatched to, but no distribution could say it supported one.
-        # Validate the shape of the declaration here; membership is not ours to decide.
+        # Deliberately NOT closed over KNOWN_COMPUTE_ENGINES alone. That frozenset names the engines
+        # mixle itself ships and verifies -- it is the right gate for composition capping
+        # (COMPOSITION_ENGINES) but the wrong gate for what a distribution may *declare*. Backends are
+        # an advertised extension point: register_array_type lets a third party add one, so requiring
+        # membership in a hardcoded literal made a custom engine undeclarable -- it could be
+        # registered and dispatched to, but no distribution could say it supported it.
+        #
+        # Membership still is ours to decide, though, just not from a literal: an engine_ready entry
+        # is a public capability claim, and a name that resolves to no engine at all -- here or in the
+        # host program -- is a claim about something that does not exist. Checked against the live
+        # registry, so a genuinely registered third-party engine passes and a typo does not.
+        unknown = sorted(set(self.engine_ready) - _declarable_engine_names())
+        if unknown:
+            raise ValueError(
+                "engine_ready names no registered compute engine: %s. Register it with "
+                "mixle.engines.register_array_type before declaring support for it." % ", ".join(unknown)
+            )
         if self.engine_ready[0] != "numpy":
             raise ValueError("engine_ready must include 'numpy' first as the reference execution path.")
         if not isinstance(self.kernel_status, str) or self.kernel_status not in KERNEL_STATUSES:
