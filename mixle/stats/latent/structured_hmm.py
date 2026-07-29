@@ -3087,7 +3087,13 @@ def jit_forward_loglik(hmm: StructuredHMM):
     """Compile the scaled forward log-likelihood recursion to a single jax.jit XLA program (lax.scan over
     time). Returns a callable ``score(seq) -> float``: emission log-densities are evaluated on the host
     (arbitrary emissions), then the forward scan runs jitted on the transition matrix. Works for any
-    operator (uses ``as_matrix()``); the win is large T / K. Requires the JAX optional extra."""
+    operator (uses ``as_matrix()``); the win is large T / K. Requires the JAX optional extra.
+
+    Precision follows the caller's ambient JAX policy rather than mixle's: with the default
+    ``jax_enable_x64=False`` the scan runs in float32, so the returned score agrees with
+    ``seq_log_density`` to roughly float32 relative precision, not to float64. Enable x64 in your own
+    process if you need more -- mixle does not set it for you (MXR-080-0147 removed the import-time
+    global mutation that used to make this path silently float64)."""
     import jax
     import jax.numpy as jnp
 
