@@ -93,6 +93,13 @@ class AdviResult:
     mean: np.ndarray
     scale: np.ndarray
     objective: float | None = None
+    cholesky: np.ndarray | None = None
+    """Lower-triangular Cholesky factor of the fitted covariance, for ``family='fullrank'`` only.
+
+    ``None`` for meanfield, whose covariance is exactly ``diag(scale**2)``. A full-rank fit exists
+    to learn the posterior correlations, and those live entirely in the off-diagonals: without this
+    the returned parameters describe a diagonal Gaussian, so reconstructing q from ``(mean, scale)``
+    silently gives back the meanfield answer the caller explicitly asked not to have."""
 
 
 def nuts(
@@ -500,7 +507,8 @@ def advi(
 
     Returns:
         :class:`AdviResult` with ``samples`` ``(samples, d)`` drawn from the fitted Gaussian q (in
-        the *same* space ``target_batch`` consumes), plus the fitted ``mean`` and ``scale``.
+        the *same* space ``target_batch`` consumes), plus the fitted ``mean`` and ``scale`` -- and,
+        for ``family='fullrank'``, the ``cholesky`` factor carrying the learned correlations.
     """
     from mixle.inference._advi import _advi_optimize
     from mixle.inference.mcmc.gradients import torch_available
@@ -510,7 +518,7 @@ def advi(
     import torch  # noqa: F401
 
     rng = _as_rng(rng)
-    mean_np, scale_np, U, objective = _advi_optimize(
+    mean_np, scale_np, U, objective, chol = _advi_optimize(
         torch,
         target_batch,
         u0,
@@ -523,7 +531,7 @@ def advi(
         family=family,
         alpha=alpha,
     )
-    return AdviResult(samples=U, mean=mean_np, scale=scale_np, objective=objective)
+    return AdviResult(samples=U, mean=mean_np, scale=scale_np, objective=objective, cholesky=chol)
 
 
 def _as_rng(rng: np.random.RandomState | int | None) -> np.random.RandomState:

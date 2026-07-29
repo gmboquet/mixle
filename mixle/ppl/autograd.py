@@ -391,7 +391,7 @@ class GradTarget:
                 )
             return self._logtarget_batch(u)
 
-        mean_np, scale_np, U, objective = _advi_optimize(
+        mean_np, scale_np, U, objective, _chol = _advi_optimize(
             self._torch,
             log_p_fn,
             u0,

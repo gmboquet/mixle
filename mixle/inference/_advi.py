@@ -95,9 +95,13 @@ def _advi_optimize(
     ``log_p_fn(U: Tensor(mc, d)) -> Tensor(mc,)`` is the (unconstrained) batched joint log-target;
     it owns any data minibatching/rescaling. This is the family/objective machinery shared by
     :meth:`GradTarget.advi` and the public :func:`mixle.inference.advi` facade, with no dependency on
-    ``GradTarget``'s slots or data. Returns ``(mean_u, scale_u, U_draws, objective)`` with the
-    unconstrained mean/scale, the draws ``(samples, d)``, and the final variational objective value
-    (the ELBO for ``alpha=1``, otherwise the tilted Renyi bound).
+    ``GradTarget``'s slots or data. Returns ``(mean_u, scale_u, U_draws, objective, cholesky)`` with
+    the unconstrained mean/scale, the draws ``(samples, d)``, the final variational objective value
+    (the ELBO for ``alpha=1``, otherwise the tilted Renyi bound), and -- for ``family='fullrank'``
+    only -- the fitted lower-triangular Cholesky factor of the covariance (``None`` for meanfield).
+    Returning the factor is what makes a full-rank fit usable: the correlations it exists to learn
+    live in the off-diagonals, and reporting marginal scales alone hands back a posterior
+    indistinguishable from the meanfield one the caller opted out of.
 
     Every control is validated before any optimization happens, and the fitted parameters and final
     objective must be finite before a result is handed back: an ``AdviResult`` is a claim that a
@@ -187,6 +191,7 @@ def _advi_optimize(
         U = mean_np + z @ chol.T
         scale_np = np.sqrt(np.sum(chol * chol, axis=1))  # marginal std per dim
     else:
+        chol = None  # meanfield has no off-diagonal structure to report; `scale` is the whole story
         scale_np = torch.exp(log_std).detach().numpy()
         U = mean_np + scale_np * z
 
@@ -200,4 +205,4 @@ def _advi_optimize(
         )
     if not (np.isfinite(mean_np).all() and np.isfinite(scale_np).all() and np.all(scale_np > 0.0)):
         raise ValueError("ADVI did not converge to finite variational parameters with positive scales")
-    return mean_np, scale_np, U, final_obj
+    return mean_np, scale_np, U, final_obj, chol
