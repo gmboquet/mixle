@@ -239,6 +239,24 @@ def detect_drift(
         raise ValueError("drift detection requires a non-empty reference dataset")
     if not current:
         raise ValueError("drift detection requires a non-empty current dataset")
+    # Every comparison below is a bare `>` or `<` against one of these, so an unvalidated threshold
+    # decides the verdict silently: NaN makes every comparison False and suppresses drift entirely,
+    # and a negative psi_threshold flags drift on identical data, since PSI is non-negative by
+    # construction. A threshold that cannot be met, or cannot fail, is not a detector.
+    for label, value, upper in (
+        ("psi_threshold", psi_threshold, None),
+        ("ks_threshold", ks_threshold, 1.0),
+        ("min_scorable_fraction", min_scorable_fraction, 1.0),
+        ("unscorable_shift_threshold", unscorable_shift_threshold, 1.0),
+    ):
+        numeric = float(value)
+        if not np.isfinite(numeric) or numeric < 0.0 or (upper is not None and numeric > upper):
+            expected = "a finite non-negative number" if upper is None else f"a finite number in [0, {upper:g}]"
+            raise ValueError(f"{label} must be {expected}; got {value!r}")
+    if not np.isfinite(float(loglik_shift_threshold)):
+        # A shift threshold is legitimately negative -- it is how far the mean log-likelihood may
+        # fall -- so only finiteness is required of it.
+        raise ValueError(f"loglik_shift_threshold must be a finite number; got {loglik_shift_threshold!r}")
     score = score_drift(model, reference, current)
     reasons: list[str] = []
     if score["ks"] > ks_threshold:
