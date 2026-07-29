@@ -50,12 +50,37 @@ class EmbeddedFieldCodec:
     representatives: list[str]  # one training example per cluster, nearest its centroid (for describe())
 
     def vector(self, value: Any) -> np.ndarray:
-        """Embed one field value as a numeric vector."""
-        return np.asarray(self.embedder.transform(str(value)), dtype=np.float64)
+        """Embed one field value as a single ``(dim,)`` vector.
+
+        Uses :meth:`~mixle.represent.api.Embedder.transform_one` rather than ``transform``.
+        ``transform`` decides one-vs-batch by guessing from the outer container, and its own
+        docstring says so; handed a *string* it can read the string as the container and answer
+        with a block of rows, one per character. That block then went into a single field slot,
+        which is how two unrelated texts ended up scoring identically -- nothing downstream was
+        looking at the field's own content by then.
+        """
+        one = getattr(self.embedder, "transform_one", None)
+        raw = one(str(value)) if callable(one) else self.embedder.transform(str(value))
+        vec = np.asarray(raw, dtype=np.float64)
+        if vec.ndim != 1:
+            raise ValueError(
+                f"embedder returned shape {vec.shape} for one field value; a single value must embed "
+                "to exactly one (dim,) vector"
+            )
+        return vec
 
     def vectors(self, values: Sequence[Any]) -> np.ndarray:
-        """Embed a sequence of field values as a matrix."""
-        return np.asarray(self.embedder.transform([str(v) for v in values]), dtype=np.float64)
+        """Embed a sequence of field values as an ``(n, dim)`` matrix, one row per value."""
+        values = [str(v) for v in values]
+        batch = getattr(self.embedder, "transform_batch", None)
+        raw = batch(values) if callable(batch) else self.embedder.transform(values)
+        mat = np.asarray(raw, dtype=np.float64)
+        if mat.ndim != 2 or mat.shape[0] != len(values):
+            raise ValueError(
+                f"embedder returned shape {mat.shape} for {len(values)} field values; a batch must "
+                "embed to exactly one (dim,) row per value"
+            )
+        return mat
 
 
 class EmbeddedStructureModel:
@@ -77,11 +102,18 @@ class EmbeddedStructureModel:
         return tuple(vals)
 
     def encode_records(self, rows: Sequence[tuple]) -> list[tuple]:
-        """Replace configured text fields with embedding vectors for each record."""
+        """Replace configured text fields with embedding vectors for each record.
+
+        :meth:`EmbeddedFieldCodec.vectors` guarantees one row per value, so the pairing below is
+        total. It used to be a bare ``zip`` over an unchecked embedder result: an embedder that
+        returned fewer vectors than it was given left the surplus records holding raw *text* in a
+        slot the graph reads as numeric, and the batch silently shrank downstream instead of
+        reporting that the embedder had underproduced.
+        """
         rows = [list(r) for r in rows]
         for i, codec in self.codecs.items():
             vecs = codec.vectors([r[i] for r in rows])
-            for r, v in zip(rows, vecs):
+            for r, v in zip(rows, vecs, strict=True):
                 r[i] = v
         return [tuple(r) for r in rows]
 
@@ -90,11 +122,25 @@ class EmbeddedStructureModel:
         return self.net.edges()
 
     def log_density(self, x: tuple) -> float:
-        """Evaluate log density after embedding text fields in one record."""
+        """Log density of ``x`` **in the embedded space**, not of the original record.
+
+        Worth being exact about, because the name invites the stronger reading. Each configured text
+        field is replaced by its embedding vector before scoring, and the graph then evaluates a
+        density over *that* representation. Embedding is not a measure-preserving change of
+        variables and no Jacobian relates the two, so this number is not the log density of the text
+        record and does not integrate to one over any space of text.
+
+        What it is good for is comparison: between records whose non-text fields differ, and between
+        records whose text embeds to genuinely different vectors. What it cannot support is an
+        absolute probability claim about a record, or a comparison against a density from a model
+        that scores text some other way. Two different texts that embed close together will score
+        close together -- that is the representation working as designed, not the model failing to
+        tell them apart.
+        """
         return float(self.net.log_density(self.encode_record(x)))
 
     def seq_log_density(self, rows: Sequence[tuple]) -> np.ndarray:
-        """Evaluate log density for records after embedding text fields."""
+        """Per-record log densities in the embedded space; see :meth:`log_density` for what that means."""
         embedded = self.encode_records(list(rows))
         return np.asarray(self.net.seq_log_density(self.net.dist_to_encoder().seq_encode(embedded)))
 
