@@ -139,7 +139,14 @@ class PipelineTwin:
         self._supply_nodes = list(supply_nodes)
         self._demand_nodes = list(demand_nodes)
         self._seed = seed
-        self._arrival_noise = arrival_noise
+        # arrival_noise is a standard deviation, so it has no meaning below zero and a NaN silently
+        # turns every period's supply into NaN. Both used to construct fine and only show up as an
+        # unexplained run much later.
+        if not np.isfinite(arrival_noise) or float(arrival_noise) < 0.0:
+            raise ValueError(
+                f"arrival_noise is a standard deviation: it must be finite and >= 0, got {arrival_noise!r}"
+            )
+        self._arrival_noise = float(arrival_noise)
         self._interventions: dict[str, dict[str, Any]] = dict(interventions or {})
         self._simulator = Simulator(_ArrivalModel(len(self._supply_nodes), arrival_noise))
         for name, iv in self._interventions.items():
@@ -234,7 +241,13 @@ class PipelineTwin:
         unconditional ``bottleneck_arcs[-1]`` index) to whatever code reads the result instead of
         surfacing it here at the call that actually got the invalid count.
         """
-        if int(n_periods) < 1:
+        # `int(n_periods) < 1` accepted 2.7 and then silently ran two periods: the truncation
+        # happened inside the guard that was supposed to be validating the value, so a caller asking
+        # for a fractional horizon got a shorter run with no indication the request had been changed.
+        if isinstance(n_periods, (bool, np.bool_)) or not isinstance(n_periods, (int, np.integer)):
+            raise ValueError(f"n_periods must be an exact integer, got {n_periods!r}")
+        n_periods = int(n_periods)
+        if n_periods < 1:
             raise ValueError(f"n_periods must be >= 1, got {n_periods!r}")
 
         cap = self._cap.copy()
