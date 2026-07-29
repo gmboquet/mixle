@@ -454,22 +454,33 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         return self.pmap.get(x, self.default_value) / (1.0 + self.default_value)
 
     def density_semantics(self):
-        """Report ``EXACT`` only for instances that really are normalized probability laws.
+        """Declare scoring-only objects as factors rather than generative laws.
 
-        This used to key off ``scoring_only`` alone, so an instance whose pmap does not sum to one --
-        ``{"a": 0.8, "b": 0.8}``, or the empty pmap an EM component gets when it wins zero
-        responsibility -- declared itself ``EXACT`` while ``is_normalized_probability`` said
-        ``False``. Two attributes on the same object disagreeing about the same fact is worse than
-        either answer alone: a caller that checks the flag gets the truth, a caller that checks
-        semantics gets a claim of exactness, and both are documented as the way to ask.
+        An external review asked for this to key off ``is_normalized_probability`` instead, so that
+        ``{"a": 0.8, "b": 0.8}`` (mass 1.6) and the empty pmap stop reporting ``EXACT``. The
+        complaint is fair on its face -- two attributes on one object appear to disagree -- but the
+        change is not available, and the reason is worth recording rather than rediscovering:
 
-        ``is_normalized_probability`` is computed at construction and already folds in
-        ``scoring_only``, so it is the single fact to report from. Unnormalized instances stay
-        constructible on purpose (see the constructor) -- what changes is that they now describe
-        themselves as :attr:`~mixle.stats.compute.pdist.DensitySemantics.LIKELIHOOD_FACTOR`: an
-        exact score factor, not a normalized generative law.
+        ``_owned_generative_components`` refuses any component whose semantics are
+        ``LIKELIHOOD_FACTOR``, and mixtures and HMMs in this repository are built today from
+        categoricals that ``is_normalized_probability`` calls ``False``:
+
+        * ``default_value != 0`` open-world smoothing (sparse_mixture_test builds one directly),
+        * the empty pmap, which is both an EM component that won zero responsibility this iteration
+          and the "explicit no-evidence state" a learned segment model fits on all-empty sequences,
+        * and pmaps that simply do not sum to one (sparse_mixture_test's second component is 0.95).
+
+        Re-labelling any of those makes them non-composable; doing it broke five tests across
+        mixture, HMM and segment construction. The two attributes are answering different questions:
+        ``is_normalized_probability`` asks "is this an exactly-finite law, safe for a sampler or a
+        packer?", while these semantics ask "is ``log_density`` exact for what this object
+        represents?" -- and for a pmap lookup it is. Callers needing the stronger property have the
+        flag, which is computed from the parameters and cannot go stale.
+
+        Closing the gap properly means teaching the composition layer which non-laws are admissible
+        as components, which is a larger change than a label and is not attempted here.
         """
-        if not self.is_normalized_probability:
+        if self.scoring_only:
             from mixle.stats.compute.pdist import DensitySemantics
 
             return DensitySemantics.LIKELIHOOD_FACTOR

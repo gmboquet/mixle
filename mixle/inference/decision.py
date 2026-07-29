@@ -98,16 +98,13 @@ def _loss_samples(
     else:
         try:
             values, mode = _vector_losses(loss, action, draws), True
-        except ValueError:
-            # _vector_losses' own "wrong number of values" complaint: the loss ran fine, it just is
-            # not vectorized. That is exactly what the probe is asking, so fall through.
-            values, mode = _scalar_losses(loss, action, draws, context=context), False
-        except TypeError as probe_error:
-            # TypeError is what a per-draw loss raises when handed the whole array -- a bad index, a
-            # bad attribute, a bad arity -- and it is the ordinary "not vectorized" signal. Anything
-            # else is not: a ConnectionError from a pricing service, a RuntimeError from a solver,
-            # used to be absorbed identically and the loss then called once per draw, returning
-            # numbers that decide which action gets taken as though nothing had failed.
+        except Exception as probe_error:  # noqa: BLE001 - no exception type separates the two cases
+            # A per-draw loss handed the whole array raises whatever its body raises -- TypeError
+            # from an index, ValueError from a shape check, KeyError from a lookup. Narrowing the
+            # catch to any one of those breaks the others, so the probe stays broad and the cost is
+            # made addressable instead: declare vectorized=True/False (or loss.vectorized) to skip
+            # discovery entirely, which is what a metered or stateful loss should do. If the scalar
+            # retry fails too, the discarded probe error is attached rather than lost.
             try:
                 values, mode = _scalar_losses(loss, action, draws, context=context), False
             except Exception as exc:
