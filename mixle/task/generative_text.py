@@ -24,7 +24,7 @@ from typing import Any
 
 import numpy as np
 
-from mixle.task._teacher import TeacherCaller
+from mixle.task._teacher import TeacherCaller, batched_from_mode
 from mixle.task.extract import tokenize
 from mixle.task.model import TaskModel, register_adapter
 
@@ -196,6 +196,7 @@ def distill_text_generative(
     pseudo_count: float = 0.5,
     min_count: int = 2,
     task: str = "",
+    teacher_mode: str = "auto",
 ) -> TaskModel:
     """Distill a teacher into the generative text student (the teacher labels; see module docstring)."""
     items = [str(t) for t in texts]
@@ -203,7 +204,7 @@ def distill_text_generative(
         raise ValueError("texts must contain at least one example")
     # per-item or batched (see :mod:`mixle.task._teacher`) -- resolved by trying the batch, and a
     # batched teacher that answers with the wrong number of labels is still rejected outright
-    ys = TeacherCaller(teacher)(items)
+    ys = TeacherCaller(teacher, batched=batched_from_mode(teacher_mode))(items)
     return distill_text_generative_from_labels(
         items, ys, labels=labels, pseudo_count=pseudo_count, min_count=min_count, task=task
     )

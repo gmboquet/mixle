@@ -121,6 +121,21 @@ class EmbeddedStructureModel:
         """Return discovered graph edges."""
         return self.net.edges()
 
+    def density_semantics(self):
+        """Always :attr:`~mixle.stats.compute.pdist.DensitySemantics.LIKELIHOOD_FACTOR`.
+
+        The score is exact for what it computes, but it is not a normalized law over records: text
+        fields are replaced by embedding vectors before scoring, embedding is not a
+        measure-preserving change of variables, and no Jacobian relates the two measures. Saying so
+        in the docstring was not enough -- the machine-readable contract (the ``ExactDensity``
+        capability, ``describe()``, and every combinator that folds child semantics through
+        :func:`~mixle.stats.compute.pdist.join_density_semantics`) still read this as an exact
+        density, so a model composed over one of these silently inherited an exactness claim.
+        """
+        from mixle.stats.compute.pdist import DensitySemantics
+
+        return DensitySemantics.LIKELIHOOD_FACTOR
+
     def log_density(self, x: tuple) -> float:
         """Log density of ``x`` **in the embedded space**, not of the original record.
 
