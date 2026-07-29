@@ -276,8 +276,19 @@ def _gradient_shadow_state(state, torch):
         shadow = object.__new__(type(template))
         shadow.__dict__.update(getattr(template, "__dict__", {}))
         params = _gradient_leaf_parameters(template, declaration, raw, fixed, torch)
+        # The shadow substitutes grad-carrying tensors for the template's numeric parameters, which
+        # is why it is built by object.__new__ rather than by the constructor. A class that hangs
+        # validation or derived-cache rebuilding off __setattr__ (see
+        # mixle.stats.univariate.discrete._count_contracts) has the same problem the constructor
+        # does: its rebuild is numeric, so `float(p)` / `np.log(p)` on a tensor that requires grad
+        # raises rather than producing a differentiable cache. Bypass it exactly as __init__ is
+        # bypassed. Nothing is left stale on this path: the shadow is scored only through
+        # backend_seq_log_density, which recomputes every derived quantity from the parameters via
+        # the engine (GeometricDistribution.backend_log_density_from_params takes `p` and derives
+        # log(p) and log(1-p) itself), so a numeric cache inherited from the template is never read.
+        shadow.__dict__.pop("_parameter_caches_ready", None)
         for spec in declaration.parameters:
-            setattr(shadow, spec.name, params[spec.name])
+            object.__setattr__(shadow, spec.name, params[spec.name])
         if "p_vec" in params:
             shadow.log_p_vec = torch.log(params["p_vec"])
         return shadow
