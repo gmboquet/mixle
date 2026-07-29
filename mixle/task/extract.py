@@ -199,6 +199,10 @@ def _as_batched(teacher: Callable[..., Any]) -> Callable[[list[str]], list[dict[
     return batched
 
 
+# torch's conventional ignore_index: a label position that must contribute no loss at all.
+IGNORE_LABEL = -100
+
+
 def _bio_labels(
     text: str,
     spans: list[tuple[str, int, int]],
@@ -207,10 +211,29 @@ def _bio_labels(
     *,
     max_tokens: int,
 ) -> tuple[list[int] | None, dict[str, str]]:
-    """Align a teacher extraction to BIO labels, abstaining on ambiguous supervision."""
+    """Align a teacher extraction to BIO labels, abstaining per field on ambiguous supervision.
+
+    Returns ``(labels, abstentions)``. An abstention no longer discards the whole example: the
+    fields that did align still supervise, and only the token positions the abstained field could
+    plausibly occupy are marked ``IGNORE_LABEL`` so they contribute no loss either way. ``labels``
+    is ``None`` only when nothing aligned at all.
+
+    Discarding the example wholesale threw away every field's supervision because one field was
+    ambiguous. With a plan-so-far suffix that repeats an id ("order 2040 ... order_id=2040"), that
+    is every example, and training failed outright with "every training extraction was ambiguous".
+    """
     labels = [0] * min(len(spans), max_tokens)
     assignments: list[tuple[str, list[int]]] = []
     abstentions: dict[str, str] = {}
+    # Token positions that an abstained field might legitimately occupy. They cannot be labelled
+    # (that is what abstaining means) but they must not be labelled O either, or the example would
+    # teach that a token which may well BE the field is not the field. They are marked IGNORE_LABEL
+    # and dropped from the loss instead.
+    uncertain: set[int] = set()
+
+    def _span_tokens(lo: int, hi: int) -> list[int]:
+        return [index for index, (_token, start, end) in enumerate(spans) if start >= lo and end <= hi]
+
     for field, value in extraction.items():
         if field not in io.fields:
             abstentions[str(field)] = "unknown_field"
@@ -223,29 +246,46 @@ def _bio_labels(
             abstentions[field] = "not_grounded"
             continue
         if len(occurrences) != 1:
+            # The value really is in the text, just more than once, so every occurrence is a
+            # candidate for the field and none of them can be called O.
             abstentions[field] = "ambiguous_duplicate"
+            for lo, hi in occurrences:
+                uncertain.update(_span_tokens(lo, hi))
             continue
         lo, hi = occurrences[0]
-        inside = [index for index, (_token, start, end) in enumerate(spans) if start >= lo and end <= hi]
+        inside = _span_tokens(lo, hi)
         if not inside or spans[inside[0]][1] != lo or spans[inside[-1]][2] != hi:
             abstentions[field] = "not_token_aligned"
+            uncertain.update(inside)
             continue
         if inside[-1] >= max_tokens:
             abstentions[field] = "truncated"
+            uncertain.update(inside)
             continue
         assignments.append((field, inside))
 
-    claimed: set[int] = set()
-    for field, inside in assignments:
-        if claimed.intersection(inside):
+    # Overlap drops BOTH sides, not just the later one. When one field's span sits inside another's
+    # ("record"="invoice 123" containing "id"="123"), which of them the tokens belong to is genuinely
+    # undetermined, and keeping whichever the teacher's dict happened to yield first would pick a
+    # winner by iteration order. Other, non-overlapping fields in the same example are unaffected.
+    kept: list[tuple[str, list[int]]] = []
+    for position, (field, inside) in enumerate(assignments):
+        collides = any(set(inside) & set(other) for index, (_f, other) in enumerate(assignments) if index != position)
+        if collides:
             abstentions[field] = "overlapping_field"
-        claimed.update(inside)
-    if abstentions:
+            uncertain.update(inside)
+        else:
+            kept.append((field, inside))
+    if not kept:
+        # Nothing at all could be aligned, so the example carries no supervision worth keeping.
         return None, abstentions
-    for field, inside in assignments:
+    for field, inside in kept:
         for rank, k in enumerate(inside):
             labels[k] = io.tag_index[f"{'B' if rank == 0 else 'I'}-{field}"]
-    return labels, {}
+    for k in uncertain:
+        if k < len(labels) and labels[k] == 0:
+            labels[k] = IGNORE_LABEL
+    return labels, abstentions
 
 
 def distill_extractor(
@@ -291,11 +331,17 @@ def distill_extractor(
     alignment_abstentions: list[dict[str, str]] = []
     for i, (text, spans) in enumerate(zip(texts, spans_per, strict=True)):
         lab, abstentions = _bio_labels(text, spans, extractions[i], io, max_tokens=m)
+        if abstentions:
+            alignment_abstentions.append(abstentions)
         if lab is None:
             mask[i, :] = False
-            alignment_abstentions.append(abstentions)
             continue
         y[i, : len(lab)] = lab
+        # Positions the alignment could not commit to score no loss, rather than scoring as O.
+        for k, tag in enumerate(lab):
+            if tag == IGNORE_LABEL:
+                y[i, k] = 0
+                mask[i, k] = False
     if not mask.any():
         raise ValueError("every training extraction was ambiguous, ungrounded, overlapping, or truncated")
     yt = torch.from_numpy(y).to(device)
