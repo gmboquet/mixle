@@ -184,7 +184,12 @@ class Registry:
         model_ser = to_serializable(subject)
 
         lock_path = os.path.join(d, ".register.lock")
-        with open(lock_path, "w") as lock_f:
+        # O_NOFOLLOW: _model_dir screens the model directory for symlink escape, but not the files
+        # inside it. A preplaced .register.lock symlink was followed, and opening it for writing
+        # truncated whatever it pointed at, outside the store. O_TRUNC is deliberately absent too --
+        # a lock file's contents are never read, so there is nothing here that needs truncating.
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(lock_fd, "r+") as lock_f:
             fcntl.flock(lock_f, fcntl.LOCK_EX)
             try:
                 # the NEXT version number, not the current COUNT: a deleted version (v2 removed from
@@ -324,7 +329,10 @@ class Registry:
 
     def _load_payload(self, name: str, version: str) -> dict[str, Any]:
         """Read one immutable envelope and verify its content digest when present."""
-        with open(os.path.join(self._model_dir(name, create=False), version + ".json")) as f:
+        # O_NOFOLLOW for the same reason as the registration lock: a symlinked version file would
+        # otherwise be followed and read JSON from outside the store as though it were a record.
+        version_path = os.path.join(self._model_dir(name, create=False), version + ".json")
+        with os.fdopen(os.open(version_path, os.O_RDONLY | os.O_NOFOLLOW)) as f:
             payload = json.load(f)
         stored = payload.get("record_digest")
         if stored is not None and stored != _record_digest(payload):
