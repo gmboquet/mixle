@@ -1,5 +1,6 @@
 import ast
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -126,7 +127,10 @@ def _assert_suff_close(test_case, actual, expected):
         for key in actual:
             _assert_suff_close(test_case, actual[key], expected[key])
         return
-    if isinstance(actual, (tuple, list)):
+    # Sequence, not just tuple/list: a statistics record that carries bookkeeping beside its child
+    # statistics (HiddenAssociationStatistics) implements the protocol so it can be read
+    # positionally, and coercing one straight to a float array raises on the ragged children.
+    if isinstance(actual, Sequence) and not isinstance(actual, (str, bytes, bytearray)):
         test_case.assertEqual(len(actual), len(expected))
         for a, e in zip(actual, expected):
             _assert_suff_close(test_case, a, e)
@@ -1681,7 +1685,11 @@ class ComputeMetadataTestCase(unittest.TestCase):
                 ),
                 [[-2.0, 1.0], [2.5, 2.0], [-1.0, -2.5]],
             ),
-            (IntegerUniformSpikeDistribution(k=2, num_vals=5, p=0.6, min_val=0), None, [0, 1, 2, 3, 4, 5]),
+            # 0..4 is the entire support of num_vals=5 from min_val=0. Unlike the layout test
+            # above, this one goes on to call estimate(), and a fixed-support family refuses
+            # positively weighted evidence outside its declared support -- a 5 here is not a
+            # harder case, it is a contradiction the estimator is right to reject.
+            (IntegerUniformSpikeDistribution(k=2, num_vals=5, p=0.6, min_val=0), None, [0, 1, 2, 3, 4]),
             (IntegerBernoulliSetDistribution(np.log([0.2, 0.5, 0.8])), None, [[], [0], [1, 2], [0, 2]]),
             (
                 IndianBuffetProcessDistribution(

@@ -36,9 +36,12 @@ class ContinuousParameterContractTest(unittest.TestCase):
             lambda value: LogisticDistribution(value, 1.0),
             lambda value: StudentTDistribution(5.0, value, 1.0),
         )
-        for constructor in constructors:
+        # subTest labels are serializable stand-ins, not the objects themselves: xdist ships every
+        # subtest report through execnet, which cannot serialize a lambda or a distribution, so a
+        # raw label crashed the report channel under the suite's own default -n invocation.
+        for index, constructor in enumerate(constructors):
             for invalid in (np.nan, np.inf, -np.inf):
-                with self.subTest(constructor=constructor, invalid=invalid), self.assertRaises(ValueError):
+                with self.subTest(constructor=index, invalid=invalid), self.assertRaises(ValueError):
                     constructor(invalid)
 
     def test_student_moment_estimator_requires_existing_mean_and_variance(self):
@@ -96,7 +99,7 @@ class ContinuousObservationContractTest(unittest.TestCase):
         for distribution in distributions:
             encoder = distribution.dist_to_encoder()
             for invalid in ([0.0, np.nan], [np.inf], [-np.inf]):
-                with self.subTest(distribution=distribution, invalid=invalid), self.assertRaises(ValueError):
+                with self.subTest(distribution=repr(distribution), invalid=invalid), self.assertRaises(ValueError):
                     encoder.seq_encode(invalid)
 
     def test_nonnegative_amplitude_models_reject_negative_or_nonfinite_evidence(self):
@@ -104,11 +107,11 @@ class ContinuousObservationContractTest(unittest.TestCase):
             encoder = distribution.dist_to_encoder()
             accumulator = distribution.estimator().accumulator_factory().make()
             for invalid in (-1.0, np.nan, np.inf):
-                with self.subTest(distribution=distribution, invalid=invalid), self.assertRaises(ValueError):
+                with self.subTest(distribution=repr(distribution), invalid=invalid), self.assertRaises(ValueError):
                     encoder.seq_encode([invalid])
-                with self.subTest(distribution=distribution, invalid=invalid), self.assertRaises(ValueError):
+                with self.subTest(distribution=repr(distribution), invalid=invalid), self.assertRaises(ValueError):
                     accumulator.update(invalid, 1.0, distribution)
-                with self.subTest(distribution=distribution, invalid=invalid), self.assertRaises(ValueError):
+                with self.subTest(distribution=repr(distribution), invalid=invalid), self.assertRaises(ValueError):
                     accumulator.seq_update(np.asarray([invalid]), np.ones(1), distribution)
 
     def test_generalized_pareto_fitting_and_encoding_respect_threshold_and_endpoint(self):
