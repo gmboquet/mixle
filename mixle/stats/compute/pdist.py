@@ -1346,6 +1346,36 @@ def _encoded_nbytes(x: Any, seen: set[int]) -> int:
 _KEY_ATTRS = ("key", "keys", "weight_key", "comp_key", "init_key", "trans_key", "state_key")
 
 
+def _key_attr_value(owner: Any, attr: str) -> Any:
+    """Read a key attribute, calling it when the object exposes it as a no-argument accessor.
+
+    Estimators and accumulators may carry their keys either as a plain attribute (``self.keys = [...]``,
+    which every shipped family uses) or as a method (``def keys(self): ...``). getattr returns a bound
+    method for the second form, which is not a key value and not a sequence, so key collection fell
+    through to _canonical_key and rejected the estimator outright with "got method" -- a custom
+    estimator following the documented API could not be fitted at all.
+
+    Only a zero-argument callable is invoked: anything requiring arguments is not a keys accessor, and
+    is left alone so the normal validation reports it.
+    """
+    import inspect  # deferred, as elsewhere in this module, to keep the import graph acyclic
+
+    value = getattr(owner, attr)
+    if not callable(value):
+        return value
+    try:
+        signature = inspect.signature(value)
+    except (TypeError, ValueError):
+        return value
+    if any(
+        parameter.default is inspect.Parameter.empty
+        and parameter.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        for parameter in signature.parameters.values()
+    ):
+        return value
+    return value()
+
+
 def _canonical_key(x: Any) -> tuple[str, Any]:
     """Return a typed, equality-stable representation of one permitted scalar key."""
     if isinstance(x, np.generic):
@@ -1485,7 +1515,7 @@ def _collect_estimator_keys(
     for attr in _KEY_ATTRS:
         if not hasattr(estimator, attr):
             continue
-        keys = getattr(estimator, attr)
+        keys = _key_attr_value(estimator, attr)
         if keys is None:
             continue
         if _is_key_value(keys):
@@ -1530,7 +1560,7 @@ def _collect_accumulator_keys(
     for attr in _KEY_ATTRS:
         if not hasattr(accumulator, attr):
             continue
-        key = getattr(accumulator, attr)
+        key = _key_attr_value(accumulator, attr)
         if key is None:
             continue
         if _is_key_value(key):
