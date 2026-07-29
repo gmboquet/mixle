@@ -67,6 +67,57 @@ def _xi_from_skewness(skew: float, xi_min: float, xi_max: float) -> float:
     return 0.5 * (lo + hi)
 
 
+def _endpoint_in_sds(xi: float) -> float:
+    """Distance from the mean to the finite support endpoint, in standard deviations.
+
+    Under moment matching the bounded end of a GEV sits a fixed number of standard deviations from
+    the mean, independent of location and scale: substituting ``sigma = sd |xi| / sqrt(g2 - g1^2)``
+    and ``mu = mean - sigma (g1 - 1)/xi`` into the endpoint ``mu - sigma/xi`` leaves
+    ``mean +/- sd g1 / sqrt(g2 - g1^2)``. The value diverges as ``xi -> 0`` (Gumbel is unbounded)
+    and shrinks monotonically as ``|xi|`` grows -- which is exactly why an unconstrained
+    moment-matched shape can put the endpoint inside the sample it was fit on.
+    """
+    g1, g2 = _gamma(1.0 - xi), _gamma(1.0 - 2.0 * xi)
+    denom = g2 - g1 * g1
+    if denom <= 0.0 or not np.isfinite(denom):
+        return np.inf
+    return float(g1 / math.sqrt(denom))
+
+
+def _shape_covering_range(xi: float, mean: float, sd: float, min_val: float, max_val: float) -> float:
+    """Shrink ``|xi|`` until the moment-matched support contains the observed range.
+
+    Method of moments matches mean, variance and skewness but says nothing about *support*: with
+    ``xi < 0`` a GEV is bounded above, and a sample whose skew maps to, say, ``xi = -0.72`` gets an
+    upper endpoint only 1.85 sd above the mean -- so the largest observations in the very sample
+    being fit score ``-inf``. That is not a numerical accident; it is an estimate that declares its
+    own training data impossible, and downstream EM cannot recover from it because the moments (and
+    therefore the estimate) never change.
+
+    Give up the third moment rather than the support: keep mean and variance matched exactly and
+    move ``xi`` toward the Gumbel limit, which pushes the endpoint outward monotonically, until the
+    observed range is strictly inside it. ``|xi|`` is only ever reduced, so a shape whose support
+    already covers the data is returned untouched.
+    """
+    if abs(xi) < _XI_TOL or sd <= 0.0 or not (np.isfinite(min_val) and np.isfinite(max_val)):
+        return xi
+    needed = (max_val - mean) / sd if xi < 0.0 else (mean - min_val) / sd
+    if not np.isfinite(needed):
+        return xi
+    margin = 1.0e-6 * max(1.0, abs(needed))
+    target = needed + margin
+    if _endpoint_in_sds(xi) >= target:
+        return xi
+    lo, hi = _XI_TOL, abs(xi)  # invariant: lo covers the range, hi does not
+    for _ in range(100):
+        mid = 0.5 * (lo + hi)
+        if _endpoint_in_sds(math.copysign(mid, xi)) >= target:
+            lo = mid
+        else:
+            hi = mid
+    return math.copysign(lo, xi)
+
+
 class GeneralizedExtremeValueDistribution(SequenceEncodableProbabilityDistribution):
     """Generalized Extreme Value distribution with location ``loc``, scale ``> 0`` and shape ``xi``."""
 
@@ -132,14 +183,30 @@ class GeneralizedExtremeValueDistribution(SequenceEncodableProbabilityDistributi
             name="generalized_extreme_value",
             distribution_type=cls,
             parameters=(ParameterSpec("loc"), ParameterSpec("scale", constraint="positive"), ParameterSpec("shape")),
-            statistics=(StatisticSpec("sum"), StatisticSpec("sum2"), StatisticSpec("sum3"), StatisticSpec("count")),
+            statistics=(
+                StatisticSpec("sum"),
+                StatisticSpec("sum2"),
+                StatisticSpec("sum3"),
+                StatisticSpec("count"),
+                StatisticSpec("min_val", kind="support_bound", additive=False, scales=False),
+                StatisticSpec("max_val", kind="support_bound", additive=False, scales=False),
+            ),
             support="real",
-            legacy_sufficient_statistics=cls.backend_legacy_sufficient_statistics,
         )
 
     @staticmethod
     def backend_legacy_sufficient_statistics(x: Any, params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
-        """Per-row GEV moment sums in accumulator order ``(sum, sum2, sum3, count)``."""
+        """Per-row GEV moment sums in accumulator order ``(sum, sum2, sum3, count)``.
+
+        Deliberately not wired into the declaration as ``legacy_sufficient_statistics``. The
+        generated statistic path reduces every declared statistic with a weighted *sum*, ignoring
+        ``StatisticSpec.additive``, so it cannot produce the observed range the M-step needs to keep
+        the fitted support around the data (see :func:`_shape_covering_range`) -- it would silently
+        hand ``estimate`` a summed min and max. GEV therefore accumulates through the host
+        ``seq_update``, which is three dot products for a univariate leaf; engine-resident *scoring*
+        via ``backend_seq_log_density`` is unaffected. Reinstate this hook once the generated path
+        honours non-additive support bounds.
+        """
         xx = engine.asarray(x)
         x2 = xx * xx
         return xx, x2, x2 * xx, xx * 0.0 + engine.asarray(1.0)
@@ -297,22 +364,32 @@ class GeneralizedExtremeValueSampler(DistributionSampler):
 
 
 class GeneralizedExtremeValueAccumulator(SequenceEncodableStatisticAccumulator):
-    """Accumulate weighted first three moments for GEV estimation."""
+    """Accumulate weighted first three moments and the observed range for GEV estimation.
+
+    The range is not a moment: it is the support bound the estimate has to respect, since a GEV with
+    ``xi != 0`` is bounded on one side and moment matching alone can place that bound inside the
+    sample. See :func:`_shape_covering_range`.
+    """
 
     def __init__(self, name: str | None = None, keys: str | None = None) -> None:
         self.sum = 0.0
         self.sum2 = 0.0
         self.sum3 = 0.0
         self.count = 0.0
+        self.min_val = np.inf
+        self.max_val = -np.inf
         self.name = name
         self.keys = keys
 
     def update(self, x: float, weight: float, estimate: GeneralizedExtremeValueDistribution | None) -> None:
-        """Accumulate weighted first three raw moments for one observation."""
+        """Accumulate weighted first three raw moments and the observed range for one observation."""
         self.sum += x * weight
         self.sum2 += x * x * weight
         self.sum3 += x * x * x * weight
         self.count += weight
+        if weight > 0.0:
+            self.min_val = min(self.min_val, float(x))
+            self.max_val = max(self.max_val, float(x))
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
         """Initialize statistics from one observation."""
@@ -321,32 +398,53 @@ class GeneralizedExtremeValueAccumulator(SequenceEncodableStatisticAccumulator):
     def seq_update(
         self, x: np.ndarray, weights: np.ndarray, estimate: GeneralizedExtremeValueDistribution | None
     ) -> None:
-        """Accumulate weighted first three raw moments from encoded data."""
+        """Accumulate weighted first three raw moments and the observed range from encoded data."""
         xx = np.asarray(x, dtype=np.float64)
         self.sum += np.dot(xx, weights)
         self.sum2 += np.dot(xx * xx, weights)
         self.sum3 += np.dot(xx * xx * xx, weights)
         self.count += np.sum(weights, dtype=np.float64)
+        mask = np.asarray(weights) > 0.0
+        if np.any(mask):
+            self.min_val = min(self.min_val, float(np.min(xx[mask])))
+            self.max_val = max(self.max_val, float(np.max(xx[mask])))
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
 
-    def combine(self, suff_stat: tuple[float, float, float, float]) -> "GeneralizedExtremeValueAccumulator":
+    def combine(
+        self, suff_stat: tuple[float, float, float, float, float, float]
+    ) -> "GeneralizedExtremeValueAccumulator":
         """Merge another GEV sufficient-statistic tuple."""
         self.sum += suff_stat[0]
         self.sum2 += suff_stat[1]
         self.sum3 += suff_stat[2]
         self.count += suff_stat[3]
+        if len(suff_stat) > 5:
+            self.min_val = min(self.min_val, float(suff_stat[4]))
+            self.max_val = max(self.max_val, float(suff_stat[5]))
         return self
 
-    def value(self) -> tuple[float, float, float, float]:
-        """Return raw moment sums and observation count."""
-        return self.sum, self.sum2, self.sum3, self.count
+    def value(self) -> tuple[float, float, float, float, float, float]:
+        """Return raw moment sums, observation count, and the observed range."""
+        return self.sum, self.sum2, self.sum3, self.count, self.min_val, self.max_val
 
-    def from_value(self, x: tuple[float, float, float, float]) -> "GeneralizedExtremeValueAccumulator":
+    def from_value(self, x: tuple[float, float, float, float, float, float]) -> "GeneralizedExtremeValueAccumulator":
         """Replace accumulator contents from a sufficient-statistic tuple."""
         self.sum, self.sum2, self.sum3, self.count = float(x[0]), float(x[1]), float(x[2]), float(x[3])
+        # A four-entry tuple predates the range statistic and simply leaves the support unknown --
+        # estimate() then skips the coverage clamp rather than inventing a bound.
+        self.min_val = float(x[4]) if len(x) > 5 else np.inf
+        self.max_val = float(x[5]) if len(x) > 5 else -np.inf
+        return self
+
+    def scale(self, c: float) -> "GeneralizedExtremeValueAccumulator":
+        """Scale accumulated evidence while preserving the observed range."""
+        self.sum *= c
+        self.sum2 *= c
+        self.sum3 *= c
+        self.count *= c
         return self
 
     def acc_to_encoder(self) -> "GeneralizedExtremeValueDataEncoder":
@@ -405,10 +503,11 @@ class GeneralizedExtremeValueEstimator(ParameterEstimator):
         return GeneralizedExtremeValueAccumulatorFactory(name=self.name, keys=self.keys)
 
     def estimate(
-        self, nobs: float | None, suff_stat: tuple[float, float, float, float]
+        self, nobs: float | None, suff_stat: tuple[float, float, float, float, float, float]
     ) -> GeneralizedExtremeValueDistribution:
-        """Estimate location, scale, and shape from weighted moments."""
-        sum_x, sum_x2, sum_x3, count = suff_stat
+        """Estimate location, scale, and shape from weighted moments, keeping the data in support."""
+        sum_x, sum_x2, sum_x3, count = suff_stat[:4]
+        min_val, max_val = (float(suff_stat[4]), float(suff_stat[5])) if len(suff_stat) > 5 else (np.inf, -np.inf)
         if self.pseudo_count is not None and self.suff_stat is not None:
             mean0, second0, third0 = self.suff_stat
             sum_x += self.pseudo_count * mean0
@@ -434,6 +533,11 @@ class GeneralizedExtremeValueEstimator(ParameterEstimator):
             scale, loc, xi = gumbel_fallback
         else:
             xi = _xi_from_skewness(skew, self.xi_min, self.xi_max)
+            # Trade the third moment for support coverage before building the parameters: a shape
+            # solved purely from skewness can put the bounded end of the GEV inside the very sample
+            # it summarizes, which scores those observations -inf and leaves EM with a permanently
+            # non-finite model (the moments never move, so the estimate never recovers).
+            xi = _shape_covering_range(xi, mean, math.sqrt(var), min_val, max_val)
             if abs(xi) < _XI_TOL:  # Gumbel limit
                 scale = math.sqrt(6.0 * var) / math.pi
                 loc = mean - scale * _EULER
