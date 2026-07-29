@@ -16,9 +16,22 @@ class PhysicsInverseTest(unittest.TestCase):
         self.assertLess(abs(draws.mean() - K_TRUE), 0.15)  # near the truth (up to noise-draw MLE shift)
 
     def test_certificate_downgrades_under_the_physics_potential(self):
+        """The potential caps what the certificate may claim, and says so by name.
+
+        The claim under test is the honest downgrade, and the certificate expresses it with two
+        fields, not one: ``candidate_guarantee`` is what the block WOULD earn (STATIONARY, from its
+        exponential-family shape) and ``guarantee`` is what it actually earns without a receipt.
+        Asserting ``cert.guarantee == STATIONARY`` asked the aggregate to report the uncapped value
+        -- i.e. asked for exactly the false claim the downgrade exists to prevent -- and the reason
+        is worded "CANDIDATE CAPPED", never "DOWNGRADED". The mechanism was working the whole time.
+        """
         _draws, cert = infer_k(observe(0), 0, draws=400)
-        self.assertEqual(cert.guarantee.name, "STATIONARY")
-        self.assertIn("DOWNGRADED", cert.blocks[0].reason)  # the potential is named, never a false claim
+        block = cert.blocks[0]
+        self.assertEqual(block.candidate_guarantee.name, "STATIONARY")  # what it would earn
+        self.assertEqual(block.guarantee.name, "UNVERIFIED")  # what it earns unreceipted
+        self.assertEqual(cert.guarantee.name, "UNVERIFIED")  # the aggregate never exceeds a block
+        self.assertIn("CANDIDATE CAPPED", block.reason)
+        self.assertIn("custom potential", block.reason)  # the potential is named, never a false claim
 
     def test_interval_coverage_over_noise_draws(self):
         hits = 0

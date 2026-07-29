@@ -12,9 +12,11 @@ the trajectory, as a Bayesian inverse problem:
   * the UQ is HONEST: a credible interval per dataset, and -- the receipt that matters -- calibrated
     COVERAGE across repeated noise draws (a 90% interval must bracket the truth ~90% of the time; one
     miss is a statistic, not a bug);
-  * the CERTIFICATE downgrades: a potential-augmented fit optimizes a modified objective, so the fit
-    carries an E2-downgraded certificate (STATIONARY, with the penalty named) instead of a false
-    closed-form claim.
+  * the CERTIFICATE downgrades: a potential-augmented fit optimizes a modified objective, so the
+    block's STATIONARY candidate is CAPPED to UNVERIFIED with the custom potential named in the
+    reason, instead of a false closed-form claim. Both numbers are on the certificate --
+    ``candidate_guarantee`` is what the block would earn, ``guarantee`` is what it earns without a
+    receipt -- and the aggregate reports the capped one.
 
 Everything measured in-process; ~a minute, no GPU, no network.
 """
@@ -62,7 +64,10 @@ def main() -> None:
     draws, cert = infer_k(y, 0)
     lo, hi = np.quantile(draws, [0.05, 0.95])
     print(f"one dataset : posterior mean {draws.mean():.3f}, 90% CI [{lo:.3f}, {hi:.3f}]")
-    print(f"certificate : {cert.guarantee.name} (physics potential -> honest downgrade)")
+    print(
+        f"certificate : {cert.guarantee.name} "
+        f"(candidate {cert.blocks[0].candidate_guarantee.name}, capped by the physics potential)"
+    )
     print(f"  {cert.blocks[0].reason.split('[')[-1].rstrip(']')}")
 
     # the UQ receipt: coverage of the 90% interval over repeated noise draws
