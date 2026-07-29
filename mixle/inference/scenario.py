@@ -364,6 +364,7 @@ class Simulator:
         self._hmm_model: HiddenMarkovModelDistribution | None = None
         self._hmm_evidence: dict[int, Any] = {}
         self._posterior: Posterior | None = None
+        self._determined: tuple | None = None
         working = base
 
         if interventions:
@@ -413,6 +414,23 @@ class Simulator:
             )
             return
 
+        determined = _fully_observed_record(working, evidence)
+        if determined is not None:
+            # Evidence fixes every field, so there is no residual distribution to condition to --
+            # CompositeDistribution.condition would be asked for the empty composite and reject it.
+            # That is not a degenerate corner: scoring a fully specified scenario is the whole point
+            # of the plausibility receipt, and the plausibility itself is already computed above by
+            # _exact_evidence_log_density, independently of conditioning. The scenario is a point
+            # mass on the evidence, so every rollout draw is that record.
+            self._determined = determined
+            self.receipt = SimulationReceipt(
+                plausibility=plausibility,
+                plausibility_method=plaus_method,
+                method="none",
+                evidence_status="possible" if np.isfinite(plausibility) else "impossible",
+            )
+            return
+
         if evidence:
             self._posterior = condition(working, dict(evidence), n_particles=n_particles, seed=_rng_seed(self._rng))
             self.receipt = SimulationReceipt(
@@ -447,6 +465,9 @@ class Simulator:
             return [records[j] for j in idx]
         if self._hmm_model is not None:
             return _hmm_forward_rollout(self._hmm_model, self._hmm_evidence, int(self.scenario.horizon), n, self._rng)
+        if self._determined is not None:
+            # A fully observed scenario is a point mass on its evidence; every draw is that record.
+            return [self._determined] * n
         if self._posterior is not None:
             return self._posterior.sample(n, seed=_rng_seed(self._rng))
         sampler = self._working.sampler(seed=_rng_seed(self._rng))
@@ -459,6 +480,25 @@ class Simulator:
         rows = self.rollout(n)
         values = np.array([float(_extract(r, path)) for r in rows], dtype=np.float64)
         return FieldPosterior(values)
+
+
+def _fully_observed_record(working: Any, evidence: dict) -> tuple | None:
+    """The evidence as a full record when it fixes every field of ``working``, else ``None``.
+
+    Deliberately narrow: only a CompositeDistribution observed at every top-level index qualifies.
+    Any other model, any nested path, or any partial observation returns None and takes the ordinary
+    conditioning path, so this cannot change the behaviour of a scenario that has a real residual.
+    """
+    from mixle.stats.combinator.composite import CompositeDistribution
+
+    if not isinstance(working, CompositeDistribution) or not evidence:
+        return None
+    if any(len(path) != 1 or not isinstance(path[0], (int, np.integer)) for path in evidence):
+        return None
+    observed = {int(path[0]): value for path, value in evidence.items()}
+    if set(observed) != set(range(working.count)):
+        return None
+    return tuple(observed[i] for i in range(working.count))
 
 
 def simulate(scenario: Scenario, *, base: Any | None = None, seed: int | None = None) -> Simulator:
