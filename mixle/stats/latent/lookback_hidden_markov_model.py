@@ -873,7 +873,7 @@ class LookbackHiddenMarkovModelSampler(DistributionSampler):
 
             if lag == 0:
                 # ordinary HMM: each of the n states emits one observation given an empty history
-                return [self.obs_samplers[state_seq[i]].sample_given([]) for i in range(n)]
+                return [_emit_unconditioned(self.obs_samplers[state_seq[i]]) for i in range(n)]
 
             rv = list(self.init_samplers[state_seq[0]].sample())  # [v_1, ..., v_lag]
             for i in range(1, n):
@@ -898,11 +898,26 @@ class LookbackHiddenMarkovModelSampler(DistributionSampler):
             last_state=z,
         )
         if lag == 0:
-            return [self.obs_samplers[s].sample_given([]) for s in states]
+            return [_emit_unconditioned(self.obs_samplers[s]) for s in states]
         rv = list(self.init_samplers[states[0]].sample())
         for s in states[1:]:
             rv.append(self.obs_samplers[s].sample_given(rv[-lag:]))
         return rv
+
+
+def _emit_unconditioned(sampler):
+    """One draw from an emission sampler with no history to condition on (the lag == 0 case).
+
+    At lag 0 the model is an ordinary HMM: there is no lookback window, so "emit given an empty
+    history" is just an unconditional draw. Calling sample_given([]) unconditionally demanded a
+    conditional sampler interface that the emission does not need and mostly does not have --
+    GaussianSampler and SequenceSampler have no sample_given at all, and the conditional laws that
+    do have it reject an empty path when their own lag is >= 1. That left the lag == 0 sampling
+    path with no usable emission type, including the SequenceDistribution emissions this model's
+    own engine test builds (that test only fits and scores, so it never reached this line).
+    """
+    given = getattr(sampler, "sample_given", None)
+    return given([]) if callable(given) else sampler.sample()
 
 
 class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
