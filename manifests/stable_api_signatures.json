@@ -1775,7 +1775,7 @@
             "name": "mode"
           },
           {
-            "annotation": "Any | None",
+            "annotation": "typing.Any | None",
             "default": {
               "present": true,
               "value": null
@@ -1870,7 +1870,7 @@
             "name": "data"
           },
           {
-            "annotation": "Any | None",
+            "annotation": "typing.Any | None",
             "default": {
               "present": true,
               "value": null
@@ -2019,7 +2019,7 @@
             "name": "enc_vdata"
           },
           {
-            "annotation": "IO | None",
+            "annotation": "typing.IO | None",
             "default": {
               "present": true,
               "value": null
@@ -2064,7 +2064,7 @@
             "name": "seed"
           },
           {
-            "annotation": "dict[str, Any] | None",
+            "annotation": "dict[str, typing.Any] | None",
             "default": {
               "present": true,
               "value": null
@@ -2296,7 +2296,7 @@
             "name": "enc_vdata"
           },
           {
-            "annotation": "IO | None",
+            "annotation": "typing.IO | None",
             "default": {
               "present": true,
               "value": null
@@ -2323,7 +2323,7 @@
             "name": "num_chunks"
           },
           {
-            "annotation": "Any | None",
+            "annotation": "typing.Any | None",
             "default": {
               "present": true,
               "value": null
@@ -2332,7 +2332,7 @@
             "name": "engine"
           },
           {
-            "annotation": "Any | None",
+            "annotation": "typing.Any | None",
             "default": {
               "present": true,
               "value": null
@@ -2341,7 +2341,7 @@
             "name": "precision"
           },
           {
-            "annotation": "Any | None",
+            "annotation": "typing.Any | None",
             "default": {
               "present": true,
               "value": null
@@ -2350,7 +2350,7 @@
             "name": "fields"
           },
           {
-            "annotation": "Any | None",
+            "annotation": "typing.Any | None",
             "default": {
               "present": true,
               "value": null
@@ -2359,7 +2359,7 @@
             "name": "resources"
           },
           {
-            "annotation": "Any | None",
+            "annotation": "typing.Any | None",
             "default": {
               "present": true,
               "value": null
@@ -2404,7 +2404,7 @@
             "name": "num_workers"
           },
           {
-            "annotation": "Any | None",
+            "annotation": "typing.Any | None",
             "default": {
               "present": true,
               "value": null
@@ -2413,7 +2413,7 @@
             "name": "client"
           },
           {
-            "annotation": "Any | None",
+            "annotation": "typing.Any | None",
             "default": {
               "present": true,
               "value": null
@@ -2440,7 +2440,7 @@
             "name": "root_only"
           },
           {
-            "annotation": "Any | None",
+            "annotation": "typing.Any | None",
             "default": {
               "present": true,
               "value": null
@@ -2467,7 +2467,7 @@
             "name": "objective"
           },
           {
-            "annotation": "Any | None",
+            "annotation": "typing.Any | None",
             "default": {
               "present": true,
               "value": null
@@ -2521,7 +2521,7 @@
             "name": "seed"
           },
           {
-            "annotation": "dict[str, Any] | None",
+            "annotation": "dict[str, typing.Any] | None",
             "default": {
               "present": true,
               "value": null
@@ -4011,7 +4011,7 @@
             "name": "weight"
           },
           {
-            "annotation": "ForwardRef('np.random.RandomState') | None",
+            "annotation": "Optional[ForwardRef('np.random.RandomState')]",
             "default": {
               "present": false
             },
@@ -4091,7 +4091,7 @@
             "name": "weights"
           },
           {
-            "annotation": "ForwardRef('ExponentialDistribution') | None",
+            "annotation": "Optional[ForwardRef('ExponentialDistribution')]",
             "default": {
               "present": false
             },
@@ -4131,7 +4131,7 @@
             "name": "weight"
           },
           {
-            "annotation": "ForwardRef('ExponentialDistribution') | None",
+            "annotation": "Optional[ForwardRef('ExponentialDistribution')]",
             "default": {
               "present": false
             },
@@ -5319,7 +5319,7 @@
             "name": "weights"
           },
           {
-            "annotation": "ForwardRef('GammaDistribution') | None",
+            "annotation": "Optional[ForwardRef('GammaDistribution')]",
             "default": {
               "present": false
             },
@@ -5359,7 +5359,7 @@
             "name": "weight"
           },
           {
-            "annotation": "ForwardRef('GammaDistribution') | None",
+            "annotation": "Optional[ForwardRef('GammaDistribution')]",
             "default": {
               "present": false
             },
@@ -6628,7 +6628,7 @@
             "name": "weight"
           },
           {
-            "annotation": "ForwardRef('GaussianDistribution') | None",
+            "annotation": "Optional[ForwardRef('GaussianDistribution')]",
             "default": {
               "present": false
             },
@@ -8022,7 +8022,7 @@
             "name": "weight"
           },
           {
-            "annotation": "ForwardRef('LogGaussianDistribution') | None",
+            "annotation": "Optional[ForwardRef('LogGaussianDistribution')]",
             "default": {
               "present": false
             },
@@ -9292,7 +9292,7 @@
             "name": "weights"
           },
           {
-            "annotation": "ForwardRef('CategoricalDistribution') | None",
+            "annotation": "Optional[ForwardRef('CategoricalDistribution')]",
             "default": {
               "present": false
             },
@@ -9332,7 +9332,7 @@
             "name": "weight"
           },
           {
-            "annotation": "ForwardRef('CategoricalDistribution') | None",
+            "annotation": "Optional[ForwardRef('CategoricalDistribution')]",
             "default": {
               "present": false
             },
@@ -9497,7 +9497,7 @@
             "name": "prob_map"
           },
           {
-            "annotation": "ForwardRef('SequenceEncodableProbabilityDistribution') | None",
+            "annotation": "Optional[ForwardRef('SequenceEncodableProbabilityDistribution')]",
             "default": {
               "present": true,
               "value": null
@@ -9930,7 +9930,7 @@
             "name": "self"
           }
         ],
-        "return_annotation": "ForwardRef('SequenceEncodableProbabilityDistribution') | None"
+        "return_annotation": "Optional[ForwardRef('SequenceEncodableProbabilityDistribution')]"
       }
     },
     "mixle.stats.univariate.discrete.categorical.CategoricalDistribution.gradient_fit_state": {
@@ -10214,7 +10214,7 @@
             "name": "self"
           },
           {
-            "annotation": "ForwardRef('SequenceEncodableProbabilityDistribution') | None",
+            "annotation": "Optional[ForwardRef('SequenceEncodableProbabilityDistribution')]",
             "default": {
               "present": false
             },
@@ -10295,7 +10295,7 @@
             "name": "pseudo_count"
           },
           {
-            "annotation": "dict[Any, float] | None",
+            "annotation": "dict[typing.Any, float] | None",
             "default": {
               "present": true,
               "value": null
@@ -10543,7 +10543,7 @@
             "name": "batched"
           }
         ],
-        "return_annotation": "Any | list[Any]"
+        "return_annotation": "typing.Any | list[typing.Any]"
       }
     },
     "mixle.stats.univariate.discrete.geometric.GeometricAccumulator": {
@@ -10745,7 +10745,7 @@
             "name": "weights"
           },
           {
-            "annotation": "ForwardRef('GeometricDistribution') | None",
+            "annotation": "Optional[ForwardRef('GeometricDistribution')]",
             "default": {
               "present": false
             },
@@ -10785,7 +10785,7 @@
             "name": "weight"
           },
           {
-            "annotation": "ForwardRef('GeometricDistribution') | None",
+            "annotation": "Optional[ForwardRef('GeometricDistribution')]",
             "default": {
               "present": false
             },
@@ -12051,7 +12051,7 @@
             "name": "weights"
           },
           {
-            "annotation": "ForwardRef('PoissonDistribution') | None",
+            "annotation": "Optional[ForwardRef('PoissonDistribution')]",
             "default": {
               "present": true,
               "value": null
@@ -12092,7 +12092,7 @@
             "name": "weight"
           },
           {
-            "annotation": "ForwardRef('PoissonDistribution') | None",
+            "annotation": "Optional[ForwardRef('PoissonDistribution')]",
             "default": {
               "present": true,
               "value": null
