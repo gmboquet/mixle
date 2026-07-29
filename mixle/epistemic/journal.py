@@ -346,7 +346,16 @@ class EpistemicJournal:
         trajectory = [HypothesisPortfolio.from_dict(r.portfolio_snapshot) for r in self._records]
         return ([portfolio0] + trajectory) if portfolio0 is not None else trajectory
 
-    def verify(self) -> bool:
+    def head(self) -> str:
+        """The chain's current tip: the last record's ``record_hash``, or the genesis anchor if empty.
+
+        This is what :meth:`verify` needs in order to detect truncation. Store it outside the
+        journal's own storage each time you finish appending, and hand it back to
+        ``verify(expect_head=...)``.
+        """
+        return self._records[-1].record_hash if self._records else _GENESIS_HASH
+
+    def verify(self, *, expect_length: int | None = None, expect_head: str | None = None) -> bool:
         """Return whether the journal is intact: every record's content AND its place in the chain.
 
         This used to compare only ``portfolio_snapshot`` against ``belief_snapshot_hash``, so
@@ -368,7 +377,25 @@ class EpistemicJournal:
         ``str()`` snapshot (see the module docstring), this only proves that string is unchanged, not
         that the original object would be recovered -- there is no stronger claim to make once the
         exact object is gone.
+
+        **Truncation from the end cannot be detected from the records alone, and no hash chain can
+        do it.** Deleting the final record leaves a shorter chain that is entirely self-consistent:
+        every remaining ``prev_hash`` still matches its predecessor and every ``record_hash`` still
+        verifies, because a prefix of a valid chain is a valid chain. Catching it requires one fact
+        the journal does not itself hold -- how many records there should be, or what the tip was:
+
+            head = journal.head()          # store this outside the journal
+            ...
+            journal.verify(expect_head=head, expect_length=n)
+
+        ``expect_head`` is the stronger anchor: it pins the exact final record, so it also rejects a
+        journal truncated and then re-extended back to its original length. ``expect_length`` alone
+        only notices a change in count. With neither, this still proves internal consistency -- but
+        it is not evidence that nothing was dropped off the end, and an auditor should not read it
+        as such.
         """
+        if expect_length is not None and len(self._records) != expect_length:
+            return False
         expected_prev = _GENESIS_HASH
         for index, record in enumerate(self._records):
             if record.step_index != index or record.prev_hash != expected_prev:
@@ -378,7 +405,7 @@ class EpistemicJournal:
             if _hash_record(record) != record.record_hash:
                 return False
             expected_prev = record.record_hash
-        return True
+        return expect_head is None or expected_prev == expect_head
 
     def to_json(self, **dumps_kwargs: Any) -> str:
         """Serialize the journal as JSON that a strict parser actually accepts.

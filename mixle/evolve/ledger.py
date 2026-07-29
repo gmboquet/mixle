@@ -169,14 +169,42 @@ class EvolutionLedger:
         self._rows.append(row)
         return copy.deepcopy(row)
 
-    def verify(self) -> bool:
+    def head(self) -> str:
+        """The chain's current tip: the last row's ``row_hash``, or :data:`_GENESIS_HASH` if empty.
+
+        This is the anchor :meth:`verify` needs to detect truncation. Record it somewhere the ledger
+        's own storage cannot reach -- a run report, a build artifact, a separate durable store --
+        each time you finish appending; passing it back to ``verify(expect_head=...)`` is what turns
+        "these rows are self-consistent" into "these are the rows that were written".
+        """
+        return self._rows[-1]["row_hash"] if self._rows else _GENESIS_HASH
+
+    def verify(self, *, expect_length: int | None = None, expect_head: str | None = None) -> bool:
         """Whether every row still matches its digest and its place in the chain.
 
         Checks, per row: the sequence number matches its position, ``prev_hash`` matches the previous
         row's ``row_hash`` (:data:`_GENESIS_HASH` for the first), and ``row_hash`` still matches the
         row's canonical content. A rewritten delta or verdict, a deleted or reordered attempt, and a
         front-truncated ledger all fail.
+
+        **Truncation from the end cannot be detected from the rows alone, and no hash chain can do
+        it.** Deleting the last row leaves a shorter chain that is perfectly self-consistent -- every
+        remaining ``prev_hash`` still matches, every ``row_hash`` still verifies -- because a prefix
+        of a valid chain is a valid chain. Detecting it needs one fact the ledger does not hold: how
+        long the chain is supposed to be, or what its tip was. Supply either and the check becomes
+        real:
+
+            head = ledger.head()          # store this outside the ledger
+            ...
+            ledger.verify(expect_head=head, expect_length=n)
+
+        ``expect_head`` is the stronger of the two: it pins the exact final row, so it also rejects a
+        ledger truncated and then re-extended to the original length. ``expect_length`` alone catches
+        only a change in count. Omitting both is still meaningful -- it proves internal consistency --
+        but it is not proof that nothing was removed from the end.
         """
+        if expect_length is not None and len(self._rows) != expect_length:
+            return False
         expected_prev = _GENESIS_HASH
         for index, row in enumerate(self._rows):
             if row.get("seq") != index or row.get("prev_hash") != expected_prev:
@@ -184,7 +212,7 @@ class EvolutionLedger:
             if _row_hash(row) != row.get("row_hash"):
                 return False
             expected_prev = row["row_hash"]
-        return True
+        return expect_head is None or expected_prev == expect_head
 
     def to_json(self, **dumps_kwargs: Any) -> str:
         """Serialize the full ledger to a **strict** JSON string.
