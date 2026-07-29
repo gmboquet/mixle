@@ -221,12 +221,21 @@ class HypothesisPortfolio:
             chosen = rng.choice(n, size=n, p=p)
         new_hyps = list(self.hypotheses)
         new_weights = self.weights.copy()
-        seen: dict[str, int] = {}
+        # Suffixes have to dodge the ids this resample does *not* get to reassign -- the inactive
+        # slots, which are copied through untouched. Counting only the duplicates produced within
+        # this pass minted an id that was already sitting in one of those slots, and the
+        # constructor's own uniqueness check then rejected the portfolio: resample -> prune ->
+        # resample is an ordinary particle-filter cycle, and the second resample raised
+        # "hypothesis ids must be unique" on a portfolio this method itself had produced.
+        taken = {h.id for i, h in enumerate(self.hypotheses) if i not in set(map(int, active_idx))}
+        counts: dict[str, int] = {}
         for slot, pick in zip(active_idx, chosen):
             src = self.hypotheses[active_idx[int(pick)]]
-            count = seen.get(src.id, 0)
-            seen[src.id] = count + 1
-            new_id = src.id if count == 0 else f"{src.id}#{count}"
+            new_id = src.id  # the first copy keeps the source id; later ones get "#1", "#2", ...
+            while new_id in taken:
+                counts[src.id] = counts.get(src.id, 0) + 1
+                new_id = f"{src.id}#{counts[src.id]}"
+            taken.add(new_id)
             new_hyps[slot] = Hypothesis(id=new_id, payload=src.payload, active=True)
             new_weights[slot] = total_active / n
         return HypothesisPortfolio(new_hyps, new_weights, self.w_open)
