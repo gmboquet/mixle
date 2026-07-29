@@ -295,8 +295,11 @@ def gaussian_moments(
         sum_xx = 0.5 * (sum_xx + sum_xx.T)
         if np.linalg.eigvalsh(sum_xx)[0] < -1.0e-6 * scale:
             raise ValueError("Gaussian second-moment statistic must be positive semidefinite")
-    if count == 0.0 and (np.any(sum_x != 0.0) or np.any(sum_xx != 0.0)):
-        raise ValueError("zero-count Gaussian sufficient statistics require zero moments")
+    # A zero-count component is a starved one, which is a normal EM state and the whole reason the
+    # mixture weight floor exists. Its moments are never read: the estimator sees count == 0 and
+    # returns the floor defaults whatever they hold, so rejecting them fails closed on dead data and
+    # turns a component the floor was built to revive into a hard crash. Their shape, finiteness,
+    # symmetry, non-negativity and PSD-ness were all still checked above, unconditionally.
     return sum_x, sum_xx, count, inferred_dim
 
 
