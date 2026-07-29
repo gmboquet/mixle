@@ -177,9 +177,26 @@ DictRecordDistribution = _estimator_provider(False).DictRecordDistribution
 DictRecordEstimator = _estimator_provider(False).DictRecordEstimator
 
 
-def get_optional_estimator(est: ParameterEstimator, missing_value: Any | None = None, use_bstats: bool = False):
-    """Wrap an estimator with an optional/missing-value model."""
-    return _estimator_provider(use_bstats).OptionalEstimator(est, missing_value=missing_value)
+def get_optional_estimator(
+    est: ParameterEstimator,
+    missing_value: Any | None = None,
+    use_bstats: bool = False,
+    est_prob: bool = False,
+):
+    """Wrap an estimator with an optional/missing-value model.
+
+    ``est_prob`` decides what the wrapper MEANS, so callers pass it deliberately rather than taking a
+    default. With it false the fitted OptionalDistribution carries no rate: it is transparent to the
+    density (contributing 0) and is a marginalized likelihood factor that cannot generate
+    observations. With it true the missingness rate is fit from the data the profiler has already
+    seen, the wrapper contributes log(p)/log(1-p) to the density, and the model can be sampled.
+
+    Only genuine optionality -- a field that is really absent, marked by ``None`` -- wants the rate.
+    The non-finite sentinels (``nan``, ``+/-inf``) use this wrapper as a REPRESENTATIONAL device so a
+    numeric field can carry a non-finite value; modelling how often that happens would change the
+    density of every such record, which is why they keep the transparent default.
+    """
+    return _estimator_provider(use_bstats).OptionalEstimator(est, missing_value=missing_value, est_prob=est_prob)
 
 
 def get_length_estimator(
