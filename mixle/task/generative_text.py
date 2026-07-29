@@ -24,6 +24,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.task._teacher import TeacherCaller
 from mixle.task.extract import tokenize
 from mixle.task.model import TaskModel, register_adapter
 
@@ -41,11 +42,7 @@ class GenerativeTextIO:
         self.log_prior = [float(v) for v in log_prior]
         if not self.labels or any(not label for label in self.labels) or len(set(self.labels)) != len(self.labels):
             raise ValueError("generative text labels must be nonempty and unique")
-        if (
-            not self._vocab_list
-            or _UNK not in self._vocab_list
-            or len(set(self._vocab_list)) != len(self._vocab_list)
-        ):
+        if not self._vocab_list or _UNK not in self._vocab_list or len(set(self._vocab_list)) != len(self._vocab_list):
             raise ValueError("generative text vocabulary must be unique and include '<unk>'")
         if len(self.log_prior) != len(self.labels) or not np.all(np.isfinite(self.log_prior)):
             raise ValueError("generative text log priors must be finite and aligned with labels")
@@ -204,17 +201,9 @@ def distill_text_generative(
     items = [str(t) for t in texts]
     if not items:
         raise ValueError("texts must contain at least one example")
-    try:
-        got = teacher(items)
-    except TypeError:  # a per-item-only callable can reject the batch shape
-        ys = [teacher(t) for t in items]
-    else:
-        if isinstance(got, (list, tuple)):
-            if len(got) != len(items):
-                raise ValueError("batched teacher must return exactly one label per text")
-            ys = list(got)
-        else:
-            ys = [teacher(t) for t in items]
+    # per-item or batched (see :mod:`mixle.task._teacher`) -- resolved by trying the batch, and a
+    # batched teacher that answers with the wrong number of labels is still rejected outright
+    ys = TeacherCaller(teacher)(items)
     return distill_text_generative_from_labels(
         items, ys, labels=labels, pseudo_count=pseudo_count, min_count=min_count, task=task
     )
