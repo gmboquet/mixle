@@ -421,16 +421,29 @@ class StreamingTransformerEstimator(ParameterEstimator):
                 self.optimizer.load_state_dict(optimizer_state)
             except (KeyError, TypeError, ValueError) as exc:
                 raise ValueError("optimizer_state is incompatible with the streaming transformer") from exc
+        self._pinned_digest: str | None = None
 
     def accumulator_factory(self) -> StreamingTransformerAccumulatorFactory:
         """Return workers pinned to the estimator's current model revision."""
+        self._pinned_digest = _model_digest(self.module)
         return StreamingTransformerAccumulatorFactory(self.module, self.lr, self.device)
 
     def estimate(self, nobs: float | None, suff_stat: Any) -> StreamingTransformer:
         """Apply one persistent AdamW step from aggregated weighted gradient numerators."""
         torch = _torch()
         state = _gradient_state(suff_stat)
-        if state.base_sha256 != _model_digest(self.module):
+        # Check against the revision this estimator PINNED when it handed out accumulators, not
+        # against the module as it stands now. Those differ exactly in the case the leaf exists to
+        # support: several mixture components sharing one embedding tensor. Every component's
+        # accumulators are built (and pinned) before any component estimates, so the first
+        # component's optimizer step mutates the shared tensor -- and therefore the whole-module
+        # digest -- underneath its still-unapplied siblings, whose gradients are perfectly valid
+        # for the revision they were computed at. Comparing to the live digest rejected them and
+        # made shared-parameter training impossible. A foreign accumulator still fails: its base
+        # digest matches neither pin nor module. Without a pin (estimate called directly) the live
+        # digest remains the reference.
+        expected = self._pinned_digest if self._pinned_digest is not None else _model_digest(self.module)
+        if state.base_sha256 != expected:
             raise ValueError("streaming gradients were not computed from the estimator's current model revision")
         named = dict(self.module.named_parameters())
         trainable_names = tuple(name for name, parameter in named.items() if parameter.requires_grad)

@@ -412,7 +412,15 @@ class JitForwardTest(unittest.TestCase):
             DenseTransition(_row_normalize(rng.rand(k, k) + np.eye(k))),
         )
         seq = [float(x) for x in rng.normal(0, 6, 1500)]
-        self.assertAlmostEqual(jit_forward_loglik(hmm)(seq), hmm.seq_log_density([seq])[0], places=5)
+        # Relative, not absolute-to-5-places: the scan runs at whatever dtype the caller's ambient
+        # JAX policy provides, and that is float32 by default. An absolute 1e-5 on a score of order
+        # 1e4 asks for ~10 significant digits, which float32 cannot carry -- it only ever passed
+        # because importing mixle.engines.jax_engine used to force jax_enable_x64 on process-wide,
+        # a global mutation MXR-080-0147 correctly removed. 1e-6 relative still holds the scaled
+        # recursion to well inside float32's ~1.2e-7 epsilon per operation.
+        got = jit_forward_loglik(hmm)(seq)
+        want = float(hmm.seq_log_density([seq])[0])
+        self.assertLessEqual(abs(got - want), 1.0e-6 * abs(want))
 
 
 class EnumerationTest(unittest.TestCase):
