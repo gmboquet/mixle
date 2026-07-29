@@ -421,6 +421,24 @@ def _ensure_diagnostic_backend_trace_supported(declaration: DistributionDeclarat
         raise KernelCapabilityDeclinedError("symbolic backend diagnostics do not synthesize mapping-valued parameters")
 
 
+def _dynamo_opaque(fn):
+    """Keep ``fn`` out of a torch.compile graph, if torch is present.
+
+    This is pure parameter VALIDATION -- convert, then reject NaN/+inf. It computes nothing the
+    compiled kernel needs, but np.asarray on a Python float makes Dynamo guard on the literal value
+    ("value == 1.03"), so every distinct parameter value forces a recompilation. A hot mixture blows
+    through config.recompile_limit (8) on parameter variety alone and then falls back to eager
+    permanently -- which is why the compiled path measured SLOWER than eager after warmup.
+    """
+    try:
+        import torch
+    except Exception:  # noqa: BLE001 - torch is an optional extra; validation still runs untraced
+        return fn
+    disable = getattr(getattr(torch, "_dynamo", None), "disable", None)
+    return disable(fn) if callable(disable) else fn
+
+
+@_dynamo_opaque
 def _numeric_parameter_array(value: Any, name: str) -> np.ndarray:
     try:
         arr = np.asarray(value, dtype=np.float64)
