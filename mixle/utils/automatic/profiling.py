@@ -2375,7 +2375,11 @@ class DatumNode:
             )
 
         if self.none_count > 0:
-            rv = get_optional_estimator(rv, None, use_bstats=use_bstats)
+            # Genuine optionality: the field is really absent. Fit the missingness rate so the
+            # auto-built model stays generative -- the README quickstart ships a row with a
+            # missing value and then calls model.sampler().sample(5). The nan/inf sentinel
+            # wrappers below keep est_prob=False: they are representational, not optional.
+            rv = get_optional_estimator(rv, None, use_bstats=use_bstats, est_prob=True)
 
         if self.nan_count > 0:
             rv = get_optional_estimator(rv, math.nan, use_bstats=use_bstats)
