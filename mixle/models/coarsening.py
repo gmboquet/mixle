@@ -344,6 +344,31 @@ if _HAS_TORCH:
             """
             return self.u @ self.v
 
+else:
+    # These four are nn.Module subclasses, so they cannot be defined without torch -- but they are in
+    # __all__ and mixle.models.__init__ imports them by name at module scope. Leaving them undefined
+    # made `import mixle.models` fail on a torch-less install with "cannot import name 'CoarsenedLM'
+    # ... Did you mean: 'CoarsenResult'?", which reads like a typo in mixle rather than a missing
+    # optional dependency, and took down every torch-free surface in the package with it. Bind
+    # placeholders that import cleanly and name the real problem the moment anyone touches them.
+    def _requires_torch(name: str) -> type:
+        class _MissingTorch:
+            _mixle_requires = "torch"
+
+            def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+                raise ImportError(
+                    f"mixle.models.coarsening.{name} requires torch, which is not installed. "
+                    f"Install it with `pip install mixle[torch]`."
+                )
+
+        _MissingTorch.__name__ = name
+        _MissingTorch.__qualname__ = name
+        return _MissingTorch
+
+    MergedBlock = _requires_torch("MergedBlock")
+    CoarsenedLM = _requires_torch("CoarsenedLM")
+    LowRankLinear = _requires_torch("LowRankLinear")
+
 
 # --------------------------------------------------------------------------------------------------------
 # closed-form Gaussian KL -- the per-scale receipt's core arithmetic
