@@ -160,6 +160,13 @@ def _symmetric_sqrt_and_pinv_sqrt(sigma: np.ndarray, rcond: float = 1e-10) -> tu
     zero, matching the fact that ``Sigma`` assigns no weight/cost to those directions at all).
     """
     eigval, eigvec = np.linalg.eigh(sigma)
+    # Clip before the sqrt, as this docstring has always promised. _validate_problem does project
+    # Sigma onto the PSD cone, but it does so by REBUILDING the matrix from its eigendecomposition,
+    # and eigh of that reconstruction hands back a roundoff-scale negative eigenvalue again (-4.2e-16
+    # on the failing case). np.sqrt of it is NaN, which propagates into sigma_half, into
+    # W @ sigma_half, and finally surfaces as an opaque "SVD did not converge" from LAPACK -- far
+    # from the arithmetic that actually produced it.
+    eigval = np.maximum(eigval, 0.0)
     sqrt_eigval = np.sqrt(eigval)
     threshold = rcond * float(sqrt_eigval.max() if sqrt_eigval.size else 0.0)
     inv_sqrt_eigval = np.where(sqrt_eigval > threshold, np.reciprocal(np.where(sqrt_eigval > 0, sqrt_eigval, 1.0)), 0.0)
