@@ -209,8 +209,7 @@ def _emit_score(node: Any, lines: list[str], quantized_lse: bool = False) -> str
     for v in cvars:
         if quantized_lse:
             lines.append(
-                f"        qi{node.node_id} = "
-                f"int(np.rint(({v} - mx{node.node_id}) * lse_inv_delta)) + lse_levm1"
+                f"        qi{node.node_id} = int(np.rint(({v} - mx{node.node_id}) * lse_inv_delta)) + lse_levm1"
             )
             lines.append(f"        if qi{node.node_id} < 0:")
             lines.append(f"            qi{node.node_id} = 0")
@@ -378,9 +377,7 @@ def _compile_estep(root: Any, ctx: _Ctx, sig: tuple, parallel: bool = False) -> 
         # rebinding is pure text substitution on the accumulator names.
         acc_all = [*cc_args, *leaf_acc]
         args = ", ".join(
-            _data_args(ctx)
-            + _param_args(root)
-            + ["weights", *acc_all, "out_ll", "invalid_rows", "n_chunks"]
+            _data_args(ctx) + _param_args(root) + ["weights", *acc_all, "out_ll", "invalid_rows", "n_chunks"]
         )
         lines = [
             f"def _es_par({args}):",
@@ -427,8 +424,7 @@ def _fill_slots(model: Any, node: Any, enc: Any, ctx: _Ctx) -> None:
         encs = enc if isinstance(enc, tuple) else (enc,)
         if len(encs) != len(node.children):
             raise ValueError(
-                "nested fused composite encoding has %d fields but the model has %d."
-                % (len(encs), len(node.children))
+                "nested fused composite encoding has %d fields but the model has %d." % (len(encs), len(node.children))
             )
         for child_model, child_node, child_enc in zip(model.dists, node.children, encs):
             _fill_slots(child_model, child_node, child_enc, ctx)
@@ -440,10 +436,7 @@ def _fill_slots(model: Any, node: Any, enc: Any, ctx: _Ctx) -> None:
         else:
             sub = getattr(enc, "encodings", None)
             if sub is None or len(sub) != len(node.children):
-                raise ValueError(
-                    "nested fused mixture requires %d per-component encodings."
-                    % len(node.children)
-                )
+                raise ValueError("nested fused mixture requires %d per-component encodings." % len(node.children))
             for child_model, child_node, child_enc in zip(model.components, node.children, sub):
                 _fill_slots(child_model, child_node, child_enc, ctx)
     else:

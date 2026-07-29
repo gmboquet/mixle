@@ -60,9 +60,7 @@ class HamiltonianNet:
             raise ValueError("separable must be a boolean")
         self.is_separable = separable
         self.module = (
-            _make_separable_mlp(self.dim, hidden)
-            if separable
-            else make_mlp(2 * self.dim, hidden, 1, activation="tanh")
+            _make_separable_mlp(self.dim, hidden) if separable else make_mlp(2 * self.dim, hidden, 1, activation="tanh")
         )
 
     def hamiltonian(self, q: Any, p: Any) -> Any:

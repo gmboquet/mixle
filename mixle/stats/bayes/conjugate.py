@@ -76,9 +76,7 @@ def _as_weight_vector(weights: Any, count: int) -> np.ndarray:
     except (TypeError, ValueError) as exc:
         raise ValueError("conjugate_posterior weights must be numeric.") from exc
     if result.shape != (count,):
-        raise ValueError(
-            "conjugate_posterior weights must have exact shape (%d,), got %r." % (count, result.shape)
-        )
+        raise ValueError("conjugate_posterior weights must have exact shape (%d,), got %r." % (count, result.shape))
     if not np.all(np.isfinite(result)):
         raise ValueError("conjugate_posterior requires finite weights (no NaN/Inf).")
     if np.any(result < 0.0):
@@ -93,8 +91,7 @@ def _as_weighted_array(data: Any, weights: np.ndarray | None) -> tuple[np.ndarra
         raise ValueError("conjugate_posterior observations must be numeric.") from exc
     if x.ndim != 1:
         raise ValueError(
-            "univariate conjugate_posterior requires a one-dimensional observation vector, got shape %r."
-            % (x.shape,)
+            "univariate conjugate_posterior requires a one-dimensional observation vector, got shape %r." % (x.shape,)
         )
     if not np.all(np.isfinite(x)):
         raise ValueError("conjugate_posterior requires finite observations (no NaN/Inf).")
@@ -632,8 +629,7 @@ def _build_categorical(dist, data, weights, prior) -> DirichletPosterior:
         unsupported = [value for value in counts if value not in dist.pmap]
         if unsupported:
             raise ValueError(
-                "Categorical conjugate update received observations outside its explicit support: %r."
-                % unsupported
+                "Categorical conjugate update received observations outside its explicit support: %r." % unsupported
             )
     if not support:
         raise ValueError("Categorical conjugate update requires a non-empty support.")
@@ -903,8 +899,7 @@ def _build_mvn(dist, data, weights, prior) -> NormalInverseWishartPosterior:
         x = np.empty((0, d), dtype=np.float64)
     if x.ndim != 2 or x.shape[1] != d:
         raise ValueError(
-            "Multivariate Gaussian conjugate observations must have exact shape (n, %d), got %r."
-            % (d, x.shape)
+            "Multivariate Gaussian conjugate observations must have exact shape (n, %d), got %r." % (d, x.shape)
         )
     if np.any(~np.isfinite(x)):
         raise ValueError("Multivariate Gaussian conjugate observations must be finite.")
@@ -1272,8 +1267,7 @@ def _build_diagonal_gaussian(dist, data, weights, prior) -> DiagonalNIGPosterior
         x = np.empty((0, d), dtype=np.float64)
     if x.ndim != 2 or x.shape[1] != d:
         raise ValueError(
-            "Diagonal Gaussian conjugate observations must have exact shape (n, %d), got %r."
-            % (d, x.shape)
+            "Diagonal Gaussian conjugate observations must have exact shape (n, %d), got %r." % (d, x.shape)
         )
     if np.any(~np.isfinite(x)):
         raise ValueError("Diagonal Gaussian conjugate observations must be finite.")
@@ -1290,15 +1284,10 @@ def _build_diagonal_gaussian(dist, data, weights, prior) -> DiagonalNIGPosterior
             except (TypeError, ValueError) as exc:
                 raise ValueError("Diagonal Normal-Inverse-Gamma prior %s must be numeric." % key) from exc
             if values.shape != (d,):
-                raise ValueError(
-                    "Diagonal Normal-Inverse-Gamma prior %s must be scalar or length %d." % (key, d)
-                )
+                raise ValueError("Diagonal Normal-Inverse-Gamma prior %s must be scalar or length %d." % (key, d))
         for j, value in enumerate(values):
             per_dim_priors[j][key] = float(value)
-    per_dim = [
-        _build_gaussian(None, list(x[:, j]), checked_weights, per_dim_priors[j])
-        for j in range(d)
-    ]
+    per_dim = [_build_gaussian(None, list(x[:, j]), checked_weights, per_dim_priors[j]) for j in range(d)]
     return DiagonalNIGPosterior(per_dim)
 
 

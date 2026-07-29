@@ -105,17 +105,9 @@ class OpenAICompatLLM:
             raise ValueError("base_url must be a non-empty string")
         if not isinstance(model, str) or not model.strip():
             raise ValueError("model must be a non-empty string")
-        if (
-            isinstance(max_tokens, bool)
-            or not isinstance(max_tokens, int)
-            or max_tokens <= 0
-        ):
+        if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0:
             raise ValueError("max_tokens must be a positive integer")
-        if (
-            isinstance(temperature, bool)
-            or not isinstance(temperature, (int, float))
-            or not math.isfinite(temperature)
-        ):
+        if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or not math.isfinite(temperature):
             raise ValueError("temperature must be finite")
         if (
             isinstance(timeout, bool)
@@ -139,11 +131,7 @@ class OpenAICompatLLM:
             raise ValueError("system must be a string or None")
         temperature = kwargs.get("temperature", self.temperature)
         max_tokens = kwargs.get("max_tokens", self.max_tokens)
-        if (
-            isinstance(temperature, bool)
-            or not isinstance(temperature, (int, float))
-            or not math.isfinite(temperature)
-        ):
+        if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or not math.isfinite(temperature):
             raise ValueError("temperature must be finite")
         if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0:
             raise ValueError("max_tokens must be a positive integer")
@@ -181,9 +169,7 @@ def pick_label(text: str, labels: Sequence[str]) -> str:
         if normalized == label.casefold():
             return label
     matches = [
-        label
-        for label in labels
-        if re.search(rf"(?<!\w){re.escape(label.casefold())}(?!\w)", normalized) is not None
+        label for label in labels if re.search(rf"(?<!\w){re.escape(label.casefold())}(?!\w)", normalized) is not None
     ]
     if len(matches) == 1:
         return matches[0]

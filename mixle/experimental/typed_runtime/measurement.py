@@ -228,9 +228,7 @@ class EffectiveContextMeasurement:
             _finite_real(self.verified_claim_fraction, "verified_claim_fraction")
             if not 0.0 <= self.verified_claim_fraction <= 1.0:
                 raise ValueError("verified_claim_fraction must be in [0, 1].")
-        if self.stopped_reason is not None and (
-            not isinstance(self.stopped_reason, str) or not self.stopped_reason
-        ):
+        if self.stopped_reason is not None and (not isinstance(self.stopped_reason, str) or not self.stopped_reason):
             raise ValueError("stopped_reason must be a non-empty string when supplied.")
         classified_actions = self.retrieval_actions + self.generation_actions + self.verification_actions
         if classified_actions > self.context_actions:

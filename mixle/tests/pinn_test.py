@@ -226,9 +226,7 @@ class PINNRegressionTest(unittest.TestCase):
 
         for residual in (
             lambda module, coll: torch.zeros((len(coll), 2), dtype=coll.dtype, device=coll.device),
-            lambda module, coll: torch.full(
-                (len(coll), 1), torch.nan, dtype=coll.dtype, device=coll.device
-            ),
+            lambda module, coll: torch.full((len(coll), 1), torch.nan, dtype=coll.dtype, device=coll.device),
         ):
             model = PINNRegression(
                 _AnchoredMLP(4),
@@ -239,9 +237,7 @@ class PINNRegressionTest(unittest.TestCase):
                 m_steps=1,
             )
             with self.subTest(residual=residual), self.assertRaises(ValueError):
-                model.estimator().estimate(
-                    None, (np.zeros((0, 1)), np.zeros((0, 1)), np.zeros(0))
-                )
+                model.estimator().estimate(None, (np.zeros((0, 1)), np.zeros((0, 1)), np.zeros(0)))
 
         observed_dtypes = []
 
@@ -257,9 +253,7 @@ class PINNRegressionTest(unittest.TestCase):
             n_collocation=4,
             m_steps=1,
         )
-        double_model.estimator().estimate(
-            None, (np.zeros((0, 1)), np.zeros((0, 1)), np.zeros(0))
-        )
+        double_model.estimator().estimate(None, (np.zeros((0, 1)), np.zeros((0, 1)), np.zeros(0)))
         self.assertEqual(observed_dtypes, [torch.float64])
 
 

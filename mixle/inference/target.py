@@ -604,9 +604,7 @@ def _pool_chains(
     rh = rhat_max(stacked) if chains >= 2 and diagnostic_ready else np.full(d, np.nan)
     es = ess_bulk(stacked) if diagnostic_ready else ess(stacked)
     if total_evals is not None and (
-        isinstance(total_evals, (bool, np.bool_))
-        or not isinstance(total_evals, (int, np.integer))
-        or total_evals < 0
+        isinstance(total_evals, (bool, np.bool_)) or not isinstance(total_evals, (int, np.integer)) or total_evals < 0
     ):
         raise RuntimeError("backend returned an invalid target-evaluation count")
     return NutsResult(

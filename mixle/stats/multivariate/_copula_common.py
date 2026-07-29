@@ -230,9 +230,7 @@ def reject_out_of_unit_cube(u: np.ndarray, *, label: str = "copula observations"
         finite = u[np.isfinite(u)]
         lo = float(finite.min()) if finite.size else float("nan")
         hi = float(finite.max()) if finite.size else float("nan")
-        raise ValueError(
-            "%s must be finite and lie strictly inside (0, 1); observed min=%r, max=%r" % (label, lo, hi)
-        )
+        raise ValueError("%s must be finite and lie strictly inside (0, 1); observed min=%r, max=%r" % (label, lo, hi))
 
 
 def weighted_kendall_tau(a: np.ndarray, b: np.ndarray, w: np.ndarray) -> float:

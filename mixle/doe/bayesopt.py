@@ -349,15 +349,13 @@ def _validate_prediction(mean: Any, cov: Any, n: int, *, context: str) -> tuple[
     asymmetry = float(np.linalg.norm(cov - cov.T, ord=np.inf))
     if asymmetry > tolerance:
         raise ValueError(
-            f"{context}: surrogate covariance is not symmetric within {tolerance:.6g}; "
-            f"asymmetry is {asymmetry:.6g}."
+            f"{context}: surrogate covariance is not symmetric within {tolerance:.6g}; asymmetry is {asymmetry:.6g}."
         )
     cov = 0.5 * (cov + cov.T)
     eigvals, eigvecs = np.linalg.eigh(cov)
     if eigvals[0] < -tolerance:
         raise ValueError(
-            f"{context}: surrogate covariance is not positive-semidefinite; "
-            f"smallest eigenvalue is {eigvals[0]:.6g}."
+            f"{context}: surrogate covariance is not positive-semidefinite; smallest eigenvalue is {eigvals[0]:.6g}."
         )
     if eigvals[0] < 0.0:
         cov = (eigvecs * np.clip(eigvals, 0.0, None)) @ eigvecs.T

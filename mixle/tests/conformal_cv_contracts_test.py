@@ -53,9 +53,7 @@ def test_every_returned_temporal_fold_is_nonempty_and_disjoint():
     [
         lambda: split_conformal(np.array([0.0]), np.array([0.0, 1.0]), np.array([0.0])),
         lambda: split_conformal(np.array([0.0]), np.array([0.0]), np.array([np.nan])),
-        lambda: weighted_conformal(
-            np.array([0.0]), np.array([0.0]), np.array([np.inf]), np.array([1.0])
-        ),
+        lambda: weighted_conformal(np.array([0.0]), np.array([0.0]), np.array([np.inf]), np.array([1.0])),
         lambda: mondrian_conformal(
             np.array([0.0]), np.array([0.0]), np.array([np.nan]), np.array([0.0]), np.array([0])
         ),
@@ -92,8 +90,6 @@ def test_fit_predict_output_must_have_exact_finite_shape():
         (np.array([0.8]), np.array([[0.5, 0.5]]), 1.1),
     ],
 )
-def test_classification_conformal_requires_probabilities_and_valid_quantiles(
-    calibration, test_prob, qhat
-):
+def test_classification_conformal_requires_probabilities_and_valid_quantiles(calibration, test_prob, qhat):
     with pytest.raises(ValueError):
         conformal_label_sets(calibration, test_prob, qhat=qhat)

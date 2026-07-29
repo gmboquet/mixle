@@ -71,9 +71,7 @@ def validated_weight(value: Any) -> float:
     except (TypeError, ValueError) as exc:
         raise TypeError("circular observation weight must be a real scalar") from exc
     if not np.isfinite(result) or result < 0.0:
-        raise ValueError(
-            "circular observation weight must be finite and non-negative"
-        )
+        raise ValueError("circular observation weight must be finite and non-negative")
     return result
 
 
@@ -84,13 +82,9 @@ def validated_weights(value: Any, rows: int) -> np.ndarray:
     except (TypeError, ValueError) as exc:
         raise ValueError("circular observation weights must be numeric") from exc
     if result.shape != (rows,):
-        raise ValueError(
-            "circular observation weights must have exact shape (%d,)" % rows
-        )
+        raise ValueError("circular observation weights must have exact shape (%d,)" % rows)
     if np.any(~np.isfinite(result)) or np.any(result < 0.0):
-        raise ValueError(
-            "circular observation weights must be finite and non-negative"
-        )
+        raise ValueError("circular observation weights must be finite and non-negative")
     return result
 
 
@@ -136,9 +130,7 @@ def validated_circular_statistics(
 def validated_em_statistics(value: Any) -> tuple[float, float, float]:
     """Return ``(sum_x, sum_y, count)`` for projected-normal EM."""
     if not isinstance(value, (tuple, list)) or len(value) != 3:
-        raise ValueError(
-            "projected-normal sufficient statistics must contain three items"
-        )
+        raise ValueError("projected-normal sufficient statistics must contain three items")
     sum_x = validated_angle(value[0], "projected-normal x sum")
     sum_y = validated_angle(value[1], "projected-normal y sum")
     count = validated_weight(value[2])

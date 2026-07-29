@@ -35,9 +35,7 @@ class FactoryMassValidationTest(unittest.TestCase):
         for mass in (-1.0, float("nan"), float("inf")):
             for factory in factories:
                 key = 1 if factory in (get_integer_categorical_estimator, get_poisson_estimator) else 1.0
-                with self.subTest(factory=factory.__name__, mass=mass), self.assertRaisesRegex(
-                    ValueError, "masses"
-                ):
+                with self.subTest(factory=factory.__name__, mass=mass), self.assertRaisesRegex(ValueError, "masses"):
                     factory({key: mass})
 
     def test_invalid_pseudo_counts_are_rejected_consistently(self):

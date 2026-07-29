@@ -94,7 +94,9 @@ def _install_sample_dispatch(
         exists = dispatch_id in _SAMPLE_DISPATCHERS
         if exists != replace:
             action = "replace" if exists else "register"
-            raise KeyError(f"cannot {action} sample dispatch {dispatch_id!r}: registration {'exists' if exists else 'missing'}.")
+            raise KeyError(
+                f"cannot {action} sample dispatch {dispatch_id!r}: registration {'exists' if exists else 'missing'}."
+            )
         # A dict assignment preserves the existing precedence slot during an explicit replacement.
         _SAMPLE_DISPATCHERS[dispatch_id] = registration
     return fn

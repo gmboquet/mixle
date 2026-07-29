@@ -365,10 +365,7 @@ class DPOModelEstimator(ParameterEstimator):
                     raise RuntimeError("DPO objective became non-finite")
                 loss.backward()
                 opt.step()
-                if any(
-                    not bool(torch.all(torch.isfinite(parameter)).detach().cpu().item())
-                    for parameter in trainable
-                ):
+                if any(not bool(torch.all(torch.isfinite(parameter)).detach().cpu().item()) for parameter in trainable):
                     raise RuntimeError("DPO optimization produced non-finite policy parameters")
         return DPOModel(self.policy, self.ref, self.beta, self.m_steps, self.lr, self.device)
 
@@ -378,16 +375,8 @@ def _validate_independent_modules(policy: Any, ref: Any, torch: Any) -> None:
         raise TypeError("policy and ref must be torch.nn.Module instances")
     if policy is ref:
         raise ValueError("policy and ref must be independently owned modules, not the same object")
-    policy_storage = {
-        parameter.untyped_storage().data_ptr()
-        for parameter in policy.parameters()
-        if parameter.numel()
-    }
-    ref_storage = {
-        parameter.untyped_storage().data_ptr()
-        for parameter in ref.parameters()
-        if parameter.numel()
-    }
+    policy_storage = {parameter.untyped_storage().data_ptr() for parameter in policy.parameters() if parameter.numel()}
+    ref_storage = {parameter.untyped_storage().data_ptr() for parameter in ref.parameters() if parameter.numel()}
     if policy_storage & ref_storage:
         raise ValueError("policy and ref must not share parameter storage")
 
@@ -423,9 +412,7 @@ def _exact_actions(value: Any, name: str, n_rows: int) -> np.ndarray:
         raise ValueError(f"{name} must be a one-dimensional vector with {n_rows} rows")
     if actions.dtype.kind not in {"i", "u", "f"}:
         raise ValueError(f"{name} actions must be numeric integers")
-    if actions.dtype.kind == "f" and (
-        not np.all(np.isfinite(actions)) or not np.all(actions == np.round(actions))
-    ):
+    if actions.dtype.kind == "f" and (not np.all(np.isfinite(actions)) or not np.all(actions == np.round(actions))):
         raise ValueError(f"{name} actions must be finite integer values")
     if np.any(actions < 0):
         raise ValueError(f"{name} actions must be non-negative")

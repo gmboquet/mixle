@@ -64,12 +64,8 @@ class WrappedNormalDistribution(SequenceEncodableProbabilityDistribution):
         if checked_sigma2 <= 0.0:
             raise ValueError("WrappedNormalDistribution requires sigma2 > 0.")
         if checked_sigma2 > 1.0e6:
-            raise ValueError(
-                "WrappedNormalDistribution sigma2 exceeds the supported finite branch range"
-            )
-        self.mu = float(
-            math.atan2(math.sin(checked_mu), math.cos(checked_mu))
-        )
+            raise ValueError("WrappedNormalDistribution sigma2 exceeds the supported finite branch range")
+        self.mu = float(math.atan2(math.sin(checked_mu), math.cos(checked_mu)))
         self.sigma2 = checked_sigma2
         self.name = name
         self.keys = keys
@@ -225,9 +221,7 @@ class WrappedNormalAccumulator(SequenceEncodableStatisticAccumulator):
             self.sum_sin + sum_sin,
             self.count + count,
         )
-        self.count, self.sum_cos, self.sum_sin = (
-            validated_circular_statistics(combined, count_index=2)
-        )
+        self.count, self.sum_cos, self.sum_sin = validated_circular_statistics(combined, count_index=2)
         return self
 
     def value(self) -> tuple[float, float, float]:
@@ -236,9 +230,7 @@ class WrappedNormalAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x: tuple[float, float, float]) -> "WrappedNormalAccumulator":
         """Replace accumulator contents from circular-resultant statistics."""
-        self.count, self.sum_cos, self.sum_sin = (
-            validated_circular_statistics(x, count_index=2)
-        )
+        self.count, self.sum_cos, self.sum_sin = validated_circular_statistics(x, count_index=2)
         return self
 
     def scale(self, c: float) -> "WrappedNormalAccumulator":
@@ -276,9 +268,7 @@ class WrappedNormalEstimator(ParameterEstimator):
         keys: str | None = None,
     ) -> None:
         if sigma2_max is not None:
-            raise ValueError(
-                "wrapped-normal boundary clipping is not a valid fit contract"
-            )
+            raise ValueError("wrapped-normal boundary clipping is not a valid fit contract")
         self.name = name
         self.keys = keys
 
@@ -293,19 +283,13 @@ class WrappedNormalEstimator(ParameterEstimator):
             count_index=2,
         )
         if count == 0.0:
-            raise WrappedNormalFitError(
-                "wrapped-normal fitting requires positive observation weight"
-            )
+            raise WrappedNormalFitError("wrapped-normal fitting requires positive observation weight")
         mu = math.atan2(sum_sin, sum_cos)
         rbar = math.hypot(sum_cos, sum_sin) / count
         if rbar <= 1.0e-12:
-            raise WrappedNormalFitError(
-                "wrapped-normal zero resultant has no finite variance or mean direction"
-            )
+            raise WrappedNormalFitError("wrapped-normal zero resultant has no finite variance or mean direction")
         if rbar >= 1.0 - 1.0e-12:
-            raise WrappedNormalFitError(
-                "wrapped-normal unit resultant has no positive-variance fit"
-            )
+            raise WrappedNormalFitError("wrapped-normal unit resultant has no positive-variance fit")
         sigma2 = -2.0 * math.log(rbar)
         result = WrappedNormalDistribution(
             mu,

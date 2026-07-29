@@ -111,16 +111,15 @@ def test_claim_gate_requires_real_scale_evidence_and_accepts_complete_receipts()
     wrong_control = replace(
         receipt,
         failure_receipts=tuple(
-            replace(row, benchmark_id="unrelated-pilot")
-            if row.case_id == "local-window-negative-control"
-            else row
+            replace(row, benchmark_id="unrelated-pilot") if row.case_id == "local-window-negative-control" else row
             for row in receipt.failure_receipts
         ),
     )
     wrong_assessment = assess_frontier_claims(wrong_control, scale)
-    assert next(
-        gate for gate in wrong_assessment.gates if gate.gate == "local-negative-controls"
-    ).status is GateStatus.FAILED
+    assert (
+        next(gate for gate in wrong_assessment.gates if gate.gate == "local-negative-controls").status
+        is GateStatus.FAILED
+    )
 
 
 def test_passed_gate_cannot_be_constructed_without_declared_evidence():

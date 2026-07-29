@@ -101,9 +101,7 @@ def scatter_component_draws(comp_state: Any, comp_samplers: Sequence[Any], size:
         drawn = comp_samplers[component].sample(size=count)
         draws_by_comp[component] = _validated_draw_batch(drawn, count, component)
 
-    array_shapes = {
-        drawn.shape[1:] for drawn in draws_by_comp.values() if isinstance(drawn, np.ndarray)
-    }
+    array_shapes = {drawn.shape[1:] for drawn in draws_by_comp.values() if isinstance(drawn, np.ndarray)}
     if len(array_shapes) == 1 and all(isinstance(drawn, np.ndarray) for drawn in draws_by_comp.values()):
         trailing_shape = next(iter(array_shapes))
         dtype = np.result_type(*(drawn.dtype for drawn in draws_by_comp.values()))

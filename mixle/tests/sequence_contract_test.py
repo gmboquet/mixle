@@ -62,9 +62,7 @@ class _FakeRDD:
         return self._with([list(function(iter(partition))) for partition in self.partitions])
 
     def mapPartitionsWithIndex(self, function, _preserves_partitioning=False):
-        return self._with(
-            [list(function(index, iter(partition))) for index, partition in enumerate(self.partitions)]
-        )
+        return self._with([list(function(index, iter(partition))) for index, partition in enumerate(self.partitions)])
 
     def collect(self):
         return [value for partition in self.partitions for value in partition]

@@ -146,9 +146,7 @@ class ExplorationWorld:
         if self.done:
             return []
         surveys = (
-            [{"type": "survey", "cell": c} for c in range(self.n_cells)]
-            if self.remaining_budget >= SURVEY_COST
-            else []
+            [{"type": "survey", "cell": c} for c in range(self.n_cells)] if self.remaining_budget >= SURVEY_COST else []
         )
         drills = (
             [{"type": "drill", "cell": c} for c in range(self.n_cells) if not self._drilled[c]]

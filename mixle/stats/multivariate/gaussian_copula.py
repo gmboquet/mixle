@@ -184,9 +184,7 @@ class GaussianCopulaAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x: tuple[np.ndarray, np.ndarray, float]) -> "GaussianCopulaAccumulator":
         """Restore the accumulator from serialized normal-score moments."""
-        self.sum_z, self.sum_zz, self.count = _validated_gaussian_statistic(
-            x, self.dim, require_positive=False
-        )
+        self.sum_z, self.sum_zz, self.count = _validated_gaussian_statistic(x, self.dim, require_positive=False)
         return self
 
     def acc_to_encoder(self) -> "GaussianCopulaDataEncoder":
@@ -273,9 +271,7 @@ def _validated_gaussian_statistic(
     sum_zz = np.asarray(value[1], dtype=np.float64)
     count = validated_weight(value[2])
     if sum_z.shape != (dim,) or sum_zz.shape != (dim, dim):
-        raise ValueError(
-            "Gaussian copula statistic must have shapes (%d,) and (%d, %d)" % (dim, dim, dim)
-        )
+        raise ValueError("Gaussian copula statistic must have shapes (%d,) and (%d, %d)" % (dim, dim, dim))
     if np.any(~np.isfinite(sum_z)) or np.any(~np.isfinite(sum_zz)):
         raise ValueError("Gaussian copula statistic moments must be finite")
     if not np.allclose(sum_zz, sum_zz.T):

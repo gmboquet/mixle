@@ -90,10 +90,15 @@ class FeatureMapTest(unittest.TestCase):
 
     def test_feature_shape_and_finiteness_are_checked_before_stacking(self):
         register_feature_fn("test_bad_shape", lambda x: np.asarray(x), version="1", feature_dim=2)
-        encoder = FeatureMapEstimator(
-            "test_bad_shape",
-            MultivariateGaussianEstimator(dim=2),
-        ).accumulator_factory().make().acc_to_encoder()
+        encoder = (
+            FeatureMapEstimator(
+                "test_bad_shape",
+                MultivariateGaussianEstimator(dim=2),
+            )
+            .accumulator_factory()
+            .make()
+            .acc_to_encoder()
+        )
         with self.assertRaisesRegex(ValueError, "must return shape"):
             encoder.seq_encode([[1.0], [1.0, 2.0]])
         with self.assertRaisesRegex(ValueError, "non-finite"):

@@ -90,9 +90,7 @@ class BirthDeathSamplingValidationTestCase(unittest.TestCase):
 
     def test_initial_population_must_be_an_exact_nonnegative_integer(self):
         for value in (True, -1, 0.5):
-            with self.subTest(value=value), self.assertRaises(
-                (TypeError, ValueError)
-            ):
+            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
                 BirthDeathSamplingDistribution(
                     0.5,
                     0.3,
@@ -124,9 +122,7 @@ class BirthDeathSamplingValidationTestCase(unittest.TestCase):
             (1, 4.0),
         )
         for trajectory in malformed:
-            with self.subTest(trajectory=trajectory), self.assertRaises(
-                (TypeError, ValueError)
-            ):
+            with self.subTest(trajectory=trajectory), self.assertRaises((TypeError, ValueError)):
                 dist.log_density(trajectory)
 
     def test_encoded_schema_and_weights_fail_closed(self):

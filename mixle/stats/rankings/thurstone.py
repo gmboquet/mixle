@@ -94,9 +94,7 @@ def _thurstone_statistics(value: Any, dim: int) -> tuple[float, np.ndarray]:
     pair_totals = precede + precede.T
     off_diagonal = ~np.eye(dim, dtype=bool)
     if not np.allclose(pair_totals[off_diagonal], count, rtol=1.0e-10, atol=tolerance):
-        raise ValueError(
-            "each Thurstone item pair must have total precedence weight equal to the observation weight."
-        )
+        raise ValueError("each Thurstone item pair must have total precedence weight equal to the observation weight.")
     return count, precede
 
 

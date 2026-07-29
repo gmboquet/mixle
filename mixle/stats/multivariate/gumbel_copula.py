@@ -76,13 +76,7 @@ class GumbelCopulaDistribution(SequenceEncodableProbabilityDistribution):
         log_a = np.maximum(log_x, log_y) + soft_max_correction / th
         a = np.exp(log_a)
         power_terms = -th * delta - 2.0 * soft_max_correction + log_a - log_x - log_y
-        log_c = (
-            -a
-            + power_terms
-            + np.log(a + th - 1.0)
-            - np.log(u[:, 0])
-            - np.log(u[:, 1])
-        )
+        log_c = -a + power_terms + np.log(a + th - 1.0) - np.log(u[:, 0]) - np.log(u[:, 1])
         if np.any(np.isnan(log_c)):
             raise FloatingPointError("Gumbel log-density was numerically indeterminate")
         return log_c

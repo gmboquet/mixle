@@ -80,8 +80,10 @@ class CatalogEntry:
             raise TypeError("catalog entry schema must be a dictionary")
         cost = _finite_real(self.cost, "catalog entry cost", minimum=0.0, maximum=float("inf"))
         reliability = _finite_real(self.reliability, "catalog entry reliability", minimum=0.0, maximum=1.0)
-        if self.verifier is not None and not isinstance(self.verifier, str) and not callable(
-            getattr(self.verifier, "verify", None)
+        if (
+            self.verifier is not None
+            and not isinstance(self.verifier, str)
+            and not callable(getattr(self.verifier, "verify", None))
         ):
             raise TypeError("catalog entry verifier must be a verifier name, an object exposing verify(), or None")
         object.__setattr__(self, "cost", cost)
@@ -135,9 +137,7 @@ def _validate_output_schema(schema: Any, *, path: str = "output") -> None:
     kind = schema.get("type")
     if kind not in _JSON_TYPES:
         raise ValueError(f"{path} schema must declare one JSON type from {sorted(_JSON_TYPES)}")
-    if "enum" in schema and (
-        not isinstance(schema["enum"], list) or not schema["enum"]
-    ):
+    if "enum" in schema and (not isinstance(schema["enum"], list) or not schema["enum"]):
         raise ValueError(f"{path}.enum must be a non-empty list")
     if kind == "object":
         properties = schema.get("properties", {})
@@ -176,17 +176,11 @@ def _matches_output_schema(value: Any, schema: dict[str, Any]) -> bool:
             for name, child in schema.get("properties", {}).items()
         )
     if kind == "array":
-        return isinstance(value, list) and all(
-            _matches_output_schema(item, schema["items"]) for item in value
-        )
+        return isinstance(value, list) and all(_matches_output_schema(item, schema["items"]) for item in value)
     if kind == "string":
         return isinstance(value, str)
     if kind == "number":
-        return (
-            not isinstance(value, (bool, np.bool_))
-            and isinstance(value, Real)
-            and np.isfinite(float(value))
-        )
+        return not isinstance(value, (bool, np.bool_)) and isinstance(value, Real) and np.isfinite(float(value))
     if kind == "integer":
         return not isinstance(value, (bool, np.bool_)) and isinstance(value, Integral)
     if kind == "boolean":

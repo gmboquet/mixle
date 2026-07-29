@@ -103,10 +103,7 @@ class SolveStructuredTest(unittest.TestCase):
         broken = _tickets(40)
         with self.assertRaisesRegex(ValueError, "schema mismatch"):
             solve_structured(
-                lambda batch: [
-                    _triage(row) if i else {"queue": "billing"}
-                    for i, row in enumerate(batch)
-                ],
+                lambda batch: [_triage(row) if i else {"queue": "billing"} for i, row in enumerate(batch)],
                 broken,
                 schema={"queue": "categorical", "priority": "numeric"},
                 tol={"priority": 2.0},

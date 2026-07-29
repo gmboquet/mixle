@@ -110,9 +110,7 @@ def _pack_nibbles(w: np.ndarray) -> np.ndarray:
 
 def _unpack_nibbles(packed: np.ndarray, shape: tuple[int, ...]) -> np.ndarray:
     """Inverse of :func:`_pack_nibbles`: uint8 pairs -> int8 values in [-7, 7] with ``shape``."""
-    if not shape or any(
-        isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in shape
-    ):
+    if not shape or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in shape):
         raise ValueError("packed int4 shape must contain positive integers")
     raw = np.asarray(packed)
     if raw.ndim != 1 or not np.issubdtype(raw.dtype, np.integer) or np.any(raw < 0) or np.any(raw > 255):
@@ -151,11 +149,7 @@ class QuantizedMLP:
                 raise ValueError("each quantized layer must be a (weights, scale, bias) triple")
             raw_w, raw_scale, raw_b = layer
             weights = np.asarray(raw_w)
-            if (
-                weights.ndim != 2
-                or 0 in weights.shape
-                or not np.issubdtype(weights.dtype, np.integer)
-            ):
+            if weights.ndim != 2 or 0 in weights.shape or not np.issubdtype(weights.dtype, np.integer):
                 raise ValueError("quantized layer weights must be a nonempty 2-D integer array")
             if np.any(weights < -qmax) or np.any(weights > qmax):
                 raise ValueError(f"weight magnitude exceeds the int{self.bits} range [-{qmax}, {qmax}]")

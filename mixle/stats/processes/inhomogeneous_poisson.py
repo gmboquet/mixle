@@ -79,20 +79,11 @@ def _validated_events(
         events = np.asarray(value, dtype=np.float64).reshape(-1)
     except (TypeError, ValueError) as exc:
         if fail_closed:
-            raise ValueError(
-                "InhomogeneousPoisson event times must be numeric"
-            ) from exc
+            raise ValueError("InhomogeneousPoisson event times must be numeric") from exc
         return None
-    if (
-        np.any(~np.isfinite(events))
-        or np.any(events < edges[0])
-        or np.any(events > edges[-1])
-    ):
+    if np.any(~np.isfinite(events)) or np.any(events < edges[0]) or np.any(events > edges[-1]):
         if fail_closed:
-            raise ValueError(
-                "InhomogeneousPoisson event times must be finite and inside "
-                "the process window"
-            )
+            raise ValueError("InhomogeneousPoisson event times must be finite and inside the process window")
         return None
     return events
 
@@ -101,24 +92,13 @@ def _validated_count_rows(value: Any, *, num_bins: int) -> np.ndarray:
     try:
         counts = np.asarray(value, dtype=np.float64)
     except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "InhomogeneousPoisson encoded counts must be numeric"
-        ) from exc
+        raise ValueError("InhomogeneousPoisson encoded counts must be numeric") from exc
     if counts.shape == (0,):
         counts = counts.reshape((0, num_bins))
     if counts.ndim != 2 or counts.shape[1] != num_bins:
-        raise ValueError(
-            f"InhomogeneousPoisson encoded counts must have shape (N, {num_bins})"
-        )
-    if (
-        np.any(~np.isfinite(counts))
-        or np.any(counts < 0.0)
-        or np.any(counts != np.floor(counts))
-    ):
-        raise ValueError(
-            "InhomogeneousPoisson per-realization counts must be finite "
-            "non-negative exact integers"
-        )
+        raise ValueError(f"InhomogeneousPoisson encoded counts must have shape (N, {num_bins})")
+    if np.any(~np.isfinite(counts)) or np.any(counts < 0.0) or np.any(counts != np.floor(counts)):
+        raise ValueError("InhomogeneousPoisson per-realization counts must be finite non-negative exact integers")
     return counts.copy()
 
 
@@ -128,13 +108,9 @@ def _validated_weights(value: Any, rows: int) -> np.ndarray:
     except (TypeError, ValueError) as exc:
         raise ValueError("InhomogeneousPoisson weights must be numeric") from exc
     if weights.shape != (rows,):
-        raise ValueError(
-            f"InhomogeneousPoisson weights must have exact shape ({rows},)"
-        )
+        raise ValueError(f"InhomogeneousPoisson weights must have exact shape ({rows},)")
     if np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
-        raise ValueError(
-            "InhomogeneousPoisson weights must be finite and non-negative"
-        )
+        raise ValueError("InhomogeneousPoisson weights must be finite and non-negative")
     return weights
 
 
@@ -144,31 +120,21 @@ def _validated_statistics(
     num_bins: int,
 ) -> InhomogeneousPoissonProcessStatistics:
     if not isinstance(value, (tuple, list)) or len(value) != 2:
-        raise ValueError(
-            "InhomogeneousPoisson statistics must be (bin_counts, realization_weight)"
-        )
+        raise ValueError("InhomogeneousPoisson statistics must be (bin_counts, realization_weight)")
     try:
         counts = np.asarray(value[0], dtype=np.float64)
     except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "InhomogeneousPoisson aggregate counts must be numeric"
-        ) from exc
+        raise ValueError("InhomogeneousPoisson aggregate counts must be numeric") from exc
     if counts.shape != (num_bins,):
-        raise ValueError(
-            f"InhomogeneousPoisson aggregate counts must have shape ({num_bins},)"
-        )
+        raise ValueError(f"InhomogeneousPoisson aggregate counts must have shape ({num_bins},)")
     if np.any(~np.isfinite(counts)) or np.any(counts < 0.0):
-        raise ValueError(
-            "InhomogeneousPoisson aggregate counts must be finite and non-negative"
-        )
+        raise ValueError("InhomogeneousPoisson aggregate counts must be finite and non-negative")
     realization_weight = _nonnegative_scalar(
         value[1],
         label="InhomogeneousPoisson realization weight",
     )
     if realization_weight == 0.0 and np.any(counts != 0.0):
-        raise ValueError(
-            "Positive InhomogeneousPoisson counts require realization exposure"
-        )
+        raise ValueError("Positive InhomogeneousPoisson counts require realization exposure")
     return InhomogeneousPoissonProcessStatistics(
         counts.copy(),
         realization_weight,
@@ -183,17 +149,11 @@ def _prior_vector(value: Any, *, num_bins: int, label: str, minimum: float) -> n
         try:
             result = np.asarray(value, dtype=np.float64).copy()
         except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"InhomogeneousPoisson {label} must be numeric"
-            ) from exc
+            raise ValueError(f"InhomogeneousPoisson {label} must be numeric") from exc
         if result.shape != (num_bins,):
-            raise ValueError(
-                f"InhomogeneousPoisson {label} must have shape ({num_bins},)"
-            )
+            raise ValueError(f"InhomogeneousPoisson {label} must have shape ({num_bins},)")
     if np.any(~np.isfinite(result)) or np.any(result < minimum):
-        raise ValueError(
-            f"InhomogeneousPoisson {label} must be finite and at least {minimum}"
-        )
+        raise ValueError(f"InhomogeneousPoisson {label} must be finite and at least {minimum}")
     result.setflags(write=False)
     return result
 
@@ -201,12 +161,7 @@ def _prior_vector(value: Any, *, num_bins: int, label: str, minimum: float) -> n
 def _resolve_edges(num_bins: int | None, t_max: float | None, edges: Sequence[float] | np.ndarray | None) -> np.ndarray:
     if edges is not None:
         e = np.array(edges, dtype=np.float64, copy=True)
-        if (
-            e.ndim != 1
-            or e.size < 2
-            or np.any(~np.isfinite(e))
-            or np.any(np.diff(e) <= 0.0)
-        ):
+        if e.ndim != 1 or e.size < 2 or np.any(~np.isfinite(e)) or np.any(np.diff(e) <= 0.0):
             raise ValueError("edges must be a finite strictly increasing 1-D array of length >= 2.")
         e.setflags(write=False)
         return e
@@ -289,13 +244,16 @@ class InhomogeneousPoissonProcessDistribution(SequenceEncodableProbabilityDistri
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the inhomogeneous Poisson process."""
-        return "InhomogeneousPoissonProcessDistribution(%s, edges=%s, name=%s, keys=%s, prior_shape=%s, prior_rate=%s)" % (
-            repr(list(self.rates)),
-            repr(list(self.edges)),
-            repr(self.name),
-            repr(self.keys),
-            repr(self.prior_shape.tolist()),
-            repr(self.prior_rate.tolist()),
+        return (
+            "InhomogeneousPoissonProcessDistribution(%s, edges=%s, name=%s, keys=%s, prior_shape=%s, prior_rate=%s)"
+            % (
+                repr(list(self.rates)),
+                repr(list(self.edges)),
+                repr(self.name),
+                repr(self.keys),
+                repr(self.prior_shape.tolist()),
+                repr(self.prior_rate.tolist()),
+            )
         )
 
     def intensity(self, t: float, times: Any = None, marks: Any = None) -> float:
@@ -417,9 +375,7 @@ class InhomogeneousPoissonProcessSampler(DistributionSampler):
             label="InhomogeneousPoisson sample size",
         )
         if checked_size < 0:
-            raise ValueError(
-                "InhomogeneousPoisson sample size must be non-negative"
-            )
+            raise ValueError("InhomogeneousPoisson sample size must be non-negative")
         return [self._sample_one() for _ in range(checked_size)]
 
 
@@ -549,13 +505,8 @@ class InhomogeneousPoissonProcessEstimator(ParameterEstimator):
         self.widths = np.diff(self.edges)
         self.name = name
         self.keys = keys
-        if pseudo_count is not None and (
-            prior_shape is not None or prior_rate is not None
-        ):
-            raise ValueError(
-                "InhomogeneousPoisson pseudo_count cannot be combined with "
-                "explicit Gamma priors"
-            )
+        if pseudo_count is not None and (prior_shape is not None or prior_rate is not None):
+            raise ValueError("InhomogeneousPoisson pseudo_count cannot be combined with explicit Gamma priors")
         self.pseudo_count = (
             None
             if pseudo_count is None
@@ -598,9 +549,7 @@ class InhomogeneousPoissonProcessEstimator(ParameterEstimator):
         """Validate and restore estimator configuration."""
         required = {"edges", "name", "keys", "prior_shape", "prior_rate"}
         if set(state) != required:
-            raise ValueError(
-                "invalid InhomogeneousPoisson estimator state fields"
-            )
+            raise ValueError("invalid InhomogeneousPoisson estimator state fields")
         self.__init__(
             edges=state["edges"],
             name=state["name"],
@@ -622,18 +571,14 @@ class InhomogeneousPoissonProcessEstimator(ParameterEstimator):
             num_bins=self.widths.size,
         )
         if checked.realization_weight <= 0.0:
-            raise ValueError(
-                "Cannot estimate InhomogeneousPoisson without realization exposure"
-            )
+            raise ValueError("Cannot estimate InhomogeneousPoisson without realization exposure")
         if nobs is not None:
             _nonnegative_scalar(
                 nobs,
                 label="InhomogeneousPoisson observation count",
             )
         numerator = checked.bin_counts + self.prior_shape - 1.0
-        denominator = (
-            self.widths * checked.realization_weight + self.prior_rate
-        )
+        denominator = self.widths * checked.realization_weight + self.prior_rate
         rates = numerator / denominator
         return InhomogeneousPoissonProcessDistribution(
             rates,

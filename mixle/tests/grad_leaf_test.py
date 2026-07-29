@@ -453,9 +453,7 @@ class GradientAuditContractTest(unittest.TestCase):
             raise RuntimeError("user sentinel")
 
         with self.assertRaisesRegex(RuntimeError, "user sentinel"):
-            GradEstimator(module, m_steps=1, loss=broken_loss).estimate(
-                None, (np.zeros((2, 1)), np.ones(2))
-            )
+            GradEstimator(module, m_steps=1, loss=broken_loss).estimate(None, (np.zeros((2, 1)), np.ones(2)))
         torch.testing.assert_close(module.mu, before)
         self.assertFalse(module.training)
 

@@ -41,9 +41,7 @@ def test_file_digest_validation_detects_drift(tmp_path):
 
 
 def test_dataset_license_record_is_resolved_not_a_placeholder():
-    record = json.loads(
-        (_ROOT / "release-checklists" / "0.8.0-banking77-dataset.json").read_text(encoding="utf-8")
-    )
+    record = json.loads((_ROOT / "release-checklists" / "0.8.0-banking77-dataset.json").read_text(encoding="utf-8"))
     assert record["artifact"] == "mixle.dataset_source/v1"
     assert record["license"]["spdx"] == "CC-BY-4.0"
     assert record["source"]["revision"] == _load().BANKING77_SOURCE_COMMIT

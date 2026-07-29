@@ -136,9 +136,7 @@ class LightningEncodedData(EncodedDataHandle):
         self._local = LocalEncodedData(
             rows, estimator=estimator, model=model, encoder=self.encoder, sub_chunks=sub_chunks
         )
-        self._datamodule = _make_datamodule(
-            self.size, self.batch_size, self.shuffle, self.seed, self.num_workers
-        )
+        self._datamodule = _make_datamodule(self.size, self.batch_size, self.shuffle, self.seed, self.num_workers)
 
     # -- full-data orchestrator contract: delegate to the resident local handle ------------
     def pysp_seq_log_density_sum(self, estimate: Any) -> tuple[float, float]:

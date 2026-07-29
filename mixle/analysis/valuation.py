@@ -346,8 +346,7 @@ class NPVDistribution(_NPVDistributionFields):
         )
         if not np.allclose(provided, expected, rtol=1e-12, atol=1e-12):
             raise ValueError(
-                "NPVDistribution summaries must agree with samples "
-                f"(expected mean/p10/p50/p90 {expected.tolist()!r})"
+                f"NPVDistribution summaries must agree with samples (expected mean/p10/p50/p90 {expected.tolist()!r})"
             )
         if not isinstance(sensitivity, Mapping):
             raise TypeError("NPVDistribution.sensitivity must be a mapping.")
@@ -694,9 +693,7 @@ def monte_carlo_npv(
     price_per_period = _align_price_paths(price_paths, n, n_periods, rng)
 
     call_mode = _cost_model_call_mode(cost_model)
-    opex = np.array(
-        [_call_cost_model(cost_model, t, float(tonnage[t]), call_mode=call_mode) for t in range(n_periods)]
-    )
+    opex = np.array([_call_cost_model(cost_model, t, float(tonnage[t]), call_mode=call_mode) for t in range(n_periods)])
     if not np.all(np.isfinite(opex)):
         raise ValueError("monte_carlo_npv: cost_model must return finite opex")
     if np.any(opex < 0.0):

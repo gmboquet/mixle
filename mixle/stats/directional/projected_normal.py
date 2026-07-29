@@ -72,9 +72,7 @@ def _log_projected_bracket(a: Any) -> np.ndarray:
         selected = values[positive]
         log_term = np.full_like(selected, -np.inf)
         nonzero = selected > 0.0
-        log_term[nonzero] = (
-            np.log(selected[nonzero]) + _log_mills(selected[nonzero])
-        )
+        log_term[nonzero] = np.log(selected[nonzero]) + _log_mills(selected[nonzero])
         result[positive] = np.logaddexp(0.0, log_term)
     if np.any(~positive):
         selected = values[~positive]
@@ -89,9 +87,7 @@ def _log_projected_bracket(a: Any) -> np.ndarray:
                 + 15.0 * inverse_square * inverse_square
                 - 105.0 * inverse_square * inverse_square * inverse_square
             )
-            selected_result[extreme] = (
-                -2.0 * np.log(magnitude) + np.log(denominator)
-            )
+            selected_result[extreme] = -2.0 * np.log(magnitude) + np.log(denominator)
         if np.any(~extreme):
             moderate = selected[~extreme]
             log_product = np.log(-moderate) + _log_mills(moderate)
@@ -134,9 +130,7 @@ class ProjectedNormalDistribution(SequenceEncodableProbabilityDistribution):
         """Return the log-density at a single angle (radians)."""
         theta = validated_angle(x)
         a = self.mu_x * math.cos(theta) + self.mu_y * math.sin(theta)
-        result = -_LOG_2PI - self._half_sq + float(
-            _log_projected_bracket(a)
-        )
+        result = -_LOG_2PI - self._half_sq + float(_log_projected_bracket(a))
         if not np.isfinite(result):
             raise ValueError("projected-normal log density is non-finite")
         return result
@@ -181,15 +175,9 @@ class ProjectedNormalDistribution(SequenceEncodableProbabilityDistribution):
     @classmethod
     def _engine_log_bracket(cls, a: Any, engine: Any) -> Any:
         regular_a = engine.clip(a, -8.0, 8.0)
-        regular = engine.log(
-            1.0 + regular_a * cls._engine_mills(regular_a, engine)
-        )
+        regular = engine.log(1.0 + regular_a * cls._engine_mills(regular_a, engine))
         positive = engine.maximum(a, engine.asarray(8.0))
-        positive_result = (
-            engine.log(positive)
-            + 0.5 * positive * positive
-            + 0.5 * _LOG_2PI
-        )
+        positive_result = engine.log(positive) + 0.5 * positive * positive + 0.5 * _LOG_2PI
         negative = engine.maximum(-a, engine.asarray(8.0))
         inverse_square = 1.0 / (negative * negative)
         negative_series = (
@@ -198,9 +186,7 @@ class ProjectedNormalDistribution(SequenceEncodableProbabilityDistribution):
             + 15.0 * inverse_square * inverse_square
             - 105.0 * inverse_square * inverse_square * inverse_square
         )
-        negative_result = -2.0 * engine.log(negative) + engine.log(
-            negative_series
-        )
+        negative_result = -2.0 * engine.log(negative) + engine.log(negative_series)
         return engine.where(
             a > 8.0,
             positive_result,
@@ -211,9 +197,7 @@ class ProjectedNormalDistribution(SequenceEncodableProbabilityDistribution):
     def _engine_expected_radius(cls, a: Any, engine: Any) -> Any:
         regular_a = engine.clip(a, -8.0, 8.0)
         mills = cls._engine_mills(regular_a, engine)
-        regular = (
-            regular_a + (1.0 + regular_a * regular_a) * mills
-        ) / (1.0 + regular_a * mills)
+        regular = (regular_a + (1.0 + regular_a * regular_a) * mills) / (1.0 + regular_a * mills)
         positive = engine.maximum(a, engine.asarray(8.0))
         positive_result = positive + 1.0 / positive
         negative = engine.maximum(-a, engine.asarray(8.0))
@@ -360,9 +344,7 @@ def _expected_radius(a: np.ndarray) -> np.ndarray:
     if np.any(nonnegative):
         selected = values[nonnegative]
         inverse_mills = np.exp(-_log_mills(selected))
-        result[nonnegative] = (
-            selected * inverse_mills + 1.0 + selected * selected
-        ) / (inverse_mills + selected)
+        result[nonnegative] = (selected * inverse_mills + 1.0 + selected * selected) / (inverse_mills + selected)
     if np.any(~nonnegative):
         selected = values[~nonnegative]
         selected_result = np.empty_like(selected)
@@ -382,23 +364,15 @@ def _expected_radius(a: np.ndarray) -> np.ndarray:
                 + 45.0 * inverse_square * inverse_square
                 - 420.0 * inverse_square * inverse_square * inverse_square
             )
-            selected_result[extreme] = (
-                (2.0 / magnitude) * numerator / denominator
-            )
+            selected_result[extreme] = (2.0 / magnitude) * numerator / denominator
         if np.any(~extreme):
             moderate = selected[~extreme]
             magnitude = -moderate
             log_mills = _log_mills(moderate)
-            log_denominator = np.log(
-                -np.expm1(np.log(magnitude) + log_mills)
-            )
+            log_denominator = np.log(-np.expm1(np.log(magnitude) + log_mills))
             log_term = np.log1p(magnitude * magnitude) + log_mills
-            log_numerator = log_term + np.log(
-                -np.expm1(np.log(magnitude) - log_term)
-            )
-            selected_result[~extreme] = np.exp(
-                log_numerator - log_denominator
-            )
+            log_numerator = log_term + np.log(-np.expm1(np.log(magnitude) - log_term))
+            selected_result[~extreme] = np.exp(log_numerator - log_denominator)
         result[~nonnegative] = selected_result
     if np.any(~np.isfinite(result)) or np.any(result <= 0.0):
         raise ValueError("projected-normal conditional radius is non-finite")
@@ -510,9 +484,7 @@ class ProjectedNormalEstimator(ParameterEstimator):
         """Estimate the projected-normal mean vector from EM sufficient statistics."""
         sum_x, sum_y, count = validated_em_statistics(suff_stat)
         if count == 0.0:
-            raise ProjectedNormalFitError(
-                "projected-normal fitting requires positive observation weight"
-            )
+            raise ProjectedNormalFitError("projected-normal fitting requires positive observation weight")
         result = ProjectedNormalDistribution(
             sum_x / count,
             sum_y / count,

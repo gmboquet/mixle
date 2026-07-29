@@ -334,13 +334,10 @@ def verify_reproducible(
         "data_count_matches": len(rows) == receipt.n,
         "data_tolerance_matches": data_fingerprint(rows) == receipt.data_fingerprint,
         "data_digest_matches": bool(receipt.data_digest) and dataset_hash(rows) == receipt.data_digest,
-        "estimator_name_matches": receipt.estimator
-        == f"{type(estimator).__module__}.{type(estimator).__qualname__}",
-        "estimator_implementation_matches": current_estimator_implementation
-        == receipt.estimator_implementation_digest,
+        "estimator_name_matches": receipt.estimator == f"{type(estimator).__module__}.{type(estimator).__qualname__}",
+        "estimator_implementation_matches": current_estimator_implementation == receipt.estimator_implementation_digest,
         "estimator_state_matches": current_estimator_state == receipt.estimator_state_digest,
-        "optimizer_implementation_matches": current_optimizer_implementation
-        == receipt.optimizer_implementation_digest,
+        "optimizer_implementation_matches": current_optimizer_implementation == receipt.optimizer_implementation_digest,
         "dependency_environment_matches": current_environment == receipt.environment
         and canonical_digest(current_environment) == receipt.dependency_digest,
         "fit_policy_matches": canonical_digest(replay_policy) == receipt.fit_policy_digest,

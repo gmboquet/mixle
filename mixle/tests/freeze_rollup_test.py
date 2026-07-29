@@ -139,9 +139,7 @@ class FreezeRollupMonotonicityTestCase(unittest.TestCase):
         that the gate is wired correctly end to end, not re-deriving the EM theorem.
         """
         start, estimator, enc = _make_problem(seed=7, nobs=300)
-        _, history = run_em_freeze_rollup(
-            enc, estimator, start, max_its=150, delta=1.0e-10, approximate_freezing=True
-        )
+        _, history = run_em_freeze_rollup(enc, estimator, start, max_its=150, delta=1.0e-10, approximate_freezing=True)
 
         self.assertGreater(len(history), 1)
         objectives = [h.objective for h in history]
@@ -245,9 +243,7 @@ class FreezeRollupCacheInvalidationTestCase(unittest.TestCase):
         component = GaussianDistribution(0.0, 1.0)
         scores = np.asarray([[0.0], [1.0]])
 
-        exact_cache = FreezeRollupCache(
-            weight_tol=1.0, q_gain_tol=1.0, weight_delta_tol=1.0, freeze_patience=1
-        )
+        exact_cache = FreezeRollupCache(weight_tol=1.0, q_gain_tol=1.0, weight_delta_tol=1.0, freeze_patience=1)
         exact_cache.record_component_scores(scores)
         self.assertFalse(exact_cache.is_frozen(0, component, 0.01))
         exact_cache.record_component_scores(scores)

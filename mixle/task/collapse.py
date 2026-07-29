@@ -122,9 +122,7 @@ def collapse_monitor(
             diversity_value = diversity_fn(candidate_list)
         else:
             if "diversity" not in round_:
-                raise ValueError(
-                    f"history round {i} must provide {candidates_key!r} or 'diversity'"
-                )
+                raise ValueError(f"history round {i} must provide {candidates_key!r} or 'diversity'")
             diversity_value = round_["diversity"]
         try:
             diversity = float(diversity_value)

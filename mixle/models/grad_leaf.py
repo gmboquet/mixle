@@ -234,9 +234,7 @@ def _accepts_generator(method: Any) -> bool:
     except (TypeError, ValueError):
         return False
     return any(
-        parameter.name == "generator"
-        or parameter.kind == inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters
+        parameter.name == "generator" or parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters
     )
 
 
@@ -433,9 +431,7 @@ class GradLeafSampler(DistributionSampler):
         self.dist.module.to(dev)
         seed = int(self.rng.randint(0, 2**31 - 1))
         with _module_mode(self.dist.module, train=False), torch.no_grad():
-            out = _call_sample_with_seed(
-                self.dist.module.sample, n, torch=torch, device=dev, seed=seed
-            ).cpu().numpy()
+            out = _call_sample_with_seed(self.dist.module.sample, n, torch=torch, device=dev, seed=seed).cpu().numpy()
         return out if (size is not None) else out[0]
 
 
@@ -503,9 +499,7 @@ class DataBufferAccumulator(SequenceEncodableStatisticAccumulator):
         if wb.ndim != 1:
             raise ValueError("gradient accumulator weights must be one-dimensional.")
         if wb.shape[0] != rows:
-            raise ValueError(
-                f"gradient accumulator received {wb.shape[0]} weights for {rows} rows."
-            )
+            raise ValueError(f"gradient accumulator received {wb.shape[0]} weights for {rows} rows.")
         for buf, fb in zip(self.parts, prepared):
             buf.append(fb)
         self.w.append(wb)

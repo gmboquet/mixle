@@ -150,9 +150,7 @@ class RefreshAndGrowthTest(unittest.TestCase):
             raise RuntimeError("injected embedding failure")
 
         stream._embed_landmarks = fail_embedding
-        replacement = MixtureDistribution(
-            [GaussianDistribution(0.0, 1.0), GaussianDistribution(9.0, 1.0)], [0.5, 0.5]
-        )
+        replacement = MixtureDistribution([GaussianDistribution(0.0, 1.0), GaussianDistribution(9.0, 1.0)], [0.5, 0.5])
         with self.assertRaisesRegex(RuntimeError, "injected"):
             stream.refresh(mix_model=replacement)
         self.assertIs(stream.mix_model, old_model)

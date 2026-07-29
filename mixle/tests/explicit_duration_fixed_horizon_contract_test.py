@@ -27,10 +27,7 @@ class ExplicitDurationFixedHorizonTest(unittest.TestCase):
     def test_each_fixed_horizon_is_a_normalized_observation_law(self):
         model = self._categorical_model()
         for horizon in range(1, 5):
-            mass = sum(
-                np.exp(model.forward_loglik(sequence))
-                for sequence in itertools.product((0, 1), repeat=horizon)
-            )
+            mass = sum(np.exp(model.forward_loglik(sequence)) for sequence in itertools.product((0, 1), repeat=horizon))
             self.assertAlmostEqual(mass, 1.0, places=12)
 
     def test_expanded_hmm_matches_the_right_censored_law(self):

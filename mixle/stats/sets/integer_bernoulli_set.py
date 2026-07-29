@@ -64,13 +64,9 @@ def _validated_weight(value: Any, *, label: str = "weight") -> float:
     try:
         result = float(value)
     except (TypeError, ValueError) as exc:
-        raise TypeError(
-            f"Integer Bernoulli-set {label} must be a real scalar"
-        ) from exc
+        raise TypeError(f"Integer Bernoulli-set {label} must be a real scalar") from exc
     if not np.isfinite(result) or result < 0.0:
-        raise ValueError(
-            f"Integer Bernoulli-set {label} must be finite and non-negative"
-        )
+        raise ValueError(f"Integer Bernoulli-set {label} must be finite and non-negative")
     return result
 
 
@@ -80,13 +76,9 @@ def _validated_weights(value: Any, rows: int) -> np.ndarray:
     except (TypeError, ValueError) as exc:
         raise ValueError("Integer Bernoulli-set weights must be numeric") from exc
     if result.shape != (rows,):
-        raise ValueError(
-            "Integer Bernoulli-set weights must have exact shape (%d,)" % rows
-        )
+        raise ValueError("Integer Bernoulli-set weights must have exact shape (%d,)" % rows)
     if np.any(~np.isfinite(result)) or np.any(result < 0.0):
-        raise ValueError(
-            "Integer Bernoulli-set weights must be finite and non-negative"
-        )
+        raise ValueError("Integer Bernoulli-set weights must be finite and non-negative")
     return result
 
 
@@ -126,23 +118,15 @@ def _validated_observation(
     seen = set()
     for raw in labels:
         if isinstance(raw, (bool, np.bool_)):
-            raise TypeError(
-                "Integer Bernoulli-set observations require exact integers"
-            )
+            raise TypeError("Integer Bernoulli-set observations require exact integers")
         try:
             label = operator.index(raw)
         except TypeError as exc:
-            raise TypeError(
-                "Integer Bernoulli-set observations require exact integers"
-            ) from exc
+            raise TypeError("Integer Bernoulli-set observations require exact integers") from exc
         if label < 0 or (num_vals is not None and label >= num_vals):
-            raise ValueError(
-                "Integer Bernoulli-set observation is outside configured support"
-            )
+            raise ValueError("Integer Bernoulli-set observation is outside configured support")
         if label in seen:
-            raise ValueError(
-                "Integer Bernoulli-set observations cannot contain duplicates"
-            )
+            raise ValueError("Integer Bernoulli-set observations cannot contain duplicates")
         seen.add(label)
         checked.append(label)
     return np.asarray(checked, dtype=np.int64)
@@ -158,11 +142,7 @@ def _validated_encoded_sets(
     rows = _validated_num_vals(value[0])
     row_index = np.asarray(value[1])
     labels = np.asarray(value[2])
-    if (
-        row_index.ndim != 1
-        or labels.ndim != 1
-        or row_index.shape != labels.shape
-    ):
+    if row_index.ndim != 1 or labels.ndim != 1 or row_index.shape != labels.shape:
         raise ValueError("Encoded integer Bernoulli-set arrays have invalid geometry")
     if row_index.dtype.kind not in "iu" or labels.dtype.kind not in "iu":
         raise TypeError("Encoded integer Bernoulli-set values must be integer arrays")
@@ -170,15 +150,11 @@ def _validated_encoded_sets(
     labels = labels.astype(np.int64, copy=False)
     if np.any(row_index < 0) or np.any(row_index >= rows):
         raise ValueError("Encoded integer Bernoulli-set row indices are out of range")
-    if np.any(labels < 0) or (
-        num_vals is not None and np.any(labels >= num_vals)
-    ):
+    if np.any(labels < 0) or (num_vals is not None and np.any(labels >= num_vals)):
         raise ValueError("Encoded integer Bernoulli-set labels are out of range")
     pairs = tuple(zip(row_index.tolist(), labels.tolist()))
     if len(set(pairs)) != len(pairs):
-        raise ValueError(
-            "Encoded integer Bernoulli-set rows cannot contain duplicate labels"
-        )
+        raise ValueError("Encoded integer Bernoulli-set rows cannot contain duplicate labels")
     return rows, row_index, labels
 
 
@@ -188,30 +164,19 @@ def _validated_statistics(
     num_vals: int,
 ) -> tuple[np.ndarray, float]:
     if not isinstance(value, (tuple, list)) or len(value) != 2:
-        raise ValueError(
-            "Integer Bernoulli-set sufficient statistics must contain two items"
-        )
+        raise ValueError("Integer Bernoulli-set sufficient statistics must contain two items")
     try:
         counts = np.asarray(value[0], dtype=np.float64)
     except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "Integer Bernoulli-set inclusion counts must be numeric"
-        ) from exc
+        raise ValueError("Integer Bernoulli-set inclusion counts must be numeric") from exc
     if counts.shape != (num_vals,):
-        raise ValueError(
-            "Integer Bernoulli-set inclusion counts must have exact shape (%d,)"
-            % num_vals
-        )
+        raise ValueError("Integer Bernoulli-set inclusion counts must have exact shape (%d,)" % num_vals)
     total = _validated_weight(value[1], label="total weight")
     tolerance = _COUNT_ATOL * max(1.0, total)
     if np.any(~np.isfinite(counts)) or np.any(counts < 0.0):
-        raise ValueError(
-            "Integer Bernoulli-set inclusion counts must be finite and non-negative"
-        )
+        raise ValueError("Integer Bernoulli-set inclusion counts must be finite and non-negative")
     if np.any(counts > total + tolerance):
-        raise ValueError(
-            "Integer Bernoulli-set inclusion counts cannot exceed total weight"
-        )
+        raise ValueError("Integer Bernoulli-set inclusion counts cannot exceed total weight")
     return counts.copy(), total
 
 
@@ -292,9 +257,7 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
                 raise ValueError("log_pvec and log_nvec must have equal lengths")
             pair_norm = np.logaddexp(checked_log_p, checked_log_n)
             if not np.allclose(pair_norm, 0.0, rtol=0.0, atol=1.0e-12):
-                raise ValueError(
-                    "Each log_pvec/log_nvec pair must be complementary probabilities"
-                )
+                raise ValueError("Each log_pvec/log_nvec pair must be complementary probabilities")
         self.name = name
         self.num_vals = num_vals
         self.log_pvec = checked_log_p
@@ -321,10 +284,7 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         s2 = repr(list(self.log_nvec))
         s3 = repr(self.name)
         s4 = repr(self.keys)
-        return (
-            "IntegerBernoulliSetDistribution(%s, log_nvec=%s, name=%s, keys=%s)"
-            % (s1, s2, s3, s4)
-        )
+        return "IntegerBernoulliSetDistribution(%s, log_nvec=%s, name=%s, keys=%s)" % (s1, s2, s3, s4)
 
     def density(self, x: Sequence[int] | np.ndarray) -> float:
         """Return the probability density or mass at a single observation."""
@@ -368,9 +328,7 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
     def backend_stacked_params(cls, dists: Sequence["IntegerBernoulliSetDistribution"], engine: Any) -> dict[str, Any]:
         """Return stacked integer Bernoulli-set parameters for shared support size."""
         if not dists:
-            raise ValueError(
-                "Stacked IntegerBernoulliSetDistribution parameters require at least one component."
-            )
+            raise ValueError("Stacked IntegerBernoulliSetDistribution parameters require at least one component.")
         num_vals = int(dists[0].num_vals)
         if any(int(dist.num_vals) != num_vals for dist in dists):
             raise ValueError("Stacked IntegerBernoulliSetDistribution components require shared support size.")
@@ -421,14 +379,9 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         )
         expected_shape = (sz, int(params["num_components"]))
         if weights_np.shape != expected_shape:
-            raise ValueError(
-                "Stacked integer Bernoulli-set weights must have exact shape %r"
-                % (expected_shape,)
-            )
+            raise ValueError("Stacked integer Bernoulli-set weights must have exact shape %r" % (expected_shape,))
         if np.any(~np.isfinite(weights_np)) or np.any(weights_np < 0.0):
-            raise ValueError(
-                "Stacked integer Bernoulli-set weights must be finite and non-negative"
-            )
+            raise ValueError("Stacked integer Bernoulli-set weights must be finite and non-negative")
         ww = engine.asarray(weights_np)
         num_vals = int(params["num_vals"])
         if len(xs):
@@ -453,9 +406,7 @@ class IntegerBernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         return IntegerBernoulliSetEstimator(
             self.num_vals,
             pseudo_count=pseudo_count,
-            suff_stat=(
-                None if pseudo_count is None else np.exp(self.log_pvec)
-            ),
+            suff_stat=(None if pseudo_count is None else np.exp(self.log_pvec)),
             name=self.name,
             keys=self.keys,
         )
@@ -736,9 +687,7 @@ class IntegerBernoulliSetEstimator(ParameterEstimator):
         self.keys = keys
         if pseudo_count is None:
             if suff_stat is not None:
-                raise ValueError(
-                    "Integer Bernoulli-set prior probabilities require a pseudo-count"
-                )
+                raise ValueError("Integer Bernoulli-set prior probabilities require a pseudo-count")
             self.pseudo_count = None
             self.suff_stat = None
         else:
@@ -755,22 +704,17 @@ class IntegerBernoulliSetEstimator(ParameterEstimator):
                         dtype=np.float64,
                     )
                 except (TypeError, ValueError) as exc:
-                    raise ValueError(
-                        "Integer Bernoulli-set prior probabilities must be numeric"
-                    ) from exc
+                    raise ValueError("Integer Bernoulli-set prior probabilities must be numeric") from exc
                 if prior_probabilities.shape != (self.num_vals,):
                     raise ValueError(
-                        "Integer Bernoulli-set prior probabilities must have exact "
-                        "shape (%d,)" % self.num_vals
+                        "Integer Bernoulli-set prior probabilities must have exact shape (%d,)" % self.num_vals
                     )
                 if (
                     np.any(~np.isfinite(prior_probabilities))
                     or np.any(prior_probabilities < 0.0)
                     or np.any(prior_probabilities > 1.0)
                 ):
-                    raise ValueError(
-                        "Integer Bernoulli-set prior probabilities must lie in [0, 1]"
-                    )
+                    raise ValueError("Integer Bernoulli-set prior probabilities must lie in [0, 1]")
                 self.suff_stat = prior_probabilities.copy()
         self.name = name
         self.min_prob = _validated_min_prob(min_prob)
@@ -795,9 +739,7 @@ class IntegerBernoulliSetEstimator(ParameterEstimator):
         else:
             prior_probabilities = self.suff_stat
         denominator = total + prior_weight
-        probabilities = (
-            counts + prior_weight * prior_probabilities
-        ) / denominator
+        probabilities = (counts + prior_weight * prior_probabilities) / denominator
         if self.min_prob > 0.0:
             upper = 1.0 - self.min_prob
             if upper == 1.0:
@@ -824,18 +766,13 @@ class IntegerBernoulliSetDataEncoder(DataSequenceEncoder):
     """Data encoder for iid integer Bernoulli-set observations."""
 
     def __init__(self, num_vals: int | None = None) -> None:
-        self.num_vals = (
-            None if num_vals is None else _validated_num_vals(num_vals)
-        )
+        self.num_vals = None if num_vals is None else _validated_num_vals(num_vals)
 
     def __str__(self) -> str:
         return "IntegerBernoulliSetDataEncoder(num_vals=%r)" % self.num_vals
 
     def __eq__(self, other: object) -> bool:
-        return (
-            isinstance(other, IntegerBernoulliSetDataEncoder)
-            and self.num_vals == other.num_vals
-        )
+        return isinstance(other, IntegerBernoulliSetDataEncoder) and self.num_vals == other.num_vals
 
     def seq_encode(self, x: Sequence[Sequence[int]]) -> tuple[int, np.ndarray, np.ndarray]:
         """Encode sequences of iid observations for vectorized calculations.
@@ -855,9 +792,7 @@ class IntegerBernoulliSetDataEncoder(DataSequenceEncoder):
         try:
             rows = tuple(x)
         except TypeError as exc:
-            raise TypeError(
-                "Integer Bernoulli-set batches must be iterable"
-            ) from exc
+            raise TypeError("Integer Bernoulli-set batches must be iterable") from exc
         row_index = []
         labels = []
         for row, observation in enumerate(rows):

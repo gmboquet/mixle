@@ -258,7 +258,9 @@ class StreamingTransformerAccumulator(SequenceEncodableStatisticAccumulator):
         self.device = device
         self.lr = _positive_finite(lr, "lr")
         self.base_sha256 = _model_digest(self.module)
-        self.parameter_names = tuple(name for name, parameter in self.module.named_parameters() if parameter.requires_grad)
+        self.parameter_names = tuple(
+            name for name, parameter in self.module.named_parameters() if parameter.requires_grad
+        )
         if not self.parameter_names:
             raise ValueError("streaming transformer must contain trainable parameters")
         self.gradient_sums: list[np.ndarray | None] = [None] * len(self.parameter_names)
@@ -345,8 +347,10 @@ class StreamingTransformerAccumulator(SequenceEncodableStatisticAccumulator):
 
     def value(self) -> StreamingGradientState:
         """Return model-sized gradients and weighted telemetry, never the corpus."""
-        if self.batches == 0 or self.effective_weight <= 0.0 or any(
-            gradient is None for gradient in self.gradient_sums
+        if (
+            self.batches == 0
+            or self.effective_weight <= 0.0
+            or any(gradient is None for gradient in self.gradient_sums)
         ):
             raise ValueError("streaming accumulator has no positive-weight gradient batches")
         return StreamingGradientState(
@@ -524,9 +528,7 @@ def stream_fit(
 
 _MAX_OPTIMIZER_STATE_BYTES = 512 * 1024 * 1024
 _OPTIMIZER_FORMAT = "torch-optimizer-state/v1"
-_OPTIMIZER_FIELDS = frozenset(
-    {"__optimizer_state__", "format", "decoded_bytes", "sha256"}
-)
+_OPTIMIZER_FIELDS = frozenset({"__optimizer_state__", "format", "decoded_bytes", "sha256"})
 
 
 def _training_batch(
@@ -572,9 +574,7 @@ def _contexts(value: Any) -> np.ndarray:
 
 def _validate_model_contexts(contexts: np.ndarray, module: Any) -> None:
     if hasattr(module, "block") and contexts.shape[1] > int(module.block):
-        raise ValueError(
-            f"context sequence length {contexts.shape[1]} exceeds configured block size {module.block}"
-        )
+        raise ValueError(f"context sequence length {contexts.shape[1]} exceeds configured block size {module.block}")
     if hasattr(module, "vocab"):
         if not np.all(contexts == np.round(contexts)):
             raise ValueError("token contexts must contain integer-valued entries")
@@ -588,9 +588,7 @@ def _exact_actions(value: Any, n_rows: int) -> np.ndarray:
         raise ValueError(f"next-token actions must be a one-dimensional vector with {n_rows} rows")
     if actions.dtype.kind not in {"i", "u", "f"}:
         raise ValueError("next-token actions must be numeric integers")
-    if actions.dtype.kind == "f" and (
-        not np.all(np.isfinite(actions)) or not np.all(actions == np.round(actions))
-    ):
+    if actions.dtype.kind == "f" and (not np.all(np.isfinite(actions)) or not np.all(actions == np.round(actions))):
         raise ValueError("next-token actions must be finite integer values")
     if np.any(actions < 0) or np.any(actions > np.iinfo(np.intp).max):
         raise ValueError("next-token actions must be non-negative supported integer indices")
@@ -679,9 +677,7 @@ def _encode_optimizer_state(state: dict[str, Any] | None) -> dict[str, Any] | No
     torch.save(_cpu_optimizer_state(state), buffer)
     data = buffer.getvalue()
     if not data or len(data) > _MAX_OPTIMIZER_STATE_BYTES:
-        raise ValueError(
-            f"optimizer state must contain 1 through {_MAX_OPTIMIZER_STATE_BYTES} decoded bytes"
-        )
+        raise ValueError(f"optimizer state must contain 1 through {_MAX_OPTIMIZER_STATE_BYTES} decoded bytes")
     return {
         "__optimizer_state__": base64.b64encode(data).decode("ascii"),
         "format": _OPTIMIZER_FORMAT,

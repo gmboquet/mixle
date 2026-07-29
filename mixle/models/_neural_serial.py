@@ -83,9 +83,7 @@ def module_to_bytes(module: Any) -> bytes:
     if not data:
         raise ValueError("torch.save produced an empty neural-module artifact")
     if len(data) > MAX_NEURAL_MODULE_BYTES:
-        raise ValueError(
-            f"neural-module artifact is {len(data)} bytes; maximum is {MAX_NEURAL_MODULE_BYTES} bytes"
-        )
+        raise ValueError(f"neural-module artifact is {len(data)} bytes; maximum is {MAX_NEURAL_MODULE_BYTES} bytes")
     return data
 
 
@@ -154,17 +152,13 @@ def decode_module(payload: Any) -> Any:
 
     decoded_bytes = payload["decoded_bytes"]
     if type(decoded_bytes) is not int or not 0 < decoded_bytes <= MAX_NEURAL_MODULE_BYTES:
-        raise _serialization_error(
-            f"decoded_bytes must be an integer from 1 through {MAX_NEURAL_MODULE_BYTES}"
-        )
+        raise _serialization_error(f"decoded_bytes must be an integer from 1 through {MAX_NEURAL_MODULE_BYTES}")
     encoded = payload["__neural_module__"]
     if not isinstance(encoded, str):
         raise _serialization_error("__neural_module__ must be an ASCII base64 string")
     max_encoded_bytes = 4 * ((MAX_NEURAL_MODULE_BYTES + 2) // 3)
     if not encoded or len(encoded) > max_encoded_bytes:
-        raise _serialization_error(
-            f"encoded neural module must contain at most {max_encoded_bytes} base64 characters"
-        )
+        raise _serialization_error(f"encoded neural module must contain at most {max_encoded_bytes} base64 characters")
     try:
         encoded_ascii = encoded.encode("ascii")
     except UnicodeEncodeError as exc:
@@ -174,9 +168,7 @@ def decode_module(payload: Any) -> Any:
     except (ValueError, binascii.Error) as exc:
         raise _serialization_error("__neural_module__ is not strict base64") from exc
     if len(data) != decoded_bytes:
-        raise _serialization_error(
-            f"decoded neural-module length {len(data)} does not match declared {decoded_bytes}"
-        )
+        raise _serialization_error(f"decoded neural-module length {len(data)} does not match declared {decoded_bytes}")
 
     digest = payload["sha256"]
     if not isinstance(digest, str) or len(digest) != 64:

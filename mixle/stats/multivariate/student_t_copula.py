@@ -155,9 +155,7 @@ class StudentTCopulaEstimator(ParameterEstimator):
         return corr
 
     def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray]) -> StudentTCopulaDistribution:
-        u, w = validated_buffered_statistic(
-            suff_stat, self.dim, minimum_rows=2, require_positive_weight=True
-        )
+        u, w = validated_buffered_statistic(suff_stat, self.dim, minimum_rows=2, require_positive_weight=True)
         best = None
         for nu in _NU_GRID:  # profile nu: refit R at each nu (t-scores depend on nu), keep the best likelihood
             corr = self._corr_from_scores(_t.ppf(u, nu), w)

@@ -32,9 +32,7 @@ class WorkerTopologyAttestation:
         }
 
 
-def attest_worker_coordinate(
-    plan: ParallelPlan, *, actual_world_size: int, rank: int
-) -> WorkerTopologyAttestation:
+def attest_worker_coordinate(plan: ParallelPlan, *, actual_world_size: int, rank: int) -> WorkerTopologyAttestation:
     """Validate a runtime rank and deterministically bind it to the plan mesh."""
     if not isinstance(plan, ParallelPlan):
         raise TypeError("plan must be a ParallelPlan.")

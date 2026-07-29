@@ -70,9 +70,7 @@ class IntegerBernoulliEditFitError(RuntimeError):
 
 def _default_init_distribution(num_vals: int) -> IntegerBernoulliSetDistribution:
     """Return a normalized point mass on the empty previous set."""
-    return IntegerBernoulliSetDistribution(
-        np.full(num_vals, -np.inf, dtype=np.float64)
-    )
+    return IntegerBernoulliSetDistribution(np.full(num_vals, -np.inf, dtype=np.float64))
 
 
 def _validated_log_kernel(value: Any) -> tuple[np.ndarray, np.ndarray]:
@@ -82,39 +80,26 @@ def _validated_log_kernel(value: Any) -> tuple[np.ndarray, np.ndarray]:
     except (TypeError, ValueError) as exc:
         raise ValueError("Integer Bernoulli-edit kernel must be numeric") from exc
     if supplied.ndim != 2 or supplied.shape[1] not in (2, 4):
-        raise ValueError(
-            "Integer Bernoulli-edit kernel must have exact shape (N, 2) or (N, 4)"
-        )
-    if (
-        np.any(np.isnan(supplied))
-        or np.any(np.isposinf(supplied))
-        or np.any(supplied > 0.0)
-    ):
-        raise ValueError(
-            "Integer Bernoulli-edit kernel must contain finite or -inf log probabilities"
-        )
+        raise ValueError("Integer Bernoulli-edit kernel must have exact shape (N, 2) or (N, 4)")
+    if np.any(np.isnan(supplied)) or np.any(np.isposinf(supplied)) or np.any(supplied > 0.0):
+        raise ValueError("Integer Bernoulli-edit kernel must contain finite or -inf log probabilities")
     if supplied.shape[1] == 2:
         present = supplied.copy()
     else:
         pair_norm_missing = np.logaddexp(supplied[:, 0], supplied[:, 2])
         pair_norm_present = np.logaddexp(supplied[:, 1], supplied[:, 3])
-        if (
-            not np.allclose(
-                pair_norm_missing,
-                0.0,
-                rtol=0.0,
-                atol=1.0e-12,
-            )
-            or not np.allclose(
-                pair_norm_present,
-                0.0,
-                rtol=0.0,
-                atol=1.0e-12,
-            )
+        if not np.allclose(
+            pair_norm_missing,
+            0.0,
+            rtol=0.0,
+            atol=1.0e-12,
+        ) or not np.allclose(
+            pair_norm_present,
+            0.0,
+            rtol=0.0,
+            atol=1.0e-12,
         ):
-            raise ValueError(
-                "Integer Bernoulli-edit transition pairs must each sum to one"
-            )
+            raise ValueError("Integer Bernoulli-edit transition pairs must each sum to one")
         present = supplied[:, 2:4].copy()
     full = np.empty((len(present), 4), dtype=np.float64)
     full[:, 0] = _log_complement(present[:, 0])
@@ -125,9 +110,7 @@ def _validated_log_kernel(value: Any) -> tuple[np.ndarray, np.ndarray]:
 
 def _validated_pair(value: Any, *, num_vals: int) -> tuple[np.ndarray, np.ndarray]:
     if not isinstance(value, (tuple, list)) or len(value) != 2:
-        raise ValueError(
-            "Integer Bernoulli-edit observations must be (previous, next) pairs"
-        )
+        raise ValueError("Integer Bernoulli-edit observations must be (previous, next) pairs")
     return (
         _validated_observation(value[0], num_vals=num_vals),
         _validated_observation(value[1], num_vals=num_vals),
@@ -140,9 +123,7 @@ def _validated_encoded_edits(
     num_vals: int,
 ) -> E:
     if not isinstance(value, (tuple, list)) or len(value) != 6:
-        raise ValueError(
-            "Encoded integer Bernoulli edits must contain six items"
-        )
+        raise ValueError("Encoded integer Bernoulli edits must contain six items")
     rows = _validated_num_vals(value[0])
     row_index = np.asarray(value[1])
     labels = np.asarray(value[2])
@@ -155,11 +136,7 @@ def _validated_encoded_edits(
         or row_index.shape != edit_types.shape
     ):
         raise ValueError("Encoded integer Bernoulli-edit arrays have invalid geometry")
-    if (
-        row_index.dtype.kind not in "iu"
-        or labels.dtype.kind not in "iu"
-        or edit_types.dtype.kind not in "iu"
-    ):
+    if row_index.dtype.kind not in "iu" or labels.dtype.kind not in "iu" or edit_types.dtype.kind not in "iu":
         raise TypeError("Encoded integer Bernoulli-edit arrays must be integer arrays")
     row_index = row_index.astype(np.int64, copy=False)
     labels = labels.astype(np.int64, copy=False)
@@ -172,27 +149,19 @@ def _validated_encoded_edits(
         raise ValueError("Encoded integer Bernoulli-edit types are out of range")
     pairs = tuple(zip(row_index.tolist(), labels.tolist()))
     if len(set(pairs)) != len(pairs):
-        raise ValueError(
-            "Encoded integer Bernoulli-edit rows cannot repeat a support value"
-        )
+        raise ValueError("Encoded integer Bernoulli-edit rows cannot repeat a support value")
     masks = value[4]
     if not isinstance(masks, (tuple, list)) or len(masks) != 3:
-        raise ValueError(
-            "Encoded integer Bernoulli-edit type masks must contain three arrays"
-        )
+        raise ValueError("Encoded integer Bernoulli-edit type masks must contain three arrays")
     checked_masks = []
     for edit_type, mask in enumerate(masks):
         mask_array = np.asarray(mask)
         if mask_array.ndim != 1 or mask_array.dtype.kind not in "iu":
-            raise TypeError(
-                "Encoded integer Bernoulli-edit type masks must be integer vectors"
-            )
+            raise TypeError("Encoded integer Bernoulli-edit type masks must be integer vectors")
         mask_array = mask_array.astype(np.int64, copy=False)
         expected = np.flatnonzero(edit_types == edit_type)
         if not np.array_equal(mask_array, expected):
-            raise ValueError(
-                "Encoded integer Bernoulli-edit type masks do not match edit types"
-            )
+            raise ValueError("Encoded integer Bernoulli-edit type masks do not match edit types")
         checked_masks.append(mask_array)
     return (
         rows,
@@ -210,33 +179,21 @@ def _validated_edit_statistics(
     num_vals: int,
 ) -> tuple[np.ndarray, float, Any]:
     if not isinstance(value, (tuple, list)) or len(value) != 3:
-        raise ValueError(
-            "Integer Bernoulli-edit sufficient statistics must contain three items"
-        )
+        raise ValueError("Integer Bernoulli-edit sufficient statistics must contain three items")
     try:
         counts = np.asarray(value[0], dtype=np.float64)
     except (TypeError, ValueError) as exc:
         raise ValueError("Integer Bernoulli-edit counts must be numeric") from exc
     if counts.shape != (num_vals, 3):
-        raise ValueError(
-            "Integer Bernoulli-edit counts must have exact shape (%d, 3)"
-            % num_vals
-        )
+        raise ValueError("Integer Bernoulli-edit counts must have exact shape (%d, 3)" % num_vals)
     total = _validated_weight(value[1], label="total weight")
     if np.any(~np.isfinite(counts)) or np.any(counts < 0.0):
-        raise ValueError(
-            "Integer Bernoulli-edit counts must be finite and non-negative"
-        )
+        raise ValueError("Integer Bernoulli-edit counts must be finite and non-negative")
     tolerance = _COUNT_ATOL * max(1.0, total)
     present_trials = counts[:, 0] + counts[:, 2]
     missing_trials = total - present_trials
-    if (
-        np.any(present_trials > total + tolerance)
-        or np.any(counts[:, 1] > missing_trials + tolerance)
-    ):
-        raise ValueError(
-            "Integer Bernoulli-edit counts do not define feasible transition partitions"
-        )
+    if np.any(present_trials > total + tolerance) or np.any(counts[:, 1] > missing_trials + tolerance):
+        raise ValueError("Integer Bernoulli-edit counts do not define feasible transition partitions")
     return counts.copy(), total, value[2]
 
 
@@ -292,11 +249,7 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
         self.name = name
         self.keys = keys
         self.num_vals = num_vals
-        self.init_dist = (
-            _default_init_distribution(num_vals)
-            if init_dist is None
-            else init_dist
-        )
+        self.init_dist = _default_init_distribution(num_vals) if init_dist is None else init_dist
         if supports(self.init_dist, Neutral):
             raise ValueError(
                 "IntegerBernoulliEditDistribution requires a normalized init_dist; "
@@ -305,9 +258,7 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
             )
         init_num_vals = getattr(self.init_dist, "num_vals", num_vals)
         if int(init_num_vals) != num_vals:
-            raise ValueError(
-                "Integer Bernoulli-edit init_dist support size must match the transition kernel"
-            )
+            raise ValueError("Integer Bernoulli-edit init_dist support size must match the transition kernel")
 
         self.orig_log_edit_pmat = present_kernel
         self.log_edit_pmat = log_pmat
@@ -464,9 +415,7 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
         from mixle.stats.compute.stacked import stacked_component_params
 
         if not dists:
-            raise ValueError(
-                "Stacked IntegerBernoulliEditDistribution parameters require at least one component."
-            )
+            raise ValueError("Stacked IntegerBernoulliEditDistribution parameters require at least one component.")
         num_vals = int(dists[0].num_vals)
         null_init_dist = supports(dists[0].init_dist, Neutral)
         if any(int(dist.num_vals) != num_vals or supports(dist.init_dist, Neutral) != null_init_dist for dist in dists):
@@ -493,9 +442,7 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
             "num_vals": num_vals,
             "log_dvec": engine.asarray(np.stack([dist.log_dvec for dist in dists], axis=2)),
             "log_nsum": engine.asarray([dist.log_nsum for dist in dists]),
-            "forced": engine.asarray(
-                np.stack([dist.forced for dist in dists], axis=1)
-            ),
+            "forced": engine.asarray(np.stack([dist.forced for dist in dists], axis=1)),
             "init_route": init_route,
             "num_components": len(dists),
         }
@@ -561,14 +508,9 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
         )
         expected_shape = (sz, num_components)
         if weights_np.shape != expected_shape:
-            raise ValueError(
-                "Stacked integer Bernoulli-edit weights must have exact shape %r"
-                % (expected_shape,)
-            )
+            raise ValueError("Stacked integer Bernoulli-edit weights must have exact shape %r" % (expected_shape,))
         if np.any(~np.isfinite(weights_np)) or np.any(weights_np < 0.0):
-            raise ValueError(
-                "Stacked integer Bernoulli-edit weights must be finite and non-negative"
-            )
+            raise ValueError("Stacked integer Bernoulli-edit weights must be finite and non-negative")
         ww = engine.asarray(weights_np)
 
         if len(idx) > 0 and num_vals > 0:
@@ -629,9 +571,7 @@ class IntegerBernoulliEditDistribution(SequenceEncodableProbabilityDistribution)
                 pseudo_count=pseudo_count,
             ),
             pseudo_count=pseudo_count,
-            suff_stat=(
-                None if pseudo_count is None else np.exp(self.log_edit_pmat)
-            ),
+            suff_stat=(None if pseudo_count is None else np.exp(self.log_edit_pmat)),
             name=self.name,
             keys=self.keys,
         )
@@ -853,11 +793,7 @@ class IntegerBernoulliEditAccumulator(SequenceEncodableStatisticAccumulator):
         self.num_vals = _validated_num_vals(num_vals)
         self.pcnt = np.zeros((self.num_vals, 3), dtype=np.float64)
         self.keys = keys
-        self.init_acc = (
-            IntegerBernoulliSetAccumulator(self.num_vals)
-            if init_acc is None
-            else init_acc
-        )
+        self.init_acc = IntegerBernoulliSetAccumulator(self.num_vals) if init_acc is None else init_acc
         self.tot_sum = 0.0
 
     def update(self, x: T, weight: float, estimate: IntegerBernoulliEditDistribution | None) -> None:
@@ -1134,9 +1070,7 @@ class IntegerBernoulliEditAccumulatorFactory(StatisticAccumulatorFactory):
         self.keys = keys
         self.num_vals = _validated_num_vals(num_vals)
         self.init_factory = (
-            IntegerBernoulliSetEstimator(self.num_vals).accumulator_factory()
-            if init_factory is None
-            else init_factory
+            IntegerBernoulliSetEstimator(self.num_vals).accumulator_factory() if init_factory is None else init_factory
         )
 
     def make(self) -> "IntegerBernoulliEditAccumulator":
@@ -1191,9 +1125,7 @@ class IntegerBernoulliEditEstimator(ParameterEstimator):
         self.keys = keys
         if pseudo_count is None:
             if suff_stat is not None:
-                raise ValueError(
-                    "Integer Bernoulli-edit prior probabilities require a pseudo-count"
-                )
+                raise ValueError("Integer Bernoulli-edit prior probabilities require a pseudo-count")
             self.pseudo_count = None
             self.suff_stat = None
         else:
@@ -1207,13 +1139,10 @@ class IntegerBernoulliEditEstimator(ParameterEstimator):
                 try:
                     prior = np.asarray(suff_stat, dtype=np.float64)
                 except (TypeError, ValueError) as exc:
-                    raise ValueError(
-                        "Integer Bernoulli-edit prior kernel must be numeric"
-                    ) from exc
+                    raise ValueError("Integer Bernoulli-edit prior kernel must be numeric") from exc
                 if prior.shape != (self.num_vals, 4):
                     raise ValueError(
-                        "Integer Bernoulli-edit prior kernel must have exact shape "
-                        "(%d, 4)" % self.num_vals
+                        "Integer Bernoulli-edit prior kernel must have exact shape (%d, 4)" % self.num_vals
                     )
                 if (
                     np.any(~np.isfinite(prior))
@@ -1232,9 +1161,7 @@ class IntegerBernoulliEditEstimator(ParameterEstimator):
                         atol=1.0e-12,
                     )
                 ):
-                    raise ValueError(
-                        "Integer Bernoulli-edit prior rows must define stochastic transition pairs"
-                    )
+                    raise ValueError("Integer Bernoulli-edit prior rows must define stochastic transition pairs")
                 self.suff_stat = prior.copy()
         self.name = name
         self.min_prob = _validated_min_prob(min_prob)
@@ -1291,12 +1218,10 @@ class IntegerBernoulliEditEstimator(ParameterEstimator):
         add_identified = add_denominator > 0.0
         keep_identified = keep_denominator > 0.0
         add_probability[add_identified] = (
-            count_mat[add_identified, 1]
-            + prior_weight * prior_add[add_identified]
+            count_mat[add_identified, 1] + prior_weight * prior_add[add_identified]
         ) / add_denominator[add_identified]
         keep_probability[keep_identified] = (
-            count_mat[keep_identified, 2]
-            + prior_weight * prior_keep[keep_identified]
+            count_mat[keep_identified, 2] + prior_weight * prior_keep[keep_identified]
         ) / keep_denominator[keep_identified]
         if self.min_prob > 0.0:
             upper = 1.0 - self.min_prob
@@ -1313,9 +1238,7 @@ class IntegerBernoulliEditEstimator(ParameterEstimator):
                 upper,
             )
         with np.errstate(divide="ignore"):
-            present_kernel = np.log(
-                np.column_stack((add_probability, keep_probability))
-            )
+            present_kernel = np.log(np.column_stack((add_probability, keep_probability)))
         result = IntegerBernoulliEditDistribution(
             present_kernel,
             init_dist=init_dist,
@@ -1349,29 +1272,17 @@ class IntegerBernoulliEditDataEncoder(DataSequenceEncoder):
             init_encoder (DataSequenceEncoder): Encoder for the previous sets x[i][0].
 
         """
-        self.num_vals = (
-            None if num_vals is None else _validated_num_vals(num_vals)
-        )
-        self.init_encoder = (
-            IntegerBernoulliSetDataEncoder(self.num_vals)
-            if init_encoder is None
-            else init_encoder
-        )
+        self.num_vals = None if num_vals is None else _validated_num_vals(num_vals)
+        self.init_encoder = IntegerBernoulliSetDataEncoder(self.num_vals) if init_encoder is None else init_encoder
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the encoder."""
-        return (
-            "IntegerBernoulliEditDataEncoder(init_encoder=%s, num_vals=%r)"
-            % (self.init_encoder, self.num_vals)
-        )
+        return "IntegerBernoulliEditDataEncoder(init_encoder=%s, num_vals=%r)" % (self.init_encoder, self.num_vals)
 
     def __eq__(self, other: object) -> bool:
         """Return true when ``other`` is an equivalent integer Bernoulli-edit encoder."""
         if isinstance(other, IntegerBernoulliEditDataEncoder):
-            return (
-                other.init_encoder == self.init_encoder
-                and other.num_vals == self.num_vals
-            )
+            return other.init_encoder == self.init_encoder and other.num_vals == self.num_vals
         else:
             return False
 
@@ -1398,9 +1309,7 @@ class IntegerBernoulliEditDataEncoder(DataSequenceEncoder):
         try:
             rows = tuple(x)
         except TypeError as exc:
-            raise TypeError(
-                "Integer Bernoulli-edit batches must be iterable"
-            ) from exc
+            raise TypeError("Integer Bernoulli-edit batches must be iterable") from exc
         idx = []
         xs = []
         ys = []
@@ -1408,9 +1317,7 @@ class IntegerBernoulliEditDataEncoder(DataSequenceEncoder):
 
         for i, xx in enumerate(rows):
             if not isinstance(xx, (tuple, list)) or len(xx) != 2:
-                raise ValueError(
-                    "Integer Bernoulli-edit observations must be (previous, next) pairs"
-                )
+                raise ValueError("Integer Bernoulli-edit observations must be (previous, next) pairs")
             xx0 = _validated_observation(xx[0], num_vals=self.num_vals)
             xx1 = _validated_observation(xx[1], num_vals=self.num_vals)
             pre.append(xx0)
@@ -1441,9 +1348,7 @@ class IntegerBernoulliEditDataEncoder(DataSequenceEncoder):
         """Return the validated encoded batch row count."""
         if self.num_vals is None:
             if not isinstance(x, (tuple, list)) or len(x) != 6:
-                raise ValueError(
-                    "Encoded integer Bernoulli edits must contain six items"
-                )
+                raise ValueError("Encoded integer Bernoulli edits must contain six items")
             rows = _validated_num_vals(x[0])
         else:
             rows, _, _, _, _, _ = _validated_encoded_edits(
@@ -1452,7 +1357,5 @@ class IntegerBernoulliEditDataEncoder(DataSequenceEncoder):
             )
         child_rows = self.init_encoder.row_count(x[5])
         if child_rows != rows:
-            raise ValueError(
-                "Integer Bernoulli-edit child encoding row count does not match"
-            )
+            raise ValueError("Integer Bernoulli-edit child encoding row count does not match")
         return rows

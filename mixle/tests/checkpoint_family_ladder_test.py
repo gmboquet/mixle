@@ -267,9 +267,7 @@ class LadderContractTest(unittest.TestCase):
             )
         self.assertEqual([call[0] for call in eval_calls], ["headline", "a", "b"])
         self.assertTrue(all(call[1] is eval_data for call in eval_calls))
-        self.assertTrue(
-            all(call[2]["evaluation_set_sha256"] == result.evaluation_set_digest for call in eval_calls)
-        )
+        self.assertTrue(all(call[2]["evaluation_set_sha256"] == result.evaluation_set_digest for call in eval_calls))
         self.assertEqual(result.evaluation_set_size, 2)
         self.assertTrue(all(rung.evaluation_set_digest == result.evaluation_set_digest for rung in result.rungs))
 

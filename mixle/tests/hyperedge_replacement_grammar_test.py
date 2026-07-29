@@ -227,9 +227,7 @@ class HyperedgeReplacementGrammarTestCase(unittest.TestCase):
         self._node(malformed_start, 0, "X")
         self._node(malformed_start, 1, "Y")
         malformed = HyperedgeReplacementGrammar()
-        malformed.add_rule(
-            HyperedgeReplacementRule("S", Hypergraph(malformed_start, [("A", (0, 1))]), ())
-        )
+        malformed.add_rule(HyperedgeReplacementRule("S", Hypergraph(malformed_start, [("A", (0, 1))]), ()))
         malformed.add_rule(HyperedgeReplacementRule("A", Hypergraph(boundary), (0,)))
         with self.assertRaises(ValueError):
             HyperedgeReplacementGrammarDistribution(malformed, start_symbol="S")

@@ -268,9 +268,7 @@ def _validate_experiment(
         if len(source) != len(text_list):
             raise ValueError("teacher labels and texts must have the same length")
 
-    validation_texts = None if val_texts is None else [
-        str(text) for text in _materialize(val_texts, "val_texts")
-    ]
+    validation_texts = None if val_texts is None else [str(text) for text in _materialize(val_texts, "val_texts")]
     validation_labels = None if val_labels is None else _materialize(val_labels, "val_labels")
     if validation_texts is None and validation_labels is not None:
         raise ValueError("val_labels require val_texts")
@@ -496,9 +494,7 @@ def _teacher_labels(teacher: Callable[..., Any], texts: list[str]) -> list[Any]:
             labels = []
         else:
             if len(labels) != len(texts):
-                raise ValueError(
-                    f"batch teacher returned {len(labels)} labels for {len(texts)} texts"
-                )
+                raise ValueError(f"batch teacher returned {len(labels)} labels for {len(texts)} texts")
             return labels
     return [teacher(t) for t in texts]
 

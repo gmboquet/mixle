@@ -403,9 +403,7 @@ class StepBernoulliEditEstimatorTestCase(unittest.TestCase):
             estimator.init_est,
             type(initial.estimator()),
         )
-        count_mat = np.asarray(
-            [[0.0, 0.0, 10.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]]
-        )
+        count_mat = np.asarray([[0.0, 0.0, 10.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]])
         initial_counts = count_mat[:, 0] + count_mat[:, 2]
         fitted = estimator.estimate(
             None,

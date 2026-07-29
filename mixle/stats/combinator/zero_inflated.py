@@ -210,9 +210,7 @@ class ZeroInflatedAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize using the factory's declared structural-zero responsibility."""
         checked_weight = require_nonnegative(weight, name="observation weight")
         kind = require_count_value(x, path="ZeroInflatedAccumulator observation")
-        inflation_weight = (
-            checked_weight * self.initial_inflation_probability if kind == 0 else 0.0
-        )
+        inflation_weight = checked_weight * self.initial_inflation_probability if kind == 0 else 0.0
         self.base_accumulator.initialize(x, checked_weight - inflation_weight, rng)
         self.inflation_count += inflation_weight
         self.total += checked_weight
@@ -278,9 +276,7 @@ class ZeroInflatedAccumulator(SequenceEncodableStatisticAccumulator):
         """Replace base and inflation statistics from a keyed statistics dictionary."""
         self.base_accumulator.key_replace(stats_dict)
         if self.keys is not None and self.keys in stats_dict:
-            self.inflation_count, self.total = require_component_counts(
-                *stats_dict[self.keys], name="inflation count"
-            )
+            self.inflation_count, self.total = require_component_counts(*stats_dict[self.keys], name="inflation count")
 
     def acc_to_encoder(self) -> "ZeroInflatedDataEncoder":
         """Return an encoder that augments the base encoding with a zero mask."""
@@ -324,9 +320,7 @@ class ZeroInflatedEstimator(ParameterEstimator):
         initial_inflation_probability: float = 0.5,
     ) -> None:
         self.base_estimator = base_estimator
-        self.pseudo_count = (
-            None if pseudo_count is None else require_nonnegative(pseudo_count, name="pseudo_count")
-        )
+        self.pseudo_count = None if pseudo_count is None else require_nonnegative(pseudo_count, name="pseudo_count")
         self.name = name
         self.keys = keys
         self.initial_inflation_probability = require_probability(
@@ -345,9 +339,7 @@ class ZeroInflatedEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat: tuple[Any, float, float]) -> ZeroInflatedDistribution:
         """Estimate the base distribution and structural-zero probability."""
         if not isinstance(suff_stat, (tuple, list)) or len(suff_stat) != 3:
-            raise TypeError(
-                "ZeroInflatedEstimator sufficient statistics must be (base, inflation_count, total)."
-            )
+            raise TypeError("ZeroInflatedEstimator sufficient statistics must be (base, inflation_count, total).")
         base_ss, inflation_count, total = suff_stat
         inflation_count, total = require_component_counts(
             inflation_count,

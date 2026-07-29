@@ -196,15 +196,9 @@ def soft_agreement(student: TaskModel, teacher_probs: Sequence[Any], texts: Sequ
     raw_student = student.adapter.proba_batch(student.model, texts)
     p_student = _as_prob_matrix(raw_student, p_teacher.shape[1])
     if p_student.shape != p_teacher.shape:
-        raise ValueError(
-            f"student probabilities have shape {p_student.shape}, expected {p_teacher.shape}"
-        )
+        raise ValueError(f"student probabilities have shape {p_student.shape}, expected {p_teacher.shape}")
     kl = np.sum(
-        p_teacher
-        * (
-            np.log(np.clip(p_teacher, _EPS, None))
-            - np.log(np.clip(p_student, _EPS, None))
-        ),
+        p_teacher * (np.log(np.clip(p_teacher, _EPS, None)) - np.log(np.clip(p_student, _EPS, None))),
         axis=1,
     )
     return float(np.mean(kl))

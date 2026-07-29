@@ -22,9 +22,11 @@ class SemiSupervisedTerminalStatesTest(unittest.TestCase):
         for path in itertools.product([0, 1], repeat=len(x)):
             if path[-1] != 1 or any(z == 1 for z in path[:-1]):
                 continue
-            lp = sum(self.topics[path[t]].log_density(x[t]) for t in range(len(x))) + sum(
-                log_a[path[t], path[t + 1]] for t in range(len(x) - 1)
-            ) - np.log(2)
+            lp = (
+                sum(self.topics[path[t]].log_density(x[t]) for t in range(len(x)))
+                + sum(log_a[path[t], path[t + 1]] for t in range(len(x) - 1))
+                - np.log(2)
+            )
             total = np.logaddexp(total, lp)
         return total
 

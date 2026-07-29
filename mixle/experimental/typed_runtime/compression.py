@@ -49,12 +49,7 @@ class CompressionReceipt:
                 raise ValueError(f"compression receipt {name} must be a non-negative integer.")
         for name in ("realized_l2_error", "relative_l2_error", "pending_residual_l2_norm"):
             value = getattr(self, name)
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, Real)
-                or not math.isfinite(float(value))
-                or value < 0.0
-            ):
+            if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(float(value)) or value < 0.0:
                 raise ValueError(f"compression receipt {name} must be finite and non-negative.")
         if not isinstance(self.exact, bool) or not isinstance(self.approximation_authorized, bool):
             raise TypeError("compression receipt exact/authorization fields must be boolean.")
@@ -66,9 +61,7 @@ class CompressionReceipt:
         ):
             raise ValueError("maximum_relative_l2_error must be finite and non-negative.")
         if self.exact and (
-            self.realized_l2_error != 0.0
-            or self.relative_l2_error != 0.0
-            or self.pending_residual_l2_norm != 0.0
+            self.realized_l2_error != 0.0 or self.relative_l2_error != 0.0 or self.pending_residual_l2_norm != 0.0
         ):
             raise ValueError("exact compression receipts cannot report reconstruction error or residual.")
         if not self.exact and (
@@ -128,8 +121,10 @@ class CompressedDelta:
             dtype = np.dtype(self.dtype)
         except (TypeError, ValueError) as error:
             raise ValueError("compressed delta dtype is invalid.") from error
-        if not isinstance(self.arrays, tuple) or not self.arrays or any(
-            not isinstance(array, np.ndarray) for array in self.arrays
+        if (
+            not isinstance(self.arrays, tuple)
+            or not self.arrays
+            or any(not isinstance(array, np.ndarray) for array in self.arrays)
         ):
             raise TypeError("compressed delta arrays must be a non-empty tuple of ndarrays.")
         if not isinstance(self.feedback_token, str) or not self.feedback_token:
@@ -149,9 +144,7 @@ class CompressedDelta:
         if self.method is CompressionMethod.DENSE:
             if not self.receipt.exact or self.arrays[0].size != elements:
                 raise ValueError("dense compressed deltas must contain one exact full-size array.")
-        elif self.receipt.exact or not (
-            np.issubdtype(dtype, np.floating) or np.issubdtype(dtype, np.complexfloating)
-        ):
+        elif self.receipt.exact or not (np.issubdtype(dtype, np.floating) or np.issubdtype(dtype, np.complexfloating)):
             raise ValueError("lossy compressed deltas require a floating or complex source dtype.")
 
     def reconstruct(self) -> np.ndarray:
@@ -200,20 +193,13 @@ class CompressionAcknowledgement:
     residual_l2_norm_after: float
 
     def __post_init__(self) -> None:
-        if any(
-            not isinstance(value, str) or not value for value in (self.key, self.feedback_token, self.payload_hash)
-        ):
+        if any(not isinstance(value, str) or not value for value in (self.key, self.feedback_token, self.payload_hash)):
             raise ValueError("compression acknowledgements require complete non-empty identity.")
         if not isinstance(self.applied, bool):
             raise TypeError("compression acknowledgement applied must be boolean.")
         for name in ("residual_l2_norm_before", "residual_l2_norm_after"):
             value = getattr(self, name)
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, Real)
-                or not math.isfinite(float(value))
-                or value < 0.0
-            ):
+            if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(float(value)) or value < 0.0:
                 raise ValueError(f"compression acknowledgement {name} must be finite and non-negative.")
 
     def as_dict(self) -> dict[str, Any]:

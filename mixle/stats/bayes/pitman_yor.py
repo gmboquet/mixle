@@ -103,9 +103,7 @@ def _validated_encoded_partitions(value: Any) -> list[np.ndarray]:
     try:
         partitions = list(value)
     except TypeError as exc:
-        raise ValueError(
-            "Encoded Pitman-Yor data must be a sequence of block-size vectors."
-        ) from exc
+        raise ValueError("Encoded Pitman-Yor data must be a sequence of block-size vectors.") from exc
     return [_validated_block_sizes(sizes) for sizes in partitions]
 
 
@@ -237,9 +235,7 @@ class PitmanYorProcessDistribution(SequenceEncodableProbabilityDistribution):
             try:
                 num_elements = operator.index(num_elements)
             except TypeError as exc:
-                raise TypeError(
-                    "PitmanYorProcessDistribution num_elements must be a positive integer."
-                ) from exc
+                raise TypeError("PitmanYorProcessDistribution num_elements must be a positive integer.") from exc
             if num_elements <= 0:
                 raise ValueError("PitmanYorProcessDistribution num_elements must be positive.")
         self.alpha = float(alpha)
@@ -471,9 +467,7 @@ class PitmanYorProcessEstimator(ParameterEstimator):
         try:
             checked_max_alpha = float(max_alpha)
         except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "PitmanYorProcessEstimator max_alpha must be a finite positive scalar."
-            ) from exc
+            raise ValueError("PitmanYorProcessEstimator max_alpha must be a finite positive scalar.") from exc
         if not np.isfinite(checked_max_alpha) or checked_max_alpha <= 0.0:
             raise ValueError("PitmanYorProcessEstimator max_alpha must be a finite positive scalar.")
         self.discount = float(discount)
@@ -535,9 +529,7 @@ class PitmanYorProcessEstimator(ParameterEstimator):
             hi = min(self.max_alpha, hi * 2.0)
             grad_hi = self._grad_alpha(hi, d, a_hist, b_hist, d_hist)
             if not np.isfinite(grad_hi):
-                raise PitmanYorConvergenceError(
-                    "Pitman-Yor alpha solver produced a non-finite bracket gradient."
-                )
+                raise PitmanYorConvergenceError("Pitman-Yor alpha solver produced a non-finite bracket gradient.")
         if grad_lo <= 0.0:
             return lo, {
                 "converged": True,
@@ -580,9 +572,7 @@ class PitmanYorProcessEstimator(ParameterEstimator):
         grad_lo = self._grad_discount(a, lo, a_hist, b_hist, d_hist)
         grad_hi = self._grad_discount(a, hi, a_hist, b_hist, d_hist)
         if not np.isfinite(grad_lo) or not np.isfinite(grad_hi):
-            raise PitmanYorConvergenceError(
-                "Pitman-Yor discount solver produced a non-finite bracket gradient."
-            )
+            raise PitmanYorConvergenceError("Pitman-Yor discount solver produced a non-finite bracket gradient.")
         if grad_lo <= 0.0:
             return lo, {
                 "converged": True,
@@ -602,9 +592,7 @@ class PitmanYorProcessEstimator(ParameterEstimator):
             mid = 0.5 * (lo + hi)
             gradient = self._grad_discount(a, mid, a_hist, b_hist, d_hist)
             if not np.isfinite(gradient):
-                raise PitmanYorConvergenceError(
-                    "Pitman-Yor discount solver produced a non-finite gradient."
-                )
+                raise PitmanYorConvergenceError("Pitman-Yor discount solver produced a non-finite gradient.")
             if gradient > 0.0:
                 lo = mid
             else:
@@ -658,9 +646,7 @@ class PitmanYorProcessEstimator(ParameterEstimator):
                     break
                 a, d = a_new, d_new
             if not converged:
-                raise PitmanYorConvergenceError(
-                    "Pitman-Yor coordinate solver did not converge within 50 iterations."
-                )
+                raise PitmanYorConvergenceError("Pitman-Yor coordinate solver did not converge within 50 iterations.")
         objective = self._objective(a, d, a_hist, b_hist, d_hist)
         if not np.isfinite(objective):
             raise PitmanYorConvergenceError("Pitman-Yor estimator returned a non-finite objective.")

@@ -80,9 +80,7 @@ class IntegerBernoulliSetDistributionTestCase(unittest.TestCase):
                     dist.backend_seq_log_density(encoded, NumpyEngine())
 
     def test_scalar_sequence_and_backend_scores_agree(self):
-        dist = IntegerBernoulliSetDistribution(
-            np.asarray([0.0, np.log(0.4), -np.inf])
-        )
+        dist = IntegerBernoulliSetDistribution(np.asarray([0.0, np.log(0.4), -np.inf]))
         observations = [[0], [0, 1], [1], [0, 2]]
         encoded = dist.dist_to_encoder().seq_encode(observations)
         expected = np.asarray([dist.log_density(row) for row in observations])
@@ -91,9 +89,7 @@ class IntegerBernoulliSetDistributionTestCase(unittest.TestCase):
             expected,
         )
         np.testing.assert_allclose(
-            NumpyEngine().to_numpy(
-                dist.backend_seq_log_density(encoded, NumpyEngine())
-            ),
+            NumpyEngine().to_numpy(dist.backend_seq_log_density(encoded, NumpyEngine())),
             expected,
         )
 

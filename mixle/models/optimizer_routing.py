@@ -128,9 +128,9 @@ class RoutedNeuralOptimizer(_OptimizerBase):
             state["step_sizes"] = _TORCH.full_like(gradient, initial_step)
             state["previous_gradient"] = _TORCH.zeros_like(gradient)
         product = gradient * state["previous_gradient"]
-        state["step_sizes"].mul_(
-            _TORCH.where(product > 0.0, 1.2, _TORCH.where(product < 0.0, 0.5, 1.0))
-        ).clamp_(1.0e-6, 50.0)
+        state["step_sizes"].mul_(_TORCH.where(product > 0.0, 1.2, _TORCH.where(product < 0.0, 0.5, 1.0))).clamp_(
+            1.0e-6, 50.0
+        )
         effective = _TORCH.where(product < 0.0, _TORCH.zeros_like(gradient), gradient)
         state["previous_gradient"].copy_(effective)
         return effective.sign() * state["step_sizes"]
@@ -236,12 +236,9 @@ class RoutedNeuralOptimizer(_OptimizerBase):
                         eigenvalues = _TORCH.linalg.eigvalsh(fisher)
                         tolerance = 1.0e-6 * eigenvalues.abs().max().clamp_min(1.0)
                         if eigenvalues.min() < -tolerance:
-                            raise ValueError(
-                                "fisher_provider returned an indefinite value for %s." % group["name"]
-                            )
+                            raise ValueError("fisher_provider returned an indefinite value for %s." % group["name"])
                         direction = _TORCH.linalg.solve(
-                            0.5 * (fisher + fisher.T)
-                            + group["eps"] * _TORCH.eye(flat.numel(), device=flat.device),
+                            0.5 * (fisher + fisher.T) + group["eps"] * _TORCH.eye(flat.numel(), device=flat.device),
                             flat,
                         ).reshape_as(gradient)
                         direction = direction.to(dtype=gradient.dtype)

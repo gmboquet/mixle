@@ -538,9 +538,7 @@ def test_audit_records_enforce_portable_json_and_required_decision_reason(callba
         _initial(),
         fit=_fit,
         summarize=(lambda state, index: bad_record) if callback == "summary" else _summarize,
-        should_continue=(lambda history: bad_record)
-        if callback == "decision"
-        else _threshold_controller(0.15),
+        should_continue=(lambda history: bad_record) if callback == "decision" else _threshold_controller(0.15),
         propose=_propose_next_measurement,
         acquire=_acquire,
         combine=_combine,

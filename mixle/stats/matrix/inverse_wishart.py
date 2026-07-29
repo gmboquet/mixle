@@ -219,9 +219,7 @@ class InverseWishartMeanMomentEstimator(ParameterEstimator):
         self.dim = _validated_dimension(dim, "inverse-Wishart dimension")
         self.df = _validated_inverse_wishart_df(df, self.dim)
         if self.df <= self.dim + 1.0:
-            raise InverseWishartMomentFitError(
-                "inverse-Wishart mean-moment fitting requires df > p + 1"
-            )
+            raise InverseWishartMomentFitError("inverse-Wishart mean-moment fitting requires df > p + 1")
         self.name = name
         self.keys = keys
 
@@ -269,10 +267,7 @@ class InverseWishartDataEncoder(DataSequenceEncoder):
         return "InverseWishartDataEncoder(%d)" % self.dim
 
     def __eq__(self, other: object) -> bool:
-        return (
-            isinstance(other, InverseWishartDataEncoder)
-            and self.dim == other.dim
-        )
+        return isinstance(other, InverseWishartDataEncoder) and self.dim == other.dim
 
     def seq_encode(self, x: Sequence[np.ndarray]) -> np.ndarray:
         """Encode a sequence of SPD matrices as a floating matrix stack."""

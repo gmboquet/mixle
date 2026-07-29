@@ -42,11 +42,7 @@ class SparseMarkovProbabilityContractTest(unittest.TestCase):
         dist = _distribution()
         source_bags = ([(0, 1)], [(1, 1)])
         output_bags = ([(0, 2)], [(0, 1), (1, 1)], [(1, 2)])
-        total = sum(
-            math.exp(dist.log_density((source, output)))
-            for source in source_bags
-            for output in output_bags
-        )
+        total = sum(math.exp(dist.log_density((source, output))) for source in source_bags for output in output_bags)
         self.assertAlmostEqual(total, 1.0)
 
     def test_alpha_smoothed_source_law_is_shared_by_scoring_and_sampling(self):

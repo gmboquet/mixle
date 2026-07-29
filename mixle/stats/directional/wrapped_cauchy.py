@@ -60,15 +60,11 @@ class WrappedCauchyDistribution(SequenceEncodableProbabilityDistribution):
         checked_rho = validated_angle(rho, "wrapped-Cauchy concentration")
         if not (0.0 <= checked_rho < 1.0):
             raise ValueError("WrappedCauchyDistribution requires concentration rho in [0, 1).")
-        self.mu = float(
-            math.atan2(math.sin(checked_mu), math.cos(checked_mu))
-        )
+        self.mu = float(math.atan2(math.sin(checked_mu), math.cos(checked_mu)))
         self.rho = checked_rho
         self.name = name
         self.keys = keys
-        self._log_num = (
-            math.log1p(-self.rho) + math.log1p(self.rho) - _LOG_2PI
-        )
+        self._log_num = math.log1p(-self.rho) + math.log1p(self.rho) - _LOG_2PI
         # parameter-side trig, cached as attributes: the compute declaration exposes these (not mu) so the
         # generated scorer sees scalar parameters and the (cos, sin) encoding needs no engine trig
         self.cos_mu = math.cos(self.mu)
@@ -90,10 +86,7 @@ class WrappedCauchyDistribution(SequenceEncodableProbabilityDistribution):
         """Return the log-density at a single angle (radians)."""
         theta = validated_angle(x)
         deviation = theta - self.mu
-        denominator = (
-            (1.0 - self.rho) ** 2
-            + 4.0 * self.rho * math.sin(0.5 * deviation) ** 2
-        )
+        denominator = (1.0 - self.rho) ** 2 + 4.0 * self.rho * math.sin(0.5 * deviation) ** 2
         return self._log_num - math.log(denominator)
 
     def seq_log_density(self, x: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
@@ -104,9 +97,7 @@ class WrappedCauchyDistribution(SequenceEncodableProbabilityDistribution):
             -1.0,
             1.0,
         )
-        denominator = (
-            (1.0 - self.rho) ** 2 + 2.0 * self.rho * (1.0 - cos_dev)
-        )
+        denominator = (1.0 - self.rho) ** 2 + 2.0 * self.rho * (1.0 - cos_dev)
         return self._log_num - np.log(denominator)
 
     # --- compute-engine backend (numpy + torch/GPU). The encoder pre-computes (cos, sin) and the
@@ -153,15 +144,8 @@ class WrappedCauchyDistribution(SequenceEncodableProbabilityDistribution):
             1.0 - cos_dev,
             engine.asarray(0.0),
         )
-        log_num = (
-            engine.log(1.0 - rho)
-            + engine.log(1.0 + rho)
-            - engine.log(engine.asarray(2.0 * math.pi))
-        )
-        denominator = (
-            (1.0 - rho) * (1.0 - rho)
-            + 2.0 * rho * one_minus_cosine
-        )
+        log_num = engine.log(1.0 - rho) + engine.log(1.0 + rho) - engine.log(engine.asarray(2.0 * math.pi))
+        denominator = (1.0 - rho) * (1.0 - rho) + 2.0 * rho * one_minus_cosine
         return log_num - engine.log(denominator)
 
     def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
@@ -310,9 +294,7 @@ class WrappedCauchyAccumulator(SequenceEncodableStatisticAccumulator):
             self.sum_sin + sum_sin,
             self.count + count,
         )
-        self.count, self.sum_cos, self.sum_sin = (
-            validated_circular_statistics(combined, count_index=2)
-        )
+        self.count, self.sum_cos, self.sum_sin = validated_circular_statistics(combined, count_index=2)
         return self
 
     def value(self) -> tuple[float, float, float]:
@@ -321,9 +303,7 @@ class WrappedCauchyAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x: tuple[float, float, float]) -> "WrappedCauchyAccumulator":
         """Replace accumulator contents from circular-resultant statistics."""
-        self.count, self.sum_cos, self.sum_sin = (
-            validated_circular_statistics(x, count_index=2)
-        )
+        self.count, self.sum_cos, self.sum_sin = validated_circular_statistics(x, count_index=2)
         return self
 
     def scale(self, c: float) -> "WrappedCauchyAccumulator":
@@ -361,9 +341,7 @@ class WrappedCauchyEstimator(ParameterEstimator):
         keys: str | None = None,
     ) -> None:
         if rho_max is not None:
-            raise ValueError(
-                "wrapped-Cauchy boundary clipping is not a valid fit contract"
-            )
+            raise ValueError("wrapped-Cauchy boundary clipping is not a valid fit contract")
         self.name = name
         self.keys = keys
 
@@ -378,15 +356,11 @@ class WrappedCauchyEstimator(ParameterEstimator):
             count_index=2,
         )
         if count == 0.0:
-            raise WrappedCauchyFitError(
-                "wrapped-Cauchy fitting requires positive observation weight"
-            )
+            raise WrappedCauchyFitError("wrapped-Cauchy fitting requires positive observation weight")
         mu = math.atan2(sum_sin, sum_cos)
         rho = math.hypot(sum_cos, sum_sin) / count
         if rho >= 1.0 - 1.0e-12:
-            raise WrappedCauchyFitError(
-                "wrapped-Cauchy resultant is on a boundary with no finite fit"
-            )
+            raise WrappedCauchyFitError("wrapped-Cauchy resultant is on a boundary with no finite fit")
         result = WrappedCauchyDistribution(
             mu,
             rho,

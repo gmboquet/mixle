@@ -68,9 +68,8 @@ class CorrectionResult:
         if isinstance(versions, Mapping):
             versions = tuple(sorted((str(key), int(value)) for key, value in versions.items()))
             object.__setattr__(self, "target_dependency_versions", versions)
-        if (
-            len({key for key, _ in versions}) != len(versions)
-            or any(not key or version < 0 for key, version in versions)
+        if len({key for key, _ in versions}) != len(versions) or any(
+            not key or version < 0 for key, version in versions
         ):
             raise ValueError("correction target dependency versions must be unique and non-negative.")
         computed_hash = payload_fingerprint(self.payload)
@@ -135,9 +134,7 @@ class StalenessReceipt:
             raise ValueError("staleness receipt identities must be non-empty.")
         if not isinstance(self.action, StalenessAction):
             raise TypeError("staleness receipt action must be a StalenessAction value.")
-        if self.correction_semantics is not None and not isinstance(
-            self.correction_semantics, CorrectionSemantics
-        ):
+        if self.correction_semantics is not None and not isinstance(self.correction_semantics, CorrectionSemantics):
             raise TypeError("staleness receipt correction semantics are invalid.")
         if self.target_model_version < 0 or not math.isfinite(self.scale) or self.scale < 0.0:
             raise ValueError("staleness receipt target version and scale must be valid.")
@@ -145,9 +142,8 @@ class StalenessReceipt:
         if isinstance(versions, Mapping):
             versions = tuple(sorted((str(key), int(value)) for key, value in versions.items()))
             object.__setattr__(self, "target_dependency_versions", versions)
-        if (
-            len({key for key, _ in versions}) != len(versions)
-            or any(not key or version < 0 for key, version in versions)
+        if len({key for key, _ in versions}) != len(versions) or any(
+            not key or version < 0 for key, version in versions
         ):
             raise ValueError("staleness target dependency versions must be unique and non-negative.")
         if self.action is StalenessAction.CORRECT:
@@ -175,9 +171,7 @@ class StalenessReceipt:
             "scale": self.scale,
             "correction_fingerprint": self.correction_fingerprint,
             "correction_semantics": (
-                self.correction_semantics.value
-                if self.correction_semantics is not None
-                else None
+                self.correction_semantics.value if self.correction_semantics is not None else None
             ),
             "source_payload_hash": self.source_payload_hash,
             "target_model_version": self.target_model_version,
@@ -287,11 +281,7 @@ def assess_staleness(
             or correction.target_dependency_versions != target_versions
         ):
             raise ValueError("correction result does not match the complete target version vector.")
-        correction_scale = (
-            1.0
-            if correction.semantics is CorrectionSemantics.EXACT_REBASE
-            else scale
-        )
+        correction_scale = 1.0 if correction.semantics is CorrectionSemantics.EXACT_REBASE else scale
         return result(
             StalenessAction.CORRECT,
             (
@@ -364,9 +354,7 @@ def shrink_proposal(
         if exact_rebase and receipt.scale != 1.0:
             raise ValueError("an exact correction cannot be statistically shrunk.")
         payload = correction.payload if exact_rebase else _scale_payload(correction.payload, receipt.scale)
-        staleness_semantics = (
-            "exact_rebase" if exact_rebase else "corrected_statistical_approximation"
-        )
+        staleness_semantics = "exact_rebase" if exact_rebase else "corrected_statistical_approximation"
         predicted_gain = None
         correction_fingerprint = correction.fingerprint
     else:
@@ -374,11 +362,7 @@ def shrink_proposal(
             raise ValueError("bounded-stale shrinkage cannot carry a correction result.")
         payload = _scale_payload(proposal.payload, receipt.scale)
         staleness_semantics = "bounded_stale_approximation"
-        predicted_gain = (
-            proposal.predicted_gain * receipt.scale
-            if proposal.predicted_gain is not None
-            else None
-        )
+        predicted_gain = proposal.predicted_gain * receipt.scale if proposal.predicted_gain is not None else None
         correction_fingerprint = None
     return replace(
         proposal,

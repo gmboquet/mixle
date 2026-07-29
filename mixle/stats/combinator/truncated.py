@@ -114,9 +114,7 @@ def _is_allowed(
     except TypeError:
         return False
     if allowed_keys is not None:
-        return key in allowed_keys or any(
-            _same_support_value(value, allowed) for allowed in allowed_values
-        )
+        return key in allowed_keys or any(_same_support_value(value, allowed) for allowed in allowed_values)
     return key not in forbidden_keys and not any(
         _same_support_value(value, forbidden) for forbidden in forbidden_values
     )
@@ -286,17 +284,11 @@ class TruncatedDistribution(SequenceEncodableProbabilityDistribution):
     def support_size(self) -> int | None:
         """Cardinality of the retained support (``None`` if infinite)."""
         if self._allowed_values is not None:
-            return sum(
-                _atomic_log_probability(self.base, value) > -math.inf
-                for value in self._allowed_values
-            )
+            return sum(_atomic_log_probability(self.base, value) > -math.inf for value in self._allowed_values)
         base_n = self.base.support_size()
         if base_n is None:
             return None
-        forbidden_in = sum(
-            _atomic_log_probability(self.base, value) > -math.inf
-            for value in self._forbidden_values
-        )
+        forbidden_in = sum(_atomic_log_probability(self.base, value) > -math.inf for value in self._forbidden_values)
         return max(0, int(base_n) - forbidden_in)
 
     def enumerator(self) -> "TruncatedEnumerator":

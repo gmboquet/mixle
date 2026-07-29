@@ -32,12 +32,7 @@ class PowerLawHawkesTest(unittest.TestCase):
 
     def test_branching_ratio_subcritical(self):
         self.assertTrue(0 < self.d.branching_ratio() < 1)
-        expected = (
-            self.d.A
-            * self.d.c
-            / (self.d.p - 1.0)
-            / (1.0 - self.d.mark_dist.beta * self.d.alpha)
-        )
+        expected = self.d.A * self.d.c / (self.d.p - 1.0) / (1.0 - self.d.mark_dist.beta * self.d.alpha)
         self.assertAlmostEqual(self.d.branching_ratio(), expected)
 
     def test_sampler_is_clustered(self):

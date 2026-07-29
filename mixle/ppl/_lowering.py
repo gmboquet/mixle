@@ -877,12 +877,7 @@ class _FixedMVNEstimator:
             count = float(suff_stat[2])
             sample_mean = np.asarray(suff_stat[0], dtype=float) / count
             second = np.asarray(suff_stat[1], dtype=float) / count
-            raw_cov = (
-                second
-                - np.outer(sample_mean, mean)
-                - np.outer(mean, sample_mean)
-                + np.outer(mean, mean)
-            )
+            raw_cov = second - np.outer(sample_mean, mean) - np.outer(mean, sample_mean) + np.outer(mean, mean)
             cov = self.base._regularize_covar(raw_cov)
         return MultivariateGaussianDistribution(mean, cov, name=self.base.name, keys=self.base.keys)
 

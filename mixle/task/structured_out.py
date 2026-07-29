@@ -222,9 +222,7 @@ def _joint_scores(
             raise ValueError(f"categorical field {key!r} returned invalid calibration probabilities")
         index = {label: j for j, label in enumerate(labels)}
         try:
-            field_scores = np.asarray(
-                [1.0 - probabilities[i, index[str(row[key])]] for i, row in enumerate(outputs)]
-            )
+            field_scores = np.asarray([1.0 - probabilities[i, index[str(row[key])]] for i, row in enumerate(outputs)])
         except KeyError as exc:
             raise ValueError(f"joint calibration observed an unknown label for field {key!r}") from exc
         scores = np.maximum(scores, field_scores)
@@ -278,10 +276,7 @@ def solve_structured(
     if schema is None:
         if not raw_outputs or not isinstance(raw_outputs[0], dict) or not raw_outputs[0]:
             raise ValueError("the teacher must produce a nonempty dictionary schema")
-        schema = {
-            str(key): "numeric" if _is_number(value) else "categorical"
-            for key, value in raw_outputs[0].items()
-        }
+        schema = {str(key): "numeric" if _is_number(value) else "categorical" for key, value in raw_outputs[0].items()}
     else:
         schema = dict(schema)
         if not schema or any(not isinstance(key, str) or not key for key in schema):
@@ -379,8 +374,6 @@ def solve_structured(
             "contract": "joint_structured",
             "calibration_count": len(joint_inputs),
             "calibration_indices": [int(i) for i in joint_idx],
-            "calibration_sha256": sha256(
-                repr(list(zip(joint_inputs, joint_outputs))).encode("utf-8")
-            ).hexdigest(),
+            "calibration_sha256": sha256(repr(list(zip(joint_inputs, joint_outputs))).encode("utf-8")).hexdigest(),
         },
     )

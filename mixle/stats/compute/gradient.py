@@ -260,15 +260,11 @@ def mixture_priors(priors, n: int):
     family = prior_family(priors)
     if family == "mixture":
         _unexpected_keys(priors, {"family", "components", "weights", "alignment_receipt"}, "mixture prior")
-        components = prior_sequence(
-            priors.get("components", ()), n, mode=mode, label="mixture component priors"
-        )
+        components = prior_sequence(priors.get("components", ()), n, mode=mode, label="mixture component priors")
         return components, priors.get("weights")
     if isinstance(priors, Mapping) and ("components" in priors or "weights" in priors):
         _unexpected_keys(priors, {"components", "weights", "alignment_receipt"}, "mixture prior")
-        components = prior_sequence(
-            priors.get("components", ()), n, mode=mode, label="mixture component priors"
-        )
+        components = prior_sequence(priors.get("components", ()), n, mode=mode, label="mixture component priors")
         return components, priors.get("weights")
     if isinstance(priors, (list, tuple)):
         return prior_sequence(priors, n, label="mixture component priors"), None
@@ -356,13 +352,9 @@ def markov_chain_priors(priors, row_keys):
         seq = prior_sequence(priors, 3, mode=mode, label="Markov-chain priors")
         transition_priors = seq[1]
         if isinstance(transition_priors, Mapping):
-            transition_priors = _aligned_mapping(
-                transition_priors, row_keys, mode, "Markov transition-row priors"
-            )
+            transition_priors = _aligned_mapping(transition_priors, row_keys, mode, "Markov transition-row priors")
         elif isinstance(transition_priors, (list, tuple)):
-            transition_priors = _aligned_mapping(
-                transition_priors, row_keys, mode, "Markov transition-row priors"
-            )
+            transition_priors = _aligned_mapping(transition_priors, row_keys, mode, "Markov transition-row priors")
         else:
             if mode != "broadcast":
                 raise ValueError("one transition prior requires an explicit broadcast receipt.")
@@ -438,15 +430,16 @@ def dirichlet_alpha_tensor(alpha, labels, logits, engine, torch, *, prior=None):
         missing = [label for label in labels if label not in alpha]
         if missing:
             raise ValueError(
-                "Dirichlet alpha is missing labels required by exact alignment: %s."
-                % ", ".join(map(repr, missing))
+                "Dirichlet alpha is missing labels required by exact alignment: %s." % ", ".join(map(repr, missing))
             )
         alpha = [alpha[label] for label in labels]
     alpha_t = engine.asarray(alpha)
     shape = tuple(getattr(alpha_t, "shape", ()))
     logits_shape = tuple(getattr(logits, "shape", ()))
     if shape not in ((), logits_shape):
-        raise ValueError("Dirichlet alpha has shape %s; expected scalar or exact logits shape %s." % (shape, logits_shape))
+        raise ValueError(
+            "Dirichlet alpha has shape %s; expected scalar or exact logits shape %s." % (shape, logits_shape)
+        )
     to_numpy = getattr(engine, "to_numpy", np.asarray)
     host = np.asarray(to_numpy(alpha_t))
     if host.dtype.kind == "b":

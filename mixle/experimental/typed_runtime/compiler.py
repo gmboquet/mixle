@@ -619,7 +619,9 @@ def compile_update_graph(
                 node_id=node_id,
                 path=path,
                 model_type=_type_attribute(current, "__name__"),
-                estimator_type=_type_attribute(current_estimator, "__name__") if current_estimator is not None else None,
+                estimator_type=_type_attribute(current_estimator, "__name__")
+                if current_estimator is not None
+                else None,
                 contract=contract,
                 cost=cost,
                 parameter_count=parameter_count,

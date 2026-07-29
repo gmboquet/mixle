@@ -369,8 +369,7 @@ def train_with_self_distillation(
             loss.backward()
             opt.step()
             if any(
-                not bool(torch.all(torch.isfinite(parameter)).detach().cpu().item())
-                for parameter in model.parameters()
+                not bool(torch.all(torch.isfinite(parameter)).detach().cpu().item()) for parameter in model.parameters()
             ):
                 raise RuntimeError("self-distillation produced non-finite model parameters")
             teacher.update(model)
@@ -439,9 +438,7 @@ def _validated_batch(batch: Any, model: Any, device: Any, torch_module: Any) -> 
     for values, name in ((context_array, "context"), (target_array, "next_token")):
         if values.dtype.kind not in {"i", "u", "f"}:
             raise ValueError(f"{name} must contain numeric token ids")
-        if values.dtype.kind == "f" and (
-            not np.all(np.isfinite(values)) or not np.all(values == np.round(values))
-        ):
+        if values.dtype.kind == "f" and (not np.all(np.isfinite(values)) or not np.all(values == np.round(values))):
             raise ValueError(f"{name} must contain finite integer-valued token ids")
         if np.any(values < 0) or np.any(values >= model.vocab):
             raise ValueError(f"{name} token ids must lie in [0, {model.vocab})")

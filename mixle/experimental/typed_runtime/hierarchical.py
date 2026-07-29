@@ -127,8 +127,7 @@ class HierarchicalProposalCoordinator:
                     proposal = shrink_proposal(
                         proposal,
                         receipt,
-                        proposal_id="rebased:%s:v%d"
-                        % (proposal.proposal_id, self.coordinator.versions.model_version),
+                        proposal_id="rebased:%s:v%d" % (proposal.proposal_id, self.coordinator.versions.model_version),
                         correction=correction,
                     )
                 except (TypeError, ValueError) as error:

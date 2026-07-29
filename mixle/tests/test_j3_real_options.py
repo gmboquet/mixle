@@ -498,9 +498,7 @@ def test_observation_model_rejects_matrix_free_covariance():
 def test_heuristic_warns_on_a_clearly_non_gaussian_posterior():
     posterior = _BimodalToyPosterior()
     with pytest.warns(UserWarning, match="non-Gaussian"):
-        voi_dollars(
-            posterior, _decision_value, _heuristic_info(variance_reduction=0.5), rng=np.random.default_rng(0)
-        )
+        voi_dollars(posterior, _decision_value, _heuristic_info(variance_reduction=0.5), rng=np.random.default_rng(0))
 
 
 def test_observation_model_warns_on_a_clearly_non_gaussian_posterior():

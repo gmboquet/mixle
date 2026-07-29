@@ -162,10 +162,7 @@ class ContextActionExecutor:
             if missing:
                 raise KeyError("context action inputs are missing: %s" % ", ".join(missing))
             version_before = self.graph.version
-            if (
-                action.expected_graph_version is not None
-                and action.expected_graph_version != version_before
-            ):
+            if action.expected_graph_version is not None and action.expected_graph_version != version_before:
                 raise RuntimeError(
                     "context action expected graph version %d, found %d."
                     % (action.expected_graph_version, version_before)
@@ -220,10 +217,7 @@ class ContextActionExecutor:
                 if result.tool_calls > limits.tool_calls:
                     violations.append("tool_calls")
                 if violations:
-                    raise RuntimeError(
-                        "context action exceeded declared resource limits: %s."
-                        % ", ".join(violations)
-                    )
+                    raise RuntimeError("context action exceeded declared resource limits: %s." % ", ".join(violations))
                 receipt = ContextActionReceipt(
                     action,
                     version_before,

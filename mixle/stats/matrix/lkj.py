@@ -67,11 +67,7 @@ def _is_corr_like(r: np.ndarray, dim: int | None = None) -> bool:
         return False
     if dim is not None and r.shape[0] != dim:
         return False
-    return bool(
-        np.all(np.isfinite(r))
-        and np.array_equal(r, r.T)
-        and np.array_equal(np.diag(r), np.ones(r.shape[0]))
-    )
+    return bool(np.all(np.isfinite(r)) and np.array_equal(r, r.T) and np.array_equal(np.diag(r), np.ones(r.shape[0])))
 
 
 def _correlation_batch(
@@ -97,10 +93,7 @@ def _validated_correlation(
 ) -> tuple[np.ndarray, float]:
     result = _matrix_event(value, dim, name)
     if not _is_corr_like(result, dim):
-        raise ValueError(
-            "%s must be a finite, exactly symmetric matrix with unit diagonal"
-            % name
-        )
+        raise ValueError("%s must be a finite, exactly symmetric matrix with unit diagonal" % name)
     logdet = cholesky_logdet(result)
     if logdet is None:
         raise ValueError("%s must be positive definite" % name)
@@ -114,24 +107,17 @@ def _validated_encoded_lkj(
     expected_dim: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     if not isinstance(value, (tuple, list)) or len(value) != 3:
-        raise ValueError(
-            "LKJ encoded data must be (dimension, log determinants, validity mask)"
-        )
+        raise ValueError("LKJ encoded data must be (dimension, log determinants, validity mask)")
     encoded_dim = _validated_dimension(value[0], "LKJ encoded dimension")
     if encoded_dim != expected_dim:
-        raise ValueError(
-            "LKJ encoded dimension %d does not match model dimension %d"
-            % (encoded_dim, expected_dim)
-        )
+        raise ValueError("LKJ encoded dimension %d does not match model dimension %d" % (encoded_dim, expected_dim))
     try:
         logdet = np.asarray(value[1], dtype=np.float64)
         valid = np.asarray(value[2])
     except (TypeError, ValueError) as exc:
         raise ValueError("LKJ encoded data must be numeric") from exc
     if logdet.ndim != 1 or valid.shape != logdet.shape or valid.dtype != np.bool_:
-        raise ValueError(
-            "LKJ encoded log determinants and boolean validity mask must be aligned vectors"
-        )
+        raise ValueError("LKJ encoded log determinants and boolean validity mask must be aligned vectors")
     if np.any(np.isnan(logdet)) or np.any(np.isposinf(logdet)):
         raise ValueError("LKJ encoded log determinants cannot contain NaN or +inf")
     if np.any(valid & ~np.isfinite(logdet)):
@@ -146,10 +132,7 @@ def _validated_encoded_lkj(
 def _validated_lkj_statistics(value: Any) -> tuple[float, float]:
     if not isinstance(value, (tuple, list)) or len(value) != 2:
         raise ValueError("LKJ sufficient statistics must be a two-item tuple")
-    if any(
-        isinstance(item, (bool, np.bool_)) or np.ndim(item) != 0
-        for item in value
-    ):
+    if any(isinstance(item, (bool, np.bool_)) or np.ndim(item) != 0 for item in value):
         raise TypeError("LKJ sufficient statistics must be real scalars")
     try:
         count = float(value[0])
@@ -402,15 +385,8 @@ class LKJEstimator(ParameterEstimator):
             lower, upper = (float(value) for value in eta_bounds)
         except (TypeError, ValueError) as exc:
             raise ValueError("LKJ eta_bounds must be numeric") from exc
-        if (
-            not np.isfinite(lower)
-            or not np.isfinite(upper)
-            or lower <= 0.0
-            or lower >= upper
-        ):
-            raise ValueError(
-                "LKJ eta_bounds must be finite, positive, and strictly ordered"
-            )
+        if not np.isfinite(lower) or not np.isfinite(upper) or lower <= 0.0 or lower >= upper:
+            raise ValueError("LKJ eta_bounds must be finite, positive, and strictly ordered")
         self.eta_bounds = (lower, upper)
         self.name = name
         self.keys = keys
@@ -471,9 +447,7 @@ class LKJEstimator(ParameterEstimator):
             iterations = int(result.iterations)
             residual = float(score(eta))
             if not np.isfinite(residual) or abs(residual) > 1.0e-7:
-                raise LKJFitError(
-                    "LKJ profile root lacks a finite optimality certificate"
-                )
+                raise LKJFitError("LKJ profile root lacks a finite optimality certificate")
         fitted = LKJDistribution(
             self.dim,
             eta,

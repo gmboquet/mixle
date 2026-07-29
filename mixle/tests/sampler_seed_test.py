@@ -566,11 +566,7 @@ def _bayes_only_distribution_catalog():
 
 class SamplerSeedTestCase(unittest.TestCase):
     def assert_catalog_matches_exports(self, module, catalog):
-        expected = {
-            name
-            for name in module.__all__
-            if name.endswith("Distribution") and name != "NullDistribution"
-        }
+        expected = {name for name in module.__all__ if name.endswith("Distribution") and name != "NullDistribution"}
         self.assertEqual(expected, set(catalog))
 
     def assert_repeatable_sampler(self, name, dist):

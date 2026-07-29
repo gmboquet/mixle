@@ -125,8 +125,10 @@ class PINNProblemSpec:
             "identifiability_conditions",
         ):
             values = getattr(self, name)
-            if not isinstance(values, tuple) or not values or any(
-                not isinstance(value, str) or not value.strip() for value in values
+            if (
+                not isinstance(values, tuple)
+                or not values
+                or any(not isinstance(value, str) or not value.strip() for value in values)
             ):
                 raise ValueError(f"{name} must be a non-empty tuple of non-empty strings")
             if len(set(values)) != len(values):
@@ -246,9 +248,7 @@ def _encode_residual_fn(fn: Any) -> dict[str, Any]:
             "lambda or closure); construct the model from a named function if you need serialization."
         ) from e
     if not data or len(data) > MAX_PINN_RESIDUAL_BYTES:
-        raise ValueError(
-            f"PINN residual artifact must contain 1 through {MAX_PINN_RESIDUAL_BYTES} decoded bytes"
-        )
+        raise ValueError(f"PINN residual artifact must contain 1 through {MAX_PINN_RESIDUAL_BYTES} decoded bytes")
     return {
         "__pinn_residual__": base64.b64encode(data).decode("ascii"),
         "format": _PINN_RESIDUAL_FORMAT,
@@ -379,9 +379,7 @@ class PINNRegression(NeuralGaussian):
         state["residual_fn"] = _encode_residual_fn(self.residual_fn)
         state["domain"] = (self.domain[0].tolist(), self.domain[1].tolist())
         state["problem"] = self.problem.to_dict()
-        state["constraint_receipt"] = (
-            None if self.constraint_receipt is None else self.constraint_receipt.to_dict()
-        )
+        state["constraint_receipt"] = None if self.constraint_receipt is None else self.constraint_receipt.to_dict()
         return state
 
     def __pysp_setstate__(self, state: dict[str, Any]) -> None:
@@ -421,9 +419,7 @@ class PINNRegression(NeuralGaussian):
             "residual_weight": self.residual_weight,
             "n_collocation": self.n_collocation,
             "seed": self.seed,
-            "constraint_receipt": (
-                None if self.constraint_receipt is None else self.constraint_receipt.to_dict()
-            ),
+            "constraint_receipt": (None if self.constraint_receipt is None else self.constraint_receipt.to_dict()),
         }
 
     @classmethod
@@ -509,9 +505,7 @@ class PINNRegressionEstimator(NeuralGaussianEstimator):
             raise ValueError("PINN sufficient statistics must be an (x, y, weights) tuple")
         xs, ys, ws = (np.asarray(value) for value in suff_stat)
         if xs.ndim != 2 or xs.shape[1] != len(self.problem.coordinates):
-            raise ValueError(
-                f"PINN x must have shape (n, {len(self.problem.coordinates)}), got {xs.shape}"
-            )
+            raise ValueError(f"PINN x must have shape (n, {len(self.problem.coordinates)}), got {xs.shape}")
         if ys.ndim != 2 or ys.shape[1] != len(self.problem.fields):
             raise ValueError(f"PINN y must have shape (n, {len(self.problem.fields)}), got {ys.shape}")
         if ws.ndim != 1 or not (len(xs) == len(ys) == len(ws)):
@@ -565,10 +559,7 @@ class PINNRegressionEstimator(NeuralGaussianEstimator):
             d = yt.shape[1]
 
         log_noise = (
-            torch.log(torch.tensor(float(self.noise), dtype=dtype, device=dev))
-            .clone()
-            .detach()
-            .requires_grad_(True)
+            torch.log(torch.tensor(float(self.noise), dtype=dtype, device=dev)).clone().detach().requires_grad_(True)
         )
         opt = torch.optim.Adam(list(self.module.parameters()) + [log_noise], lr=self.lr)
         residual_losses: list[float] = []

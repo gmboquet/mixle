@@ -410,7 +410,9 @@ def fit_scaling_law(
         np.asarray(fitted.posterior(name), dtype=float).ravel()
         for name in ("E", "log_A", "log_alpha", "log_B", "log_beta", "log_sigma")
     ]
-    posterior_finite = bool(sample_columns and all(col.size == draws and np.isfinite(col).all() for col in sample_columns))
+    posterior_finite = bool(
+        sample_columns and all(col.size == draws and np.isfinite(col).all() for col in sample_columns)
+    )
     acceptance_rate = float(getattr(fitted.result, "acceptance_rate", float("nan")))
     n_chains = int(getattr(fitted.result, "n_chains", 1))
     if not posterior_finite:
@@ -461,9 +463,7 @@ def allocate_compute(
         raise ValueError("fit must be a ScalingLawFit.")
     fit.require_usable()
     c = _finite_scalar(compute_budget, "compute_budget", positive=True)
-    flops_per_token_param = _finite_scalar(
-        flops_per_token_param, "flops_per_token_param", positive=True
-    )
+    flops_per_token_param = _finite_scalar(flops_per_token_param, "flops_per_token_param", positive=True)
     n_bounds = _positive_bounds(n_bounds, "n_bounds")
     n_init = _exact_integer(n_init, "n_init", minimum=1)
     n_iter = _exact_integer(n_iter, "n_iter", minimum=1)
@@ -500,9 +500,7 @@ def allocate_fixed_heuristic(
     """
     c = _finite_scalar(compute_budget, "compute_budget", positive=True)
     ratio = _finite_scalar(ratio, "ratio", positive=True)
-    flops_per_token_param = _finite_scalar(
-        flops_per_token_param, "flops_per_token_param", positive=True
-    )
+    flops_per_token_param = _finite_scalar(flops_per_token_param, "flops_per_token_param", positive=True)
     n_val = float(np.sqrt(c / (flops_per_token_param * ratio)))
     d_val = ratio * n_val
     if not np.isfinite((n_val, d_val)).all() or n_val <= 0.0 or d_val <= 0.0:
@@ -674,9 +672,7 @@ class ScalingLawAllocationController:
             n_params=_finite_scalar(n_params, "n_params", positive=True),
             n_tokens=_finite_scalar(n_tokens, "n_tokens", positive=True),
             compute_budget=_finite_scalar(compute_budget, "compute_budget", positive=True),
-            flops_per_token_param=_finite_scalar(
-                flops_per_token_param, "flops_per_token_param", positive=True
-            ),
+            flops_per_token_param=_finite_scalar(flops_per_token_param, "flops_per_token_param", positive=True),
             predicted_loss=predicted_loss,
             heuristic_predicted_loss=heuristic_predicted_loss,
             predicted_gain=heuristic_predicted_loss - predicted_loss,
@@ -793,9 +789,7 @@ def allocate_compute_learned(
         raise ValueError("fit must be a ScalingLawFit.")
     fit.require_usable()
     compute_budget = _finite_scalar(compute_budget, "compute_budget", positive=True)
-    flops_per_token_param = _finite_scalar(
-        flops_per_token_param, "flops_per_token_param", positive=True
-    )
+    flops_per_token_param = _finite_scalar(flops_per_token_param, "flops_per_token_param", positive=True)
     if controller is not None and not isinstance(controller, ScalingLawAllocationController):
         raise ValueError("controller must be a ScalingLawAllocationController.")
     controller = controller if controller is not None else ScalingLawAllocationController()

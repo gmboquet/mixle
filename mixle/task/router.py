@@ -296,11 +296,7 @@ def resolve_from_harvest(
 
     inputs, labels = router.harvested()
     n_harvested = len(inputs)
-    if (
-        not isinstance(name, str)
-        or not name
-        or any(existing_name == name for existing_name, _, _ in router.tiers)
-    ):
+    if not isinstance(name, str) or not name or any(existing_name == name for existing_name, _, _ in router.tiers):
         raise ValueError("name must be non-empty and unique within the router")
     if (
         isinstance(cost_per_request, (bool, np.bool_))
@@ -390,13 +386,7 @@ def resolve_from_harvest(
     n_intercepted = int(intercepted.sum())
     drop = n_intercepted / len(eval_in)
     esc_after = 1.0 - drop
-    correct = int(
-        sum(
-            str(decisions[i]) == eval_lab[i]
-            for i in range(len(eval_in))
-            if intercepted[i]
-        )
-    )
+    correct = int(sum(str(decisions[i]) == eval_lab[i] for i in range(len(eval_in)) if intercepted[i]))
     local_accuracy = correct / n_intercepted if n_intercepted else 0.0
     # Two simultaneous release claims: Bonferroni-split the failure budget.
     tail = (1.0 - float(evaluation_confidence)) / 2.0
@@ -421,8 +411,7 @@ def resolve_from_harvest(
             local_accuracy_lower=float(accuracy_lower),
             evaluation_confidence=float(evaluation_confidence),
             reason=(
-                "independent evaluation lower bounds did not clear both "
-                f"drop>={min_drop} and accuracy>={1.0 - alpha}"
+                f"independent evaluation lower bounds did not clear both drop>={min_drop} and accuracy>={1.0 - alpha}"
             ),
         )
 

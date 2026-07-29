@@ -86,9 +86,7 @@ def sparse_model_distances(
     the dense n x n affinity matrix is never materialized. Distances are
     non-negative. evidence_cap as in model_log_affinity.
     """
-    factors, n, k, cap = _validated_neighbor_request(
-        posterior_mat, ll_mat, affinity, k=k, evidence_cap=evidence_cap
-    )
+    factors, n, k, cap = _validated_neighbor_request(posterior_mat, ll_mat, affinity, k=k, evidence_cap=evidence_cap)
     block_size = _validate_block_size(block_size)
 
     rows = np.repeat(np.arange(n), k)
@@ -285,17 +283,11 @@ def approx_sparse_model_distances(
     proposal/evaluation split is the intended boundary for future distributed
     graph construction.
     """
-    factors, n, k, cap = _validated_neighbor_request(
-        posterior_mat, ll_mat, affinity, k=k, evidence_cap=evidence_cap
-    )
+    factors, n, k, cap = _validated_neighbor_request(posterior_mat, ll_mat, affinity, k=k, evidence_cap=evidence_cap)
 
     if leaf_size is None:
         leaf_size = min(n, max(64, 2 * k))
-    elif (
-        isinstance(leaf_size, bool)
-        or not isinstance(leaf_size, (int, np.integer))
-        or not k <= leaf_size <= n
-    ):
+    elif isinstance(leaf_size, bool) or not isinstance(leaf_size, (int, np.integer)) or not k <= leaf_size <= n:
         raise ValueError(f"leaf_size must be an integer between k={k} and n={n}, or None.")
     if isinstance(n_trees, bool) or not isinstance(n_trees, (int, np.integer)) or n_trees <= 0:
         raise ValueError("n_trees must be a positive integer.")
@@ -356,9 +348,7 @@ def model_knn(
     matrix is never materialized.
     evidence_cap as in model_log_affinity.
     """
-    factors, n, k, cap = _validated_neighbor_request(
-        posterior_mat, ll_mat, affinity, k=k, evidence_cap=evidence_cap
-    )
+    factors, n, k, cap = _validated_neighbor_request(posterior_mat, ll_mat, affinity, k=k, evidence_cap=evidence_cap)
     block_size = _validate_block_size(block_size)
 
     knn_idx = np.empty((n, k), dtype=np.int64)

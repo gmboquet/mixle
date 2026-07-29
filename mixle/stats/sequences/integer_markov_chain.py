@@ -109,12 +109,7 @@ def _exact_state(value: Any, *, num_values: int, label: str) -> int:
         numeric = float(array)
     except (TypeError, ValueError, OverflowError) as exc:
         raise TypeError("%s must be an exact integer state." % label) from exc
-    if (
-        not math.isfinite(numeric)
-        or math.floor(numeric) != numeric
-        or numeric < 0.0
-        or numeric >= num_values
-    ):
+    if not math.isfinite(numeric) or math.floor(numeric) != numeric or numeric < 0.0 or numeric >= num_values:
         raise ValueError("%s must be in the declared support [0, %d)." % (label, num_values))
     return int(numeric)
 
@@ -132,8 +127,7 @@ def _checked_observation(
     elif isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
         raise TypeError("%s must be a sequence of integer states." % label)
     states = tuple(
-        _exact_state(state, num_values=num_values, label="%s[%d]" % (label, index))
-        for index, state in enumerate(value)
+        _exact_state(state, num_values=num_values, label="%s[%d]" % (label, index)) for index, state in enumerate(value)
     )
     if len(states) < lag:
         raise ValueError("%s length must be at least lag=%d." % (label, lag))
@@ -184,9 +178,7 @@ def _validate_initial_child(
     length_dist = getattr(initial_dist, "len_dist", None)
     element_dist = getattr(initial_dist, "dist", None)
     if length_dist is None or element_dist is None:
-        raise TypeError(
-            "IntegerMarkovChainDistribution init_dist must expose element and length laws."
-        )
+        raise TypeError("IntegerMarkovChainDistribution init_dist must expose element and length laws.")
     from mixle.stats.combinator.sequence import _checked_length, _validate_length_distribution
 
     _validate_length_distribution(length_dist)
@@ -270,9 +262,7 @@ def _validate_statistics(
         if key in seen:
             raise ValueError("%s contains duplicate transition %r." % (path, key))
         seen.add(key)
-        transitions.append(
-            (prefix, target, _finite_nonnegative(entry[2], label="%s transition count" % path))
-        )
+        transitions.append((prefix, target, _finite_nonnegative(entry[2], label="%s transition count" % path)))
     canonical = tuple(sorted(transitions, key=lambda entry: (entry[0], entry[1])))
     if tuple(transitions) != canonical:
         raise ValueError("%s transition counts must use canonical lexicographic order." % path)
@@ -418,9 +408,7 @@ class IntegerMarkovChainDistribution(SequenceEncodableProbabilityDistribution):
 
         if supports(self.init_dist, Neutral) or supports(self.len_dist, Neutral):
             return DensitySemantics.LIKELIHOOD_FACTOR
-        return join_density_semantics(
-            child.density_semantics() for child in (self.init_dist, self.len_dist)
-        )
+        return join_density_semantics(child.density_semantics() for child in (self.init_dist, self.len_dist))
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the distribution."""
@@ -1175,13 +1163,9 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             label="integer Markov observation",
         )
         weight = _finite_nonnegative(weight, label="integer Markov observation weight")
-        self.len_accumulator.update(
-            len(states), weight, estimate.len_dist if estimate is not None else None
-        )
+        self.len_accumulator.update(len(states), weight, estimate.len_dist if estimate is not None else None)
         self.length_nobs += weight
-        self.init_accumulator.update(
-            states[: self.lag], weight, estimate.init_dist if estimate is not None else None
-        )
+        self.init_accumulator.update(states[: self.lag], weight, estimate.init_dist if estimate is not None else None)
         self.initial_nobs += weight
 
         for i in range(len(states) - self.lag):
@@ -1458,9 +1442,7 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             lag=self.lag,
             path="IntegerMarkovChainAccumulator.from_value",
         )
-        self.trans_count_map = {
-            (prefix, target): count for prefix, target, count in checked.transition_counts
-        }
+        self.trans_count_map = {(prefix, target): count for prefix, target, count in checked.transition_counts}
         self.initial_nobs = checked.initial_nobs
         self.length_nobs = checked.length_nobs
         if checked.initial is not None:
@@ -1473,9 +1455,7 @@ class IntegerMarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
     def scale(self, c: float) -> "IntegerMarkovChainAccumulator":
         """Scale numeric evidence while preserving support and schema metadata."""
         c = _finite_nonnegative(c, label="integer Markov statistic scale")
-        self.trans_count_map = {
-            key: count * c for key, count in self.trans_count_map.items()
-        }
+        self.trans_count_map = {key: count * c for key, count in self.trans_count_map.items()}
         self.initial_nobs *= c
         self.length_nobs *= c
         self.init_accumulator.scale(c)
@@ -1643,9 +1623,7 @@ class IntegerMarkovChainEstimator(ParameterEstimator):
         self.init_dist = init_dist
         self.len_dist = len_dist
         self.pseudo_count = (
-            None
-            if pseudo_count is None
-            else _finite_nonnegative(pseudo_count, label="integer Markov pseudo_count")
+            None if pseudo_count is None else _finite_nonnegative(pseudo_count, label="integer Markov pseudo_count")
         )
         if self.init_dist is not None:
             if not isinstance(self.init_dist, SequenceEncodableProbabilityDistribution):
@@ -1932,6 +1910,7 @@ class IntegerMarkovChainDataEncoder(DataSequenceEncoder):
         if not isinstance(x, tuple) or len(x) != 7:
             raise ValueError("integer Markov encoded data must be a seven-slot tuple.")
         lengths, init_idx, seq_idx, unique_idx, values, _, _ = x
+
         def integer_vector(value: Any, label: str) -> np.ndarray:
             raw = np.asarray(value)
             if raw.ndim != 1:

@@ -303,9 +303,7 @@ class FreezeRollupCache:
             self._prev_weight[idx] = weight
             return False
 
-        score_converged = (
-            idx in self._component_score_change and self._component_score_change[idx] < self.q_gain_tol
-        )
+        score_converged = idx in self._component_score_change and self._component_score_change[idx] < self.q_gain_tol
         weight_collapsed = weight < self.weight_tol
         prev_weight = self._prev_weight.get(idx)
         weight_converged = prev_weight is not None and abs(weight - prev_weight) < self.weight_delta_tol

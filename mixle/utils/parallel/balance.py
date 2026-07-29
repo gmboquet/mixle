@@ -115,11 +115,7 @@ def balance_plan(model: Any, resources: Resources, *, n_data: int) -> BalancePla
     max_units = best.num_units if best is not None else 1
     if best is not None:
         unit_works = np.asarray(best.unit_works, dtype=np.float64)
-        if (
-            unit_works.shape != (best.num_units,)
-            or not np.all(np.isfinite(unit_works))
-            or np.any(unit_works < 0.0)
-        ):
+        if unit_works.shape != (best.num_units,) or not np.all(np.isfinite(unit_works)) or np.any(unit_works < 0.0):
             raise ValueError("parallel-axis unit work must be finite, non-negative, and schema-aligned.")
         if len(best.unit_bytes) != best.num_units or any(
             isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 0

@@ -98,10 +98,14 @@ def test_weights_and_routes_are_strict() -> None:
             model.log_density("a")
         with pytest.raises(error):
             model.dist_to_encoder().seq_encode(["a"])
-        accumulator = SelectEstimator(
-            tuple(child.estimator() for child in children),
-            router,
-        ).accumulator_factory().make()
+        accumulator = (
+            SelectEstimator(
+                tuple(child.estimator() for child in children),
+                router,
+            )
+            .accumulator_factory()
+            .make()
+        )
         with pytest.raises(error):
             accumulator.update("a", 1.0, None)
 

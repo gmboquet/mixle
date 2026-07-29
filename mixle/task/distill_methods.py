@@ -489,10 +489,7 @@ def multi_teacher_distill(
             classes=first_shape[1],
             device=x.device,
         )
-    ens_prob = sum(
-        weight * torch.softmax(logit, dim=-1)
-        for weight, logit in zip(w, logits, strict=True)
-    )
+    ens_prob = sum(weight * torch.softmax(logit, dim=-1) for weight, logit in zip(w, logits, strict=True))
     ens_argmax = ens_prob.argmax(-1)
 
     torch.manual_seed(seed)
@@ -628,9 +625,7 @@ def hint_distill(
     x = _as_tensor(x).to(device)
     if x.ndim < 1 or x.shape[0] == 0:
         raise ValueError("distillation inputs must contain at least one row")
-    teach_feat = _flatten_feat(
-        _capture_teacher_feature(teacher, x, teacher_layer, target_device=device)
-    )
+    teach_feat = _flatten_feat(_capture_teacher_feature(teacher, x, teacher_layer, target_device=device))
 
     torch.manual_seed(seed)
     student = _reset(student, seed)
@@ -642,11 +637,7 @@ def hint_distill(
             raise ValueError("student layer must emit a tensor with one row per input")
         stud_dim = _flatten_feat(student_feature).shape[-1]
         teach_dim = teach_feat.shape[-1]
-        regressor = (
-            torch.nn.Identity()
-            if stud_dim == teach_dim
-            else torch.nn.Linear(stud_dim, teach_dim).to(device)
-        )
+        regressor = torch.nn.Identity() if stud_dim == teach_dim else torch.nn.Linear(stud_dim, teach_dim).to(device)
 
         def feat_gap() -> float:
             with torch.no_grad():
@@ -744,14 +735,13 @@ def attention_transfer(
     x = _as_tensor(x).to(device)
     if x.ndim < 1 or x.shape[0] == 0:
         raise ValueError("distillation inputs must contain at least one row")
-    teach_att = _attention_map(
-        _capture_teacher_feature(teacher, x, teacher_layer, target_device=device)
-    ).detach()
+    teach_att = _attention_map(_capture_teacher_feature(teacher, x, teacher_layer, target_device=device)).detach()
 
     torch.manual_seed(seed)
     student = _reset(student, seed)
     sh = _Hook(student, student_layer)
     try:
+
         def student_attention() -> Any:
             student(x)
             value = sh.value
@@ -852,9 +842,7 @@ def relational_distill(
     x = _as_tensor(x).to(device)
     if x.ndim < 1 or x.shape[0] < 2:
         raise ValueError("relational distillation requires at least two input rows")
-    tf = _flatten_feat(
-        _capture_teacher_feature(teacher, x, teacher_layer, target_device=device)
-    )
+    tf = _flatten_feat(_capture_teacher_feature(teacher, x, teacher_layer, target_device=device))
     teach_dist = _pairwise_distances(tf).detach()
     teach_ang = _pairwise_angles(tf).detach() if use_angle else None
 
@@ -862,6 +850,7 @@ def relational_distill(
     student = _reset(student, seed)
     sh = _Hook(student, student_layer)
     try:
+
         def student_feature() -> Any:
             student(x)
             value = sh.value

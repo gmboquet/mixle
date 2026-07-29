@@ -160,9 +160,7 @@ class TransEKnowledgeGraphModel:
                     self.relation_names[int(r)],
                     self.entity_names[int(t)],
                 )
-                raise ValueError(
-                    f"no filtered {corrupt} corruption is available for true triple {triple!r}"
-                )
+                raise ValueError(f"no filtered {corrupt} corruption is available for true triple {triple!r}")
             sampled = candidates[int(rng.randint(len(candidates)))]
             rv.append(
                 (
@@ -230,9 +228,7 @@ class TransEKnowledgeGraphModel:
                     self._apply_distance_gradient(neg, scale=-1.0, lr=lr)
             if normalize_entities:
                 self.normalize_entity_embeddings()
-            if not np.all(np.isfinite(self.entity_embeddings)) or not np.all(
-                np.isfinite(self.relation_embeddings)
-            ):
+            if not np.all(np.isfinite(self.entity_embeddings)) or not np.all(np.isfinite(self.relation_embeddings)):
                 raise RuntimeError("knowledge-graph fitting produced non-finite embeddings.")
             history.append(self.margin_loss(positives, negatives, margin=margin))
         return KnowledgeGraphFitResult(self, history)

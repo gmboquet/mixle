@@ -99,15 +99,11 @@ def _validated_integer_rows(
     if raw.ndim != 2:
         raise ValueError("Integer Chow-Liu batches must be two-dimensional")
     if num_features is not None and raw.shape[1] != num_features:
-        raise ValueError(
-            "Integer Chow-Liu observation width does not match feature count"
-        )
+        raise ValueError("Integer Chow-Liu observation width does not match feature count")
     if raw.dtype == np.bool_:
         raise TypeError("Integer Chow-Liu states must be exact integers")
     if np.issubdtype(raw.dtype, np.integer):
-        if np.issubdtype(raw.dtype, np.unsignedinteger) and np.any(
-            raw > np.iinfo(np.int64).max
-        ):
+        if np.issubdtype(raw.dtype, np.unsignedinteger) and np.any(raw > np.iinfo(np.int64).max):
             raise ValueError("Integer Chow-Liu states exceed integer range")
         result = raw.astype(np.int64, copy=False)
     elif np.issubdtype(raw.dtype, np.floating):
@@ -117,9 +113,7 @@ def _validated_integer_rows(
             or np.any(raw < 0.0)
             or np.any(raw >= float(2**63))
         ):
-            raise ValueError(
-                "Integer Chow-Liu states must be finite exact integers"
-            )
+            raise ValueError("Integer Chow-Liu states must be finite exact integers")
         result = raw.astype(np.int64)
     else:
         raise TypeError("Integer Chow-Liu states must be exact integers")
@@ -127,15 +121,10 @@ def _validated_integer_rows(
         raise ValueError("Integer Chow-Liu states must be non-negative")
     if domain_sizes is not None:
         if len(domain_sizes) != result.shape[1]:
-            raise ValueError(
-                "Integer Chow-Liu domain metadata does not match feature count"
-            )
+            raise ValueError("Integer Chow-Liu domain metadata does not match feature count")
         for feature, size in enumerate(domain_sizes):
             if np.any(result[:, feature] >= size):
-                raise ValueError(
-                    f"Integer Chow-Liu state for feature {feature} is outside "
-                    f"[0, {size})"
-                )
+                raise ValueError(f"Integer Chow-Liu state for feature {feature} is outside [0, {size})")
     return result
 
 
@@ -145,21 +134,15 @@ def _validated_weights(value: Any, rows: int) -> np.ndarray:
     except (TypeError, ValueError) as exc:
         raise ValueError("Integer Chow-Liu weights must be numeric") from exc
     if weights.shape != (rows,):
-        raise ValueError(
-            f"Integer Chow-Liu weights must have exact shape ({rows},)"
-        )
+        raise ValueError(f"Integer Chow-Liu weights must have exact shape ({rows},)")
     if np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
-        raise ValueError(
-            "Integer Chow-Liu weights must be finite and non-negative"
-        )
+        raise ValueError("Integer Chow-Liu weights must be finite and non-negative")
     return weights
 
 
 def _validated_statistics(value: Any) -> IntegerChowLiuStatistics:
     if not isinstance(value, (tuple, list)) or len(value) != 4:
-        raise ValueError(
-            "Integer Chow-Liu sufficient statistics must contain four fields"
-        )
+        raise ValueError("Integer Chow-Liu sufficient statistics must contain four fields")
     num_features = _positive_integer_or_none(
         value[0],
         label="Integer Chow-Liu statistic feature count",
@@ -169,9 +152,7 @@ def _validated_statistics(value: Any) -> IntegerChowLiuStatistics:
         label="Integer Chow-Liu statistic state count",
     )
     if num_features is None or num_states is None:
-        raise ValueError(
-            "Integer Chow-Liu sufficient statistics require fixed dimensions"
-        )
+        raise ValueError("Integer Chow-Liu sufficient statistics require fixed dimensions")
     try:
         counts = np.asarray(value[2], dtype=np.float64)
         marginal_counts = np.asarray(value[3], dtype=np.float64)
@@ -180,27 +161,19 @@ def _validated_statistics(value: Any) -> IntegerChowLiuStatistics:
     expected_counts = (num_features, num_features, num_states, num_states)
     expected_marginals = (num_features, num_states)
     if counts.shape != expected_counts:
-        raise ValueError(
-            f"Integer Chow-Liu pair counts must have shape {expected_counts}"
-        )
+        raise ValueError(f"Integer Chow-Liu pair counts must have shape {expected_counts}")
     if marginal_counts.shape != expected_marginals:
-        raise ValueError(
-            f"Integer Chow-Liu marginal counts must have shape {expected_marginals}"
-        )
+        raise ValueError(f"Integer Chow-Liu marginal counts must have shape {expected_marginals}")
     if (
         np.any(~np.isfinite(counts))
         or np.any(counts < 0.0)
         or np.any(~np.isfinite(marginal_counts))
         or np.any(marginal_counts < 0.0)
     ):
-        raise ValueError(
-            "Integer Chow-Liu counts must be finite and non-negative"
-        )
+        raise ValueError("Integer Chow-Liu counts must be finite and non-negative")
     for feature in range(num_features):
         if np.any(counts[feature, : feature + 1] != 0.0):
-            raise ValueError(
-                "Integer Chow-Liu counts must use the canonical upper-triangle layout"
-            )
+            raise ValueError("Integer Chow-Liu counts must use the canonical upper-triangle layout")
     total_weight = float(marginal_counts[0].sum())
     tolerance = _COUNT_ATOL * max(1.0, total_weight)
     for feature in range(num_features):
@@ -210,9 +183,7 @@ def _validated_statistics(value: Any) -> IntegerChowLiuStatistics:
             rtol=0.0,
             atol=tolerance,
         ):
-            raise ValueError(
-                "Integer Chow-Liu marginal totals must agree across features"
-            )
+            raise ValueError("Integer Chow-Liu marginal totals must agree across features")
     for first in range(num_features - 1):
         for second in range(first + 1, num_features):
             pair = counts[first, second]
@@ -222,18 +193,14 @@ def _validated_statistics(value: Any) -> IntegerChowLiuStatistics:
                 rtol=0.0,
                 atol=tolerance,
             ):
-                raise ValueError(
-                    "Integer Chow-Liu pair row sums contradict marginal counts"
-                )
+                raise ValueError("Integer Chow-Liu pair row sums contradict marginal counts")
             if not np.allclose(
                 pair.sum(axis=0),
                 marginal_counts[second],
                 rtol=0.0,
                 atol=tolerance,
             ):
-                raise ValueError(
-                    "Integer Chow-Liu pair column sums contradict marginal counts"
-                )
+                raise ValueError("Integer Chow-Liu pair column sums contradict marginal counts")
     return IntegerChowLiuStatistics(
         num_features,
         num_states,
@@ -379,30 +346,15 @@ class IntegerChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
         """
         self.num_features = len(dependency_list)
         if self.num_features == 0:
-            raise ValueError(
-                "IntegerChowLiuTreeDistribution requires at least one feature"
-            )
+            raise ValueError("IntegerChowLiuTreeDistribution requires at least one feature")
         if len(conditional_log_densities) != self.num_features:
-            raise ValueError(
-                "Integer Chow-Liu table count must match dependency count"
-            )
-        raw_order = (
-            range(self.num_features)
-            if feature_order is None
-            else feature_order
-        )
-        checked_order = [
-            _exact_integer(value, label="Integer Chow-Liu feature index")
-            for value in raw_order
-        ]
+            raise ValueError("Integer Chow-Liu table count must match dependency count")
+        raw_order = range(self.num_features) if feature_order is None else feature_order
+        checked_order = [_exact_integer(value, label="Integer Chow-Liu feature index") for value in raw_order]
         if sorted(checked_order) != list(range(self.num_features)):
-            raise ValueError(
-                "Integer Chow-Liu feature_order must be a feature permutation"
-            )
+            raise ValueError("Integer Chow-Liu feature_order must be a feature permutation")
         self.feature_order = (
-            range(self.num_features)
-            if checked_order == list(range(self.num_features))
-            else tuple(checked_order)
+            range(self.num_features) if checked_order == list(range(self.num_features)) else tuple(checked_order)
         )
         parents = [
             None
@@ -414,39 +366,27 @@ class IntegerChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
             for parent in dependency_list
         ]
         if sum(parent is None for parent in parents) != 1:
-            raise ValueError(
-                "Integer Chow-Liu dependency list must contain exactly one root"
-            )
+            raise ValueError("Integer Chow-Liu dependency list must contain exactly one root")
         self.dependency_list = tuple(zip(self.feature_order, parents))
         seen: set[int] = set()
         for position, (feature, parent) in enumerate(self.dependency_list):
             if parent is None:
                 if position != 0:
-                    raise ValueError(
-                        "Integer Chow-Liu feature_order must begin with the root"
-                    )
+                    raise ValueError("Integer Chow-Liu feature_order must begin with the root")
             elif parent not in seen:
-                raise ValueError(
-                    "Integer Chow-Liu feature_order must place every parent "
-                    "before its child"
-                )
+                raise ValueError("Integer Chow-Liu feature_order must place every parent before its child")
             seen.add(feature)
 
         self.conditional_log_densities = [
-            np.array(table, dtype=np.float64, copy=True)
-            for table in conditional_log_densities
+            np.array(table, dtype=np.float64, copy=True) for table in conditional_log_densities
         ]
         for i, (feature, parent) in enumerate(self.dependency_list):
             _validate_conditional_log_density_table(self.conditional_log_densities[i], feature, parent)
         self.domain_sizes = self._validate_domain_geometry_and_reachability()
         for table in self.conditional_log_densities:
             table.setflags(write=False)
-        self.conditional_log_densities = tuple(
-            self.conditional_log_densities
-        )
-        self.conditional_densities = tuple(
-            np.exp(table).copy() for table in self.conditional_log_densities
-        )
+        self.conditional_log_densities = tuple(self.conditional_log_densities)
+        self.conditional_densities = tuple(np.exp(table).copy() for table in self.conditional_log_densities)
         for table in self.conditional_densities:
             table.setflags(write=False)
         self.name = name
@@ -467,9 +407,7 @@ class IntegerChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
                 label="Integer Chow-Liu enumeration item budget",
             )
             if self.enumeration_item_budget < 0:
-                raise ValueError(
-                    "Integer Chow-Liu enumeration item budget must be non-negative"
-                )
+                raise ValueError("Integer Chow-Liu enumeration item budget must be non-negative")
 
     def _validate_domain_geometry_and_reachability(self) -> tuple[int, ...]:
         domain_sizes: list[int | None] = [None] * self.num_features
@@ -479,36 +417,24 @@ class IntegerChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
             if parent is None:
                 child_size = table.shape[0]
                 if child_size <= 0:
-                    raise ValueError(
-                        "Integer Chow-Liu root domain must be non-empty"
-                    )
+                    raise ValueError("Integer Chow-Liu root domain must be non-empty")
                 domain_sizes[feature] = child_size
                 reachable[feature] = np.exp(table) > 0.0
                 continue
 
             parent_size, child_size = table.shape
             if parent_size <= 0 or child_size <= 0:
-                raise ValueError(
-                    "Integer Chow-Liu conditional domains must be non-empty"
-                )
+                raise ValueError("Integer Chow-Liu conditional domains must be non-empty")
             known_parent_size = domain_sizes[parent]
             if known_parent_size != parent_size:
                 raise ValueError(
-                    f"Integer Chow-Liu parent domain size for feature {feature} "
-                    "contradicts its parent table"
+                    f"Integer Chow-Liu parent domain size for feature {feature} contradicts its parent table"
                 )
-            if (
-                domain_sizes[feature] is not None
-                and domain_sizes[feature] != child_size
-            ):
-                raise ValueError(
-                    "Integer Chow-Liu child domain sizes are inconsistent"
-                )
+            if domain_sizes[feature] is not None and domain_sizes[feature] != child_size:
+                raise ValueError("Integer Chow-Liu child domain sizes are inconsistent")
             parent_reachable = reachable[parent]
             if parent_reachable is None:
-                raise ValueError(
-                    "Integer Chow-Liu reachability requires parent-first order"
-                )
+                raise ValueError("Integer Chow-Liu reachability requires parent-first order")
             probabilities = np.exp(table)
             row_sums = probabilities.sum(axis=1)
             missing = parent_reachable & np.isclose(
@@ -529,18 +455,14 @@ class IntegerChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
                 axis=0,
             )
         if any(size is None for size in domain_sizes):
-            raise ValueError(
-                "Integer Chow-Liu could not infer every feature domain"
-            )
+            raise ValueError("Integer Chow-Liu could not infer every feature domain")
         return tuple(int(size) for size in domain_sizes)
 
     def __pysp_getstate__(self) -> dict[str, Any]:
         """Return the constructor-owned state used by the safe JSON codec."""
         return {
             "dependency_list": [parent for _, parent in self.dependency_list],
-            "conditional_log_densities": [
-                table.copy() for table in self.conditional_log_densities
-            ],
+            "conditional_log_densities": [table.copy() for table in self.conditional_log_densities],
             "feature_order": self.feature_order,
             "name": self.name,
             "keys": self.keys,
@@ -563,17 +485,13 @@ class IntegerChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
         }
         legacy_derived = {"conditional_densities", "num_features"}
         fields = set(state)
-        if not required.issubset(fields) or not fields.issubset(
-            required | optional | legacy_derived
-        ):
+        if not required.issubset(fields) or not fields.issubset(required | optional | legacy_derived):
             raise ValueError(
                 "invalid IntegerChowLiuTreeDistribution state fields: "
                 "required %r, got %r" % (sorted(required), sorted(fields))
             )
         if bool(fields & legacy_derived) and not legacy_derived.issubset(fields):
-            raise ValueError(
-                "legacy Integer Chow-Liu derived state must contain both fields"
-            )
+            raise ValueError("legacy Integer Chow-Liu derived state must contain both fields")
         dependencies = state["dependency_list"]
         if dependencies and all(isinstance(entry, (list, tuple)) and len(entry) == 2 for entry in dependencies):
             dependencies = [entry[1] for entry in dependencies]
@@ -707,9 +625,7 @@ class IntegerChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
         xx = engine.asarray(checked)
         rv = engine.zeros(checked.shape[0])
         for i, (j, k) in enumerate(self.dependency_list):
-            table = engine.asarray(
-                np.array(self.conditional_log_densities[i], copy=True)
-            )
+            table = engine.asarray(np.array(self.conditional_log_densities[i], copy=True))
             if k is None:
                 rv = rv + table[xx[:, j]]
             else:
@@ -738,9 +654,7 @@ class IntegerChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
             IntegerChowLiuTreeEstimator: Estimator configured with the same feature count and state count.
 
         """
-        effective_pseudo = (
-            self.pseudo_count if pseudo_count is None else pseudo_count
-        )
+        effective_pseudo = self.pseudo_count if pseudo_count is None else pseudo_count
         num_states = max(self.domain_sizes)
         return IntegerChowLiuTreeEstimator(
             num_features=self.num_features,
@@ -765,11 +679,7 @@ class IntegerChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
         """Returns IntegerChowLiuTreeEnumerator iterating fixed-length integer vectors in descending probability order."""
         return IntegerChowLiuTreeEnumerator(
             self,
-            max_items=(
-                self.enumeration_item_budget
-                if max_items is None
-                else max_items
-            ),
+            max_items=(self.enumeration_item_budget if max_items is None else max_items),
         )
 
     def support_size(self) -> int:
@@ -803,9 +713,7 @@ class IntegerChowLiuTreeEnumerator(DistributionEnumerator):
                 label="Integer Chow-Liu enumeration item budget",
             )
             if self.max_items < 0:
-                raise ValueError(
-                    "Integer Chow-Liu enumeration item budget must be non-negative"
-                )
+                raise ValueError("Integer Chow-Liu enumeration item budget must be non-negative")
         self._support_size = int(np.prod(dist.domain_sizes, dtype=object))
         self._entries: list[tuple[list[int], float]] | None = None
         self._pos = 0
@@ -821,10 +729,7 @@ class IntegerChowLiuTreeEnumerator(DistributionEnumerator):
             self.termination_reason = "item_budget_exhausted"
             raise EnumerationError(
                 self.dist,
-                reason=(
-                    f"support size {self._support_size} exceeds enumeration "
-                    f"item budget {self.max_items}"
-                ),
+                reason=(f"support size {self._support_size} exceeds enumeration item budget {self.max_items}"),
             )
         entries = []
         ranges = [range(size) for size in self.dist.domain_sizes]
@@ -904,9 +809,7 @@ class IntegerChowLiuTreeSampler(DistributionSampler):
             label="Integer Chow-Liu sample size",
         )
         if checked_size < 0:
-            raise ValueError(
-                "Integer Chow-Liu sample size must be non-negative"
-            )
+            raise ValueError("Integer Chow-Liu sample size must be non-negative")
         return [self.sample() for _ in range(checked_size)]
 
 
@@ -952,9 +855,7 @@ class IntegerChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
                     self.num_states,
                 )
             )
-            self.marginal_counts = np.zeros(
-                (self.num_features, self.num_states)
-            )
+            self.marginal_counts = np.zeros((self.num_features, self.num_states))
         else:
             self.counts = None
             self.marginal_counts = None
@@ -979,20 +880,11 @@ class IntegerChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
             label="Integer Chow-Liu state count",
         )
         if checked_features is None or checked_states is None:
-            raise ValueError(
-                "Integer Chow-Liu count allocation requires fixed dimensions"
-            )
-        if (
-            self.num_features is not None
-            and checked_features != self.num_features
-        ):
-            raise ValueError(
-                "Integer Chow-Liu feature count cannot change during accumulation"
-            )
+            raise ValueError("Integer Chow-Liu count allocation requires fixed dimensions")
+        if self.num_features is not None and checked_features != self.num_features:
+            raise ValueError("Integer Chow-Liu feature count cannot change during accumulation")
         if self._fixed_num_states and self.num_states != checked_states:
-            raise ValueError(
-                "Integer Chow-Liu observation exceeds fixed state count"
-            )
+            raise ValueError("Integer Chow-Liu observation exceeds fixed state count")
         if self.counts is None:
             self.num_features = checked_features
             self.num_states = checked_states
@@ -1004,9 +896,7 @@ class IntegerChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
                     checked_states,
                 )
             )
-            self.marginal_counts = np.zeros(
-                (checked_features, checked_states)
-            )
+            self.marginal_counts = np.zeros((checked_features, checked_states))
 
         elif checked_states > self.num_states:
             old_num_states = self.num_states
@@ -1019,9 +909,7 @@ class IntegerChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
                 )
             )
             new_marginal = np.zeros((checked_features, checked_states))
-            new_counts[
-                :, :, :old_num_states, :old_num_states
-            ] = self.counts
+            new_counts[:, :, :old_num_states, :old_num_states] = self.counts
             new_marginal[:, :old_num_states] = self.marginal_counts
             self.num_features = checked_features
             self.num_states = checked_states
@@ -1044,22 +932,14 @@ class IntegerChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
             num_features=self.num_features,
         )[0]
         if len(xx) == 0:
-            raise ValueError(
-                "Integer Chow-Liu observations require at least one feature"
-            )
+            raise ValueError("Integer Chow-Liu observations require at least one feature")
         checked_weight = _nonnegative_scalar(
             weight,
             label="Integer Chow-Liu weight",
         )
         if self._fixed_num_states and np.any(xx >= self.num_states):
-            raise ValueError(
-                "Integer Chow-Liu observation exceeds fixed state count"
-            )
-        required_states = (
-            self.num_states
-            if self._fixed_num_states
-            else int(np.max(xx)) + 1
-        )
+            raise ValueError("Integer Chow-Liu observation exceeds fixed state count")
+        required_states = self.num_states if self._fixed_num_states else int(np.max(xx)) + 1
         if self.counts is None or required_states > self.num_states:
             self._expand_states(required_states, len(xx))
         ff = np.arange(self.num_features)
@@ -1088,23 +968,15 @@ class IntegerChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
             num_features=self.num_features,
         )
         if xx.shape[1] == 0:
-            raise ValueError(
-                "Integer Chow-Liu observations require at least one feature"
-            )
+            raise ValueError("Integer Chow-Liu observations require at least one feature")
         checked_weights = _validated_weights(weights, xx.shape[0])
         if self._fixed_num_states and np.any(xx >= self.num_states):
-            raise ValueError(
-                "Integer Chow-Liu observation exceeds fixed state count"
-            )
+            raise ValueError("Integer Chow-Liu observation exceeds fixed state count")
         if xx.shape[0] == 0:
             if self.num_features is None:
                 self.num_features = xx.shape[1]
             return
-        required_states = (
-            self.num_states
-            if self._fixed_num_states
-            else int(np.max(xx)) + 1
-        )
+        required_states = self.num_states if self._fixed_num_states else int(np.max(xx)) + 1
         if self.counts is None or required_states > self.num_states:
             self._expand_states(required_states, xx.shape[1])
 
@@ -1183,31 +1055,16 @@ class IntegerChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
                 and self.num_features is not None
                 and incoming_features != self.num_features
             ):
-                raise ValueError(
-                    "Integer Chow-Liu feature counts do not match for combine"
-                )
-            if (
-                incoming_states is not None
-                and self._fixed_num_states
-                and incoming_states != self.num_states
-            ):
-                raise ValueError(
-                    "Integer Chow-Liu state counts do not match fixed configuration"
-                )
+                raise ValueError("Integer Chow-Liu feature counts do not match for combine")
+            if incoming_states is not None and self._fixed_num_states and incoming_states != self.num_states:
+                raise ValueError("Integer Chow-Liu state counts do not match fixed configuration")
             return self
         checked = _validated_statistics(suff_stat)
         num_features, num_states, counts, marginal_counts = checked
-        if (
-            self.num_features is not None
-            and self.num_features != num_features
-        ):
-            raise ValueError(
-                "Integer Chow-Liu feature counts do not match for combine"
-            )
+        if self.num_features is not None and self.num_features != num_features:
+            raise ValueError("Integer Chow-Liu feature counts do not match for combine")
         if self._fixed_num_states and self.num_states != num_states:
-            raise ValueError(
-                "Integer Chow-Liu state counts do not match fixed configuration"
-            )
+            raise ValueError("Integer Chow-Liu state counts do not match fixed configuration")
         if self.counts is None:
             self.num_features = num_features
             self.num_states = num_states
@@ -1216,9 +1073,7 @@ class IntegerChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
             return self
         if self.num_states < num_states:
             self._expand_states(num_states, num_features)
-        self.counts[
-            :, :, :num_states, :num_states
-        ] += counts
+        self.counts[:, :, :num_states, :num_states] += counts
         self.marginal_counts[:, :num_states] += marginal_counts
 
         return self
@@ -1248,17 +1103,10 @@ class IntegerChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
         """
         checked = _validated_statistics(x)
         num_features, num_states, counts, marginal_counts = checked
-        if (
-            self._fixed_num_features
-            and self.num_features != num_features
-        ):
-            raise ValueError(
-                "Integer Chow-Liu statistic feature count contradicts accumulator"
-            )
+        if self._fixed_num_features and self.num_features != num_features:
+            raise ValueError("Integer Chow-Liu statistic feature count contradicts accumulator")
         if self._fixed_num_states and self.num_states != num_states:
-            raise ValueError(
-                "Integer Chow-Liu statistic state count contradicts accumulator"
-            )
+            raise ValueError("Integer Chow-Liu statistic state count contradicts accumulator")
         self.num_features = num_features
         self.num_states = num_states
         self.counts = counts.copy()
@@ -1312,11 +1160,7 @@ class IntegerChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
         """Return a data encoder for accumulated integer Chow-Liu tree observations."""
         return IntegerChowLiuTreeDataEncoder(
             self.num_features,
-            (
-                None
-                if self.num_states is None or self.num_features is None
-                else [self.num_states] * self.num_features
-            ),
+            (None if self.num_states is None or self.num_features is None else [self.num_states] * self.num_features),
         )
 
 
@@ -1405,9 +1249,7 @@ class IntegerChowLiuTreeEstimator(ParameterEstimator):
                 label="Integer Chow-Liu enumeration item budget",
             )
             if self.enumeration_item_budget < 0:
-                raise ValueError(
-                    "Integer Chow-Liu enumeration item budget must be non-negative"
-                )
+                raise ValueError("Integer Chow-Liu enumeration item budget must be non-negative")
 
     def accumulator_factory(self):
         """Return an accumulator factory configured from this estimator."""
@@ -1436,22 +1278,13 @@ class IntegerChowLiuTreeEstimator(ParameterEstimator):
         """
         checked = _validated_statistics(suff_stat)
         num_features, num_states, counts, marginal_counts = checked
-        if (
-            self.num_features is not None
-            and num_features != self.num_features
-        ):
-            raise ValueError(
-                "Integer Chow-Liu statistic feature count contradicts estimator"
-            )
+        if self.num_features is not None and num_features != self.num_features:
+            raise ValueError("Integer Chow-Liu statistic feature count contradicts estimator")
         if self.num_states is not None and num_states != self.num_states:
-            raise ValueError(
-                "Integer Chow-Liu statistic state count contradicts estimator"
-            )
+            raise ValueError("Integer Chow-Liu statistic state count contradicts estimator")
         total_weight = float(marginal_counts[0].sum())
         if total_weight <= 0.0:
-            raise ValueError(
-                "Cannot estimate Integer Chow-Liu without positive weight"
-            )
+            raise ValueError("Cannot estimate Integer Chow-Liu without positive weight")
         if nobs is not None:
             _nonnegative_scalar(
                 nobs,
@@ -1560,24 +1393,17 @@ class IntegerChowLiuTreeDataEncoder(DataSequenceEncoder):
                 for feature, size in enumerate(domain_sizes)
             )
             if any(size is None for size in self.domain_sizes):
-                raise ValueError(
-                    "Integer Chow-Liu encoder domain sizes must be fixed"
-                )
-            if (
-                self.num_features is not None
-                and len(self.domain_sizes) != self.num_features
-            ):
-                raise ValueError(
-                    "Integer Chow-Liu encoder domain sizes must match feature count"
-                )
+                raise ValueError("Integer Chow-Liu encoder domain sizes must be fixed")
+            if self.num_features is not None and len(self.domain_sizes) != self.num_features:
+                raise ValueError("Integer Chow-Liu encoder domain sizes must match feature count")
             if self.num_features is None:
                 self.num_features = len(self.domain_sizes)
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the encoder."""
-        return (
-            "IntegerChowLiuTreeDataEncoder(num_features=%r, domain_sizes=%r)"
-            % (self.num_features, self.domain_sizes)
+        return "IntegerChowLiuTreeDataEncoder(num_features=%r, domain_sizes=%r)" % (
+            self.num_features,
+            self.domain_sizes,
         )
 
     def __eq__(self, other: object) -> bool:

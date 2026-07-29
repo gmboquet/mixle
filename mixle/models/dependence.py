@@ -502,23 +502,16 @@ def _apply_meek_rules(directed: set[Edge], undirected: set[Edge], p: int) -> Non
                     proposals.add((source, target))
                 # R2: source - target and source -> c -> target.
                 if any(
-                    (source, c) in directed and (c, target) in directed
-                    for c in range(p)
-                    if c not in {source, target}
+                    (source, c) in directed and (c, target) in directed for c in range(p) if c not in {source, target}
                 ):
                     proposals.add((source, target))
                 # R3: source-c and source-d undirected, c -> target, d -> target, c/d non-adjacent.
                 parents = [
                     c
                     for c in range(p)
-                    if c not in {source, target}
-                    and _edge(source, c) in undirected
-                    and (c, target) in directed
+                    if c not in {source, target} and _edge(source, c) in undirected and (c, target) in directed
                 ]
-                if any(
-                    not _adjacent(c, d, directed, undirected)
-                    for c, d in itertools.combinations(parents, 2)
-                ):
+                if any(not _adjacent(c, d, directed, undirected) for c, d in itertools.combinations(parents, 2)):
                     proposals.add((source, target))
         if not proposals:
             return

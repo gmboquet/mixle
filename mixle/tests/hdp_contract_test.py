@@ -98,9 +98,7 @@ class HierarchicalDirichletProcessStateContractTestCase(unittest.TestCase):
         model = _model()
         before = model.log_density([0.0])
         with self.assertRaises(ValueError):
-            model.set_parameters(
-                ([0.5, 0.5], 2.0, 1.5, [_FixedScoreGaussian(4.0)])
-            )
+            model.set_parameters(([0.5, 0.5], 2.0, 1.5, [_FixedScoreGaussian(4.0)]))
         self.assertEqual(model.log_density([0.0]), before)
         model.set_parameters(
             (
@@ -142,9 +140,7 @@ class HierarchicalDirichletProcessStateContractTestCase(unittest.TestCase):
         restored = eval(
             str(model),
             {
-                "HierarchicalDirichletProcessMixtureDistribution": (
-                    HierarchicalDirichletProcessMixtureDistribution
-                ),
+                "HierarchicalDirichletProcessMixtureDistribution": (HierarchicalDirichletProcessMixtureDistribution),
                 "GaussianDistribution": GaussianDistribution,
                 "NullDistribution": NullDistribution,
             },
@@ -188,9 +184,7 @@ class HierarchicalDirichletProcessEvidenceContractTestCase(unittest.TestCase):
         model = _model(scores=(-np.inf, -np.inf))
         np.testing.assert_array_equal(model.group_posteriors([[0.0]]), [[0.0, 0.0]])
         self.assertTrue(np.isneginf(model.log_density([0.0])))
-        accumulator = HierarchicalDirichletProcessMixtureAccumulator(
-            [GaussianAccumulator(), GaussianAccumulator()]
-        )
+        accumulator = HierarchicalDirichletProcessMixtureAccumulator([GaussianAccumulator(), GaussianAccumulator()])
         encoded = model.dist_to_encoder().seq_encode([HDPGroup("g", [0.0])])
         accumulator.seq_update(encoded, np.asarray([2.0]), model)
         counts = next(iter(accumulator.group_counts.values()))
@@ -207,17 +201,13 @@ class HierarchicalDirichletProcessIdentityContractTestCase(unittest.TestCase):
         )
 
     def make_accumulator(self):
-        return HierarchicalDirichletProcessMixtureAccumulator(
-            [GaussianAccumulator(), GaussianAccumulator()]
-        )
+        return HierarchicalDirichletProcessMixtureAccumulator([GaussianAccumulator(), GaussianAccumulator()])
 
     def test_duplicate_content_requires_explicit_group_ids(self):
         encoder = self.model.dist_to_encoder()
         with self.assertRaisesRegex(ValueError, "HDPGroup"):
             encoder.seq_encode([[0.0], [0.0]])
-        encoded = encoder.seq_encode(
-            [HDPGroup("first", [0.0]), HDPGroup("second", [0.0])]
-        )
+        encoded = encoder.seq_encode([HDPGroup("first", [0.0]), HDPGroup("second", [0.0])])
         self.assertEqual(encoder.row_count(encoded), 2)
 
     def test_merge_is_order_independent_and_preserves_group_ids(self):
@@ -254,9 +244,7 @@ class HierarchicalDirichletProcessIdentityContractTestCase(unittest.TestCase):
 
     def test_batch_weight_geometry_is_validated_before_mutation(self):
         accumulator = self.make_accumulator()
-        encoded = self.model.dist_to_encoder().seq_encode(
-            [HDPGroup("a", [0.0]), HDPGroup("b", [1.0])]
-        )
+        encoded = self.model.dist_to_encoder().seq_encode([HDPGroup("a", [0.0]), HDPGroup("b", [1.0])])
         before = accumulator.value()
         for weights in (
             np.ones(1),
@@ -294,9 +282,7 @@ class HierarchicalDirichletProcessIdentityContractTestCase(unittest.TestCase):
 
 class HierarchicalDirichletProcessEstimatorContractTestCase(unittest.TestCase):
     def test_estimator_rejects_malformed_serialized_state(self):
-        estimator = HierarchicalDirichletProcessMixtureEstimator(
-            [GaussianEstimator(), GaussianEstimator()]
-        )
+        estimator = HierarchicalDirichletProcessMixtureEstimator([GaussianEstimator(), GaussianEstimator()])
         accumulator = estimator.accumulator_factory().make()
         encoded = accumulator.acc_to_encoder().seq_encode([HDPGroup("g", [0.0])])
         accumulator.seq_initialize(encoded, np.ones(1), RandomState(2))

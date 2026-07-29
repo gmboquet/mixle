@@ -20,9 +20,9 @@ def _load(name: str):
 
 def test_every_release_profile_generates_exact_floors() -> None:
     generator = _load("generate_extra_floor_constraints")
-    profiles = json.loads(
-        (ROOT / "release-checklists" / "0.8.0-extra-profiles.json").read_text(encoding="utf-8")
-    )["profiles"]
+    profiles = json.loads((ROOT / "release-checklists" / "0.8.0-extra-profiles.json").read_text(encoding="utf-8"))[
+        "profiles"
+    ]
     for profile in profiles:
         lines = generator.constraints(profile)
         assert lines

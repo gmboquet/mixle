@@ -203,9 +203,7 @@ def _canonical_leaf_id(value: Any) -> Any:
         return tuple(_canonical_leaf_id(item) for item in value)
     if isinstance(value, frozenset):
         return frozenset(_canonical_leaf_id(item) for item in value)
-    raise ValueError(
-        "SumProductCircuit leaf ids must be immutable scalar/tuple/frozenset values, got %r" % (value,)
-    )
+    raise ValueError("SumProductCircuit leaf ids must be immutable scalar/tuple/frozenset values, got %r" % (value,))
 
 
 class SumProductCircuit:

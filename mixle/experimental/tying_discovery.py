@@ -345,10 +345,7 @@ def apply_tie(
         (max_abs_tolerance, "max_abs_tolerance"),
     ):
         if value is not None and (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-            or value < 0
+            isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0
         ):
             raise ValueError(f"{name} must be finite and non-negative")
 
@@ -413,9 +410,7 @@ def apply_tie(
     relative_l2 = diff_norm / before_norm if before_norm > 0 else (0.0 if diff_norm == 0 else math.inf)
 
     params_after = sum(p.numel() for p in candidate.parameters())
-    accepted = relative_l2 <= max_relative_l2 and (
-        max_abs_tolerance is None or max_abs_diff <= max_abs_tolerance
-    )
+    accepted = relative_l2 <= max_relative_l2 and (max_abs_tolerance is None or max_abs_diff <= max_abs_tolerance)
 
     receipt = ParityReceipt(
         max_abs_diff=max_abs_diff,

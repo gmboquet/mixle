@@ -181,11 +181,7 @@ class DesignedModel:
 
 def _validate_family_values(family: str, values: list[Any]) -> None:
     def real(value: Any) -> bool:
-        return (
-            not isinstance(value, (bool, np.bool_))
-            and isinstance(value, Real)
-            and np.isfinite(float(value))
-        )
+        return not isinstance(value, (bool, np.bool_)) and isinstance(value, Real) and np.isfinite(float(value))
 
     def integer(value: Any) -> bool:
         return not isinstance(value, (bool, np.bool_)) and isinstance(value, Integral)
@@ -245,9 +241,7 @@ def _validate_spec_against_data(spec: dict[str, Any], rows: list[Any]) -> None:
             else:
                 raise ValueError("composite spec requires tuple/list observations")
             if len(values) != len(fields):
-                raise ValueError(
-                    f"composite spec has {len(fields)} fields but an observation has {len(values)}"
-                )
+                raise ValueError(f"composite spec has {len(fields)} fields but an observation has {len(values)}")
             normalized.append(values)
         for index, field_spec in enumerate(fields):
             _validate_spec_against_data(field_spec, [row[index] for row in normalized])

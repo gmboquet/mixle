@@ -136,12 +136,15 @@ def test_dose_response_output_gate_rejects_non_finite_dose():
         dr.probability(np.array([1.0, float("nan"), 3.0]), n=3, rng=np.random.default_rng(0))
 
 
-@pytest.mark.parametrize("model, params", [
-    ("loglinear", {"beta": 0.05}),
-    ("logit", {"a": 1.0}),
-    ("hill", {"ec50": 1.0}),
-    ("threshold_linear", {"slope": 0.1}),
-])
+@pytest.mark.parametrize(
+    "model, params",
+    [
+        ("loglinear", {"beta": 0.05}),
+        ("logit", {"a": 1.0}),
+        ("hill", {"ec50": 1.0}),
+        ("threshold_linear", {"slope": 0.1}),
+    ],
+)
 def test_dose_response_rejects_negative_dose_for_every_model(model, params):
     dr = DoseResponse(model=model, params=params)
     with pytest.raises(ValueError, match="nonnegative"):

@@ -127,9 +127,7 @@ class CensoredFitTest(unittest.TestCase):
             ([0.9], [0], None, 0.8),
         ]
         for times, events, lower, upper in invalid:
-            with self.subTest(times=times, events=events, lower=lower, upper=upper), self.assertRaises(
-                ValueError
-            ):
+            with self.subTest(times=times, events=events, lower=lower, upper=upper), self.assertRaises(ValueError):
                 censored_loglik(dist, times, event=events, lower=lower, upper=upper)
 
 

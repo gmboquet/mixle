@@ -8,4 +8,3 @@ class KernelCapabilityDeclinedError(RuntimeError):
     errors and implementation failures must use their natural exception types
     and must never be interpreted as permission to change algorithms.
     """
-

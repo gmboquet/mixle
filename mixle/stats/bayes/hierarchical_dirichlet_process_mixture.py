@@ -151,9 +151,7 @@ def _validated_group_state(
 ) -> tuple[np.ndarray | None, tuple[str, ...]]:
     if group_weights is None:
         if group_ids is not None and (
-            isinstance(group_ids, (str, bytes))
-            or not isinstance(group_ids, Sequence)
-            or len(group_ids) != 0
+            isinstance(group_ids, (str, bytes)) or not isinstance(group_ids, Sequence) or len(group_ids) != 0
         ):
             raise ValueError("HDP group_ids require group_weights.")
         return None, ()
@@ -162,9 +160,7 @@ def _validated_group_state(
     except (TypeError, ValueError) as exc:
         raise ValueError("HDP group_weights must be numeric.") from exc
     if weights.ndim != 2 or weights.shape[1] != component_count:
-        raise ValueError(
-            "HDP group_weights must have exact shape (groups, %d)." % component_count
-        )
+        raise ValueError("HDP group_weights must have exact shape (groups, %d)." % component_count)
     if np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
         raise ValueError("HDP group_weights must be finite and non-negative.")
     if not np.allclose(
@@ -210,21 +206,11 @@ def _validated_encoded_groups(
         offsets = np.asarray(raw_offsets)
     except (TypeError, ValueError) as exc:
         raise ValueError("HDP encoded lengths and offsets must be numeric.") from exc
-    if (
-        lengths.ndim != 1
-        or not np.issubdtype(lengths.dtype, np.integer)
-        or np.any(lengths < 0)
-    ):
+    if lengths.ndim != 1 or not np.issubdtype(lengths.dtype, np.integer) or np.any(lengths < 0):
         raise ValueError("HDP encoded group lengths must be non-negative integers.")
-    if (
-        offsets.ndim != 1
-        or not np.issubdtype(offsets.dtype, np.integer)
-        or offsets.shape != (len(lengths) + 1,)
-    ):
+    if offsets.ndim != 1 or not np.issubdtype(offsets.dtype, np.integer) or offsets.shape != (len(lengths) + 1,):
         raise ValueError("HDP encoded offsets must have one integer boundary per group.")
-    expected_offsets = np.concatenate(
-        [np.asarray([0], dtype=np.int64), np.cumsum(lengths, dtype=np.int64)]
-    )
+    expected_offsets = np.concatenate([np.asarray([0], dtype=np.int64), np.cumsum(lengths, dtype=np.int64)])
     if not np.array_equal(offsets, expected_offsets):
         raise ValueError("HDP encoded offsets must exactly match group lengths.")
     if len(group_ids) != len(lengths):
@@ -251,9 +237,7 @@ def _validated_group_counts(value: Any, component_count: int) -> dict[str, np.nd
         except (TypeError, ValueError) as exc:
             raise ValueError("HDP group counts must be numeric vectors.") from exc
         if counts.shape != (component_count,):
-            raise ValueError(
-                "Every HDP group count must have exact shape (%d,)." % component_count
-            )
+            raise ValueError("Every HDP group count must have exact shape (%d,)." % component_count)
         if np.any(~np.isfinite(counts)) or np.any(counts < 0.0):
             raise ValueError("HDP group counts must be finite and non-negative.")
         result[group_id] = counts.copy()
@@ -370,9 +354,7 @@ class HierarchicalDirichletProcessMixtureDistribution(SequenceEncodableProbabili
             self.log_beta = np.log(self.beta)
         self.group_weights = checked_group_weights
         self.group_ids = checked_group_ids
-        self._group_index = {
-            group_id: index for index, group_id in enumerate(self.group_ids)
-        }
+        self._group_index = {group_id: index for index, group_id in enumerate(self.group_ids)}
         self._structure_fingerprint = fingerprint
         self._length_structure_fingerprint = self._length_structure()
 
@@ -417,7 +399,9 @@ class HierarchicalDirichletProcessMixtureDistribution(SequenceEncodableProbabili
         checked_beta = _simplex_vector(self.beta, self.num_components, "beta")
         _positive_scalar(self.alpha, "alpha")
         _positive_scalar(self.gamma, "gamma")
-        if not np.array_equal(self.log_beta, np.log(checked_beta, where=checked_beta > 0.0, out=np.full_like(checked_beta, -np.inf))):
+        if not np.array_equal(
+            self.log_beta, np.log(checked_beta, where=checked_beta > 0.0, out=np.full_like(checked_beta, -np.inf))
+        ):
             raise RuntimeError("HDP cached global log weights are inconsistent.")
         checked_weights, checked_ids = _validated_group_state(
             self.group_weights,
@@ -428,11 +412,9 @@ class HierarchicalDirichletProcessMixtureDistribution(SequenceEncodableProbabili
         if checked_weights is None:
             if self._group_index:
                 raise RuntimeError("HDP fitted-group index is inconsistent.")
-        elif (
-            checked_ids != self.group_ids
-            or self._group_index
-            != {group_id: index for index, group_id in enumerate(checked_ids)}
-        ):
+        elif checked_ids != self.group_ids or self._group_index != {
+            group_id: index for index, group_id in enumerate(checked_ids)
+        }:
             raise RuntimeError("HDP fitted-group index is inconsistent.")
 
     def set_parameters(self, params: tuple[np.ndarray, float, float, Sequence[Any]]) -> None:
@@ -450,12 +432,8 @@ class HierarchicalDirichletProcessMixtureDistribution(SequenceEncodableProbabili
         checked_components = copy.deepcopy(checked_components)
         if _component_structure_fingerprint(checked_components) != self._structure_fingerprint:
             raise ValueError("HDP replacement components changed model structure.")
-        if self.group_weights is not None and np.any(
-            self.group_weights[:, checked_beta == 0.0] != 0.0
-        ):
-            raise ValueError(
-                "HDP beta update would make a fitted group's positive atom mass impossible."
-            )
+        if self.group_weights is not None and np.any(self.group_weights[:, checked_beta == 0.0] != 0.0):
+            raise ValueError("HDP beta update would make a fitted group's positive atom mass impossible.")
 
         self.beta = checked_beta
         with np.errstate(divide="ignore"):
@@ -495,9 +473,7 @@ class HierarchicalDirichletProcessMixtureDistribution(SequenceEncodableProbabili
 
     def _group_log_density(self, log_b: np.ndarray, weights: np.ndarray) -> float:
         """Sum over observations of log sum_k w_k p(x_i | theta_k)."""
-        evidence = normalize_mixture_log_scores(
-            _weighted_scores(log_b, weights)
-        ).log_evidence
+        evidence = normalize_mixture_log_scores(_weighted_scores(log_b, weights)).log_evidence
         if np.any(np.isneginf(evidence)):
             return -np.inf
         if np.any(np.isposinf(evidence)):
@@ -540,9 +516,7 @@ class HierarchicalDirichletProcessMixtureDistribution(SequenceEncodableProbabili
         unpacked = [_group_identity_and_values(group) for group in x]
         group_ids = tuple(group_id for group_id, _ in unpacked)
         if len(set(group_ids)) != len(group_ids):
-            raise ValueError(
-                "HDP group identities must be unique; wrap duplicate-content groups in HDPGroup."
-            )
+            raise ValueError("HDP group identities must be unique; wrap duplicate-content groups in HDPGroup.")
         groups = [values for _, values in unpacked]
         lengths = np.asarray([len(group) for group in groups], dtype=int)
         offsets = np.concatenate([[0], np.cumsum(lengths)])
@@ -605,9 +579,7 @@ class HierarchicalDirichletProcessMixtureDistribution(SequenceEncodableProbabili
                 continue
             group_index = self._group_index.get(group_ids[j])
             weights = (
-                self.beta
-                if group_index is None or self.group_weights is None
-                else self.group_weights[group_index]
+                self.beta if group_index is None or self.group_weights is None else self.group_weights[group_index]
             )
             rv[j] = self._group_log_density(
                 log_b_all[offsets[j] : offsets[j + 1], :],
@@ -634,9 +606,7 @@ class HierarchicalDirichletProcessMixtureDistribution(SequenceEncodableProbabili
                 continue
             group_index = self._group_index.get(group_ids[j])
             weights = (
-                self.beta
-                if group_index is None or self.group_weights is None
-                else self.group_weights[group_index]
+                self.beta if group_index is None or self.group_weights is None else self.group_weights[group_index]
             )
             normalized = normalize_mixture_log_scores(
                 _weighted_scores(
@@ -765,9 +735,7 @@ class HierarchicalDirichletProcessMixtureAccumulator(SequenceEncodableStatisticA
             raise TypeError("HDP initialization requires numpy.random.RandomState.")
         group_id, values = _group_identity_and_values(x)
         if group_id in self.group_counts:
-            raise ValueError(
-                "Duplicate HDP group identity; use distinct HDPGroup IDs for duplicate content."
-            )
+            raise ValueError("Duplicate HDP group identity; use distinct HDPGroup IDs for duplicate content.")
         counts = np.zeros(self.num_components)
         new_accumulators = copy.deepcopy(self.accumulators)
         for value in values:
@@ -864,12 +832,8 @@ class HierarchicalDirichletProcessMixtureAccumulator(SequenceEncodableStatisticA
                     if group_index is None or estimate.group_weights is None
                     else estimate.group_weights[group_index]
                 )
-                normalized = normalize_mixture_log_scores(
-                    _weighted_scores(log_b_all[sl, :], group_weights)
-                )
-                weighted_phi = (
-                    normalized.responsibilities * checked_weights[j]
-                )
+                normalized = normalize_mixture_log_scores(_weighted_scores(log_b_all[sl, :], group_weights))
+                weighted_phi = normalized.responsibilities * checked_weights[j]
                 phi_all[sl, :] = weighted_phi
                 counts = weighted_phi.sum(axis=0)
             new_group_counts[group_ids[j]] = counts
@@ -932,10 +896,7 @@ class HierarchicalDirichletProcessMixtureAccumulator(SequenceEncodableStatisticA
         # ``prev_beta`` and ``prev_alpha`` are non-linear scalar/vector metadata carried for the
         # estimator's global-weight update; the inherited default would multiply and corrupt them.
         checked_scale = _validated_observation_weight(c)
-        self.group_counts = {
-            group_id: counts * checked_scale
-            for group_id, counts in self.group_counts.items()
-        }
+        self.group_counts = {group_id: counts * checked_scale for group_id, counts in self.group_counts.items()}
         for u in self.accumulators:
             u.scale(checked_scale)
         if not supports(self.len_accumulator, Neutral):
@@ -1137,17 +1098,10 @@ class HierarchicalDirichletProcessMixtureEstimator(ParameterEstimator):
             len_val,
         ) = _validated_hdp_statistics(suff_stat, k)
         group_ids = tuple(sorted(group_count_map))
-        counts = (
-            np.asarray([group_count_map[group_id] for group_id in group_ids])
-            if group_ids
-            else np.zeros((0, k))
-        )
+        counts = np.asarray([group_count_map[group_id] for group_id in group_ids]) if group_ids else np.zeros((0, k))
 
         atom_counts = counts.sum(axis=0) if len(counts) else np.zeros(k)
-        components = [
-            self.estimators[i].estimate(atom_counts[i], comp_stats[i])
-            for i in range(k)
-        ]
+        components = [self.estimators[i].estimate(atom_counts[i], comp_stats[i]) for i in range(k)]
 
         if isinstance(self.len_estimator, NullEstimator) or len_val is None:
             len_dist: SequenceEncodableProbabilityDistribution = NullDistribution()
@@ -1163,9 +1117,7 @@ class HierarchicalDirichletProcessMixtureEstimator(ParameterEstimator):
         if counts.shape[0] > 0:
             m_mat = np.zeros_like(counts)
             active = ab > 0.0
-            m_mat[:, active] = ab[active] * (
-                digamma(ab[active] + counts[:, active]) - digamma(ab[active])
-            )
+            m_mat[:, active] = ab[active] * (digamma(ab[active] + counts[:, active]) - digamma(ab[active]))
             if np.any(~np.isfinite(m_mat)) or np.any(m_mat < 0.0):
                 raise ValueError("HDP expected table counts must be finite and non-negative.")
             m_k = m_mat.sum(axis=0)
@@ -1190,11 +1142,7 @@ class HierarchicalDirichletProcessMixtureEstimator(ParameterEstimator):
         row_denominators = counts.sum(axis=1) + alpha
         if np.any(~np.isfinite(row_denominators)) or np.any(row_denominators <= 0.0):
             raise ValueError("HDP group posterior rows have invalid normalizers.")
-        group_weights = (
-            (counts + ab_new) / row_denominators[:, None]
-            if len(counts)
-            else np.zeros((0, k))
-        )
+        group_weights = (counts + ab_new) / row_denominators[:, None] if len(counts) else np.zeros((0, k))
         if len(group_weights) and (
             np.any(~np.isfinite(group_weights))
             or np.any(group_weights < 0.0)
@@ -1260,9 +1208,7 @@ class HierarchicalDirichletProcessMixtureDataEncoder(DataSequenceEncoder):
         unpacked = [_group_identity_and_values(group) for group in x]
         group_ids = tuple(group_id for group_id, _ in unpacked)
         if len(set(group_ids)) != len(group_ids):
-            raise ValueError(
-                "HDP group identities must be unique; wrap duplicate-content groups in HDPGroup."
-            )
+            raise ValueError("HDP group identities must be unique; wrap duplicate-content groups in HDPGroup.")
         groups = [values for _, values in unpacked]
         lengths = np.asarray([len(group) for group in groups], dtype=int)
         offsets = np.concatenate([[0], np.cumsum(lengths)])

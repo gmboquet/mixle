@@ -213,9 +213,7 @@ def test_vector_fit_preserves_identity_metadata(estimator):
 def test_student_t_restoration_copies_serialized_arrays():
     first = np.array([1.0, 2.0])
     second = np.eye(2)
-    accumulator = MultivariateStudentTAccumulator(5.0, 2).from_value(
-        (1.0, 1.0, first, second)
-    )
+    accumulator = MultivariateStudentTAccumulator(5.0, 2).from_value((1.0, 1.0, first, second))
     first[0] = 99.0
     second[0, 0] = 99.0
     assert accumulator.value()[2][0] == 1.0

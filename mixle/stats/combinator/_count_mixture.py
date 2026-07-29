@@ -55,10 +55,7 @@ def require_count_base(
         if count_value_kind(getattr(base, "value", None)) < 0:
             raise TypeError("%s requires a base supported on non-negative integer counts." % model)
     elif support not in _COUNT_SUPPORTS:
-        raise TypeError(
-            "%s requires a base declaring non-negative integer count support; got %r."
-            % (model, support)
-        )
+        raise TypeError("%s requires a base declaring non-negative integer count support; got %r." % (model, support))
     try:
         log_p0 = float(base.log_density(0))
     except (TypeError, ValueError, OverflowError) as exc:

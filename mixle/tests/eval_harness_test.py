@@ -98,9 +98,7 @@ class EvaluateCheckpointTest(unittest.TestCase):
         task = next(task for task in report.tasks if task.name == "in_context_induction")
         instances = task.details["instances"]
         self.assertEqual(len(instances["contexts"]), 24)
-        for context, target, planted in zip(
-            instances["contexts"], instances["targets"], instances["plant_positions"]
-        ):
+        for context, target, planted in zip(instances["contexts"], instances["targets"], instances["plant_positions"]):
             a = context[-1]
             occurrences = [index for index, token in enumerate(context[:-1]) if token == a]
             self.assertEqual(occurrences, [planted])
@@ -213,8 +211,9 @@ class RegressionTrackingTest(unittest.TestCase):
             ),
         )
         for report in cases:
-            with self.subTest(schema=[task.name for task in report.tasks]), self.assertRaisesRegex(
-                ValueError, "schema"
+            with (
+                self.subTest(schema=[task.name for task in report.tasks]),
+                self.assertRaisesRegex(ValueError, "schema"),
             ):
                 track_regression([baseline, report])
         with self.assertRaisesRegex(ValueError, "checkpoint_id"):

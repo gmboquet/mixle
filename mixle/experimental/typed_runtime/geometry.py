@@ -146,10 +146,7 @@ def describe_parameters(module: Any) -> tuple[ParameterDescriptor, ...]:
             signature = None
         supports_duplicates = signature is not None and (
             "remove_duplicate" in signature.parameters
-            or any(
-                parameter.kind is inspect.Parameter.VAR_KEYWORD
-                for parameter in signature.parameters.values()
-            )
+            or any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values())
         )
         rows = tuple(named(remove_duplicate=False)) if supports_duplicates else tuple(named())
     else:
@@ -428,8 +425,7 @@ def apply_optimizer_evidence(
         elif not candidate.target_achieved:
             fallback_reason = "%s failed target; measured fallback to AdamW" % route.family.value
         elif baseline.target_achieved and (
-            candidate.time_to_target_seconds
-            >= (1.0 - minimum_time_improvement) * baseline.time_to_target_seconds
+            candidate.time_to_target_seconds >= (1.0 - minimum_time_improvement) * baseline.time_to_target_seconds
         ):
             fallback_reason = "%s did not beat AdamW time-to-target after overhead" % route.family.value
         if fallback_reason is None:
@@ -621,9 +617,7 @@ class CurvatureSketch:
                 eigenvalues = np.linalg.eigvalsh(value)
                 if float(np.min(eigenvalues)) < 0.0:
                     raise ValueError("Kronecker/Fisher curvature factors must be positive semidefinite.")
-            elif self.kind is CurvatureKind.DIAGONAL and (
-                value.ndim != 1 or np.any(value < 0.0)
-            ):
+            elif self.kind is CurvatureKind.DIAGONAL and (value.ndim != 1 or np.any(value < 0.0)):
                 raise ValueError("diagonal curvature factors must be non-negative vectors.")
             immutable = np.frombuffer(value.tobytes(order="C"), dtype=value.dtype).reshape(value.shape)
             frozen.append(immutable)
@@ -650,10 +644,7 @@ class CurvatureCache:
     def put(self, sketch: CurvatureSketch) -> None:
         existing = self._sketches.get(sketch.key)
         if existing is not None:
-            if (
-                existing.model_id != sketch.model_id
-                or existing.parameter_fingerprint != sketch.parameter_fingerprint
-            ):
+            if existing.model_id != sketch.model_id or existing.parameter_fingerprint != sketch.parameter_fingerprint:
                 raise ValueError("curvature cache key cannot be reused across model/parameter identities.")
             if sketch.model_version < existing.model_version:
                 raise ValueError("curvature cache cannot replace a newer sketch with a stale one.")

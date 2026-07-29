@@ -121,10 +121,14 @@ def run_anchor_harness(
     """Fit on training data, calibrate on a disjoint split, and evaluate once."""
     n_train = _positive_count(n_train, "n_train", minimum=40)
     n_test = _positive_count(n_test, "n_test", minimum=30)
-    calibration_rows = max(30, n_test // 2) if n_calibration is None else _positive_count(
-        n_calibration,
-        "n_calibration",
-        minimum=30,
+    calibration_rows = (
+        max(30, n_test // 2)
+        if n_calibration is None
+        else _positive_count(
+            n_calibration,
+            "n_calibration",
+            minimum=30,
+        )
     )
     if isinstance(seed, bool) or not isinstance(seed, (int, np.integer)):
         raise ValueError("seed must be an integer.")
@@ -136,7 +140,9 @@ def run_anchor_harness(
     models = _fit_bootstraps(train, seed=int(seed))
     calibration_posteriors = [_grade_posterior(models, calibration, index) for index in range(len(calibration))]
     calibration_scale = _calibration_scale(calibration_posteriors, calibration.grade)
-    calibration_posteriors = [_scale_posterior_variance(posterior, calibration_scale) for posterior in calibration_posteriors]
+    calibration_posteriors = [
+        _scale_posterior_variance(posterior, calibration_scale) for posterior in calibration_posteriors
+    ]
     test_posteriors = [
         _scale_posterior_variance(_grade_posterior(models, test, index), calibration_scale)
         for index in range(len(test))
@@ -324,9 +330,7 @@ def _grade_posterior(models: tuple[_BootstrapModel, ...], dataset: _Dataset, ind
         grade_row = _grade_design(np.array([density_mean]), np.array([dataset.geochemistry[index]], dtype=object))[0]
         grade_mean = float(model.grade_coef @ grade_row)
         lithology_index = _LITHOLOGIES.index(str(dataset.geochemistry[index]))
-        propagated = float(
-            model.grade_coef[1] ** 2 * model.density_variance + model.grade_variance[lithology_index]
-        )
+        propagated = float(model.grade_coef[1] ** 2 * model.density_variance + model.grade_variance[lithology_index])
         means.append([grade_mean])
         variances.append([[max(propagated, np.finfo(float).eps)]])
     return GaussianMixtureDistribution(
@@ -390,11 +394,7 @@ def _density_coverage(models: tuple[_BootstrapModel, ...], test: _Dataset) -> fl
 def _binary_decision_projection_error(components: tuple[Any, ...], weights: np.ndarray, merged: Any) -> float:
     def positive_probability(component: Any) -> float:
         mean = float(np.asarray(component.mu).reshape(-1)[0])
-        variance = (
-            float(np.asarray(component.covar)[0, 0])
-            if hasattr(component, "covar")
-            else float(component.sigma2)
-        )
+        variance = float(np.asarray(component.covar)[0, 0]) if hasattr(component, "covar") else float(component.sigma2)
         return float(norm.cdf(mean / np.sqrt(variance)))
 
     original = float(

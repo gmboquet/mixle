@@ -188,9 +188,7 @@ class LogNumberSystem:
         with np.errstate(over="ignore", invalid="ignore"):
             rounded = np.rint(x / self.step)
         ordinary = ~is_log_zero
-        invalid = ordinary & (
-            ~np.isfinite(rounded) | (rounded < float(CODE_MIN)) | (rounded > float(CODE_MAX))
-        )
+        invalid = ordinary & (~np.isfinite(rounded) | (rounded < float(CODE_MIN)) | (rounded > float(CODE_MAX)))
         if np.any(invalid):
             raise OverflowError("quantize: finite log value is outside the representable LNS code range")
         safe = np.where(is_log_zero, 0.0, rounded)

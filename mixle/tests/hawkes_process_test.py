@@ -86,9 +86,7 @@ class HawkesLikelihoodTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.dist.seq_log_density((bad_padding, encoded[1], encoded[2]))
         with self.assertRaises(ValueError):
-            self.dist.seq_log_density(
-                (encoded[0], np.array([3, 0]), encoded[2])
-            )
+            self.dist.seq_log_density((encoded[0], np.array([3, 0]), encoded[2]))
 
     def test_string_round_trip(self):
         d = HawkesProcessDistribution(0.6, 0.7, 1.3, 50.0, name="h", keys="k")
@@ -163,9 +161,7 @@ class HawkesEvidenceTest(unittest.TestCase):
             self.estimator.estimate(None, self.accumulator.value())
 
     def test_encoded_weight_alignment_is_exact(self):
-        encoded = HawkesProcessDataEncoder(10.0).seq_encode(
-            [[1.0], [2.0]]
-        )
+        encoded = HawkesProcessDataEncoder(10.0).seq_encode([[1.0], [2.0]])
         with self.assertRaises(ValueError):
             self.accumulator.seq_update(encoded, np.ones(1), None)
 

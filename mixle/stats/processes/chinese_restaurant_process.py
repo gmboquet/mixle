@@ -83,9 +83,7 @@ def _canonical_partition(
         return None
     if array.ndim != 1 or array.size != n:
         if fail_closed:
-            raise ValueError(
-                f"CRP partition must be a one-dimensional length-{n} label vector"
-            )
+            raise ValueError(f"CRP partition must be a one-dimensional length-{n} label vector")
         return None
     representatives: list[Any] = []
     canonical = np.empty(n, dtype=np.int64)
@@ -104,9 +102,7 @@ def _canonical_partition(
                     break
         except (TypeError, ValueError):
             if fail_closed:
-                raise ValueError(
-                    "CRP labels must have scalar, reflexive equality"
-                ) from None
+                raise ValueError("CRP labels must have scalar, reflexive equality") from None
             return None
         if match is None:
             match = len(representatives)
@@ -149,9 +145,7 @@ def _validated_statistics(
         if sum_k != 0.0:
             raise ValueError("CRP zero-count statistics must have zero blocks")
     elif sum_k < count or sum_k > n * count:
-        raise ValueError(
-            "CRP block total must lie between count and n * count"
-        )
+        raise ValueError("CRP block total must lie between count and n * count")
     return ChineseRestaurantProcessStatistics(sum_k, count, n)
 
 
@@ -211,8 +205,7 @@ class ChineseRestaurantProcessDistribution(SequenceEncodableProbabilityDistribut
             )
             if checked_pseudo != 0.0:
                 raise NotImplementedError(
-                    "CRP does not define an implicit pseudo-count prior; "
-                    "fit an explicit prior over alpha instead"
+                    "CRP does not define an implicit pseudo-count prior; fit an explicit prior over alpha instead"
                 )
         return ChineseRestaurantProcessEstimator(self.n, name=self.name, keys=self.keys)
 
@@ -376,9 +369,7 @@ class ChineseRestaurantProcessEstimator(ParameterEstimator):
             or self.alpha_min <= 0.0
             or self.alpha_min >= self.alpha_max
         ):
-            raise ValueError(
-                "CRP alpha bounds must be finite and satisfy 0 < min < max"
-            )
+            raise ValueError("CRP alpha bounds must be finite and satisfy 0 < min < max")
         self.name = name
         self.keys = keys
 
@@ -428,10 +419,7 @@ class ChineseRestaurantProcessDataEncoder(DataSequenceEncoder):
         return "ChineseRestaurantProcessDataEncoder(%s)" % repr(self.n)
 
     def __eq__(self, other: object) -> bool:
-        return (
-            isinstance(other, ChineseRestaurantProcessDataEncoder)
-            and self.n == other.n
-        )
+        return isinstance(other, ChineseRestaurantProcessDataEncoder) and self.n == other.n
 
     def seq_encode(self, x: Sequence[np.ndarray]) -> list[np.ndarray]:
         """Encode partition label vectors as integer arrays without relabeling them."""

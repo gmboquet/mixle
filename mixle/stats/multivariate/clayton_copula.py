@@ -123,9 +123,7 @@ class ClaytonCopulaEstimator(ParameterEstimator):
         return BufferedUScoreAccumulatorFactory(self.dim, keys=self.keys)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray]) -> ClaytonCopulaDistribution:
-        u, w = validated_buffered_statistic(
-            suff_stat, self.dim, minimum_rows=2, require_positive_weight=True
-        )
+        u, w = validated_buffered_statistic(suff_stat, self.dim, minimum_rows=2, require_positive_weight=True)
         taus = [weighted_kendall_tau(u[:, i], u[:, j], w) for i in range(self.dim) for j in range(i + 1, self.dim)]
         tau = max(float(np.mean(taus)), 0.0)
         if tau >= 1.0 - 1.0e-12:

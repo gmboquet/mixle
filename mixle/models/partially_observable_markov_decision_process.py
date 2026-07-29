@@ -198,9 +198,7 @@ class PartiallyObservableMarkovDecisionProcessModel:
             row = prev.dot(self.transition[int(a)]) * self.observation[int(a), :, int(o)]
             scale = float(row.sum())
             if scale == 0.0:
-                raise ValueError(
-                    f"observation evidence is zero at step {t}; forward-backward posterior is undefined"
-                )
+                raise ValueError(f"observation evidence is zero at step {t}; forward-backward posterior is undefined")
             scales[t] = scale
             alpha[t] = row / scale
             prev = alpha[t]
@@ -229,9 +227,7 @@ class PartiallyObservableMarkovDecisionProcessModel:
             mat = prev[:, None] * self.transition[int(a)] * (self.observation[int(a), :, int(o)] * beta[t])[None, :]
             total = mat.sum()
             if total <= 0.0 or not np.isfinite(total):
-                raise ValueError(
-                    f"transition posterior is undefined at step {t} because sequence evidence is zero"
-                )
+                raise ValueError(f"transition posterior is undefined at step {t} because sequence evidence is zero")
             xi[t] = mat / total
         return xi
 
@@ -397,9 +393,7 @@ def _index_sequence(value: Any, name: str) -> np.ndarray:
         raise ValueError(f"{name} must be a one-dimensional sequence")
     if array.dtype.kind not in {"i", "u", "f"}:
         raise ValueError(f"{name} must contain integer indices")
-    if array.dtype.kind == "f" and (
-        not np.all(np.isfinite(array)) or not np.all(array == np.round(array))
-    ):
+    if array.dtype.kind == "f" and (not np.all(np.isfinite(array)) or not np.all(array == np.round(array))):
         raise ValueError(f"{name} must contain finite integer indices")
     if np.any(array < 0) or np.any(array > np.iinfo(np.intp).max):
         raise ValueError(f"{name} must contain non-negative supported integer indices")

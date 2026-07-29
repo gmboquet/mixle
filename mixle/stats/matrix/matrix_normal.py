@@ -52,9 +52,7 @@ def _matrix_normal_event(value: Any, n: int, p: int) -> np.ndarray:
     except (TypeError, ValueError) as exc:
         raise ValueError("matrix-normal observation must be numeric") from exc
     if result.shape != (n, p):
-        raise ValueError(
-            "matrix-normal observation must have exact shape (%d, %d)" % (n, p)
-        )
+        raise ValueError("matrix-normal observation must have exact shape (%d, %d)" % (n, p))
     if np.any(~np.isfinite(result)):
         raise ValueError("matrix-normal observation must be finite")
     return result
@@ -68,10 +66,7 @@ def _matrix_normal_batch(value: Any, n: int, p: int) -> np.ndarray:
     if result.shape == (0,):
         return np.empty((0, n, p), dtype=np.float64)
     if result.ndim != 3 or result.shape[1:] != (n, p):
-        raise ValueError(
-            "matrix-normal observations must have exact shape (N, %d, %d)"
-            % (n, p)
-        )
+        raise ValueError("matrix-normal observations must have exact shape (N, %d, %d)" % (n, p))
     if np.any(~np.isfinite(result)):
         raise ValueError("matrix-normal observations must be finite")
     return result
@@ -83,13 +78,9 @@ def _validated_matrix_normal_statistics(
     p: int,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     if not isinstance(value, (tuple, list)) or len(value) != 3:
-        raise ValueError(
-            "matrix-normal sufficient statistics must be a three-item tuple"
-        )
+        raise ValueError("matrix-normal sufficient statistics must be a three-item tuple")
     if isinstance(value[2], (bool, np.bool_)) or np.ndim(value[2]) != 0:
-        raise TypeError(
-            "matrix-normal sufficient-statistic count must be a real scalar"
-        )
+        raise TypeError("matrix-normal sufficient-statistic count must be a real scalar")
     try:
         sum_x = np.asarray(value[0], dtype=np.float64)
         moment = np.asarray(value[1], dtype=np.float64)
@@ -97,26 +88,15 @@ def _validated_matrix_normal_statistics(
     except (TypeError, ValueError) as exc:
         raise ValueError("matrix-normal sufficient statistics must be numeric") from exc
     if sum_x.shape != (n, p) or np.any(~np.isfinite(sum_x)):
-        raise ValueError(
-            "matrix-normal sum must be finite with exact shape (%d, %d)" % (n, p)
-        )
+        raise ValueError("matrix-normal sum must be finite with exact shape (%d, %d)" % (n, p))
     if moment.shape != (n, n, p, p) or np.any(~np.isfinite(moment)):
-        raise ValueError(
-            "matrix-normal second moment must be finite with exact shape "
-            "(%d, %d, %d, %d)" % (n, n, p, p)
-        )
+        raise ValueError("matrix-normal second moment must be finite with exact shape (%d, %d, %d, %d)" % (n, n, p, p))
     if not np.isfinite(count) or count < 0.0:
-        raise ValueError(
-            "matrix-normal sufficient-statistic count must be finite and non-negative"
-        )
+        raise ValueError("matrix-normal sufficient-statistic count must be finite and non-negative")
     if count == 0.0 and (np.any(sum_x != 0.0) or np.any(moment != 0.0)):
-        raise ValueError(
-            "empty matrix-normal sufficient statistics must have zero moments"
-        )
+        raise ValueError("empty matrix-normal sufficient statistics must have zero moments")
     if not np.array_equal(moment, moment.transpose(1, 0, 3, 2)):
-        raise ValueError(
-            "matrix-normal second moment must have exact paired symmetry"
-        )
+        raise ValueError("matrix-normal second moment must have exact paired symmetry")
     return sum_x.copy(), moment.copy(), count
 
 
@@ -334,13 +314,9 @@ class MatrixNormalEstimator(ParameterEstimator):
         try:
             self.tol = float(tol)
         except (TypeError, ValueError) as exc:
-            raise TypeError(
-                "matrix-normal tolerance must be a finite positive scalar"
-            ) from exc
+            raise TypeError("matrix-normal tolerance must be a finite positive scalar") from exc
         if not np.isfinite(self.tol) or self.tol <= 0.0:
-            raise ValueError(
-                "matrix-normal tolerance must be a finite positive scalar"
-            )
+            raise ValueError("matrix-normal tolerance must be a finite positive scalar")
         self.name = name
         self.keys = keys
 
@@ -357,9 +333,7 @@ class MatrixNormalEstimator(ParameterEstimator):
         )
         n, p = self.n, self.p
         if count == 0.0:
-            raise MatrixNormalFitError(
-                "matrix-normal fitting requires positive observation weight"
-            )
+            raise MatrixNormalFitError("matrix-normal fitting requires positive observation weight")
         mean = sum_x / count
         # centered row-blocked second moment: T_c[a,b,c,d] = sum_i (X_i-M)[a,c] (X_i-M)[b,d]
         tc = t - count * np.einsum("ac,bd->abcd", mean, mean, optimize=True)
@@ -373,8 +347,7 @@ class MatrixNormalEstimator(ParameterEstimator):
             u_new = 0.5 * (u_new + u_new.T)
             if np.any(~np.isfinite(u_new)) or cholesky_logdet(u_new) is None:
                 raise MatrixNormalFitError(
-                    "matrix-normal row covariance is non-identifiable at "
-                    "flip-flop iteration %d" % iteration
+                    "matrix-normal row covariance is non-identifiable at flip-flop iteration %d" % iteration
                 )
             u_inv = np.linalg.inv(u_new)
             v_new = np.einsum("abcd,ab->cd", tc, u_inv, optimize=True) / (count * n)
@@ -382,19 +355,13 @@ class MatrixNormalEstimator(ParameterEstimator):
             scale = v_new[0, 0]  # anchor V[0,0]=1 to fix the U<->V scale ambiguity
             if not np.isfinite(scale) or scale <= 0.0:
                 raise MatrixNormalFitError(
-                    "matrix-normal scale anchor is invalid at flip-flop "
-                    "iteration %d" % iteration
+                    "matrix-normal scale anchor is invalid at flip-flop iteration %d" % iteration
                 )
             v_new = v_new / scale
             u_new = u_new * scale
-            if (
-                np.any(~np.isfinite(v_new))
-                or cholesky_logdet(v_new) is None
-                or cholesky_logdet(u_new) is None
-            ):
+            if np.any(~np.isfinite(v_new)) or cholesky_logdet(v_new) is None or cholesky_logdet(u_new) is None:
                 raise MatrixNormalFitError(
-                    "matrix-normal covariance factors are invalid at "
-                    "flip-flop iteration %d" % iteration
+                    "matrix-normal covariance factors are invalid at flip-flop iteration %d" % iteration
                 )
             delta = max(
                 float(np.max(np.abs(u_new - u))),
@@ -439,11 +406,7 @@ class MatrixNormalDataEncoder(DataSequenceEncoder):
         return "MatrixNormalDataEncoder(%d, %d)" % (self.n, self.p)
 
     def __eq__(self, other: object) -> bool:
-        return (
-            isinstance(other, MatrixNormalDataEncoder)
-            and self.n == other.n
-            and self.p == other.p
-        )
+        return isinstance(other, MatrixNormalDataEncoder) and self.n == other.n and self.p == other.p
 
     def seq_encode(self, x: Sequence[np.ndarray]) -> np.ndarray:
         """Encode matrices as a floating-point stack for vectorized evaluation."""

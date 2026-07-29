@@ -102,32 +102,20 @@ def _validated_triples(
     except (TypeError, ValueError) as exc:
         raise ValueError("knowledge-graph triples must be array-like") from exc
     if raw.size == 0:
-        if not (
-            (raw.ndim == 1 and raw.shape == (0,))
-            or (raw.ndim == 2 and raw.shape[1] == 3)
-        ):
-            raise ValueError(
-                "knowledge-graph triples must have exact shape (N, 3)"
-            )
+        if not ((raw.ndim == 1 and raw.shape == (0,)) or (raw.ndim == 2 and raw.shape[1] == 3)):
+            raise ValueError("knowledge-graph triples must have exact shape (N, 3)")
         result = np.empty((0, 3), dtype=np.int64)
         result.setflags(write=False)
         return result
     if raw.ndim != 2 or raw.shape[1] != 3:
-        raise ValueError(
-            "knowledge-graph triples must have exact shape (N, 3)"
-        )
+        raise ValueError("knowledge-graph triples must have exact shape (N, 3)")
     if raw.dtype == np.bool_:
         raise TypeError("knowledge-graph identifiers must be exact integers")
     try:
         numeric = raw.astype(np.float64)
     except (TypeError, ValueError) as exc:
-        raise TypeError(
-            "knowledge-graph identifiers must be exact integers"
-        ) from exc
-    if (
-        np.any(~np.isfinite(numeric))
-        or not np.array_equal(numeric, np.round(numeric))
-    ):
+        raise TypeError("knowledge-graph identifiers must be exact integers") from exc
+    if np.any(~np.isfinite(numeric)) or not np.array_equal(numeric, np.round(numeric)):
         raise TypeError("knowledge-graph identifiers must be exact integers")
     triples = numeric.astype(np.int64)
     if (
@@ -169,14 +157,9 @@ def _validated_weights(value: Any, rows: int) -> np.ndarray:
     except (TypeError, ValueError) as exc:
         raise ValueError("knowledge-graph weights must be numeric") from exc
     if weights.shape != (rows,):
-        raise ValueError(
-            "knowledge-graph weights must have exact shape "
-            f"({rows},)"
-        )
+        raise ValueError(f"knowledge-graph weights must have exact shape ({rows},)")
     if np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
-        raise ValueError(
-            "knowledge-graph weights must be finite and non-negative"
-        )
+        raise ValueError("knowledge-graph weights must be finite and non-negative")
     return weights
 
 
@@ -200,8 +183,7 @@ def _owned_embeddings(
         or np.any(~np.isfinite(owned_relation))
     ):
         raise ValueError(
-            "knowledge-graph embeddings must be nonempty finite 2-D arrays "
-            "with a shared embedding dimension"
+            "knowledge-graph embeddings must be nonempty finite 2-D arrays with a shared embedding dimension"
         )
     owned_entity = owned_entity.copy()
     owned_relation = owned_relation.copy()
@@ -244,14 +226,8 @@ def _validated_statistics(
         raw_dim,
         label="knowledge-graph statistic dimension",
     )
-    if (
-        statistic_entities != num_entities
-        or statistic_relations != num_relations
-        or statistic_dim != dim
-    ):
-        raise ValueError(
-            "knowledge-graph statistic dimensions do not match estimator"
-        )
+    if statistic_entities != num_entities or statistic_relations != num_relations or statistic_dim != dim:
+        raise ValueError("knowledge-graph statistic dimensions do not match estimator")
     triples = _validated_triples(
         raw_triples,
         num_entities=num_entities,
@@ -269,13 +245,9 @@ def _validated_statistics(
         rel_tol=1.0e-12,
         abs_tol=1.0e-12,
     ):
-        raise ValueError(
-            "knowledge-graph total weight contradicts row weights"
-        )
+        raise ValueError("knowledge-graph total weight contradicts row weights")
     if (raw_warm_entity is None) != (raw_warm_relation is None):
-        raise ValueError(
-            "knowledge-graph warm start requires both embedding arrays"
-        )
+        raise ValueError("knowledge-graph warm start requires both embedding arrays")
     warm_entity = None
     warm_relation = None
     if raw_warm_entity is not None:
@@ -283,14 +255,8 @@ def _validated_statistics(
             raw_warm_entity,
             raw_warm_relation,
         )
-        if (
-            warm_entity.shape != (num_entities, dim)
-            or warm_relation.shape != (num_relations, dim)
-        ):
-            raise ValueError(
-                "knowledge-graph warm-start embedding shapes do not match "
-                "estimator"
-            )
+        if warm_entity.shape != (num_entities, dim) or warm_relation.shape != (num_relations, dim):
+            raise ValueError("knowledge-graph warm-start embedding shapes do not match estimator")
     return KnowledgeGraphStatistics(
         count,
         triples,
@@ -461,9 +427,7 @@ class KnowledgeGraphDistribution(SequenceEncodableProbabilityDistribution):
             num_entities=self.num_entities,
             num_relations=self.num_relations,
         )
-        known_set = {
-            (int(h), int(r), int(t)) for h, r, t in known_array
-        }
+        known_set = {(int(h), int(r), int(t)) for h, r, t in known_array}
         cand: list[tuple[int, int, int, float]] = []
         for r in range(self.num_relations):
             for t, lp in self.rank(h=node, r=r):
@@ -500,9 +464,7 @@ class KnowledgeGraphDistribution(SequenceEncodableProbabilityDistribution):
             num_entities=self.num_entities,
             num_relations=self.num_relations,
         )
-        context_log_prob = -math.log(self.num_entities) - math.log(
-            self.num_relations
-        )
+        context_log_prob = -math.log(self.num_entities) - math.log(self.num_relations)
         return float(self.tail_log_posterior(h, r)[t] + context_log_prob)
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
@@ -513,9 +475,7 @@ class KnowledgeGraphDistribution(SequenceEncodableProbabilityDistribution):
             num_relations=self.num_relations,
         )
         out = np.empty(triples.shape[0], dtype=float)
-        context_log_prob = -math.log(self.num_entities) - math.log(
-            self.num_relations
-        )
+        context_log_prob = -math.log(self.num_entities) - math.log(self.num_relations)
         for n in range(triples.shape[0]):
             out[n] = (
                 self.tail_log_posterior(
@@ -568,15 +528,9 @@ class KnowledgeGraphSampler(DistributionSampler):
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         """Draw one triple or ``size`` iid triples."""
-        sz = (
-            1
-            if size is None
-            else _exact_integer(size, label="knowledge-graph sample size")
-        )
+        sz = 1 if size is None else _exact_integer(size, label="knowledge-graph sample size")
         if sz < 0:
-            raise ValueError(
-                "knowledge-graph sample size must be non-negative"
-            )
+            raise ValueError("knowledge-graph sample size must be non-negative")
         out = []
         for _ in range(sz):
             h = int(self.rng.randint(self.dist.num_entities))
@@ -619,25 +573,19 @@ class KnowledgeGraphAccumulator(SequenceEncodableStatisticAccumulator):
     ) -> None:
         if estimate is None:
             return
-        if (
-            estimate.entity.shape != (self.num_entities, self.dim)
-            or estimate.relation.shape != (self.num_relations, self.dim)
+        if estimate.entity.shape != (self.num_entities, self.dim) or estimate.relation.shape != (
+            self.num_relations,
+            self.dim,
         ):
-            raise ValueError(
-                "knowledge-graph warm-start model shape does not match "
-                "accumulator"
-            )
+            raise ValueError("knowledge-graph warm-start model shape does not match accumulator")
         entity, relation = _owned_embeddings(
             estimate.entity,
             estimate.relation,
         )
         if self.warm_entity is not None and (
-            not np.array_equal(self.warm_entity, entity)
-            or not np.array_equal(self.warm_relation, relation)
+            not np.array_equal(self.warm_entity, entity) or not np.array_equal(self.warm_relation, relation)
         ):
-            raise ValueError(
-                "knowledge-graph accumulator received conflicting warm starts"
-            )
+            raise ValueError("knowledge-graph accumulator received conflicting warm starts")
         self.warm_entity = entity
         self.warm_relation = relation
 
@@ -863,25 +811,14 @@ class KnowledgeGraphEstimator(ParameterEstimator):
             or len(set(self.directions)) != len(self.directions)
             or not set(self.directions) <= allowed_directions
         ):
-            raise ValueError(
-                "knowledge-graph directions must be unique members of "
-                "{'tail', 'head', 'relation'}"
-            )
+            raise ValueError("knowledge-graph directions must be unique members of {'tail', 'head', 'relation'}")
         if objective is None:
-            objective = (
-                "joint_likelihood"
-                if self.directions == ("tail",)
-                else "pseudo_likelihood"
-            )
+            objective = "joint_likelihood" if self.directions == ("tail",) else "pseudo_likelihood"
         if objective not in {"joint_likelihood", "pseudo_likelihood"}:
-            raise ValueError(
-                "knowledge-graph objective must be 'joint_likelihood' or "
-                "'pseudo_likelihood'"
-            )
+            raise ValueError("knowledge-graph objective must be 'joint_likelihood' or 'pseudo_likelihood'")
         if objective == "joint_likelihood" and self.directions != ("tail",):
             raise ValueError(
-                "joint_likelihood trains only the tail conditional because "
-                "head/relation context laws are fixed uniform"
+                "joint_likelihood trains only the tail conditional because head/relation context laws are fixed uniform"
             )
         self.objective = objective
         if negatives is None:
@@ -892,10 +829,7 @@ class KnowledgeGraphEstimator(ParameterEstimator):
                 label="knowledge-graph negative count",
             )
             if self.negatives <= 0 or self.negatives >= self.num_entities:
-                raise ValueError(
-                    "knowledge-graph negatives must lie in "
-                    "[1, num_entities)"
-                )
+                raise ValueError("knowledge-graph negatives must lie in [1, num_entities)")
         self.seed = _exact_integer(seed, label="knowledge-graph seed")
         if self.seed < 0 or self.seed >= 2**32:
             raise ValueError("knowledge-graph seed must lie in [0, 2**32)")
@@ -915,24 +849,17 @@ class KnowledgeGraphEstimator(ParameterEstimator):
         self.initial_entity = None
         self.initial_relation = None
         if initial_model is not None:
-            if (
-                initial_model.entity.shape
-                != (self.num_entities, self.dim)
-                or initial_model.relation.shape
-                != (self.num_relations, self.dim)
+            if initial_model.entity.shape != (self.num_entities, self.dim) or initial_model.relation.shape != (
+                self.num_relations,
+                self.dim,
             ):
-                raise ValueError(
-                    "knowledge-graph initial model shape does not match "
-                    "estimator"
-                )
+                raise ValueError("knowledge-graph initial model shape does not match estimator")
             self.initial_entity, self.initial_relation = _owned_embeddings(
                 initial_model.entity,
                 initial_model.relation,
             )
         self.outer_objective_compatible = (
-            self.objective == "joint_likelihood"
-            and self.negatives is None
-            and self.weight_decay == 0.0
+            self.objective == "joint_likelihood" and self.negatives is None and self.weight_decay == 0.0
         )
 
     def accumulator_factory(self) -> KnowledgeGraphAccumulatorFactory:
@@ -998,29 +925,17 @@ class KnowledgeGraphEstimator(ParameterEstimator):
             dim=self.dim,
         )
         if checked.count <= 0.0 or checked.triples.shape[0] == 0:
-            raise ValueError(
-                "knowledge-graph fitting requires positively weighted triples"
-            )
+            raise ValueError("knowledge-graph fitting requires positively weighted triples")
         rng = RandomState(self.seed)
         nE, nR, d = self.num_entities, self.num_relations, self.dim
-        warm_entity = (
-            checked.warm_entity
-            if checked.warm_entity is not None
-            else self.initial_entity
-        )
-        warm_relation = (
-            checked.warm_relation
-            if checked.warm_relation is not None
-            else self.initial_relation
-        )
+        warm_entity = checked.warm_entity if checked.warm_entity is not None else self.initial_entity
+        warm_relation = checked.warm_relation if checked.warm_relation is not None else self.initial_relation
         used_warm_start = warm_entity is not None
         if used_warm_start:
             E = np.asarray(warm_entity, dtype=np.float64).copy()
             R = np.asarray(warm_relation, dtype=np.float64).copy()
         else:
-            E = self._project(
-                rng.normal(0.0, self.init_scale, (nE, d))
-            )
+            E = self._project(rng.normal(0.0, self.init_scale, (nE, d)))
             R = rng.normal(0.0, self.init_scale, (nR, d))
         triples = checked.triples
         weights = checked.weights
@@ -1052,9 +967,7 @@ class KnowledgeGraphEstimator(ParameterEstimator):
                 R = R + self.lr * (gr / m - self.weight_decay * R)
             E = self._project(E)
             if np.any(~np.isfinite(E)) or np.any(~np.isfinite(R)):
-                raise RuntimeError(
-                    "knowledge-graph training produced non-finite embeddings"
-                )
+                raise RuntimeError("knowledge-graph training produced non-finite embeddings")
         training_objective = self.objective
         if self.negatives is not None:
             training_objective = "corrected_sampled_" + training_objective
@@ -1089,9 +1002,7 @@ class KnowledgeGraphDataEncoder(DataSequenceEncoder):
             label="knowledge-graph relation count",
         )
         if self.num_entities <= 0 or self.num_relations <= 0:
-            raise ValueError(
-                "knowledge-graph encoder dimensions must be positive"
-            )
+            raise ValueError("knowledge-graph encoder dimensions must be positive")
 
     def __str__(self) -> str:
         return "KnowledgeGraphDataEncoder(%s, %s)" % (
@@ -1216,10 +1127,7 @@ class KnowledgeGraphPattern:
         for raw_edge in pattern:
             edge = tuple(raw_edge)
             if len(edge) != 3:
-                raise ValueError(
-                    "knowledge-graph pattern edges must contain exactly "
-                    "(head, relation, tail)"
-                )
+                raise ValueError("knowledge-graph pattern edges must contain exactly (head, relation, tail)")
             self.edges.append(edge)
         if not self.edges:
             raise ValueError("knowledge-graph pattern cannot be empty")
@@ -1248,14 +1156,8 @@ class KnowledgeGraphPattern:
         cand = dict(candidates or {})
         unknown_candidates = set(cand) - set(self.variables)
         if unknown_candidates:
-            raise ValueError(
-                "candidate domains provided for unknown variables: "
-                f"{sorted(unknown_candidates)}"
-            )
-        self.domain = {
-            v: self._validated_domain(v, cand.get(v))
-            for v in self.variables
-        }
+            raise ValueError(f"candidate domains provided for unknown variables: {sorted(unknown_candidates)}")
+        self.domain = {v: self._validated_domain(v, cand.get(v)) for v in self.variables}
         self.known = (
             None
             if known is None
@@ -1271,35 +1173,22 @@ class KnowledgeGraphPattern:
         self.beam = _exact_integer(beam, label="pattern beam width")
         if self.beam <= 0:
             raise ValueError("pattern beam width must be strictly positive")
-        binding_count = math.prod(
-            len(self.domain[variable]) for variable in self.variables
-        )
+        binding_count = math.prod(len(self.domain[variable]) for variable in self.variables)
         if binding_count > 1_000_000:
-            raise ValueError(
-                "knowledge-graph binding space exceeds the exact "
-                "normalization budget"
-            )
+            raise ValueError("knowledge-graph binding space exceeds the exact normalization budget")
         raw_scores = [
             self._raw_score(tuple(values))
-            for values in itertools.product(
-                *(self.domain[variable] for variable in self.variables)
-            )
+            for values in itertools.product(*(self.domain[variable] for variable in self.variables))
         ]
         maximum = max(raw_scores)
-        self._log_normalizer = maximum + math.log(
-            sum(math.exp(score - maximum) for score in raw_scores)
-        )
+        self._log_normalizer = maximum + math.log(sum(math.exp(score - maximum) for score in raw_scores))
 
     def _validated_domain(
         self,
         variable: str,
         supplied: Any,
     ) -> list[int]:
-        size = (
-            self.kg.num_relations
-            if self.kind[variable] == "relation"
-            else self.kg.num_entities
-        )
+        size = self.kg.num_relations if self.kind[variable] == "relation" else self.kg.num_entities
         values = range(size) if supplied is None else supplied
         result = [
             _validated_id(
@@ -1310,10 +1199,7 @@ class KnowledgeGraphPattern:
             for value in values
         ]
         if not result or len(set(result)) != len(result):
-            raise ValueError(
-                "knowledge-graph candidate domains must be nonempty and "
-                "contain unique ids"
-            )
+            raise ValueError("knowledge-graph candidate domains must be nonempty and contain unique ids")
         return result
 
     @staticmethod
@@ -1321,12 +1207,7 @@ class KnowledgeGraphPattern:
         return {s for s in edge if isinstance(s, str) and s.startswith("?")}
 
     def _ground_edge(self, edge: tuple, b: dict) -> tuple:
-        grounded = tuple(
-            b[s]
-            if isinstance(s, str) and s.startswith("?")
-            else s
-            for s in edge
-        )
+        grounded = tuple(b[s] if isinstance(s, str) and s.startswith("?") else s for s in edge)
         return _validated_single_triple(
             grounded,
             num_entities=self.kg.num_entities,
@@ -1336,36 +1217,23 @@ class KnowledgeGraphPattern:
     def binding(self, assignment: dict) -> tuple:
         """Canonical binding tuple (sorted-variable order) from a ``{variable: value}`` dict."""
         if set(assignment) != set(self.variables):
-            raise ValueError(
-                "binding assignment must contain exactly the pattern variables"
-            )
+            raise ValueError("binding assignment must contain exactly the pattern variables")
         binding = tuple(
             _validated_id(
                 assignment[variable],
-                size=(
-                    self.kg.num_relations
-                    if self.kind[variable] == "relation"
-                    else self.kg.num_entities
-                ),
+                size=(self.kg.num_relations if self.kind[variable] == "relation" else self.kg.num_entities),
                 label=f"binding for {variable}",
             )
             for variable in self.variables
         )
-        if any(
-            value not in self.domain[variable]
-            for variable, value in zip(self.variables, binding)
-        ):
+        if any(value not in self.domain[variable] for variable, value in zip(self.variables, binding)):
             raise ValueError("binding lies outside the candidate domain")
         return binding
 
     def triples(self, binding: tuple) -> list[tuple]:
         """Ground a binding tuple to the list of completed ``(h, r, t)`` edges."""
-        if not isinstance(binding, tuple) or len(binding) != len(
-            self.variables
-        ):
-            raise ValueError(
-                "binding must be a tuple aligned with pattern variables"
-            )
+        if not isinstance(binding, tuple) or len(binding) != len(self.variables):
+            raise ValueError("binding must be a tuple aligned with pattern variables")
         b = dict(zip(self.variables, binding))
         return [self._ground_edge(e, b) for e in self.edges]
 
@@ -1373,18 +1241,11 @@ class KnowledgeGraphPattern:
         return float(self.kg.tail_log_posterior(h, r)[t])
 
     def _raw_score(self, binding: tuple) -> float:
-        return float(
-            sum(
-                self._edge_logprob(*edge)
-                for edge in self.triples(binding)
-            )
-        )
+        return float(sum(self._edge_logprob(*edge) for edge in self.triples(binding)))
 
     def log_density(self, binding: tuple) -> float:
         """Normalized log-probability of a complete binding."""
-        checked = self.binding(
-            dict(zip(self.variables, binding))
-        )
+        checked = self.binding(dict(zip(self.variables, binding)))
         return self._raw_score(checked) - self._log_normalizer
 
     def enumerator(self):

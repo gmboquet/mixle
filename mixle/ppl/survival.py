@@ -78,9 +78,7 @@ def _survival_data(
             numeric_events = raw_events.astype(float)
         except (TypeError, ValueError) as error:
             raise ValueError("event indicators must contain exact binary values 0 or 1") from error
-        if not np.all(np.isfinite(numeric_events)) or not np.all(
-            (numeric_events == 0.0) | (numeric_events == 1.0)
-        ):
+        if not np.all(np.isfinite(numeric_events)) or not np.all((numeric_events == 0.0) | (numeric_events == 1.0)):
             raise ValueError("event indicators must contain exact binary values 0 or 1")
         events = numeric_events.astype(bool)
 

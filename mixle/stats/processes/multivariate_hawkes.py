@@ -87,9 +87,7 @@ def _split(events: Any) -> tuple[np.ndarray, np.ndarray]:
     try:
         size = len(events)
     except TypeError as exc:
-        raise ValueError(
-            "events must be a two-dimensional sequence of (time, mark) pairs"
-        ) from exc
+        raise ValueError("events must be a two-dimensional sequence of (time, mark) pairs") from exc
     if size == 0:
         return np.zeros(0, dtype=np.float64), np.zeros(0, dtype=np.int64)
     try:
@@ -97,9 +95,7 @@ def _split(events: Any) -> tuple[np.ndarray, np.ndarray]:
     except (TypeError, ValueError) as exc:
         raise ValueError("event time/mark pairs must be numeric") from exc
     if arr.ndim != 2 or arr.shape[1] != 2:
-        raise ValueError(
-            "events must have exact shape (num_events, 2)"
-        )
+        raise ValueError("events must have exact shape (num_events, 2)")
     marks = arr[:, 1]
     if np.any(~np.isfinite(marks)) or not np.array_equal(marks, np.round(marks)):
         raise ValueError("event marks must be integer-valued (they index the process dimension).")
@@ -175,14 +171,9 @@ def _validated_weights(value: Any, rows: int) -> np.ndarray:
     except (TypeError, ValueError) as exc:
         raise ValueError("multivariate Hawkes weights must be numeric") from exc
     if weights.shape != (rows,):
-        raise ValueError(
-            "multivariate Hawkes weights must have exact shape "
-            f"({rows},)"
-        )
+        raise ValueError(f"multivariate Hawkes weights must have exact shape ({rows},)")
     if np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
-        raise ValueError(
-            "multivariate Hawkes weights must be finite and non-negative"
-        )
+        raise ValueError("multivariate Hawkes weights must be finite and non-negative")
     return weights
 
 
@@ -193,10 +184,7 @@ def _validated_statistics(
     window: float,
 ) -> MultivariateHawkesProcessStatistics:
     if not isinstance(value, (tuple, list)) or len(value) != 4:
-        raise ValueError(
-            "multivariate Hawkes statistics must contain realizations, "
-            "weights, dimension, and window"
-        )
+        raise ValueError("multivariate Hawkes statistics must contain realizations, weights, dimension, and window")
     raw_realizations, raw_weights, raw_dim, raw_window = value
     statistic_dim = _exact_integer(
         raw_dim,
@@ -205,25 +193,16 @@ def _validated_statistics(
     try:
         statistic_window = float(raw_window)
     except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "multivariate Hawkes statistic window must be numeric"
-        ) from exc
+        raise ValueError("multivariate Hawkes statistic window must be numeric") from exc
     if statistic_dim != dim:
-        raise ValueError(
-            "multivariate Hawkes statistic dimension does not match estimator"
-        )
-    if (
-        not np.isfinite(statistic_window)
-        or not math.isclose(
-            statistic_window,
-            window,
-            rel_tol=0.0,
-            abs_tol=_WINDOW_TOLERANCE * max(1.0, window),
-        )
+        raise ValueError("multivariate Hawkes statistic dimension does not match estimator")
+    if not np.isfinite(statistic_window) or not math.isclose(
+        statistic_window,
+        window,
+        rel_tol=0.0,
+        abs_tol=_WINDOW_TOLERANCE * max(1.0, window),
     ):
-        raise ValueError(
-            "multivariate Hawkes statistic window does not match estimator"
-        )
+        raise ValueError("multivariate Hawkes statistic window does not match estimator")
     if not isinstance(raw_realizations, (tuple, list)):
         raise ValueError("multivariate Hawkes realizations must be a sequence")
     realizations = tuple(
@@ -279,10 +258,7 @@ class MultivariateHawkesProcessDistribution(SequenceEncodableProbabilityDistribu
             or checked_beta <= 0.0
             or checked_window <= 0.0
         ):
-            raise ValueError(
-                "multivariate Hawkes requires finite mu>0, alpha>=0, "
-                "beta>0, and window>0"
-            )
+            raise ValueError("multivariate Hawkes requires finite mu>0, alpha>=0, beta>0, and window>0")
         self.mu = m.copy()
         self.alpha = a.copy()
         self.mu.setflags(write=False)
@@ -294,22 +270,15 @@ class MultivariateHawkesProcessDistribution(SequenceEncodableProbabilityDistribu
             label="multivariate Hawkes maximum event count",
         )
         if self.max_events < 0:
-            raise ValueError(
-                "multivariate Hawkes maximum event count must be non-negative"
-            )
+            raise ValueError("multivariate Hawkes maximum event count must be non-negative")
         self.name = name
         self.keys = keys
         self._col_alpha = self.alpha.sum(axis=0)
         self._col_alpha.setflags(write=False)
-        self.spectral_radius = float(
-            np.max(np.abs(np.linalg.eigvals(self.alpha / self.beta)))
-        )
+        self.spectral_radius = float(np.max(np.abs(np.linalg.eigvals(self.alpha / self.beta))))
 
     def __str__(self) -> str:
-        return (
-            "MultivariateHawkesProcessDistribution(%s, %s, %s, %s, "
-            "name=%s, keys=%s, max_events=%s)"
-        ) % (
+        return ("MultivariateHawkesProcessDistribution(%s, %s, %s, %s, name=%s, keys=%s, max_events=%s)") % (
             repr(self.mu.tolist()),
             repr(self.alpha.tolist()),
             repr(self.beta),
@@ -330,9 +299,7 @@ class MultivariateHawkesProcessDistribution(SequenceEncodableProbabilityDistribu
             label="multivariate Hawkes query time",
         )
         if query > self.window:
-            raise ValueError(
-                "multivariate Hawkes query time must lie inside [0, window]"
-            )
+            raise ValueError("multivariate Hawkes query time must lie inside [0, window]")
         ti, mi = _validated_history(
             times,
             marks,
@@ -363,10 +330,7 @@ class MultivariateHawkesProcessDistribution(SequenceEncodableProbabilityDistribu
             label="multivariate Hawkes interval end",
         )
         if start > end or end > self.window:
-            raise ValueError(
-                "multivariate Hawkes interval must satisfy "
-                "0 <= start <= end <= window"
-            )
+            raise ValueError("multivariate Hawkes interval must satisfy 0 <= start <= end <= window")
         ti, mi = _validated_history(
             times,
             marks,
@@ -378,10 +342,7 @@ class MultivariateHawkesProcessDistribution(SequenceEncodableProbabilityDistribu
         if np.any(rel):
             tp, mp = ti[rel], mi[rel]
             lo = np.maximum(start, tp)
-            kernel = (
-                np.exp(-self.beta * (lo - tp))
-                - np.exp(-self.beta * (end - tp))
-            ) / self.beta
+            kernel = (np.exp(-self.beta * (lo - tp)) - np.exp(-self.beta * (end - tp))) / self.beta
             # per-parent-mark integrated kernel mass, then route through the excitation matrix
             mass = np.zeros(self.dim)
             np.add.at(mass, mp, kernel)
@@ -528,9 +489,7 @@ class MultivariateHawkesProcessSampler(DistributionSampler):
             label="multivariate Hawkes sample size",
         )
         if checked_size < 0:
-            raise ValueError(
-                "multivariate Hawkes sample size must be non-negative"
-            )
+            raise ValueError("multivariate Hawkes sample size must be non-negative")
         return [self._sample_one() for _ in range(checked_size)]
 
 
@@ -543,13 +502,9 @@ class MultivariateHawkesProcessAccumulator(SequenceEncodableStatisticAccumulator
             label="multivariate Hawkes dimension",
         )
         if self.dim <= 0:
-            raise ValueError(
-                "multivariate Hawkes dimension must be strictly positive"
-            )
+            raise ValueError("multivariate Hawkes dimension must be strictly positive")
         if not np.isfinite(window) or window <= 0.0:
-            raise ValueError(
-                "multivariate Hawkes accumulator requires a finite window > 0"
-            )
+            raise ValueError("multivariate Hawkes accumulator requires a finite window > 0")
         self.window = float(window)
         self.realizations: list[np.ndarray] = []
         self.weights: list[float] = []
@@ -681,13 +636,9 @@ class MultivariateHawkesProcessEstimator(ParameterEstimator):
             label="multivariate Hawkes dimension",
         )
         if self.dim <= 0:
-            raise ValueError(
-                "multivariate Hawkes dimension must be strictly positive"
-            )
+            raise ValueError("multivariate Hawkes dimension must be strictly positive")
         if not np.isfinite(window) or window <= 0.0:
-            raise ValueError(
-                "multivariate Hawkes estimator requires a finite window > 0"
-            )
+            raise ValueError("multivariate Hawkes estimator requires a finite window > 0")
         self.window = float(window)
         self.name = name
         self.keys = keys
@@ -696,9 +647,7 @@ class MultivariateHawkesProcessEstimator(ParameterEstimator):
             label="multivariate Hawkes maximum event count",
         )
         if self.max_events < 0:
-            raise ValueError(
-                "multivariate Hawkes maximum event count must be non-negative"
-            )
+            raise ValueError("multivariate Hawkes maximum event count must be non-negative")
 
     def accumulator_factory(self) -> MultivariateHawkesProcessAccumulatorFactory:
         """Return an accumulator factory for branching EM statistics."""
@@ -729,10 +678,7 @@ class MultivariateHawkesProcessEstimator(ParameterEstimator):
             if events.shape[0] > 1:
                 gap_arrays.append(np.diff(events[:, 0]))
         if total_weight <= 0.0:
-            raise ValueError(
-                "multivariate Hawkes fitting requires positive realization "
-                "weight"
-            )
+            raise ValueError("multivariate Hawkes fitting requires positive realization weight")
         if np.any(event_counts <= 0.0):
             raise ValueError(
                 "multivariate Hawkes fitting requires positively weighted "
@@ -740,25 +686,15 @@ class MultivariateHawkesProcessEstimator(ParameterEstimator):
             )
 
         empirical_mu = event_counts / (total_weight * self.window)
-        gaps = (
-            np.concatenate(gap_arrays)
-            if gap_arrays
-            else np.empty(0, dtype=np.float64)
-        )
-        beta_seed = (
-            1.0 / float(np.median(gaps))
-            if gaps.size
-            else 1.0 / self.window
-        )
+        gaps = np.concatenate(gap_arrays) if gap_arrays else np.empty(0, dtype=np.float64)
+        beta_seed = 1.0 / float(np.median(gaps)) if gaps.size else 1.0 / self.window
         beta_seed = max(beta_seed, 1.0 / self.window)
         alpha_offset = self.dim
         beta_offset = alpha_offset + self.dim * self.dim
 
         def objective(parameters: np.ndarray) -> float:
             mu = np.exp(parameters[: self.dim])
-            alpha = parameters[
-                alpha_offset:beta_offset
-            ].reshape(self.dim, self.dim)
+            alpha = parameters[alpha_offset:beta_offset].reshape(self.dim, self.dim)
             beta = math.exp(float(parameters[beta_offset]))
             column_mass = np.sum(alpha, axis=0)
             total = 0.0
@@ -775,9 +711,7 @@ class MultivariateHawkesProcessEstimator(ParameterEstimator):
                 loglam = 0.0
                 for index, (event, mark) in enumerate(zip(times, marks)):
                     if index:
-                        excitation *= math.exp(
-                            -beta * (float(event) - previous)
-                        )
+                        excitation *= math.exp(-beta * (float(event) - previous))
                     intensity = float(mu[mark] + alpha[mark] @ excitation)
                     if not np.isfinite(intensity) or intensity <= 0.0:
                         return np.inf
@@ -787,15 +721,7 @@ class MultivariateHawkesProcessEstimator(ParameterEstimator):
                 compensator = self.window * float(np.sum(mu))
                 if times.size and np.any(alpha):
                     compensator += (1.0 / beta) * float(
-                        np.sum(
-                            column_mass[marks]
-                            * (
-                                1.0
-                                - np.exp(
-                                    -beta * (self.window - times)
-                                )
-                            )
-                        )
+                        np.sum(column_mass[marks] * (1.0 - np.exp(-beta * (self.window - times))))
                     )
                 total += float(weight) * (loglam - compensator)
             return -total if np.isfinite(total) else np.inf
@@ -825,11 +751,7 @@ class MultivariateHawkesProcessEstimator(ParameterEstimator):
                     )
                 )
             )
-        bounds = (
-            [(-40.0, 40.0)] * self.dim
-            + [(0.0, None)] * (self.dim * self.dim)
-            + [(-40.0, 40.0)]
-        )
+        bounds = [(-40.0, 40.0)] * self.dim + [(0.0, None)] * (self.dim * self.dim) + [(-40.0, 40.0)]
         candidates = []
         for start in starts:
             result = minimize(
@@ -843,8 +765,7 @@ class MultivariateHawkesProcessEstimator(ParameterEstimator):
                 candidates.append(result)
         if not candidates:
             raise RuntimeError(
-                "multivariate Hawkes finite-window likelihood optimization "
-                "failed to converge to a finite candidate"
+                "multivariate Hawkes finite-window likelihood optimization failed to converge to a finite candidate"
             )
         best = min(candidates, key=lambda result: float(result.fun))
         mu = np.exp(best.x[: self.dim])
@@ -872,18 +793,14 @@ class MultivariateHawkesProcessDataEncoder(DataSequenceEncoder):
 
     def __init__(self, window: float, dim: int) -> None:
         if not np.isfinite(window) or window <= 0.0:
-            raise ValueError(
-                "multivariate Hawkes encoder requires a finite window > 0"
-            )
+            raise ValueError("multivariate Hawkes encoder requires a finite window > 0")
         self.window = float(window)
         self.dim = _exact_integer(
             dim,
             label="multivariate Hawkes dimension",
         )
         if self.dim <= 0:
-            raise ValueError(
-                "multivariate Hawkes dimension must be strictly positive"
-            )
+            raise ValueError("multivariate Hawkes dimension must be strictly positive")
 
     def __str__(self) -> str:
         return "MultivariateHawkesProcessDataEncoder(%s, %s)" % (repr(self.window), repr(self.dim))

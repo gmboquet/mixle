@@ -62,9 +62,7 @@ class SymmetricDirichletDistribution(SequenceEncodableProbabilityDistribution):
         try:
             alpha = float(value)
         except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "SymmetricDirichletDistribution requires a positive finite concentration alpha."
-            ) from exc
+            raise ValueError("SymmetricDirichletDistribution requires a positive finite concentration alpha.") from exc
         if not np.isfinite(alpha) or alpha <= 0.0:
             raise ValueError("SymmetricDirichletDistribution requires a positive finite concentration alpha.")
         return alpha
@@ -137,14 +135,9 @@ class SymmetricDirichletDistribution(SequenceEncodableProbabilityDistribution):
         except (TypeError, ValueError) as exc:
             raise ValueError("SymmetricDirichletDistribution encoded observations must be numeric.") from exc
         if xx.ndim != 2:
-            raise ValueError(
-                "SymmetricDirichletDistribution encoded observations must have exact shape (n, d)."
-            )
+            raise ValueError("SymmetricDirichletDistribution encoded observations must have exact shape (n, d).")
         if dimension is not None and xx.shape[1] != dimension:
-            raise ValueError(
-                "SymmetricDirichletDistribution encoded observations must have %d columns."
-                % dimension
-            )
+            raise ValueError("SymmetricDirichletDistribution encoded observations must have %d columns." % dimension)
         if xx.shape[0] == 0:
             return np.zeros(0, dtype=float)
         n = xx.shape[1]
@@ -224,10 +217,7 @@ class SymmetricDirichletDataEncoder(DataSequenceEncoder):
         return "SymmetricDirichletDataEncoder"
 
     def __eq__(self, other: object) -> bool:
-        return (
-            isinstance(other, SymmetricDirichletDataEncoder)
-            and self.dimension == other.dimension
-        )
+        return isinstance(other, SymmetricDirichletDataEncoder) and self.dimension == other.dimension
 
     def seq_encode(self, x: Any) -> np.ndarray:
         """Encode simplex observations as a raw (m, n) float array.
@@ -246,8 +236,5 @@ class SymmetricDirichletDataEncoder(DataSequenceEncoder):
         if values.shape[1] == 0:
             raise ValueError("SymmetricDirichletDataEncoder observations cannot have zero dimension.")
         if self.dimension is not None and values.shape[1] != self.dimension:
-            raise ValueError(
-                "SymmetricDirichletDataEncoder observations must have %d columns."
-                % self.dimension
-            )
+            raise ValueError("SymmetricDirichletDataEncoder observations must have %d columns." % self.dimension)
         return values

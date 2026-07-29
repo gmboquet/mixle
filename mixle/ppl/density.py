@@ -127,9 +127,7 @@ class _DensitySpec:
                 minimum = 2 if kind == "conditional_flow" and name == "y_dim" else 1
                 self.params[name] = _positive_int(self.params[name], name, minimum=minimum)
         if "n_categories" in self.params:
-            self.params["n_categories"] = _positive_int(
-                self.params["n_categories"], "category count", minimum=2
-            )
+            self.params["n_categories"] = _positive_int(self.params["n_categories"], "category count", minimum=2)
         if "noise_ratio" in self.extra:
             self.extra["noise_ratio"] = _positive_int(self.extra["noise_ratio"], "noise_ratio")
 
@@ -219,9 +217,7 @@ def _density_fit(rv: RandomVariable, data: Any, **kw: Any) -> RandomVariable:
     if unknown:
         raise TypeError(f"unsupported neural-density fit control(s): {', '.join(unknown)}")
     if kw.get("how", "auto") not in {"auto", "em"}:
-        raise NotImplementedError(
-            f"neural-density fitting implements EM-style optimization, not how={kw['how']!r}"
-        )
+        raise NotImplementedError(f"neural-density fitting implements EM-style optimization, not how={kw['how']!r}")
     if kw.get("missing", "error") != "error":
         raise NotImplementedError("neural-density fitting does not support missing='marginalize'")
     if "its" in kw and kw.get("max_its", 100) != 100:
@@ -267,9 +263,7 @@ def _density_fit(rv: RandomVariable, data: Any, **kw: Any) -> RandomVariable:
             width=int(spec.params["x_dim"]),
         )
         if xs.shape[0] != ys.shape[0]:
-            raise ValueError(
-                f"given[{spec.field!r}] has {xs.shape[0]} rows but observations have {ys.shape[0]}"
-            )
+            raise ValueError(f"given[{spec.field!r}] has {xs.shape[0]} rows but observations have {ys.shape[0]}")
         rows = list(zip(xs, ys))
 
     import torch

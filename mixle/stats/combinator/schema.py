@@ -99,8 +99,7 @@ class Schema:
             raise TypeError("schema positional values must be a sequence")
         if len(values) != len(self.names):
             raise ValueError(
-                "schema positional values require exactly %d entries; received %d"
-                % (len(self.names), len(values))
+                "schema positional values require exactly %d entries; received %d" % (len(self.names), len(values))
             )
         record = dict(zip(self.names, values))
         self.validate(record)

@@ -122,9 +122,7 @@ def _validated_statistics(
         label="Chow-Liu statistic feature count",
     )
     if checked_features != num_features:
-        raise ValueError(
-            "Chow-Liu statistic feature count does not match the estimator"
-        )
+        raise ValueError("Chow-Liu statistic feature count does not match the estimator")
     marginal_counts, marginal_values = value[2], value[3]
     joint_counts, marginal_stats, conditional_stats = value[4], value[5], value[6]
     if (
@@ -135,9 +133,7 @@ def _validated_statistics(
         or not isinstance(marginal_stats, (tuple, list))
         or len(marginal_stats) != num_features
     ):
-        raise ValueError(
-            "Chow-Liu marginal statistic fields must match feature count"
-        )
+        raise ValueError("Chow-Liu marginal statistic fields must match feature count")
     tolerance = _COUNT_ATOL * max(1.0, total_weight)
     checked_counts = []
     checked_values = []
@@ -147,9 +143,7 @@ def _validated_statistics(
         if not isinstance(counts, dict) or not isinstance(values, dict):
             raise TypeError("Chow-Liu marginal maps must be dictionaries")
         if set(counts) != set(values):
-            raise ValueError(
-                "Chow-Liu marginal count/value maps must have identical keys"
-            )
+            raise ValueError("Chow-Liu marginal count/value maps must have identical keys")
         copied_counts = {}
         copied_values = {}
         for key, count in counts.items():
@@ -158,9 +152,7 @@ def _validated_statistics(
                 label="marginal count",
             )
             if freeze(values[key]) != key:
-                raise ValueError(
-                    "Chow-Liu marginal value does not match its canonical key"
-                )
+                raise ValueError("Chow-Liu marginal value does not match its canonical key")
             copied_counts[key] = checked_count
             copied_values[key] = values[key]
         if not np.isclose(
@@ -169,23 +161,15 @@ def _validated_statistics(
             rtol=0.0,
             atol=tolerance,
         ):
-            raise ValueError(
-                "Each Chow-Liu marginal count map must sum to total weight"
-            )
+            raise ValueError("Each Chow-Liu marginal count map must sum to total weight")
         checked_counts.append(copied_counts)
         checked_values.append(copied_values)
 
     if not isinstance(joint_counts, dict):
         raise TypeError("Chow-Liu joint counts must be a dictionary")
-    expected_pairs = {
-        (i, j)
-        for i in range(num_features - 1)
-        for j in range(i + 1, num_features)
-    }
+    expected_pairs = {(i, j) for i in range(num_features - 1) for j in range(i + 1, num_features)}
     if total_weight > 0.0 and set(joint_counts) != expected_pairs:
-        raise ValueError(
-            "Chow-Liu joint counts must cover every unordered feature pair"
-        )
+        raise ValueError("Chow-Liu joint counts must cover every unordered feature pair")
     if not set(joint_counts).issubset(expected_pairs):
         raise ValueError("Chow-Liu joint count direction is invalid")
     checked_joint = {}
@@ -203,9 +187,7 @@ def _validated_statistics(
                 or key_pair[0] not in row_sums
                 or key_pair[1] not in col_sums
             ):
-                raise ValueError(
-                    "Chow-Liu joint count key is outside marginal support"
-                )
+                raise ValueError("Chow-Liu joint count key is outside marginal support")
             checked_count = _validated_nonnegative_scalar(
                 count,
                 label="joint count",
@@ -215,37 +197,26 @@ def _validated_statistics(
             col_sums[key_pair[1]] += checked_count
         for key, count in checked_counts[i].items():
             if not np.isclose(row_sums[key], count, rtol=0.0, atol=tolerance):
-                raise ValueError(
-                    "Chow-Liu joint row sums contradict marginal counts"
-                )
+                raise ValueError("Chow-Liu joint row sums contradict marginal counts")
         for key, count in checked_counts[j].items():
             if not np.isclose(col_sums[key], count, rtol=0.0, atol=tolerance):
-                raise ValueError(
-                    "Chow-Liu joint column sums contradict marginal counts"
-                )
+                raise ValueError("Chow-Liu joint column sums contradict marginal counts")
         checked_joint[pair] = copied
 
     if not isinstance(conditional_stats, dict):
         raise TypeError("Chow-Liu conditional statistics must be a dictionary")
     expected_directions = {
-        (parent, child)
-        for parent in range(num_features)
-        for child in range(num_features)
-        if parent != child
+        (parent, child) for parent in range(num_features) for child in range(num_features) if parent != child
     }
     if total_weight > 0.0 and set(conditional_stats) != expected_directions:
-        raise ValueError(
-            "Chow-Liu conditional statistics must cover every directed feature pair"
-        )
+        raise ValueError("Chow-Liu conditional statistics must cover every directed feature pair")
     checked_conditional = {}
     for direction, by_parent in conditional_stats.items():
         if direction not in expected_directions or not isinstance(by_parent, dict):
             raise ValueError("Chow-Liu conditional statistic direction is invalid")
         parent, _ = direction
         if set(by_parent) != set(checked_counts[parent]):
-            raise ValueError(
-                "Chow-Liu conditional parent keys contradict marginal support"
-            )
+            raise ValueError("Chow-Liu conditional parent keys contradict marginal support")
         checked_conditional[direction] = dict(by_parent)
 
     return ChowLiuStatistics(
@@ -276,9 +247,7 @@ def _finite_support_values(
     enumerator = child_enumerator(dist, path)
     entries = list(islice(enumerator, int(size) + 1))
     if len(entries) > int(size):
-        raise ValueError(
-            f"{path} enumerator size contradicts support_size()"
-        )
+        raise ValueError(f"{path} enumerator size contradicts support_size()")
     values = []
     for value, log_probability in entries:
         score = float(log_probability)
@@ -312,9 +281,7 @@ def _validated_pseudo_count(
         return None
     if isinstance(value, (list, tuple)):
         if len(value) != num_features:
-            raise ValueError(
-                "Chow-Liu pseudo-count sequence must match feature count"
-            )
+            raise ValueError("Chow-Liu pseudo-count sequence must match feature count")
         return tuple(
             _validated_nonnegative_scalar(
                 item,
@@ -403,10 +370,7 @@ class ChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
         default_policy: str = "marginal",
     ) -> None:
         self.parents = [
-            None
-            if u is None
-            else _validated_feature_index(u, label="Chow-Liu parent index")
-            for u in parents
+            None if u is None else _validated_feature_index(u, label="Chow-Liu parent index") for u in parents
         ]
         self.marginal_dists = list(marginal_dists)
         # Per this class's own contract (see the class docstring): conditional_dists[i] is looked up
@@ -433,9 +397,7 @@ class ChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
             ]
         )
         self.parent_values = (
-            [{} for _ in self.parents]
-            if parent_values is None
-            else [dict(values) for values in parent_values]
+            [{} for _ in self.parents] if parent_values is None else [dict(values) for values in parent_values]
         )
         self.num_features = len(self.parents)
         self.name = name
@@ -502,8 +464,7 @@ class ChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
             if parent_support is None:
                 if self.default_dists[child] is None:
                     raise ValueError(
-                        "A non-enumerable parent requires an explicit default "
-                        f"conditional for child {child}"
+                        f"A non-enumerable parent requires an explicit default conditional for child {child}"
                     )
                 reachable[child] = _finite_support_values(
                     self.default_dists[child],
@@ -516,8 +477,7 @@ class ChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
                 conditional = self.conditional_dist(child, parent_value)
                 if conditional is None:
                     raise ValueError(
-                        f"No conditional distribution covers child {child} for "
-                        f"reachable parent value {parent_value!r}"
+                        f"No conditional distribution covers child {child} for reachable parent value {parent_value!r}"
                     )
                 values = _finite_support_values(
                     conditional,
@@ -528,9 +488,7 @@ class ChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
                 elif child_support_known:
                     child_values.extend(values)
             reachable[child] = (
-                list({freeze(value): value for value in child_values}.values())
-                if child_support_known
-                else None
+                list({freeze(value): value for value in child_values}.values()) if child_support_known else None
             )
 
     def __str__(self) -> str:
@@ -630,13 +588,9 @@ class ChowLiuTreeDistribution(SequenceEncodableProbabilityDistribution):
 
     def estimator(self, pseudo_count: float | None = None) -> "ChowLiuTreeEstimator":
         """Return an estimator for fitting this distribution from data."""
-        effective_pseudo = (
-            self.pseudo_count if pseudo_count is None else pseudo_count
-        )
+        effective_pseudo = self.pseudo_count if pseudo_count is None else pseudo_count
         estimators = [
-            dist.estimator(
-                pseudo_count=_pseudo_for_index(effective_pseudo, i)
-            )
+            dist.estimator(pseudo_count=_pseudo_for_index(effective_pseudo, i))
             for i, dist in enumerate(self.marginal_dists)
         ]
         root = self.feature_order[0]
@@ -692,9 +646,7 @@ class ChowLiuTreeEnumerator(DistributionEnumerator):
                 raise ValueError("feature_order contains a second root")
             child_dist = dist.conditional_dist(child, assignment[parent])
             if child_dist is None:
-                raise ValueError(
-                    "Validated Chow-Liu conditional coverage was lost"
-                )
+                raise ValueError("Validated Chow-Liu conditional coverage was lost")
             values = _finite_support_values(
                 child_dist,
                 f"ChowLiuTreeDistribution.conditional_dists[{child}]",
@@ -828,9 +780,7 @@ class ChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
 
         for i, value in enumerate(xx):
             key = keys[i]
-            self.marginal_counts[i][key] = (
-                self.marginal_counts[i].get(key, 0.0) + checked_weight
-            )
+            self.marginal_counts[i][key] = self.marginal_counts[i].get(key, 0.0) + checked_weight
             self.marginal_values[i].setdefault(key, copy.deepcopy(value))
             prev = None if estimate is None else estimate.marginal_dists[i]
             self.marginal_accumulators[i].update(value, checked_weight, prev)
@@ -863,9 +813,7 @@ class ChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
 
         for i, value in enumerate(xx):
             key = keys[i]
-            self.marginal_counts[i][key] = (
-                self.marginal_counts[i].get(key, 0.0) + checked_weight
-            )
+            self.marginal_counts[i][key] = self.marginal_counts[i].get(key, 0.0) + checked_weight
             self.marginal_values[i].setdefault(key, copy.deepcopy(value))
             self.marginal_accumulators[i].initialize(
                 value,
@@ -976,14 +924,10 @@ class ChowLiuTreeAccumulator(SequenceEncodableStatisticAccumulator):
         checked_scale = _validated_nonnegative_scalar(c, label="scale")
         self.total_weight *= checked_scale
         self.marginal_counts = [
-            {key: count * checked_scale for key, count in counts.items()}
-            for counts in self.marginal_counts
+            {key: count * checked_scale for key, count in counts.items()} for counts in self.marginal_counts
         ]
         self.joint_counts = {
-            pair_key: {
-                value_key: count * checked_scale
-                for value_key, count in counts.items()
-            }
+            pair_key: {value_key: count * checked_scale for value_key, count in counts.items()}
             for pair_key, counts in self.joint_counts.items()
         }
         for acc in self.marginal_accumulators:
@@ -1057,9 +1001,7 @@ class ChowLiuTreeEstimator(ParameterEstimator):
         name: str | None = None,
     ) -> None:
         if len(estimators) == 0:
-            raise ValueError(
-                "ChowLiuTreeEstimator requires at least one feature estimator."
-            )
+            raise ValueError("ChowLiuTreeEstimator requires at least one feature estimator.")
         self.num_features = len(estimators)
         self.pseudo_count = _validated_pseudo_count(
             pseudo_count,
@@ -1067,8 +1009,7 @@ class ChowLiuTreeEstimator(ParameterEstimator):
         )
         inherited_mi = (
             self.pseudo_count
-            if mi_pseudo_count is None
-            and not isinstance(self.pseudo_count, tuple)
+            if mi_pseudo_count is None and not isinstance(self.pseudo_count, tuple)
             else mi_pseudo_count
         )
         self.mi_pseudo_count = (
@@ -1247,18 +1188,13 @@ class ChowLiuTreeDataEncoder(DataSequenceEncoder):
             )
         )
         if self.num_features is not None and self.num_features < 0:
-            raise ValueError(
-                "Chow-Liu encoder feature count must be non-negative"
-            )
+            raise ValueError("Chow-Liu encoder feature count must be non-negative")
 
     def __str__(self) -> str:
         return f"ChowLiuTreeDataEncoder(num_features={self.num_features!r})"
 
     def __eq__(self, other: object) -> bool:
-        return (
-            isinstance(other, ChowLiuTreeDataEncoder)
-            and self.num_features == other.num_features
-        )
+        return isinstance(other, ChowLiuTreeDataEncoder) and self.num_features == other.num_features
 
     def seq_encode(self, x: Sequence[Sequence[Any]]) -> tuple[tuple[Any, ...], ...]:
         """Encode observations as immutable feature tuples."""

@@ -91,9 +91,7 @@ if _HAS_TORCH:
                 # is lossless for fp16/bfloat16 and stays on the declared device; float64 remains
                 # float64, so QAT never introduces the old unrelated float32 precision bottleneck.
                 quantile_input = (
-                    absolute
-                    if absolute.dtype in (torch.float32, torch.float64)
-                    else absolute.to(dtype=torch.float32)
+                    absolute if absolute.dtype in (torch.float32, torch.float64) else absolute.to(dtype=torch.float32)
                 )
                 magnitude = torch.quantile(quantile_input.reshape(-1), clip_percentile / 100.0).to(x.dtype)
             scale = torch.where(magnitude > 0, magnitude / qmax, torch.ones_like(magnitude))

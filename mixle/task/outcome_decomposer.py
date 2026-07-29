@@ -220,11 +220,7 @@ def train_outcome_decomposer(
             budget=budget,
             rng_seed=audit_plan_seed,
         )
-        promoted = (
-            len(kept) >= 2
-            and proposal_error is None
-            and proposed_audit_score > incumbent_audit_score
-        )
+        promoted = len(kept) >= 2 and proposal_error is None and proposed_audit_score > incumbent_audit_score
         history.append(
             RoundStats(
                 round=r,

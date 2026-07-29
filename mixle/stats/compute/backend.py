@@ -57,8 +57,7 @@ def backend_seq_log_density(dist: Any, enc: Any, engine: ComputeEngine = NUMPY_E
 
     if not generated_log_density_available(dist):
         raise BackendCapabilityUnavailableError(
-            "%s has neither backend_seq_log_density nor a declaration-generated scorer."
-            % type(dist).__name__
+            "%s has neither backend_seq_log_density nor a declaration-generated scorer." % type(dist).__name__
         )
     # Once a scorer is declared available, every shape/data/arithmetic/formula
     # failure is an execution failure. Preserve its original type and traceback

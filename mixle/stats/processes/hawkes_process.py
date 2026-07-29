@@ -110,8 +110,7 @@ def _validated_events(
     if invalid:
         if fail_closed:
             raise ValueError(
-                "Hawkes event times must be a one-dimensional, finite, "
-                "strictly increasing sequence inside [0, window]"
+                "Hawkes event times must be a one-dimensional, finite, strictly increasing sequence inside [0, window]"
             )
         return None
     result = events.copy()
@@ -137,9 +136,7 @@ def _validated_payload(
     window: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     if not isinstance(value, (tuple, list)) or len(value) != 3:
-        raise ValueError(
-            "Hawkes encoded payload must be (times, lengths, window)"
-        )
+        raise ValueError("Hawkes encoded payload must be (times, lengths, window)")
     times_raw, lengths_raw, encoded_window = value
     try:
         times = np.asarray(times_raw, dtype=np.float64)
@@ -147,14 +144,11 @@ def _validated_payload(
         encoded_window = float(encoded_window)
     except (TypeError, ValueError) as exc:
         raise ValueError("Hawkes encoded payload must be numeric") from exc
-    if (
-        not np.isfinite(encoded_window)
-        or not math.isclose(
-            encoded_window,
-            window,
-            rel_tol=0.0,
-            abs_tol=_WINDOW_TOLERANCE * max(1.0, window),
-        )
+    if not np.isfinite(encoded_window) or not math.isclose(
+        encoded_window,
+        window,
+        rel_tol=0.0,
+        abs_tol=_WINDOW_TOLERANCE * max(1.0, window),
     ):
         raise ValueError("Hawkes encoded window does not match the model window")
     if times.ndim != 2:
@@ -165,9 +159,7 @@ def _validated_payload(
         or lengths.dtype == np.bool_
         or not np.issubdtype(lengths.dtype, np.integer)
     ):
-        raise ValueError(
-            "Hawkes encoded lengths must be an aligned exact-integer vector"
-        )
+        raise ValueError("Hawkes encoded lengths must be an aligned exact-integer vector")
     lengths = lengths.astype(np.int64, copy=False)
     if np.any(lengths < 0) or np.any(lengths > times.shape[1]):
         raise ValueError("Hawkes encoded length is outside the padded matrix")
@@ -181,9 +173,7 @@ def _validated_payload(
             raise AssertionError("unreachable")
         padding = row[int(length) :]
         if np.any(~np.isfinite(padding)) or np.any(padding != window):
-            raise ValueError(
-                "Hawkes padding must equal the fixed observation window"
-            )
+            raise ValueError("Hawkes padding must equal the fixed observation window")
     return times, lengths
 
 
@@ -193,30 +183,22 @@ def _validated_statistics(
     window: float,
 ) -> HawkesProcessStatistics:
     if not isinstance(value, (tuple, list)) or len(value) != 3:
-        raise ValueError(
-            "Hawkes statistics must contain realizations, weights, and window"
-        )
+        raise ValueError("Hawkes statistics must contain realizations, weights, and window")
     raw_realizations, raw_weights, raw_window = value
     try:
         statistic_window = float(raw_window)
     except (TypeError, ValueError) as exc:
         raise ValueError("Hawkes statistic window must be numeric") from exc
-    if (
-        not np.isfinite(statistic_window)
-        or not math.isclose(
-            statistic_window,
-            window,
-            rel_tol=0.0,
-            abs_tol=_WINDOW_TOLERANCE * max(1.0, window),
-        )
+    if not np.isfinite(statistic_window) or not math.isclose(
+        statistic_window,
+        window,
+        rel_tol=0.0,
+        abs_tol=_WINDOW_TOLERANCE * max(1.0, window),
     ):
         raise ValueError("Hawkes statistic window does not match the estimator")
     if not isinstance(raw_realizations, (tuple, list)):
         raise ValueError("Hawkes realizations must be a sequence")
-    realizations = tuple(
-        _validated_events(item, window=window, fail_closed=True)
-        for item in raw_realizations
-    )
+    realizations = tuple(_validated_events(item, window=window, fail_closed=True) for item in raw_realizations)
     if any(item is None for item in realizations):  # pragma: no cover
         raise AssertionError("unreachable")
     weights = _validated_weights(raw_weights, len(realizations)).copy()
@@ -258,10 +240,7 @@ class HawkesProcessDistribution(SequenceEncodableProbabilityDistribution):
             and self.beta > 0.0
             and self.window > 0.0
         ):
-            raise ValueError(
-                "Hawkes process requires finite mu>0, alpha>=0, beta>0, "
-                "and window>0."
-            )
+            raise ValueError("Hawkes process requires finite mu>0, alpha>=0, beta>0, and window>0.")
         self.max_events = _exact_integer(
             max_events,
             label="Hawkes maximum event count",
@@ -274,10 +253,7 @@ class HawkesProcessDistribution(SequenceEncodableProbabilityDistribution):
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the Hawkes process distribution."""
-        return (
-            "HawkesProcessDistribution(%s, %s, %s, %s, name=%s, keys=%s, "
-            "max_events=%s)"
-        ) % (
+        return ("HawkesProcessDistribution(%s, %s, %s, %s, name=%s, keys=%s, max_events=%s)") % (
             repr(self.mu),
             repr(self.alpha),
             repr(self.beta),
@@ -304,10 +280,7 @@ class HawkesProcessDistribution(SequenceEncodableProbabilityDistribution):
         if ti is None:  # pragma: no cover
             raise AssertionError("unreachable")
         past = ti[ti < query]
-        return float(
-            self.mu
-            + self.alpha * np.sum(np.exp(-self.beta * (query - past)))
-        )
+        return float(self.mu + self.alpha * np.sum(np.exp(-self.beta * (query - past))))
 
     def expected_count(self, t_start: float, t_end: float, times: Any, marks: Any = None) -> float:
         """Compensator ``integral_{t_start}^{t_end} lambda(s) ds`` of the intensity given the history.
@@ -320,9 +293,7 @@ class HawkesProcessDistribution(SequenceEncodableProbabilityDistribution):
         )
         end = _finite_nonnegative_scalar(t_end, label="Hawkes interval end")
         if start > end or end > self.window:
-            raise ValueError(
-                "Hawkes interval must satisfy 0 <= start <= end <= window"
-            )
+            raise ValueError("Hawkes interval must satisfy 0 <= start <= end <= window")
         ti = _validated_events(
             times,
             window=self.window,
@@ -332,13 +303,8 @@ class HawkesProcessDistribution(SequenceEncodableProbabilityDistribution):
             raise AssertionError("unreachable")
         tp = ti[ti < end]
         lo = np.maximum(start, tp)
-        kernel = np.exp(-self.beta * (lo - tp)) - np.exp(
-            -self.beta * (end - tp)
-        )
-        return float(
-            self.mu * (end - start)
-            + (self.alpha / self.beta) * np.sum(kernel)
-        )
+        kernel = np.exp(-self.beta * (lo - tp)) - np.exp(-self.beta * (end - tp))
+        return float(self.mu * (end - start) + (self.alpha / self.beta) * np.sum(kernel))
 
     def density(self, x: Any) -> float:
         """Probability density of one realization ``x`` (a sequence of event times)."""
@@ -482,8 +448,7 @@ class HawkesProcessSampler(DistributionSampler):
                         "termination_reason": "event_budget_exhausted",
                     }
                     raise RuntimeError(
-                        "Hawkes sampling event budget exhausted before the "
-                        "observation window was completed"
+                        "Hawkes sampling event budget exhausted before the observation window was completed"
                     )
                 events.append(t)
                 excitation += 1.0  # the new event contributes exp(0) = 1 to future excitation
@@ -657,26 +622,13 @@ class HawkesProcessEstimator(ParameterEstimator):
             raise ValueError("Hawkes fitting requires positive realization weight")
         if event_weight <= 0.0:
             raise ValueError(
-                "Hawkes evidence with no positively weighted events has no "
-                "finite interior baseline-rate MLE"
+                "Hawkes evidence with no positively weighted events has no finite interior baseline-rate MLE"
             )
 
         empirical_rate = event_weight / (total_weight * self.window)
-        gap_arrays = [
-            np.diff(events)
-            for events in checked.realizations
-            if events.size > 1
-        ]
-        positive_gaps = (
-            np.concatenate(gap_arrays)
-            if gap_arrays
-            else np.empty(0, dtype=np.float64)
-        )
-        beta_seed = (
-            1.0 / float(np.median(positive_gaps))
-            if positive_gaps.size
-            else 1.0 / self.window
-        )
+        gap_arrays = [np.diff(events) for events in checked.realizations if events.size > 1]
+        positive_gaps = np.concatenate(gap_arrays) if gap_arrays else np.empty(0, dtype=np.float64)
+        beta_seed = 1.0 / float(np.median(positive_gaps)) if positive_gaps.size else 1.0 / self.window
         beta_seed = max(beta_seed, 1.0 / self.window)
 
         def objective(parameters: np.ndarray) -> float:
@@ -695,9 +647,7 @@ class HawkesProcessEstimator(ParameterEstimator):
                 previous = 0.0
                 for index, event in enumerate(events):
                     if index:
-                        excitation = math.exp(
-                            -beta * (float(event) - previous)
-                        ) * (excitation + 1.0)
+                        excitation = math.exp(-beta * (float(event) - previous)) * (excitation + 1.0)
                     intensity = mu + alpha * excitation
                     if not np.isfinite(intensity) or intensity <= 0.0:
                         return np.inf
@@ -705,14 +655,7 @@ class HawkesProcessEstimator(ParameterEstimator):
                     previous = float(event)
                 compensator = mu * self.window
                 if events.size and alpha:
-                    compensator += (alpha / beta) * float(
-                        np.sum(
-                            1.0
-                            - np.exp(
-                                -beta * (self.window - events)
-                            )
-                        )
-                    )
+                    compensator += (alpha / beta) * float(np.sum(1.0 - np.exp(-beta * (self.window - events))))
                 total += float(weight) * (loglam - compensator)
             return -total if np.isfinite(total) else np.inf
 
@@ -745,10 +688,7 @@ class HawkesProcessEstimator(ParameterEstimator):
             if result.success and np.isfinite(result.fun):
                 candidates.append(result)
         if not candidates:
-            raise RuntimeError(
-                "Hawkes finite-window likelihood optimization failed to "
-                "converge to a finite candidate"
-            )
+            raise RuntimeError("Hawkes finite-window likelihood optimization failed to converge to a finite candidate")
         best = min(candidates, key=lambda result: float(result.fun))
         mu = math.exp(float(best.x[0]))
         alpha = max(0.0, float(best.x[1]))

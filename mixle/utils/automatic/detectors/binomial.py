@@ -28,13 +28,9 @@ def _params(arr: np.ndarray) -> tuple[int, float] | None:
         p = mean / n
         if not 0.0 < p < 1.0:
             return -math.inf
-        log_combinations = special.gammaln(n + 1.0) - special.gammaln(values + 1.0) - special.gammaln(
-            n - values + 1.0
-        )
+        log_combinations = special.gammaln(n + 1.0) - special.gammaln(values + 1.0) - special.gammaln(n - values + 1.0)
         return float(
-            np.dot(counts, log_combinations)
-            + successes * math.log(p)
-            + (total * n - successes) * math.log1p(-p)
+            np.dot(counts, log_combinations) + successes * math.log(p) + (total * n - successes) * math.log1p(-p)
         )
 
     candidates = {lower, _MAX_N}

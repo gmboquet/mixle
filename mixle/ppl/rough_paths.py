@@ -100,14 +100,10 @@ def path_signature(
             if total_elements > max_elements:
                 break
     if total_elements > max_elements:
-        raise ValueError(
-            f"signature requires more than max_elements={max_elements} tensor elements"
-        )
+        raise ValueError(f"signature requires more than max_elements={max_elements} tensor elements")
     estimated_work = max(1, int(pts.shape[0]) - 1) * total_elements * max(1, depth + 1)
     if estimated_work > max_work_elements:
-        raise ValueError(
-            f"signature work estimate {estimated_work} exceeds max_work_elements={max_work_elements}"
-        )
+        raise ValueError(f"signature work estimate {estimated_work} exceeds max_work_elements={max_work_elements}")
     if pts.shape[0] < 2:
         return [np.array(1.0)] + [np.zeros((pts.shape[1],) * k) for k in range(1, depth + 1)]
     sig = _segment_signature(pts[1] - pts[0], depth)

@@ -173,8 +173,7 @@ class NullDistribution(SequenceEncodableProbabilityDistribution):
         raise EnumerationError(
             self,
             reason=(
-                "NullDistribution is a neutral likelihood factor; "
-                "use PointMassDistribution(None) for singleton support"
+                "NullDistribution is a neutral likelihood factor; use PointMassDistribution(None) for singleton support"
             ),
         )
 
@@ -206,9 +205,7 @@ class NullEnumerator(DistributionEnumerator):
 
         """
         super().__init__(dist)
-        raise NeutralFactorError(
-            "NullDistribution is not enumerable; use PointMassDistribution(None)."
-        )
+        raise NeutralFactorError("NullDistribution is not enumerable; use PointMassDistribution(None).")
 
     def __next__(self) -> tuple[None, float]:
         """Stop immediately; construction already rejects this non-enumerable factor."""
@@ -226,9 +223,7 @@ class NullSampler(DistributionSampler):
             seed (Optional[int]): Seed for random number generator (unused).
 
         """
-        raise NeutralFactorError(
-            "NullDistribution is not samplable; use PointMassDistribution(None)."
-        )
+        raise NeutralFactorError("NullDistribution is not samplable; use PointMassDistribution(None).")
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> None | list[None]:
         """Reject every draw from this non-generative compatibility guard.
@@ -238,9 +233,7 @@ class NullSampler(DistributionSampler):
             batched (bool): Compatibility flag (unused).
 
         """
-        raise NeutralFactorError(
-            "NullDistribution is not samplable; use PointMassDistribution(None)."
-        )
+        raise NeutralFactorError("NullDistribution is not samplable; use PointMassDistribution(None).")
 
 
 class NullAccumulator(SequenceEncodableStatisticAccumulator):

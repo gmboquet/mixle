@@ -1385,9 +1385,10 @@ def _profile_series(path: tuple[Any, ...], role: str, values: Sequence[Any]) -> 
         for u in observed
     )
     all_str = all(isinstance(u, (str, bytes)) for u in observed)
-    mixed_categorical = all(
-        isinstance(u, (str, bytes, int, np.integer, bool, np.bool_)) for u in observed
-    ) and len({type(value) for value in observed}) > 1
+    mixed_categorical = (
+        all(isinstance(u, (str, bytes, int, np.integer, bool, np.bool_)) for u in observed)
+        and len({type(value) for value in observed}) > 1
+    )
 
     if all_str:
         recommendation = "categorical"

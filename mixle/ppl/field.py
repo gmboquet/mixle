@@ -810,12 +810,7 @@ class FieldPosterior:
             raise TypeError("posterior values and layout must be dictionaries.")
         intervals = []
         for node, bounds in self._layout.items():
-            if (
-                not isinstance(node, str)
-                or not node
-                or not isinstance(bounds, (tuple, list))
-                or len(bounds) != 2
-            ):
+            if not isinstance(node, str) or not node or not isinstance(bounds, (tuple, list)) or len(bounds) != 2:
                 raise ValueError("posterior layout entries must be named (start, stop) intervals.")
             lo, hi = bounds
             if any(isinstance(x, (bool, np.bool_)) or not isinstance(x, (int, np.integer)) for x in (lo, hi)):
@@ -859,16 +854,12 @@ class FieldPosterior:
             self._hessian = np.zeros((0, 0))
         hessian = np.asarray(self._hessian, dtype=float)
         if hessian.size:
-            self._hessian = _validate_symmetric_matrix(
-                hessian, dim, "posterior curvature", positive_definite=True
-            )
+            self._hessian = _validate_symmetric_matrix(hessian, dim, "posterior curvature", positive_definite=True)
         elif hessian.shape not in {(0,), (0, 0)}:
             raise ValueError("an unavailable posterior curvature must be empty.")
         prior = np.asarray(self._field_prior, dtype=float)
         if prior.size:
-            self._field_prior = _validate_symmetric_matrix(
-                prior, dim, "joint prior curvature", positive_definite=False
-            )
+            self._field_prior = _validate_symmetric_matrix(prior, dim, "joint prior curvature", positive_definite=False)
         for label, block in self._proxy_info.items():
             if not isinstance(label, str) or not label:
                 raise ValueError("proxy-curvature labels must be non-empty strings.")
@@ -921,7 +912,9 @@ class FieldPosterior:
         ):
             raise ValueError("posterior curvature rank receipt is invalid.")
         if self.regularization != 0.0:
-            raise ValueError("posterior regularization must be reported as zero; hidden covariance jitter is forbidden.")
+            raise ValueError(
+                "posterior regularization must be reported as zero; hidden covariance jitter is forbidden."
+            )
 
     def mean(self, node: str) -> np.ndarray:
         """Return the posterior mean/MAP value for ``node`` in its natural parameter space."""
@@ -1550,9 +1543,7 @@ def fit_field(
         )
         curvature_rank = int(np.linalg.matrix_rank(H))
         if curvature_rank != pos:
-            raise ValueError(
-                f"Gauss-Newton posterior is unidentifiable (curvature rank {curvature_rank} of {pos})."
-            )
+            raise ValueError(f"Gauss-Newton posterior is unidentifiable (curvature rank {curvature_rank} of {pos}).")
         cov = np.linalg.inv(H)
         cov = 0.5 * (cov + cov.T)
         return FieldPosterior(
@@ -1613,11 +1604,7 @@ def fit_field(
                 raise FloatingPointError("variational field gradient became non-finite.")
             opt2.step()
             last_loss = float(loss.detach())
-        if (
-            last_loss is None
-            or not bool(torch.isfinite(mu).all())
-            or not bool(torch.isfinite(log_sigma).all())
-        ):
+        if last_loss is None or not bool(torch.isfinite(mu).all()) or not bool(torch.isfinite(log_sigma).all()):
             raise FloatingPointError("variational field fit did not produce finite parameters.")
         mu_np = mu.detach().numpy()
         var_np = np.exp(2.0 * log_sigma.detach().numpy())
@@ -1924,9 +1911,7 @@ def multistart(model: FieldModel, inits: Sequence[dict], *, how: str = "map", **
             if not post.converged or not np.isfinite(post.objective):
                 raise RuntimeError("fit did not return a converged finite result.")
         except (RuntimeError, ValueError, TypeError, ArithmeticError, np.linalg.LinAlgError) as exc:
-            receipts.append(
-                {"index": index, "success": False, "error_type": type(exc).__name__, "message": str(exc)}
-            )
+            receipts.append({"index": index, "success": False, "error_type": type(exc).__name__, "message": str(exc)})
             continue
         receipts.append(
             {

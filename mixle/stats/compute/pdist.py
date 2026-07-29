@@ -419,7 +419,9 @@ class ProbabilityDistribution(ABC):
         policy = _invalid_score_policy(invalid_score)
         samples = self.sampler(seed).sample(count)
         if not hasattr(samples, "__len__") or len(samples) != count:
-            raise ValueError("sampler returned %s values for n_samples=%d." % (getattr(samples, "__len__", lambda: "?")(), count))
+            raise ValueError(
+                "sampler returned %s values for n_samples=%d." % (getattr(samples, "__len__", lambda: "?")(), count)
+            )
         with np.errstate(divide="ignore"):
             scored = [(float(self.log_density(y)), y) for y in samples]
         invalid = [lp for lp, _ in scored if not math.isfinite(lp)]
@@ -471,7 +473,9 @@ class ProbabilityDistribution(ABC):
         policy = _invalid_score_policy(invalid_score)
         samples = self.sampler(seed).sample(count)
         if not hasattr(samples, "__len__") or len(samples) != count:
-            raise ValueError("sampler returned %s values for n_samples=%d." % (getattr(samples, "__len__", lambda: "?")(), count))
+            raise ValueError(
+                "sampler returned %s values for n_samples=%d." % (getattr(samples, "__len__", lambda: "?")(), count)
+            )
         with np.errstate(divide="ignore"):
             scored = [(float(self.log_density(y)), y) for y in samples]
         invalid = [lp for lp, _ in scored if not math.isfinite(lp)]
@@ -1281,8 +1285,7 @@ def _infer_encoded_row_count(x: Any) -> int | None:
         shape = tuple(shape)
         return int(shape[0]) if shape else None
     if isinstance(x, list) and all(
-        not isinstance(value, (dict, list, tuple, np.ndarray)) and not hasattr(value, "shape")
-        for value in x
+        not isinstance(value, (dict, list, tuple, np.ndarray)) and not hasattr(value, "shape") for value in x
     ):
         return len(x)
     if isinstance(x, dict):
@@ -1364,8 +1367,7 @@ def _canonical_key(x: Any) -> tuple[str, Any]:
             return "float", "0"
         return "float", x.hex()
     raise KeyValidationError(
-        "Key values must be scalar str, bytes, bool, int, float, or NumPy scalar; got %s."
-        % type(x).__name__
+        "Key values must be scalar str, bytes, bool, int, float, or NumPy scalar; got %s." % type(x).__name__
     )
 
 
@@ -1614,6 +1616,7 @@ def validate_estimator_keys(estimator: ParameterEstimator) -> None:
     missing_from_accumulator = set(estimator_registry) - set(accumulator_registry)
     missing_from_estimator = set(accumulator_registry) - set(estimator_registry)
     if missing_from_accumulator or missing_from_estimator:
+
         def describe(registry: dict[Any, tuple[Any, str, int, Any]], keys: set[Any]) -> list[str]:
             return ["%r at %s" % (registry[key][3], registry[key][1]) for key in sorted(keys, key=repr)]
 

@@ -97,10 +97,7 @@ def _validated_events(
     )
     if invalid:
         if fail_closed:
-            raise ValueError(
-                "RenewalProcess events must be finite, strictly increasing, "
-                "and inside (0, window]"
-            )
+            raise ValueError("RenewalProcess events must be finite, strictly increasing, and inside (0, window]")
         return None
     return events
 
@@ -118,11 +115,7 @@ def _gaps_and_remaining(
     )
     if events is None:
         return None
-    gaps = (
-        np.diff(np.concatenate(([0.0], events)))
-        if events.size
-        else np.empty(0, dtype=np.float64)
-    )
+    gaps = np.diff(np.concatenate(([0.0], events))) if events.size else np.empty(0, dtype=np.float64)
     last = float(events[-1]) if events.size else 0.0
     return gaps, window - last
 
@@ -141,34 +134,23 @@ def _validated_weights(value: Any, rows: int) -> np.ndarray:
 
 def _validated_statistics(value: Any) -> RenewalProcessStatistics:
     if not isinstance(value, (tuple, list)) or len(value) != 5:
-        raise ValueError(
-            "RenewalProcess statistics must contain gap and censoring evidence"
-        )
+        raise ValueError("RenewalProcess statistics must contain gap and censoring evidence")
     arrays = []
     for index, item in enumerate(value[1:]):
         try:
             array = np.asarray(item, dtype=np.float64)
         except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"RenewalProcess evidence field {index + 1} must be numeric"
-            ) from exc
+            raise ValueError(f"RenewalProcess evidence field {index + 1} must be numeric") from exc
         if array.ndim != 1:
             raise ValueError("RenewalProcess evidence arrays must be one-dimensional")
         if np.any(~np.isfinite(array)) or np.any(array < 0.0):
-            raise ValueError(
-                "RenewalProcess gaps, censoring times, and weights must be "
-                "finite and non-negative"
-            )
+            raise ValueError("RenewalProcess gaps, censoring times, and weights must be finite and non-negative")
         arrays.append(array.copy())
     gaps, gap_weights, censored, censor_weights = arrays
     if gaps.shape != gap_weights.shape:
-        raise ValueError(
-            "RenewalProcess completed gaps and weights must align"
-        )
+        raise ValueError("RenewalProcess completed gaps and weights must align")
     if censored.shape != censor_weights.shape:
-        raise ValueError(
-            "RenewalProcess censoring times and weights must align"
-        )
+        raise ValueError("RenewalProcess censoring times and weights must align")
     if np.any(gaps <= 0.0):
         raise ValueError("RenewalProcess completed gaps must be strictly positive")
     return RenewalProcessStatistics(
@@ -187,18 +169,14 @@ def _validated_payload(
     window: float,
 ) -> tuple[Any, np.ndarray, np.ndarray, int, np.ndarray, np.ndarray]:
     if not isinstance(value, (tuple, list)) or len(value) != 6:
-        raise ValueError(
-            "RenewalProcess encoded payload must contain six fields"
-        )
+        raise ValueError("RenewalProcess encoded payload must contain six fields")
     child_enc, raw_gaps, seg_ids, num_real, remaining, ok = value
     num_real = _exact_integer(
         num_real,
         label="RenewalProcess encoded realization count",
     )
     if num_real < 0:
-        raise ValueError(
-            "RenewalProcess encoded realization count must be non-negative"
-        )
+        raise ValueError("RenewalProcess encoded realization count must be non-negative")
     try:
         gaps = np.asarray(raw_gaps, dtype=np.float64)
         segments_raw = np.asarray(seg_ids)
@@ -207,41 +185,25 @@ def _validated_payload(
     except (TypeError, ValueError) as exc:
         raise ValueError("RenewalProcess encoded metadata must be numeric") from exc
     if gaps.ndim != 1 or np.any(~np.isfinite(gaps)) or np.any(gaps <= 0.0):
-        raise ValueError(
-            "RenewalProcess encoded gaps must be finite and strictly positive"
-        )
+        raise ValueError("RenewalProcess encoded gaps must be finite and strictly positive")
     if (
         segments_raw.ndim != 1
         or segments_raw.shape != gaps.shape
         or segments_raw.dtype == np.bool_
         or not np.issubdtype(segments_raw.dtype, np.integer)
     ):
-        raise ValueError(
-            "RenewalProcess segment ids must be aligned exact integers"
-        )
+        raise ValueError("RenewalProcess segment ids must be aligned exact integers")
     segments = segments_raw.astype(np.int64, copy=False)
     if np.any(segments < 0) or np.any(segments >= num_real):
         raise ValueError("RenewalProcess segment id is outside realization range")
     if remaining.shape != (num_real,):
-        raise ValueError(
-            "RenewalProcess remaining times must match realization count"
-        )
-    if (
-        np.any(~np.isfinite(remaining))
-        or np.any(remaining < 0.0)
-        or np.any(remaining > window)
-    ):
-        raise ValueError(
-            "RenewalProcess remaining times must lie inside the fixed window"
-        )
+        raise ValueError("RenewalProcess remaining times must match realization count")
+    if np.any(~np.isfinite(remaining)) or np.any(remaining < 0.0) or np.any(remaining > window):
+        raise ValueError("RenewalProcess remaining times must lie inside the fixed window")
     if ok.dtype != np.bool_ or ok.shape != (num_real,):
-        raise ValueError(
-            "RenewalProcess validity flags must be a Boolean realization vector"
-        )
+        raise ValueError("RenewalProcess validity flags must be a Boolean realization vector")
     if int(gap_encoder.row_count(child_enc)) != gaps.size:
-        raise ValueError(
-            "RenewalProcess child encoding does not match completed gaps"
-        )
+        raise ValueError("RenewalProcess child encoding does not match completed gaps")
     elapsed = np.bincount(
         segments,
         weights=gaps,
@@ -256,14 +218,11 @@ def _validated_payload(
             atol=1.0e-10 * max(1.0, window),
         )
     ):
-        raise ValueError(
-            "RenewalProcess gaps and remaining time contradict the fixed window"
-        )
+        raise ValueError("RenewalProcess gaps and remaining time contradict the fixed window")
     if np.any(~ok & ((elapsed != 0.0) | (remaining != 0.0))):
-        raise ValueError(
-            "Invalid RenewalProcess rows cannot carry likelihood evidence"
-        )
+        raise ValueError("Invalid RenewalProcess rows cannot carry likelihood evidence")
     return child_enc, gaps, segments, num_real, remaining.copy(), ok.copy()
+
 
 def _survival_logprob(interarrival: Any, remaining: np.ndarray) -> np.ndarray:
     """Return validated ``log(1 - cdf(remaining))`` values."""
@@ -277,10 +236,7 @@ def _survival_logprob(interarrival: Any, remaining: np.ndarray) -> np.ndarray:
     for i, r in enumerate(remaining):
         f = float(cdf(float(r)))
         if not np.isfinite(f) or f < -_CDF_TOLERANCE or f > 1.0 + _CDF_TOLERANCE:
-            raise ValueError(
-                f"RenewalProcess inter-arrival cdf({float(r)!r}) returned "
-                f"non-probability value {f!r}"
-            )
+            raise ValueError(f"RenewalProcess inter-arrival cdf({float(r)!r}) returned non-probability value {f!r}")
         bounded = min(1.0, max(0.0, f))
         out[i] = math.log1p(-bounded) if bounded < 1.0 else -np.inf
     return out
@@ -297,17 +253,11 @@ class RenewalProcessDistribution(SequenceEncodableProbabilityDistribution):
         keys: str | None = None,
         max_events: int = _DEFAULT_MAX_EVENTS,
     ) -> None:
-        if (
-            isinstance(window, (bool, np.bool_))
-            or not (np.isfinite(window) and window > 0.0)
-        ):
+        if isinstance(window, (bool, np.bool_)) or not (np.isfinite(window) and window > 0.0):
             raise ValueError("RenewalProcessDistribution requires a finite window > 0.")
         for method in ("log_density", "seq_log_density", "cdf", "sampler", "estimator", "dist_to_encoder"):
             if not callable(getattr(interarrival, method, None)):
-                raise TypeError(
-                    "RenewalProcess inter-arrival distribution must expose "
-                    f"{method}()"
-                )
+                raise TypeError(f"RenewalProcess inter-arrival distribution must expose {method}()")
         from mixle.stats.compute.declarations import declaration_for
 
         declaration = declaration_for(interarrival)
@@ -316,17 +266,14 @@ class RenewalProcessDistribution(SequenceEncodableProbabilityDistribution):
             "non_negative_real",
         }:
             raise TypeError(
-                "RenewalProcess inter-arrival distributions must declare "
-                "positive or non-negative real support"
+                "RenewalProcess inter-arrival distributions must declare positive or non-negative real support"
             )
         checked_budget = _exact_integer(
             max_events,
             label="RenewalProcess maximum event count",
         )
         if checked_budget < 0:
-            raise ValueError(
-                "RenewalProcess maximum event count must be non-negative"
-            )
+            raise ValueError("RenewalProcess maximum event count must be non-negative")
         self.interarrival = interarrival
         self.window = float(window)
         self.name = name
@@ -406,9 +353,7 @@ class RenewalProcessSampler(DistributionSampler):
         # seed the inter-arrival sampler deterministically from this rng
         self._gap_sampler = dist.interarrival.sampler(seed=int(self.rng.randint(2**31)))
         if not callable(getattr(self._gap_sampler, "sample", None)):
-            raise TypeError(
-                "RenewalProcess inter-arrival sampler must expose sample()"
-            )
+            raise TypeError("RenewalProcess inter-arrival sampler must expose sample()")
         self.last_receipt: dict[str, Any] | None = None
 
     def _sample_one(self) -> np.ndarray:
@@ -422,9 +367,7 @@ class RenewalProcessSampler(DistributionSampler):
                 label="RenewalProcess sampled inter-arrival",
             )
             if g <= 0.0:
-                raise ValueError(
-                    "RenewalProcess sampled inter-arrivals must be strictly positive"
-                )
+                raise ValueError("RenewalProcess sampled inter-arrivals must be strictly positive")
             gap_draws += 1
             t += g
             if t > self.dist.window:
@@ -445,8 +388,7 @@ class RenewalProcessSampler(DistributionSampler):
                     "termination_reason": "event_budget_exhausted",
                 }
                 raise RuntimeError(
-                    "RenewalProcess sampling event budget exhausted before "
-                    "the observation window was crossed"
+                    "RenewalProcess sampling event budget exhausted before the observation window was crossed"
                 )
             events.append(t)
         return np.asarray(events, dtype=np.float64)
@@ -535,9 +477,7 @@ class RenewalProcessAccumulator(SequenceEncodableStatisticAccumulator):
             window=self.window,
         )
         if not np.all(ok):
-            raise ValueError(
-                "RenewalProcess cannot accumulate invalid realizations"
-            )
+            raise ValueError("RenewalProcess cannot accumulate invalid realizations")
         checked_weights = _validated_weights(weights, num_real)
         if seg_ids.size:
             gap_weights = checked_weights[seg_ids]
@@ -563,9 +503,7 @@ class RenewalProcessAccumulator(SequenceEncodableStatisticAccumulator):
             window=self.window,
         )
         if not np.all(ok):
-            raise ValueError(
-                "RenewalProcess cannot initialize from invalid realizations"
-            )
+            raise ValueError("RenewalProcess cannot initialize from invalid realizations")
         checked_weights = _validated_weights(weights, num_real)
         if seg_ids.size:
             gap_weights = checked_weights[seg_ids]
@@ -612,12 +550,8 @@ class RenewalProcessAccumulator(SequenceEncodableStatisticAccumulator):
             label="RenewalProcess scale",
         )
         self.gap_accumulator.scale(checked_scale)
-        self.completed_weights = [
-            weight * checked_scale for weight in self.completed_weights
-        ]
-        self.censored_weights = [
-            weight * checked_scale for weight in self.censored_weights
-        ]
+        self.completed_weights = [weight * checked_scale for weight in self.completed_weights]
+        self.censored_weights = [weight * checked_scale for weight in self.censored_weights]
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -698,17 +632,11 @@ def _estimate_censored_interarrival(
     if isinstance(estimator, ExponentialEstimator):
         gap_stat = statistics.gap_statistics
         if not isinstance(gap_stat, (tuple, list)) or len(gap_stat) != 2:
-            raise ValueError(
-                "Exponential renewal gap statistics must be (count, sum)"
-            )
-        exposure = float(
-            np.dot(statistics.censored_times, statistics.censored_weights)
-        )
+            raise ValueError("Exponential renewal gap statistics must be (count, sum)")
+        exposure = float(np.dot(statistics.censored_times, statistics.censored_weights))
         adjusted = (gap_stat[0], gap_stat[1] + exposure)
         if float(adjusted[0]) <= 0.0:
-            raise ValueError(
-                "A fully censored exponential renewal sample has no finite MLE"
-            )
+            raise ValueError("A fully censored exponential renewal sample has no finite MLE")
         return estimator.estimate(nobs, adjusted)
 
     initial = estimator.estimate(nobs, statistics.gap_statistics)
@@ -717,9 +645,7 @@ def _estimate_censored_interarrival(
     censored = statistics.censored_times
     censor_weights = statistics.censored_weights
     if float(gap_weights.sum()) <= 0.0:
-        raise ValueError(
-            "Fully censored renewal evidence has no finite identifiable fit"
-        )
+        raise ValueError("Fully censored renewal evidence has no finite identifiable fit")
 
     name = getattr(estimator, "name", None)
     keys = getattr(estimator, "keys", None)
@@ -730,19 +656,11 @@ def _estimate_censored_interarrival(
 
         def objective(parameters):
             shape, scale = np.exp(parameters)
-            completed = (
-                (shape - 1.0) * log_gaps
-                - gaps / scale
-                - gammaln(shape)
-                - shape * math.log(scale)
-            )
+            completed = (shape - 1.0) * log_gaps - gaps / scale - gammaln(shape) - shape * math.log(scale)
             survival = gammaincc(shape, censored / scale)
             if np.any(survival <= 0.0) or np.any(~np.isfinite(survival)):
                 return np.inf
-            return -float(
-                np.dot(gap_weights, completed)
-                + np.dot(censor_weights, np.log(survival))
-            )
+            return -float(np.dot(gap_weights, completed) + np.dot(censor_weights, np.log(survival)))
 
         def build(parameters):
             shape, scale = np.exp(parameters)
@@ -759,17 +677,9 @@ def _estimate_censored_interarrival(
         def objective(parameters):
             shape, scale = np.exp(parameters)
             powered_gaps = np.power(gaps / scale, shape)
-            completed = (
-                math.log(shape)
-                - math.log(scale)
-                + (shape - 1.0) * (log_gaps - math.log(scale))
-                - powered_gaps
-            )
+            completed = math.log(shape) - math.log(scale) + (shape - 1.0) * (log_gaps - math.log(scale)) - powered_gaps
             log_survival = -np.power(censored / scale, shape)
-            return -float(
-                np.dot(gap_weights, completed)
-                + np.dot(censor_weights, log_survival)
-            )
+            return -float(np.dot(gap_weights, completed) + np.dot(censor_weights, log_survival))
 
         def build(parameters):
             shape, scale = np.exp(parameters)
@@ -790,19 +700,11 @@ def _estimate_censored_interarrival(
             mu, log_sigma = parameters
             sigma = math.exp(log_sigma)
             z = (log_gaps - mu) / sigma
-            completed = (
-                -log_gaps
-                - log_sigma
-                - 0.5 * math.log(2.0 * math.pi)
-                - 0.5 * z * z
-            )
+            completed = -log_gaps - log_sigma - 0.5 * math.log(2.0 * math.pi) - 0.5 * z * z
             with np.errstate(divide="ignore"):
                 censor_z = (np.log(censored) - mu) / sigma
             log_survival = log_ndtr(-censor_z)
-            return -float(
-                np.dot(gap_weights, completed)
-                + np.dot(censor_weights, log_survival)
-            )
+            return -float(np.dot(gap_weights, completed) + np.dot(censor_weights, log_survival))
 
         def build(parameters):
             mu, log_sigma = parameters
@@ -821,14 +723,9 @@ def _estimate_censored_interarrival(
             shape = mu / lam
             completed = invgauss.logpdf(gaps, shape, scale=lam)
             log_survival = invgauss.logsf(censored, shape, scale=lam)
-            if np.any(~np.isfinite(completed)) or np.any(
-                ~np.isfinite(log_survival)
-            ):
+            if np.any(~np.isfinite(completed)) or np.any(~np.isfinite(log_survival)):
                 return np.inf
-            return -float(
-                np.dot(gap_weights, completed)
-                + np.dot(censor_weights, log_survival)
-            )
+            return -float(np.dot(gap_weights, completed) + np.dot(censor_weights, log_survival))
 
         def build(parameters):
             mu, lam = np.exp(parameters)
@@ -853,10 +750,7 @@ def _estimate_censored_interarrival(
         options={"maxiter": 500, "ftol": 1.0e-12},
     )
     if not result.success or not np.isfinite(result.fun):
-        raise RuntimeError(
-            "RenewalProcess censor-aware likelihood optimization failed: "
-            f"{result.message}"
-        )
+        raise RuntimeError(f"RenewalProcess censor-aware likelihood optimization failed: {result.message}")
     return build(result.x)
 
 
@@ -872,11 +766,7 @@ class RenewalProcessEstimator(ParameterEstimator):
         max_events: int = _DEFAULT_MAX_EVENTS,
     ) -> None:
         self.interarrival_estimator = interarrival_estimator
-        if (
-            isinstance(window, (bool, np.bool_))
-            or not np.isfinite(window)
-            or window <= 0.0
-        ):
+        if isinstance(window, (bool, np.bool_)) or not np.isfinite(window) or window <= 0.0:
             raise ValueError("RenewalProcessEstimator requires a finite window > 0")
         self.window = float(window)
         self.name = name
@@ -886,9 +776,7 @@ class RenewalProcessEstimator(ParameterEstimator):
             label="RenewalProcess maximum event count",
         )
         if self.max_events < 0:
-            raise ValueError(
-                "RenewalProcess maximum event count must be non-negative"
-            )
+            raise ValueError("RenewalProcess maximum event count must be non-negative")
 
     def accumulator_factory(self) -> "RenewalProcessAccumulatorFactory":
         """Return an accumulator factory for observed inter-arrival gaps."""
@@ -934,14 +822,8 @@ class RenewalProcessDataEncoder(DataSequenceEncoder):
 
     def __init__(self, gap_encoder: DataSequenceEncoder, window: float) -> None:
         self.gap_encoder = gap_encoder
-        if (
-            isinstance(window, (bool, np.bool_))
-            or not np.isfinite(window)
-            or window <= 0.0
-        ):
-            raise ValueError(
-                "RenewalProcessDataEncoder requires a finite window > 0"
-            )
+        if isinstance(window, (bool, np.bool_)) or not np.isfinite(window) or window <= 0.0:
+            raise ValueError("RenewalProcessDataEncoder requires a finite window > 0")
         self.window = float(window)
 
     def __str__(self) -> str:

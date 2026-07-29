@@ -44,8 +44,7 @@ def _freeze_metadata_value(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     raise TypeError(
-        "context metadata values must be JSON scalars, mappings, lists, or tuples; found %s."
-        % type(value).__name__
+        "context metadata values must be JSON scalars, mappings, lists, or tuples; found %s." % type(value).__name__
     )
 
 
@@ -64,9 +63,7 @@ class FrozenMetadata(Mapping[str, Any]):
         values = values or {}
         if any(not isinstance(key, str) or not key for key in values):
             raise TypeError("context metadata keys must be non-empty strings.")
-        self._items = tuple(
-            (key, _freeze_metadata_value(value)) for key, value in sorted(values.items())
-        )
+        self._items = tuple((key, _freeze_metadata_value(value)) for key, value in sorted(values.items()))
         payload_fingerprint(self._items)
 
     def __getitem__(self, key: str) -> Any:
@@ -143,9 +140,7 @@ class EvidenceTransition:
     def __post_init__(self) -> None:
         if self.graph_version < 0:
             raise ValueError("evidence transition graph_version must be non-negative.")
-        if self.confidence is not None and (
-            not math.isfinite(self.confidence) or not 0.0 <= self.confidence <= 1.0
-        ):
+        if self.confidence is not None and (not math.isfinite(self.confidence) or not 0.0 <= self.confidence <= 1.0):
             raise ValueError("evidence transition confidence must be in [0, 1].")
         if self.status is EvidenceStatus.SUPPORTED and not self.provenance:
             raise ValueError("supported evidence transitions require source provenance.")
@@ -215,8 +210,7 @@ class ContextNode:
         ):
             raise ValueError("context node evidence fields must match its latest evidence history entry.")
         if any(
-            later.graph_version <= earlier.graph_version
-            for earlier, later in zip(history, history[1:], strict=False)
+            later.graph_version <= earlier.graph_version for earlier, later in zip(history, history[1:], strict=False)
         ):
             raise ValueError("context node evidence history versions must increase strictly.")
 
@@ -520,11 +514,7 @@ class ContextAction:
         )
         if any(not math.isfinite(value) for value in numeric):
             raise ValueError("context action gain and costs must be finite.")
-        if (
-            self.gain_standard_error < 0.0
-            or self.expected_latency_seconds < 0.0
-            or self.expected_monetary_cost < 0.0
-        ):
+        if self.gain_standard_error < 0.0 or self.expected_latency_seconds < 0.0 or self.expected_monetary_cost < 0.0:
             raise ValueError("context action uncertainty and expected costs must be non-negative.")
         if (
             self.gain_sample_count < 0

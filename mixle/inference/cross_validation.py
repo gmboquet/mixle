@@ -249,9 +249,7 @@ def time_series_split(n: int, n_splits: int = 5, *, gap: int = 0, max_train_size
         test_end = n if i == n_splits - 1 else test_start + test_size
         train_end = test_start - gap
         if train_end <= 0:
-            raise ValueError(
-                f"gap={gap} leaves fold {i} without a training window; reduce gap or n_splits"
-            )
+            raise ValueError(f"gap={gap} leaves fold {i} without a training window; reduce gap or n_splits")
         train_start = 0 if max_train_size is None else max(0, train_end - max_train_size)
         folds.append((np.arange(train_start, train_end), np.arange(test_start, test_end)))
     return _validate_folds(folds, n, expected=n_splits)
@@ -353,9 +351,7 @@ def spatial_block_kfold(
     _, block_id = np.unique(block_idx, axis=0, return_inverse=True)
     n_blocks = block_id.max() + 1
     if n_blocks < n_splits:
-        raise ValueError(
-            f"spatial geometry has only {n_blocks} occupied blocks for {n_splits} requested folds"
-        )
+        raise ValueError(f"spatial geometry has only {n_blocks} occupied blocks for {n_splits} requested folds")
     rng = _as_rng(seed)
     block_fold = rng.permutation(n_blocks) % n_splits
     assign = block_fold[block_id]

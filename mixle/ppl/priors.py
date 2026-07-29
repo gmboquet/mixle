@@ -57,16 +57,12 @@ class _TotalVariationPenalty:
     def __call__(self, field_t, torch):
         values = field_t.reshape(-1)
         if values.numel() != self.n_nodes:
-            raise ValueError(
-                f"field contains {values.numel()} values; grid geometry requires {self.n_nodes}"
-            )
+            raise ValueError(f"field contains {values.numel()} values; grid geometry requires {self.n_nodes}")
         device = values.device
         a = torch.as_tensor(self.face_a, dtype=torch.long, device=device)
         b = torch.as_tensor(self.face_b, dtype=torch.long, device=device)
         difference = values[a] - values[b]
-        return self.weight * torch.sum(
-            torch.sqrt(difference * difference + self.eps * self.eps)
-        )
+        return self.weight * torch.sum(torch.sqrt(difference * difference + self.eps * self.eps))
 
 
 @dataclass(frozen=True)

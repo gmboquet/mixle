@@ -516,8 +516,7 @@ def _freeze_state_value(value):
 def _hypergraph_state_key(hg, depth):
     nodes = frozenset((node, _freeze_state_value(dict(attrs))) for node, attrs in hg.graph.nodes(data=True))
     edges = frozenset(
-        (frozenset((left, right)), _freeze_state_value(dict(attrs)))
-        for left, right, attrs in hg.graph.edges(data=True)
+        (frozenset((left, right)), _freeze_state_value(dict(attrs))) for left, right, attrs in hg.graph.edges(data=True)
     )
     return nodes, edges, frozenset(hg.hyperedges), depth
 
@@ -660,8 +659,7 @@ def _rules_share_structure(left, right):
         if tuple(mapping[node] for node in left.external) != right.external:
             continue
         mapped_hyperedges = {
-            (label, tuple(mapping[node] for node in attachments))
-            for label, attachments in left.rhs.hyperedges
+            (label, tuple(mapping[node] for node in attachments)) for label, attachments in left.rhs.hyperedges
         }
         if mapped_hyperedges == right_hyperedges:
             return True

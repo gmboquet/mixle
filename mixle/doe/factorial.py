@@ -204,8 +204,7 @@ def generator_alias_structure(generators: str | list, *, max_order: int = 2) -> 
     for relation in defining_words:
         relation_sign, relation_factors = relation
         products = {
-            (sign * relation_sign, factors.symmetric_difference(relation_factors))
-            for sign, factors in defining_group
+            (sign * relation_sign, factors.symmetric_difference(relation_factors)) for sign, factors in defining_group
         }
         defining_group.update(products)
     ordered_group = sorted(defining_group, key=lambda word: (len(word[1]), tuple(sorted(word[1])), word[0]))
@@ -230,8 +229,7 @@ def generator_alias_structure(generators: str | list, *, max_order: int = 2) -> 
         "max_order": order_limit,
         "factor_labels": {f"x{index}": token for index, token in enumerate(tokens)},
         "base_factors": {
-            letter: {"factor": f"x{index}", "sign": sign}
-            for letter, (index, sign) in sorted(base_factors.items())
+            letter: {"factor": f"x{index}", "sign": sign} for letter, (index, sign) in sorted(base_factors.items())
         },
         "generators": generator_records,
         "defining_relations": [_alias_word_record(sign, factors) for sign, factors in defining_words],
