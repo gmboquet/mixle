@@ -269,7 +269,16 @@ class PipelineTwin:
             result = min_cost_flow(cap_ext, cost_ext, supply_ext)
             flow = result.flow[:n, :n]
 
-            delivered = flow[:, self._demand_nodes].sum(axis=0)
+            # Delivery is what a demand node *keeps*: inflow minus whatever it forwards on. Counting
+            # gross inflow credited a demand node with every unit that merely passed through it, so a
+            # distribution centre that consumes 4 and forwards 6 reported 10 delivered. That is the
+            # twin's headline throughput number, and it overstated by the entire transit volume --
+            # while the matching lost_sales, clipped at zero, hid any real shortfall at that node
+            # behind the same transit. Identical to the old value for a pure sink, which has no
+            # outgoing flow to subtract.
+            inflow = flow[:, self._demand_nodes].sum(axis=0)
+            outflow = flow[self._demand_nodes, :].sum(axis=1)
+            delivered = inflow - outflow
             shortfall = float(np.clip(nominal_demand - delivered, 0.0, None).sum())
             lost_total += shortfall
 
