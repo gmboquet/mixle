@@ -47,7 +47,7 @@ __all__ = [
     "HAS_H5PY",
     "pandas",
     "HAS_PANDAS",
-    "MPI",
+    "MPI",  # noqa: F822 - resolved by the PEP 562 __getattr__ below, never bound at module level
     "HAS_MPI4PY",
     "require",
 ]
@@ -133,12 +133,24 @@ HAS_PANDAS = pandas is not None
 # anything useful, so MPI is None and HAS_MPI4PY is False when missing rather than a no-op shim -- the
 # backend raises via require(...) at its entry points instead of silently pretending to coordinate
 # ranks. Install with: pip install mixle[mpi]
+# Importing mpi4py.MPI calls MPI_Init, which binds sockets and can print runtime errors on a host
+# with no MPI fabric configured -- so it must not happen merely because something imported mixle.
+# Importing the mpi4py package alone does not initialize anything, which is enough to answer
+# HAS_MPI4PY; mpi4py.MPI is resolved on first attribute access instead (PEP 562).
 _mpi4py = _import_optional("mpi4py")
-if _mpi4py is not None:
-    MPI = _import_optional("mpi4py.MPI")
-    if MPI is None:
+HAS_MPI4PY = _mpi4py is not None
+# MPI is deliberately NOT bound here: PEP 562's module __getattr__ only runs when normal lookup
+# fails, so any module-level binding (even None) would keep the hook from ever firing.
+
+
+def __getattr__(name: str) -> object:
+    """Resolve ``MPI`` on demand so import of this module never initializes an MPI runtime."""
+    if name != "MPI":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    if not HAS_MPI4PY:
+        return None
+    module = _import_optional("mpi4py.MPI")
+    if module is None:
         raise ImportError("installed mpi4py package is missing its required mpi4py.MPI module")
-    HAS_MPI4PY = True
-else:
-    MPI = None
-    HAS_MPI4PY = False
+    globals()["MPI"] = module  # cache so later reads skip __getattr__ entirely
+    return module
