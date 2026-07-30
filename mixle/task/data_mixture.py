@@ -362,14 +362,18 @@ def _doe_search(
     # optimum. Re-scoring the finalists at seeds the search never used breaks that selection bias.
     finalists = [x for _loss, x in sorted(observed, key=lambda row: row[0])[:_DOE_FINALISTS]]
     scored: list[tuple[float, np.ndarray]] = []
-    for rank, candidate in enumerate(finalists):
+    for candidate in finalists:
         weights = _softmax(_logits_from_free(candidate, n))
         confirmations = [
             proxy_run_score(
                 weights,
                 domains,
                 proxy_steps,
-                seed=_derived_seed(seed, f"doe-confirm-{rank}-{repeat}"),
+                # Common random numbers: every finalist is confirmed on the SAME seeds, so the
+                # comparison between them differs only by the mixture and not also by the draw. Keying
+                # this on finalist rank -- which it did -- gave each finalist its own noise and
+                # confounded exactly the comparison these runs exist to de-bias (MXR-080-1847).
+                seed=_derived_seed(seed, f"doe-confirm-{repeat}"),
                 **proxy_kwargs,
             )
             for repeat in range(_DOE_CONFIRM_RUNS)
@@ -417,7 +421,12 @@ def optimize_mixture(
         raise ValueError("proxy_kwargs must not override optimize_mixture's return_detail setting.")
     selection_eval_seed = _random_state_seed(kwargs.get("eval_seed", 999_000), "proxy_kwargs['eval_seed']")
     kwargs["eval_seed"] = selection_eval_seed
-    search_runs = budget - 1
+    # _doe_search spends its search runs AND up to _DOE_FINALISTS * _DOE_CONFIRM_RUNS confirmation
+    # runs on top. Charging only budget - 1 undercounted the real work -- a budget of four issued ten
+    # proxy calls -- so the public budget and the receipt both lied about resource use (MXR-080-1847).
+    # Reserve the confirmations out of the caller's budget instead of spending them beside it.
+    confirm_runs = _DOE_FINALISTS * _DOE_CONFIRM_RUNS if method == "doe" else 0
+    search_runs = max(budget - 1 - confirm_runs, 1)
     if method == "bandit":
         weights = _bandit_search(domains, proxy_steps, search_runs, kwargs, seed)
     elif method == "doe":
@@ -443,7 +452,7 @@ def optimize_mixture(
     receipt = MixtureOptimizationReceipt(
         method=method,
         weights=tuple(float(weight) for weight in weights),
-        search_runs=search_runs,
+        search_runs=search_runs + confirm_runs,
         selection_eval_seed=selection_eval_seed,
         audit_training_seed=audit_training_seed,
         audit_eval_seed=audit_eval_seed,
