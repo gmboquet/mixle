@@ -304,6 +304,11 @@ def _softmax(z: np.ndarray) -> np.ndarray:
     return e / e.sum()
 
 
+# Finalist re-scoring controls for _doe_search's confirmation round; see the note at its return.
+_DOE_FINALISTS = 3
+_DOE_CONFIRM_RUNS = 2
+
+
 def _logits_from_free(free_logits: Any, n: int) -> np.ndarray:
     """Expand ``n - 1`` free logits to ``n`` by pinning the last at 0 -- the identifiable softmax chart."""
     free = np.asarray(free_logits, dtype=np.float64).reshape(-1)
@@ -331,6 +336,7 @@ def _doe_search(
     bounds = [(-3.0, 3.0)] * free
     n_init = min(max(2 * free + 1, 2), max(budget - 1, 2))
     opt = BayesianOptimizer(bounds, acq="ei", maximize=False, n_init=n_init, seed=seed)
+    observed: list[tuple[float, np.ndarray]] = []
     for t in range(int(budget)):
         x = opt.ask()
         w = _softmax(_logits_from_free(x, n))
@@ -342,7 +348,34 @@ def _doe_search(
             **proxy_kwargs,
         )
         opt.tell(x, loss)
-    return _softmax(_logits_from_free(opt.best.best_x, n))
+        observed.append((float(loss), np.asarray(x, dtype=np.float64)))
+
+    # Select by CONFIRMED score, not by the single best search observation. proxy_run_score is noisy --
+    # re-running one mixture at fresh seeds moves it by several tenths of a nat -- and ``opt.best`` is
+    # documented as the best OBSERVED point, so taking it makes the winner whichever candidate drew the
+    # most favourable noise. Measured on the four-domain difficulty ladder: the argmin-of-observed scored
+    # 2.9193 during the search and 3.4280 when the same weights were re-scored at five fresh seeds, an
+    # optimism of +0.51, against uniform's 3.2245 -- i.e. the search returned a mixture genuinely WORSE
+    # than uniform, and one that starved a domain to 0.002, because extreme corners are exactly where a
+    # lucky draw is most likely to look best. It also explains why more budget did not help: additional
+    # evaluations give more chances at a low outlier, so argmin-of-observed does not converge on the
+    # optimum. Re-scoring the finalists at seeds the search never used breaks that selection bias.
+    finalists = [x for _loss, x in sorted(observed, key=lambda row: row[0])[:_DOE_FINALISTS]]
+    scored: list[tuple[float, np.ndarray]] = []
+    for rank, candidate in enumerate(finalists):
+        weights = _softmax(_logits_from_free(candidate, n))
+        confirmations = [
+            proxy_run_score(
+                weights,
+                domains,
+                proxy_steps,
+                seed=_derived_seed(seed, f"doe-confirm-{rank}-{repeat}"),
+                **proxy_kwargs,
+            )
+            for repeat in range(_DOE_CONFIRM_RUNS)
+        ]
+        scored.append((float(np.mean(confirmations)), candidate))
+    return _softmax(_logits_from_free(min(scored, key=lambda row: row[0])[1], n))
 
 
 def optimize_mixture(
