@@ -257,20 +257,13 @@ class GeneralizedExtremeValueDistribution(SequenceEncodableProbabilityDistributi
             xx[:, None], params["loc"][None, :], params["scale"][None, :], params["shape"][None, :], engine
         )
 
-    @classmethod
-    def backend_stacked_sufficient_statistics(
-        cls, x: np.ndarray, weights: Any, params: dict[str, Any], engine: Any
-    ) -> tuple[Any, Any, Any, Any]:
-        """Stacked GEV moment sums ``(sum, sum2, sum3, count)`` using engine-resident arrays."""
-        xx = engine.asarray(x)
-        ww = engine.asarray(weights)
-        x2 = xx * xx
-        return (
-            engine.sum(ww * xx[:, None], axis=0),
-            engine.sum(ww * x2[:, None], axis=0),
-            engine.sum(ww * (x2 * xx)[:, None], axis=0),
-            engine.sum(ww, axis=0),
-        )
+    # No backend_stacked_sufficient_statistics here, deliberately. GEV declares six statistics --
+    # the three moment sums, the count, and the observed min/max that keep its bounded support from
+    # excluding a positive-weight training row. A stacked backend returning only the four moments
+    # silently drops the two support bounds, and StackedMixtureKernel.has_resident_accumulate selects
+    # a backend on mere presence, so the stale method won over the correct host accumulator and the
+    # engine-resident path produced -inf on rows the host path fits (MXR-080-1846). Re-add this only
+    # together with the support bounds, and only with the arity guard in stacked.accumulate green.
 
     def cdf(self, x: float) -> float:
         """Cumulative distribution function ``P(X <= x)`` (exact)."""
