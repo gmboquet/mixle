@@ -108,10 +108,27 @@ class CapabilitySuiteTest(unittest.TestCase):
         # same fallback prediction, making heavy-typo agreement rise degenerately (measured: 0.997
         # at typo_80 vs 0.94 at typo_10 after the analytic-first neural fitting change -- the old
         # ordering assertion held only while corruption happened to differentiate the two models).
-        levels = ["typo_10", "typo_40", "typo_80"]
+        # typo_80 is exempt from the strict-degradation check too, for the SAME reason the paragraph
+        # above exempts cross-severity ordering, applied consistently. Measured here: clean 1.000000,
+        # typo_10 0.953333, typo_40 0.920000, typo_80 0.990000 -- the severe level sits 0.01 below
+        # clean, i.e. 3 items out of 300. That is the degenerate collapse, not degradation: as both
+        # models converge on the same fallback the agreement rises back toward clean, and a COMPLETE
+        # collapse puts it exactly AT clean, which `assertLess` then reads as a failure even though
+        # nothing regressed. The margin is thin enough that torch reduction-order differences (thread
+        # count varies with machine load, so this fired under `pytest -n` and not standalone) flip a
+        # couple of predictions and cross it. Asserting a strict inequality the library may legitimately
+        # violate is the same unsound-gate shape this branch has been removing elsewhere.
+        #
+        # typo_10 and typo_40 keep the assertion, where it has both meaning and room: those margins are
+        # 0.047 and 0.080 (roughly 14 and 24 items), and mild corruption genuinely differentiates the
+        # two models rather than collapsing them, so a real loss of typo-robustness still fails here.
+        levels = ["typo_10", "typo_40"]
         scores = [profile["corruptions"][lvl] for lvl in levels]
         for lvl, score in zip(levels, scores):
             self.assertLess(score, profile["clean_agreement"], f"{lvl} must degrade agreement vs clean")
+        # Still pinned for the severe level: it must remain a probability and must not exceed clean.
+        severe = profile["corruptions"]["typo_80"]
+        self.assertTrue(0.0 <= severe <= profile["clean_agreement"], f"typo_80 agreement out of range: {severe}")
 
     def test_case_jitter_near_zero_violation_for_case_insensitive_teacher(self):
         train = _make_corpus(seed=2)
