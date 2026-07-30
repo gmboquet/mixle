@@ -24,6 +24,7 @@ except ImportError:
 
 from mixle.reason.transport_edge import (
     COVERAGE_P_FLOOR,
+    MIN_HOLDOUT_ROWS,
     EdgeTransportVerdict,
     PremiseStatus,
     coverage_consistent_with_nominal,
@@ -40,11 +41,23 @@ def _cubic_sensor_data(n, rng, noise_std=0.15):
 
 @unittest.skipUnless(_HAS_TORCH, "NeuralConditionalDensity needs torch")
 class RealEdgePremiseCheckTest(unittest.TestCase):
+    # 6000 training rows and a 400-row holdout, both load-bearing. The premise here is a statement
+    # about the *sampler*, and at 400 training rows the sampler does not satisfy it: measured against a
+    # 3000-row holdout its true coverage is 0.845 against a nominal 0.90, p=1e-20 -- genuinely
+    # miscalibrated, not unlucky. Coverage converges with training data (0.845 at 400 rows, 0.878 at
+    # 2000, 0.893 at 6000 where p=0.20 is consistent with nominal), so 6000 is where the edge actually
+    # holds its premise. The 60-row holdout then hid the shortfall from both directions: it reported
+    # p=0.66 for a sampler that is miscalibrated at p=1e-20, and at that size the coverage bound clears
+    # its 0.80 threshold by 0.012 for a *perfect* sampler, so one hit either way decided the verdict.
+    # At 400 holdout rows the bound clears by 0.05-0.08 across holdout seeds and p runs 0.18-0.93.
+    TRAIN_ROWS = 6000
+    HOLDOUT_ROWS = 400
+
     @classmethod
     def setUpClass(cls):
         rng = np.random.RandomState(0)
-        x_train, y_train = _cubic_sensor_data(400, rng)
-        cls.x_test, cls.y_test = _cubic_sensor_data(60, np.random.RandomState(1))
+        x_train, y_train = _cubic_sensor_data(cls.TRAIN_ROWS, rng)
+        cls.x_test, cls.y_test = _cubic_sensor_data(cls.HOLDOUT_ROWS, np.random.RandomState(1))
         data = list(zip(y_train.tolist(), x_train.tolist()))  # (cond=y, target=x): p(x | y)
         cls.sampler = fit_conditional_transport(data, x_dim=1, y_dim=1, seed=0)
 
@@ -91,7 +104,9 @@ class _ConstantSampler:
 class KillCriterionUnusableEdgeTest(unittest.TestCase):
     def test_an_uninformative_transport_is_reported_unusable_with_a_named_reason(self):
         rng = np.random.RandomState(2)
-        x_test, y_test = _cubic_sensor_data(40, rng)  # true x ranges over [-2, 2]^3-ish, far from 0
+        # Sized from the verifier's own minimum rather than a literal: below it every verdict is
+        # INCONCLUSIVE, which would make this kill criterion pass for the wrong reason.
+        x_test, y_test = _cubic_sensor_data(MIN_HOLDOUT_ROWS, rng)  # true x is far from 0
         verdict = verify_edge_transport("broken_edge", _ConstantSampler(), x_test, y_test, n_draws=50)
         self.assertFalse(verdict.usable)
         self.assertIn("dim(s)", verdict.reason)
@@ -116,7 +131,7 @@ class _WrongShapeSampler:
 
 class TransportVerdictContractTest(unittest.TestCase):
     def setUp(self):
-        self.x = np.linspace(-1.0, 1.0, 40).reshape(-1, 1)
+        self.x = np.linspace(-1.0, 1.0, MIN_HOLDOUT_ROWS).reshape(-1, 1)  # exactly the decidable minimum
         self.y = self.x.copy()
 
     def test_passing_verdict_has_a_dataset_bound_receipt(self):
@@ -138,7 +153,8 @@ class TransportVerdictContractTest(unittest.TestCase):
         self.assertFalse(verdict.usable)
 
     def test_small_holdout_is_inconclusive_not_approved(self):
-        verdict = verify_edge_transport("small", _CenteredSampler(), self.x[:10], self.y[:10], n_draws=100)
+        too_few = MIN_HOLDOUT_ROWS - 1
+        verdict = verify_edge_transport("small", _CenteredSampler(), self.x[:too_few], self.y[:too_few], n_draws=100)
         self.assertEqual(verdict.status, PremiseStatus.INCONCLUSIVE)
         self.assertFalse(verdict.usable)
 

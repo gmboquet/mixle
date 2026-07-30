@@ -31,10 +31,35 @@ from mixle.models.mixture_density import NeuralConditionalDensity, build_mdn
 
 ALPHA = 0.10  # 90% nominal credible-interval coverage
 COVERAGE_P_FLOOR = 0.01  # p-value floor below which coverage is inconsistent with nominal
-MIN_HOLDOUT_ROWS = 30
 COVERAGE_TOLERANCE = 0.10
 SUBGROUP_TOLERANCE = 0.20
 MAX_RELATIVE_INTERVAL_WIDTH = 2.0
+COVERAGE_BOUND_ERROR_RATE = 0.05  # one-sided error rate of the coverage lower confidence bound
+
+
+def _smallest_decidable_holdout(limit: int = 10_000) -> int:
+    """Smallest holdout size at which this module's own coverage gate can return PASS.
+
+    The gate requires a one-sided lower confidence bound on the coverage rate to reach
+    ``1 - ALPHA - COVERAGE_TOLERANCE``. That bound tightens with sample size, so below some size it
+    cannot reach the threshold *even for a sampler whose coverage is exactly nominal* -- the verifier
+    would be accepting input on which its only possible verdict is FAIL. At the published constants
+    that size is 44; a hardcoded 30 admitted 30-43, a band where a flawless edge is rejected for being
+    measured too little. Deriving the minimum from the gate keeps admission and decision consistent
+    when either constant changes.
+    """
+    threshold = 1.0 - ALPHA - COVERAGE_TOLERANCE
+    for total in range(2, limit + 1):
+        hits = int(round((1.0 - ALPHA) * total))
+        if hits and float(beta.ppf(COVERAGE_BOUND_ERROR_RATE, hits, total - hits + 1)) >= threshold:
+            return total
+    raise ValueError(  # pragma: no cover -- unreachable for any sane ALPHA/COVERAGE_TOLERANCE pair
+        f"no holdout size up to {limit} can satisfy a coverage bound of {threshold}; "
+        "ALPHA and COVERAGE_TOLERANCE are jointly unsatisfiable."
+    )
+
+
+MIN_HOLDOUT_ROWS = _smallest_decidable_holdout()
 
 
 class PremiseStatus(StrEnum):
@@ -293,7 +318,7 @@ def _holdout_digest(x_test: np.ndarray, y_test: np.ndarray) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-def _binomial_lower_bound(hits: int, total: int, *, error_rate: float = 0.05) -> float:
+def _binomial_lower_bound(hits: int, total: int, *, error_rate: float = COVERAGE_BOUND_ERROR_RATE) -> float:
     if hits == 0:
         return 0.0
     return float(beta.ppf(error_rate, hits, total - hits + 1))
