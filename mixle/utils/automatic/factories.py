@@ -310,6 +310,39 @@ def _dense_integer_support(vdict: dict[Any, float]) -> bool:
     return width <= max(MAX_INT_CATEGORICAL_DISTINCT, int(math.ceil(MAX_INT_CATEGORICAL_RANGE_MULTIPLIER * len(vdict))))
 
 
+MAX_INFERRED_ESCAPE_WEIGHT = 0.05
+
+
+def _backoff_over_unobserved(sharp, vdict, min_val, observed_count, *, use_bstats):
+    """Wrap a fitted-support integer-categorical so held-out integers stay scorable, *properly*.
+
+    An inferred support covers only what was observed, so the sharp estimator alone returns ``-inf``
+    for any held-out integer outside it -- one such row drives a whole held-out mean log-density to
+    ``-inf`` (this is what broke flagship_heterogeneous_adult).
+
+    The earlier remedy set ``IntegerCategoricalDistribution.default_value``, which is wrong here and
+    was reported as MXR-080-1838: the integer support is *unbounded*, so a constant out-of-support
+    probability is paid over infinitely many integers and the total mass diverges. That is an improper
+    distribution, not smoothing, and the factory was putting one in every inferred model.
+
+    A backoff mixture is proper: the fallback is itself a normalized distribution, so the two
+    components' mass sums to 1 no matter how wide the unobserved region is.
+
+    Only applied when a *valid* fallback exists. Poisson requires non-negative integers, so a support
+    reaching below zero is left sharp rather than wrapped in a fallback that cannot represent it --
+    an honest ``-inf`` beats a fabricated finite score.
+    """
+    if min_val < 0 or observed_count <= 0.0:
+        return sharp
+    escape = min(1.0 / observed_count, MAX_INFERRED_ESCAPE_WEIGHT)
+    return _estimator_provider(use_bstats).BackoffEstimator(
+        sharp,
+        get_poisson_estimator(vdict, None, emp_suff_stat=True, use_bstats=use_bstats),
+        escape_weight=escape,
+        max_escape_weight=MAX_INFERRED_ESCAPE_WEIGHT,
+    )
+
+
 def get_integer_categorical_estimator(
     vdict: dict[int, float], pseudo_count: float | None = None, emp_suff_stat: bool = True, use_bstats: bool = False
 ) -> "ParameterEstimator":
@@ -319,20 +352,17 @@ def get_integer_categorical_estimator(
     if any(isinstance(k, bool) or not isinstance(k, Integral) for k in vdict):
         raise ValueError("integer-categorical observations must be integers")
     min_val, max_val, width = _integer_range(vdict)
-    # An inferred support is bounded by whatever happened to be observed, so without out-of-support
-    # mass an automatically fitted model returns -inf for any held-out integer outside it -- and one
-    # such row makes a whole held-out mean log-density -inf. Reserve add-one smoothing's share for
-    # "a value I have not seen": default_value = 1/n puts probability 1/(n+1) outside the support.
-    # Derived from the evidence count rather than a fixed constant, so more data narrows it.
     observed_count = float(sum(vdict.values()))
-    default_value = 1.0 / observed_count if observed_count > 0.0 else 0.0
 
     if use_bstats:
-        return _estimator_provider(True).IntegerCategoricalEstimator(
-            min_val=min_val,
-            max_val=max_val,
-            prior=_integer_categorical_default_prior(),
-            default_value=default_value,
+        return _backoff_over_unobserved(
+            _estimator_provider(True).IntegerCategoricalEstimator(
+                min_val=min_val, max_val=max_val, prior=_integer_categorical_default_prior()
+            ),
+            vdict,
+            min_val,
+            observed_count,
+            use_bstats=True,
         )
 
     suff_stat = None
@@ -344,12 +374,14 @@ def get_integer_categorical_estimator(
                 p_vec[int(k) - min_val] = float(v) / cnt
         suff_stat = (min_val, p_vec)
 
-    return _estimator_provider(False).IntegerCategoricalEstimator(
-        min_val=min_val,
-        max_val=max_val,
-        pseudo_count=pseudo_count,
-        suff_stat=suff_stat,
-        default_value=default_value,
+    return _backoff_over_unobserved(
+        _estimator_provider(False).IntegerCategoricalEstimator(
+            min_val=min_val, max_val=max_val, pseudo_count=pseudo_count, suff_stat=suff_stat
+        ),
+        vdict,
+        min_val,
+        observed_count,
+        use_bstats=False,
     )
 
 
