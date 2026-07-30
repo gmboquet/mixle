@@ -231,18 +231,40 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             # Both collapse to the historical values at default_value == 0.0: the normalizer is 0.0 and
             # out-of-support is -inf, so the scored vector is log_p_vec itself.
             self.log_out_of_support = self.log_default_value - self.log1p_default_value
-            # A zero entry means "never observed", which is the same state CategoricalDistribution
-            # represents by the label being absent from pmap -- there it draws default_value. The only
-            # difference here is dense storage: the unobserved value sits inside [min_val, max_val] as
-            # an explicit 0.0 instead of being missing. Treat it the same, or default_value would cover
-            # a held-out 84 but not a held-out 17 in a support with holes. At default_value == 0.0 both
-            # branches are -inf, so this stays bit-for-bit identical to the historical behaviour.
-            self.scored_log_p_vec = np.where(
-                self.p_vec > 0.0, self.log_p_vec - self.log1p_default_value, self.log_out_of_support
-            )
             self.name = name
             self.keys = keys
         self.set_prior(prior)
+
+    @property
+    def scored_log_p_vec(self) -> Any:
+        """``log_p_vec`` less the default_value normalizer, with unobserved entries filled.
+
+        Derived on access, never cached. The gradient-fit path installs a grad-carrying ``log_p_vec``
+        onto the instance *after* construction, so a copy taken in ``__init__`` is a detached numpy
+        snapshot that silently severs the autograd graph -- it did, and gradient_fit's converted-leaf
+        tests raised "element 0 of tensors does not require grad".
+
+        At ``default_value == 0.0`` this returns ``log_p_vec`` itself -- same object, no copy, whatever
+        type and graph it carries -- which is every direct construction and every deserialized model.
+        """
+        if self.default_value == 0.0:
+            return self.log_p_vec
+        log_p = self.log_p_vec
+        if not isinstance(log_p, np.ndarray):
+            # Rather than np.where this into a detached array and lose the graph the way the cached
+            # version did, say so. Smoothing a leaf that is simultaneously being gradient-fitted is not
+            # a combination this class supports yet.
+            raise TypeError(
+                "IntegerCategoricalDistribution with default_value > 0 needs a numpy log_p_vec; got "
+                f"{type(log_p).__name__}. Gradient-fitting a smoothed integer-categorical leaf is not "
+                "supported -- fit with default_value=0.0 and apply smoothing to the fitted result."
+            )
+        scored = log_p - self.log1p_default_value
+        unobserved = np.asarray(self.p_vec) <= 0.0
+        if unobserved.any():
+            scored = scored.copy()
+            scored[unobserved] = self.log_out_of_support
+        return scored
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the integer categorical distribution."""
