@@ -334,6 +334,14 @@ def _backoff_over_unobserved(sharp, vdict, min_val, observed_count, *, use_bstat
     """
     if min_val < 0 or observed_count <= 0.0:
         return sharp
+    # Only a support that fails to tile its own range needs a fallback. A small dense code set --
+    # every integer in [min_val, max_val] observed -- already covers its support, so wrapping it
+    # would claim mass for values the family legitimately calls impossible and would change the
+    # inferred family for columns that are genuinely categorical (automatic_test's
+    # small_cardinality_ints_categorical and dense_integer say so).
+    keys = {int(k) for k in vdict}
+    if len(keys) >= (max(keys) - min(keys) + 1):
+        return sharp
     escape = min(1.0 / observed_count, MAX_INFERRED_ESCAPE_WEIGHT)
     return _estimator_provider(use_bstats).BackoffEstimator(
         sharp,
