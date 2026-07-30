@@ -171,6 +171,34 @@ class GraphPrefetchReceipt:
     evicted: tuple[str, ...]
     resident_tokens: int
 
+    def __post_init__(self) -> None:
+        """Bind the receipt to a prefetch that could actually have happened (MXR-080-0643).
+
+        The counts here are read as memory evidence, so an unchecked receipt is a forgeable one:
+        ``GraphPrefetchReceipt(requested=("a",), loaded=("a", "b", "c"), evicted=(),
+        resident_tokens=999999)`` used to construct, claiming three loads from a one-partition
+        request and an arbitrary residency.
+
+        ``GraphMemoryCache.prefetch`` already satisfies all of this -- it appends to ``loaded`` only
+        from the requested ids and measures ``resident_tokens`` -- so this rejects nothing the cache
+        produces. ``loaded`` and ``evicted`` are deliberately allowed to intersect: a partition
+        loaded early in one prefetch can be evicted by LRU later in that same prefetch.
+        """
+        unknown = [item for item in self.loaded if item not in set(self.requested)]
+        if unknown:
+            raise ValueError(
+                f"prefetch receipt loaded partitions that were never requested: {sorted(unknown)}. "
+                "A prefetch can only load what it was asked for."
+            )
+        if len(set(self.loaded)) != len(self.loaded):
+            raise ValueError("prefetch receipt loaded the same partition twice in one prefetch.")
+        if isinstance(self.resident_tokens, bool) or not isinstance(self.resident_tokens, int):
+            raise ValueError(
+                f"prefetch receipt resident_tokens must be an exact integer; got {self.resident_tokens!r}."
+            )
+        if self.resident_tokens < 0:
+            raise ValueError(f"prefetch receipt resident_tokens must be non-negative; got {self.resident_tokens}.")
+
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible prefetch receipt."""
 
