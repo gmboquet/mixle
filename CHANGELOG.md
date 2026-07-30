@@ -13,6 +13,16 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 
 ### Added
 
+- `BackoffDistribution` / `BackoffEstimator` (`mixle.stats.combinator.backoff`): a two-component
+  mixture that reserves a pinned share of mass for outcomes a fitted support cannot represent, so an
+  automatically inferred model scores held-out values finitely instead of `-inf`. `escape_weight` is a
+  floor and `max_escape_weight` a ceiling — zero is an absorbing state EM will otherwise settle into,
+  and an unbounded weight turns smoothing into model selection between the two components. The
+  fallback must be a normalized law and determines the tail; a mixture of unnormalized factors is a
+  factor, not a law. Replaces the unbounded-support `default_value` shortcut on
+  `IntegerCategoricalDistribution`, which could not be a proper law and has been removed.
+  `CategoricalDistribution.default_value` is unaffected — its label set is finite.
+
 - Stable ``mixle.semantics`` contracts for value roles, units, transforms and
   Jacobians, constraints, priors, observations, posterior/predictive identity,
   uncertainty, calibration, decisions, capability extensions, and trace sinks;

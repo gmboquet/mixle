@@ -114,6 +114,12 @@ Combinators build distributions over structured observations.
 ``ZeroInflatedDistribution``
     Support modifications for common data-generation effects.
 
+``BackoffDistribution``
+    Reserves a small, pinned share of mass for outcomes the fitted support cannot represent, so a
+    held-out value outside it scores finitely instead of ``-inf``. The fallback must be a normalized
+    law covering what the base cannot, and it -- not the combinator -- determines the tail. A mixture
+    of unnormalized factors is a factor, not a law.
+
 Example:
 
 .. code-block:: python
