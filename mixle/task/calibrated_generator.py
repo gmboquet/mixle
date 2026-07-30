@@ -33,8 +33,19 @@ ABSTAIN = None  # sentinel returned when no candidate clears the calibrated thre
 
 
 def _derive_seed(base_seed: int, prompt: Any) -> int:
-    """A stable (cross-process) per-prompt seed derived from ``base_seed`` -- unlike builtin ``hash()``,
-    which is salted per-process by default, so it cannot be used to reproduce a draw across runs."""
+    """A per-prompt seed derived from ``base_seed``, cross-process stable for canonical prompt types.
+
+    Unlike builtin ``hash()``, which is salted per process, this is reproducible across runs -- but only
+    for prompts whose ``repr`` is itself canonical: ``str``, ``bytes``, ``int``, ``float``, ``bool``,
+    ``None``, and tuples, lists, sets or mappings of those.
+
+    It is NOT stable for a prompt relying on the default ``object.__repr__``, which embeds a memory
+    address, so two equal prompts can seed differently in one run and the same prompt seeds differently
+    across runs (MXR-080-1848). Re-deriving the key canonically was tried and rejected: it changes every
+    existing seed, so it silently breaks the reproducibility of runs already recorded, and it moved two
+    calibration outcomes that depend on the current draws. The promise is therefore scoped to say what
+    is true rather than widened by breaking compatibility -- pass a canonical prompt (or your own stable
+    key) when a draw must reproduce on another machine."""
     digest = hashlib.sha256(f"{base_seed}:{prompt!r}".encode()).digest()
     return int.from_bytes(digest[:8], "big") % (2**32)
 
@@ -200,6 +211,13 @@ class CalibratedGenerator:
         if seed is not None and (isinstance(seed, (bool, np.bool_)) or not isinstance(seed, (int, np.integer))):
             raise ValueError("seed must be an exact integer or None")
         rng_seed = self.seed if seed is None else int(seed)
+        # MXR-080-1849 (open): only certification-half verdicts reach the bound, so the proposal-half
+        # is_correct calls are wasted on a possibly metered or side-effecting oracle. Skipping them was
+        # implemented and REVERTED: it changed the outcome of
+        # geoscience_inversion_report's m5 bracketing test, which passes at this revision, so at least
+        # one in-repo oracle is side-effecting in a way the calibration currently depends on. Landing
+        # this needs that dependency understood first -- bending the test to match an unproven change
+        # would be worse than the waste.
         statistics: list[float] = []
         errors: list[bool] = []
         for i, prompt in enumerate(prompts):
