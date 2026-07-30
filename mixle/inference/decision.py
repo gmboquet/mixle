@@ -16,6 +16,7 @@ reported via :class:`mixle.capability.CapabilityError`.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -23,6 +24,8 @@ from typing import Any
 import numpy as np
 
 from mixle.capability import CapabilityError
+
+_LOGGER = logging.getLogger(__name__)
 
 Loss = Callable[[Any, Any], float]
 
@@ -113,6 +116,20 @@ def _loss_samples(
                     "vectorized=True/False (or set loss.vectorized) to skip this discovery"
                 )
                 raise
+            # A scalar retry that SUCCEEDS used to discard probe_error, so a vectorized loss whose body
+            # failed was indistinguishable from a per-draw loss and its values were used as if nothing
+            # had gone wrong (MXR-080-1611, the sibling of MXR-080-0686 in task/_teacher.py). The two
+            # cases genuinely cannot be told apart, so this deliberately does NOT warn: the same fix
+            # attempted as a warning on the teacher fired on every ordinary per-item callable, measured.
+            # debug-level keeps the evidence retrievable for a suspected-down backend without making
+            # every legitimate per-draw loss noisy, and declaring vectorized= skips the probe entirely.
+            _LOGGER.debug(
+                "vectorized-loss probe for action %r failed (%r) and the per-draw retry succeeded; "
+                "treating the loss as per-draw. If it is vectorized, that was a failure inside it -- "
+                "pass vectorized=True to surface it.",
+                action,
+                probe_error,
+            )
     unit, caller = ("posterior draw", "bayes_action") if context == "bayes_action" else ("outcome", context)
     return _validated_losses(values, action, unit=unit, caller=caller), mode
 
