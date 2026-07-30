@@ -71,6 +71,27 @@ class SkellamDistribution(SequenceEncodableProbabilityDistribution):
         self.sqrt_diff_sq = (math.sqrt(self.mu1) - math.sqrt(self.mu2)) ** 2
         self.two_sqrt_prod = 2.0 * math.sqrt(self.mu1 * self.mu2)
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Keep the cached ``log_ratio_half`` tied to the parameters ``mu1`` and ``mu2`` they derive from.
+
+        The constant is computed once in ``__init__`` and read by ``log_density``, so a later
+        assignment used to leave it stale and the scorer kept reporting the *previous*
+        parameter's density with no error at all (MXR-080-1192).
+
+        Recompute rather than validate: callers legitimately install out-of-domain or non-finite
+        parameters -- deserialized legacy states and NaN-propagation checks both do -- so a value
+        outside the domain yields a NaN constant that propagates honestly instead of rejecting a
+        state the library is expected to be able to hold.
+        """
+        object.__setattr__(self, name, value)
+        if name not in ("mu1", "mu2"):
+            return
+        try:
+            object.__setattr__(self, "log_ratio_half", 0.5 * (math.log(self.mu1) - math.log(self.mu2)))
+        except (ValueError, TypeError, OverflowError, ZeroDivisionError, AttributeError, FloatingPointError):
+            # AttributeError covers __init__, where the first parameter is assigned before the rest.
+            object.__setattr__(self, "log_ratio_half", float("nan"))
+
     def __str__(self) -> str:
         """Return a constructor-style representation of the Skellam distribution."""
         return "SkellamDistribution(%s, %s, name=%s, keys=%s)" % (
