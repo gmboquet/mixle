@@ -15,7 +15,10 @@ import numpy as np
 
 from mixle.engines import NUMPY_ENGINE
 from mixle.stats.compute.exp_family import ExponentialFamilyForm, is_exponential_family, to_exponential_family
-from mixle.stats.univariate.discrete.integer_categorical import IntegerCategoricalDistribution
+from mixle.stats.univariate.discrete.integer_categorical import (
+    IntegerCategoricalDistribution,
+    IntegerCategoricalEstimator,
+)
 
 
 class IntegerCategoricalExponentialFamilyTest(unittest.TestCase):
@@ -69,3 +72,58 @@ class IntegerCategoricalExponentialFamilyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IntegerCategoricalDefaultValueTest(unittest.TestCase):
+    """Out-of-support mass, so a support fitted from data can score an integer it never saw.
+
+    The end-to-end case lives in flagship_heterogeneous_adult_smoke_test, but that one skips when the
+    dataset host is unreachable, so the semantics are pinned here too.
+    """
+
+    def test_default_value_zero_is_exactly_the_historical_behaviour(self):
+        d = IntegerCategoricalDistribution(2, [0.6, 0.0, 0.4])
+        self.assertEqual(d.default_value, 0.0)
+        for x in (9, -1, 3):  # outside the range, below it, and an interior zero
+            self.assertEqual(d.log_density(x), -np.inf)
+            self.assertEqual(d.density(x), 0.0)
+        self.assertAlmostEqual(d.log_density(2), float(np.log(0.6)))
+        np.testing.assert_allclose(d.seq_log_density(np.asarray([2, 3, 9])), [np.log(0.6), -np.inf, -np.inf])
+
+    def test_unseen_integers_inside_and_outside_the_range_score_alike(self):
+        d = IntegerCategoricalDistribution(2, [0.6, 0.0, 0.4], default_value=0.01)
+        expected_out = float(np.log(0.01) - np.log1p(0.01))
+        # An interior hole is stored as 0.0 only because the vector is dense; it is the same
+        # "never observed" state CategoricalDistribution represents by an absent pmap key.
+        self.assertAlmostEqual(d.log_density(3), expected_out)
+        self.assertAlmostEqual(d.log_density(99), expected_out)
+        self.assertAlmostEqual(d.log_density(2), float(np.log(0.6) - np.log1p(0.01)))
+        self.assertEqual(d.log_density(2.5), -np.inf)  # a non-integer is still impossible
+
+    def test_every_scoring_path_agrees(self):
+        d = IntegerCategoricalDistribution(2, [0.6, 0.0, 0.4], default_value=0.05)
+        xs = np.asarray([2, 3, 4, 9, -1])
+        scalar = np.asarray([d.log_density(int(x)) for x in xs], dtype=np.float64)
+        np.testing.assert_allclose(d.seq_log_density(xs), scalar)
+        np.testing.assert_allclose(d.backend_seq_log_density(xs, NUMPY_ENGINE), scalar)
+        stacked = IntegerCategoricalDistribution.backend_stacked_params([d, d], NUMPY_ENGINE)
+        matrix = IntegerCategoricalDistribution.backend_stacked_log_density(xs, stacked, NUMPY_ENGINE)
+        np.testing.assert_allclose(np.asarray(matrix)[:, 0], scalar)
+
+    def test_stacking_rejects_mixed_default_values(self):
+        a = IntegerCategoricalDistribution(2, [0.6, 0.4], default_value=0.01)
+        b = IntegerCategoricalDistribution(2, [0.6, 0.4], default_value=0.20)
+        with self.assertRaisesRegex(ValueError, "shared default_value"):
+            IntegerCategoricalDistribution.backend_stacked_params([a, b], NUMPY_ENGINE)
+
+    def test_invalid_default_value_is_rejected_not_clamped(self):
+        for bad in (1.5, -0.1, float("nan")):
+            with self.subTest(default_value=repr(bad)), self.assertRaisesRegex(ValueError, "default_value"):
+                IntegerCategoricalDistribution(2, [0.5, 0.5], default_value=bad)
+
+    def test_an_estimator_carries_default_value_onto_the_fit(self):
+        est = IntegerCategoricalEstimator(min_val=0, max_val=3, default_value=0.02)
+        fitted = est.estimate(None, (0, np.asarray([4.0, 0.0, 4.0, 2.0])))
+        self.assertEqual(fitted.default_value, 0.02)
+        self.assertGreater(fitted.log_density(1), -np.inf)  # the interior zero is now scorable
+        self.assertGreater(fitted.log_density(7), -np.inf)  # and so is a value past max_val

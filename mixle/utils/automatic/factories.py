@@ -319,10 +319,20 @@ def get_integer_categorical_estimator(
     if any(isinstance(k, bool) or not isinstance(k, Integral) for k in vdict):
         raise ValueError("integer-categorical observations must be integers")
     min_val, max_val, width = _integer_range(vdict)
+    # An inferred support is bounded by whatever happened to be observed, so without out-of-support
+    # mass an automatically fitted model returns -inf for any held-out integer outside it -- and one
+    # such row makes a whole held-out mean log-density -inf. Reserve add-one smoothing's share for
+    # "a value I have not seen": default_value = 1/n puts probability 1/(n+1) outside the support.
+    # Derived from the evidence count rather than a fixed constant, so more data narrows it.
+    observed_count = float(sum(vdict.values()))
+    default_value = 1.0 / observed_count if observed_count > 0.0 else 0.0
 
     if use_bstats:
         return _estimator_provider(True).IntegerCategoricalEstimator(
-            min_val=min_val, max_val=max_val, prior=_integer_categorical_default_prior()
+            min_val=min_val,
+            max_val=max_val,
+            prior=_integer_categorical_default_prior(),
+            default_value=default_value,
         )
 
     suff_stat = None
@@ -335,7 +345,11 @@ def get_integer_categorical_estimator(
         suff_stat = (min_val, p_vec)
 
     return _estimator_provider(False).IntegerCategoricalEstimator(
-        min_val=min_val, max_val=max_val, pseudo_count=pseudo_count, suff_stat=suff_stat
+        min_val=min_val,
+        max_val=max_val,
+        pseudo_count=pseudo_count,
+        suff_stat=suff_stat,
+        default_value=default_value,
     )
 
 
