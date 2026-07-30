@@ -150,6 +150,23 @@ class BudgetAndEmptyPortfolioTest(unittest.TestCase):
         self.assertEqual(martingale_violation(empty, lambda rng: 1.0, _gaussian_likelihood, n=3, rng=0), 0.0)
         self.assertFalse(evidence_conservation_violation(empty, 1.0, _gaussian_likelihood))
 
+    def test_a_sequence_with_only_one_ordering_is_refused_not_certified(self):
+        """MXR-080-1758: 0 or 1 observations cannot exhibit order dependence, so 0.0 would lie.
+
+        The zero-``n_permutations`` case was already refused for exactly this reason. A sequence of
+        length 0 or 1 has a single ordering, so every permutation is the base order and the deviation
+        is identically zero -- "no violation" from a test that never ran.
+        """
+        portfolio = _toy_portfolio()
+        for observations in ([], [1.0]):
+            with self.subTest(n_observations=len(observations)):
+                with self.assertRaisesRegex(ValueError, "at least two observations"):
+                    exchangeability_violation(portfolio, observations, _gaussian_likelihood, n_permutations=3, rng=0)
+        # Two is the smallest sequence with a second ordering, so it must still be accepted.
+        self.assertIsInstance(
+            exchangeability_violation(portfolio, [1.0, 2.0], _gaussian_likelihood, n_permutations=3, rng=0), float
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
