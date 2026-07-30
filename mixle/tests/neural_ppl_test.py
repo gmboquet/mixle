@@ -150,7 +150,19 @@ class NeuralPPLTest(unittest.TestCase):
         self.assertGreater(np.mean(fit.predict(given={"x": x})[mask == 1] == y[mask == 1]), 0.9)  # learned the unmasked
 
     def test_cpt_ewc_retains_the_old_task(self):
-        # continued pretraining with EWC retains task A better than plain continuation does
+        """Continued pretraining with EWC retains task A where plain continuation destroys it.
+
+        The Fisher floor is load-bearing, not a tuning nicety. Pretraining reaches ~0.99 on task A, so
+        the per-example gradients the diagonal empirical Fisher is built from are near zero and the
+        quadratic it defines is badly rank-deficient. Minimizing an unfloored penalty then does not hold
+        the module near ``theta*`` -- it walks the module through the Fisher's null space, where the
+        penalty is cheap and task A's function is not preserved. Measured here: raising ``lam`` from 10 to
+        8000 with ``floor=0`` drives the Fisher-weighted drift from 3.6e-1 to 3.7e-5, four orders of
+        magnitude, while the raw distance from the anchor nearly *doubles* (81 to 147) and retained
+        accuracy stays flat at 0.21-0.24 against 0.19 for plain continuation. The constraint is satisfied;
+        the capability is gone. Past lam ~1e4 the penalty is stiffer than the routed optimizer's step size
+        and the objective diverges, so no lam reaches the margin below.
+        """
         from mixle.models.continual import ewc, fisher_diagonal, snapshot
         from mixle.ppl import Categorical, Net
 
@@ -165,9 +177,8 @@ class NeuralPPLTest(unittest.TestCase):
         # SIGN of the gradient only. Pretraining Net(hidden=[32]) full-batch converges to a minimum
         # rprop's sign-based steps consider stable but that generalizes poorly to any later
         # perturbation -- an EWC penalty (a magnitude signal: lam * F_i * (theta_i - theta*_i)^2)
-        # cannot pull a fine-tune back from there regardless of lam (verified empirically: scaling lam
-        # from 1e2 to 1e8 changed retained accuracy by under 2 points). Minibatching routes the same
-        # parameters to sgd_momentum/adagrad instead, and EWC's lam becomes lam-sensitive again.
+        # cannot pull a fine-tune back from there regardless of lam. Minibatching routes the same
+        # parameters to sgd_momentum/adagrad instead, and the penalty becomes effective again.
         def pre(s):
             torch.manual_seed(s)
             return Categorical(logits=Net(hidden=[32], out=3)).fit(ya, given={"x": xa}, epochs=250, batch_size=64)
@@ -176,11 +187,16 @@ class NeuralPPLTest(unittest.TestCase):
         anc, fish = snapshot(p1.dist), fisher_diagonal(p1.dist, xa, ya)
         no = Categorical(logits=Net(hidden=[32], out=3)).fit(yb, given={"x": xb}, epochs=250, init=p1, batch_size=64)
         yes = Categorical(logits=Net(hidden=[32], out=3)).fit(
-            yb, given={"x": xb}, epochs=250, init=p2, ewc=ewc(anc, fish, lam=3e4), batch_size=64
+            yb, given={"x": xb}, epochs=250, init=p2, ewc=ewc(anc, fish, lam=1e2, floor=1e-3), batch_size=64
         )
         acc_a_no = np.mean(no.predict(given={"x": xa}) == ya)
         acc_a_yes = np.mean(yes.predict(given={"x": xa}) == ya)
+        acc_b_yes = np.mean(yes.predict(given={"x": xb}) == yb)
         self.assertGreater(acc_a_yes, acc_a_no + 0.08)  # EWC anti-forgetting retains task A
+        # And it is a stability/plasticity trade, not a frozen module: the new task is still learned.
+        # An over-constrained penalty (floor or lam an order of magnitude higher) pushes task A to ~0.99
+        # and task B down to ~0.21 -- retention bought by refusing to learn, which is not the claim.
+        self.assertGreater(acc_b_yes, 0.5)
 
     def test_dpo_aligns_policy_to_preferences(self):
         # DPO: the policy learns to prefer chosen over rejected -- no reward model, no RL
