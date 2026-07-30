@@ -564,9 +564,20 @@ class NeuralCategoricalEstimator(ParameterEstimator):
                     loss = batch_scale * (wb * ce(logits, yb)).sum() / total_weight.to(dev)
                     if ewc is not None:  # + lambda * sum_i F_i (theta_i - theta*_i)^2 -- pull important weights back
                         anchor, fisher, lam = ewc
-                        loss = loss + lam * sum(
+                        penalty = lam * sum(
                             (f * (p - a) ** 2).sum() for p, a, f in zip(self.module.parameters(), anchor, fisher)
                         )
+                        if not bool(torch.isfinite(penalty)):
+                            # A stiff penalty diverges rather than pulling: gradient descent on a quadratic of
+                            # curvature 2*lam*F_i is stable only for step sizes below 1/(lam*max_i F_i), so a
+                            # large lam outruns the routed optimizer. Name it here -- the aggregate objective
+                            # check below cannot tell the caller which term blew up, and lam is the usual cause.
+                            raise ValueError(
+                                f"EWC penalty became non-finite at lambda={lam:g}; the penalty is stiffer than "
+                                "the optimizer's step size. Lower lambda and raise the Fisher floor instead "
+                                "(see mixle.models.continual.ewc)."
+                            )
+                        loss = loss + penalty
                     if not bool(torch.isfinite(loss)):
                         raise ValueError("categorical weighted objective became non-finite")
                     loss.backward()

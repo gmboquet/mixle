@@ -8,12 +8,20 @@ declarative stage in the pipeline::
 
     pre  = Categorical(logits=Net(out=K)).fit(yA, given={"x": XA})
     F    = fisher_diagonal(pre.dist, XA, yA)
-    cpt  = Categorical(logits=Net(out=K)).fit(yB, given={"x": XB}, init=pre, ewc=ewc(snapshot(pre.dist), F, lam=200))
+    cpt  = Categorical(logits=Net(out=K)).fit(
+        yB, given={"x": XB}, init=pre, ewc=ewc(snapshot(pre.dist), F, lam=100, floor=1e-3))
+
+``floor`` is not decoration. A stage that fit well leaves per-example gradients near zero, so the
+diagonal empirical Fisher is near zero almost everywhere and the penalty it defines is rank-deficient:
+minimizing it walks the module through the Fisher's null space instead of holding it near ``theta*``,
+and the old task is lost with the penalty itself satisfied to four decimal places. Raising ``lam`` does
+not fix that and eventually diverges. See :func:`ewc` for the measurements behind both statements.
 """
 
 from __future__ import annotations
 
 import copy
+from numbers import Real
 from typing import Any
 
 import numpy as np
@@ -98,8 +106,32 @@ def fisher_diagonal(
     return ParameterBundle(result, tuple(name for name, _ in named))
 
 
-def ewc(anchor: ParameterBundle, fisher: ParameterBundle, lam: float = 1.0) -> tuple:
-    """Bundle ``(anchor, fisher, lambda)`` for ``.fit(..., ewc=...)`` (the EWC anti-forgetting penalty)."""
+def ewc(anchor: ParameterBundle, fisher: ParameterBundle, lam: float = 1.0, floor: float = 0.0) -> tuple:
+    """Bundle ``(anchor, fisher, lambda)`` for ``.fit(..., ewc=...)`` (the EWC anti-forgetting penalty).
+
+    ``floor`` adds a constant to every Fisher entry, so the penalty weights are ``F_i + floor`` and the
+    penalty is ``lambda * sum_i (F_i + floor) (theta_i - theta*_i)^2``. It defaults to 0.0, which is EWC
+    exactly as defined -- and which, on its own, usually does not retain the old task, for a reason that
+    is structural rather than a matter of tuning ``lam``.
+
+    The diagonal empirical Fisher is estimated from per-example gradients at the end of the previous
+    stage. A stage that fit well leaves those gradients near zero, so almost every entry of ``F`` is
+    near zero and the quadratic it defines is badly rank-deficient. Minimizing that penalty then does
+    not hold the module near ``theta*``; it moves the module through the Fisher's null space, where the
+    penalty is cheap and the old task's function is not preserved. Measured on a 4-feature 3-class pair
+    of unrelated tasks (see ``neural_ppl_test.test_cpt_ewc_retains_the_old_task``), raising ``lam`` from
+    10 to 8000 drives the Fisher-weighted drift down by four orders of magnitude, 3.6e-1 to 3.7e-5,
+    while the *raw* distance from the anchor nearly doubles, 81 to 147, and retained accuracy on the old
+    task stays flat around 0.21-0.24 against 0.19 for plain continuation. The penalty is satisfied; the
+    capability it exists to protect is not. Past ``lam`` of about 1e4 the quadratic is stiffer than the
+    routed optimizer's step size and the objective diverges instead.
+
+    A small positive ``floor`` closes that null space -- it is EWC plus L2-to-anchor, a Tikhonov
+    regularization of the importance estimate rather than of the parameters. On the same task pair
+    ``floor=1e-3, lam=1e2`` retains 0.59-0.74 on the old task against 0.19-0.34 for plain continuation,
+    at 0.62-0.66 on the new one: a real stability/plasticity trade rather than a satisfied constraint.
+    Prefer a floor over a large ``lam``; the floor buys retention where ``lam`` alone only buys stiffness.
+    """
     import torch
 
     if not isinstance(anchor, ParameterBundle) or not isinstance(fisher, ParameterBundle):
@@ -108,6 +140,8 @@ def ewc(anchor: ParameterBundle, fisher: ParameterBundle, lam: float = 1.0) -> t
         raise ValueError("anchor and Fisher parameter identity manifests must match exactly.")
     if not np.isfinite(lam) or lam < 0.0:
         raise ValueError("EWC penalty lambda must be finite and non-negative.")
+    if isinstance(floor, bool) or not isinstance(floor, Real) or not np.isfinite(floor) or floor < 0.0:
+        raise ValueError("EWC Fisher floor must be a finite non-negative real number.")
     for name, anchor_tensor, fisher_tensor in zip(anchor.names, anchor, fisher):
         if not isinstance(anchor_tensor, torch.Tensor) or not isinstance(fisher_tensor, torch.Tensor):
             raise TypeError(f"EWC parameter {name!r} must use tensor anchors and Fisher values.")
@@ -119,4 +153,6 @@ def ewc(anchor: ParameterBundle, fisher: ParameterBundle, lam: float = 1.0) -> t
             raise ValueError(f"EWC parameter {name!r} contains non-finite values.")
         if torch.any(fisher_tensor < 0.0):
             raise ValueError(f"EWC Fisher values for parameter {name!r} must be non-negative.")
+    if floor > 0.0:  # the penalty's weights, not the Fisher estimate: fisher_diagonal stays what it says
+        fisher = ParameterBundle([tensor + float(floor) for tensor in fisher], fisher.names)
     return (anchor, fisher, float(lam))
