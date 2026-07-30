@@ -1486,6 +1486,8 @@
         "AitchisonNormalEstimator",
         "BackendCapabilityUnavailableError",
         "BackendScoringError",
+        "BackoffDistribution",
+        "BackoffEstimator",
         "BernoulliDistribution",
         "BernoulliEnumerator",
         "BernoulliEstimator",
