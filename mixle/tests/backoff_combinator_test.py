@@ -1,0 +1,110 @@
+"""Contracts for the backoff combinator: unseen outcomes stay scorable, and the pin actually pins."""
+
+import io
+import unittest
+
+import numpy as np
+
+from mixle.inference import optimize
+from mixle.stats import (
+    BackoffDataEncoder,
+    BackoffDistribution,
+    BackoffEstimator,
+    IntegerCategoricalDistribution,
+    IntegerCategoricalEstimator,
+    PoissonDistribution,
+    PoissonEstimator,
+)
+
+
+def _sparse_base() -> IntegerCategoricalDistribution:
+    """A support with a hole at every value except 11 and 21, both inside [1, 21]."""
+    return IntegerCategoricalDistribution(1, [0.0] * 10 + [0.5] + [0.0] * 9 + [0.5])
+
+
+class BackoffScoringTest(unittest.TestCase):
+    def test_unseen_outcomes_are_finite_where_the_base_alone_is_not(self):
+        base = _sparse_base()
+        dist = BackoffDistribution(base, PoissonDistribution(16.0), escape_weight=0.01)
+        for unseen in (17, 84):  # a hole inside the support, and a value past its maximum
+            with self.subTest(x=unseen):
+                self.assertEqual(base.log_density(unseen), -np.inf)
+                self.assertTrue(np.isfinite(dist.log_density(unseen)))
+        # An observed value is barely moved. It is bracketed: above the retained base alone, because
+        # the fallback puts a little mass there too, and below the unmixed base, because some mass left.
+        observed = dist.log_density(11)
+        self.assertGreater(observed, float(np.log(0.5) + np.log1p(-0.01)))
+        self.assertLess(observed, float(np.log(0.5)))
+        self.assertLess(float(np.log(0.5)) - observed, 0.01)
+
+    def test_zero_escape_weight_is_inert_rather_than_wrong(self):
+        base = _sparse_base()
+        dist = BackoffDistribution(base, PoissonDistribution(16.0), escape_weight=0.0)
+        self.assertEqual(dist.log_density(11), base.log_density(11))
+        self.assertEqual(dist.log_density(17), -np.inf)
+
+    def test_sequence_and_scalar_paths_agree(self):
+        dist = BackoffDistribution(_sparse_base(), PoissonDistribution(16.0), escape_weight=0.01)
+        xs = [11, 21, 17, 84]
+        encoded = dist.dist_to_encoder().seq_encode(xs)
+        scalar = np.asarray([dist.log_density(x) for x in xs], dtype=np.float64)
+        np.testing.assert_allclose(np.asarray(dist.seq_log_density(encoded), dtype=np.float64), scalar)
+
+    def test_encoder_equality_follows_both_children(self):
+        dist = BackoffDistribution(_sparse_base(), PoissonDistribution(16.0), escape_weight=0.01)
+        self.assertEqual(dist.dist_to_encoder(), dist.dist_to_encoder())
+        self.assertNotEqual(dist.dist_to_encoder(), BackoffDataEncoder(object(), object()))
+
+    def test_invalid_escape_weight_is_rejected(self):
+        base = _sparse_base()
+        for bad in (1.5, -0.1, float("nan")):
+            with self.subTest(escape_weight=repr(bad)), self.assertRaisesRegex(ValueError, "escape_weight"):
+                BackoffDistribution(base, PoissonDistribution(16.0), escape_weight=bad)
+
+
+class BackoffFitTest(unittest.TestCase):
+    """The floor is the load-bearing part; without it EM collapses the escape branch on step one."""
+
+    def setUp(self) -> None:
+        self.data = list(np.random.RandomState(0).poisson(16, size=400).astype(int))
+
+    def _fit(self, **kwargs) -> BackoffDistribution:
+        est = BackoffEstimator(IntegerCategoricalEstimator(min_val=1, max_val=30), PoissonEstimator(), **kwargs)
+        return optimize(self.data, est, max_its=25, out=io.StringIO())
+
+    def test_em_never_drives_the_escape_weight_below_its_floor(self):
+        # Zero is absorbing: at w == 0 the fallback's responsibility is 0 for every row, so
+        # escape_count can never recover and the fit silently loses the ability to score anything new.
+        fitted = self._fit(escape_weight=0.01, max_escape_weight=0.05)
+        self.assertGreaterEqual(fitted.escape_weight, 0.01)
+        self.assertLessEqual(fitted.escape_weight, 0.05)
+
+    def test_a_fitted_model_still_scores_values_absent_from_its_training_sample(self):
+        fitted = self._fit(escape_weight=0.01, max_escape_weight=0.05)
+        absent = sorted(set(range(1, 61)) - set(self.data))
+        self.assertTrue(absent, "the sample was expected to leave some values unobserved")
+        for x in absent[:5]:
+            with self.subTest(x=x):
+                self.assertTrue(np.isfinite(fitted.log_density(x)))
+
+    def test_freezing_the_weight_returns_it_exactly(self):
+        self.assertAlmostEqual(self._fit(escape_weight=0.02, max_escape_weight=0.02).escape_weight, 0.02)
+
+    def test_an_unbounded_weight_becomes_model_selection_not_smoothing(self):
+        """Documents why the ceiling exists rather than asserting the ceiling is optional."""
+        capped = self._fit(escape_weight=0.01, max_escape_weight=0.05)
+        free = self._fit(escape_weight=0.01, max_escape_weight=None)
+        self.assertGreater(free.escape_weight, capped.escape_weight * 2.0)
+
+    def test_a_starting_weight_outside_its_own_bound_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "exceeds max_escape_weight"):
+            BackoffEstimator(
+                IntegerCategoricalEstimator(min_val=1, max_val=30),
+                PoissonEstimator(),
+                escape_weight=0.5,
+                max_escape_weight=0.05,
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -701,6 +701,10 @@ __all__ = [
     "ZeroInflatedSampler",
     "ZeroInflatedEstimator",
     "ZeroInflatedDataEncoder",
+    "BackoffDistribution",
+    "BackoffSampler",
+    "BackoffEstimator",
+    "BackoffDataEncoder",
     "HurdleDistribution",
     "HurdleSampler",
     "HurdleEstimator",
@@ -984,6 +988,12 @@ from mixle.stats.bayes.pitman_yor import (
 from mixle.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution, SymmetricDirichletSampler
 
 ### combinators distributions
+from mixle.stats.combinator.backoff import (
+    BackoffDataEncoder,
+    BackoffDistribution,
+    BackoffEstimator,
+    BackoffSampler,
+)
 from mixle.stats.combinator.censored import (
     CensoredAccumulator,
     CensoredAccumulatorFactory,
