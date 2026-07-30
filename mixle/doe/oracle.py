@@ -37,7 +37,7 @@ import inspect
 import itertools
 import math
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
@@ -196,6 +196,29 @@ class OracleResult:
             object.__setattr__(self, "valid", False)
 
 
+def _deeply_frozen(value: Any) -> Any:
+    """Return an immutable stand-in for ``value``, recursively.
+
+    ``ndarray.setflags(write=False)`` freezes the *buffer*, not what an object-dtype element points at,
+    so a list stored in one stayed mutable and a "frozen" receipt could still be edited through its
+    own elements (MXR-080-1851). Containers are converted rather than merely copied, because a copy of
+    a list is still a list.
+    """
+    if isinstance(value, np.ndarray):
+        frozen = value.copy()
+        frozen.setflags(write=False)
+        return frozen
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _deeply_frozen(item) for key, item in value.items()})
+    if isinstance(value, (str, bytes, bytearray)):
+        return bytes(value) if isinstance(value, bytearray) else value
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_deeply_frozen(item) for item in value)
+    if isinstance(value, Sequence):
+        return tuple(_deeply_frozen(item) for item in value)
+    return value
+
+
 @dataclass(frozen=True)
 class LateOracleResult:
     """A timed-out oracle call's outcome, captured after the fact.
@@ -226,6 +249,10 @@ class LateOracleResult:
             # out-of-contract candidate type is not a reason to drop it.
             candidate = np.asarray(self.candidate, dtype=object).copy()
         candidate.setflags(write=False)
+        if candidate.dtype == object:
+            # Only the object path can hold mutable elements; the float64 path is frozen by setflags
+            # alone. Store the deeply frozen form so the receipt cannot be edited through its elements.
+            candidate = _deeply_frozen(candidate.tolist())
         object.__setattr__(self, "candidate", candidate)
 
 
