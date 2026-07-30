@@ -141,6 +141,25 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
         self.set_prior(prior)
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Keep ``log_lambda`` tied to the rate it was computed from.
+
+        ``log_lambda`` is derived from ``lam`` once in ``__init__``. Assigning ``lam``
+        afterwards used to leave it stale, which is worse than a stale value here: with
+        ``lam = -3`` the scorer returned ``log_density(1) == +3.0``, a *positive* log
+        density, i.e. a probability above one, reported with no error at all.
+
+        Recompute rather than validate, so a rate outside the domain yields a NaN log
+        rate that propagates honestly instead of rejecting states the library is
+        expected to be able to hold (deserialized legacy parameters, NaN-propagation
+        checks). ``log_density`` then reports NaN, not a confident wrong number.
+        """
+        object.__setattr__(self, name, value)
+        if name != "lam":
+            return
+        usable = np.isscalar(value) and np.isfinite(value) and value > 0.0
+        object.__setattr__(self, "log_lambda", log(value) if usable else float("nan"))
+
     def __str__(self) -> str:
         """Return a readable distribution summary."""
         return "PoissonDistribution(%s, name=%s, keys=%s)" % (repr(self.lam), repr(self.name), repr(self.keys))
