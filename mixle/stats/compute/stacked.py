@@ -493,7 +493,9 @@ class StackedMixtureKernel(Kernel):
         if self.estimator is None:
             raise ValueError("StackedMixtureKernel.accumulate requires an estimator.")
         if self.has_resident_accumulate:
-            return self.resident_accumulate(enc, weights).value()
+            resident = self.resident_accumulate(enc, weights).value()
+            self._assert_resident_statistics_complete(resident)
+            return resident
         host_enc = getattr(enc, "host_payload", enc)
         gamma = self.posteriors(enc)
         weights = self.engine.asarray(weights)
@@ -505,6 +507,36 @@ class StackedMixtureKernel(Kernel):
             acc.seq_update(host_enc, gamma_np[:, i], self.dist.components[i])
             comp_stats.append(acc.value())
         return comp_counts, tuple(comp_stats)
+
+    def _assert_resident_statistics_complete(self, resident: Any) -> None:
+        """Refuse a resident statistic tuple that is shorter than the family declares.
+
+        has_resident_accumulate selects a backend because the method *exists*, never because it is
+        current. GEV added observed min/max to its declaration and left its stacked backend returning
+        the four moments; the stale method was chosen over the correct host accumulator and the
+        support bounds vanished, so the engine-resident path scored -inf on rows the host path fits
+        (MXR-080-1846). Presence is not currency, so check the arity at the point of use, where it
+        cannot go stale.
+        """
+        declaration = getattr(self.component_type, "compute_declaration", None)
+        if not callable(declaration):
+            return
+        try:
+            declared = len(declaration().statistics)
+        except Exception:  # noqa: BLE001 - a family that cannot describe itself is another test's problem
+            return
+        per_component = resident[1] if isinstance(resident, tuple) and len(resident) == 2 else resident
+        first = None
+        if isinstance(per_component, (tuple, list)) and per_component:
+            first = per_component[0]
+        if not isinstance(first, (tuple, list)) or declared == 0:
+            return
+        if len(first) < declared:
+            raise ValueError(
+                f"{self.component_type.__name__}.backend_stacked_sufficient_statistics returned "
+                f"{len(first)} statistics but the family declares {declared}. The engine-resident "
+                "path would drop the rest; update the backend or remove it so the host accumulator runs."
+            )
 
     def refresh(self, dist: SequenceEncodableProbabilityDistribution) -> None:
         """Refresh stacked parameters after an M-step without changing structure."""
