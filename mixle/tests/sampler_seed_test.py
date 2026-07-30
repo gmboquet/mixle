@@ -310,6 +310,11 @@ def _stats_public_distribution_catalog():
         ),
         "ChineseRestaurantProcessDistribution": stats.ChineseRestaurantProcessDistribution(1.7, 6),
         "ZeroInflatedDistribution": stats.ZeroInflatedDistribution(stats.PoissonDistribution(2.0), 0.3),
+        "BackoffDistribution": stats.BackoffDistribution(
+            stats.IntegerCategoricalDistribution(0, [0.25, 0.5, 0.25]),
+            stats.PoissonDistribution(2.0),
+            escape_weight=0.05,
+        ),
         "HurdleDistribution": stats.HurdleDistribution(stats.PoissonDistribution(2.0), 0.3),
         "GeneralizedParetoDistribution": stats.GeneralizedParetoDistribution(2.0, 0.3),
         "GeneralizedExtremeValueDistribution": stats.GeneralizedExtremeValueDistribution(0.0, 2.0, 0.2),

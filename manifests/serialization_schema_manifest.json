@@ -30,6 +30,8 @@
         "mixle.stats.bayes.pitman_yor.PitmanYorProcessDistribution",
         "mixle.stats.bayes.pitman_yor.PitmanYorProcessEstimator",
         "mixle.stats.bayes.symmetric_dirichlet.SymmetricDirichletDistribution",
+        "mixle.stats.combinator.backoff.BackoffDistribution",
+        "mixle.stats.combinator.backoff.BackoffEstimator",
         "mixle.stats.combinator.censored.CensoredDistribution",
         "mixle.stats.combinator.censored.CensoredLikelihoodEstimator",
         "mixle.stats.combinator.censored.ExactOnlyCensoredEstimator",
@@ -554,6 +556,20 @@
           "state_version": 1
         },
         "mixle.stats.bayes.symmetric_dirichlet.SymmetricDirichletDistribution": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.combinator.backoff.BackoffDistribution": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.combinator.backoff.BackoffEstimator": {
           "codec": "constructor-validated",
           "migrations": [],
           "stability": "provisional",
@@ -3060,6 +3076,8 @@
         "mixle.stats.bayes.pitman_yor.PitmanYorProcessDistribution",
         "mixle.stats.bayes.pitman_yor.PitmanYorProcessEstimator",
         "mixle.stats.bayes.symmetric_dirichlet.SymmetricDirichletDistribution",
+        "mixle.stats.combinator.backoff.BackoffDistribution",
+        "mixle.stats.combinator.backoff.BackoffEstimator",
         "mixle.stats.combinator.censored.CensoredDistribution",
         "mixle.stats.combinator.censored.CensoredLikelihoodEstimator",
         "mixle.stats.combinator.censored.ExactOnlyCensoredEstimator",
@@ -3683,6 +3701,20 @@
           "state_version": 1
         },
         "mixle.stats.bayes.symmetric_dirichlet.SymmetricDirichletDistribution": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.combinator.backoff.BackoffDistribution": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.combinator.backoff.BackoffEstimator": {
           "codec": "constructor-validated",
           "migrations": [],
           "stability": "provisional",
