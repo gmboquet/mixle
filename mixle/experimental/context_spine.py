@@ -331,6 +331,7 @@ def train_tbptt(
     opt: Any,
     *,
     detach_horizon: int = 1,
+    extra_loss: Any | None = None,
 ) -> dict[str, Any]:
     """Stream ``chunks`` through ``mechanism``, TBPTT-training with the given optimizer.
 
@@ -339,12 +340,22 @@ def train_tbptt(
     continuing. ``detach_horizon=1`` is literal per-chunk stop-gradient (Transformer-XL); a horizon
     spanning the whole stream means no mid-stream detach happens at all (see ``notes/designs/E1.md``).
     Returns ``{"losses": [float, ...], "state": final_state}`` -- one loss per chunk, detached telemetry.
+
+    ``extra_loss`` is an optional live tensor added to the FIRST backward only -- a term earned outside
+    ``chunks`` (e.g. an auxiliary regularizer from a warm-up prefix this call does not train the LM on).
+    Folding it in here rather than backpropagating it separately keeps the optimizer-step count
+    independent of whether the term is present, so an ablation on it is not confounded by step count.
+    It is excluded from the returned ``losses`` telemetry, which stays one entry per chunk.
     """
     if isinstance(detach_horizon, bool) or not isinstance(detach_horizon, int) or detach_horizon <= 0:
         raise ValueError("detach_horizon must be a positive integer.")
+    # Duck-typed on purpose: this function is defined outside the ``_HAS_TORCH`` guard and must not name torch.
+    if extra_loss is not None and not (hasattr(extra_loss, "backward") and getattr(extra_loss, "ndim", None) == 0):
+        raise TypeError("extra_loss must be a scalar torch tensor or None.")
     losses: list[float] = []
     acc_loss = None
     acc_count = 0
+    pending_extra = extra_loss
     for chunk in chunks:
         state, loss = mechanism.step(state, chunk)
         losses.append(float(loss.detach()))
@@ -352,13 +363,20 @@ def train_tbptt(
         acc_count += 1
         if acc_count >= detach_horizon:
             opt.zero_grad()
-            (acc_loss / acc_count).backward()
+            step_loss = acc_loss / acc_count
+            if pending_extra is not None:
+                step_loss, pending_extra = step_loss + pending_extra, None
+            step_loss.backward()
             opt.step()
             state = mechanism.detach(state)
             acc_loss, acc_count = None, 0
-    if acc_loss is not None:
+    # ``pending_extra`` survives an empty or exactly-horizon-aligned stream: it must still be trained on.
+    if acc_loss is not None or pending_extra is not None:
         opt.zero_grad()
-        (acc_loss / acc_count).backward()
+        step_loss = None if acc_loss is None else acc_loss / acc_count
+        if pending_extra is not None:
+            step_loss = pending_extra if step_loss is None else step_loss + pending_extra
+        step_loss.backward()
         opt.step()
         state = mechanism.detach(state)
     return {"losses": losses, "state": state}

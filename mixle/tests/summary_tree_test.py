@@ -1,16 +1,32 @@
 """E4 acceptance receipts for the hierarchical summary tree (see notes/designs/E4.md).
 
 Four receipts:
-1. needle retrieval beyond the exact/local window -- E7's ``needle_suite`` at ``distance > window``,
-   ``SummaryTreeSpine`` averaged over several seeds vs. ``SlidingWindowSpine`` baseline, matched
-   architecture, same seeds.
-2. ablation -- ``aux_weight > 0`` vs ``aux_weight == 0``, same needle evaluation, same seeds: the
-   auxiliary loss version scores materially higher.
+1. needle retrieval beyond the exact/local window -- E7's ``needle_suite`` at ``distance > window``:
+   the tree's prediction at the query position responds to the planted value token, and
+   ``SlidingWindowSpine``'s provably cannot.
+2. auxiliary loss -- it reaches the optimizer (a regression guard, see below), and its measured effect
+   on needle retrieval at this scale, which is negative, not the "materially higher" originally claimed.
 3. positions stable under re-chunking -- identical token stream through two different chunk-size
    schedules produces identical tree topology (paths, node ids, finalization order) for every node.
 4. stop-gradient horizon (receipted) -- detachment after ``H`` subsequent evictions, within the caller's
    detach cadence, plus the "load-bearing, not just bookkept" consequence check: a loss built purely from
    an archived (detached) node's summary must not touch ``compressor``'s gradient.
+
+Receipts 1 and 2 were both re-instrumented after measurement, because as written they could not measure
+their own claims. Both compared a 5-seed mean of ``loss_threshold_success_rate`` at ``d_model=24`` from
+150 training steps and 50 evaluation trials. Nothing learns the task at that budget: every arm lands in
+0.08-0.26 seed noise, and at 600 steps / 200 trials the tree, the tree without the auxiliary loss, and
+the sliding-window baseline all converge to ~0.07 -- the marginal, which is what a mechanism that cannot
+retrieve *should* score. Given capacity and steps the claim is real and large (``d_model=64``, 1200
+steps: 0.513 vs 0.093), so receipt 1 now measures it two ways -- deterministically via
+:func:`_needle_sensitivity`, and on the referee's own statistic at a budget where it has power.
+
+Two properties of ``needle_suite`` shape what those receipts may assert. The filler tokens are uniform
+over the whole vocabulary, so the planted value can recur inside the window by chance, which lets the
+baseline clear the loss threshold on some trials without any long-range retrieval at all -- its measured
+rate runs 0.0-0.2 depending on budget, so no receipt here asserts that it is *at chance*, only that the
+tree materially exceeds it. And the target at the query position is the only position worth training on,
+which is what makes the auxiliary term's gradient path (receipt 2) so easy to sever by accident.
 """
 
 import numpy as np
@@ -19,7 +35,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from mixle.experimental.context_spine import SlidingWindowSpine  # noqa: E402
-from mixle.experimental.long_context_eval import _train_and_probe, needle_suite  # noqa: E402
+from mixle.experimental.long_context_eval import _chunks, _train_and_probe, needle_suite  # noqa: E402
 from mixle.experimental.summary_tree import SummaryTreeSpine, digits_of, lca_depth  # noqa: E402
 
 # torch / experimental / slow markers come from mixle/tests/conftest.py's FILE_MARKERS table.
@@ -77,33 +93,220 @@ def _run_baseline(seed: int) -> dict:
     )
 
 
+def _query_position_nll(m, tokens: list[int]):
+    """NLL at the query position for every candidate target, after streaming ``tokens[:-1]`` as context.
+
+    ``step`` returns a fresh state and leaves its argument untouched, so the six candidate scorings all
+    read the same post-prefix state (asserted by ``test_query_position_scoring_does_not_consume_state``).
+    """
+    x = torch.as_tensor(np.asarray(tokens)[None, :], dtype=torch.long)
+    state = m.init_state(1)
+    with torch.no_grad():
+        for chunk in _chunks(x[:, :-1], x[:, :-1], CHUNK_SIZE):
+            state, _ = m.step(state, chunk)
+        return torch.tensor(
+            [float(m.step(state, (x[:, -1:], torch.full((1, 1), c, dtype=torch.long)))[1]) for c in range(VOCAB)]
+        )
+
+
+def _needle_sensitivity(m, *, seed: int, trials: int = 20) -> float:
+    """Mean swing in the query-position NLL from changing ONLY the planted value token.
+
+    This is "retrieval beyond the window" measured directly: ``needle_suite`` puts the value at position 1
+    and the query at position ``DISTANCE``, and ``DISTANCE > WINDOW``, so a response to that token has to
+    have travelled through a summary node -- there is no other path. Deterministic given the mechanism:
+    no training, no threshold on a success rate, no averaging over seeds to find a margin.
+    """
+    rng = np.random.RandomState(seed)
+    swings = []
+    for _ in range(trials):
+        x, _y = needle_suite(rng, distance=DISTANCE, vocab=VOCAB)
+        tokens = x[0].tolist()
+        altered = list(tokens)
+        altered[1] = (altered[1] + 1) % (VOCAB - 1)  # a different value; never collides with the key
+        swings.append(float((_query_position_nll(m, tokens) - _query_position_nll(m, altered)).abs().max()))
+    return float(np.mean(swings))
+
+
+def test_query_position_scoring_does_not_consume_state():
+    """``_needle_sensitivity`` scores several candidate targets from one post-prefix state, so ``step``
+    must not mutate the state it is handed -- otherwise every probe after the first reads a different tree."""
+    torch.manual_seed(0)
+    m = SummaryTreeSpine(VOCAB, d_model=16, n_layer=1, n_head=2, window=WINDOW, fanout=FANOUT, aux_weight=0.1)
+    m.eval()
+    x = torch.as_tensor(np.arange(DISTANCE + 1)[None, :] % VOCAB, dtype=torch.long)
+    state = m.init_state(1)
+    with torch.no_grad():
+        for chunk in _chunks(x[:, :-1], x[:, :-1], CHUNK_SIZE):
+            state, _ = m.step(state, chunk)
+        target = torch.zeros((1, 1), dtype=torch.long)
+        repeated = {float(m.step(state, (x[:, -1:], target))[1]) for _ in range(6)}
+    assert len(repeated) == 1, f"step() mutated the state it was given: {sorted(repeated)}"
+
+
 def test_needle_retrieval_beyond_window_beats_baseline():
-    tree_acc = [_run_tree(s, aux_weight=0.2)["loss_threshold_success_rate"] for s in SEEDS]
-    base_acc = [_run_baseline(s)["loss_threshold_success_rate"] for s in SEEDS]
+    """The tree answers using a token outside its window; ``SlidingWindowSpine`` provably cannot.
+
+    The baseline's swing is not merely small but exactly zero, for every seed: its attention mask hard-
+    excludes every position more than ``WINDOW`` back, so the needle cannot reach the query through any
+    path at all. That is the strongest form this receipt can take, and it replaces a 0.1 accuracy-margin
+    assertion that the experiment had no power to decide (see the module docstring).
+    """
+    for seed in SEEDS:
+        torch.manual_seed(seed)
+        tree = SummaryTreeSpine(
+            VOCAB,
+            d_model=24,
+            n_layer=2,
+            n_head=4,
+            window=WINDOW,
+            fanout=FANOUT,
+            detach_horizon_nodes=4,
+            aux_weight=0.2,
+        )
+        baseline = SlidingWindowSpine(VOCAB, d_model=24, n_layer=2, n_head=4, window=WINDOW)
+        tree.eval()
+        baseline.eval()
+        tree_swing = _needle_sensitivity(tree, seed=seed)
+        base_swing = _needle_sensitivity(baseline, seed=seed)
+
+        print(
+            f"[E4 receipt 1] seed={seed} needle response at distance={DISTANCE} > window={WINDOW}: "
+            f"SummaryTreeSpine={tree_swing:.6f}  SlidingWindowSpine={base_swing:.6e}"
+        )
+        assert base_swing == 0.0, (
+            f"baseline responded to a token outside its window (seed={seed}, swing={base_swing:.6e}); "
+            "the window mask is supposed to make this structurally impossible"
+        )
+        assert tree_swing > 1e-3, (
+            f"tree did not respond to the needle at all (seed={seed}, swing={tree_swing:.6e}) -- "
+            "the summary path from the planted value to the query position is severed"
+        )
+
+
+def test_needle_accuracy_beats_baseline_at_a_budget_that_can_measure_it():
+    """The referee's own statistic, at a budget where it has power: the tree materially outperforms.
+
+    This is receipt 1's original claim (``tree_mean > base_mean + 0.1`` on ``loss_threshold_success_rate``)
+    restored at ``d_model=64`` and 1200 steps, where it holds by ~0.4 rather than being decided by seed
+    noise. No upper bound is asserted on the baseline: uniform filler tokens let the planted value recur
+    inside the window by chance, so a nonzero baseline rate is expected and is not evidence of retrieval.
+
+    ``aux_weight=0.0`` here, deliberately. At ``aux_weight=0.2`` the same configuration scores 0.080 --
+    below the baseline margin -- so the mechanism clears its graduation bar only with the auxiliary loss
+    disabled. That is measured, not assumed; see the ablation in
+    :func:`test_auxiliary_loss_reaches_the_optimizer_but_does_not_improve_needle_retrieval`.
+    """
+    fair_seeds = (1, 2)
+    tree_acc, base_acc = [], []
+    for seed in fair_seeds:
+        for kind, bucket in (("tree", tree_acc), ("baseline", base_acc)):
+            torch.manual_seed(seed)
+            m = (
+                SummaryTreeSpine(
+                    VOCAB,
+                    d_model=64,
+                    n_layer=2,
+                    n_head=4,
+                    window=WINDOW,
+                    fanout=FANOUT,
+                    detach_horizon_nodes=4,
+                    aux_weight=0.0,
+                )
+                if kind == "tree"
+                else SlidingWindowSpine(VOCAB, d_model=64, n_layer=2, n_head=4, window=WINDOW)
+            )
+            bucket.append(
+                _train_and_probe(
+                    m,
+                    torch.optim.Adam(m.parameters(), lr=3e-3),
+                    needle_suite,
+                    distance=DISTANCE,
+                    vocab=VOCAB,
+                    chunk_size=CHUNK_SIZE,
+                    n_train_steps=1200,
+                    n_eval_trials=150,
+                    rng=np.random.RandomState(seed + 100),
+                )["loss_threshold_success_rate"]
+            )
     tree_mean, base_mean = float(np.mean(tree_acc)), float(np.mean(base_acc))
 
     print(
-        f"[E4 receipt 1] needle accuracy at distance={DISTANCE} > window={WINDOW}: "
+        f"[E4 receipt 1b] needle accuracy at distance={DISTANCE} > window={WINDOW}, d_model=64, 1200 steps: "
         f"SummaryTreeSpine mean={tree_mean:.3f} {tree_acc}  SlidingWindowSpine mean={base_mean:.3f} {base_acc}"
     )
-    # SlidingWindowSpine is at-chance by construction past its window -- this is a real, measured
-    # (not asserted-by-construction) margin, not just "different": the tree materially outperforms.
     assert tree_mean > base_mean + 0.1, (
         f"tree needle accuracy ({tree_mean:.3f}) is not materially above baseline ({base_mean:.3f})"
     )
-    assert base_mean < 0.1, f"baseline unexpectedly solved distance > window: {base_mean:.3f}"
 
 
-def test_ablation_auxiliary_loss_improves_summary_usefulness():
+def test_auxiliary_loss_reaches_the_optimizer_but_does_not_improve_needle_retrieval():
+    """Two claims, both measured: the auxiliary loss is trained on, and it does not help here.
+
+    The first half is a regression guard. ``predict_head`` has exactly one consumer in the library --
+    ``_aux_loss_for_nodes`` -- so a populated ``predict_head.weight.grad`` is proof the auxiliary term
+    reached a backward pass, and a ``None`` one is proof it did not. It was ``None`` from ``2338f3d1``
+    (which made the evaluation harness warm the prefix under ``no_grad`` and train only the final
+    dependency position) until the harness was taught to keep the prefix's auxiliary term: nodes finalize
+    in the prefix and never on that single trained position, so the term was computed 600 times per run
+    and differentiated zero times. ``aux_weight`` was silently inert, which is why an on/off ablation
+    returned byte-identical numbers.
+
+    The second half records what the now-live term actually does, which is the opposite of the original
+    receipt's claim that "the auxiliary loss version scores materially higher". It does not, and this is
+    not a near miss. Sweeping ``aux_weight`` over 0.01/0.05/0.1/0.2/0.5 lowers both this success rate and
+    the receipt-1 needle response versus 0.0 at every weight. Under the pre-``2338f3d1`` protocol the
+    receipt was written against -- whole sequence trained, so the term was live then -- the ablation also
+    came out against it, 0.088 vs 0.136. And at the budget where the statistic has power (``d_model=64``,
+    1200 steps) the cost is not marginal but roughly sixfold: 0.080 with the auxiliary loss against 0.513
+    without, which is the difference between missing and clearing receipt 1b's baseline margin. The
+    summary-prediction objective competes with needle retrieval for the same capacity. Note this makes
+    ``SummaryTreeSpine``'s ``aux_weight=0.1`` default costly on this suite.
+
+    The assertion is therefore inverted and left loud: if this ever reverses, the claim is back on the
+    table and this note has to go.
+    """
+    for aux_weight, expect_grad in ((0.2, True), (0.0, False)):
+        torch.manual_seed(1)
+        m = SummaryTreeSpine(
+            VOCAB, d_model=24, n_layer=2, n_head=4, window=WINDOW, fanout=FANOUT, aux_weight=aux_weight
+        )
+        _train_and_probe(
+            m,
+            torch.optim.Adam(m.parameters(), lr=1.5e-2),
+            needle_suite,
+            distance=DISTANCE,
+            vocab=VOCAB,
+            chunk_size=CHUNK_SIZE,
+            n_train_steps=1,
+            n_eval_trials=1,
+            rng=np.random.RandomState(101),
+        )
+        grad = m.predict_head.weight.grad
+        norm = 0.0 if grad is None else float(grad.norm())
+        print(f"[E4 receipt 2] aux_weight={aux_weight}: predict_head grad norm after one step = {norm:.6f}")
+        if expect_grad:
+            assert grad is not None and norm > 0.0, (
+                "the auxiliary loss never reached a backward pass: predict_head has no consumer other "
+                "than _aux_loss_for_nodes, so aux_weight is inert and any ablation on it is a no-op"
+            )
+        else:
+            assert grad is None, f"predict_head was trained with aux_weight=0 (grad norm {norm:.6f})"
+
     on = [_run_tree(s, aux_weight=0.2)["loss_threshold_success_rate"] for s in SEEDS]
     off = [_run_tree(s, aux_weight=0.0)["loss_threshold_success_rate"] for s in SEEDS]
     on_mean, off_mean = float(np.mean(on)), float(np.mean(off))
 
     print(
-        f"[E4 receipt 2] needle accuracy: aux_weight=0.2 mean={on_mean:.3f} {on}  aux_weight=0.0 mean={off_mean:.3f} {off}"
+        f"[E4 receipt 2] needle accuracy: aux_weight=0.2 mean={on_mean:.3f} {on}  "
+        f"aux_weight=0.0 mean={off_mean:.3f} {off}"
     )
-    assert on_mean > off_mean, (
-        f"auxiliary loss did not improve summary usefulness: on={on_mean:.3f} vs off={off_mean:.3f}"
+    # 0.02 of slack absorbs cross-platform float drift (one eval trial is 0.02) without absorbing a real
+    # reversal: the measured gap runs the other way by roughly twice that.
+    assert on_mean < off_mean + 0.02, (
+        f"the auxiliary loss now improves needle retrieval (on={on_mean:.3f} vs off={off_mean:.3f}) -- "
+        "restore the receipt-2 claim that it 'scores materially higher' and retire the note in this "
+        "test's docstring saying it does not"
     )
 
 
