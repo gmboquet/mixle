@@ -77,8 +77,20 @@ def exchangeability_violation(
     ``n_permutations`` must be a positive exact integer: a zero budget returned ``0.0`` -- read by any
     caller as "no violation" -- having permuted nothing at all. An open-world-only portfolio (no
     active hypotheses) is a valid input and reports on ``w_open`` alone; see :func:`_max_abs`.
+
+    ``observations`` must hold at least two entries, for the same reason on the other axis: a
+    sequence of length 0 or 1 has exactly one ordering, so every "permutation" is the base order,
+    every deviation is identically ``0.0``, and the function reports "no violation" from a test it
+    could not run. Order-dependence is undefined on a sequence that has no alternative order, so this
+    refuses rather than certifies (MXR-080-1758).
     """
     n_permutations = _positive_budget(n_permutations, "n_permutations")
+    if len(observations) < 2:
+        raise ValueError(
+            "exchangeability_violation needs at least two observations to permute; got "
+            f"{len(observations)}. A sequence with one ordering cannot exhibit order dependence, so a "
+            "0.0 result here would report coherence that was never tested."
+        )
     rng = _as_rng(rng)
 
     def _run(seq: Sequence[Any]) -> tuple[np.ndarray, float]:
