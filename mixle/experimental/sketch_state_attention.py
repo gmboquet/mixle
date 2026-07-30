@@ -641,7 +641,11 @@ if _HAS_TORCH:
 @dataclass
 class TensorSketchState:
     C: list[Any] = field(default_factory=list)  # per layer: (batch, n_head, sketch_dim, d_v)
-    Z: list[Any] = field(default_factory=list)  # per layer: (batch, n_head, sketch_dim), kernel normalizer
+    # per layer: (batch, n_head, d_phi) -- the normalizer sum phi(k_t) tracked EXACTLY, as (b) does.
+    # Sketching it too would be both unnecessary (d_phi == head_dim, O(d_phi) per step) and unsound:
+    # TensorSketch applies random signs, so a sketched normalizer is only an unbiased estimate and can
+    # come out zero or negative, which is what _phi's non-negativity is supposed to rule out.
+    Z: list[Any] = field(default_factory=list)
     cache_k: list[Any] = field(default_factory=list)
     cache_v: list[Any] = field(default_factory=list)
     pos: int = 0
@@ -671,28 +675,33 @@ if _HAS_TORCH:
         processed = 0
         outputs: list[Any] = []
         min_denominator: float | None = None
-        ts_q = tensor_sketch_project(_phi(q_raw), hashes, signs, sketch_dim)
+        phi_q = _phi(q_raw)
+        ts_q = tensor_sketch_project(phi_q, hashes, signs, sketch_dim)
         for query_index in range(t):
             target = max(0, cache_len + query_index + 1 - window)
             if target > n_evict:
                 raise RuntimeError("local-window eviction schedule is inconsistent with TensorSketch far-state scan")
             while processed < target:
-                ts_key = tensor_sketch_project(_phi(evicted_k[:, processed]), hashes, signs, sketch_dim)
+                phi_key = _phi(evicted_k[:, processed])
+                ts_key = tensor_sketch_project(phi_key, hashes, signs, sketch_dim)
                 C = C + torch.einsum("bhm,bhe->bhme", ts_key, evicted_v[:, processed])
-                Z = Z + ts_key
+                Z = Z + phi_key  # exact, not TS(phi(k)): see TensorSketchState.Z
                 processed += 1
             if far_count_before + processed == 0:
                 outputs.append(q_raw.new_zeros(q_raw.shape[0], q_raw.shape[2], head_dim))
                 continue
             query = ts_q[:, query_index]
             numerator = torch.einsum("bhm,bhme->bhe", query, C)
-            denominator = torch.einsum("bhm,bhm->bh", query, Z)
+            # phi is elu + 1, so both factors are strictly positive and this is exact: the sum cannot be
+            # zero or negative once any token has left the window. Only the NUMERATOR is sketched, which
+            # is the standard exact-normalizer form and is what (b) already does.
+            denominator = torch.einsum("bhd,bhd->bh", phi_q[:, query_index], Z)
             if not bool(torch.isfinite(numerator).all().item()) or not bool(torch.isfinite(denominator).all().item()):
                 raise ValueError("TensorSketch far readout produced non-finite values")
             if bool((denominator <= 0).any().item()):
                 raise ValueError(
-                    "TensorSketch estimated kernel normalizer must be strictly positive; "
-                    "increase sketch_dim or choose a different seed"
+                    "TensorSketch exact kernel normalizer must be strictly positive when far state is "
+                    "non-empty; phi is elu + 1 so this indicates corrupted state, not sketch variance"
                 )
             current_min = float(denominator.min().item())
             min_denominator = current_min if min_denominator is None else min(min_denominator, current_min)
@@ -705,11 +714,21 @@ if _HAS_TORCH:
         """(c) Tensor sketch (Count Sketch + circular convolution) of degree-``p`` key features (Pham &
         Pagh 2013). Local half identical in shape to (b); far-field half accumulates
         ``C_t = C_{t-1} + TS(phi(k_t)) v_t^T`` and
-        ``Z_t = Z_{t-1} + TS(phi(k_t))`` for evicted tokens. It reads normalized polynomial-kernel
-        kernel readout as ``TS(phi(q))^T C / TS(phi(q))^T Z`` and fails closed if sketch collision makes
-        the estimated denominator non-positive. This is a normalized estimator of polynomial-kernel
-        attention, not a probability distribution: TensorSketch inner-product estimates can be signed,
-        so non-negative per-token weights are not claimed.
+        ``Z_t = Z_{t-1} + phi(k_t)`` for evicted tokens -- the numerator sketched, the normalizer kept
+        exact, as in (b). The readout is ``TS(phi(q))^T C / phi(q)^T Z``.
+
+        The normalizer is deliberately NOT sketched. TensorSketch applies random signs, so ``TS(phi(q))^T
+        TS(phi(k))`` is an unbiased estimate that can come out zero or negative however non-negative
+        ``phi`` is; a sketched denominator therefore made the readout fail on a chance collision rather
+        than on any invalid state, and the probability of that is not monotone in ``sketch_dim`` (measured
+        on the E7 bake-off: ``sketch_dim`` 16 and 32 succeeded where 12 and 24 failed), so no sketch width
+        fixed it and every width that fit the bake-off's state budget could fail. Keeping ``Z`` exact
+        costs ``O(d_phi)`` per step -- the same the design note already calls cheap for (b) -- and makes
+        ``phi(q)^T Z > 0`` a theorem again rather than a hope.
+
+        This is still a normalized estimator of polynomial-kernel attention, not a probability
+        distribution: the sketched NUMERATOR's per-token contributions can be signed, so non-negative
+        per-token weights are not claimed.
         """
 
         def __init__(
@@ -786,7 +805,7 @@ if _HAS_TORCH:
                 for _ in range(self.n_layer)
             ]
             Z = [
-                torch.zeros(batch_size, self.n_head, self.sketch_dim, device=device, dtype=dtype)
+                torch.zeros(batch_size, self.n_head, self.head_dim, device=device, dtype=dtype)
                 for _ in range(self.n_layer)
             ]
             return TensorSketchState(
