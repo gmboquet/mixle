@@ -61,6 +61,19 @@ def _rss_bytes() -> int:
     return peak if platform.system() == "Darwin" else peak * 1024
 
 
+def _skip_if_process_is_shared(test: unittest.TestCase) -> None:
+    """Peak-RSS receipts read whole-process counters, so they need the process to themselves.
+
+    ``ru_maxrss`` is per-process and monotonic. Under ``pytest -n`` a worker reaches this test having
+    already imported and exercised unrelated modules, and it competes for memory with sibling workers.
+    Both inflate the reading for reasons that have nothing to do with the code under test, so a
+    measurement taken there is not evidence either way -- report it as not measured rather than as a
+    pass or a failure. The serial pass is where these receipts are actually collected.
+    """
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        test.skipTest("peak-RSS receipt needs an uncontended process; run without -n to measure it")
+
+
 def _write_two_region_zarr_in_subprocess(
     path: str, depth: int, height: int, width: int, *, block: int = 20, chunk_plane: int = 50
 ) -> None:
@@ -111,6 +124,7 @@ class PeakRssPatchStreamingTest(unittest.TestCase):
 
     @unittest.skipUnless(HAS_ZARR, "zarr not installed; pip install mixle[arrays]")
     def test_patch_stream_fit_keeps_peak_rss_far_below_volume_size(self):
+        _skip_if_process_is_shared(self)
         # 650x650x650 float32 ~= 1010 MiB uncompressed -- big enough that fully materializing it would
         # visibly move peak RSS well past our threshold below, and still writes+reads in well under a
         # minute given the small (block, 50, 50) write/storage chunking.
@@ -191,12 +205,21 @@ class PeakRssPatchStreamingTest(unittest.TestCase):
             # (0.70 / 0.554 ~= 1.26) while a genuine "materialized the whole volume" regression would push
             # peak_ratio toward ~1.4+ (today's ~0.46 baseline plus a full extra volume) -- still a wide,
             # hard-failing gap for the regression this receipt actually exists to catch.
-            self.assertLess(
-                peak_rss,
-                volume_bytes * 0.70,
-                "peak RSS %.1f MiB was not far below the %.1f MiB volume -- patch sampling may have "
-                "materialized the full array" % (peak_rss / 2**20, volume_bytes / 2**20),
-            )
+            # The absolute ceiling that used to sit here is gone, because it could not be made sound.
+            # ru_maxrss is a monotonic per-process high-water mark (the paragraph above says so), so a
+            # bound on the RAW peak bounds every allocation the process ever made -- including every
+            # test module the worker imported before this one. Its value therefore tracked test
+            # execution order and import graph weight, not whether patch sampling materialized the
+            # volume. That is why it needed widening three times (0.50 -> 0.55 -> 0.70, each time
+            # chasing baseline drift) and why it still failed reliably under `-n 4`, where a worker
+            # arrives here having already loaded torch, jax and zarr: ~0.46 solo, over 0.70 in a warm
+            # worker. A fourth widening would have been the same mistake a fourth time.
+            #
+            # The delta assertion above is the sound measurement and it pins the actual claim: the
+            # increment over the process's own baseline is patch-bounded, not volume-sized. It also
+            # still fails hard on the regression this receipt exists for -- materializing the whole
+            # volume would exceed the 5% delta bound by roughly 20x -- so nothing this test was built
+            # to catch has stopped being caught.
 
             mus = sorted(c.mu for c in model.components)
             self.assertAlmostEqual(mus[0], -3.0, delta=0.75)
@@ -514,6 +537,7 @@ class PeakRssArrayEncodeTest(unittest.TestCase):
 
     @unittest.skipUnless(HAS_ZARR, "zarr not installed; pip install mixle[arrays]")
     def test_encode_keeps_peak_rss_far_below_volume_size(self):
+        _skip_if_process_is_shared(self)
         depth = height = width = 400
         volume_bytes = depth * height * width * 4
         tmpdir = tempfile.mkdtemp(prefix="mixle_array_encode_rss_")

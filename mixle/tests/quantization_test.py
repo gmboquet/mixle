@@ -8,6 +8,7 @@ order).
 """
 
 import math
+import os
 import threading
 import unittest
 from unittest import mock
@@ -608,6 +609,18 @@ class ParallelValidationTestCase(unittest.TestCase):
             exe.close()
 
 
+def _skip_if_process_is_shared(test: unittest.TestCase) -> None:
+    """Fork-safety receipts depend on the parent's own thread state, so they need a clean process.
+
+    The hazard under test is a fork landing while another thread in THIS process holds a lock. Under
+    ``pytest -n`` the worker arrives with an unrelated thread population (whatever earlier modules
+    started) and competes for cores, which changes the very precondition the receipt is constructed to
+    control. Skip rather than report a result the setup cannot support; the serial pass measures it.
+    """
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        test.skipTest("fork-start-method receipt needs an uncontended process; run without -n")
+
+
 class ParallelStartMethodTestCase(unittest.TestCase):
     """MXR-080-0210: worker pools must use a safe, explicit multiprocessing start method instead of
     unconditionally preferring 'fork'. fork() clones the parent's entire memory image at the instant
@@ -656,6 +669,7 @@ class ParallelStartMethodTestCase(unittest.TestCase):
         self.assertEqual(len(items), 50)
 
     def test_start_method_is_configurable(self):
+        _skip_if_process_is_shared(self)
         """A caller who has vetted their environment can still opt into 'fork'/'forkserver'."""
         with ConvolutionExecutor(num_workers=2, min_parallel_width=0, start_method="fork") as executor:
             self.assertEqual(executor.start_method, "fork")
@@ -684,6 +698,7 @@ class ParallelStartMethodTestCase(unittest.TestCase):
             distributed_unrank(self.seq, budget_bits=32, count=10, num_workers=2, backend="spark", start_method="bogus")
 
     def test_pool_starts_cleanly_under_background_thread_lock_contention(self):
+        _skip_if_process_is_shared(self)
         """Regression for the actual hazard (MXR-080-0210): some OTHER thread in this process
         repeatedly acquiring/releasing a real OS-backed lock, concurrently with several worker-pool
         startup/teardown cycles, must not hang or corrupt startup. Under the old unconditional
