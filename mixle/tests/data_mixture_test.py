@@ -146,10 +146,17 @@ class OptimizerSanityTest(unittest.TestCase):
             SyntheticDomain(name="noise_a", vocab=VOCAB, period=None),
             SyntheticDomain(name="noise_b", vocab=VOCAB, period=None),
         ]
+        # budget=24, not the bandit test's 10. The DoE method spends n_init = 2*(n-1)+1 = 5 evaluations on
+        # its initial design before the surrogate steers anything, so a budget of 10 leaves five guided
+        # asks to resolve a noisy two-dimensional objective, and it lands on a noise domain. This is a
+        # power floor rather than the earlier defect: _doe_search used to search all n logits, and since
+        # softmax is shift-invariant that made one search direction a pure invariance -- the same weights
+        # came back at budget 10, 16, 24 and 40, so no budget could have helped. With the identifiable
+        # n-1 chart the budget is effective again (10 and 16 agree, 24 and 32 agree on a better point).
         weights = optimize_mixture(
             domains,
             proxy_steps=20,
-            budget=10,
+            budget=24,
             method="doe",
             proxy_kwargs={"batch_size": 16, "block": BLOCK, "eval_tokens": 256},
             seed=0,
