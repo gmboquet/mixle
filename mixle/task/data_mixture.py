@@ -304,18 +304,36 @@ def _softmax(z: np.ndarray) -> np.ndarray:
     return e / e.sum()
 
 
+def _logits_from_free(free_logits: Any, n: int) -> np.ndarray:
+    """Expand ``n - 1`` free logits to ``n`` by pinning the last at 0 -- the identifiable softmax chart."""
+    free = np.asarray(free_logits, dtype=np.float64).reshape(-1)
+    if free.shape[0] != max(n - 1, 1):
+        raise ValueError(f"expected {max(n - 1, 1)} free logits for {n} domains, got {free.shape[0]}")
+    return free if n == 1 else np.append(free, 0.0)
+
+
 def _doe_search(
     domains: Sequence[SyntheticDomain], proxy_steps: int, budget: int, proxy_kwargs: dict[str, Any], seed: int
 ) -> np.ndarray:
     from mixle.doe.optimizer import BayesianOptimizer
 
     n = len(domains)
-    bounds = [(-3.0, 3.0)] * n
-    n_init = min(max(2 * n + 1, 2), max(budget - 1, 2))
+    # Search n-1 free logits with the last pinned at 0, not all n. ``softmax(x + c * 1) == softmax(x)``,
+    # so searching n logits gives every mixture an entire line of duplicate representations: the
+    # objective is exactly flat along ``1``, the box's corners collapse onto each other (``[-2.6, -2.8,
+    # -3.0]`` and ``[2.6, 3.0, 2.5]`` are both essentially uniform), and the surrogate is fitting a
+    # non-identifiable function. Measured, the acquisition then spent every post-initialization ask on
+    # box corners and never refined near the incumbent, so the search returned byte-identical weights at
+    # budget 10, 16, 24 and 40 -- extra evaluations bought no information at all. Pinning one logit makes
+    # the parameterization a bijection onto the simplex's own n-1 dimensions and the budget effective
+    # again.
+    free = max(n - 1, 1)
+    bounds = [(-3.0, 3.0)] * free
+    n_init = min(max(2 * free + 1, 2), max(budget - 1, 2))
     opt = BayesianOptimizer(bounds, acq="ei", maximize=False, n_init=n_init, seed=seed)
     for t in range(int(budget)):
         x = opt.ask()
-        w = _softmax(np.asarray(x, dtype=np.float64))
+        w = _softmax(_logits_from_free(x, n))
         loss = proxy_run_score(
             w,
             domains,
@@ -324,7 +342,7 @@ def _doe_search(
             **proxy_kwargs,
         )
         opt.tell(x, loss)
-    return _softmax(np.asarray(opt.best.best_x, dtype=np.float64))
+    return _softmax(_logits_from_free(opt.best.best_x, n))
 
 
 def optimize_mixture(
