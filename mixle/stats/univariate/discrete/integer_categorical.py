@@ -152,6 +152,7 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         keys: str | None = None,
         prob_vec: list[float] | np.ndarray = MISSING,
         prior: Optional["SequenceEncodableProbabilityDistribution"] = None,
+        default_value: float = 0.0,
     ) -> None:
         """Create a categorical distribution over consecutive integers.
 
@@ -170,6 +171,14 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
                 :class:`~mixle.stats.bayes.symmetric_dirichlet.SymmetricDirichletDistribution` enables the Bayesian /
                 variational machinery (``expected_log_density`` and the conjugate posterior update);
                 ``None`` (default) is a plain point model.
+            default_value: Probability assigned to integers outside ``[min_val, max_val]``, mirroring
+                :class:`~mixle.stats.univariate.discrete.categorical.CategoricalDistribution.default_value`.
+                Must be finite and within ``[0, 1]``. The default of ``0.0`` leaves every method
+                bit-for-bit as it was -- ``log1p(0) == 0`` and ``log(0) == -inf`` -- so an
+                out-of-range integer stays impossible unless a caller asks for otherwise.
+                Above zero, in-support values score ``log p_k - log1p(default_value)`` and
+                out-of-support values score ``log(default_value) - log1p(default_value)``, which is
+                what lets a support fitted on observed data still score an integer it never saw.
 
         Attributes:
             p_vec: Owned copy of the weight vector (not renormalized or sum-checked).
@@ -177,6 +186,10 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             max_val: Maximum supported integer value.
             log_p_vec: Elementwise log probabilities.
             num_vals: Number of integer values in the support.
+            default_value: Probability assigned to integers outside the support.
+            log1p_default_value: Log normalizer ``log(1 + default_value)``.
+            log_out_of_support: Log-density returned for an integer outside the support.
+            scored_log_p_vec: ``log_p_vec`` less the normalizer -- what the density methods read.
             name: Optional distribution name.
             keys: Optional key for merging sufficient statistics.
         """
@@ -199,12 +212,34 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             # (commit 7bdc3646) broke them. Consumers that need a true simplex should check the sum
             # themselves rather than re-adding a rejection here.
             raise ValueError("IntegerCategoricalDistribution requires finite, non-negative probabilities.")
+        if not np.isfinite(default_value) or default_value < 0.0 or default_value > 1.0:
+            # Rejected rather than clamped, for the reason CategoricalDistribution documents: clamping
+            # self.default_value while deriving the log normalizer from the raw input desyncs
+            # density() from log_density(), and a NaN silently poisons every in-support answer too.
+            raise ValueError(
+                "IntegerCategoricalDistribution requires default_value in [0, 1], not %s." % repr(default_value)
+            )
         with np.errstate(divide="ignore"):
             self.p_vec = probabilities.copy()
             self.min_val = min_value
             self.max_val = min_value + self.p_vec.shape[0] - 1
             self.log_p_vec = np.log(self.p_vec)
             self.num_vals = self.p_vec.shape[0]
+            self.default_value = float(default_value)
+            self.log1p_default_value = float(np.log1p(self.default_value))
+            self.log_default_value = float(np.log(self.default_value))
+            # Both collapse to the historical values at default_value == 0.0: the normalizer is 0.0 and
+            # out-of-support is -inf, so the scored vector is log_p_vec itself.
+            self.log_out_of_support = self.log_default_value - self.log1p_default_value
+            # A zero entry means "never observed", which is the same state CategoricalDistribution
+            # represents by the label being absent from pmap -- there it draws default_value. The only
+            # difference here is dense storage: the unobserved value sits inside [min_val, max_val] as
+            # an explicit 0.0 instead of being missing. Treat it the same, or default_value would cover
+            # a held-out 84 but not a held-out 17 in a support with holes. At default_value == 0.0 both
+            # branches are -inf, so this stays bit-for-bit identical to the historical behaviour.
+            self.scored_log_p_vec = np.where(
+                self.p_vec > 0.0, self.log_p_vec - self.log1p_default_value, self.log_out_of_support
+            )
             self.name = name
             self.keys = keys
         self.set_prior(prior)
@@ -215,7 +250,14 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         s2 = repr(list(self.p_vec))
         s3 = repr(self.name)
         s4 = repr(self.keys)
-
+        if self.default_value != 0.0:
+            return "IntegerCategoricalDistribution(%s, %s, name=%s, keys=%s, default_value=%s)" % (
+                s1,
+                s2,
+                s3,
+                s4,
+                repr(self.default_value),
+            )
         return "IntegerCategoricalDistribution(%s, %s, name=%s, keys=%s)" % (s1, s2, s3, s4)
 
     def get_parameters(self) -> np.ndarray:
@@ -269,11 +311,14 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         if self.expected_nparams is None:
             return self.log_density(x)
 
-        if not valid_integer(x) or (x < self.min_val) or (x > self.max_val):
+        if not valid_integer(x):
             return -np.inf
+        if (x < self.min_val) or (x > self.max_val):
+            return self.log_out_of_support
 
         idx = int(x - self.min_val)
-        return float(self.expected_nparams[idx])
+        # The normalizer the set_prior() docstring specifies: E[log p_{x-min_val}] - log(1 + default_value).
+        return float(self.expected_nparams[idx]) - self.log1p_default_value
 
     def seq_expected_log_density(self, x: np.ndarray) -> np.ndarray:
         """Vectorized ``expected_log_density`` over sequence-encoded observations."""
@@ -282,9 +327,10 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
         values = np.asarray(x, dtype=np.float64)
         v = values - self.min_val
-        u = np.isfinite(v) & (np.floor(v) == v) & (v >= 0) & (v < self.num_vals)
-        rv = np.full(values.shape, -np.inf, dtype=np.float64)
-        rv[u] = self.expected_nparams[v[u].astype(np.int64)]
+        integral = np.isfinite(v) & (np.floor(v) == v)
+        u = integral & (v >= 0) & (v < self.num_vals)
+        rv = np.where(integral, self.log_out_of_support, -np.inf).astype(np.float64)
+        rv[u] = self.expected_nparams[v[u].astype(np.int64)] - self.log1p_default_value
         return rv
 
     def density(self, x: int) -> float:
@@ -300,8 +346,13 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         if not valid_integer(x) or x < self.min_val or x > self.max_val:
-            return zero
-        return self.p_vec[int(x) - self.min_val]
+            return self.default_value / (1.0 + self.default_value)
+        p = self.p_vec[int(x) - self.min_val]
+        if p == 0.0:
+            # An unobserved value inside the range is the same state as one outside it; see the
+            # scored_log_p_vec comment in __init__.
+            return self.default_value / (1.0 + self.default_value)
+        return p / (1.0 + self.default_value)
 
     def log_density(self, x: int) -> float:
         """Evaluate the log-density of the integer categorical at observation x.
@@ -319,8 +370,8 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
             return -inf
         xi = int(x)
         if xi < self.min_val or xi > self.max_val:
-            return -inf
-        return self.log_p_vec[xi - self.min_val]
+            return self.log_out_of_support
+        return self.scored_log_p_vec[xi - self.min_val]
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Vectorized evaluation of IntegerCategorical log_density() for sequence encoded iid observations x.
@@ -333,27 +384,40 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         values = np.asarray(x, dtype=np.float64)
-        rv = np.full(values.shape, -np.inf)
         exact = np.isfinite(values) & (np.floor(values) == values)
+        # A non-integer is still impossible; only an out-of-range *integer* draws on default_value.
+        rv = np.where(exact, self.log_out_of_support, -np.inf).astype(np.float64)
         safe = np.where(exact, values, self.min_val).astype(np.int64)
         v = safe - self.min_val
         u = exact & (v >= 0) & (v < self.num_vals)
-        rv[u] = self.log_p_vec[v[u]]
+        rv[u] = self.scored_log_p_vec[v[u]]
         return rv
 
     @staticmethod
-    def backend_log_density_from_params(x: Any, min_val: int, log_p_vec: Any, engine: Any) -> Any:
-        """Engine-neutral integer-categorical log-density from explicit parameters."""
+    def backend_log_density_from_params(
+        x: Any, min_val: int, log_p_vec: Any, engine: Any, log_out_of_support: float = -np.inf
+    ) -> Any:
+        """Engine-neutral integer-categorical log-density from explicit parameters.
+
+        ``log_out_of_support`` defaults to ``-inf``, so an existing caller that passes a raw
+        ``log_p_vec`` and no out-of-support value keeps the historical behaviour exactly.
+        """
         v = x - engine.asarray(min_val)
         finite = ~(engine.isnan(v) | engine.isinf(v))
-        good = finite & (engine.floor(v) == v) & (v >= 0) & (v < len(log_p_vec))
+        integral = finite & (engine.floor(v) == v)
+        good = integral & (v >= 0) & (v < len(log_p_vec))
         safe_v = engine.clip(v, 0, len(log_p_vec) - 1)
-        return engine.where(good, log_p_vec[safe_v], engine.asarray(-np.inf))
+        # A non-integer stays impossible; only an out-of-range integer draws on default_value, which
+        # keeps this path identical to the scalar log_density() and to seq_log_density().
+        out = engine.where(integral, engine.asarray(log_out_of_support), engine.asarray(-np.inf))
+        return engine.where(good, log_p_vec[safe_v], out)
 
     def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded data."""
         xx = engine.asarray(x)
-        return self.backend_log_density_from_params(xx, self.min_val, engine.asarray(self.log_p_vec), engine)
+        return self.backend_log_density_from_params(
+            xx, self.min_val, engine.asarray(self.scored_log_p_vec), engine, self.log_out_of_support
+        )
 
     @classmethod
     def backend_stacked_params(cls, dists: Sequence["IntegerCategoricalDistribution"], engine: Any) -> dict[str, Any]:
@@ -362,11 +426,17 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         num_vals = dists[0].num_vals
         if any(d.min_val != min_val or d.num_vals != num_vals for d in dists):
             raise ValueError("Stacked IntegerCategoricalDistribution components require shared support.")
+        log_out = dists[0].log_out_of_support
+        if any(d.log_out_of_support != log_out for d in dists):
+            # One scalar out-of-support value is stacked, so a mixture of different default_values
+            # would silently score every component with the first one's.
+            raise ValueError("Stacked IntegerCategoricalDistribution components require a shared default_value.")
         return {
             "__pysp_component_axis__": {"log_p": 1},
             "min_val": min_val,
             "num_vals": num_vals,
-            "log_p": engine.asarray(np.stack([d.log_p_vec for d in dists], axis=1)),
+            "log_out_of_support": log_out,
+            "log_p": engine.asarray(np.stack([d.scored_log_p_vec for d in dists], axis=1)),
         }
 
     @classmethod
@@ -375,10 +445,14 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         xx = engine.asarray(x)
         v = xx - engine.asarray(params["min_val"])
         finite = ~(engine.isnan(v) | engine.isinf(v))
-        good = finite & (engine.floor(v) == v) & (v >= 0) & (v < params["num_vals"])
+        integral = finite & (engine.floor(v) == v)
+        good = integral & (v >= 0) & (v < params["num_vals"])
         safe_v = engine.clip(v, 0, params["num_vals"] - 1)
         rv = params["log_p"][safe_v, :]
-        return engine.where(good[:, None], rv, engine.asarray(-np.inf))
+        out = engine.where(
+            integral, engine.asarray(float(params.get("log_out_of_support", -np.inf))), engine.asarray(-np.inf)
+        )
+        return engine.where(good[:, None], rv, out[:, None])
 
     @classmethod
     def backend_stacked_sufficient_statistics(
@@ -817,6 +891,7 @@ class IntegerCategoricalEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
         prior: SequenceEncodableProbabilityDistribution | None = None,
+        default_value: float = 0.0,
     ) -> None:
         """Create an estimator for bounded integer-categorical distributions.
 
@@ -832,6 +907,9 @@ class IntegerCategoricalEstimator(ParameterEstimator):
             suff_stat: Optional prior statistic ``(min_val, prob_vec)``.
             name: Optional estimator and fitted-distribution name.
             keys: Optional merge key for accumulator statistics.
+            default_value: Out-of-support probability carried onto every fitted distribution, so a
+                support fitted from observed data can still score an integer outside it. Defaults to
+                ``0.0``, which leaves the fitted distribution exactly as before.
 
         Attributes:
             min_val: Minimum support value, when fixed.
@@ -840,6 +918,7 @@ class IntegerCategoricalEstimator(ParameterEstimator):
             suff_stat: Optional prior statistic.
             name: Optional estimator name.
             keys: Optional merge key.
+            default_value: Out-of-support probability given to fitted distributions.
         """
         if pseudo_count is not None and (
             isinstance(pseudo_count, (bool, np.bool_)) or not np.isfinite(pseudo_count) or pseudo_count < 0.0
@@ -880,6 +959,9 @@ class IntegerCategoricalEstimator(ParameterEstimator):
         self.keys = keys
         self.name = name
         self.prior = prior
+        # Validated by constructing nothing here -- the distribution constructor is the single place
+        # that rejects an out-of-range default_value, and estimate() routes every fit through it.
+        self.default_value = float(default_value)
         self._set_has_conj_prior(prior)
 
     def _set_has_conj_prior(self, prior: SequenceEncodableProbabilityDistribution | None) -> None:
@@ -954,7 +1036,14 @@ class IntegerCategoricalEstimator(ParameterEstimator):
 
         hyper_posterior = DirichletDistribution(posterior_params)
 
-        return IntegerCategoricalDistribution(min_val, prob_vec, name=self.name, keys=self.keys, prior=hyper_posterior)
+        return IntegerCategoricalDistribution(
+            min_val,
+            prob_vec,
+            name=self.name,
+            keys=self.keys,
+            prior=hyper_posterior,
+            default_value=self.default_value,
+        )
 
     def _validated_observed_statistic(
         self,
@@ -1018,6 +1107,7 @@ class IntegerCategoricalEstimator(ParameterEstimator):
             probabilities,
             name=self.name,
             keys=self.keys,
+            default_value=self.default_value,
         )
 
 
