@@ -70,34 +70,48 @@ class SenseSimulateInvertReportTest(unittest.TestCase):
         y_obs = np.asarray(_amplitude(TRUE_DEPTH, TRUE_FORMATION), dtype=float) + SENSOR_NOISE * obs_rng.randn(3)
 
         inv_model = invert_new_observation(depth_prior, y_obs, seed=9)
-        calibration_set = build_calibration_set(inv_model, depth_prior, n=60, seed=999)
-        self.assertEqual(len(calibration_set), 60)
 
         from mixle.reason.language_bridge import PosteriorDescriber
+        from mixle.task.calibrated_generator import smallest_certifiable_calibration_set
 
-        # tol=0.1 sat right at a knife's edge for this inversion's posterior (std ~0.001): claim_score's
-        # narrowest-wins-decisively softmax was only just short of dominant enough, so the calibrated
-        # qhat's APS-style cumulative admission pulled in the next-widest candidate too -> a genuinely
-        # ambiguous 2-candidate set -> an honest abstain, not a bug (verified by sweeping local seeds,
-        # alpha, calibration-set size, and width_multiples spacing -- none broke the tie; only widening
-        # tol did). tol=0.2 clears that edge with real margin: 125/125 across a (describer, calibrate,
-        # describe) seed sweep resolve to a clean singleton, vs. 0/125 at tol=0.15.
+        # ALPHA=0.1 is only reachable above a calibration size fixed by the certificate itself, not by the
+        # model: calibrate() certifies on half the set with a Bonferroni-corrected Clopper-Pearson bound
+        # whose zero-error floor is 1 - tail**(1/c) for c certification rows. This test used n=60 -> c=30,
+        # where that floor is 0.1157 > 0.1, so qhat was +inf and describe() abstained on EVERY input at
+        # EVERY tol, regardless of the inversion's quality. A previous revision read that as a scoring
+        # tie and tuned tol and alpha against it across seed sweeps; no setting could have served a claim.
+        ALPHA = 0.1
+        n_cal = max(160, smallest_certifiable_calibration_set(ALPHA))
+        calibration_set = build_calibration_set(inv_model, depth_prior, n=n_cal, seed=999)
+        self.assertEqual(len(calibration_set), n_cal)
+
+        def describer_at(tol):
+            d = PosteriorDescriber(
+                "depth_km", tol=tol, k=3, alpha=ALPHA, width_multiples=(1.0, 3.0, 10.0), n_probe=300, seed=0
+            )
+            d.calibrate(calibration_set, seed=0)
+            return d
+
+        # The describer is selective, so the receipt has to show BOTH directions or it shows nothing.
         #
-        # alpha=0.1 (this class's own default, not 0.2): MXR-080-0291 fixed PosteriorDescriber.calibrate
-        # to sum softmax probability over EVERY nested candidate that covers the calibration truth,
-        # not just an artificial single "exclusive band" -- the honest, sound event, but a stricter one
-        # to satisfy at a fixed alpha, since a candidate's own admission threshold now has to clear
-        # after genuinely sharing credit with the other candidates that also cover on each calibration
-        # row. alpha=0.2 no longer reliably reaches that bar here (0/125 across the same seed sweep,
-        # post-fix); alpha=0.1 does, with room to spare (256/256 across an 8x8x4 describer/calibrate/
-        # describe seed sweep, holding this test's own n=60 calibration set and tol=0.2 fixed).
-        describer = PosteriorDescriber(
-            "depth_km", tol=0.2, k=3, alpha=0.1, width_multiples=(1.0, 3.0, 10.0), n_probe=300, seed=0
-        )
-        describer.calibrate(calibration_set, seed=0)
-        claim = describer.describe(inv_model.posterior(y_obs), seed=0)
-        self.assertIsNotNone(claim)  # a calibrated candidate clears the threshold for this seeded run
+        # Abstain at a precision the inversion cannot deliver. tol=0.2 asks for +/-0.2 km; measured on this
+        # calibration set the served claim misses the truth on 0.275 of rows (median |center - truth| is
+        # 0.136 with a tail to 0.688), so a 10%-risk gate must refuse. That the posterior is sharp does not
+        # help: claim_score is coverage-per-unit-width against the posterior's OWN draws, so at std ~0.001
+        # it saturates to exactly 1.0/width -- an identical 2.5 on every row -- and carries no information
+        # about whether the posterior is centered on the truth. A confidently mis-centered inversion is
+        # indistinguishable from a correct one by that statistic, which is precisely why the risk
+        # certificate, not the score, is what decides here.
+        tight = describer_at(0.2)
+        self.assertIsNone(tight.describe(inv_model.posterior(y_obs), seed=0))
+        self.assertFalse(tight._gen.risk_receipt["target_attainable"] is False)  # size is not the blocker now
+
+        # Serve at a precision it can. tol=0.5 misses on 0.006 of rows and certifies at 0.077 <= 0.1.
+        loose = describer_at(0.5)
+        claim = loose.describe(inv_model.posterior(y_obs), seed=0)
+        self.assertIsNotNone(claim, msg=str(loose._gen.risk_receipt))
         self.assertTrue(claim.contains(TRUE_DEPTH))
+        self.assertLessEqual(loose._gen.risk_receipt["error_upper"], ALPHA)  # the served claim is receipted
 
     @unittest.skipUnless(HAS_TORCH, "main() calls invert_new_observation, which requires torch")
     def test_main_runs_end_to_end(self):
