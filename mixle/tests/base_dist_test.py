@@ -410,8 +410,25 @@ def log_density_test(dist):
     return max(rv) < 1.0e-14, max(rv)
 
 
-def em_fit(est, model, enc_data, step, max_its=200, delta=1.0e-7):
-    """Iterate EM (one `step` call per iteration) until the log-likelihood stops improving."""
+def em_fit(est, model, enc_data, step, max_its=2000, delta=1.0e-7):
+    """Iterate EM (one `step` call per iteration) until the log-likelihood stops improving.
+
+    ``max_its`` was 200, which TRUNCATED rather than converged some fits and returned them as if they
+    were converged -- the loop can exhaust its budget without ever meeting ``delta``, and the caller
+    cannot tell the two exits apart. HiddenMarkovModel showed this sharply: ``initialize`` hands EM a
+    COLLAPSED start for that fixture at every size and every rng (both topics near 0 with sigma2 ~= 1e4
+    against a true sigma2 of 1), so escaping it means a long slow climb out of a near-symmetric
+    configuration. At 269 training sequences the climb finished inside 200 iterations; adding one more
+    sequence pushed it past the cap, and the truncated model -- still collapsed, sigma2 ~= 9975 -- was
+    scored as the estimator's answer, giving a held-out KL of 11.73 against a 0.011 median.
+    Raising the cap to 2000 lets that same fit reach mu = +/-100 with sigma2 ~= 1. Raising ``delta``
+    instead does nothing (1e-12 behaves exactly like 1e-7), which is what identifies the cap, not the
+    convergence test, as the cause.
+
+    Letting EM run longer can only move a fit closer to its own local optimum, so unlike selecting among
+    restarts by training likelihood -- measured, and it made 39 other families worse by preferring the
+    most overfit candidate -- this carries no selection bias.
+    """
     old_ll = seq_log_density_sum(enc_data, model)[1]
     for _ in range(max_its):
         model = step(est, model)
