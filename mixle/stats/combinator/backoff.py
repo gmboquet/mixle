@@ -203,15 +203,25 @@ class BackoffAccumulator(SequenceEncodableStatisticAccumulator):
     def _responsibilities(base_ll: np.ndarray, fallback_ll: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Return the posterior component shares from already-weighted log densities.
 
-        Both components are ``-inf`` only when neither can explain the observation; the responsibility
-        is then split evenly rather than left as NaN, so a single unscorable row cannot poison the
-        whole fit with silent NaNs.
+        An observation impossible under *both* components contributes **zero** mass, not half to each.
+        Returning ``(0.5, 0.5)`` -- which this did -- turns evidence the model calls impossible into
+        real fitting mass and moves both components toward it, which is fabricating an observation
+        rather than declining to explain one (MXR-080-1842). Zero shares leave the fit untouched.
+
+        A NaN or ``+inf`` total is not the same situation: no valid log-density is either, so a
+        component is defective and silently bucketing it with "impossible" would hide the defect.
         """
         total = np.logaddexp(base_ll, fallback_ll)
-        dead = ~np.isfinite(total)
+        if np.any(np.isnan(total)) or np.any(np.isposinf(total)):
+            raise ValueError(
+                "backoff component produced a NaN or +inf log-density; a log-density must be finite "
+                "or -inf. Fix the component rather than letting it be treated as impossible evidence."
+            )
+        impossible = np.isneginf(total)
         with np.errstate(invalid="ignore"):
-            base_share = np.where(dead, 0.5, np.exp(base_ll - total))
-        return base_share, 1.0 - base_share
+            base_share = np.where(impossible, 0.0, np.exp(base_ll - total))
+        fallback_share = np.where(impossible, 0.0, 1.0 - base_share)
+        return base_share, fallback_share
 
     def update(self, x: Any, weight: float, estimate: BackoffDistribution | None) -> None:
         """Accumulate one raw observation."""
