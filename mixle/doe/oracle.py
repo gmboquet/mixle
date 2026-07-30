@@ -215,7 +215,16 @@ class LateOracleResult:
     error: str | None
 
     def __post_init__(self) -> None:
-        candidate = np.asarray(self.candidate, dtype=np.float64).copy()
+        try:
+            candidate = np.asarray(self.candidate, dtype=np.float64).copy()
+        except (TypeError, ValueError):
+            # This module scopes itself to numeric candidates (see the module docstring), but this
+            # object is built on the abandoned worker thread of a timed-out call, where a raise is
+            # nobody's to catch -- it escaped as PytestUnhandledThreadExceptionWarning and lost the
+            # late result entirely. Keep the candidate as an immutable object array instead: recording
+            # a side-effecting oracle's eventual outcome is the whole point of this class, and the
+            # out-of-contract candidate type is not a reason to drop it.
+            candidate = np.asarray(self.candidate, dtype=object).copy()
         candidate.setflags(write=False)
         object.__setattr__(self, "candidate", candidate)
 
