@@ -896,7 +896,16 @@ if _HAS_TORCH:
                     "far_tokens_per_layer": far_counts,
                     "minimum_positive_denominator_per_layer": denominator_minima,
                     "chunk_boundary_invariant_update": True,
-                    "normalized_kernel_estimator": True,
+                    # Only true at degree 1. TS(phi(q))^T TS(phi(k)) estimates
+                    # <phi(q), phi(k)>**degree, but the denominator is phi(q)^T sum(phi(k)), a
+                    # degree-ONE kernel, so above degree 1 the ratio does not normalize its own
+                    # numerator: with one key, value 1, degree 2 and q = k = [2, 1], a normalized
+                    # readout must be 1 and the measured average over 128 hash seeds is 4.90625
+                    # (MXR-080-1853). The exact degree-p normalizer is sum_t <phi(q), phi(k_t)>**p,
+                    # which this single degree-1 accumulator cannot express -- it needs
+                    # sum_t phi(k_t) tensor-powered to p (head_dim**p entries). Until that is
+                    # implemented and benchmarked, report the claim honestly rather than asserting it.
+                    "normalized_kernel_estimator": self.degree == 1,
                     "nonnegative_attention_weights_guaranteed": False,
                 },
             )
