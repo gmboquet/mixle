@@ -24,19 +24,46 @@ from pathlib import Path
 
 import pytest
 
-README = Path(__file__).resolve().parent.parent.parent / "README.md"
+REPO = Path(__file__).resolve().parent.parent.parent
+README = REPO / "README.md"
 
-# Phrases that must not reappear. Each maps a banned substring (case-insensitive) to the
-# reason it was removed, so a future failure explains itself.
-FORBIDDEN: dict[str, str] = {
+# Overclaims that are false wherever they appear: a safety guarantee mixle cannot make,
+# frontier-training capability it does not have, and universal engine/backend portability
+# that is bounded to the supported engines. A reader meets these as statements about what
+# mixle *is*, so the README is not the only surface that has to stay honest about them.
+UNIVERSAL_FORBIDDEN: dict[str, str] = {
     "safe to put in front of users": "a safety guarantee the library cannot make",
     "lab-grade ai": "implies frontier-scale training capability",
     "on any engine": "universal-engine overclaim; portability is bounded",
     "across any backend": "universal-backend overclaim; only supported backends",
     "runs unchanged": "overstates cross-backend portability",
-    "not a rewrite": "absolute claim; use 'rather than a rewrite'",
+}
+
+# Phrases the credibility pass ruled on for the README's *opening positioning*, where they
+# read as unbounded. They stay legal elsewhere because a bounded, checkable local use is a
+# different claim: "scale as a flag, not a rewrite" names one keyword argument, and it is
+# true. Banning them project-wide would reject accurate prose, so this tier is not widened.
+README_FORBIDDEN: dict[str, str] = {
+    "not a rewrite": "absolute claim in the opening; use 'rather than a rewrite'",
     "does the heavy lifting": "obscures that the user still owns modeling judgment",
 }
+
+FORBIDDEN: dict[str, str] = {**UNIVERSAL_FORBIDDEN, **README_FORBIDDEN}
+
+
+def _claim_surfaces() -> list[Path]:
+    """Every shipped surface whose prose a reader takes as a claim about mixle.
+
+    ``docs/audits/`` is excluded deliberately: an audit quotes an overclaim in order to
+    rule on it, so scanning it would make this gate fire on its own evidence.
+    """
+    surfaces = [README, REPO / "CHANGELOG.md"]
+    surfaces += sorted((REPO / "docs").rglob("*.rst"))
+    surfaces += sorted((REPO / "examples").rglob("*.py"))
+    return [path for path in surfaces if path.is_file() and "audits" not in path.parts]
+
+
+CLAIM_SURFACES = _claim_surfaces()
 
 # Substrings that must be present (case-insensitive) with the reason each is required.
 REQUIRED: dict[str, str] = {
@@ -73,9 +100,43 @@ def test_maturity_link_is_a_real_link(readme_text: str) -> None:
     )
 
 
+def test_claim_surfaces_were_actually_discovered() -> None:
+    """A scan over an empty file list passes vacuously; require the surfaces to exist."""
+    assert README in CLAIM_SURFACES, "the README must be among the scanned claim surfaces"
+    assert len(CLAIM_SURFACES) > 20, (
+        f"expected the docs/ and examples/ claim surfaces to be discovered, found {len(CLAIM_SURFACES)}"
+    )
+    assert not [path for path in CLAIM_SURFACES if "audits" in path.parts]
+
+
+@pytest.mark.parametrize("phrase, reason", sorted(UNIVERSAL_FORBIDDEN.items()))
+def test_universal_overclaim_absent_from_every_claim_surface(phrase: str, reason: str) -> None:
+    """These five are false wherever they appear, so no shipped surface may carry them."""
+    offenders = []
+    for path in CLAIM_SURFACES:
+        text = path.read_text(encoding="utf-8", errors="replace").lower()
+        if phrase in text:
+            line = text[: text.find(phrase)].count("\n") + 1
+            offenders.append(f"{path.relative_to(REPO)}:{line}")
+    assert not offenders, f"overclaim {phrase!r} appears in {offenders}; it is not allowed because: {reason}."
+
+
 def test_negative_control_detects_a_planted_overclaim() -> None:
     """Guard the guard: the forbidden scan must fire on a planted phrase."""
     planted = "This model is Lab-grade AI and safe to put in front of users.\n"
     low = planted.lower()
     hits = [p for p in FORBIDDEN if p in low]
     assert "lab-grade ai" in hits and "safe to put in front of users" in hits
+
+
+def test_negative_control_covers_a_non_readme_surface(tmp_path: Path) -> None:
+    """Guard the widened scan: planting an overclaim in a non-README surface must be caught.
+
+    This is the property that distinguishes the widened gate from the README-only one it
+    replaced, so it is asserted against the same read-and-search step the scan uses.
+    """
+    planted = tmp_path / "some_example.py"
+    planted.write_text('"""Fits on any engine you have."""\n', encoding="utf-8")
+    text = planted.read_text(encoding="utf-8", errors="replace").lower()
+    assert "on any engine" in text
+    assert [phrase for phrase in UNIVERSAL_FORBIDDEN if phrase in text] == ["on any engine"]
