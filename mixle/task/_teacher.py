@@ -44,7 +44,7 @@ class TeacherCaller:
     callable, and failing that discovered on first use and kept.
     """
 
-    __slots__ = ("_batched", "teacher")
+    __slots__ = ("_batched", "last_probe_error", "teacher")
 
     def __init__(self, teacher: Callable[..., Any], *, batched: bool | None = None) -> None:
         if batched is None:
@@ -52,6 +52,8 @@ class TeacherCaller:
             batched = declared if isinstance(declared, bool) else None
         self.teacher = teacher
         self._batched = batched
+        # Set here so it is always readable, not only after a probe failure has happened to occur.
+        self.last_probe_error: BaseException | None = None
 
     @property
     def batched(self) -> bool | None:
@@ -99,13 +101,24 @@ class TeacherCaller:
         except Exception as probe_error:  # noqa: BLE001 - see the docstring: no type discriminates here
             self._batched = False
             try:
-                return [self.teacher(x) for x in items]
+                resolved = [self.teacher(x) for x in items]
             except Exception as exc:
                 exc.add_note(
                     f"the batch-call probe on {_teacher_name(self.teacher)} first failed with: "
                     f"{probe_error!r} -- pass teacher_mode='item' or 'batch' to skip this discovery"
                 )
                 raise
+            # A retry that SUCCEEDS used to return with the probe error discarded, which is how
+            # MXR-080-0686 hid: a batch teacher whose body raised (a backend down, say) was
+            # indistinguishable from a genuine per-item teacher, so the values came back as if the
+            # first failure had not happened. The two cases really are indistinguishable -- a per-item
+            # lambda handed a list raises just as readily -- so this cannot warn without firing on every
+            # ordinary per-item teacher, which was measured and is why there is no warning here. What it
+            # can do is stop throwing the evidence away: the probe error is retained on the caller for a
+            # supervisor or a telemetry pass to read. teacher_mode='batch' remains the way to make a
+            # failure inside a batch teacher raise instead of being rediscovered as a convention.
+            self.last_probe_error = probe_error
+            return resolved
         if isinstance(out, (list, tuple)):
             # a sequence answer to a batch means batched; a *wrong-length* one is a broken batched
             # teacher rather than a per-item one, so it is reported instead of silently relabeled
