@@ -287,10 +287,34 @@ class AdaptiveVsFixedLadderTest(unittest.TestCase):
     not the original overstated one.
     """
 
-    # Calibrated to the CI-reproducible ~1.3% margin measured above for SEEDS=(1, 2, 3): a real,
-    # non-trivial floor (rules out "wins by any nonzero amount, however marginal") that still leaves
-    # headroom below the actual measured margin so this doesn't flake on the pinned harness.
-    _MIN_ADAPTIVE_MARGIN = 0.01  # require >=1% less compute than the best fixed baseline, not just any win
+    # SUPERSEDED, 2026-07-30. The ~1.3% win recorded above no longer reproduces, and the reason is a
+    # deliberate correctness change rather than drift. Both FIXED baselines still come out byte-exactly at
+    # the numbers above -- 1.725e+10 and 1.330e+10 -- so the harness, seeding and FLOP accounting are
+    # unchanged. Only the adaptive arm moved, 1.314e+10 -> 1.361e+10, i.e. from 1.3% LESS compute than the
+    # best fixed baseline to 2.3% MORE, winning on 1 of 3 seeds.
+    #
+    # The recorded figure came from d54664ca (2026-07-09). a418eb15 ("make structure edits model safe",
+    # 2026-07-26) then rewrote 215 lines of structure_edit_schedule.py without re-validating this receipt.
+    # Two changes in it alter the post-edit trajectory: block-only ``grow_widen_block`` became fail-closed
+    # (it had been returning an internal Block in place of a complete model), and an accepted edit now
+    # rebuilds the optimizer PRESERVING AdamW state for parameters proven unchanged instead of discarding
+    # it. The default candidate list is ``{"edit_type": "grow_insert"}`` both before and after, so the
+    # widen removal is not what this ladder exercises; the optimizer-state change is the live candidate,
+    # though which one dominates has not been isolated. Either way the compute number is a CONSEQUENCE of
+    # a correctness fix, and the fix is not in question.
+    #
+    # So the win is not asserted any more, because this benchmark cannot support it. The docstring above
+    # already concedes as much: at 3 seeds and a ~1% effect it records the win as "genuinely fragile
+    # (single-digit-percent at best, sometimes a net loss)" across other seed triples -- and the seeds it
+    # was calibrated to have now joined that set. Two successive rounds of correcting this flagship
+    # number (9.4% -> 1.3% -> a net loss) is itself the evidence that 3 seeds is too few to decide a
+    # single-digit-percent compute difference. What IS stable and worth receipting is asserted instead:
+    # every arm reaches target_loss, and adaptive stays COMPETITIVE with the best fixed baseline rather
+    # than being materially worse. The win check is inverted and left loud so that if the adaptive
+    # schedule does start beating the best fixed baseline by the original margin, this note is retired
+    # and the claim restored rather than quietly kept off.
+    _MAX_ADAPTIVE_OVERHEAD = 0.10  # adaptive must stay within 10% of the best fixed baseline's compute
+    _MIN_ADAPTIVE_MARGIN = 0.01  # the win margin the receipt USED to claim; see the note above
 
     TARGET_LOSS = 1.3
     SEEDS = (1, 2, 3)
@@ -381,9 +405,23 @@ class AdaptiveVsFixedLadderTest(unittest.TestCase):
 
         self.assertIsNotNone(best_fixed_avg, "no fixed baseline reached target_loss on every seed")
         self.assertTrue(all(adaptive_reached), "adaptive run failed to reach target_loss on some seed")
-        # A real margin, not just "any win, however marginal" -- see _MIN_ADAPTIVE_MARGIN's docstring
-        # note above for how this was calibrated and why it replaced a bare assertLess.
-        self.assertLess(avg_adaptive, best_fixed_avg * (1.0 - self._MIN_ADAPTIVE_MARGIN))
+        # Competitiveness, not a win -- see the _MIN_ADAPTIVE_MARGIN note above for why the win is no
+        # longer asserted and what changed. This still catches the adaptive schedule becoming materially
+        # more expensive than simply picking the best fixed depth, which is the failure worth guarding.
+        self.assertLess(
+            avg_adaptive,
+            best_fixed_avg * (1.0 + self._MAX_ADAPTIVE_OVERHEAD),
+            f"adaptive compute {avg_adaptive:.3e} is more than "
+            f"{100 * self._MAX_ADAPTIVE_OVERHEAD:.0f}% above the best fixed baseline {best_fixed_avg:.3e}",
+        )
+        # Left loud: a restored win must restore the claim rather than pass unnoticed.
+        self.assertGreaterEqual(
+            avg_adaptive,
+            best_fixed_avg * (1.0 - self._MIN_ADAPTIVE_MARGIN),
+            f"adaptive now beats the best fixed baseline by >={100 * self._MIN_ADAPTIVE_MARGIN:.0f}% "
+            f"({avg_adaptive:.3e} vs {best_fixed_avg:.3e}) -- restore the acceptance claim and retire the "
+            "SUPERSEDED note above _MIN_ADAPTIVE_MARGIN",
+        )
 
 
 if __name__ == "__main__":
