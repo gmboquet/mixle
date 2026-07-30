@@ -179,6 +179,27 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
         self.set_prior(prior)
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Keep the cached normalizers tied to the variance they were computed from.
+
+        ``log_const`` and ``const`` are derived from ``sigma2`` once in ``__init__``.
+        Assigning ``sigma2`` afterwards used to leave them untouched, so ``log_density``
+        and ``sampler`` kept reporting the *previous* variance's density -- a silent
+        wrong answer rather than an error (``sigma2 = 100`` still scored as ``sigma2 = 1``).
+
+        This recomputes rather than validating. Callers legitimately install non-finite
+        or out-of-domain parameters to exercise downstream handling -- deserialized
+        legacy states and NaN-propagation tests both do -- so an out-of-domain variance
+        yields a NaN normalizer, which propagates honestly, instead of raising here and
+        rejecting a state the library is expected to represent.
+        """
+        object.__setattr__(self, name, value)
+        if name != "sigma2":
+            return
+        usable = np.isscalar(value) and np.isfinite(value) and value > 0.0
+        object.__setattr__(self, "log_const", -0.5 * log(2.0 * pi * value) if usable else float("nan"))
+        object.__setattr__(self, "const", 1.0 / sqrt(2.0 * pi * value) if usable else float("nan"))
+
     def __str__(self) -> str:
         """Return a readable distribution summary."""
         return "GaussianDistribution(%s, %s, name=%s, keys=%s)" % (
