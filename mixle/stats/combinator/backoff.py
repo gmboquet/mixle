@@ -27,6 +27,33 @@ Two things the caller owns:
   string labels -- there is no natural distribution over unseen strings -- so
   ``CategoricalDistribution.default_value`` (and its integer-categorical counterpart) remains the
   right tool there, and this combinator is not a replacement for it.
+* **A mixture of factors is a factor, not a law.** Several mixle families deliberately admit
+  unnormalized weight vectors -- ``CategoricalDistribution`` and its integer counterpart both document
+  that -- and this class cannot detect it: there is no general "are you normalized?" query to ask a
+  child. So ``BackoffDistribution`` inherits its children's status rather than conferring one, and
+  wrapping a factor does not make it exactly generative however proper the mixing weights are
+  (MXR-080-1844). ``sampler()`` in particular is only meaningful when both children are true laws.
+  Pass normalized components if you need the result to be one.
+
+Usage (MXR-080-1854)::
+
+    from mixle.stats import BackoffDistribution, BackoffEstimator
+    from mixle.stats import IntegerCategoricalEstimator, PoissonEstimator
+
+    # score-time: a sharp support plus a fallback that covers what it never saw
+    scorer = BackoffDistribution(sharp_fit, PoissonDistribution(16.0), escape_weight=0.01)
+    scorer.log_density(84)          # finite even though sharp_fit alone gives -inf
+
+    # fit-time: escape_weight is a FLOOR, max_escape_weight a ceiling
+    est = BackoffEstimator(
+        IntegerCategoricalEstimator(min_val=0, max_val=99),
+        PoissonEstimator(),
+        escape_weight=0.01,         # never estimated below this; zero is absorbing
+        max_escape_weight=0.05,     # above this it becomes model selection, not smoothing
+    )
+
+Set ``max_escape_weight`` equal to ``escape_weight`` to freeze the weight, or to ``None`` to let EM
+choose freely -- which is model selection between the two components and usually not what you want.
 """
 
 from __future__ import annotations
@@ -85,9 +112,20 @@ class BackoffDistribution(SequenceEncodableProbabilityDistribution):
             escape_weight: Mass on ``fallback``.
             log_escape, log_retain: ``log(escape_weight)`` and ``log(1 - escape_weight)``.
         """
+        # Every method this class goes on to call, not only the two the first happy path needed
+        # (MXR-080-1845). dist_to_encoder/estimator/sampler are all invoked below, so a child missing
+        # one fails later at a confusing place instead of here with its name attached.
         for label, child in (("base", base), ("fallback", fallback)):
-            if not hasattr(child, "log_density") or not hasattr(child, "seq_log_density"):
-                raise TypeError(f"backoff {label} must be a distribution with log_density/seq_log_density.")
+            missing = [
+                name
+                for name in ("log_density", "seq_log_density", "dist_to_encoder", "estimator", "sampler")
+                if not callable(getattr(child, name, None))
+            ]
+            if missing:
+                raise TypeError(
+                    f"backoff {label} is missing {', '.join(missing)}; it must be a distribution this "
+                    "combinator can score, encode, fit and sample through."
+                )
         self.base = base
         self.fallback = fallback
         self.escape_weight = _validated_weight(escape_weight, name="escape_weight")
@@ -131,9 +169,18 @@ class BackoffDistribution(SequenceEncodableProbabilityDistribution):
     def component_log_densities(self, x: tuple[Any, Any]) -> tuple[np.ndarray, np.ndarray]:
         """Return the two weighted component log-density vectors for encoded data ``x``."""
         base_enc, fallback_enc = x
-        base = np.asarray(self.base.seq_log_density(base_enc), dtype=np.float64) + self.log_retain
-        fallback = np.asarray(self.fallback.seq_log_density(fallback_enc), dtype=np.float64) + self.log_escape
-        return base, fallback
+        base = np.asarray(self.base.seq_log_density(base_enc), dtype=np.float64)
+        fallback = np.asarray(self.fallback.seq_log_density(fallback_enc), dtype=np.float64)
+        if base.shape != fallback.shape:
+            # The children encode the same observations independently, so nothing upstream guarantees
+            # they agree on the batch. numpy would broadcast a (1,) against an (n,) and score every row
+            # against one child value without complaint (MXR-080-1843); a disagreement here means one
+            # child dropped or fabricated rows, which is not something to average over.
+            raise ValueError(
+                f"backoff children disagree on the batch: base scored {base.shape} and fallback "
+                f"{fallback.shape} for the same observations; one of them is not encoding all rows."
+            )
+        return base + self.log_retain, fallback + self.log_escape
 
     def seq_log_density(self, x: tuple[Any, Any]) -> np.ndarray:
         """Vectorized mixture log-density over sequence-encoded observations."""
