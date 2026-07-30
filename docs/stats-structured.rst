@@ -58,6 +58,11 @@ observations.
    * - ``ZeroInflatedDistribution`` / ``ZeroInflatedEstimator``
      - extra zeros
      - count data have more zeros than the base family explains.
+   * - ``BackoffDistribution`` / ``BackoffEstimator``
+     - outcome a fitted support cannot represent
+     - held-out values fall outside (or in a hole of) the support the fit observed. The escape weight
+       is a floor with a ceiling: EM may raise it, never to zero, and never past the bound that would
+       make it model selection instead of smoothing.
    * - ``WeightedDistribution`` / ``WeightedEstimator``
      - weighted observation
      - examples carry frequency or importance weights.
