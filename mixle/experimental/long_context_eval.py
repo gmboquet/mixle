@@ -232,6 +232,9 @@ def _train_and_probe(
     chance_loss = math.log(vocab)
     threshold = 0.5 * chance_loss
     was_training = getattr(mechanism, "training", None)
+    # Only mechanisms that both expose a live auxiliary term and weight it nonzero need a grad-enabled
+    # prefix; every other mechanism keeps the cheaper no_grad warm-up and behaves bit-for-bit as before.
+    aux_is_live = hasattr(mechanism, "last_aux_term") and float(getattr(mechanism, "aux_weight", 0.0)) > 0.0
 
     if hasattr(mechanism, "train"):
         mechanism.train()
@@ -240,11 +243,27 @@ def _train_and_probe(
         state = mechanism.init_state(1)
         # Warm the prefix without an optimizer step, then train only on the controlled dependency target.
         # Otherwise identity targets at every uninteresting prefix position dominate the scientific probe.
-        with torch.no_grad():
+        #
+        # The prefix LM loss is what must stay untrained; an auxiliary regularizer earned there is not an
+        # identity target and must NOT be dropped with it. Mechanisms that keep summary state (see
+        # SummaryTreeSpine) only earn their aux term when a node finalizes, which happens in the prefix and
+        # never on the single trained position -- so a no_grad prefix silently zeroes the entire aux
+        # gradient and makes any ablation on its weight a no-op. Collect it here and fold it into the one
+        # backward below, which leaves the optimizer-step count identical either way.
+        if aux_is_live:
+            aux_terms = []
             for chunk in _chunks(x[:, :-1], y[:, :-1], chunk_size):
                 state, _ = mechanism.step(state, chunk)
+                if mechanism.last_aux_term is not None:
+                    aux_terms.append(mechanism.last_aux_term)
+            prefix_aux = torch.stack(aux_terms).sum() if aux_terms else None
+        else:
+            prefix_aux = None
+            with torch.no_grad():
+                for chunk in _chunks(x[:, :-1], y[:, :-1], chunk_size):
+                    state, _ = mechanism.step(state, chunk)
         state = mechanism.detach(state)
-        train_tbptt(mechanism, state, [(x[:, -1:], y[:, -1:])], opt, detach_horizon=1)
+        train_tbptt(mechanism, state, [(x[:, -1:], y[:, -1:])], opt, detach_horizon=1, extra_loss=prefix_aux)
 
     solved: list[bool] = []
     probe_losses: list[float] = []

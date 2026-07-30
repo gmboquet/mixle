@@ -244,6 +244,13 @@ if _HAS_TORCH:
             self.lca_bias = nn.Parameter(torch.zeros(self.max_level_cap))
 
             self.last_aux_loss: float = 0.0  # self-reported per-step signal, mean over nodes finalized this step
+            # The same quantity as a live, aux_weight-scaled tensor -- ALREADY included in the loss the
+            # matching step() returned, exposed for callers that discard that loss but must keep the aux
+            # term trainable (a warm-up prefix whose LM targets are deliberately not trained on: nodes
+            # finalize there and nowhere else, so dropping the prefix loss drops all aux gradient).
+            # ``None`` when no node finalized or ``aux_weight == 0``. Adding it to a backward that already
+            # includes the returned loss double-counts it.
+            self.last_aux_term: Any | None = None
 
         # -----------------------------------------------------------------------------------------------
         # ContextMechanism protocol
@@ -612,6 +619,7 @@ if _HAS_TORCH:
                 current_state = state
                 losses = []
                 auxiliary_losses = []
+                auxiliary_terms = []
                 for query_index in range(t):
                     current_state, token_loss = self.step(
                         current_state,
@@ -622,7 +630,12 @@ if _HAS_TORCH:
                     )
                     losses.append(token_loss)
                     auxiliary_losses.append(self.last_aux_loss)
+                    if self.last_aux_term is not None:
+                        auxiliary_terms.append(self.last_aux_term)
                 self.last_aux_loss = float(sum(auxiliary_losses) / len(auxiliary_losses))
+                # The returned loss is the MEAN over tokens, so the aux contribution it already carries
+                # is the per-token sum divided by t -- not the mean over the finalizing tokens alone.
+                self.last_aux_term = torch.stack(auxiliary_terms).sum() / t if auxiliary_terms else None
                 return current_state, torch.stack(losses).mean()
 
             device = x.device
@@ -784,11 +797,14 @@ if _HAS_TORCH:
 
             aux_loss = self._aux_loss_for_nodes(finalized_this_step)
             if aux_loss is not None and self.aux_weight > 0:
-                total_loss = lm_loss + self.aux_weight * aux_loss
+                aux_term = self.aux_weight * aux_loss
+                total_loss = lm_loss + aux_term
                 self.last_aux_loss = float(aux_loss.detach())
+                self.last_aux_term = aux_term
             else:
                 total_loss = lm_loss
                 self.last_aux_loss = 0.0
+                self.last_aux_term = None
 
             return new_state, total_loss
 
