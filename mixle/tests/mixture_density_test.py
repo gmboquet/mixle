@@ -108,8 +108,13 @@ class ConditionalFlowTest(unittest.TestCase):
     def test_conditional_flow_beats_single_gaussian_on_within_y_structure(self):
         _seed()
         train, test = _within_y_curve(0), _within_y_curve(1)
+        # max_its=20, not 8: at 8 the flow is still mid-training and scores -3492 against the Gaussian's
+        # -1994, so it lost by 1497 rather than winning by 100 -- the assertion was reading an unconverged
+        # model, not a weak one. The flow converges by 20 (20 and 40 give bit-identical -32.31), where it
+        # beats the Gaussian by 1962, twenty times the required margin. Lowering lr instead makes it worse
+        # (lr=1e-3 at 20 its scores -11032), so this is optimization budget rather than step size.
         cf = NeuralConditionalDensity(build_conditional_flow(1, 2, hidden=32, layers=6), m_steps=100, lr=5e-3)
-        fit = optimize(train, cf.estimator(), prev_estimate=cf, max_its=8, out=None)
+        fit = optimize(train, cf.estimator(), prev_estimate=cf, max_its=20, out=None)
         # NeuralGaussian: p(y|x) = N(y; mlp(x), sigma^2 I) -- isotropic, mean-only, blind to the y2=y1^2 coupling
         gauss = optimize(train, NeuralGaussian(make_mlp(1, [32, 32], 2), lr=1e-2).estimator(), max_its=40, out=None)
         self.assertGreater(_ll(fit, test) - _ll(gauss, test), 100.0)
