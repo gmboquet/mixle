@@ -15,7 +15,9 @@ re-exported under the same bare name from ``mixle.inference``).
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
@@ -279,6 +281,39 @@ def _hmm_forward_rollout(
 # --------------------------------------------------------------------------------------------- #
 
 
+def _frozen_point_mass(record: Any) -> Any:
+    """An immutable snapshot of a fully observed record, for the point-mass rollout path.
+
+    ``rollout`` returned ``[self._determined] * n``: n references to ONE object, itself holding the
+    caller's evidence values by reference. Mutating one draw therefore changed every draw and the
+    caller's evidence, and a later rollout saw the edit (MXR-080-1850). Containers are converted, not
+    copied, because a copy of a list is still a list.
+    """
+    if isinstance(record, np.ndarray):
+        frozen = record.copy()
+        frozen.setflags(write=False)
+        return frozen
+    if isinstance(record, Mapping):
+        return MappingProxyType({key: _frozen_point_mass(item) for key, item in record.items()})
+    if isinstance(record, (str, bytes)):
+        return record
+    if isinstance(record, (set, frozenset)):
+        return frozenset(_frozen_point_mass(item) for item in record)
+    if isinstance(record, Sequence):
+        return tuple(_frozen_point_mass(item) for item in record)
+    return record
+
+
+def _exact_draw_count(n: Any) -> int:
+    """``n`` as an exact positive integer; ``int(n)`` accepted True and truncated 2.7 (MXR-080-1850)."""
+    if isinstance(n, (bool, np.bool_)) or not isinstance(n, (int, np.integer)):
+        raise ValueError(f"n must be an exact positive integer, not {type(n).__name__}")
+    count = int(n)
+    if count < 1:
+        raise ValueError("n must be >= 1")
+    return count
+
+
 def _exact_evidence_log_density(model: Any, top: dict[int, Any]) -> float | None:
     if not top or not callable(getattr(model, "marginal", None)):
         return None
@@ -422,7 +457,7 @@ class Simulator:
             # of the plausibility receipt, and the plausibility itself is already computed above by
             # _exact_evidence_log_density, independently of conditioning. The scenario is a point
             # mass on the evidence, so every rollout draw is that record.
-            self._determined = determined
+            self._determined = _frozen_point_mass(determined)
             self.receipt = SimulationReceipt(
                 plausibility=plausibility,
                 plausibility_method=plaus_method,
@@ -448,9 +483,7 @@ class Simulator:
 
     def rollout(self, n: int = 1) -> list[Any]:
         """``n`` draws from the resolved scenario (do() applied, evidence conditioned, seed-fixed)."""
-        n = int(n)
-        if n < 1:
-            raise ValueError("n must be >= 1")
+        n = _exact_draw_count(n)
         if self.receipt.evidence_status == "impossible":
             raise ImpossibleEvidenceError(
                 "Cannot roll out a scenario whose evidence has zero probability after intervention."
