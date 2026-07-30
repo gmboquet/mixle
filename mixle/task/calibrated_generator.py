@@ -211,13 +211,22 @@ class CalibratedGenerator:
         if seed is not None and (isinstance(seed, (bool, np.bool_)) or not isinstance(seed, (int, np.integer))):
             raise ValueError("seed must be an exact integer or None")
         rng_seed = self.seed if seed is None else int(seed)
-        # MXR-080-1849 (open): only certification-half verdicts reach the bound, so the proposal-half
-        # is_correct calls are wasted on a possibly metered or side-effecting oracle. Skipping them was
-        # implemented and REVERTED: it changed the outcome of
-        # geoscience_inversion_report's m5 bracketing test, which passes at this revision, so at least
-        # one in-repo oracle is side-effecting in a way the calibration currently depends on. Landing
-        # this needs that dependency understood first -- bending the test to match an unproven change
-        # would be worse than the waste.
+        # ORACLE CONTRACT: is_correct is called exactly once per prompt, for EVERY prompt, in the
+        # order given. That is load-bearing, not incidental. The oracle receives only
+        # (prompt, candidate) -- no row index -- so an oracle that must recover per-row ground truth
+        # has no way to do it except by counting its own calls.
+        # mixle.reason.language_bridge.PosteriorDescriber.calibrate does exactly that: it closes over
+        # a monotone counter and indexes `truths[calls["n"]]`.
+        #
+        # MXR-080-1849 asks for the proposal-half calls to be dropped, since only certification-half
+        # verdicts reach the bound and the oracle may be metered. That is NOT safely actionable while
+        # this contract stands: skipping the first `split` calls restarts any such counter at 0, so
+        # every certification row is scored against the truth of a row `split` positions earlier.
+        # Measured twice -- both attempts moved geoscience_inversion_report's m5 bracketing, and the
+        # counter above is why. Removing the waste requires first giving the oracle a row identity
+        # (passing an index, or a (prompt, index) pair), which changes the public oracle signature.
+        # Until then the extra calls are the price of row alignment, and this comment is here so the
+        # next person to spot the "wasted" calls sees the coupling before deleting them.
         statistics: list[float] = []
         errors: list[bool] = []
         for i, prompt in enumerate(prompts):
