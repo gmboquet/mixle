@@ -40,6 +40,53 @@ class StructuredEstimationReceipt:
     work: WorkMeasurement
     reference_seconds: float | None = None
 
+    def __post_init__(self) -> None:
+        """Bind ``exact_parity`` to the hashes it claims to summarize (MXR-080-0647).
+
+        ``exact_parity`` is the receipt's headline claim: that the parallel M-step reproduced the
+        serial reference exactly. It was previously a free-standing boolean, so a receipt could
+        report ``exact_parity=True`` while carrying ``parallel_statistics_hash != reference_statistics_hash``
+        -- asserting a parity its own evidence refutes, and doing so in the artifact a reader would
+        consult to confirm it. The producer derives the flag from exactly this comparison, so
+        checking it here rejects only receipts no run can produce.
+
+        Deliberately NOT checked: ``num_workers == len(worker_device_ids)``. A caller may pass
+        ``num_workers`` below the placement capacity, so a worker count smaller than the device list
+        is a legitimate plan, not a forged one.
+        """
+        has_reference = self.reference_statistics_hash is not None or self.reference_model_hash is not None
+        if self.exact_parity is None:
+            if has_reference:
+                raise ValueError(
+                    "structured-estimation receipt carries reference hashes but leaves exact_parity "
+                    "unset; a reference run either establishes parity or refutes it."
+                )
+        else:
+            if not has_reference:
+                raise ValueError(
+                    f"structured-estimation receipt claims exact_parity={self.exact_parity} with no "
+                    "reference hashes; parity is a comparison and needs both sides."
+                )
+            matches = (
+                self.parallel_statistics_hash == self.reference_statistics_hash
+                and self.parallel_model_hash == self.reference_model_hash
+            )
+            if bool(self.exact_parity) != matches:
+                raise ValueError(
+                    f"structured-estimation receipt reports exact_parity={self.exact_parity} but its "
+                    f"hashes say otherwise: statistics {self.parallel_statistics_hash!r} vs "
+                    f"{self.reference_statistics_hash!r}, model {self.parallel_model_hash!r} vs "
+                    f"{self.reference_model_hash!r}."
+                )
+        if not (isinstance(self.observations, (int, float)) and self.observations >= 0.0):
+            raise ValueError(
+                f"structured-estimation receipt observations must be non-negative, got {self.observations!r}."
+            )
+        if self.reference_seconds is not None and not self.reference_seconds >= 0.0:
+            raise ValueError(
+                f"structured-estimation receipt reference_seconds must be non-negative, got {self.reference_seconds!r}."
+            )
+
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible structured-execution receipt."""
 
