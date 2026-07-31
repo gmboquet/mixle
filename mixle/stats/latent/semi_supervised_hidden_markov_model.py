@@ -20,6 +20,8 @@ SemiSupervisedHiddenMarkovEstimatorAccumulator, SemiSupervisedHiddenMarkovEstima
 SemiSupervisedHiddenMarkovEstimator, and SemiSupervisedHiddenMarkovDataEncoder.
 """
 
+from typing import Any
+
 import numpy as np
 from numpy.random import RandomState
 
@@ -77,6 +79,36 @@ def _as_prior(prior, length: int, num_states: int) -> np.ndarray | None:
     return (p / row_max).copy()
 
 
+def _validated_semi_supervised_transitions(values: Any, n_states: int) -> np.ndarray:
+    """Return an owned row-stochastic transition matrix.
+
+    The constructor previously did ``np.reshape(np.asarray(values, dtype=float), ...)`` and nothing
+    else, so a matrix with NaN entries, negative entries, or rows that do not sum to one was
+    accepted and silently turned into ``logTransitions`` full of NaN or of positive log-values
+    (MXR-080-1252). Forward/backward then produced a number rather than an error, and nothing in the
+    result distinguished it from a real likelihood.
+
+    Zero rows are allowed for the same reason the segmental model allows them: a state with no
+    outgoing mass is a terminal state, not a malformed row. This mirrors
+    ``_validated_segmental_transitions`` so the two latent families agree on what a transition
+    matrix is.
+    """
+    try:
+        transitions = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("semi-supervised HMM transitions must be a numeric matrix.") from exc
+    expected = (n_states, n_states)
+    if transitions.shape != expected:
+        raise ValueError(f"semi-supervised HMM transitions must have shape {expected}, got {transitions.shape}.")
+    if np.any(~np.isfinite(transitions)) or np.any(transitions < 0.0):
+        raise ValueError("semi-supervised HMM transitions must contain finite non-negative probabilities.")
+    row_sums = transitions.sum(axis=1)
+    nonzero = row_sums != 0.0
+    if not np.allclose(row_sums[nonzero], 1.0, rtol=1.0e-10, atol=1.0e-12):
+        raise ValueError("semi-supervised HMM transition rows must sum to one.")
+    return transitions.copy()
+
+
 class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
     """HMM with shared emissions/transitions where each observation may carry a per-position state prior."""
 
@@ -99,7 +131,7 @@ class SemiSupervisedHiddenMarkovModelDistribution(SequenceEncodableProbabilityDi
         """
         self.topics = list(topics)
         self.nStates = len(self.topics)
-        self.transitions = np.reshape(np.asarray(transitions, dtype=float), (self.nStates, self.nStates))
+        self.transitions = _validated_semi_supervised_transitions(transitions, self.nStates)
         with np.errstate(divide="ignore"):
             self.logTransitions = np.log(self.transitions)
         self.len_dist = len_dist if len_dist is not None else NullDistribution()
