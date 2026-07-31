@@ -76,6 +76,36 @@ class StudentTDistribution(SequenceEncodableProbabilityDistribution):
         self.name = name
         self.keys = keys
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Keep the cached ``log_const`` tied to the ``df`` and ``scale`` it derives from.
+
+        The constant is computed once in ``__init__`` and read by ``log_density``, so a later
+        assignment used to leave it stale and the scorer kept reporting the *previous*
+        parameters' density with no error at all (MXR-080-1192). ``loc`` is read directly.
+
+        Recompute rather than validate: callers legitimately install out-of-domain or non-finite
+        parameters -- deserialized legacy states and NaN-propagation checks both do -- so a value
+        outside the domain yields a NaN constant that propagates honestly instead of rejecting a
+        state the library is expected to be able to hold.
+        """
+        object.__setattr__(self, name, value)
+        if name not in ("df", "scale"):
+            return
+        try:
+            object.__setattr__(
+                self,
+                "log_const",
+                float(
+                    gammaln((self.df + 1.0) / 2.0)
+                    - gammaln(self.df / 2.0)
+                    - 0.5 * math.log(self.df * math.pi)
+                    - math.log(self.scale)
+                ),
+            )
+        except (ValueError, TypeError, OverflowError, ZeroDivisionError, AttributeError, FloatingPointError):
+            # AttributeError covers __init__, where the first parameter is assigned before the rest.
+            object.__setattr__(self, "log_const", float("nan"))
+
     def __str__(self) -> str:
         return "StudentTDistribution(%s, loc=%s, scale=%s, name=%s, keys=%s)" % (
             repr(self.df),

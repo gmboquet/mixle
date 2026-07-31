@@ -132,6 +132,26 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
         self.set_prior(prior)
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Keep the cached ``log_beta`` tied to the ``beta`` it derives from.
+
+        ``log_beta`` is computed once in ``__init__`` and read by ``log_density``, so a later
+        assignment used to leave it stale and the scorer kept reporting the *previous* rate's
+        density with no error at all (MXR-080-1192).
+
+        Recompute rather than validate: callers legitimately install out-of-domain or non-finite
+        parameters -- deserialized legacy states and NaN-propagation checks both do -- so a value
+        outside the domain yields a NaN constant that propagates honestly instead of rejecting a
+        state the library is expected to be able to hold.
+        """
+        object.__setattr__(self, name, value)
+        if name != "beta":
+            return
+        try:
+            object.__setattr__(self, "log_beta", float(np.log(self.beta)))
+        except (ValueError, TypeError, OverflowError, ZeroDivisionError, AttributeError, FloatingPointError):
+            object.__setattr__(self, "log_beta", float("nan"))
+
     def __str__(self) -> str:
         """Return a constructor-style representation of the exponential distribution."""
         return "ExponentialDistribution(%s, name=%s, keys=%s)" % (repr(self.beta), repr(self.name), repr(self.keys))

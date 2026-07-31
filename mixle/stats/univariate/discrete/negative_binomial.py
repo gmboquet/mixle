@@ -151,7 +151,7 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
 
     def __setattr__(self, name: str, value: Any) -> None:
-        """Keep the cached ``log_p``, ``log_gamma_r`` tied to the parameters ``p`` and ``r`` they derive from.
+        """Keep the cached ``log_p``, ``log_1p``, ``log_gamma_r`` tied to the parameters ``p`` and ``r``.
 
         The constants are computed once in ``__init__`` and read by ``log_density``, so a later
         assignment used to leave them stale and the scorer kept reporting the *previous*
@@ -167,10 +167,12 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
             return
         try:
             object.__setattr__(self, "log_p", math.log(self.p))
+            object.__setattr__(self, "log_1p", math.log1p(-self.p))
             object.__setattr__(self, "log_gamma_r", float(gammaln(self.r)))
         except (ValueError, TypeError, OverflowError, ZeroDivisionError, AttributeError, FloatingPointError):
             # AttributeError covers __init__, where the first parameter is assigned before the rest.
             object.__setattr__(self, "log_p", float("nan"))
+            object.__setattr__(self, "log_1p", float("nan"))
             object.__setattr__(self, "log_gamma_r", float("nan"))
 
     def __str__(self) -> str:

@@ -52,7 +52,11 @@ class NakagamiDistribution(SequenceEncodableProbabilityDistribution):
         self._m_over_omega = self.m / self.omega
 
     def __setattr__(self, name: str, value: Any) -> None:
-        """Keep the cached ``_log_const`` tied to the parameters ``m`` and ``omega`` they derive from.
+        """Keep the cached ``_log_const`` and ``_m_over_omega`` tied to ``m`` and ``omega``.
+
+        BOTH derived constants must refresh, not just the normalizer: ``log_density`` reads
+        ``_m_over_omega`` in its exponent and ``cdf`` uses it as the gamma-integral scale, so
+        refreshing only ``_log_const`` still scored the new normalizer against the OLD shape.
 
         The constant is computed once in ``__init__`` and read by ``log_density``, so a later
         assignment used to leave it stale and the scorer kept reporting the *previous*
@@ -72,9 +76,11 @@ class NakagamiDistribution(SequenceEncodableProbabilityDistribution):
                 "_log_const",
                 math.log(2.0) + self.m * math.log(self.m) - gammaln(self.m) - self.m * math.log(self.omega),
             )
+            object.__setattr__(self, "_m_over_omega", self.m / self.omega)
         except (ValueError, TypeError, OverflowError, ZeroDivisionError, AttributeError, FloatingPointError):
             # AttributeError covers __init__, where the first parameter is assigned before the rest.
             object.__setattr__(self, "_log_const", float("nan"))
+            object.__setattr__(self, "_m_over_omega", float("nan"))
 
     def __str__(self) -> str:
         return "NakagamiDistribution(%s, %s, name=%s, keys=%s)" % (

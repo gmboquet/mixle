@@ -97,6 +97,29 @@ class WeibullDistribution(SequenceEncodableProbabilityDistribution):
         self.name = name
         self.keys = keys
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Keep ``log_shape`` and ``log_scale`` tied to the ``shape`` and ``scale`` they derive from.
+
+        Both are computed once in ``__init__`` and read by ``log_density``, so a later assignment
+        used to leave them stale and the scorer kept reporting the *previous* parameters' density
+        with no error at all (MXR-080-1192).
+
+        Recompute rather than validate: callers legitimately install out-of-domain or non-finite
+        parameters -- deserialized legacy states and NaN-propagation checks both do -- so a value
+        outside the domain yields a NaN constant that propagates honestly instead of rejecting a
+        state the library is expected to be able to hold.
+        """
+        object.__setattr__(self, name, value)
+        if name not in ("shape", "scale"):
+            return
+        try:
+            object.__setattr__(self, "log_shape", math.log(self.shape))
+            object.__setattr__(self, "log_scale", math.log(self.scale))
+        except (ValueError, TypeError, OverflowError, ZeroDivisionError, AttributeError, FloatingPointError):
+            # AttributeError covers __init__, where the first parameter is assigned before the rest.
+            object.__setattr__(self, "log_shape", float("nan"))
+            object.__setattr__(self, "log_scale", float("nan"))
+
     def __str__(self) -> str:
         return "WeibullDistribution(%s, %s, name=%s, keys=%s)" % (
             repr(self.shape),
