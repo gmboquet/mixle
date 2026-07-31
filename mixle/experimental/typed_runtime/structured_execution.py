@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -54,7 +55,16 @@ class StructuredEstimationReceipt:
         ``num_workers`` below the placement capacity, so a worker count smaller than the device list
         is a legitimate plan, not a forged one.
         """
-        has_reference = self.reference_statistics_hash is not None or self.reference_model_hash is not None
+        present = (self.reference_statistics_hash is not None, self.reference_model_hash is not None)
+        if any(present) and not all(present):
+            raise ValueError(
+                "structured-estimation receipt carries a half reference: statistics "
+                f"{self.reference_statistics_hash!r}, model {self.reference_model_hash!r}. Parity is "
+                "the conjunction of both comparisons, so one side alone cannot establish it and "
+                "cannot refute it either -- the missing hash would compare unequal purely by being "
+                "absent. The reference run computes both together or runs not at all."
+            )
+        has_reference = all(present)
         if self.exact_parity is None:
             if has_reference:
                 raise ValueError(
@@ -78,14 +88,30 @@ class StructuredEstimationReceipt:
                     f"{self.reference_statistics_hash!r}, model {self.parallel_model_hash!r} vs "
                     f"{self.reference_model_hash!r}."
                 )
-        if not (isinstance(self.observations, (int, float)) and self.observations >= 0.0):
+        # ``>= 0.0`` alone admits ``inf``: NaN fails it (NaN compares false against everything) but
+        # infinity passes, so a receipt could report having processed infinitely many observations in
+        # infinite reference time. Both are measured quantities from a run that finished, so both are
+        # finite by construction; isfinite rejects the impossible magnitude the old bound let through.
+        if not (isinstance(self.observations, (int, float)) and math.isfinite(self.observations)):
+            raise ValueError(
+                f"structured-estimation receipt observations must be a finite number, got {self.observations!r}."
+            )
+        if self.observations < 0.0:
             raise ValueError(
                 f"structured-estimation receipt observations must be non-negative, got {self.observations!r}."
             )
-        if self.reference_seconds is not None and not self.reference_seconds >= 0.0:
-            raise ValueError(
-                f"structured-estimation receipt reference_seconds must be non-negative, got {self.reference_seconds!r}."
-            )
+        if self.reference_seconds is not None:
+            if not math.isfinite(self.reference_seconds):
+                raise ValueError(
+                    "structured-estimation receipt reference_seconds must be finite, got "
+                    f"{self.reference_seconds!r}: a reference run that produced hashes also took a "
+                    "measurable amount of time."
+                )
+            if self.reference_seconds < 0.0:
+                raise ValueError(
+                    "structured-estimation receipt reference_seconds must be non-negative, got "
+                    f"{self.reference_seconds!r}."
+                )
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible structured-execution receipt."""
