@@ -70,6 +70,31 @@ class WrappedCauchyDistribution(SequenceEncodableProbabilityDistribution):
         self.cos_mu = math.cos(self.mu)
         self.sin_mu = math.sin(self.mu)
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Keep ``_log_num`` tied to ``rho`` and ``cos_mu``/``sin_mu`` tied to ``mu``.
+
+        All three are computed once in ``__init__`` and read by ``log_density``, so a later
+        assignment used to leave them stale and the scorer kept reporting the *previous*
+        parameters' density with no error at all (MXR-080-1192).
+
+        Recompute rather than validate: callers legitimately install out-of-domain or non-finite
+        parameters -- deserialized legacy states and NaN-propagation checks both do -- so a value
+        outside the domain yields a NaN constant that propagates honestly instead of rejecting a
+        state the library is expected to be able to hold.
+        """
+        object.__setattr__(self, name, value)
+        if name not in ("mu", "rho"):
+            return
+        try:
+            object.__setattr__(self, "_log_num", math.log1p(-self.rho) + math.log1p(self.rho) - _LOG_2PI)
+            object.__setattr__(self, "cos_mu", math.cos(self.mu))
+            object.__setattr__(self, "sin_mu", math.sin(self.mu))
+        except (ValueError, TypeError, OverflowError, ZeroDivisionError, AttributeError, FloatingPointError):
+            # AttributeError covers __init__, where the first parameter is assigned before the rest.
+            object.__setattr__(self, "_log_num", float("nan"))
+            object.__setattr__(self, "cos_mu", float("nan"))
+            object.__setattr__(self, "sin_mu", float("nan"))
+
     def __str__(self) -> str:
         return "WrappedCauchyDistribution(%s, %s, name=%s, keys=%s)" % (
             repr(self.mu),
