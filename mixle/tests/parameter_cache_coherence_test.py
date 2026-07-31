@@ -13,6 +13,7 @@ without refreshing it fails here rather than silently mis-scoring.
 
 from __future__ import annotations
 
+import inspect
 import math
 
 import pytest
@@ -42,6 +43,13 @@ CASES = [
     ("GeneralizedGaussianDistribution", (0.0, 1.0, 2.0), "alpha", 3.0, 0.5),
     ("NakagamiDistribution", (1.0, 1.0), "omega", 4.0, 1.0),
     ("GeneralizedExtremeValueDistribution", (0.0, 1.0, 0.1), "scale", 3.0, 0.5),
+    ("GammaDistribution", (2.0, 1.0), "theta", 3.0, 1.5),
+    ("StudentTDistribution", (5.0, 0.0, 1.0), "scale", 3.0, 1.0),
+    ("WrappedCauchyDistribution", (0.0, 0.3), "rho", 0.8, 0.5),
+    ("NakagamiDistribution", (1.0, 1.0), "m", 2.5, 1.0),
+    ("SkellamDistribution", (2.0, 3.0), "mu2", 6.0, 1),
+    ("NegativeBinomialDistribution", (3.0, 0.4), "r", 7.0, 2),
+    ("WeibullDistribution", (2.0, 1.0), "shape", 4.0, 1.0),
 ]
 
 
@@ -61,6 +69,24 @@ def test_reassigning_a_parameter_moves_the_score(cls_name, args, attr, new_value
         f"derived from {attr!r} in __init__ was not refreshed, so scoring reports the old parameter."
     )
     assert math.isfinite(after), f"{cls_name} scored non-finite after a valid {attr}={new_value}"
+
+    # "The score moved" is NOT sufficient, and relying on it is what let MXR-080-1192 survive a
+    # first repair: when a class caches SEVERAL constants from one parameter and the refresh hook
+    # updates only some of them, the score does move -- to a wrong number. Nakagami refreshed
+    # `_log_const` but not `_m_over_omega`, Skellam refreshed `log_ratio_half` but neither
+    # `sqrt_diff_sq` nor `two_sqrt_prod`, and NegativeBinomial refreshed `log_p` but not `log_1p`
+    # (which scored a log-density of +0.089 -- a probability above one -- and passed the old check).
+    # The only comparison that cannot be fooled by a forgotten field is against a fresh object.
+    rebuilt_args = list(args)
+    parameters = [p for p in inspect.signature(cls.__init__).parameters if p != "self"]
+    assert attr in parameters, f"{cls_name}.__init__ takes no {attr!r}; update this case"
+    rebuilt_args[parameters.index(attr)] = new_value
+    expected = float(cls(*rebuilt_args).log_density(x))
+    assert math.isclose(after, expected, rel_tol=1e-12, abs_tol=1e-12), (
+        f"{cls_name}.log_density({x}) is {after!r} after {attr}={new_value}, but a freshly built "
+        f"{cls_name} with the same parameters scores {expected!r}. The score moved, so a partial "
+        f"refresh ran, but at least one other constant derived from {attr!r} is still stale."
+    )
 
 
 def test_the_gate_would_notice_a_stale_constant():
