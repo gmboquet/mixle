@@ -25,8 +25,10 @@ Two things the caller owns:
   choice. Whatever you pass is what the tail behaves like.
 * **This needs a fallback family to exist.** That holds for integers. It does not hold for arbitrary
   string labels -- there is no natural distribution over unseen strings -- so
-  ``CategoricalDistribution.default_value`` (and its integer-categorical counterpart) remains the
-  right tool there, and this combinator is not a replacement for it.
+  ``CategoricalDistribution.default_value`` remains the right tool there, and this combinator is not
+  a replacement for it. ``IntegerCategoricalDistribution`` has no such knob -- it was removed in
+  MXR-080-1839 because a constant out-of-support mass over an unbounded integer support diverges --
+  which is exactly why integers get this combinator instead.
 * **A mixture of factors is a factor, not a law.** Several mixle families deliberately admit
   unnormalized weight vectors -- ``CategoricalDistribution`` and its integer counterpart both document
   that -- and this class cannot detect it: there is no general "are you normalized?" query to ask a
@@ -38,7 +40,7 @@ Two things the caller owns:
 Usage (MXR-080-1854)::
 
     from mixle.stats import BackoffDistribution, BackoffEstimator
-    from mixle.stats import IntegerCategoricalEstimator, PoissonEstimator
+    from mixle.stats import IntegerCategoricalEstimator, PoissonDistribution, PoissonEstimator
 
     # score-time: a sharp support plus a fallback that covers what it never saw
     scorer = BackoffDistribution(sharp_fit, PoissonDistribution(16.0), escape_weight=0.01)
