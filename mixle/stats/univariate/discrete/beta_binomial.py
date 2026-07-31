@@ -13,6 +13,7 @@ estimated by moments -- ``rho`` from the dispersion and the mean fixing ``a/(a+b
 
 import math
 from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
@@ -53,6 +54,27 @@ class BetaBinomialDistribution(SequenceEncodableProbabilityDistribution):
         self.name = name
         self.keys = keys
         self._log_beta_ab = betaln(self.a, self.b)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Keep ``_log_beta_ab`` tied to the parameter(s) ``a``/``b`` they derive from.
+
+        Computed once in ``__init__`` and read by ``log_density``, so a later assignment used to
+        leave them stale and the scorer kept reporting the *previous* parameters' density with no
+        error at all (MXR-080-1192).
+
+        Recompute rather than validate: callers legitimately install out-of-domain or non-finite
+        parameters -- deserialized legacy states and NaN-propagation checks both do -- so a value
+        outside the domain yields a NaN constant that propagates honestly instead of rejecting a
+        state the library is expected to be able to hold.
+        """
+        object.__setattr__(self, name, value)
+        if name not in ("a", "b"):
+            return
+        try:
+            object.__setattr__(self, "_log_beta_ab", float(betaln(self.a, self.b)))
+        except (ValueError, TypeError, OverflowError, ZeroDivisionError, AttributeError, FloatingPointError):
+            # AttributeError covers __init__, where the first parameter is assigned before the rest.
+            object.__setattr__(self, "_log_beta_ab", float("nan"))
 
     def __str__(self) -> str:
         return "BetaBinomialDistribution(%s, %s, %s, name=%s, keys=%s)" % (
