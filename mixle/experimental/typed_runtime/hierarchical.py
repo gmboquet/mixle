@@ -38,6 +38,66 @@ class HierarchicalRoundReceipt:
     rejected: dict[str, str]
     commit: CommitReceipt | None
 
+    def __post_init__(self) -> None:
+        """Require the round's outcome to account for exactly the proposals it was given.
+
+        The receipt is the record a reader consults to learn what happened to each submitted
+        proposal, and it previously validated nothing: it could admit an id never submitted, reject
+        one it also admitted, or credit a merge to inputs that were not part of the round
+        (MXR-080-0644).
+
+        What is checked is deliberately narrower than "every id is accounted for", because the
+        round MINTS ids: merging several proposals for one node produces ``merged:<fingerprint>``,
+        and a drift correction rebases under ``rebased:<...>``. An admitted id absent from the
+        inputs is therefore ordinary, and requiring containment rejects real rounds -- see the note
+        at the first check. What holds regardless of how many mint points exist is that a recorded
+        merge was admitted, that a merge is credited only to proposals this round received, that a
+        rejection names a proposal this round received, that nothing is both admitted and rejected
+        (a merge's constituents counting as admitted through it), and that staleness was assessed
+        only for submitted proposals.
+        """
+        inputs = set(self.input_proposal_ids)
+        admitted = set(self.admitted_proposal_ids)
+        merge_keys = set(self.merged_proposals)
+
+        # NOT checked: that every admitted id is an input or a merge key. Merging is not the only
+        # step that mints ids -- a drift correction rebases a proposal under a fresh
+        # ``rebased:<...>`` id, and more mint points may follow. An admitted id absent from the
+        # inputs is therefore normal, so demanding containment here rejects rounds the coordinator
+        # legitimately produces. Measured: it broke
+        # typed_hierarchical_test::test_corrected_eventual_provider_returns_identity_bound_exact_rebase.
+        unadmitted_merges = sorted(merge_keys - admitted)
+        if unadmitted_merges:
+            raise ValueError(
+                f"hierarchical round {self.round_id} records merges {unadmitted_merges} that do not "
+                "appear in admitted_proposal_ids; a merge that was not admitted did not happen."
+            )
+        for merged_id, sources in self.merged_proposals.items():
+            stray = sorted(set(sources) - inputs)
+            if stray:
+                raise ValueError(
+                    f"hierarchical round {self.round_id} credits merge {merged_id!r} to {stray}, "
+                    "which were not submitted to this round."
+                )
+        rejected_ids = set(self.rejected)
+        stray_rejects = sorted(rejected_ids - inputs)
+        if stray_rejects:
+            raise ValueError(f"hierarchical round {self.round_id} rejected {stray_rejects} which it never received.")
+        # A merged constituent is admitted through its merge, so it counts as admitted here.
+        admitted_inputs = (admitted & inputs) | {src for sources in self.merged_proposals.values() for src in sources}
+        both = sorted(admitted_inputs & rejected_ids)
+        if both:
+            raise ValueError(
+                f"hierarchical round {self.round_id} reports {both} as both admitted and rejected; "
+                "one proposal has one outcome."
+            )
+        stray_staleness = sorted({receipt.proposal_id for receipt in self.staleness} - inputs)
+        if stray_staleness:
+            raise ValueError(
+                f"hierarchical round {self.round_id} carries staleness receipts for {stray_staleness}, "
+                "which were not submitted to this round."
+            )
+
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible hierarchical receipt."""
 
