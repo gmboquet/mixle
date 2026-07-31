@@ -232,7 +232,7 @@ class IntegerCategoricalDistribution(SequenceEncodableProbabilityDistribution):
         With a Dirichlet(alpha) (or SymmetricDirichlet(alpha)) prior over the probability vector this
         caches the variational expected log-probabilities
         E[log p_k] = digamma(alpha_k) - digamma(sum_k alpha_k) so that
-        ``expected_log_density(x) = E[log p_{x - min_val}] - log(1 + default_value)``. Any other prior
+        ``expected_log_density(x) = E[log p_{x - min_val}]``. Any other prior
         (including ``None``) leaves the distribution a plain point model.
         """
         from mixle.stats.bayes.dirichlet import DirichletDistribution
