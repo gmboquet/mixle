@@ -290,6 +290,12 @@ class ContextGraph:
     def __init__(self) -> None:
         self.nodes: dict[str, ContextNode] = {}
         self.edges: dict[str, ContextEdge] = {}
+        # (source, target, kind) -> edge_id. An edge's IDENTITY is the relation it asserts, not the
+        # label the caller happened to mint for it; confidence and provenance are payload. Without
+        # this index the same claim could enter the graph any number of times under fresh ids, and
+        # every downstream count of that relation -- support tallies, degree, traversal weight --
+        # would multiply by however many times it was restated (MXR-080-0643).
+        self._relations: dict[tuple[str, str, ContextEdgeKind], str] = {}
         self.version = 0
         self._lock = threading.RLock()
 
@@ -318,7 +324,17 @@ class ContextGraph:
                 if existing != edge:
                     raise ValueError("context edge id collision with different content: %s" % edge.edge_id)
                 return
+            relation = (edge.source_node, edge.target_node, edge.kind)
+            held_by = self._relations.get(relation)
+            if held_by is not None:
+                raise ValueError(
+                    "context edge %s restates the relation %s --%s--> %s already held by edge %s. "
+                    "Merge the provenance into the existing edge instead of adding a second id: two "
+                    "edges asserting one relation double-count it in every downstream tally."
+                    % (edge.edge_id, edge.source_node, edge.kind.value, edge.target_node, held_by)
+                )
             self.edges[edge.edge_id] = edge
+            self._relations[relation] = edge.edge_id
             self.version += 1
 
     def verify(
@@ -351,6 +367,16 @@ class ContextGraph:
             self.version += 1
             return updated
 
+    def _reindex_relations(self) -> None:
+        """Rebuild the (source, target, kind) index from ``self.edges``.
+
+        Every path that replaces ``self.edges`` wholesale -- remove_node, restore,
+        replace_if_unchanged -- must call this. Refreshing the container and leaving the derived
+        index behind is the same stale-cache defect as MXR-080-1192: the guard would keep rejecting
+        relations that a restore had already removed, and would stop rejecting ones it reinstated.
+        """
+        self._relations = {(e.source_node, e.target_node, e.kind): eid for eid, e in self.edges.items()}
+
     def remove_node(self, node_id: str) -> None:
         """Remove one node and all incident edges as one versioned mutation."""
 
@@ -362,6 +388,7 @@ class ContextGraph:
                 for edge_id, edge in self.edges.items()
                 if edge.source_node != node_id and edge.target_node != node_id
             }
+            self._reindex_relations()
             del self.nodes[node_id]
             self.version += 1
 
@@ -404,6 +431,7 @@ class ContextGraph:
 
         with self._lock:
             self.version, self.nodes, self.edges = copy.deepcopy(snapshot)
+            self._reindex_relations()
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
@@ -424,6 +452,7 @@ class ContextGraph:
             if current != expected:
                 raise RuntimeError("context graph changed while the action adapter was running.")
             self.version, self.nodes, self.edges = copy.deepcopy(replacement)
+            self._reindex_relations()
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible graph sorted by stable ids."""
