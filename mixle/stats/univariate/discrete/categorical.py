@@ -1126,6 +1126,15 @@ class CategoricalEstimator(ParameterEstimator):
             # directly above -- an HMM whose emission component drew zero weight for an iteration
             # crashed the whole fit rather than recovering on the next E-step. A pseudo_count has
             # nothing to spread over when there are no levels, so there is no smoothing to apply.
+            #
+            # MXR-080-1220 calls the result "unsampleable and non-generative". It is, and that is the
+            # honest description of a fit with no evidence -- but it is not silent about it:
+            # ``log_density`` returns ``-inf`` for every input (correct: nothing is in support), and
+            # ``sampler()`` raises "CategoricalSampler requires pmap to contain at least one
+            # category" rather than inventing a draw. The failure lands at the boundary that cannot
+            # proceed, naming its cause. Promoting it to a raise HERE is what the paragraph above
+            # rules out, and fabricating a uniform over levels never observed would be worse: it
+            # would make a zero-evidence component score and sample as if it had learned something.
             return CategoricalDistribution({}, default_value=0.0, name=self.name, keys=self.keys)
 
         stats_sum = sum(suff_stat.values())
