@@ -1,12 +1,14 @@
 """Focused contract checks for independent capability lifecycle dimensions."""
 
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from mixle.capability_lifecycle import (
     SCHEMA_VERSION,
     AuthorizationDecision,
     AuthorizationOutcome,
+    AuthorizationProvenance,
     AuthorizationStatus,
     CapabilityIdentity,
     CapabilityLifecycle,
@@ -85,7 +87,10 @@ class CapabilityLifecycleContractTest(unittest.TestCase):
 
         revoked = decision.revoke(by="safety-board", at=T0 + timedelta(hours=1), reason="new hazard")
         self.assertEqual(revoked.status_at(T0 + timedelta(hours=1)), AuthorizationStatus.REVOKED)
-        self.assertEqual(AuthorizationDecision.from_dict(revoked.as_dict()), revoked)
+        # Round trip preserves every decision field. Provenance is deliberately NOT preserved --
+        # see the loaded-provenance tests below (MXR-080-1725).
+        reloaded = AuthorizationDecision.from_dict(revoked.as_dict())
+        self.assertEqual(replace(reloaded, provenance=revoked.provenance), revoked)
 
     def test_directly_constructed_string_outcomes_are_canonicalized_not_trusted(self):
         # MXR-080-1677: a str-valued outcome used to survive __post_init__ untouched, so the
@@ -102,7 +107,8 @@ class CapabilityLifecycleContractTest(unittest.TestCase):
         self.assertEqual(denied.status_at(T0), AuthorizationStatus.DENIED)
         self.assertFalse(denied.allows("run", at=T0))
         self.assertEqual(denied.as_dict()["outcome"], "denied")
-        self.assertEqual(AuthorizationDecision.from_dict(denied.as_dict()), denied)
+        reloaded = AuthorizationDecision.from_dict(denied.as_dict())
+        self.assertEqual(replace(reloaded, provenance=denied.provenance), denied)
 
         granted = AuthorizationDecision(
             decision_id="auth-granted",
@@ -268,6 +274,59 @@ class CapabilityLifecycleContractTest(unittest.TestCase):
         )
         self.assertEqual(decision.outcome, AuthorizationOutcome.GRANTED)
         self.assertTrue(decision.allows("org", at=datetime.now(UTC)))
+
+
+class AuthorizationProvenanceTest(unittest.TestCase):
+    """A grant reconstructed from persisted content is not evidence anyone authorized anything.
+
+    MXR-080-1725: `issued_by` is a self-asserted string and this library has no key with which to
+    check it, so a hand-built record could mint `issued_by="root"` and be indistinguishable from a
+    real grant. The authority gap cannot be closed here -- but it is no longer silent.
+    """
+
+    def setUp(self):
+        self.identity = CapabilityIdentity(capability_id="mixle.probe", version="0.8.0")
+        self.granted = AuthorizationDecision(
+            decision_id="auth-1",
+            capability=self.identity,
+            outcome=AuthorizationOutcome.GRANTED,
+            issued_by="safety-board",
+            scopes=frozenset({"run"}),
+            decided_at=T0,
+        )
+
+    def test_an_issued_decision_satisfies_a_verified_requirement_only_after_verification(self):
+        self.assertIs(self.granted.provenance, AuthorizationProvenance.ISSUED)
+        self.assertTrue(self.granted.allows("run", at=T0))
+        self.assertFalse(self.granted.allows("run", at=T0, require_verified=True))
+
+    def test_a_hand_built_record_cannot_assert_its_own_provenance(self):
+        forged = dict(self.granted.as_dict())
+        forged["issued_by"] = "root"
+        forged["provenance"] = "verified"  # the attacker controls the content, including this
+        forged["verified_by"] = "root"
+        loaded = AuthorizationDecision.from_dict(forged)
+        self.assertIs(loaded.provenance, AuthorizationProvenance.LOADED)
+        self.assertEqual(loaded.verified_by, "")
+        self.assertFalse(loaded.allows("run", at=T0, require_verified=True))
+
+    def test_marking_verified_records_who_checked_it(self):
+        loaded = AuthorizationDecision.from_dict(self.granted.as_dict())
+        verified = loaded.mark_verified(by="registry.example")
+        self.assertIs(verified.provenance, AuthorizationProvenance.VERIFIED)
+        self.assertEqual(verified.verified_by, "registry.example")
+        self.assertTrue(verified.allows("run", at=T0, require_verified=True))
+        self.assertFalse(loaded.allows("run", at=T0, require_verified=True))  # original untouched
+
+    def test_marking_verified_requires_a_verifier_identity(self):
+        with self.assertRaisesRegex(ValueError, "verifier identity"):
+            self.granted.mark_verified(by="   ")
+
+    def test_a_revoked_grant_stays_refused_however_it_is_verified(self):
+        revoked = self.granted.revoke(by="safety-board", at=T0 + timedelta(hours=1), reason="hazard")
+        verified = revoked.mark_verified(by="registry.example")
+        at = T0 + timedelta(hours=2)
+        self.assertFalse(verified.allows("run", at=at, require_verified=True))
 
 
 if __name__ == "__main__":
