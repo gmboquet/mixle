@@ -10,11 +10,13 @@ from mixle.stats import (
     BackoffDataEncoder,
     BackoffDistribution,
     BackoffEstimator,
+    CategoricalDistribution,
     IntegerCategoricalDistribution,
     IntegerCategoricalEstimator,
     PoissonDistribution,
     PoissonEstimator,
 )
+from mixle.stats.compute.pdist import DensitySemantics
 
 
 def _sparse_base() -> IntegerCategoricalDistribution:
@@ -104,6 +106,53 @@ class BackoffFitTest(unittest.TestCase):
                 escape_weight=0.5,
                 max_escape_weight=0.05,
             )
+
+
+class DensitySemanticsTest(unittest.TestCase):
+    """A backoff inherits its children's status rather than conferring one (MXR-080-1844)."""
+
+    def test_two_exact_children_stay_exact(self):
+        backoff = BackoffDistribution(PoissonDistribution(1.0), PoissonDistribution(2.0))
+        self.assertIs(backoff.density_semantics(), DensitySemantics.EXACT)
+
+    def test_a_likelihood_factor_child_makes_the_backoff_a_factor(self):
+        factor = CategoricalDistribution({"a": 0.5, "b": 0.5}, scoring_only=True)
+        self.assertIs(factor.density_semantics(), DensitySemantics.LIKELIHOOD_FACTOR)
+        backoff = BackoffDistribution(factor, CategoricalDistribution({"a": 0.5, "b": 0.5}))
+        # The escape-weighted sum of an exact law and an unnormalized factor is itself unnormalized.
+        self.assertIs(backoff.density_semantics(), DensitySemantics.LIKELIHOOD_FACTOR)
+
+    def test_the_factor_may_be_either_child(self):
+        factor = CategoricalDistribution({"a": 0.5, "b": 0.5}, scoring_only=True)
+        backoff = BackoffDistribution(CategoricalDistribution({"a": 0.5, "b": 0.5}), factor)
+        self.assertIs(backoff.density_semantics(), DensitySemantics.LIKELIHOOD_FACTOR)
+
+
+class SampleCountTest(unittest.TestCase):
+    """``sample(size)`` takes a count, not anything ``int()`` will swallow (MXR-080-1845)."""
+
+    def _sampler(self):
+        return BackoffDistribution(
+            CategoricalDistribution({"a": 0.5, "b": 0.5}), CategoricalDistribution({"a": 0.9, "b": 0.1})
+        ).sampler(seed=0)
+
+    def test_an_exact_count_draws_that_many(self):
+        self.assertEqual(len(self._sampler().sample(3)), 3)
+
+    def test_none_still_draws_a_single_value(self):
+        self.assertIsInstance(self._sampler().sample(), str)
+
+    def test_a_fractional_count_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "exact non-negative integer"):
+            self._sampler().sample(2.7)  # silently became two draws
+
+    def test_a_boolean_count_is_rejected(self):
+        with self.assertRaisesRegex(TypeError, "exact non-negative integer"):
+            self._sampler().sample(True)  # silently became one draw
+
+    def test_a_negative_count_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "exact non-negative integer"):
+            self._sampler().sample(-3)  # silently became an empty "successful" sample
 
 
 if __name__ == "__main__":
