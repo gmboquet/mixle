@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 
@@ -60,11 +60,22 @@ class PoolResult:
     cost: float = 0.0
     duration_s: float = 0.0
     reason: str = ""  # rejection/error explanation when status != 'done'
+    telemetry_error: str = ""  # why the promised ``pool_job`` event was not emitted; "" when it was
 
     @property
     def ok(self) -> bool:
         """Whether the job completed successfully."""
         return self.status == "done"
+
+    @property
+    def telemetry_recorded(self) -> bool:
+        """Whether this submission's ``pool_job`` event actually reached the telemetry sink.
+
+        Separate from :attr:`ok`: the job itself can succeed while its record is lost, and the two
+        failures need different responses -- a dropped event means the spend and duration behind this
+        result are missing from whatever ledger reconciles them.
+        """
+        return not self.telemetry_error
 
 
 class Backend(Protocol):
@@ -178,7 +189,10 @@ def submit(
 
     A job whose ``est_cost`` exceeds its ``budget`` is REJECTED before running. A BILLABLE backend
     (a real GPU pool) additionally requires ``confirm=True`` -- spend is never incurred implicitly.
-    Every submission emits a ``pool_job`` telemetry event (features + realized outcome).
+    Every submission emits a ``pool_job`` telemetry event (features + realized outcome). A telemetry
+    sink that fails does not fail the job -- but it does not disappear either: the reason lands on
+    ``result.telemetry_error`` (and ``result.telemetry_recorded`` goes false), so a caller
+    reconciling spend against that event stream can see which rows are missing from it.
 
     The confirm gate demands the literal Boolean ``True``, not merely a truthy value: ``confirm`` is
     routinely threaded through JSON payloads, CLI flags and form fields, where the *string* ``"false"``
@@ -243,11 +257,20 @@ def submit(
         else:
             result = _settle(job, response)
 
-    _emit(telemetry, job, backend, result)
+    failure = _emit(telemetry, job, backend, result)
+    if failure:
+        result = replace(result, telemetry_error=failure)
     return result
 
 
-def _emit(telemetry: Any, job: PoolJob, backend: Backend, result: PoolResult) -> None:
+def _emit(telemetry: Any, job: PoolJob, backend: Backend, result: PoolResult) -> str:
+    """Emit the ``pool_job`` event. Returns "" on success, or why it failed -- never raises.
+
+    A telemetry outage must not turn a completed job into a failure, but it must not vanish either:
+    the docstring above promises *every* submission emits an event, and a caller reconciling spend
+    against that ledger has no way to notice a silently dropped row. The reason travels back on the
+    result so the broken guarantee is visible exactly where the job's cost is.
+    """
     try:
         from mixle.telemetry import record
 
@@ -265,5 +288,6 @@ def _emit(telemetry: Any, job: PoolJob, backend: Backend, result: PoolResult) ->
             choice=result.status,
             outcome={"cost": result.cost, "duration_s": round(result.duration_s, 6), "ok": result.ok},
         )
-    except Exception:  # noqa: BLE001 - telemetry must never break a submission
-        pass
+    except Exception as exc:  # noqa: BLE001 - telemetry must never break a submission
+        return f"pool_job telemetry event not recorded: {type(exc).__name__}: {exc}"
+    return ""

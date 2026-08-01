@@ -207,6 +207,22 @@ class TelemetryTest(unittest.TestCase):
         self.assertEqual(events[1].choice, "rejected")
         self.assertEqual(events[0].features["kind"], "verb")
 
+    def test_a_healthy_sink_leaves_no_telemetry_error(self):
+        r = submit(PoolJob(run=lambda: 1, reason="demo"), telemetry=Telemetry())
+        self.assertTrue(r.telemetry_recorded)
+        self.assertEqual(r.telemetry_error, "")
+
+    def test_a_failing_sink_is_reported_on_the_result_not_erased(self):
+        class BrokenSink:
+            def record(self, *args, **kwargs):
+                raise RuntimeError("sink unreachable")
+
+        r = submit(PoolJob(run=lambda: 42, reason="demo"), telemetry=BrokenSink())
+        self.assertTrue(r.ok)  # a telemetry outage does not fail the job...
+        self.assertEqual(r.artifact, 42)
+        self.assertFalse(r.telemetry_recorded)  # ...but the lost event is visible
+        self.assertIn("sink unreachable", r.telemetry_error)
+
 
 if __name__ == "__main__":
     unittest.main()
