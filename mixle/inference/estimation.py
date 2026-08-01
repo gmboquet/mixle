@@ -471,6 +471,81 @@ def _initialize_with_support_fallback(
     return seq_initialize(enc_data=enc_data, estimator=estimator, rng=rng, p=1.0)
 
 
+def _encoded_row_count(enc_data: Any) -> int | None:
+    """Rows behind an encoded dataset, or ``None`` when the encoding does not report a count."""
+    try:
+        if isinstance(enc_data, list):
+            return int(sum(int(chunk[0]) for chunk in enc_data))
+        count = getattr(enc_data, "num_records", None)
+        return None if count is None else int(count)
+    except Exception:  # noqa: BLE001 - provenance must never break a fit that already succeeded
+        return None
+
+
+def _record_fit_provenance(
+    model: SequenceEncodableProbabilityDistribution,
+    trace: "_FitTrace",
+    *,
+    algorithm: str,
+    estimator: ParameterEstimator,
+    objective: str,
+    max_its: int,
+    delta: float | None,
+    enc_data: Any,
+    seed: int | None,
+) -> SequenceEncodableProbabilityDistribution:
+    """Attach a :class:`FitProvenance` describing the run that produced ``model``.
+
+    Never raises: a fit that has already succeeded must not fail because its receipt could not be
+    written. A model that reaches a caller without provenance is reported as ``None`` from
+    ``fit_provenance()``, which is honest -- the alternative would be a fabricated receipt.
+    """
+    try:
+        from mixle.stats.compute.pdist import FitProvenance
+
+        # Repairs are applied by estimators deep inside the M-step, so the model is what knows about
+        # them; the loop only knows about iterations. Merge both, deduplicated and ordered.
+        model_repairs = tuple(model.numerical_repairs()) if hasattr(model, "numerical_repairs") else ()
+        repairs = tuple(dict.fromkeys(tuple(trace.repairs) + model_repairs))
+        model.with_fit_provenance(
+            FitProvenance(
+                algorithm=algorithm,
+                estimator=type(estimator).__name__,
+                objective=objective,
+                iterations=int(trace.iterations),
+                max_iterations=int(max_its),
+                converged=bool(trace.converged),
+                delta=None if delta is None else float(delta),
+                final_objective=trace.final_objective,
+                objective_gain=trace.objective_gain,
+                n_observations=_encoded_row_count(enc_data),
+                repairs=repairs,
+                seed=seed,
+            )
+        )
+    except Exception:  # noqa: BLE001 - see docstring
+        pass
+    return model
+
+
+class _FitTrace:
+    """Mutable scratch the EM loop fills in so ``optimize`` can describe the run it just performed.
+
+    A plain object rather than a return-value change: ``_em_loop`` has several exit paths and two
+    callers, and widening its tuple would put the burden of threading a third element on code that has
+    nothing to do with provenance.
+    """
+
+    __slots__ = ("iterations", "converged", "final_objective", "objective_gain", "repairs")
+
+    def __init__(self) -> None:
+        self.iterations = 0
+        self.converged = False
+        self.final_objective: float | None = None
+        self.objective_gain: float | None = None
+        self.repairs: tuple[str, ...] = ()
+
+
 def _em_loop(
     enc_data: Any,
     estimator: ParameterEstimator,
@@ -487,6 +562,7 @@ def _em_loop(
     fused_step_fn: Any | None = None,
     obj_label: str | None = None,
     on_step: Any | None = None,
+    trace: "_FitTrace | None" = None,
 ) -> tuple[SequenceEncodableProbabilityDistribution, float]:
     """Canonical EM iteration shared by the public estimation entry points.
 
@@ -525,6 +601,7 @@ def _em_loop(
             track_best,
             obj_label,
             on_step,
+            trace,
         )
 
     from mixle.inference.transaction import MutableStateSnapshot
@@ -588,6 +665,14 @@ def _em_loop(
             reported_ll = ll if accepted else old_ll
             reported_delta = dll if accepted else 0.0
             on_step(EMStep(i + 1, model, float(reported_ll), float(reported_delta)))
+        if trace is not None:
+            # Record on every iteration, not only at a clean exit: a run that stops because a step was
+            # rejected still produced these numbers, and that is precisely the case a caller most needs
+            # described (MXR-080-1190/1202).
+            trace.iterations = i + 1
+            trace.converged = bool(converged)
+            trace.final_objective = float(ll) if accepted else trace.final_objective
+            trace.objective_gain = float(dll) if accepted else 0.0
         if converged or (not accepted):
             break
 
@@ -615,6 +700,7 @@ def _fused_em_loop(
     track_best,
     obj_label=None,
     on_step=None,
+    trace=None,
 ):
     """EM loop that reuses the E-step's likelihood normalizer instead of a separate score pass.
 
@@ -670,6 +756,11 @@ def _fused_em_loop(
             # on_step consumer that checkpoints model alongside log_density (as the EMStep docstring
             # explicitly recommends) doesn't persist a mismatched pair.
             on_step(EMStep(i + 1, model, float(ll_model), float(dll)))
+        if trace is not None:
+            trace.iterations = i + 1
+            trace.converged = bool(converged)
+            trace.final_objective = float(ll_model)
+            trace.objective_gain = float(dll)
         if converged:
             exhausted = False
             break
@@ -1353,7 +1444,23 @@ def optimize(
                             float(np.mean([h.active_fraction for h in block_history])),
                         )
                     )
-                return best_model
+                block_trace = _FitTrace()
+                block_trace.iterations = len(block_history)
+                block_trace.final_objective = float(block_history[-1].objective) if block_history else None
+                # Block EM stops on its own convergence test; it reports rounds, not a delta, so
+                # "converged" is "it stopped before the cap" rather than an asserted gain threshold.
+                block_trace.converged = bool(block_history) and len(block_history) < max_its
+                return _record_fit_provenance(
+                    best_model,
+                    block_trace,
+                    algorithm="block-em",
+                    estimator=estimator,
+                    objective=resolved_objective,
+                    max_its=max_its,
+                    delta=delta,
+                    enc_data=enc_data,
+                    seed=seed,
+                )
 
         # Cost-model auto-fusion: with no explicit engine, switch a large-enough local MLE fit of a
         # fusible model onto the single-pass fused numba kernel (parity-identical, ~1.7x once warm).
@@ -1403,6 +1510,7 @@ def optimize(
 
         objective_scorer = _objective_scorer(resolved_objective, estimator, engine)
         objective_fn = lambda candidate: objective_scorer(enc_data, candidate)[1]
+        trace = _FitTrace()
         best_model, _ = _em_loop(
             enc_data,
             estimator,
@@ -1419,9 +1527,20 @@ def optimize(
             fused_step_fn=fused_step_fn,
             obj_label={"mle": None, "map": "penalized-LL", "vb": "ELBO"}[resolved_objective],
             on_step=on_step,
+            trace=trace,
         )
 
-        return best_model
+        return _record_fit_provenance(
+            best_model,
+            trace,
+            algorithm="fused-em" if fused_step_fn is not None else "em",
+            estimator=estimator,
+            objective=resolved_objective,
+            max_its=max_its,
+            delta=loop_delta,
+            enc_data=enc_data,
+            seed=seed,
+        )
     finally:
         if close_created_enc_data and callable(getattr(enc_data, "close", None)):
             enc_data.close()

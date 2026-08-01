@@ -1224,6 +1224,7 @@ from mixle.stats.compute.pdist import (  # noqa: F401
     DistributionEnumerator,
     DistributionSampler,
     EnumerationError,
+    FitProvenance,
     KeyValidationError,
     NucleusResult,
     ParameterEstimator,

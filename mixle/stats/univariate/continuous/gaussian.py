@@ -73,6 +73,19 @@ class GaussianFisherView(FixedFisherView):
         return info
 
 
+def _record_variance_floor(dist: Any, unfloored: float, floored: float, floor: float) -> Any:
+    """Note on ``dist`` when the variance floor actually bound, so a fit can report it.
+
+    The floor exists so a degenerate component cannot produce a zero variance and an infinite density.
+    When it binds, though, the returned variance is not the one the data implied, and a caller reading
+    only the parameters cannot tell (MXR-080-1202). Recording the repair is free on the ordinary path,
+    where the floor does not bind and nothing is set.
+    """
+    if floored > unfloored:
+        dist._numerical_repairs = ("variance-floored(%.3g -> %.3g)" % (unfloored, floor),)
+    return dist
+
+
 class GaussianDistribution(SequenceEncodableProbabilityDistribution):
     """Univariate Gaussian distribution."""
 
@@ -820,10 +833,11 @@ class GaussianEstimator(ParameterEstimator):
         new_b = old_b + 0.5 * (new_b0 + new_b1)
 
         denom = new_a - 0.5
-        new_sigma2 = new_b / denom if denom > 0.0 else self.min_covar
-        new_sigma2 = max(new_sigma2, self.min_covar)  # match the MLE-path variance floor
+        unfloored = new_b / denom if denom > 0.0 else self.min_covar
+        new_sigma2 = max(unfloored, self.min_covar)  # match the MLE-path variance floor
         new_prior = NormalGammaDistribution(new_mu, new_n, new_a, new_b)
-        return GaussianDistribution(new_mu, new_sigma2, name=self.name, keys=self.keys, prior=new_prior)
+        rv = GaussianDistribution(new_mu, new_sigma2, name=self.name, keys=self.keys, prior=new_prior)
+        return _record_variance_floor(rv, unfloored, new_sigma2, self.min_covar)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float, float]) -> "GaussianDistribution":
         """Estimate a Gaussian distribution from aggregated sufficient statistics.
@@ -870,9 +884,11 @@ class GaussianEstimator(ParameterEstimator):
         if count == 0.0 and pc2 in (None, 0.0) and prior_variance is not None:
             sigma2 = prior_variance
 
+        unfloored = sigma2
         sigma2 = max(sigma2, self.min_covar)
 
-        return GaussianDistribution(mu, sigma2, name=self.name, keys=self.keys, prior=self.prior)
+        rv = GaussianDistribution(mu, sigma2, name=self.name, keys=self.keys, prior=self.prior)
+        return _record_variance_floor(rv, unfloored, sigma2, self.min_covar)
 
 
 class GaussianDataEncoder(DataSequenceEncoder):
