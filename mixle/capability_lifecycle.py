@@ -36,6 +36,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "AuthorizationDecision",
     "AuthorizationOutcome",
+    "AuthorizationProvenance",
     "AuthorizationStatus",
     "CapabilityIdentity",
     "CapabilityLifecycle",
@@ -218,9 +219,37 @@ class CapabilityIdentity:
         )
 
 
+class AuthorizationProvenance(StrEnum):
+    """Where an :class:`AuthorizationDecision` came from -- NOT a statement about who issued it.
+
+    ``ISSUED`` means the object was constructed in this process by code that was already trusted to
+    issue it. ``LOADED`` means it was reconstructed from serialized content (:meth:`from_dict`), whose
+    ``issued_by`` is just a string the content claimed. ``VERIFIED`` means an embedder checked that
+    content against whatever authority it actually trusts and said so via :meth:`mark_verified`.
+    """
+
+    ISSUED = "issued"
+    LOADED = "loaded"
+    VERIFIED = "verified"
+
+
 @dataclass(frozen=True, slots=True)
 class AuthorizationDecision:
-    """Scoped authorization issued by a named principal for one immutable version."""
+    """Scoped authorization issued by a named principal for one immutable version.
+
+    **This record carries no proof of who issued it.** ``issued_by`` is a self-asserted string, and
+    this library has no key, trust domain, or signature scheme with which to check it -- so anyone
+    who can supply the persisted content can write ``issued_by="root"``, ``outcome="granted"`` and
+    the scopes they want (MXR-080-1725). Adding an unkeyed digest here would not change that: whoever
+    writes the record can write the digest too. The gap is real and cannot be closed inside a library
+    that never sees a key.
+
+    What is closed is the *silent* part. :attr:`provenance` records whether the object was issued in
+    this process, merely deserialized, or checked by an embedder against a real authority, and
+    :meth:`allows` takes ``require_verified=True`` to refuse anything that has not been. A caller
+    enforcing a trust boundary passes that flag; the deserialize-and-inspect paths that just read an
+    audit record are unaffected.
+    """
 
     decision_id: str
     capability: CapabilityIdentity
@@ -233,6 +262,8 @@ class AuthorizationDecision:
     revoked_at: datetime | None = None
     revoked_by: str | None = None
     revocation_reason: str = ""
+    provenance: AuthorizationProvenance = AuthorizationProvenance.ISSUED
+    verified_by: str = ""
 
     def __post_init__(self) -> None:
         # Canonicalize the outcome *first*: every decision rule below (and in
@@ -267,6 +298,11 @@ class AuthorizationDecision:
             object.__setattr__(self, "revoked_at", revoked_at)
         elif self.revoked_by is not None or self.revocation_reason:
             raise ValueError("revocation metadata requires revoked_at")
+        object.__setattr__(self, "provenance", AuthorizationProvenance(self.provenance))
+        if self.provenance is AuthorizationProvenance.VERIFIED and not self.verified_by.strip():
+            raise ValueError("verified_by is required when provenance is 'verified'")
+        if self.provenance is not AuthorizationProvenance.VERIFIED and self.verified_by:
+            raise ValueError("verified_by is only meaningful on a verified authorization")
 
     def status_at(self, at: datetime) -> AuthorizationStatus:
         """Return the decision's effective status at ``at``."""
@@ -281,9 +317,29 @@ class AuthorizationDecision:
             return AuthorizationStatus.EXPIRED
         return AuthorizationStatus.GRANTED
 
-    def allows(self, scope: str, *, at: datetime) -> bool:
-        """Return whether this decision authorizes ``scope`` at ``at``."""
+    def allows(self, scope: str, *, at: datetime, require_verified: bool = False) -> bool:
+        """Return whether this decision authorizes ``scope`` at ``at``.
+
+        ``require_verified=True`` additionally demands that the record's provenance be
+        :attr:`~AuthorizationProvenance.VERIFIED` -- i.e. that an embedder checked it against an
+        authority this library cannot see. Pass it anywhere the answer gates real access; a record
+        that merely deserialized cleanly is not evidence that anyone authorized anything
+        (MXR-080-1725).
+        """
+        if require_verified and self.provenance is not AuthorizationProvenance.VERIFIED:
+            return False
         return self.status_at(at) is AuthorizationStatus.GRANTED and (scope in self.scopes or "*" in self.scopes)
+
+    def mark_verified(self, *, by: str) -> AuthorizationDecision:
+        """Return a copy marked as checked by ``by`` against a trust authority outside this library.
+
+        Call this only after actually verifying the record -- a signature, a registry lookup, an
+        operator confirmation. The library performs no check of its own here and cannot: it is
+        recording *your* verdict so downstream ``allows(..., require_verified=True)`` can act on it.
+        """
+        if not by or not by.strip():
+            raise ValueError("mark_verified requires a non-empty verifier identity")
+        return replace(self, provenance=AuthorizationProvenance.VERIFIED, verified_by=by.strip())
 
     def revoke(self, *, by: str, at: datetime, reason: str = "") -> AuthorizationDecision:
         """Return a revoked copy; the original audit record remains unchanged."""
@@ -307,11 +363,20 @@ class AuthorizationDecision:
             "revoked_at": None if self.revoked_at is None else _timestamp(self.revoked_at),
             "revoked_by": self.revoked_by,
             "revocation_reason": self.revocation_reason,
+            # Recorded for the audit trail, deliberately NOT honored by ``from_dict``: a record that
+            # says "verified" is only a record that says so.
+            "provenance": self.provenance.value,
+            "verified_by": self.verified_by,
         }
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> AuthorizationDecision:
-        """Parse an *unauthenticated* record; see the module docstring."""
+        """Parse an *unauthenticated* record; see the class docstring.
+
+        The result always carries :attr:`~AuthorizationProvenance.LOADED` provenance, whatever the
+        content claims, so it is refused by ``allows(..., require_verified=True)`` until an embedder
+        checks it and calls :meth:`mark_verified`.
+        """
         _require_schema_version(value, "authorization decision")
         return cls(
             decision_id=str(value["decision_id"]),
@@ -329,6 +394,10 @@ class AuthorizationDecision:
             ),
             revoked_by=None if value.get("revoked_by") is None else str(value["revoked_by"]),
             revocation_reason=str(value.get("revocation_reason", "")),
+            # Deserializing proves the bytes parse, nothing more. A persisted record is LOADED even if
+            # it claims otherwise -- provenance is deliberately not read from the content, because the
+            # content is exactly what an attacker controls. Re-establishing trust is `mark_verified`.
+            provenance=AuthorizationProvenance.LOADED,
         )
 
 
