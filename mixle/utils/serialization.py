@@ -60,14 +60,15 @@ _OPTIONAL_SERIALIZATION_MODULES = (
 # Persistence compatibility is narrower than runtime serializability. These schemas have historical
 # fixtures and an explicit v0 -> v1 migration. Every other registered type remains usable for
 # same-version round trips but is honestly recorded as provisional in the schema manifest.
-# Attributes that describe how an object was PRODUCED, not what it is. They are deliberately dropped
-# from the payload and excluded from the declared-field check below: a distribution's serialized state
-# is its parameters, and provenance is not one of them.
+# Attributes that describe how an object was PRODUCED, not what it is. They are excluded from `state`
+# and from the declared-field check below, because a distribution's serialized state is its parameters
+# and provenance is not one of them.
 #
-# Not round-tripping them is the point, not a limitation. A deserialized model reports
-# ``fit_provenance() is None`` -- "no fit produced this object in this process" -- rather than a
-# reconstructed receipt, for the same reason a deserialized authorization is not a grant
-# (MXR-080-1725): a record claiming a fit converged is only a record claiming it.
+# Excluded from `state` is NOT the same as discarded: fit provenance is carried in the object envelope
+# beside `state` and restored on decode, so a persisted fitted model keeps its receipt
+# (MXR-080-1190/1202). Unlike an authorization, a fit receipt confers no power -- it describes rather
+# than permits -- so preserving it is information, not privilege, and the fail-closed reasoning that
+# keeps a deserialized grant from authorizing (MXR-080-1725) does not transfer here.
 _NON_STATE_ATTRIBUTES = frozenset({"_fit_provenance", "_numerical_repairs"})
 
 _STABLE_STATE_FIELDS: dict[str, frozenset[str]] = {
@@ -678,13 +679,23 @@ def _encode_object(value: Any, active: set[int], memo: dict[int, str]) -> dict[s
                 "state for stable constructor-owned schema %r does not match its declared fields "
                 "(missing=%r, extra=%r)" % (tid, sorted(stable_fields - set(state)), sorted(set(state) - stable_fields))
             )
-        return {
+        envelope = {
             TAG: "object",
             "id": reference_id,
             "type": tid,
             "schema_version": OBJECT_SCHEMA_VERSION,
             "state": _encode(state, active, memo),
         }
+        # Fit provenance rides in the ENVELOPE, beside `state`, not inside it. It describes how the
+        # object was produced rather than what its parameters are, so the constructor-owned schema
+        # check above must not see it -- but dropping it entirely lost the receipt on every persisted
+        # model, which is exactly the "cannot reliably carry provenance across serialization
+        # boundaries" half of MXR-080-1190/1202. Carried here, it survives the round trip and is
+        # re-validated on the way back in.
+        provenance = getattr(value, "_fit_provenance", None)
+        if provenance is not None and hasattr(provenance, "as_dict"):
+            envelope["fit_provenance"] = provenance.as_dict()
+        return envelope
     finally:
         _cycle_leave(obj_id, active)
 
@@ -751,7 +762,7 @@ def _constructor_decode(cls: type[Any], state: dict[str, Any], tid: str) -> Any:
 
 
 def _decode_object(payload: dict[str, Any], references: dict[str, Any], depth: int, budget: list[int]) -> Any:
-    _require_fields(payload, {TAG, "type", "state"}, {"id", "schema_version"})
+    _require_fields(payload, {TAG, "type", "state"}, {"id", "schema_version", "fit_provenance"})
     ensure_pysp_serialization_registry()
     tid = payload["type"]
     if not isinstance(tid, str):
@@ -802,9 +813,28 @@ def _decode_object(payload: dict[str, Any], references: dict[str, Any], depth: i
         obj.__pysp_setstate__(state)
     else:
         obj = _constructor_decode(cls, state, tid)
+    _restore_fit_provenance(obj, payload)
     if reference_id is not None:
         references[reference_id] = obj
     return obj
+
+
+def _restore_fit_provenance(obj: Any, payload: dict[str, Any]) -> None:
+    """Reattach the envelope's fit receipt, re-validating it as untrusted input.
+
+    Rebuilt through ``FitProvenance.from_dict``, so a payload describing an impossible run -- more
+    iterations than its own cap, convergence after zero steps -- is refused here rather than believed
+    downstream. A payload with no receipt simply leaves ``fit_provenance()`` at ``None``.
+    """
+    record = payload.get("fit_provenance")
+    if record is None or not hasattr(obj, "with_fit_provenance"):
+        return
+    from mixle.stats.compute.pdist import FitProvenance
+
+    try:
+        obj.with_fit_provenance(FitProvenance.from_dict(record))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SerializationError("serialized fit provenance is not a valid FitProvenance record") from exc
 
 
 def _encode_callable(value: Callable[..., Any]) -> dict[str, Any]:
