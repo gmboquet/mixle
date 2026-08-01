@@ -73,6 +73,20 @@ class GaussianFisherView(FixedFisherView):
         return info
 
 
+def _checked_variance(value: Any) -> float:
+    """Return a variance that is a finite positive scalar -- the constructor's own domain.
+
+    Shared by ``__init__`` and ``__setattr__`` so a Gaussian cannot be mutated into a state it could
+    never have been constructed in (MXR-080-1192).
+    """
+    if isinstance(value, (bool, np.bool_)) or not np.isscalar(value):
+        raise TypeError(f"GaussianDistribution sigma2 must be a real scalar variance, got {value!r}")
+    numeric = float(value)
+    if not np.isfinite(numeric) or numeric <= 0.0:
+        raise ValueError(f"GaussianDistribution sigma2 must be finite and positive, got {value!r}")
+    return numeric
+
+
 def _record_variance_floor(dist: Any, unfloored: float, floored: float, floor: float) -> Any:
     """Note on ``dist`` when the variance floor actually bound, so a fit can report it.
 
@@ -200,18 +214,22 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
         and ``sampler`` kept reporting the *previous* variance's density -- a silent
         wrong answer rather than an error (``sigma2 = 100`` still scored as ``sigma2 = 1``).
 
-        This recomputes rather than validating. Callers legitimately install non-finite
-        or out-of-domain parameters to exercise downstream handling -- deserialized
-        legacy states and NaN-propagation tests both do -- so an out-of-domain variance
-        yields a NaN normalizer, which propagates honestly, instead of raising here and
-        rejecting a state the library is expected to represent.
+        It also enforces the SAME domain the constructor does. Recomputing without validating was
+        the earlier compromise, on the reasoning that callers install out-of-domain parameters to
+        exercise downstream handling -- but the result was that ``sigma2 = -1`` succeeded and turned
+        a valid distribution into a NaN scorer with no error anywhere (MXR-080-1192). A negative
+        variance is not a NaN-propagation case; it is a valid input producing a silently wrong
+        answer, which is the failure this class exists to avoid. Deserialization builds through
+        ``__init__`` and is unaffected: this is the mutation path only, and it now agrees with the
+        constructor instead of contradicting it.
         """
+        if name == "sigma2":
+            value = _checked_variance(value)
         object.__setattr__(self, name, value)
         if name != "sigma2":
             return
-        usable = np.isscalar(value) and np.isfinite(value) and value > 0.0
-        object.__setattr__(self, "log_const", -0.5 * log(2.0 * pi * value) if usable else float("nan"))
-        object.__setattr__(self, "const", 1.0 / sqrt(2.0 * pi * value) if usable else float("nan"))
+        object.__setattr__(self, "log_const", -0.5 * log(2.0 * pi * value))
+        object.__setattr__(self, "const", 1.0 / sqrt(2.0 * pi * value))
 
     def __str__(self) -> str:
         """Return a readable distribution summary."""

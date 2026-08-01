@@ -246,9 +246,8 @@ class AuthorizationDecision:
 
     What is closed is the *silent* part. :attr:`provenance` records whether the object was issued in
     this process, merely deserialized, or checked by an embedder against a real authority, and
-    :meth:`allows` takes ``require_verified=True`` to refuse anything that has not been. A caller
-    enforcing a trust boundary passes that flag; the deserialize-and-inspect paths that just read an
-    audit record are unaffected.
+    :meth:`allows` **refuses a merely-deserialized grant by default**. Reaching for the record over an
+    untrusted channel is the whole attack, so that is the direction the default has to fail.
     """
 
     decision_id: str
@@ -317,16 +316,25 @@ class AuthorizationDecision:
             return AuthorizationStatus.EXPIRED
         return AuthorizationStatus.GRANTED
 
-    def allows(self, scope: str, *, at: datetime, require_verified: bool = False) -> bool:
+    def allows(self, scope: str, *, at: datetime, trust_unverified: bool = False) -> bool:
         """Return whether this decision authorizes ``scope`` at ``at``.
 
-        ``require_verified=True`` additionally demands that the record's provenance be
-        :attr:`~AuthorizationProvenance.VERIFIED` -- i.e. that an embedder checked it against an
-        authority this library cannot see. Pass it anywhere the answer gates real access; a record
-        that merely deserialized cleanly is not evidence that anyone authorized anything
-        (MXR-080-1725).
+        A :attr:`~AuthorizationProvenance.LOADED` decision -- one reconstructed from serialized
+        content -- returns ``False`` here regardless of what the content says. Deserializing cleanly
+        is not evidence that anyone authorized anything, and the persisted bytes are exactly what an
+        attacker controls, so hand-built JSON claiming ``issued_by="root"`` no longer authorizes
+        through the ordinary public call (MXR-080-1725).
+
+        Making verification opt-*in* was the earlier mistake: every caller that did not know to ask
+        for it stayed vulnerable, which is the wrong default for the one method whose answer gates
+        access. ISSUED (constructed in-process by code already trusted to issue it) and VERIFIED
+        (checked by an embedder via :meth:`mark_verified`) both pass.
+
+        ``trust_unverified=True`` restores the old behaviour for a caller that has decided, knowingly
+        and locally, to act on an unverified record -- an offline audit tool reading an archive, say.
+        It is deliberately explicit and deliberately ugly to read at a call site.
         """
-        if require_verified and self.provenance is not AuthorizationProvenance.VERIFIED:
+        if self.provenance is AuthorizationProvenance.LOADED and not trust_unverified:
             return False
         return self.status_at(at) is AuthorizationStatus.GRANTED and (scope in self.scopes or "*" in self.scopes)
 
@@ -335,7 +343,7 @@ class AuthorizationDecision:
 
         Call this only after actually verifying the record -- a signature, a registry lookup, an
         operator confirmation. The library performs no check of its own here and cannot: it is
-        recording *your* verdict so downstream ``allows(..., require_verified=True)`` can act on it.
+        recording *your* verdict so a later ``allows()`` stops refusing the record.
         """
         if not by or not by.strip():
             raise ValueError("mark_verified requires a non-empty verifier identity")
@@ -374,8 +382,8 @@ class AuthorizationDecision:
         """Parse an *unauthenticated* record; see the class docstring.
 
         The result always carries :attr:`~AuthorizationProvenance.LOADED` provenance, whatever the
-        content claims, so it is refused by ``allows(..., require_verified=True)`` until an embedder
-        checks it and calls :meth:`mark_verified`.
+        content claims, so ``allows()`` refuses it until an embedder checks it and calls
+        :meth:`mark_verified`.
         """
         _require_schema_version(value, "authorization decision")
         return cls(

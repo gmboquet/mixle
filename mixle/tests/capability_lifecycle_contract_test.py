@@ -295,10 +295,10 @@ class AuthorizationProvenanceTest(unittest.TestCase):
             decided_at=T0,
         )
 
-    def test_an_issued_decision_satisfies_a_verified_requirement_only_after_verification(self):
+    def test_an_issued_decision_authorizes(self):
+        # ISSUED means this process built it from code already trusted to issue it.
         self.assertIs(self.granted.provenance, AuthorizationProvenance.ISSUED)
         self.assertTrue(self.granted.allows("run", at=T0))
-        self.assertFalse(self.granted.allows("run", at=T0, require_verified=True))
 
     def test_a_hand_built_record_cannot_assert_its_own_provenance(self):
         forged = dict(self.granted.as_dict())
@@ -308,15 +308,17 @@ class AuthorizationProvenanceTest(unittest.TestCase):
         loaded = AuthorizationDecision.from_dict(forged)
         self.assertIs(loaded.provenance, AuthorizationProvenance.LOADED)
         self.assertEqual(loaded.verified_by, "")
-        self.assertFalse(loaded.allows("run", at=T0, require_verified=True))
+        # Fail closed on the ORDINARY call: opt-in verification left every unaware caller exposed.
+        self.assertFalse(loaded.allows("run", at=T0))
+        self.assertTrue(loaded.allows("run", at=T0, trust_unverified=True))  # explicit, local decision
 
     def test_marking_verified_records_who_checked_it(self):
         loaded = AuthorizationDecision.from_dict(self.granted.as_dict())
         verified = loaded.mark_verified(by="registry.example")
         self.assertIs(verified.provenance, AuthorizationProvenance.VERIFIED)
         self.assertEqual(verified.verified_by, "registry.example")
-        self.assertTrue(verified.allows("run", at=T0, require_verified=True))
-        self.assertFalse(loaded.allows("run", at=T0, require_verified=True))  # original untouched
+        self.assertTrue(verified.allows("run", at=T0))
+        self.assertFalse(loaded.allows("run", at=T0))  # original untouched
 
     def test_marking_verified_requires_a_verifier_identity(self):
         with self.assertRaisesRegex(ValueError, "verifier identity"):
@@ -326,7 +328,7 @@ class AuthorizationProvenanceTest(unittest.TestCase):
         revoked = self.granted.revoke(by="safety-board", at=T0 + timedelta(hours=1), reason="hazard")
         verified = revoked.mark_verified(by="registry.example")
         at = T0 + timedelta(hours=2)
-        self.assertFalse(verified.allows("run", at=at, require_verified=True))
+        self.assertFalse(verified.allows("run", at=at))
 
 
 if __name__ == "__main__":
