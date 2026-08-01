@@ -155,5 +155,44 @@ class SampleCountTest(unittest.TestCase):
             self._sampler().sample(-3)  # silently became an empty "successful" sample
 
 
+class ChildScoreRankTest(unittest.TestCase):
+    """A batch score is one log-density per observation, whatever the children agree on."""
+
+    class _TwoDimensional:
+        """A child that returns a matrix instead of a vector."""
+
+        def log_density(self, x):
+            return 0.0
+
+        def seq_log_density(self, enc):
+            return np.zeros((2, 2))
+
+        def sampler(self, seed=None):
+            return None
+
+        def estimator(self, pseudo_count=None):
+            return None
+
+        def dist_to_encoder(self):
+            return None
+
+        def density_semantics(self):
+            return DensitySemantics.EXACT
+
+    def test_two_children_agreeing_on_a_matrix_are_still_rejected(self):
+        # Equal shapes were the whole check, so (2, 2) against (2, 2) passed and produced a
+        # two-dimensional "log-density" (MXR-080-1843).
+        backoff = BackoffDistribution(self._TwoDimensional(), self._TwoDimensional())
+        with self.assertRaisesRegex(ValueError, "one-dimensional"):
+            backoff.seq_log_density(("enc", "enc"))
+
+    def test_the_degenerate_escape_weights_check_too(self):
+        # w == 0 and w == 1 short-circuit past the two-child comparison entirely.
+        for weight in (0.0, 1.0):
+            backoff = BackoffDistribution(self._TwoDimensional(), self._TwoDimensional(), escape_weight=weight)
+            with self.assertRaisesRegex(ValueError, "one-dimensional"):
+                backoff.seq_log_density(("enc", "enc"))
+
+
 if __name__ == "__main__":
     unittest.main()
