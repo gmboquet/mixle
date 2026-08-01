@@ -21,7 +21,8 @@ An uncertified prompt returns :data:`ABSTAIN` (``None``), the same sentinel as
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Sequence
+import warnings
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -45,9 +46,35 @@ def _derive_seed(base_seed: int, prompt: Any) -> int:
     existing seed, so it silently breaks the reproducibility of runs already recorded, and it moved two
     calibration outcomes that depend on the current draws. The promise is therefore scoped to say what
     is true rather than widened by breaking compatibility -- pass a canonical prompt (or your own stable
-    key) when a draw must reproduce on another machine."""
+    key) when a draw must reproduce on another machine.
+
+    A prompt outside those types warns rather than failing: the seed is unchanged (so recorded runs keep
+    reproducing), but the caller learns the promise does not cover it instead of discovering it when the
+    same prompt draws differently on another machine."""
+    if not _is_canonically_representable(prompt):
+        warnings.warn(
+            f"seed derivation for a {type(prompt).__name__} prompt is not reproducible across processes: "
+            "its repr embeds a memory address, so equal prompts can seed differently. Pass a str/bytes/"
+            "number/None, a container of those, or your own stable key when a draw must reproduce "
+            "(MXR-080-1848).",
+            stacklevel=3,
+        )
     digest = hashlib.sha256(f"{base_seed}:{prompt!r}".encode()).digest()
     return int.from_bytes(digest[:8], "big") % (2**32)
+
+
+_CANONICAL_SCALARS = (str, bytes, bytearray, int, float, bool, type(None))
+
+
+def _is_canonically_representable(value: Any) -> bool:
+    """Whether ``repr(value)`` is stable across processes -- i.e. carries no object address."""
+    if isinstance(value, _CANONICAL_SCALARS):
+        return True
+    if isinstance(value, Mapping):
+        return all(_is_canonically_representable(k) and _is_canonically_representable(v) for k, v in value.items())
+    if isinstance(value, (tuple, list, set, frozenset)):
+        return all(_is_canonically_representable(item) for item in value)
+    return type(value).__repr__ is not object.__repr__
 
 
 def _binomial_error_upper(errors: int, accepted: int, tail_probability: float) -> float:

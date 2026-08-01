@@ -79,6 +79,22 @@ DEFAULT_ESCAPE_WEIGHT = 0.01
 DEFAULT_MAX_ESCAPE_WEIGHT = 0.05
 
 
+def _checked_count(value: Any, *, label: str) -> int:
+    """Return one exactly integral, finite, non-negative count -- ``bool`` and fractions are requests."""
+    if isinstance(value, (bool, np.bool_, str, bytes)):
+        raise TypeError("%s must be an exact non-negative integer, got %r." % (label, value))
+    array = np.asarray(value)
+    if array.ndim != 0 or np.iscomplexobj(array):
+        raise TypeError("%s must be a scalar exact non-negative integer, got %r." % (label, value))
+    try:
+        numeric = float(array)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("%s must be an exact non-negative integer, got %r." % (label, value)) from exc
+    if not np.isfinite(numeric) or numeric < 0.0 or np.floor(numeric) != numeric:
+        raise ValueError("%s must be an exact non-negative integer, got %r." % (label, value))
+    return int(numeric)
+
+
 def _validated_weight(value: Any, *, name: str, upper: float = 1.0) -> float:
     if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.integer, np.floating)):
         raise TypeError(f"backoff {name} must be a real number, not {type(value).__name__}.")
@@ -146,6 +162,19 @@ class BackoffDistribution(SequenceEncodableProbabilityDistribution):
             repr(self.name),
             repr(self.keys),
         )
+
+    def density_semantics(self):
+        """Join both children's semantics -- a backoff is only exact when everything it mixes is.
+
+        The base-class default returns ``EXACT``, which is a claim about the *whole* mixture. A backoff
+        over a child explicitly marked ``LIKELIHOOD_FACTOR`` (a categorical used as an unnormalized
+        factor, say) inherits that child's missing normalizer: the escape-weighted sum of an exact law
+        and an unnormalized factor is itself unnormalized. Reporting ``EXACT`` there tells a caller a
+        density integrates to one when it does not.
+        """
+        from mixle.stats.compute.pdist import join_density_semantics
+
+        return join_density_semantics(child.density_semantics() for child in (self.base, self.fallback))
 
     def density(self, x: Any) -> float:
         """Return the mixture density at ``x``."""
@@ -225,11 +254,17 @@ class BackoffSampler(DistributionSampler):
         self.fallback_sampler = dist.fallback.sampler(seed=self.rng.randint(0, 2**31 - 1))
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
-        """Draw ``size`` observations (or one when ``size`` is None)."""
+        """Draw ``size`` observations (or one when ``size`` is None).
+
+        ``size`` must be an exact non-negative integer. Bare ``int(size)`` silently accepted every
+        near-miss as a request: ``2.7`` became two draws, ``True`` became one, and ``-3`` became an
+        empty result that reads like a successful zero-row sample. Each of those is a caller mistake
+        producing a differently-sized dataset than the one asked for.
+        """
         if size is None:
             escaped = self.rng.rand() < self.dist.escape_weight
             return self.fallback_sampler.sample() if escaped else self.base_sampler.sample()
-        return [self.sample() for _ in range(int(size))]
+        return [self.sample() for _ in range(_checked_count(size, label="backoff sample size"))]
 
 
 class BackoffAccumulator(SequenceEncodableStatisticAccumulator):
