@@ -79,6 +79,23 @@ DEFAULT_ESCAPE_WEIGHT = 0.01
 DEFAULT_MAX_ESCAPE_WEIGHT = 0.05
 
 
+def _checked_child_scores(scores: Any, role: str) -> np.ndarray:
+    """Return a child's sequence scores as the one-per-observation vector the contract requires.
+
+    Equal shapes are not enough. Two children each returning a ``(2, 2)`` array agreed with one
+    another and produced a two-dimensional "log-density", when a batch score is one number per
+    observation (MXR-080-1843). A child handing back a matrix has misunderstood the encoding, and
+    averaging over it silently invents a result with the wrong rank.
+    """
+    array = np.asarray(scores, dtype=np.float64)
+    if array.ndim != 1:
+        raise ValueError(
+            f"backoff {role} child returned shape {array.shape}; a sequence score is one log-density "
+            "per observation, so it must be one-dimensional."
+        )
+    return array
+
+
 def _checked_count(value: Any, *, label: str) -> int:
     """Return one exactly integral, finite, non-negative count -- ``bool`` and fractions are requests."""
     if isinstance(value, (bool, np.bool_, str, bytes)):
@@ -200,8 +217,8 @@ class BackoffDistribution(SequenceEncodableProbabilityDistribution):
     def component_log_densities(self, x: tuple[Any, Any]) -> tuple[np.ndarray, np.ndarray]:
         """Return the two weighted component log-density vectors for encoded data ``x``."""
         base_enc, fallback_enc = x
-        base = np.asarray(self.base.seq_log_density(base_enc), dtype=np.float64)
-        fallback = np.asarray(self.fallback.seq_log_density(fallback_enc), dtype=np.float64)
+        base = _checked_child_scores(self.base.seq_log_density(base_enc), "base")
+        fallback = _checked_child_scores(self.fallback.seq_log_density(fallback_enc), "fallback")
         if base.shape != fallback.shape:
             # The children encode the same observations independently, so nothing upstream guarantees
             # they agree on the batch. numpy would broadcast a (1,) against an (n,) and score every row
@@ -216,9 +233,9 @@ class BackoffDistribution(SequenceEncodableProbabilityDistribution):
     def seq_log_density(self, x: tuple[Any, Any]) -> np.ndarray:
         """Vectorized mixture log-density over sequence-encoded observations."""
         if self.escape_weight == 0.0:
-            return np.asarray(self.base.seq_log_density(x[0]), dtype=np.float64)
+            return _checked_child_scores(self.base.seq_log_density(x[0]), "base")
         if self.escape_weight == 1.0:
-            return np.asarray(self.fallback.seq_log_density(x[1]), dtype=np.float64)
+            return _checked_child_scores(self.fallback.seq_log_density(x[1]), "fallback")
         base, fallback = self.component_log_densities(x)
         return np.logaddexp(base, fallback)
 
