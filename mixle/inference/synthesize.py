@@ -218,10 +218,15 @@ def synthesize(
     round_seed = seed
     while len(inputs) < n and tried < max_tries:
         want = n - len(inputs)
-        batch = _draws(source, min(want * 2, max_tries - tried) or 1, real_inputs, round_seed)
+        # Over-draw only to absorb *expected* rejections. Without a verifier nothing can be rejected, so
+        # a wider batch is pure waste: the surplus rows are discarded, yet a side-effecting source has
+        # already been invoked for each of them. Every drawn row counts as an attempt whether or not it
+        # is consumed, so `tried` and `max_tries` describe the calls the source actually received.
+        size = min(want * 2, max_tries - tried) if verify is not None else min(want, max_tries - tried)
+        batch = _draws(source, size or 1, real_inputs, round_seed)
+        tried += len(batch)
         round_seed += 1
         for x in batch:
-            tried += 1
             y = label(x) if label is not None else None
             if verify is not None and not _check(verify, x, y):
                 rejected += 1
@@ -235,7 +240,9 @@ def synthesize(
             break
 
     accepted = len(inputs)
-    rate = accepted / (accepted + rejected) if (accepted + rejected) else 1.0
+    # No row was ever put to the verifier, so there is no acceptance rate to report. `1.0` would read as a
+    # measured perfect pass rate; NaN says the statistic is undefined, which is what an empty request means.
+    rate = accepted / (accepted + rejected) if (accepted + rejected) else float("nan")
 
     # M2 precondition: "more rows like these" assumes the source rows are exchangeable -- when the source
     # is real data, test that and record the verdict with the dataset (a warning, never a refusal).

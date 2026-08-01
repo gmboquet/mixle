@@ -130,5 +130,35 @@ class SourcesTest(unittest.TestCase):
             ds.pairs()
 
 
+class SourceInvocationBudgetTest(unittest.TestCase):
+    """The source is user code: it must not be called for rows that are then thrown away."""
+
+    def test_unverified_synthesis_draws_exactly_n(self):
+        calls = []
+
+        def source(rng):
+            calls.append(1)
+            return 1.0
+
+        ds = synthesize(source, n=4, seed=0)
+        self.assertEqual(len(calls), 4)  # no verifier => no rejections to absorb => no over-draw
+        self.assertEqual(len(ds), 4)
+
+    def test_tried_counts_every_draw_the_source_produced(self):
+        calls = []
+
+        def source(rng):
+            calls.append(1)
+            return len(calls)
+
+        ds = synthesize(source, verify=lambda x: x % 2 == 0, n=3, max_tries=40, seed=0)
+        self.assertEqual(ds.provenance["tried"], len(calls))  # provenance == real invocations
+
+    def test_empty_request_reports_no_acceptance_rate(self):
+        ds = synthesize(_draw, n=0, seed=0)
+        self.assertEqual(len(ds), 0)
+        self.assertNotEqual(ds.acceptance_rate, ds.acceptance_rate)  # NaN: nothing was ever verified
+
+
 if __name__ == "__main__":
     unittest.main()
