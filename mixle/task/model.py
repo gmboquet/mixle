@@ -186,7 +186,13 @@ class HashedRecord:
             if missing:
                 raise ValueError(f"record is missing schema {sorted(missing)!r}; the fixed schema is {list(keys)!r}.")
             items: list[tuple[str, Any]] = [(key, record[key]) for key in keys]
-            extra = sorted(str(key) for key in record if key not in keys)
+            # The extra-field token names *which* keys were unexpected, so it has to distinguish keys
+            # that are genuinely different. Bare ``str(key)`` did not: extra key ``1`` and extra key
+            # ``"1"`` both rendered ``extra:1``, so two different schemas produced byte-identical
+            # vectors and the mismatch this token exists to expose became invisible. ``repr`` carries
+            # the type (``1`` vs ``'1'``) and quotes any separator inside a key, so distinct keys stay
+            # distinct and a key containing a comma cannot forge a two-key token.
+            extra = sorted(repr(key) for key in record if key not in keys)
             if extra:
                 items.append(("__schema__", "extra:" + ",".join(extra)))
             return items

@@ -61,6 +61,19 @@ class HashedRecordTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fixed record schema"):
             RecordClassifierIO(HashedRecord(dim=32), ["no", "yes"])
 
+    def test_extra_keys_that_stringify_alike_are_different_schemas(self):
+        """The off-schema token has to distinguish key ``1`` from key ``"1"`` (MXR-080-1852)."""
+        f = HashedRecord.for_records([{"a": 2.0}], dim=64, seed=3)
+        int_key = f.transform([{"a": 2.0, 1: "extra"}])
+        str_key = f.transform([{"a": 2.0, "1": "extra"}])
+        self.assertFalse(np.array_equal(int_key, str_key))
+
+    def test_a_separator_inside_a_key_cannot_forge_two_keys(self):
+        f = HashedRecord.for_records([{"a": 2.0}], dim=64, seed=3)
+        one_key = f.transform([{"a": 2.0, "p,q": "extra"}])
+        two_keys = f.transform([{"a": 2.0, "p": "extra", "q": "extra"}])
+        self.assertFalse(np.array_equal(one_key, two_keys))
+
 
 class DistillRecordsTest(unittest.TestCase):
     def test_student_recovers_record_rule(self):
