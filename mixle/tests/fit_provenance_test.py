@@ -115,5 +115,75 @@ class ProvenanceContractTest(unittest.TestCase):
             GaussianDistribution(0.0, 1.0).with_fit_provenance({"converged": True})
 
 
+class ImpossibleReceiptTest(unittest.TestCase):
+    """A receipt exists to be trusted about the run it describes, so it must be consistent."""
+
+    def _make(self, **overrides):
+        kwargs = dict(
+            algorithm="em",
+            estimator="GaussianEstimator",
+            objective="mle",
+            iterations=3,
+            max_iterations=50,
+            converged=True,
+        )
+        kwargs.update(overrides)
+        return FitProvenance(**kwargs)
+
+    def test_iterations_cannot_exceed_the_cap(self):
+        with self.assertRaisesRegex(ValueError, "cannot exceed max_iterations"):
+            self._make(iterations=99, max_iterations=5)
+
+    def test_convergence_after_zero_iterations_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "zero iterations"):
+            self._make(iterations=0, converged=True)
+
+    def test_an_anonymous_algorithm_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "non-empty name"):
+            self._make(algorithm="   ")
+
+    def test_a_negative_iteration_count_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+            self._make(iterations=-1)
+
+    def test_a_non_finite_objective_becomes_an_absent_measurement(self):
+        # The first EM iteration has no baseline, so its gain is legitimately infinite -- but that is
+        # not strict JSON, and a receipt that cannot serialize is a receipt that gets dropped.
+        provenance = self._make(objective_gain=float("inf"), final_objective=float("-inf"))
+        self.assertIsNone(provenance.objective_gain)
+        self.assertIsNone(provenance.final_objective)
+
+
+class ProvenanceRoundTripTest(unittest.TestCase):
+    """A persisted fitted model keeps its receipt (MXR-080-1190/1202)."""
+
+    def test_provenance_survives_dict_and_json_round_trips(self):
+        fitted = optimize(_normal(), GaussianEstimator(), max_its=30)
+        original = fitted.fit_provenance()
+        self.assertEqual(GaussianDistribution.from_dict(fitted.to_dict()).fit_provenance(), original)
+        self.assertEqual(GaussianDistribution.from_json(fitted.to_json()).fit_provenance(), original)
+
+    def test_a_hand_built_model_round_trips_without_a_receipt(self):
+        plain = GaussianDistribution(0.0, 1.0)
+        self.assertIsNone(GaussianDistribution.from_dict(plain.to_dict()).fit_provenance())
+
+    def test_a_forged_receipt_is_refused_on_decode(self):
+        from mixle.utils.serialization import SerializationError
+
+        payload = optimize(_normal(), GaussianEstimator(), max_its=30).to_dict()
+        payload["fit_provenance"]["iterations"] = 9999  # more iterations than its own cap
+        with self.assertRaises(SerializationError):
+            GaussianDistribution.from_dict(payload)
+
+    def test_provenance_is_not_part_of_model_identity(self):
+        # A fingerprint identifies PARAMETERS. Two runs landing on the same parameters are the same
+        # model however many iterations each took.
+        from mixle.data.hashing import model_hash
+
+        fitted = optimize(_normal(), GaussianEstimator(), max_its=30)
+        plain = GaussianDistribution(fitted.mu, fitted.sigma2)
+        self.assertEqual(model_hash(fitted), model_hash(plain))
+
+
 if __name__ == "__main__":
     unittest.main()

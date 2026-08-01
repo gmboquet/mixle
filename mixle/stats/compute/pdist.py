@@ -132,6 +132,44 @@ class FitProvenance:
     repairs: tuple[str, ...] = ()
     seed: int | None = None
 
+    def __post_init__(self) -> None:
+        """Reject a receipt that describes a fit that cannot have happened.
+
+        A provenance record exists to be trusted about the run it describes, so it has to be
+        internally consistent: 99 iterations under a cap of 5, a negative iteration count, or an
+        anonymous algorithm are not descriptions of anything (MXR-080-1190/1202). Validating here
+        means a malformed receipt fails where it is built rather than being believed downstream.
+        """
+        for field_name in ("algorithm", "estimator", "objective"):
+            text = getattr(self, field_name)
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError(f"FitProvenance {field_name} must be a non-empty name, got {text!r}")
+        for field_name in ("iterations", "max_iterations"):
+            count = getattr(self, field_name)
+            if isinstance(count, bool) or not isinstance(count, (int, np.integer)) or int(count) < 0:
+                raise ValueError(f"FitProvenance {field_name} must be a non-negative integer, got {count!r}")
+        if int(self.iterations) > int(self.max_iterations):
+            raise ValueError(
+                f"FitProvenance iterations ({self.iterations}) cannot exceed max_iterations "
+                f"({self.max_iterations}); a run cannot outlast its own cap"
+            )
+        if self.converged and int(self.iterations) == 0:
+            raise ValueError("FitProvenance cannot report convergence after zero iterations")
+        if self.delta is not None and (not math.isfinite(float(self.delta)) or float(self.delta) < 0.0):
+            raise ValueError(f"FitProvenance delta must be finite and non-negative when set, got {self.delta!r}")
+        if self.n_observations is not None and int(self.n_observations) < 0:
+            raise ValueError(f"FitProvenance n_observations must be non-negative, got {self.n_observations!r}")
+        # The first EM iteration has no baseline, so its gain is legitimately infinite, and a run over
+        # an impossible model can leave the objective at -inf. Those are real observations but they
+        # are not strict JSON (the library emits `allow_nan=False`, MXR-080-1762), and a receipt that
+        # cannot serialize is a receipt that gets dropped. `None` -- "not a finite measurement" -- is
+        # both true and portable, and keeps the in-memory and round-tripped records identical.
+        for field_name in ("final_objective", "objective_gain"):
+            measured = getattr(self, field_name)
+            if measured is not None and not math.isfinite(float(measured)):
+                object.__setattr__(self, field_name, None)
+        object.__setattr__(self, "repairs", tuple(str(entry) for entry in self.repairs))
+
     def is_approximate(self) -> bool:
         """Whether this fit is a stopped-early or repaired approximation rather than a clean optimum.
 
@@ -139,6 +177,24 @@ class FitProvenance:
         the parameters. Both mean the returned law is not simply "the estimator's answer on this data".
         """
         return (not self.converged) or bool(self.repairs)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "FitProvenance":
+        """Rebuild a receipt from :meth:`as_dict` output, re-validating every field."""
+        return cls(
+            algorithm=str(value["algorithm"]),
+            estimator=str(value["estimator"]),
+            objective=str(value["objective"]),
+            iterations=int(value["iterations"]),
+            max_iterations=int(value["max_iterations"]),
+            converged=bool(value["converged"]),
+            delta=None if value.get("delta") is None else float(value["delta"]),
+            final_objective=None if value.get("final_objective") is None else float(value["final_objective"]),
+            objective_gain=None if value.get("objective_gain") is None else float(value["objective_gain"]),
+            n_observations=None if value.get("n_observations") is None else int(value["n_observations"]),
+            repairs=tuple(str(entry) for entry in value.get("repairs", ())),
+            seed=None if value.get("seed") is None else int(value["seed"]),
+        )
 
     def as_dict(self) -> dict[str, Any]:
         """A JSON-compatible record, for provenance ledgers and receipts."""

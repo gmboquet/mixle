@@ -73,7 +73,20 @@ def param_fingerprint(model: Any, *, ndigits: int = _NDIGITS) -> str:
         parsed = json.loads(raw) if isinstance(raw, str) else raw
     except (TypeError, ValueError):
         return _sha(str(raw))
-    return _sha(_canonical(parsed, ndigits))
+    # Serialized models carry a fit receipt beside their state (MXR-080-1190/1202). This is a
+    # fingerprint of the PARAMETERS, as the docstring says: a replay that lands on identical
+    # parameters in a different number of iterations has reproduced the fit, and folding the receipt
+    # in would report that as a failure to reproduce.
+    return _sha(_canonical(_strip_fit_provenance(parsed), ndigits))
+
+
+def _strip_fit_provenance(payload: Any) -> Any:
+    """Drop fit-provenance envelopes so a fingerprint covers parameters only."""
+    if isinstance(payload, dict):
+        return {key: _strip_fit_provenance(value) for key, value in payload.items() if key != "fit_provenance"}
+    if isinstance(payload, list):
+        return [_strip_fit_provenance(item) for item in payload]
+    return payload
 
 
 @dataclass

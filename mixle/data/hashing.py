@@ -159,8 +159,24 @@ def model_hash(model: Any) -> str:
     if had_attr:
         subject = copy(model)
         vars(subject).pop("header", None)
-    payload = to_serializable(subject)
+    payload = _without_fit_provenance(to_serializable(subject))
     return hashlib.sha256(_canonical(payload)).hexdigest()
+
+
+def _without_fit_provenance(payload: Any) -> Any:
+    """Strip fit-provenance envelopes so the fingerprint stays a fingerprint of the PARAMETERS.
+
+    Serialized models carry their fit receipt beside their state (MXR-080-1190/1202). That receipt
+    describes how the parameters were produced -- iteration count, convergence, repairs -- and two
+    models with identical parameters are the same model whichever run emitted them. Hashing it would
+    make content identity depend on fitting history, which is what ``model_hash`` exists not to do,
+    and would break replay verification against a receipt recorded from a separate run.
+    """
+    if isinstance(payload, dict):
+        return {key: _without_fit_provenance(value) for key, value in payload.items() if key != "fit_provenance"}
+    if isinstance(payload, list):
+        return [_without_fit_provenance(item) for item in payload]
+    return payload
 
 
 def _records(data: Any) -> Iterable[Any]:
