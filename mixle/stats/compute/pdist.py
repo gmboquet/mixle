@@ -10,6 +10,7 @@ import math
 import operator
 import sys
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Generic, Optional, TypeVar
 
@@ -85,6 +86,77 @@ def join_density_semantics(semantics) -> "DensitySemantics":
     if has_upper:
         return DensitySemantics.UPPER_BOUND
     return DensitySemantics.EXACT
+
+
+@dataclass(frozen=True)
+class FitProvenance:
+    """How a fitted distribution was produced -- the estimator-side half of MXR-080-1190/1202.
+
+    ``density_semantics()`` already tells a caller whether a score is an exact density, a bound, or an
+    unnormalized factor. It says nothing about *fitting*: a `GaussianDistribution` returned by
+    :func:`~mixle.inference.estimation.optimize` used to be byte-identical to one written by hand, so a
+    consumer could not tell a converged fit from one that hit the iteration cap, nor learn that a
+    covariance was repaired on the way. This record carries that, and :meth:`is_approximate` folds it
+    into the one question most callers actually ask.
+
+    ``None`` from :meth:`ProbabilityDistribution.fit_provenance` means the object was constructed
+    directly and no fit produced it -- which is different from a fit that produced no receipt.
+
+    Attributes:
+        algorithm: the fitting procedure, e.g. ``"em"``, ``"block-em"``, ``"fused-em"``.
+        estimator: class name of the :class:`ParameterEstimator` that drove it.
+        objective: which objective was maximized -- ``"mle"``, ``"map"``, ``"vb"``.
+        iterations: iterations actually run (not the cap).
+        max_iterations: the cap that was in force.
+        converged: True only if the objective gain fell below ``delta`` before the cap. False means the
+            run stopped at ``max_iterations`` with the gain still above it -- an unconverged fit.
+        delta: the convergence threshold, or ``None`` when the caller asked for a fixed iteration count.
+        final_objective: the objective value of the returned model.
+        objective_gain: the last accepted improvement; compare against ``delta``.
+        n_observations: rows the fit consumed.
+        repairs: numerical repairs applied during the fit, e.g. ``("min_covar-clamped",)``. Empty means
+            none were recorded -- by a fit that records them.
+        seed: the seed governing any stochastic initialization, when one was set.
+    """
+
+    algorithm: str
+    estimator: str
+    objective: str
+    iterations: int
+    max_iterations: int
+    converged: bool
+    delta: float | None = None
+    final_objective: float | None = None
+    objective_gain: float | None = None
+    n_observations: int | None = None
+    repairs: tuple[str, ...] = ()
+    seed: int | None = None
+
+    def is_approximate(self) -> bool:
+        """Whether this fit is a stopped-early or repaired approximation rather than a clean optimum.
+
+        True when the run hit its iteration cap without converging, or when a numerical repair changed
+        the parameters. Both mean the returned law is not simply "the estimator's answer on this data".
+        """
+        return (not self.converged) or bool(self.repairs)
+
+    def as_dict(self) -> dict[str, Any]:
+        """A JSON-compatible record, for provenance ledgers and receipts."""
+        return {
+            "algorithm": self.algorithm,
+            "estimator": self.estimator,
+            "objective": self.objective,
+            "iterations": self.iterations,
+            "max_iterations": self.max_iterations,
+            "converged": self.converged,
+            "delta": self.delta,
+            "final_objective": self.final_objective,
+            "objective_gain": self.objective_gain,
+            "n_observations": self.n_observations,
+            "repairs": list(self.repairs),
+            "seed": self.seed,
+            "approximate": self.is_approximate(),
+        }
 
 
 class EnumerationError(NotImplementedError):
@@ -176,6 +248,39 @@ class ProbabilityDistribution(ABC):
 
     def __repr__(self) -> str:
         return self.__str__()
+
+    def fit_provenance(self) -> "FitProvenance | None":
+        """How this object was fitted, or ``None`` if it was constructed directly.
+
+        A distribution is a value: nothing about its parameters says whether they came from a converged
+        EM run, a run that hit its iteration cap, or a keyboard. :func:`~mixle.inference.estimation.optimize`
+        attaches a :class:`FitProvenance` so that difference is machine-readable (MXR-080-1190/1202).
+        """
+        return getattr(self, "_fit_provenance", None)
+
+    def numerical_repairs(self) -> tuple[str, ...]:
+        """Numerical repairs applied while building this object -- ``()`` when none were recorded.
+
+        A repair means the parameters are not exactly what the estimator computed: a covariance that
+        was jitter-healed back to positive-definite, a variance clamped to a floor. Reported here so
+        :meth:`fit_provenance` can carry it, since a repaired fit is an approximation whether or not
+        the objective converged.
+
+        An empty tuple means *no repair was recorded*, which for a family that records none is not the
+        same as a proof that none occurred.
+        """
+        return tuple(getattr(self, "_numerical_repairs", ()))
+
+    def with_fit_provenance(self, provenance: "FitProvenance") -> "ProbabilityDistribution":
+        """Record ``provenance`` on this object and return it.
+
+        Mutates in place and returns ``self`` rather than copying: fitted models are large, the caller
+        is the fitting routine that just produced this object, and no one else holds a reference yet.
+        """
+        if not isinstance(provenance, FitProvenance):
+            raise TypeError("provenance must be a FitProvenance, got %s" % type(provenance).__name__)
+        object.__setattr__(self, "_fit_provenance", provenance)
+        return self
 
     def to_dict(self) -> dict[str, Any]:
         """Return a safe JSON-compatible representation of this distribution."""

@@ -74,6 +74,12 @@ real-world float32 noise while still rejecting a severely invalid input (e.g. co
 four orders of magnitude."""
 
 
+# One-slot channel from _robust_cho_factor back to the constructor below. The helper cannot return the
+# repair alongside the factor without changing a signature its dedicated tests pin, and the constructor
+# is the only caller, so it drains this immediately after the call.
+_LAST_REPAIR: list[str] = []
+
+
 def _robust_cho_factor(covar: np.ndarray) -> tuple[tuple[np.ndarray, bool], np.ndarray]:
     """Cholesky-factor a covariance, self-healing a covariance that lost positive-definiteness.
 
@@ -136,9 +142,15 @@ def _robust_cho_factor(covar: np.ndarray) -> tuple[tuple[np.ndarray, bool], np.n
         for _ in range(12):
             healed = sym + jitter * eye
             try:
-                return scipy.linalg.cho_factor(healed), healed
+                factor = scipy.linalg.cho_factor(healed)
             except (scipy.linalg.LinAlgError, np.linalg.LinAlgError):
                 jitter *= 10.0
+                continue
+            # A healed covariance is not the one the estimator computed. Name the repair and its size so
+            # a fitted model can report it rather than presenting a jittered matrix as the plain MLE
+            # (MXR-080-1190/1202).
+            _LAST_REPAIR.append("covariance-jitter-healed(%.3g)" % jitter)
+            return factor, healed
         raise
 
 
@@ -332,7 +344,10 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         # covariance _robust_cho_factor actually factorized -- not the possibly asymmetric/indefinite
         # input -- so every downstream reader of self.covar (the sampler, __str__, condition/marginal,
         # the Fisher view, ...) agrees with what chol/log_det/inv_covar drive scoring from.
+        _LAST_REPAIR.clear()
         self.chol, self.covar = _robust_cho_factor(self.covar)
+        self._numerical_repairs = tuple(_LAST_REPAIR)
+        _LAST_REPAIR.clear()
         self.name = name
         self.keys = keys
 

@@ -60,6 +60,16 @@ _OPTIONAL_SERIALIZATION_MODULES = (
 # Persistence compatibility is narrower than runtime serializability. These schemas have historical
 # fixtures and an explicit v0 -> v1 migration. Every other registered type remains usable for
 # same-version round trips but is honestly recorded as provisional in the schema manifest.
+# Attributes that describe how an object was PRODUCED, not what it is. They are deliberately dropped
+# from the payload and excluded from the declared-field check below: a distribution's serialized state
+# is its parameters, and provenance is not one of them.
+#
+# Not round-tripping them is the point, not a limitation. A deserialized model reports
+# ``fit_provenance() is None`` -- "no fit produced this object in this process" -- rather than a
+# reconstructed receipt, for the same reason a deserialized authorization is not a grant
+# (MXR-080-1725): a record claiming a fit converged is only a record claiming it.
+_NON_STATE_ATTRIBUTES = frozenset({"_fit_provenance", "_numerical_repairs"})
+
 _STABLE_STATE_FIELDS: dict[str, frozenset[str]] = {
     "mixle.stats.univariate.continuous.exponential.ExponentialDistribution": frozenset(
         {
@@ -660,6 +670,8 @@ def _encode_object(value: Any, active: set[int], memo: dict[int, str]) -> dict[s
     obj_id = _cycle_enter(value, active)
     try:
         state = state_getter() if callable(state_getter) else dict(value.__dict__)
+        for attribute in _NON_STATE_ATTRIBUTES:
+            state.pop(attribute, None)
         stable_fields = _STABLE_STATE_FIELDS.get(tid)
         if stable_fields is not None and set(state) != stable_fields:
             raise SerializationError(
@@ -718,9 +730,15 @@ def _constructor_decode(cls: type[Any], state: dict[str, Any], tid: str) -> Any:
     # state must exactly match the artifact, including the field set; otherwise
     # accepting the artifact would reintroduce an invariant-bypassing update.
     try:
+        constructed = dict(obj.__dict__)
+        for attribute in _NON_STATE_ATTRIBUTES:
+            # Symmetric with the write side: the constructor may set provenance (a rebuilt covariance
+            # records its own jitter heal), and the artifact never carries it. Comparing it would fail
+            # a round trip over a difference that is not parameter state.
+            constructed.pop(attribute, None)
         encoded_artifact = json.dumps(to_serializable(state), sort_keys=True, separators=(",", ":"), allow_nan=False)
         encoded_constructed = json.dumps(
-            to_serializable(dict(obj.__dict__)), sort_keys=True, separators=(",", ":"), allow_nan=False
+            to_serializable(constructed), sort_keys=True, separators=(",", ":"), allow_nan=False
         )
     except (TypeError, ValueError) as exc:
         raise SerializationError("cannot validate serialized state schema for %r" % tid) from exc
