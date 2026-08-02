@@ -30,8 +30,10 @@ ordinary sharing.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from mixle.substrate.core import Substrate, SubstrateItem
@@ -64,19 +66,45 @@ class Governance:
     """Who may approve promotions into which scope -- the org-governance ACL.
 
     ``approvers`` is the live, queryable ACL; ``grants`` is its append-only audit trail (who was
-    granted, into which scope, and who authorized it). A scope with no approvers yet is unowned: the
-    first grant into it may come from anyone, so an approver set can be bootstrapped from nothing. Once
-    a scope has at least one approver, only an existing approver of THAT scope may grant further ones
-    into it -- :meth:`grant` raises :class:`GovernanceAuthorizationError` for anyone else, closing the
-    hole where an arbitrary caller could self-promote into the ACL.
+    granted, into which scope, and who authorized it). Both are READ-ONLY views: they were public
+    mutable containers, so authority could be granted straight into the dict with no authorization
+    check and no audit entry, and the trail recording that could itself be edited (MXR-080-1883).
+    :meth:`grant` is the only way in, and it both checks and records.
+
+    A scope with no approvers yet is unowned: the first grant into it may come from anyone, so an
+    approver set can be bootstrapped from nothing. That remains a genuine hole -- anyone may claim an
+    unowned scope -- and it is now marked ``bootstrap: True`` in the audit trail rather than being
+    indistinguishable from an authorized grant. Rooting the bootstrap in a declared authority is
+    outstanding. Once a scope has at least one approver, only an existing approver of THAT scope may
+    grant further ones into it -- :meth:`grant` raises :class:`GovernanceAuthorizationError` for
+    anyone else.
     """
 
-    approvers: dict[str, set[str]] = field(default_factory=dict)  # scope -> {approver id, ...}
-    grants: list[dict[str, Any]] = field(default_factory=list)  # append-only: who granted whom, when
+    _approvers: dict[str, set[str]] = field(default_factory=dict, repr=False)  # scope -> {approver id}
+    _grants: list[dict[str, Any]] = field(default_factory=list, repr=False)  # append-only audit trail
+
+    @property
+    def approvers(self) -> Mapping[str, frozenset[str]]:
+        """The live ACL, as a read-only view.
+
+        This was a public mutable dict, so ``governance.approvers.setdefault("secret", set()).add(...)``
+        granted approval authority over a scope with no authorization check and no entry in the audit
+        trail that exists to record exactly that (MXR-080-1883). :meth:`grant` is the only way in, and
+        it both checks and records.
+        """
+        return MappingProxyType({scope: frozenset(who) for scope, who in self._approvers.items()})
+
+    @property
+    def grants(self) -> tuple[Mapping[str, Any], ...]:
+        """The append-only grant audit trail, as a read-only view.
+
+        An audit trail a caller can edit or truncate is not one; it was a public ``list``.
+        """
+        return tuple(MappingProxyType(dict(row)) for row in self._grants)
 
     def may_approve(self, who: str, scope: str) -> bool:
         """Return whether ``who`` is allowed to approve (or reject) promotion into ``scope``."""
-        return who in self.approvers.get(scope, set())
+        return who in self._approvers.get(scope, set())
 
     def grant(self, who: str, scope: str, *, by: str) -> Governance:
         """Add ``who`` as an approver for ``scope`` (chainable) -- audited, and gated once owned.
@@ -86,13 +114,19 @@ class Governance:
         :class:`GovernanceAuthorizationError` otherwise.
         """
         _require_actor(by, "grant")
-        incumbents = self.approvers.get(scope, set())
+        _require_actor(who, "grant")
+        incumbents = self._approvers.get(scope, set())
         if incumbents and by not in incumbents:
             raise GovernanceAuthorizationError(
                 f"{by!r} is not an approver of {scope!r} and cannot grant new approvers into it"
             )
-        self.approvers.setdefault(scope, set()).add(who)
-        self.grants.append({"who": who, "scope": scope, "by": by, "granted_at": _now()})
+        self._approvers.setdefault(scope, set()).add(who)
+        # `bootstrap` marks a grant that no incumbent authorized, because the scope had no approvers
+        # yet and someone has to seed the first one. That is a real hole -- anyone may claim an
+        # unowned scope -- and it is recorded rather than hidden, so an auditor reading the trail can
+        # see which grants rest on no prior authority instead of having to infer it from ordering
+        # (MXR-080-1883). Rooting the bootstrap in a declared authority is the remaining work.
+        self._grants.append({"who": who, "scope": scope, "by": by, "granted_at": _now(), "bootstrap": not incumbents})
         return self
 
 
@@ -184,7 +218,20 @@ def approve(substrate: Substrate, item_id: str, *, by: str, governance: Governan
     latest = _latest_proposal(item)
     if not latest or latest.get("status") != PENDING:
         return False
-    target = to or latest.get("to")
+    # The PROPOSAL declares the destination; the approver decides yes or no, not where (MXR-080-1883).
+    # `to` used to SUBSTITUTE the target, and the authorization below was then checked against the
+    # substituted value -- so the caller chose the destination and chose the scope they would be
+    # checked against, which is not an authorization check at all. An approver for `public` could take
+    # an item proposed from `secret` to `reviewed-secret` and publish it into `public` instead. `to` is
+    # kept as an ASSERTION the caller may make about what they believe they are approving, and a
+    # mismatch is refused rather than honoured.
+    target = latest.get("to")
+    if to is not None and to != target:
+        raise GovernanceAuthorizationError(
+            f"{by!r} attempted to approve item {item_id!r} into {to!r}, but its pending proposal "
+            f"declares {target!r}. An approval decides a proposal; it does not redirect one. Reject "
+            "this proposal and propose the intended target instead."
+        )
     if not governance.may_approve(by, target):
         raise GovernanceAuthorizationError(f"{by!r} is not authorized to approve promotion into {target!r}")
 
