@@ -454,37 +454,47 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         return self.pmap.get(x, self.default_value) / (1.0 + self.default_value)
 
     def density_semantics(self):
-        """Declare scoring-only objects as factors rather than generative laws.
+        """Report what ``log_density`` actually returns, derived from the parameters.
 
-        An external review asked for this to key off ``is_normalized_probability`` instead, so that
-        ``{"a": 0.8, "b": 0.8}`` (mass 1.6) and the empty pmap stop reporting ``EXACT``. The
-        complaint is fair on its face -- two attributes on one object appear to disagree -- but the
-        change is not available, and the reason is worth recording rather than rediscovering:
+        This keys off :attr:`is_normalized_probability`, so an object whose numbers do not describe a
+        law does not claim to be one (MXR-080-1841). Three shapes report ``LIKELIHOOD_FACTOR``:
 
-        ``_owned_generative_components`` refuses any component whose semantics are
-        ``LIKELIHOOD_FACTOR``, and mixtures and HMMs in this repository are built today from
-        categoricals that ``is_normalized_probability`` calls ``False``:
+        * ``scoring_only``, the author's declaration that this is an evaluation-only factor,
+        * ``default_value != 0`` open-world smoothing, which spreads mass over every unseen label and
+          so has no finite total,
+        * a pmap that does not sum to one -- including the empty pmap, whose total is zero.
 
-        * ``default_value != 0`` open-world smoothing (sparse_mixture_test builds one directly),
-        * the empty pmap, which is both an EM component that won zero responsibility this iteration
-          and the "explicit no-evidence state" a learned segment model fits on all-empty sequences,
-        * and pmaps that simply do not sum to one (sparse_mixture_test's second component is 0.95).
+        An earlier revision returned ``EXACT`` for the last two, because ``_owned_generative_components``
+        refuses ``LIKELIHOOD_FACTOR`` and mixtures, HMMs and segment models in this repository are all
+        built from categoricals of exactly those shapes: a component that won zero responsibility this
+        iteration, the explicit no-evidence state fitted on all-empty sequences, and deliberately
+        unnormalized components. Labelling them honestly made them non-composable, so the label was
+        bent instead. That was the wrong half to bend: composition inconvenience cannot turn a non-law
+        into an exact law.
 
-        Re-labelling any of those makes them non-composable; doing it broke five tests across
-        mixture, HMM and segment construction. The two attributes are answering different questions:
-        ``is_normalized_probability`` asks "is this an exactly-finite law, safe for a sampler or a
-        packer?", while these semantics ask "is ``log_density`` exact for what this object
-        represents?" -- and for a pmap lookup it is. Callers needing the stronger property have the
-        flag, which is computed from the parameters and cannot go stale.
-
-        Closing the gap properly means teaching the composition layer which non-laws are admissible
-        as components, which is a larger change than a label and is not attempted here.
+        The composition layer now decides admissibility for itself, by asking a factor whether it
+        differs from a law only by scale (see ``composable_as_component`` and
+        ``_owned_generative_components``), so both questions get a truthful answer.
         """
-        if self.scoring_only:
-            from mixle.stats.compute.pdist import DensitySemantics
+        from mixle.stats.compute.pdist import DensitySemantics
 
+        if not self.is_normalized_probability:
             return DensitySemantics.LIKELIHOOD_FACTOR
         return super().density_semantics()
+
+    def composable_as_component(self) -> bool:
+        """Whether a latent model may use this factor as a component (MXR-080-1841).
+
+        A mixture, HMM or segment model normalizes responsibilities across components, so a component
+        that differs from a law by a positive constant scale is absorbed into its own mixing weight
+        and leaves the E-step unchanged; a zero-mass component simply wins no responsibility. A
+        categorical is a lookup over a discrete support, so an unnormalized or empty pmap is exactly
+        such a scaled law and stays admissible.
+
+        ``scoring_only`` is not: it is an author's declaration that the object is not generative at
+        all, and a declaration is not something the composition layer may reason its way around.
+        """
+        return not self.scoring_only
 
     def log_density(self, x: Any) -> float:
         """Log-Density evaluation of CategoricalDistribution.
@@ -739,8 +749,13 @@ class CategoricalSampler(DistributionSampler):
             # sample from, and np.random.RandomState.choice cannot sample from an all-zero-weight
             # distribution either. Fail clearly here, at sampler construction, instead of letting
             # a 0/0 division or an opaque numpy error surface later out of sample().
+            what = "is empty" if not dist.pmap else "gives every category zero probability"
             raise ValueError(
-                "CategoricalSampler requires pmap to contain at least one category with positive probability."
+                f"CategoricalSampler requires at least one category with positive probability, but pmap {what}. "
+                "A categorical fitted on no evidence is this shape (MXR-080-1220): it reports "
+                "density_semantics() == LIKELIHOOD_FACTOR and is_normalized_probability False rather than "
+                "posing as a law, and there is nothing to draw from. Supply a prior or a declared support "
+                "(CategoricalEstimator(suff_stat=...)) if a no-evidence fit must still be sampleable."
             )
         # CategoricalDistribution.pmap is deliberately allowed to not sum to 1 (see its
         # __init__ docstring; density()/log_density() already tolerate this by dividing by
