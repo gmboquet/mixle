@@ -81,6 +81,13 @@ class CreatedModel:
         return bool(self.calibration.is_calibrated())
 
 
+# Split minima for ``calibrate=`` (MXR-080-1648). Two fitting rows because a single row implies zero
+# variance, which only the variance floor rescues; two holdout rows because a PIT calibration error
+# from one point carries no information about calibration.
+_MIN_FIT_ROWS = 2
+_MIN_CALIBRATION_ROWS = 2
+
+
 def create(
     data: Any,
     *,
@@ -116,20 +123,33 @@ def create(
         frac = float(calibrate)
         if not 0.0 < frac < 1.0:
             raise ValueError("calibrate must be a fraction in (0, 1)")
-        rng = np.random.RandomState(seed)
-        order = rng.permutation(len(rows))
-        n_hold = max(1, int(round(frac * len(rows))))
-        # The floor guarantees a holdout row; nothing guaranteed a *fit* row. calibrate=0.9 on four
-        # rows reserved all four and handed optimize() an empty list, which failed with
-        # "optimize() received empty data" -- an error naming neither calibrate nor the split, so the
-        # one parameter responsible for it was the one the message did not mention. Refuse here,
-        # where the arithmetic that caused it is visible, rather than silently shrinking the holdout
-        # to something the caller did not ask for.
-        if n_hold >= len(rows):
+        # Size the split BEFORE shuffling, and check it against what each side actually needs
+        # (MXR-080-1648). calibrate=0.9 on four rows reserved all four and handed optimize() an empty
+        # list, failing with "optimize() received empty data" -- an error naming neither calibrate nor
+        # the split, so the one parameter responsible was the one the message did not mention. The
+        # zero-row case is not the only unusable one: a variance needs two fitting rows, and a PIT
+        # error computed from a single held-out point is not a measurement of anything. Both minima
+        # are stated here, with the counts the request would need, rather than being discovered as a
+        # crash downstream or as a verdict that could never have passed.
+        if len(rows) < _MIN_FIT_ROWS + _MIN_CALIBRATION_ROWS:
+            raise ValueError(
+                f"calibrate= needs at least {_MIN_FIT_ROWS + _MIN_CALIBRATION_ROWS} rows "
+                f"({_MIN_FIT_ROWS} to fit on, {_MIN_CALIBRATION_ROWS} to hold out), but only "
+                f"{len(rows)} were supplied; no fraction can split this set. Drop calibrate= to fit "
+                "without a calibration check."
+            )
+        n_hold = max(_MIN_CALIBRATION_ROWS, int(round(frac * len(rows))))
+        n_fit = len(rows) - n_hold
+        if n_fit < _MIN_FIT_ROWS:
+            needed = _MIN_FIT_ROWS + n_hold
             raise ValueError(
                 f"calibrate={frac} reserves {n_hold} of {len(rows)} row(s) as the calibration holdout, "
-                "leaving no rows to fit on; lower calibrate or supply more rows"
+                f"leaving {n_fit} to fit on, but fitting needs at least {_MIN_FIT_ROWS}. Supply at least "
+                f"{needed} rows at this fraction, or lower calibrate to at most "
+                f"{(len(rows) - _MIN_FIT_ROWS) / len(rows):.3g}."
             )
+        rng = np.random.RandomState(seed)
+        order = rng.permutation(len(rows))
         hold_idx, fit_idx = order[:n_hold], order[n_hold:]
         fit_rows = [rows[i] for i in fit_idx]
         holdout = [rows[i] for i in hold_idx]
