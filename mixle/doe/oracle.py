@@ -33,12 +33,10 @@ immutable call IDs so side-effecting cost is never silently lost.
 
 from __future__ import annotations
 
-import copy
 import inspect
 import itertools
 import math
 import threading
-import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
@@ -48,6 +46,7 @@ import numpy as np
 
 from mixle.doe.designs import Bounds, _require_exact_positive_int
 from mixle.system.fault import abstain_on_timeout
+from mixle.utils.immutable import is_immutable_atom, opaque_snapshot
 
 # The declared verifiability tiers, weakest to strongest. "self_graded" is deliberately excluded: a
 # model grading its own candidates is the banned reward, rejected at VerifiableOracle construction.
@@ -199,38 +198,17 @@ class OracleResult:
 
 
 def _detached(value: Any) -> Any:
-    """Return a copy of an object this module cannot convert to an immutable stand-in.
+    """Return an immutable record of an object this module cannot convert to an immutable stand-in.
 
-    A custom object has no immutable counterpart to convert it into, so the recursion above used to
-    return it by reference -- and mutating the caller's object then changed what a "frozen" receipt
-    held (MXR-080-1850 / MXR-080-1851). A deep copy cannot make it immutable, but it does sever the
-    alias, which is the property the receipt actually needs: what is retained stops tracking anything
-    the caller does afterwards.
-
-    An object that refuses to be copied (an open file, a lock, a live connection) is returned as-is.
-    That is the honest fallback -- there is nothing to copy and nothing to freeze -- and it is not
-    silent: a payload like that is out of contract for a forensic receipt to begin with.
+    A custom object has no immutable counterpart to convert it into. This used to deep-copy it and
+    warn when the copy failed or came back as the original (MXR-080-1850 / MXR-080-1851), which left
+    the receipt holding a *mutable* object, executed the caller's ``__deepcopy__`` to get it, and
+    kept the alias whenever that hook returned ``self`` -- a warning names the problem but does not
+    fix it (MXR-080-1872). :func:`~mixle.utils.immutable.opaque_snapshot` records the object's type
+    and its own attribute state instead, deeply frozen by this same freezer and reachable without
+    invoking any hook the caller defined.
     """
-    try:
-        detached = copy.deepcopy(value)
-    except Exception as exc:  # noqa: BLE001 - reported below rather than silently aliased
-        warnings.warn(
-            f"late-oracle receipt retained a {type(value).__name__} it could not copy ({exc!r}); it "
-            "stays aliased to the caller's object and the receipt is NOT an immutable record of it "
-            "(MXR-080-1851).",
-            stacklevel=3,
-        )
-        return value
-    if detached is value:
-        # A __deepcopy__ that returns self defeats the copy and restores the alias, and executing
-        # caller-defined copy code is itself a side effect a forensic receipt should disclose.
-        warnings.warn(
-            f"late-oracle receipt retained a {type(value).__name__} whose __deepcopy__ returned the "
-            "same object; it stays aliased to the caller's object and the receipt is NOT an "
-            "immutable record of it (MXR-080-1851).",
-            stacklevel=3,
-        )
-    return detached
+    return opaque_snapshot(value, _deeply_frozen)
 
 
 def _deeply_frozen(value: Any) -> Any:
@@ -259,6 +237,10 @@ def _deeply_frozen(value: Any) -> Any:
         return frozenset(_deeply_frozen(item) for item in value)
     if isinstance(value, Sequence):
         return tuple(_deeply_frozen(item) for item in value)
+    if is_immutable_atom(value):
+        # Numbers, enum members, timestamps: already immutable, retained as themselves. The branches
+        # above enumerate CONTAINERS, so everything scalar reaches this point.
+        return value
     return _detached(value)
 
 
