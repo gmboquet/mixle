@@ -127,7 +127,23 @@ def lca_depth(query_pos: int, node_level: int, node_g: int, fanout: int, *, max_
     notes" section for why this integer recurrence is the exact algebraic equivalent of "matching
     leading digits of the two paths" without materializing ``query_pos``'s (potentially ~1e9-long)
     digit expansion. Pure function of ``(query_pos, node_level, node_g, fanout)`` -- no dependence on
-    how the stream was chunked, which is what makes it stable under re-chunking (Acceptance §3)."""
+    how the stream was chunked, which is what makes it stable under re-chunking (Acceptance §3).
+
+    Every argument is validated because this is a public export and each degenerate case returns a
+    number that means nothing (MXR-080-1866). ``fanout=1`` makes ``fanout**m == 1`` at every level,
+    so ``q_anc`` never moves and the loop runs to ``max_climb`` and reports that climb as a tree
+    distance -- a base-1 tree has no positional expansion to share a prefix in (the same reason
+    :func:`digits_of` refuses it). A negative ``query_pos`` floor-divides toward minus infinity, and
+    a negative ``node_level`` makes ``fanout**m`` a *float*, so the "integer recurrence" returns a
+    float distance. A negative ``node_g`` names no node. None of these are states the tree can
+    reach; each previously returned a plausible-looking integer instead of refusing."""
+    fanout = _exact_int(fanout, "lca_depth fanout", minimum=2)
+    query_pos = _exact_int(query_pos, "lca_depth query_pos", minimum=0)
+    node_level = _exact_int(node_level, "lca_depth node_level", minimum=0)
+    node_g = _exact_int(node_g, "lca_depth node_g", minimum=0)
+    # Zero is a real bound, not a degenerate one: ``SummaryTreeSpine`` passes ``max_level_cap - 1``
+    # and a one-level cap legitimately admits no climb at all.
+    max_climb = _exact_int(max_climb, "lca_depth max_climb", minimum=0)
     m = node_level
     q_anc = query_pos // (fanout**m)
     n_anc = node_g
