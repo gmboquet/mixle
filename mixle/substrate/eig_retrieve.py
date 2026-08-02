@@ -41,6 +41,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from numbers import Real
 from typing import Any
 
 import numpy as np
@@ -57,6 +58,23 @@ class EvidenceOutcome:
 
     probability: float
     evidence: Any
+
+    def __post_init__(self) -> None:
+        """Canonicalize the probability to a builtin float (MXR-080-1884).
+
+        ``EvidenceOutcomes`` validated ``float(o.probability)`` and then discarded the conversion, so
+        the ORIGINAL value stayed on the outcome and was what scoring later multiplied. A string
+        ``"0.5"`` passed validation and failed several frames away inside the entropy computation --
+        the exact confusion the eager validation was written to prevent -- and a bool sailed through
+        as 0/1. Converting here means what was checked is what is used.
+        """
+        value = self.probability
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+            raise TypeError(f"EvidenceOutcome probability must be a real number, got {value!r}")
+        numeric = float(value)
+        if not np.isfinite(numeric) or numeric < 0.0:
+            raise ValueError(f"EvidenceOutcome probability must be finite and non-negative, got {value!r}")
+        object.__setattr__(self, "probability", numeric)
 
 
 @dataclass(frozen=True)
@@ -141,8 +159,23 @@ def _clone(belief: BeliefState) -> BeliefState:
     for attr in ("copy", "clone"):
         fn = getattr(belief, attr, None)
         if callable(fn):
-            return fn()
-    return copy.deepcopy(belief)
+            duplicate = fn()
+            # A copy() that returns self defeats the whole defence: the "clone" IS current, so a
+            # non-compliant update() mutating in place contaminates the baseline every sibling
+            # candidate is scored against -- which is the one thing this function exists to prevent
+            # (MXR-080-1884). Verified rather than assumed, and deepcopy is tried before giving up.
+            if duplicate is not belief:
+                return duplicate
+            break
+    duplicate = copy.deepcopy(belief)
+    if duplicate is belief:
+        raise ValueError(
+            f"{type(belief).__name__}.copy()/clone() and copy.deepcopy both returned the SAME object, "
+            "so a hypothetical candidate update cannot be isolated from the current belief. Scoring "
+            "would mutate the baseline every candidate is compared against. Give the belief a copy() "
+            "that returns a new object."
+        )
+    return duplicate
 
 
 def _as_outcomes(raw: Any) -> Sequence[EvidenceOutcome]:
@@ -157,8 +190,7 @@ def _score_candidate(
     current_entropy: float,
     evidence_fn: Callable[[SubstrateItem], Any],
     item: SubstrateItem,
-    rng: RandomState,
-) -> tuple[float, BeliefState]:
+) -> tuple[float, list[tuple[float, BeliefState]]]:
     """Expected posterior-entropy reduction for ``item``, and the belief choosing it would move to.
 
     Every outcome's hypothetical update runs against its own fresh clone of ``current`` (MXR-080-0251), so
@@ -182,13 +214,27 @@ def _score_candidate(
         nxt = _clone(current).update(outcome.evidence)
         expected_next_entropy += outcome.probability * nxt.entropy()
         posteriors.append((outcome.probability, nxt))
-    gain = float(current_entropy - expected_next_entropy)
+    return float(current_entropy - expected_next_entropy), posteriors
+
+
+def _realize(posteriors: list[tuple[float, BeliefState]], rng: RandomState) -> BeliefState:
+    """Draw the outcome that actually occurred, for the SELECTED candidate only (MXR-080-1884).
+
+    This draw used to happen inside scoring, once per candidate. Scoring is a hypothetical -- nothing
+    is acquired, and every candidate but one is discarded -- so every rejected candidate consumed
+    draws from the shared stream and shifted it for the winner. The carried posterior therefore
+    depended on how many *other* items happened to be scored first: with the same seed and the same
+    winner, adding an unrelated candidate to the pool changed the belief the run continued from
+    (the audit measured 0.0 versus 0.4 at seed=1).
+
+    Acquisition happens once, after selection, so the stream is consumed only by outcomes that were
+    actually realized.
+    """
     if len(posteriors) == 1:
-        return gain, posteriors[0][1]
+        return posteriors[0][1]
     probs = np.array([p for p, _ in posteriors], dtype=np.float64)
     probs = probs / probs.sum()  # re-normalize: EvidenceOutcomes only guarantees close to 1, not exact
-    realized = posteriors[int(rng.choice(len(posteriors), p=probs))][1]
-    return gain, realized
+    return posteriors[int(rng.choice(len(posteriors), p=probs))][1]
 
 
 def eig_retrieve(
@@ -240,24 +286,26 @@ def eig_retrieve(
     stop_reason: str | None = None
     while remaining and len(chosen) < k:
         current_entropy = current.entropy()
-        evaluated: list[tuple[SubstrateItem, float, BeliefState]] = []
+        evaluated: list[tuple[SubstrateItem, float, list[tuple[float, BeliefState]]]] = []
         for item in remaining:
             try:
-                gain, nxt = _score_candidate(current, current_entropy, evidence_fn, item, rng)
+                gain, posteriors = _score_candidate(current, current_entropy, evidence_fn, item)
             except ValueError as exc:
                 skipped.append(SkippedCandidate(item=item, reason=str(exc)))
                 continue
-            evaluated.append((item, gain, nxt))
+            evaluated.append((item, gain, posteriors))
         if not evaluated:
             stop_reason = "no_usable_candidates"
             break
-        best_item, best_gain, best_next = max(evaluated, key=lambda t: t[1])
+        best_item, best_gain, best_posteriors = max(evaluated, key=lambda t: t[1])
         if best_gain <= 0.0:
             stop_reason = "no_admissible_positive_gain"
             break
         chosen.append(best_item)
         scores.append(best_gain)
-        current = best_next
+        # Acquire only what was selected: the draw is made here, after the winner is known, so
+        # rejected candidates no longer consume the stream (MXR-080-1884).
+        current = _realize(best_posteriors, rng)
         remaining = [item for item, _, _ in evaluated if item is not best_item]
     return EigRetrieval(
         query="<information-gain>", items=chosen, scores=scores, skipped=skipped, stop_reason=stop_reason
