@@ -291,6 +291,12 @@ def _frozen_point_mass(record: Any) -> Any:
     """
     if isinstance(record, np.ndarray):
         frozen = record.copy()
+        if frozen.dtype.hasobject:
+            # ``copy()`` duplicates the POINTERS an object array holds, and ``write=False`` only stops
+            # an element being rebound -- neither stops ``frozen[0].append(...)`` reaching the
+            # caller's list. Freeze what the pointers point at, in place, before sealing the buffer.
+            for index in np.ndindex(frozen.shape):
+                frozen[index] = _frozen_point_mass(frozen[index])
         frozen.setflags(write=False)
         return frozen
     if isinstance(record, Mapping):
