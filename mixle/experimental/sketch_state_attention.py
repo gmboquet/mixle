@@ -673,6 +673,33 @@ class TensorSketchState:
     pos: int = 0
     receipt: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        """Refuse a state carrying numerator history without its degree-matched denominator.
+
+        ``Z_ts`` was added to an existing dataclass with a ``list`` default, so a state built before
+        it -- or by any caller that does not know about it -- arrived with ``C`` and ``Z`` populated
+        and ``Z_ts == []``. ``step`` read that as "start the denominator from zero" and kept
+        accumulating the numerator, so the readout divided a full history by a partial one: a
+        deterministic two-key probe returned ``4.0`` where a normalized readout must return ``2.0``
+        (MXR-080-1870). The repair for MXR-080-1853 fixed the arithmetic and left the state's own
+        shape unchecked, which is a quieter version of the same wrong answer.
+
+        There is no migration to offer above degree one. ``Z_ts = sum_t TS(phi(k_t))`` and TensorSketch
+        is a polynomial feature map, not a linear one, so the degree-p sum cannot be recovered from
+        the exact degree-one ``Z`` or from ``C`` without the values ``v_t`` that were folded into it.
+        Refusing is the only answer that is not a guess.
+        """
+        if not self.C:
+            return
+        if len(self.Z) != len(self.C) or len(self.Z_ts) != len(self.C):
+            raise ValueError(
+                f"TensorSketchState carries {len(self.C)} numerator layer(s) but {len(self.Z)} exact "
+                f"normalizer(s) and {len(self.Z_ts)} degree-matched normalizer(s). A state written "
+                "before the degree-matched normalizer existed (MXR-080-1853) cannot be migrated: "
+                "sum_t TS(phi(k_t)) is not recoverable from C or from the exact Z, because "
+                "TensorSketch is not linear above degree one. Re-run the scan from init_state."
+            )
+
 
 if _HAS_TORCH:
 
@@ -701,6 +728,16 @@ if _HAS_TORCH:
         phi_q = _phi(q_raw)
         ts_q = tensor_sketch_project(phi_q, hashes, signs, sketch_dim)
         degree = len(hashes)
+        if degree > 1 and Z_ts is None and far_count_before > 0:
+            # ``C`` already holds ``far_count_before`` tokens, so starting the degree-matched
+            # denominator from this chunk's first key divides a full numerator by a partial
+            # normalizer -- the readout is then wrong by the ratio of the two histories rather than
+            # simply unnormalized (MXR-080-1870).
+            raise ValueError(
+                "TensorSketch far state carries %d evicted token(s) of numerator history but no "
+                "degree-matched normalizer; a degree-%d readout cannot be normalized from it. See "
+                "TensorSketchState.Z_ts." % (far_count_before, degree)
+            )
         for query_index in range(t):
             target = max(0, cache_len + query_index + 1 - window)
             if target > n_evict:
@@ -911,7 +948,11 @@ if _HAS_TORCH:
                     q_raw,
                     state.C[layer],
                     state.Z[layer],
-                    state.Z_ts[layer] if state.Z_ts else None,
+                    # Indexed unconditionally: ``TensorSketchState`` refuses a state whose Z_ts does
+                    # not cover its C, so `if state.Z_ts else None` could only ever have silently
+                    # restarted the denominator against an already-accumulated numerator
+                    # (MXR-080-1870).
+                    state.Z_ts[layer],
                     evicted_k,
                     evicted_v,
                     hashes,
