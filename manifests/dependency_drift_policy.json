@@ -30,7 +30,7 @@
     "scikit-learn": "<2",
     "scipy": "<2",
     "sentence-transformers": "<6",
-    "setuptools": "<82",
+    "setuptools": "<84",
     "sqlalchemy": "<3",
     "sympy": "<2",
     "tbb": "<2022",
