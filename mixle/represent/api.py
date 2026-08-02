@@ -30,6 +30,7 @@ import numpy as np
 
 from mixle.data.hashing import _canonical
 from mixle.represent.generative import AutoencoderResult, fit_autoencoder
+from mixle.utils.exact import require_explicit_true
 
 _ARTIFACT_ID = "represent.Embedder/v2"
 _ARTIFACT_NAME = "embedder.mixle"
@@ -280,6 +281,17 @@ class Embedder:
         """
         from mixle.utils.serialization import SerializationError, deserialization_is_trusted
 
+        # `or` on a raw flag is truthiness, and this gate authorizes code execution: trust_code="false"
+        # -- the string, straight out of a config file or CLI argument -- opened it (MXR-080-1881).
+        # The flag must be the True singleton, matching load_encoded's contract; the ambient
+        # trusted_deserialization() scope remains the other way in, and is an explicit context manager
+        # rather than a caller-supplied value.
+        if trust_code is not False:
+            require_explicit_true(
+                trust_code,
+                "Embedder.load trust_code",
+                because="Unpickling this artifact executes arbitrary code from the file.",
+            )
         if not (trust_code or deserialization_is_trusted()):
             raise SerializationError(
                 "refusing to unpickle an Embedder artifact: this executes arbitrary code from the "
