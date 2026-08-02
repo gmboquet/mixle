@@ -136,7 +136,18 @@ class CascadeIntegrationTest(unittest.TestCase):
         results = casc.serve(probe_prompts)
         self.assertEqual(len(results), len(probe_prompts))
         self.assertGreater(casc.stats.n_escalated, 0)
-        self.assertTrue(all(is_correct(p, r) for p, r in zip(probe_prompts, results)))
+
+        escalated = [(p, r) for p, r in zip(probe_prompts, results) if model.decide(p) is ABSTAIN]
+        accepted = [(p, r) for p, r in zip(probe_prompts, results) if model.decide(p) is not ABSTAIN]
+        self.assertTrue(escalated and accepted, "the probe should exercise both cascade branches")
+        # The teacher is perfect, so an escalated row is never wrong.
+        self.assertTrue(all(is_correct(p, r) for p, r in escalated))
+        # An accepted row is bounded by the certified risk, NOT guaranteed correct. Asserting zero
+        # errors here held only by luck of which half certified: alpha=0.1 permits errors among
+        # accepted rows by construction, and demanding perfection would make this test fail whenever
+        # a legitimate change moved the threshold at all.
+        errors = sum(1 for p, r in accepted if not is_correct(p, r))
+        self.assertLessEqual(errors / len(accepted), alpha)
 
 
 class DrawDispatchTest(unittest.TestCase):
