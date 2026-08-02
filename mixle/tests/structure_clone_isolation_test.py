@@ -2,7 +2,13 @@
 
 _clone was eval(str(estimator)); most estimators have the default ``<object at 0x...>`` repr, so that raised
 and silently returned the SAME object. It now uses copy.deepcopy -> a genuinely independent template per
-candidate (and no source-level eval). The fallback still returns the original for uncopyable estimators.
+candidate (and no source-level eval).
+
+The uncopyable FALLBACK is a superseded contract. This module used to assert that an estimator which
+cannot be deep-copied is returned as-is, "preserving the prior same-object behavior" -- which is the
+one outcome _clone exists to prevent, and MXR-080-1909 reopened it: what makes an estimator
+uncopyable is usually the state it holds, so sharing it is precisely the case where sharing is
+unsafe. Refusing is now the contract, and the test below asserts the refusal.
 """
 
 import copy
@@ -30,13 +36,22 @@ def test_clone_does_not_use_eval_repr_roundtrip():
     assert a is not b and a is not e  # every candidate gets its own template
 
 
-def test_clone_falls_back_for_uncopyable_estimators():
+def test_clone_refuses_an_uncopyable_estimator_rather_than_sharing_it():
+    """Supersedes the old fallback contract (MXR-080-1909).
+
+    This asserted ``_clone(obj) is obj``: the uncopyable estimator was shared across every
+    structure-search candidate, so candidates that must be independent for their scores to be
+    comparable were not. The old docstring justified it as "safe only because estimators are
+    stateless templates" -- but an estimator is usually uncopyable *because* of the state it holds,
+    so the justification fails exactly where the fallback fires.
+    """
+
     class Uncopyable:
         def __deepcopy__(self, memo):
             raise TypeError("nope")
 
-    obj = Uncopyable()
-    assert _clone(obj) is obj  # fallback preserves the prior same-object behavior
+    with pytest.raises(TypeError, match="will not share one object across candidates"):
+        _clone(Uncopyable())
 
 
 def test_clone_matches_deepcopy_for_a_torch_estimator():
