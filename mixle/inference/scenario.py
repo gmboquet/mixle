@@ -15,8 +15,6 @@ re-exported under the same bare name from ``mixle.inference``).
 
 from __future__ import annotations
 
-import copy
-import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -44,6 +42,7 @@ from mixle.inference.condition import (
 from mixle.stats.combinator.composite import CompositeDistribution
 from mixle.stats.compute.posterior import MarkovChainLatentPosterior
 from mixle.stats.latent.hidden_markov import HiddenMarkovModelDistribution
+from mixle.utils.immutable import is_immutable_atom, opaque_snapshot
 
 __all__ = ["Scenario", "SimulationReceipt", "FieldPosterior", "Simulator", "simulate"]
 
@@ -309,28 +308,20 @@ def _frozen_point_mass(record: Any) -> Any:
         return frozenset(_frozen_point_mass(item) for item in record)
     if isinstance(record, Sequence):
         return tuple(_frozen_point_mass(item) for item in record)
-    # A custom object has no immutable counterpart to convert into, so this used to return it by
-    # reference and every draw shared the caller's object (MXR-080-1850). A deep copy cannot make it
-    # immutable, but it severs the alias, which is what the point mass needs: the retained record
-    # stops tracking anything the caller does to its evidence afterwards. An object that refuses to
-    # be copied is returned as-is -- there is nothing to copy and nothing to freeze.
-    try:
-        detached = copy.deepcopy(record)
-    except Exception as exc:  # noqa: BLE001 - reported below rather than silently aliased
-        warnings.warn(
-            f"scenario point mass retained a {type(record).__name__} it could not copy ({exc!r}); "
-            "every draw shares the caller's object and the snapshot is NOT immutable (MXR-080-1850).",
-            stacklevel=3,
-        )
+    if is_immutable_atom(record):
+        # Numbers, enum members, timestamps: already immutable, retained as themselves. The branches
+        # above enumerate CONTAINERS, so everything scalar reaches this point.
         return record
-    if detached is record:
-        warnings.warn(
-            f"scenario point mass retained a {type(record).__name__} whose __deepcopy__ returned the "
-            "same object; every draw shares the caller's object and the snapshot is NOT immutable "
-            "(MXR-080-1850).",
-            stacklevel=3,
-        )
-    return detached
+    # A custom object has no immutable counterpart to convert into, so this used to return it by
+    # reference and every draw shared the caller's object (MXR-080-1850). Deep-copying it instead
+    # still left the point mass holding a MUTABLE object, executed the caller's __deepcopy__ to get
+    # it, and kept the alias whenever that hook returned self -- a warning names the problem without
+    # fixing it (MXR-080-1872). The record is therefore snapshotted: type plus its own attribute
+    # state, deeply frozen by this same freezer, reachable without invoking any caller-defined hook.
+    # A draw whose slot holds an OpaqueSnapshot is evidence about the value rather than the value,
+    # which is what "immutable point mass" can honestly mean for an object like this -- and such a
+    # payload was already out of contract for a fully-observed record.
+    return opaque_snapshot(record, _frozen_point_mass)
 
 
 def _exact_draw_count(n: Any) -> int:
