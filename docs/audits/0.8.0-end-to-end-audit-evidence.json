@@ -1,0 +1,168 @@
+{
+  "artifact": "mixle.release_audit_evidence/v1",
+  "audit_completed_at": "2026-08-02T09:39:23+08:00",
+  "branch": "release-prep/0.8.0",
+  "candidate_commit": "d7d707d714493fb8240bfcebdf50c64915496edd",
+  "candidate_tree": "6e2279dd2870c52050715bdc7bb5a18fa3bc5906",
+  "decision": "NO-GO",
+  "frozen_archive": "/tmp/mixle-audit-d7d-akO9U5J5",
+  "governance": {
+    "change_id": "CHG-20260802-0001",
+    "evidence_id": "EVID-20260802-0001",
+    "release_id": "REL-PRJ-CORE-0.8.0",
+    "work_id": "WORK-20260802-0001"
+  },
+  "inventory": {
+    "ast_nodes_approximate": 2410000,
+    "production_python_files": 803,
+    "production_python_physical_lines": 392827,
+    "public_all_declarations": 6048,
+    "test_python_files": 1179,
+    "test_python_physical_lines": 233584,
+    "tracked_files": 2989
+  },
+  "finding_counts": {
+    "confirmed_not_fixed": 16,
+    "confirmed_not_fixed_by_severity": {
+      "critical": 4,
+      "high": 9,
+      "medium": 3
+    },
+    "total": 1861,
+    "verified_fixed": 1844,
+    "withdrawn_auditor_error": 1
+  },
+  "open_findings": [
+    "MXR-080-0643",
+    "MXR-080-0647",
+    "MXR-080-1190",
+    "MXR-080-1192",
+    "MXR-080-1202",
+    "MXR-080-1220",
+    "MXR-080-1320",
+    "MXR-080-1843",
+    "MXR-080-1847",
+    "MXR-080-1850",
+    "MXR-080-1851",
+    "MXR-080-1857",
+    "MXR-080-1858",
+    "MXR-080-1859",
+    "MXR-080-1860",
+    "MXR-080-1861"
+  ],
+  "prior_open_findings_verified_fixed": [
+    "MXR-080-1648",
+    "MXR-080-1725",
+    "MXR-080-1841",
+    "MXR-080-1848",
+    "MXR-080-1849",
+    "MXR-080-1856"
+  ],
+  "checks": [
+    {
+      "name": "compileall-python-3.11",
+      "result": "passed",
+      "scope": "all Python files"
+    },
+    {
+      "name": "compileall-python-3.12",
+      "result": "passed",
+      "scope": "all Python files"
+    },
+    {
+      "name": "ruff-configured",
+      "result": "passed",
+      "scope": "mixle"
+    },
+    {
+      "name": "ruff-format",
+      "result": "passed",
+      "scope": "1982 files"
+    },
+    {
+      "name": "import-linter",
+      "result": "passed",
+      "scope": "803 files, 3029 dependencies, 3 contracts"
+    },
+    {
+      "name": "typed-core-mypy",
+      "result": "passed",
+      "scope": "8 source files"
+    },
+    {
+      "name": "production-import-sweep",
+      "result": "passed",
+      "scope": "802 child modules"
+    },
+    {
+      "name": "public-export-sweep",
+      "result": "failed",
+      "scope": "6048 declarations",
+      "detail": "duplicate CompressedAdam in mixle.models.memory_efficient_training.__all__"
+    },
+    {
+      "name": "ast-contract-census",
+      "result": "completed",
+      "scope": "803 production modules",
+      "detail": "no syntax errors, duplicate executable definitions, mutable defaults, or ndarray defaults"
+    },
+    {
+      "name": "workflow-contracts",
+      "result": "passed",
+      "scope": "release workflows"
+    },
+    {
+      "name": "pip-check",
+      "result": "passed",
+      "scope": "audit environment"
+    },
+    {
+      "name": "focused-test-executions",
+      "result": "passed",
+      "scope": "1185 passing executions plus reported subtests",
+      "detail": "no CI or full suite; bounded contract-family commands only"
+    },
+    {
+      "name": "readme-external-quickstart",
+      "result": "passed",
+      "scope": "mixed-record workflow"
+    },
+    {
+      "name": "wheel-sdist-build",
+      "result": "unavailable",
+      "detail": "project requires setuptools==83.0.0; local audit environment has 81.0.0"
+    },
+    {
+      "name": "required-doc-inventory",
+      "result": "failed",
+      "detail": "docs/development.md and docs/operations.md absent; .rst variants exist"
+    },
+    {
+      "name": "release-document-state",
+      "result": "failed",
+      "detail": "0.8.0 changelog state, migration-guide finalization, and charter freeze state incomplete"
+    },
+    {
+      "name": "license-provenance-approval",
+      "result": "failed",
+      "detail": "reviewer, review date, and authorization evidence absent"
+    },
+    {
+      "name": "decision-review-acceptance",
+      "result": "failed",
+      "detail": "D-0001 through D-0132 lack accepted review evidence"
+    },
+    {
+      "name": "central-release-gates",
+      "result": "pending",
+      "scope": "15 of 15 gates"
+    }
+  ],
+  "excluded_evidence": [
+    "commands that exceeded the 30-second local cap",
+    "frozen-archive reproducibility checks requiring Git metadata",
+    "installed-distribution version checks that did not exercise the source candidate",
+    "hosted or external release evidence not executed locally"
+  ],
+  "source_unchanged_by_audit": true
+}
