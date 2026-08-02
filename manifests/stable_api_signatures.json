@@ -9646,6 +9646,22 @@
         "return_annotation": "tuple[dict[typing.Any, float], ...]"
       }
     },
+    "mixle.stats.univariate.discrete.categorical.CategoricalDistribution.composable_as_component": {
+      "kind": "class-method",
+      "signature": {
+        "parameters": [
+          {
+            "annotation": null,
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "self"
+          }
+        ],
+        "return_annotation": "bool"
+      }
+    },
     "mixle.stats.univariate.discrete.categorical.CategoricalDistribution.compute_capabilities": {
       "kind": "class-method",
       "signature": {

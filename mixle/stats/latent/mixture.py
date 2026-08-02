@@ -120,6 +120,15 @@ def _owned_generative_components(
     The mixture math is unaffected: an absent field contributes the same factor to every component, so
     responsibilities stay proportional and the E-step is unchanged. The composite does not hide the
     result -- density_semantics() already joins to LIKELIHOOD_FACTOR when any child is one.
+
+    Scaled laws are admitted on the same reasoning, by asking rather than assuming. A component that
+    differs from a normalized law by a positive constant over its whole support has that constant
+    absorbed into its own mixing weight, so responsibilities are unchanged; a zero-mass component wins
+    no responsibility at all. Categoricals reach both states in normal use -- a component that drew
+    zero weight this iteration, an open-world smoothed emission, a deliberately unnormalized pmap --
+    and previously stayed composable only because they mislabelled themselves EXACT (MXR-080-1841).
+    A factor declares itself admissible via ``composable_as_component``; absent that declaration a
+    likelihood factor is still refused, so an intrinsically scoring-only leaf cannot slip through.
     """
     try:
         owned = list(components)
@@ -139,7 +148,9 @@ def _owned_generative_components(
         core = getattr(component, "marginalized_core", None)
         subject = component if core is None else core
         if subject.density_semantics() is DensitySemantics.LIKELIHOOD_FACTOR:
-            non_generative.append(index)
+            admits = getattr(subject, "composable_as_component", None)
+            if not (callable(admits) and admits()):
+                non_generative.append(index)
     if neutral or non_generative:
         invalid = sorted(set(neutral).union(non_generative))
         raise TypeError(
