@@ -184,14 +184,29 @@ class GraphPrefetchReceipt:
         produces. ``loaded`` and ``evicted`` are deliberately allowed to intersect: a partition
         loaded early in one prefetch can be evicted by LRU later in that same prefetch.
         """
+        for field, ids in (("requested", self.requested), ("loaded", self.loaded), ("evicted", self.evicted)):
+            blank = [item for item in ids if not isinstance(item, str) or not item.strip()]
+            if blank:
+                raise ValueError(f"prefetch receipt {field} contains a partition id that names nothing: {blank!r}.")
         unknown = [item for item in self.loaded if item not in set(self.requested)]
         if unknown:
             raise ValueError(
                 f"prefetch receipt loaded partitions that were never requested: {sorted(unknown)}. "
                 "A prefetch can only load what it was asked for."
             )
+        if len(set(self.requested)) != len(self.requested):
+            raise ValueError("prefetch receipt requested the same partition twice in one prefetch.")
         if len(set(self.loaded)) != len(self.loaded):
             raise ValueError("prefetch receipt loaded the same partition twice in one prefetch.")
+        # ``evicted`` was unchecked entirely, so evicted=("", "ghost", "ghost") constructed
+        # (MXR-080-0643). A partition leaves residency once per prefetch: re-entering requires a
+        # load, and ``requested`` ids are unique, so a repeat is not a state the cache can reach.
+        # What the receipt CANNOT check is whether an evicted id was ever resident -- prior
+        # residency is not carried here, and LRU legitimately evicts partitions this prefetch never
+        # requested, so there is no id set to test membership against. That gap is left open rather
+        # than papered over with a rule that would reject real evictions.
+        if len(set(self.evicted)) != len(self.evicted):
+            raise ValueError("prefetch receipt evicted the same partition twice in one prefetch.")
         if isinstance(self.resident_tokens, bool) or not isinstance(self.resident_tokens, int):
             raise ValueError(
                 f"prefetch receipt resident_tokens must be an exact integer; got {self.resident_tokens!r}."
