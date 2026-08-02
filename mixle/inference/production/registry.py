@@ -19,6 +19,7 @@ from copy import copy, deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
+from mixle.utils.exact import require_explicit_true
 from mixle.utils.serialization import (
     SerializationError,
     ensure_pysp_serialization_registry,
@@ -308,6 +309,16 @@ class Registry:
         requires ``trust_code=True`` for such an entry -- trust the registry root, not just the JSON
         extension. A pure-statistical entry loads either way.
         """
+        # `if trust_code:` is truthiness, and what it opens is a trusted-deserialization scope:
+        # trust_code="false" -- the string, straight out of a config file or CLI argument -- entered
+        # it (MXR-080-1881). The flag must be the True singleton, matching load_encoded's contract.
+        if trust_code is not False:
+            require_explicit_true(
+                trust_code,
+                "Registry.get trust_code",
+                because="It opens a trusted-deserialization scope, and a registered model may embed "
+                "a pickle blob whose decode executes code.",
+            )
         version = self._resolve_version(name, version)
         payload = self._load_payload(name, version)
         if trust_code:

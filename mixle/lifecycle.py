@@ -37,6 +37,8 @@ from typing import Any
 
 import numpy as np
 
+from mixle.utils.exact import require_explicit_true
+
 
 def _sha256_file(path: Path) -> str:
     """The SHA-256 of a file's bytes, streamed, as ``sha256:<hex>``."""
@@ -490,6 +492,16 @@ class Model:
                     f"{path!r}: {model_file} does not match the digest recorded in its manifest "
                     f"(expected {expected_digest}, found {actual}); the artifact is incomplete or altered."
                 )
+        # Truthiness gated both the trusted scope below and the raw pickle.load beneath it, so
+        # trust_code="false" -- the string, straight out of a config file or CLI argument -- opened
+        # both. Not named by the audit, which cited the same defect in Embedder.load and Registry.get;
+        # it is the same gate and is closed the same way (MXR-080-1881).
+        if trust_code is not False:
+            require_explicit_true(
+                trust_code,
+                "Model.load trust_code",
+                because="It authorizes unpickling this artifact, which executes arbitrary code from the file.",
+            )
         with trusted_deserialization() if trust_code else contextlib.nullcontext():
             if fmt == "json":
                 from mixle.utils.serialization import ensure_pysp_serialization_registry, from_serializable
