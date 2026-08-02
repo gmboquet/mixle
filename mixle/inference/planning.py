@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import secrets
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -29,6 +30,7 @@ __all__ = [
     "EstimationSchedule",
     "SchedulePass",
     "certify",
+    "receipt_subject",
     "verify_estimation_conditions",
     "plan_estimation",
     "schedule",
@@ -109,6 +111,14 @@ class VerificationReceipt:
     checks: tuple[str, ...]
     source: str
     evidence: dict[str, Any]
+    # Which object this receipt verified, as mixle.data.hashing.model_hash of the model. Empty means
+    # the receipt names no subject, and :func:`certify` will not raise a guarantee on it: naming the
+    # right check strings was previously the whole test, so a receipt asserting
+    # ("finite_supported_data", "solver_matches_objective", "identified_parameters") upgraded an
+    # arbitrary GaussianDistribution(999, 1) from UNVERIFIED to GLOBAL_UNIQUE with evidence reading
+    # {"trust": "me"} (MXR-080-1877). A hash cannot stop a determined forger, but it stops a receipt
+    # being minted without the model, reused across models, or outliving the parameters it describes.
+    subject_hash: str = ""
 
     def __post_init__(self) -> None:
         if not self.receipt_id or not self.block or not self.source:
@@ -157,6 +167,13 @@ class BlockPlan:
     proof_obligations: tuple[ProofObligation, ...] = ()
     verified_checks: tuple[str, ...] = ()
     receipt_ids: tuple[str, ...] = ()
+    # Who established this block's guarantee. A certificate previously read the same whether the
+    # library had checked the conditions itself or a caller had asserted them, which is exactly the
+    # distinction a reader of an audit artifact needs (MXR-080-1877).
+    verified_by: str = ""
+    # Receipts that named the right checks but not this model, so they were refused. Recorded rather
+    # than dropped, so "no evidence offered" is distinguishable from "evidence offered and refused".
+    unbound_receipt_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.candidate_guarantee is None:
@@ -220,6 +237,8 @@ class EstimationCertificate:
                     ],
                     "verified_checks": list(b.verified_checks),
                     "receipt_ids": list(b.receipt_ids),
+                    "verified_by": b.verified_by,
+                    "unbound_receipt_ids": list(b.unbound_receipt_ids),
                 }
                 for b in self.blocks
             ],
@@ -598,13 +617,52 @@ def _proof_obligations(block: BlockPlan) -> tuple[ProofObligation, ...]:
     )
 
 
-def _receipt_for(block: BlockPlan, guarantee: Guarantee, evidence: dict[str, Any]) -> VerificationReceipt:
+def receipt_subject(model: Any) -> str:
+    """Return the subject identifier a :class:`VerificationReceipt` must carry to be about ``model``.
+
+    A caller supplying optimizer evidence the library cannot produce itself -- multi-start escape
+    testing, a solver's own convergence report -- names the model it verified::
+
+        VerificationReceipt(..., subject_hash=receipt_subject(model))
+
+    Requiring this is the point (MXR-080-1877): before it, naming the right check strings was the
+    whole test, so a receipt whose evidence read ``{"trust": "me"}`` upgraded an arbitrary
+    ``GaussianDistribution(999, 1)`` to ``GLOBAL_UNIQUE``. Binding does not make forgery impossible --
+    anyone holding the model can compute this -- but it means a receipt cannot be written without the
+    model, cannot be reused against a different one, and stops applying the moment the parameters
+    change. What a reader gains is in the certificate: ``BlockPlan.verified_by`` names who established
+    each guarantee, so library-checked conditions no longer read identically to a caller's assertion.
+    """
+    return _subject_hash(model)
+
+
+def _subject_hash(model: Any) -> str:
+    """Identify the exact object a receipt is about (MXR-080-1877).
+
+    A model whose parameters cannot be serialized cannot be identified, and evidence cannot be bound
+    to a subject nobody can name. Rather than fall back to a value a caller could also produce, this
+    returns an unguessable per-call token: receipts minted inside the same :func:`certify` call still
+    match, and a caller-supplied receipt cannot, so an unidentifiable model simply cannot have its
+    guarantee raised from outside.
+    """
+    from mixle.data.hashing import model_hash
+
+    try:
+        return f"model:{model_hash(model)}"
+    except Exception:  # noqa: BLE001 - an unserializable model is unidentifiable, not a crash here
+        return f"unidentifiable:{secrets.token_hex(16)}"
+
+
+def _receipt_for(
+    block: BlockPlan, guarantee: Guarantee, evidence: dict[str, Any], subject_hash: str = ""
+) -> VerificationReceipt:
     checks = tuple(obligation.check for obligation in block.proof_obligations if obligation.required_for <= guarantee)
     payload = {
         "block": block.name,
         "guarantee": guarantee.label,
         "checks": checks,
         "evidence": evidence,
+        "subject": subject_hash,
     }
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=repr).encode()).hexdigest()[:20]
     return VerificationReceipt(
@@ -612,6 +670,7 @@ def _receipt_for(block: BlockPlan, guarantee: Guarantee, evidence: dict[str, Any
         block=block.name,
         guarantee=guarantee,
         checks=checks,
+        subject_hash=subject_hash,
         source="mixle.inference.planning.verify_estimation_conditions",
         evidence=evidence,
     )
@@ -849,6 +908,7 @@ def verify_estimation_conditions(model: Any, data: Iterable[Any]) -> list[Verifi
     rows = list(data)
     if not rows:
         return []
+    subject = _subject_hash(model)  # binds every receipt below to THIS model (MXR-080-1877)
     blocks: list[BlockPlan] = []
     _walk(model, "", blocks)
     by_name = {block.name: block for block in blocks}
@@ -863,7 +923,7 @@ def verify_estimation_conditions(model: Any, data: Iterable[Any]) -> list[Verifi
             return
         evidence = _leaf_evidence(obj, values)
         if evidence is not None:
-            receipts.append(_receipt_for(block, block.candidate_guarantee, evidence))
+            receipts.append(_receipt_for(block, block.candidate_guarantee, evidence, subject))
 
     if isinstance(getattr(model, "dists", None), (list, tuple)):
         for index, child in enumerate(model.dists):
@@ -888,7 +948,7 @@ def verify_estimation_conditions(model: Any, data: Iterable[Any]) -> list[Verifi
             elif kind == "_LinearGaussianFactor":
                 evidence = _linear_evidence(factor, columns)
                 if evidence:
-                    receipts.append(_receipt_for(block, block.candidate_guarantee, evidence))
+                    receipts.append(_receipt_for(block, block.candidate_guarantee, evidence, subject))
             # Vector fits add an undeclared covariance ridge; conditional tables
             # cannot establish unobserved parent cells from the fitted object;
             # GLMs require convergence/separation evidence. All remain unverified.
@@ -949,6 +1009,13 @@ def certify(
     supplied = list(receipts)
     if data is not None:
         supplied.extend(verify_estimation_conditions(model, data))
+    # The subject every receipt must name to raise a guarantee about THIS model (MXR-080-1877).
+    # Naming the right check strings used to be the entire test, so a caller-authored receipt whose
+    # evidence read {"trust": "me"} moved an arbitrary GaussianDistribution(999, 1) from UNVERIFIED to
+    # GLOBAL_UNIQUE. A receipt that names no subject, or names a different one, is no longer evidence
+    # about this model -- it is ignored for the upgrade and recorded as ignored, rather than silently
+    # dropped, so a reader can tell "no evidence was offered" from "evidence was offered and refused".
+    subject = _subject_hash(model) if data is None else None
     by_name = {block.name: block for block in blocks}
     for receipt in supplied:
         if not isinstance(receipt, VerificationReceipt):
@@ -962,10 +1029,16 @@ def certify(
         }
         if not required.issubset(receipt.checks):
             continue
+        if subject is None:
+            subject = _subject_hash(model)
+        if receipt.subject_hash != subject:
+            block.unbound_receipt_ids = (*block.unbound_receipt_ids, receipt.receipt_id)
+            continue
         if established > block.guarantee:
             block.guarantee = established
             block.verified_checks = tuple(sorted(required))
             block.receipt_ids = (receipt.receipt_id,)
+            block.verified_by = receipt.source
     aggregate = min((b.guarantee for b in blocks), default=Guarantee.UNVERIFIED)
     mixture_blocks = [block for block in blocks if block.method == "em"]
     escape_verified = bool(mixture_blocks) and all(

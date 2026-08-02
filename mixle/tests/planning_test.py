@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 import mixle.stats as st
-from mixle.inference import Guarantee, VerificationReceipt, certify, optimize, plan_estimation
+from mixle.inference import Guarantee, VerificationReceipt, certify, optimize, plan_estimation, receipt_subject
 
 try:
     import torch  # noqa: F401
@@ -117,11 +117,53 @@ class LatentCertificateTest(unittest.TestCase):
             checks=("optimizer_converged", "saddle_escape_compared"),
             source="test optimizer report",
             evidence={"converged": True, "starts": 4, "same_objective": True},
+            # A receipt has to name the model it verified, or it is evidence about nothing
+            # (MXR-080-1877). This is the legitimate case the binding must keep working: escape
+            # testing is optimizer evidence the library cannot produce for itself.
+            subject_hash=receipt_subject(model),
         )
         tested = certify(model, receipts=[receipt])
         self.assertEqual(plain.guarantee, Guarantee.UNVERIFIED)
         self.assertEqual(tested.blocks[0].guarantee, Guarantee.STATIONARY_ESCAPE_TESTED)
         self.assertTrue(tested.escape_tested)
+        self.assertEqual(tested.blocks[0].verified_by, "test optimizer report")
+
+    def test_an_unbound_receipt_cannot_upgrade_any_block(self):
+        """The auditor's construction: right check names, evidence reading "trust me" (MXR-080-1877).
+
+        Naming the checks was the entire test, so this moved an arbitrary model from UNVERIFIED to
+        GLOBAL_UNIQUE. The receipt is now refused for naming no subject, and the refusal is recorded
+        rather than silently dropped.
+        """
+        model = st.GaussianDistribution(999.0, 1.0)
+        block = plan_estimation(model).blocks[0].name
+        forged = VerificationReceipt(
+            receipt_id="forged",
+            block=block,
+            guarantee=Guarantee.GLOBAL_UNIQUE,
+            checks=("finite_supported_data", "solver_matches_objective", "identified_parameters"),
+            source="i said so",
+            evidence={"trust": "me"},
+        )
+        certificate = certify(model, receipts=[forged])
+        self.assertEqual(certificate.guarantee, Guarantee.UNVERIFIED)
+        self.assertEqual(certificate.blocks[0].unbound_receipt_ids, ("forged",))
+        self.assertEqual(certificate.blocks[0].verified_by, "")
+
+    def test_a_genuine_receipt_does_not_transfer_to_another_model(self):
+        model = st.GaussianDistribution(0.0, 1.0)
+        other = st.GaussianDistribution(999.0, 1.0)
+        block = plan_estimation(model).blocks[0].name
+        receipt = VerificationReceipt(
+            receipt_id="bound-elsewhere",
+            block=block,
+            guarantee=Guarantee.GLOBAL_UNIQUE,
+            checks=("finite_supported_data", "solver_matches_objective", "identified_parameters"),
+            source="test optimizer report",
+            evidence={"converged": True},
+            subject_hash=receipt_subject(model),
+        )
+        self.assertEqual(certify(other, receipts=[receipt]).blocks[0].unbound_receipt_ids, ("bound-elsewhere",))
 
     def test_incomplete_receipt_does_not_upgrade_the_block(self):
         model = optimize(
