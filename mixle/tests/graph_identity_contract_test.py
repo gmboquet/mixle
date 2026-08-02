@@ -135,11 +135,32 @@ class PrefetchReceiptTest(unittest.TestCase):
     def test_evicting_a_partition_this_prefetch_never_requested_is_allowed(self):
         # LRU legitimately evicts something resident from an earlier prefetch. Rejecting this would
         # be the guard rejecting what the cache actually produces.
-        self._receipt(requested=("a",), loaded=("a",), evicted=("older",), resident_tokens=3)
+        self._receipt(
+            requested=("a",), loaded=("a",), evicted=("older",), resident_before=("older",), resident_tokens=3
+        )
 
     def test_loading_and_evicting_the_same_partition_is_allowed(self):
         # Loaded early in a prefetch, then evicted by LRU later in that same prefetch.
-        self._receipt(requested=("a", "b"), loaded=("a", "b"), evicted=("a",), resident_tokens=1)
+        self._receipt(requested=("a", "b"), loaded=("a", "b"), evicted=("a",), resident_before=(), resident_tokens=1)
+
+    def test_an_eviction_claim_without_prior_residency_is_refused(self):
+        # resident_before defaults to None so an existing caller still constructs, but that left the
+        # eviction check optional: evicting a never-resident "ghost" constructed, and
+        # eviction_claim_verified merely LABELLED the claim unchecked (MXR-080-1869). A receipt may
+        # omit prior residency; it may not then claim an eviction.
+        with self.assertRaisesRegex(ValueError, "without recording the residency it started from"):
+            self._receipt(evicted=("ghost",))
+
+    def test_claiming_no_eviction_still_needs_no_prior_residency(self):
+        self.assertFalse(self._receipt(evicted=()).eviction_claim_verified)
+
+    def test_a_bare_string_is_not_a_partition_list(self):
+        # `requested="ab"` iterated as the characters "a" and "b" and constructed a receipt for two
+        # partitions nobody named -- the hole resident_before was repaired for, left open beside it.
+        for field in ("requested", "loaded", "evicted"):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(TypeError, "must be a sequence of partition ids"):
+                    self._receipt(**{field: "ab"})
 
 
 if __name__ == "__main__":
