@@ -1,6 +1,7 @@
 """A structured-execution receipt attests admission, not device affinity (MXR-080-0647)."""
 
 import unittest
+from dataclasses import replace
 
 from mixle.experimental.typed_runtime.measurement import WorkMeasurement
 from mixle.experimental.typed_runtime.structured_execution import StructuredEstimationReceipt
@@ -26,11 +27,19 @@ def _real_placement_and_work():
         compute_units=graph.node(graph.root_node).cost.compute_units,
         observations=40.0,
         operation_count=1,
-        extra={},
+        # The executor the measurement was taken on: the receipt's own execution_backend is checked
+        # against it, so the two halves cannot name different runs (MXR-080-1871).
+        extra={"execution_backend": "local_numpy_thread_pool"},
     )
     node_ids = tuple(row.node_id for row in placement.placements)
     devices = tuple(sorted({shard.device_id for row in placement.placements for shard in row.shards}))
     return placement, work, node_ids, devices
+
+
+def _work_with(**extra) -> WorkMeasurement:
+    """A work measurement recording the executor it measured, as the real producer emits it."""
+    _placement, work, _node_ids, _devices = _real_placement_and_work()
+    return replace(work, extra={"execution_backend": "local_numpy_thread_pool", **extra})
 
 
 class ReceiptFieldTest(unittest.TestCase):
@@ -109,6 +118,62 @@ class ReceiptFieldTest(unittest.TestCase):
             with self.subTest(field=field):
                 with self.assertRaisesRegex(ValueError, "must name something"):
                     self._receipt(**{field: ""})
+
+
+class SelfConsistencyTest(unittest.TestCase):
+    """A receipt and its own work measurement must describe one run (MXR-080-1871)."""
+
+    def _receipt(self, **overrides) -> StructuredEstimationReceipt:
+        placement, _work, node_ids, devices = _real_placement_and_work()
+        fields = dict(
+            placement=placement,
+            observations=40.0,
+            num_workers=2,
+            worker_device_ids=devices[:2],
+            execution_backend="local_numpy_thread_pool",
+            parallel_node_ids=node_ids[:1],
+            parallel_statistics_hash="abc",
+            reference_statistics_hash=None,
+            parallel_model_hash="def",
+            reference_model_hash=None,
+            exact_parity=None,
+            work=_work_with(),
+        )
+        fields.update(overrides)
+        return StructuredEstimationReceipt(**fields)
+
+    def test_the_producer_shaped_receipt_constructs(self):
+        self.assertEqual(self._receipt().execution_backend, "local_numpy_thread_pool")
+
+    def test_a_backend_its_own_measurement_contradicts_is_refused(self):
+        # execution_backend and work.backend answer different questions -- the executor versus the
+        # typed node backend -- so equality between THEM would reject the real producer. The binding
+        # is to what the measurement recorded about its own executor.
+        with self.assertRaisesRegex(ValueError, "one run had one executor"):
+            self._receipt(execution_backend="contradictory-backend")
+
+    def test_a_measurement_that_names_no_executor_is_refused(self):
+        _placement, work, _nodes, _devices = _real_placement_and_work()
+        with self.assertRaisesRegex(ValueError, "does not record the executor"):
+            self._receipt(work=replace(work, extra={}))
+
+    def test_a_worker_count_its_own_measurement_contradicts_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "one run produced one answer"):
+            self._receipt(work=_work_with(num_workers=7))
+
+    def test_device_and_node_lists_are_compared_by_content_not_container(self):
+        # The measurement records them as lists and the receipt holds tuples; that difference is not
+        # a contradiction.
+        _placement, _work, node_ids, devices = _real_placement_and_work()
+        receipt = self._receipt(
+            work=_work_with(worker_device_ids=list(devices[:2]), parallel_node_ids=list(node_ids[:1]))
+        )
+        self.assertEqual(receipt.worker_device_ids, devices[:2])
+
+    def test_a_device_list_its_own_measurement_contradicts_is_refused(self):
+        _placement, _work, _nodes, devices = _real_placement_and_work()
+        with self.assertRaisesRegex(ValueError, "one run produced one answer"):
+            self._receipt(work=_work_with(worker_device_ids=[devices[0]]))
 
 
 class AffinityClaimTest(unittest.TestCase):

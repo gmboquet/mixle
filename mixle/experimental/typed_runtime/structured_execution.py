@@ -130,6 +130,42 @@ class StructuredEstimationReceipt:
                 f"structured-estimation receipt reports observations={self.observations} while its own "
                 f"work measurement reports {self.work.observations}; one run processed one row count."
             )
+        # The receipt and its work measurement each name a backend, and nothing tied them together:
+        # ``execution_backend="contradictory-backend"`` sat beside ``work.backend="typed_model_parallel"``
+        # and constructed, so the artifact a reader consults to learn what ran named two things
+        # (MXR-080-1871). They are deliberately NOT required to be equal -- they answer different
+        # questions, and the real producer pairs the executor "local_numpy_thread_pool" with the typed
+        # node backend "typed_model_parallel" -- so the binding is that the measurement records the
+        # executor it measured and the two agree. Every scalar the receipt copies out of its own work
+        # measurement is checked the same way, for the same reason.
+        recorded_backend = self.work.extra.get("execution_backend")
+        if recorded_backend is None:
+            raise ValueError(
+                "structured-estimation receipt work measurement does not record the executor it "
+                f"measured; add extra={{'execution_backend': {self.execution_backend!r}}}. Without it "
+                "the receipt's own execution_backend is bound to nothing and can name anything."
+            )
+        if recorded_backend != self.execution_backend:
+            raise ValueError(
+                f"structured-estimation receipt reports execution_backend={self.execution_backend!r} "
+                f"while its own work measurement recorded {recorded_backend!r}; one run had one "
+                "executor."
+            )
+        for name, claimed in (
+            ("num_workers", self.num_workers),
+            ("worker_device_ids", tuple(self.worker_device_ids)),
+            ("parallel_node_ids", tuple(self.parallel_node_ids)),
+        ):
+            measured = self.work.extra.get(name)
+            if measured is None:
+                continue
+            if isinstance(claimed, tuple):
+                measured = tuple(measured)
+            if measured != claimed:
+                raise ValueError(
+                    f"structured-estimation receipt reports {name}={claimed!r} while its own work "
+                    f"measurement recorded {measured!r}; one run produced one answer."
+                )
         if self.exact_parity is not None and not isinstance(self.exact_parity, bool):
             raise TypeError(
                 f"structured-estimation receipt exact_parity must be a Boolean verdict or None, got "
@@ -369,6 +405,10 @@ def run_structured_estimation_step(
             observations=nobs,
             operation_count=1,
             extra={
+                # Records the executor this measurement was taken on, so the receipt's own
+                # execution_backend is bound to measured evidence rather than free-floating
+                # (MXR-080-1871).
+                "execution_backend": "local_numpy_thread_pool",
                 "num_workers": worker_count,
                 "worker_device_ids": list(worker_devices),
                 "parallel_node_ids": list(parallel_node_ids),
