@@ -188,19 +188,31 @@ class MeasurementCatalog:
     schema has survived real backends.
     """
 
-    records: list[WorkMeasurement] = field(default_factory=list)
+    _records: list[WorkMeasurement] = field(default_factory=list, repr=False)
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.records, list) or any(not isinstance(row, WorkMeasurement) for row in self.records):
-            raise TypeError("measurement catalog records must be a list of WorkMeasurement values.")
-        self.records = list(self.records)
+    def __init__(self, records: Iterable[WorkMeasurement] | None = None) -> None:
+        rows = list(records or ())
+        if any(not isinstance(row, WorkMeasurement) for row in rows):
+            raise TypeError("measurement catalog records must be WorkMeasurement values.")
+        self._records = rows
+
+    @property
+    def records(self) -> tuple[WorkMeasurement, ...]:
+        """The measurements, as a detached read-only view.
+
+        This was a public ``list``, so a caller could append a fabricated measurement, delete a real
+        one, or rewrite the catalog the compiler reads its cost estimates from -- all without going
+        through :meth:`record`, which is the only place the type is checked (MXR-080-1878). The
+        catalog is append-only evidence; ``record``/``extend`` are the way in.
+        """
+        return tuple(self._records)
 
     def record(self, measurement: WorkMeasurement) -> None:
         """Append one immutable measurement."""
 
         if not isinstance(measurement, WorkMeasurement):
             raise TypeError("measurement catalogs accept WorkMeasurement values.")
-        self.records.append(measurement)
+        self._records.append(measurement)
 
     def extend(self, measurements: Iterable[WorkMeasurement]) -> None:
         """Append several measurements."""
@@ -226,7 +238,13 @@ class MeasurementCatalog:
         return CostEstimate(
             compute_units=float(statistics.median(row.compute_units for row in rows)),
             wall_time_seconds=float(statistics.median(row.wall_time_seconds for row in rows)),
-            communication_bytes=int(statistics.median(row.communication_bytes for row in rows)),
+            # ``int()`` TRUNCATES, and a median over an even number of samples is a midpoint: two
+            # measurements of 0 and 1 bytes estimated 0 bytes of communication, i.e. free
+            # (MXR-080-1878). This is a cost estimate a scheduler divides gain by, so rounding the
+            # wrong way makes work look cheaper than anything ever measured. Round upward: an
+            # estimate that overstates cost by under a byte is conservative, one that understates it
+            # to zero is not.
+            communication_bytes=math.ceil(statistics.median(row.communication_bytes for row in rows)),
             peak_memory_bytes=int(max(row.peak_memory_bytes for row in rows)),
             source="measurement_catalog",
             sample_count=len(rows),
@@ -285,6 +303,17 @@ class EffectiveContextMeasurement:
             )
             if self.source_horizon_tokens < self.materialized_tokens:
                 raise ValueError("source horizon cannot be smaller than materialized context.")
+        # The counts nest physically -- attended is a subset of materialized, which is a subset of the
+        # source horizon -- and only the outer relation was enforced (MXR-080-1878). A receipt could
+        # report attending to more tokens than it ever materialized, which makes
+        # ``active_to_source_ratio`` and every attention-cost figure derived from it describe a run
+        # that cannot have happened.
+        if self.attended_tokens > self.materialized_tokens:
+            raise ValueError(
+                f"effective-context attended_tokens ({self.attended_tokens}) cannot exceed "
+                f"materialized_tokens ({self.materialized_tokens}); attention is over materialized "
+                "context, so it is a subset of it."
+            )
         for name in ("latency_seconds", "monetary_cost"):
             object.__setattr__(
                 self, name, _finite_real(getattr(self, name), f"effective-context {name}", nonnegative=True)
