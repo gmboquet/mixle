@@ -11,6 +11,7 @@ from typing import Any
 from mixle.experimental.typed_runtime.contracts import ObjectiveKind, UpdateKind
 from mixle.experimental.typed_runtime.graph import UpdateGraph, UpdateNode
 from mixle.experimental.typed_runtime.validation import validate_update_graph
+from mixle.utils.immutable import freeze_receipt_container
 
 
 @dataclass(frozen=True)
@@ -168,6 +169,12 @@ class ScheduleCompletionReceipt:
     unsuccessful_nodes: tuple[str, ...]
     states_after: dict[str, NodeScheduleState]
 
+    def __post_init__(self) -> None:
+        # Detached and sealed: these were caller-owned containers stored by reference on a
+        # frozen dataclass, so a mutation after construction rewrote evidence that had already
+        # been recorded (MXR-080-1876).
+        object.__setattr__(self, "states_after", freeze_receipt_container(self.states_after))
+
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible completion receipt."""
 
@@ -221,6 +228,15 @@ class ScheduleReceipt:
         ``spent > budget`` is deliberately NOT refused: a fairness-forced selection may legitimately
         exceed its soft budget, which is exactly what ``budget_overrun`` exists to report.
         """
+        # Detached and sealed: these were caller-owned containers stored by reference on a
+        # frozen dataclass, so a mutation after construction rewrote evidence that had already
+        # been recorded (MXR-080-1876).
+        object.__setattr__(self, "lower_confidence_bounds", freeze_receipt_container(self.lower_confidence_bounds))
+        object.__setattr__(self, "effective_costs", freeze_receipt_container(self.effective_costs))
+        object.__setattr__(self, "priorities", freeze_receipt_container(self.priorities))
+        object.__setattr__(self, "invalidation_costs", freeze_receipt_container(self.invalidation_costs))
+        object.__setattr__(self, "skipped", freeze_receipt_container(self.skipped))
+        object.__setattr__(self, "rejected_evidence", freeze_receipt_container(self.rejected_evidence))
         for name in ("round_index", "model_version"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:

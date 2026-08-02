@@ -24,6 +24,7 @@ from typing import Any
 import numpy as np
 
 from mixle.task.llm import extract_json_object
+from mixle.utils.immutable import freeze_receipt_container
 
 # Allowlisted scalar families -> mixle estimator class name. No eval, no arbitrary import: a fixed map.
 _FAMILY = {
@@ -156,6 +157,12 @@ class DesignFailureReceipt:
     proposed_spec: dict[str, Any] | None
     reply_excerpt: str
     acceptance: DesignAcceptanceReceipt | None = None
+
+    def __post_init__(self) -> None:
+        # Detached and sealed: these were caller-owned containers stored by reference on a
+        # frozen dataclass, so a mutation after construction rewrote evidence that had already
+        # been recorded (MXR-080-1876).
+        object.__setattr__(self, "proposed_spec", freeze_receipt_container(self.proposed_spec))
 
 
 @dataclass

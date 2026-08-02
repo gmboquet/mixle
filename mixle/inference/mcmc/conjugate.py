@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 
 from mixle.inference.priors import ImproperPriorReceipt
+from mixle.utils.immutable import detach_receipt_container
 
 from .parameter_bridge import _encode_data
 from .samplers import MCMCResult
@@ -28,6 +29,11 @@ class ConjugateUpdateReceipt:
     posterior_status: str
     improper_prior: dict[str, Any] | None = None
     input_mutated: bool = False
+
+    def __post_init__(self) -> None:
+        # detach, not freeze: this receipt travels through paths that copy and pickle it
+        # (MXR-080-1876).
+        object.__setattr__(self, "improper_prior", detach_receipt_container(self.improper_prior))
 
     def as_dict(self) -> dict[str, Any]:
         """Return a plain durable receipt."""
