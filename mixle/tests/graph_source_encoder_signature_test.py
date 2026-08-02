@@ -77,7 +77,7 @@ def test_save_load_round_trip_detects_fallback_assignment_mismatch(tmp_path):
     save_encoded((1, 2, 3), path, encoder=enc_saved_under)
 
     with pytest.raises(ValueError, match="encoder mismatch"):
-        load_encoded(path, encoder=enc_requested_as)
+        load_encoded(path, encoder=enc_requested_as, trusted=True)
 
 
 def test_save_load_round_trip_accepts_matching_fallback_assignments(tmp_path):
@@ -89,4 +89,4 @@ def test_save_load_round_trip_accepts_matching_fallback_assignments(tmp_path):
 
     save_encoded((1, 2, 3), path, encoder=enc_saved_under)
 
-    assert load_encoded(path, encoder=enc_requested_as) == (1, 2, 3)
+    assert load_encoded(path, encoder=enc_requested_as, trusted=True) == (1, 2, 3)

@@ -467,7 +467,7 @@ class EncodedIoTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "enc.pspenc")
             digest = save_encoded(enc, path, encoder=model.dist_to_encoder())
-            loaded = load_encoded(path, encoder=model.dist_to_encoder())
+            loaded = load_encoded(path, encoder=model.dist_to_encoder(), trusted=True)
             # the reloaded encoding scores identically
             np.testing.assert_allclose(model.seq_log_density(loaded), model.seq_log_density(enc))
             self.assertEqual(len(digest), 64)
@@ -481,7 +481,7 @@ class EncodedIoTest(unittest.TestCase):
             with open(path, "ab") as f:
                 f.write(b"corrupt")
             with self.assertRaises(ValueError):
-                load_encoded(path, encoder=encoder)
+                load_encoded(path, encoder=encoder, trusted=True)
 
     def test_header_is_json_not_pickle(self):
         # The header carrying the digest must be plain JSON: parsing it must never itself be able to
@@ -519,7 +519,7 @@ class EncodedIoTest(unittest.TestCase):
             with open(path, "wb") as f:
                 f.write(tampered)
             with self.assertRaises(ValueError):
-                load_encoded(path, encoder=encoder)
+                load_encoded(path, encoder=encoder, trusted=True)
 
     def test_header_tampering_detected(self):
         # MXR-080-0052: the digest previously covered only the pickle body, so the header's
@@ -557,7 +557,7 @@ class EncodedIoTest(unittest.TestCase):
             # A load requesting the forged identity must be rejected -- previously this succeeded
             # and silently returned 2D data mislabeled as 3D.
             with self.assertRaises(ValueError):
-                load_encoded(tampered_path, encoder=enc_3d)
+                load_encoded(tampered_path, encoder=enc_3d, trusted=True)
 
     def test_envelope_digest_covers_header_fields_not_just_body(self):
         # Direct confirmation of the mechanism behind the regression test above: two different
@@ -602,7 +602,7 @@ class EncodedIoTest(unittest.TestCase):
             path = os.path.join(d, "enc.pspenc")
             save_encoded(enc, path, encoder=one_field_encoder)
             with self.assertRaises(ValueError):
-                load_encoded(path, encoder=two_field_encoder)
+                load_encoded(path, encoder=two_field_encoder, trusted=True)
 
     def test_composite_matching_shape_round_trips(self):
         # Negative control for the regression above: two separately-constructed but structurally
@@ -618,7 +618,7 @@ class EncodedIoTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "enc.pspenc")
             save_encoded(enc, path, encoder=encoder_a)
-            loaded = load_encoded(path, encoder=encoder_b)
+            loaded = load_encoded(path, encoder=encoder_b, trusted=True)
             np.testing.assert_allclose(loaded[0], enc[0])
             np.testing.assert_allclose(loaded[1], enc[1])
 
@@ -636,7 +636,7 @@ class EncodedIoTest(unittest.TestCase):
             path = os.path.join(d, "enc.pspenc")
             save_encoded(enc, path, encoder=enc_2d)
             with self.assertRaises(ValueError):
-                load_encoded(path, encoder=enc_3d)
+                load_encoded(path, encoder=enc_3d, trusted=True)
 
 
 if __name__ == "__main__":
