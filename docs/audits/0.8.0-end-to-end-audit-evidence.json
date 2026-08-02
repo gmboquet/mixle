@@ -1,11 +1,11 @@
 {
   "artifact": "mixle.release_audit_evidence/v1",
-  "audit_completed_at": "2026-08-02T15:39:11+08:00",
+  "audit_completed_at": "2026-08-02T20:24:07+08:00",
   "branch": "release-prep/0.8.0",
-  "candidate_commit": "f0554b54a24022926677cde18e00b9818be35e75",
-  "candidate_tree": "d18114e7ad8ee2979ff09cf64061bc9eb9be4067",
+  "candidate_commit": "8263c4c860336c82137e423e336bfba2788995c1",
+  "candidate_tree": "132ac99ff8a92b53b26ce765be28e6852276143f",
   "decision": "NO-GO",
-  "frozen_archive": "/tmp/mixle-audit-f055-r6sa7qHX",
+  "frozen_archive": "/tmp/mixle-audit-8263c4c8/src",
   "governance": {
     "change_id": "CHG-20260802-0002",
     "evidence_id": "EVID-20260802-0002",
@@ -13,208 +13,197 @@
     "work_id": "WORK-20260802-0002"
   },
   "inventory": {
-    "ast_nodes_approximate": 2412407,
-    "production_python_files": 803,
-    "production_python_physical_lines": 393232,
-    "public_all_declarations": 6047,
-    "test_python_files": 1180,
-    "test_python_physical_lines": 234001,
-    "tracked_files": 2991
+    "production_python_files": 804,
+    "production_python_physical_lines": 394111,
+    "top_level_package_families": 21,
+    "mutable_semantic_record_dataclasses": 137
   },
-  "candidate_delta_from_prior_audit": {
-    "base_commit": "76dc7b0d49acb78bf3f6ea45b915617df444680d",
-    "changed_files": 25,
-    "insertions": 946,
-    "deletions": 123,
-    "repair_commits": [
-      "490b0a54",
-      "7033533e",
-      "f0554b54"
-    ]
+  "coverage_method": {
+    "unchanged_files": "Inherited the complete exact-tree semantic/static/import/export audit at f0554b54 and re-ran whole-tree structural checks at the current candidate.",
+    "changed_production_files": 18,
+    "changed_production_files_reviewed_as_diff_and_complete_file": 18,
+    "fresh_package_family_semantic_pass": true,
+    "claim": "Complete layered package coverage; not a claim that every physical line was manually reread.",
+    "full_ci_run": false,
+    "command_timeout_policy_seconds": 30
+  },
+  "candidate_delta_from_prior_exact_audit": {
+    "base_commit": "f0554b54a24022926677cde18e00b9818be35e75",
+    "changed_files_total": 36,
+    "changed_production_files": 18,
+    "insertions": 1965,
+    "deletions": 238,
+    "commits": 15
   },
   "finding_counts": {
-    "confirmed_not_fixed": 14,
+    "confirmed_not_fixed": 35,
     "confirmed_not_fixed_by_severity": {
-      "critical": 4,
-      "high": 9,
-      "medium": 1
+      "critical": 14,
+      "high": 21,
+      "medium": 0
     },
-    "total": 1865,
-    "verified_fixed": 1850,
+    "total": 1910,
+    "verified_fixed": 1874,
     "withdrawn_auditor_error": 1
   },
   "open_findings": [
-    "MXR-080-0643",
-    "MXR-080-0647",
-    "MXR-080-1190",
-    "MXR-080-1202",
-    "MXR-080-1220",
-    "MXR-080-1843",
-    "MXR-080-1850",
-    "MXR-080-1851",
-    "MXR-080-1853",
-    "MXR-080-1857",
-    "MXR-080-1862",
-    "MXR-080-1863",
-    "MXR-080-1864",
-    "MXR-080-1865"
+    "MXR-080-1876",
+    "MXR-080-1877",
+    "MXR-080-1878",
+    "MXR-080-1879",
+    "MXR-080-1880",
+    "MXR-080-1881",
+    "MXR-080-1882",
+    "MXR-080-1883",
+    "MXR-080-1884",
+    "MXR-080-1885",
+    "MXR-080-1886",
+    "MXR-080-1887",
+    "MXR-080-1888",
+    "MXR-080-1889",
+    "MXR-080-1890",
+    "MXR-080-1891",
+    "MXR-080-1892",
+    "MXR-080-1893",
+    "MXR-080-1894",
+    "MXR-080-1895",
+    "MXR-080-1896",
+    "MXR-080-1897",
+    "MXR-080-1898",
+    "MXR-080-1899",
+    "MXR-080-1900",
+    "MXR-080-1901",
+    "MXR-080-1902",
+    "MXR-080-1903",
+    "MXR-080-1904",
+    "MXR-080-1905",
+    "MXR-080-1906",
+    "MXR-080-1907",
+    "MXR-080-1908",
+    "MXR-080-1909",
+    "MXR-080-1910"
   ],
-  "prior_open_findings_verified_fixed": [
-    "MXR-080-1192",
-    "MXR-080-1320",
-    "MXR-080-1847",
-    "MXR-080-1858",
-    "MXR-080-1859",
-    "MXR-080-1860",
-    "MXR-080-1861"
-  ],
-  "reopened_findings": [
-    "MXR-080-1853"
-  ],
-  "new_findings": [
-    "MXR-080-1862",
-    "MXR-080-1863",
-    "MXR-080-1864",
-    "MXR-080-1865"
-  ],
+  "open_findings_by_severity": {
+    "critical": [
+      "MXR-080-1877",
+      "MXR-080-1881",
+      "MXR-080-1882",
+      "MXR-080-1883",
+      "MXR-080-1884",
+      "MXR-080-1889",
+      "MXR-080-1891",
+      "MXR-080-1892",
+      "MXR-080-1893",
+      "MXR-080-1894",
+      "MXR-080-1896",
+      "MXR-080-1899",
+      "MXR-080-1900",
+      "MXR-080-1910"
+    ],
+    "high": [
+      "MXR-080-1876",
+      "MXR-080-1878",
+      "MXR-080-1879",
+      "MXR-080-1880",
+      "MXR-080-1885",
+      "MXR-080-1886",
+      "MXR-080-1887",
+      "MXR-080-1888",
+      "MXR-080-1890",
+      "MXR-080-1895",
+      "MXR-080-1897",
+      "MXR-080-1898",
+      "MXR-080-1901",
+      "MXR-080-1902",
+      "MXR-080-1903",
+      "MXR-080-1904",
+      "MXR-080-1905",
+      "MXR-080-1906",
+      "MXR-080-1907",
+      "MXR-080-1908",
+      "MXR-080-1909"
+    ]
+  },
+  "new_findings": {
+    "first": "MXR-080-1876",
+    "last": "MXR-080-1910",
+    "count": 35,
+    "residual_or_reopened_contracts": [
+      "MXR-080-1887 is the unclosed multiplicity/adaptive-testing portion of MXR-080-1603",
+      "MXR-080-1879 is a residual of the sketch-state repair chain MXR-080-1853/MXR-080-1870",
+      "MXR-080-1904 includes residual exact-encoding and categorical/provenance boundaries"
+    ]
+  },
   "checks": [
     {
-      "name": "compileall-python-3.11",
+      "name": "production-compileall",
       "result": "passed",
-      "scope": "all production and test Python files",
-      "seconds": 2.46
+      "scope": "804 production Python files"
     },
     {
-      "name": "compileall-python-3.12",
+      "name": "ruff-configured-production",
       "result": "passed",
-      "scope": "all production and test Python files",
-      "seconds": 2.91
-    },
-    {
-      "name": "ruff-configured",
-      "result": "passed",
-      "scope": "mixle",
-      "seconds": 0.34
-    },
-    {
-      "name": "ruff-format",
-      "result": "passed",
-      "scope": "1983 files"
-    },
-    {
-      "name": "import-linter",
-      "result": "passed",
-      "scope": "803 files, 3030 dependencies, 3 contracts"
-    },
-    {
-      "name": "typed-core-mypy",
-      "result": "passed",
-      "scope": "8 source files"
+      "scope": "complete production tree"
     },
     {
       "name": "production-import-sweep",
       "result": "passed",
-      "scope": "802 child modules"
+      "scope": "803 child modules"
     },
     {
-      "name": "public-export-sweep",
-      "result": "passed",
-      "scope": "803 modules, 6047 declarations"
-    },
-    {
-      "name": "ast-contract-census",
+      "name": "ast-whole-tree-census",
       "result": "completed",
-      "scope": "803 production modules, approximately 2.41 million nodes",
-      "detail": "18 executable assertions, 37 swallowed broad exceptions, 34 broad-exception returns of None, 30 built-in hash uses, 59 execution/deserialization sites, 380 randomness sites, 270 ignored numeric-warning sites"
+      "scope": "804 production modules"
     },
     {
-      "name": "pip-check",
-      "result": "passed",
-      "scope": "audit environment"
-    },
-    {
-      "name": "candidate-diff-check",
-      "result": "passed",
-      "scope": "prior audit commit through exact candidate"
-    },
-    {
-      "name": "focused-test-functions",
-      "result": "passed",
-      "scope": "411 passed, 2 source-checkout skips",
-      "detail": "554 reported subtests also passed; no CI or full suite"
-    },
-    {
-      "name": "prior-finding-adversarial-probes",
+      "name": "candidate-production-delta-review",
       "result": "completed",
-      "scope": "all 16 previously open findings",
-      "detail": "7 fixed, 9 remain open; MXR-080-1853 independently reopened"
+      "scope": "all 18 changed production files, diff and complete current source"
     },
     {
-      "name": "strict-sphinx",
-      "result": "excluded-timeout",
-      "scope": "reached 28 percent before the 28-second cap",
-      "detail": "external Python, NumPy, and SciPy intersphinx inventories were unreachable"
+      "name": "package-family-semantic-review",
+      "result": "completed",
+      "scope": "all 21 top-level production families"
     },
     {
-      "name": "wheel-sdist-build",
-      "result": "unavailable",
-      "detail": "project requires setuptools==83.0.0; local audit environment has 81.0.0"
+      "name": "focused-adversarial-probes",
+      "result": "completed",
+      "scope": "changed, scientific, stateful, security, serialization, task and evidence-bearing boundaries"
     },
     {
-      "name": "required-doc-inventory",
-      "result": "failed",
-      "detail": "governance .md names absent while docs/development.rst and docs/operations.rst exist"
-    },
-    {
-      "name": "release-document-state",
-      "result": "failed",
-      "detail": "CHANGELOG marks 0.8.0 Unreleased and migration guide remains a development draft"
-    },
-    {
-      "name": "license-provenance-approval",
-      "result": "pending",
-      "detail": "named reviewer, review date, and authorization evidence are not accepted"
-    },
-    {
-      "name": "decision-review-acceptance",
-      "result": "pending",
-      "detail": "decision review acceptance evidence is incomplete"
-    },
-    {
-      "name": "central-release-gates",
-      "result": "pending",
-      "scope": "15 of 15 gates"
+      "name": "git-diff-check",
+      "result": "passed",
+      "scope": "audit record changes"
     }
   ],
   "adversarial_evidence": {
-    "probe_artifact": "/tmp/mixle_f055_deep_probes.json",
-    "confirmed_fixed_examples": [
-      "Gaussian non-finite mu and derived-cache mutation refused",
-      "DOE budget accounting bounded across both methods",
-      "calibrated prompt collision separated",
-      "failed graph restore atomic",
-      "conditional public export unique",
-      "optimized-mode architecture guards retained"
-    ],
     "confirmed_open_examples": [
-      "unbound prefetch eviction accepted",
-      "structured run and work measurements contradict",
-      "fit provenance fails strict JSON and fabricates structure-search convergence",
-      "empty categorical fit returns an unsampleable factor",
-      "legacy backoff payload can drop rows",
-      "deep-copy evidence hooks retain or execute caller behavior",
-      "categorical factor sampler renormalizes a different law",
-      "degree-2 TensorSketch returns 5 for a sole value of 1",
-      "summary-tree digit conversion hangs at base 1",
-      "typed runtime receipts remain mutable and malformed"
+      "caller-authored receipt fabricates GLOBAL_UNIQUE certification",
+      "measurement median undercounts and attended tokens exceed materialized tokens",
+      "mutable Number stays aliased while UUID semantics are replaced by OpaqueSnapshot",
+      "redaction detects but retains a secret-bearing dictionary key",
+      "governance approver redirects a secret-scope proposal into public",
+      "EIG scoring mutates a bad-copy belief and unrelated candidates change realized posterior",
+      "string probability and truthy-string Boolean controls pass public boundaries",
+      "one callable acquires two live serialization identities",
+      "p=0 random graph assigns finite likelihood to a present edge",
+      "stochastic-block model aliases parameters and accepts Boolean seed",
+      "under-delivered posteriors and truthy causal-identification verdicts are accepted",
+      "orchestrator-produced trace is not replayable",
+      "task JSON-schema minimum is ignored",
+      "task ledger serialization exposes caller mutation"
+    ],
+    "source_confirmed_security_examples": [
+      "trust_code=\"false\" opens Embedder and production-registry pickle trust",
+      "task deployment lacks closed root containment and transactional artifact replacement",
+      "optimized-away best-candidate assertions remain reachable after non-finite objectives"
     ]
   },
   "excluded_evidence": [
-    "the first focused pytest attempt that spent its cap starting automatic xdist workers",
-    "the strict Sphinx process terminated at the 28-second cap",
-    "frozen-archive checks requiring Git metadata",
-    "installed-distribution version checks that did not exercise the source candidate",
-    "hosted or external release evidence not executed locally"
+    "full CI and the full test suite",
+    "commands exceeding the repository 30-second policy",
+    "hosted or external release evidence",
+    "post-candidate concurrent repair commit 17cc207b"
   ],
   "source_unchanged_by_audit": true
 }
