@@ -15,6 +15,8 @@ from enum import StrEnum
 from numbers import Integral, Real
 from typing import Any, Protocol, runtime_checkable
 
+from mixle.utils.immutable import detach_receipt_container
+
 
 class ParallelAxis(StrEnum):
     """Named dimensions understood by Mixle and external training engines."""
@@ -378,6 +380,9 @@ class StepReceipt:
     global_tokens_observed: int | None = None
 
     def __post_init__(self) -> None:
+        # detach, not freeze: a consumer type-tests this with isinstance(extra, dict), which a
+        # mappingproxy fails (MXR-080-1876).
+        object.__setattr__(self, "extra", detach_receipt_container(self.extra))
         integer_domains = {
             "step": 0,
             "local_examples": 0,

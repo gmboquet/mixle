@@ -32,7 +32,14 @@ from numbers import Number
 from types import MappingProxyType
 from typing import Any
 
-__all__ = ["OpaqueSnapshot", "is_immutable_atom", "opaque_snapshot"]
+__all__ = [
+    "OpaqueSnapshot",
+    "detach_receipt_container",
+    "freeze_receipt_container",
+    "is_immutable_atom",
+    "opaque_snapshot",
+    "plain_receipt_container",
+]
 
 _IN_PROGRESS = threading.local()
 
@@ -130,3 +137,77 @@ def opaque_snapshot(value: Any, freeze: Callable[[Any], Any]) -> OpaqueSnapshot:
         module=getattr(cls, "__module__", "?"),
         state=MappingProxyType(frozen) if frozen else None,
     )
+
+
+def freeze_receipt_container(value: Any) -> Any:
+    """Detach and seal the *containers* in a receipt field, preserving element identity.
+
+    This is the structural half of receipt integrity, and it is the one the aliasing defect actually
+    needs: a caller hands a ``dict`` or ``list`` to a frozen dataclass, the dataclass stores the
+    reference, and the caller mutates its own copy afterwards -- rewriting a decision that had
+    already been recorded. Copying severs that alias; the read-only view stops anyone editing the
+    receipt through the field itself.
+
+    Elements are passed through by identity rather than judged. A receipt may legitimately hold a
+    frozen dataclass, a distribution, or an array, and refusing those would reject the receipts the
+    library actually produces. Where a receipt additionally advertises JSON-serializable output, the
+    stricter per-module freezers keep that separate contract -- this one does not claim it.
+
+    ``Mapping -> MappingProxyType`` is deliberately chosen over a plain copy because it still
+    compares equal to the original dict, so consumers that compare receipts keep working. Sequences
+    become tuples, which does NOT compare equal to a list; call sites converted to this helper were
+    checked for consumers that mutate or type-test the field (MXR-080-1876).
+    """
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: freeze_receipt_container(item) for key, item in value.items()})
+    if isinstance(value, (str, bytes, bytearray)):
+        return bytes(value) if isinstance(value, bytearray) else value
+    if isinstance(value, (list, tuple)):
+        return tuple(freeze_receipt_container(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(freeze_receipt_container(item) for item in value)
+    return value
+
+
+def plain_receipt_container(value: Any) -> Any:
+    """Undo :func:`freeze_receipt_container` for an ``as_dict``-style JSON-compatible view."""
+    if isinstance(value, Mapping):
+        return {key: plain_receipt_container(item) for key, item in value.items()}
+    if isinstance(value, (str, bytes)):
+        return value
+    if isinstance(value, (tuple, frozenset)):
+        return [plain_receipt_container(item) for item in value]
+    return value
+
+
+def detach_receipt_container(value: Any) -> Any:
+    """Copy a receipt's containers, preserving their concrete types.
+
+    The weaker sibling of :func:`freeze_receipt_container`, for fields whose *type* is load-bearing.
+    It severs the caller's alias -- the half of the defect that lets a mutation after construction
+    rewrite a recorded decision -- without converting ``dict`` to ``mappingproxy`` or ``list`` to
+    ``tuple``.
+
+    Use it where the concrete type is observable: a field that is content-addressed or serialized
+    with type fidelity (``mixle.epistemic.journal`` deliberately distinguishes a tuple from an
+    equal-valued list, and hashes what it stores), a field a consumer type-tests with
+    ``isinstance(x, dict)``, or a field on a record that gets pickled -- ``mappingproxy`` cannot be
+    pickled or deep-copied. Applying the stronger freezer to those fields broke the journal's hash
+    chain and a training receipt's own validation (MXR-080-1876).
+
+    The receipt's own field stays writable, which is a real and stated limitation: this defends
+    against the caller, not against the holder.
+    """
+    if isinstance(value, Mapping):
+        return {key: detach_receipt_container(item) for key, item in value.items()}
+    if isinstance(value, (str, bytes)):
+        return value
+    if isinstance(value, list):
+        return [detach_receipt_container(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(detach_receipt_container(item) for item in value)
+    if isinstance(value, set):
+        return {detach_receipt_container(item) for item in value}
+    if isinstance(value, frozenset):
+        return frozenset(detach_receipt_container(item) for item in value)
+    return value

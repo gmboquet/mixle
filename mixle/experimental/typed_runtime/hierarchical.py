@@ -22,6 +22,7 @@ from mixle.experimental.typed_runtime.staleness import (
     shrink_proposal,
 )
 from mixle.experimental.typed_runtime.transaction import CommitReceipt, TransactionalCoordinator
+from mixle.utils.immutable import freeze_receipt_container
 
 CorrectionProvider = Callable[[ProposalPacket, StalenessReceipt], CorrectionResult]
 
@@ -56,6 +57,11 @@ class HierarchicalRoundReceipt:
         (a merge's constituents counting as admitted through it), and that staleness was assessed
         only for submitted proposals.
         """
+        # Detached and sealed: these were caller-owned containers stored by reference on a
+        # frozen dataclass, so a mutation after construction rewrote evidence that had already
+        # been recorded (MXR-080-1876).
+        object.__setattr__(self, "merged_proposals", freeze_receipt_container(self.merged_proposals))
+        object.__setattr__(self, "rejected", freeze_receipt_container(self.rejected))
         inputs = set(self.input_proposal_ids)
         admitted = set(self.admitted_proposal_ids)
         merge_keys = set(self.merged_proposals)

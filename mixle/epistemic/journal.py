@@ -47,6 +47,7 @@ from typing import Any
 
 from mixle.epistemic.loop import EpistemicStep
 from mixle.epistemic.portfolio import HypothesisPortfolio
+from mixle.utils.immutable import detach_receipt_container
 
 _CODEC_VERSION = 1
 _ENVELOPE_VERSION = 1
@@ -242,6 +243,14 @@ class DecisionRecord:
     rationale: str | None = None
     prev_hash: str = _GENESIS_HASH
     record_hash: str = ""
+
+    def __post_init__(self) -> None:
+        # detach, not freeze: this record is content-addressed and JSON round-tripped with type
+        # fidelity -- the journal deliberately distinguishes a tuple from an equal-valued list --
+        # and mappingproxy cannot be deep-copied or pickled. Converting the containers broke the
+        # hash chain (MXR-080-1876).
+        object.__setattr__(self, "portfolio_snapshot", detach_receipt_container(self.portfolio_snapshot))
+        object.__setattr__(self, "action_considered", detach_receipt_container(self.action_considered))
 
 
 def _record_payload(record: DecisionRecord) -> dict:

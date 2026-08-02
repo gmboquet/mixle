@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 
 from mixle.experimental.typed_runtime.context_ir import ContextGraph, EvidenceStatus
+from mixle.utils.immutable import freeze_receipt_container
 
 
 def _nonnegative_integer(value: Any, name: str, *, positive: bool = False) -> None:
@@ -128,6 +129,10 @@ class ContextAttentionReceipt:
     similarities: dict[str, float]
 
     def __post_init__(self) -> None:
+        # Detached and sealed: these were caller-owned containers stored by reference on a
+        # frozen dataclass, so a mutation after construction rewrote evidence that had already
+        # been recorded (MXR-080-1876).
+        object.__setattr__(self, "similarities", freeze_receipt_container(self.similarities))
         if not isinstance(self.tokenizer_id, str) or not self.tokenizer_id:
             raise ValueError("context attention receipts require tokenizer identity.")
         for name in (

@@ -68,6 +68,7 @@ from mixle.inference.model_comparison import (
     paired_score_difference,
     vuong_test,
 )
+from mixle.utils.immutable import detach_receipt_container
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,11 @@ class Verdict:
     ci: tuple[float, float]  # (nan, nan) alongside a nan p_value, for the same reason
     calibration_status: str  # 'passed'|'failed'|'unavailable'|'error' -- see _calibration_no_regression
     evidence: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # detach, not freeze: promotion evidence is serialized and compared by concrete type
+        # downstream (MXR-080-1876).
+        object.__setattr__(self, "evidence", detach_receipt_container(self.evidence))
 
     @property
     def calibrated(self) -> bool:

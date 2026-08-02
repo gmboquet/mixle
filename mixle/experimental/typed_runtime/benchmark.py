@@ -9,6 +9,7 @@ from numbers import Integral, Real
 from typing import Any
 
 from mixle.experimental.typed_runtime.contracts import CounterSemantics
+from mixle.utils.immutable import freeze_receipt_container
 
 
 def _nonnegative_integer(value: Any, name: str) -> None:
@@ -244,6 +245,10 @@ class FailureReceipt:
     details: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        # Detached and sealed: these were caller-owned containers stored by reference on a
+        # frozen dataclass, so a mutation after construction rewrote evidence that had already
+        # been recorded (MXR-080-1876).
+        object.__setattr__(self, "details", freeze_receipt_container(self.details))
         if not self.benchmark_id or not self.case_id or not self.oracle or not self.observed:
             raise ValueError("failure receipt identifiers, oracle, and observation must be non-empty.")
 

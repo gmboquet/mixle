@@ -31,6 +31,7 @@ from numbers import Integral, Real
 from typing import Any
 
 from mixle.telemetry.core import Event, Telemetry
+from mixle.utils.immutable import freeze_receipt_container
 
 __all__ = [
     "FitReport",
@@ -230,6 +231,14 @@ class StragglerReport:
     z_threshold: float
     slow_ranks: tuple[int, ...]
 
+    def __post_init__(self) -> None:
+        # Detached and sealed: these were caller-owned containers stored by reference on a
+        # frozen dataclass, so a mutation after construction rewrote evidence that had already
+        # been recorded (MXR-080-1876).
+        object.__setattr__(self, "rank_seconds", freeze_receipt_container(self.rank_seconds))
+        object.__setattr__(self, "ratios", freeze_receipt_container(self.ratios))
+        object.__setattr__(self, "z_scores", freeze_receipt_container(self.z_scores))
+
     @property
     def has_stragglers(self) -> bool:
         return len(self.slow_ranks) > 0
@@ -316,6 +325,14 @@ class ImbalanceReceipt:
     max_bytes_ratio: float  # max(bytes) / mean(bytes) -- >1 means at least one rank is above-average loaded
     skew_by_rank: dict[int, float]  # bytes[rank] / mean(bytes) per rank -- matches a "rank got Nx the data" claim
 
+    def __post_init__(self) -> None:
+        # Detached and sealed: these were caller-owned containers stored by reference on a
+        # frozen dataclass, so a mutation after construction rewrote evidence that had already
+        # been recorded (MXR-080-1876).
+        object.__setattr__(self, "bytes_per_rank", freeze_receipt_container(self.bytes_per_rank))
+        object.__setattr__(self, "n_obs_per_rank", freeze_receipt_container(self.n_obs_per_rank))
+        object.__setattr__(self, "skew_by_rank", freeze_receipt_container(self.skew_by_rank))
+
 
 def imbalance_receipt(records: Sequence[RankRecord], *, round: int | None = None) -> ImbalanceReceipt:
     """Measure how unevenly data volume was actually spread across ranks for one round.
@@ -398,6 +415,13 @@ class FitReport:
     imbalance_by_round: dict[int, ImbalanceReceipt]
     worst_straggler_ratio: float
     worst_imbalance_ratio: float
+
+    def __post_init__(self) -> None:
+        # Detached and sealed: these were caller-owned containers stored by reference on a
+        # frozen dataclass, so a mutation after construction rewrote evidence that had already
+        # been recorded (MXR-080-1876).
+        object.__setattr__(self, "stragglers_by_round", freeze_receipt_container(self.stragglers_by_round))
+        object.__setattr__(self, "imbalance_by_round", freeze_receipt_container(self.imbalance_by_round))
 
     @property
     def any_stragglers(self) -> bool:

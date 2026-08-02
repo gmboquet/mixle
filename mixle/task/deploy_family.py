@@ -66,6 +66,7 @@ from mixle.models.unified_quantizer import QuantizationBudgetError, QuantizedTen
 from mixle.task.checkpoint_family_ladder import FamilyLadderResult
 from mixle.task.economics import CostModel
 from mixle.task.frontier_to_native import CascadeReceipt
+from mixle.utils.immutable import freeze_receipt_container
 
 __all__ = [
     "ArtifactReceipt",
@@ -108,6 +109,12 @@ class ArtifactReceipt:
     mean_reconstruction_error: float
     method_counts: dict[str, int]
     content_digest: str
+
+    def __post_init__(self) -> None:
+        # Detached and sealed: these were caller-owned containers stored by reference on a
+        # frozen dataclass, so a mutation after construction rewrote evidence that had already
+        # been recorded (MXR-080-1876).
+        object.__setattr__(self, "method_counts", freeze_receipt_container(self.method_counts))
 
     def summary(self) -> str:
         methods = ", ".join(f"{m}={n}" for m, n in sorted(self.method_counts.items()))
@@ -337,6 +344,12 @@ class ServeReceipt:
     points: list[FrontierPoint]
     probe_digest: str
     edge_cascade: CascadeReceipt | None = field(default=None)
+
+    def __post_init__(self) -> None:
+        # Detached and sealed: these were caller-owned containers stored by reference on a
+        # frozen dataclass, so a mutation after construction rewrote evidence that had already
+        # been recorded (MXR-080-1876).
+        object.__setattr__(self, "points", freeze_receipt_container(self.points))
 
     def frontier_sorted_by_cost(self) -> list[FrontierPoint]:
         return sorted(self.points, key=lambda p: p.cost_per_request)
