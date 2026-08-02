@@ -1,88 +1,110 @@
 {
   "artifact": "mixle.release_audit_evidence/v1",
-  "audit_completed_at": "2026-08-02T09:39:23+08:00",
+  "audit_completed_at": "2026-08-02T15:39:11+08:00",
   "branch": "release-prep/0.8.0",
-  "candidate_commit": "d7d707d714493fb8240bfcebdf50c64915496edd",
-  "candidate_tree": "6e2279dd2870c52050715bdc7bb5a18fa3bc5906",
+  "candidate_commit": "f0554b54a24022926677cde18e00b9818be35e75",
+  "candidate_tree": "d18114e7ad8ee2979ff09cf64061bc9eb9be4067",
   "decision": "NO-GO",
-  "frozen_archive": "/tmp/mixle-audit-d7d-akO9U5J5",
+  "frozen_archive": "/tmp/mixle-audit-f055-r6sa7qHX",
   "governance": {
-    "change_id": "CHG-20260802-0001",
-    "evidence_id": "EVID-20260802-0001",
+    "change_id": "CHG-20260802-0002",
+    "evidence_id": "EVID-20260802-0002",
     "release_id": "REL-PRJ-CORE-0.8.0",
-    "work_id": "WORK-20260802-0001"
+    "work_id": "WORK-20260802-0002"
   },
   "inventory": {
-    "ast_nodes_approximate": 2410000,
+    "ast_nodes_approximate": 2412407,
     "production_python_files": 803,
-    "production_python_physical_lines": 392827,
-    "public_all_declarations": 6048,
-    "test_python_files": 1179,
-    "test_python_physical_lines": 233584,
-    "tracked_files": 2989
+    "production_python_physical_lines": 393232,
+    "public_all_declarations": 6047,
+    "test_python_files": 1180,
+    "test_python_physical_lines": 234001,
+    "tracked_files": 2991
+  },
+  "candidate_delta_from_prior_audit": {
+    "base_commit": "76dc7b0d49acb78bf3f6ea45b915617df444680d",
+    "changed_files": 25,
+    "insertions": 946,
+    "deletions": 123,
+    "repair_commits": [
+      "490b0a54",
+      "7033533e",
+      "f0554b54"
+    ]
   },
   "finding_counts": {
-    "confirmed_not_fixed": 16,
+    "confirmed_not_fixed": 14,
     "confirmed_not_fixed_by_severity": {
       "critical": 4,
       "high": 9,
-      "medium": 3
+      "medium": 1
     },
-    "total": 1861,
-    "verified_fixed": 1844,
+    "total": 1865,
+    "verified_fixed": 1850,
     "withdrawn_auditor_error": 1
   },
   "open_findings": [
     "MXR-080-0643",
     "MXR-080-0647",
     "MXR-080-1190",
-    "MXR-080-1192",
     "MXR-080-1202",
     "MXR-080-1220",
-    "MXR-080-1320",
     "MXR-080-1843",
-    "MXR-080-1847",
     "MXR-080-1850",
     "MXR-080-1851",
+    "MXR-080-1853",
     "MXR-080-1857",
+    "MXR-080-1862",
+    "MXR-080-1863",
+    "MXR-080-1864",
+    "MXR-080-1865"
+  ],
+  "prior_open_findings_verified_fixed": [
+    "MXR-080-1192",
+    "MXR-080-1320",
+    "MXR-080-1847",
     "MXR-080-1858",
     "MXR-080-1859",
     "MXR-080-1860",
     "MXR-080-1861"
   ],
-  "prior_open_findings_verified_fixed": [
-    "MXR-080-1648",
-    "MXR-080-1725",
-    "MXR-080-1841",
-    "MXR-080-1848",
-    "MXR-080-1849",
-    "MXR-080-1856"
+  "reopened_findings": [
+    "MXR-080-1853"
+  ],
+  "new_findings": [
+    "MXR-080-1862",
+    "MXR-080-1863",
+    "MXR-080-1864",
+    "MXR-080-1865"
   ],
   "checks": [
     {
       "name": "compileall-python-3.11",
       "result": "passed",
-      "scope": "all Python files"
+      "scope": "all production and test Python files",
+      "seconds": 2.46
     },
     {
       "name": "compileall-python-3.12",
       "result": "passed",
-      "scope": "all Python files"
+      "scope": "all production and test Python files",
+      "seconds": 2.91
     },
     {
       "name": "ruff-configured",
       "result": "passed",
-      "scope": "mixle"
+      "scope": "mixle",
+      "seconds": 0.34
     },
     {
       "name": "ruff-format",
       "result": "passed",
-      "scope": "1982 files"
+      "scope": "1983 files"
     },
     {
       "name": "import-linter",
       "result": "passed",
-      "scope": "803 files, 3029 dependencies, 3 contracts"
+      "scope": "803 files, 3030 dependencies, 3 contracts"
     },
     {
       "name": "typed-core-mypy",
@@ -96,20 +118,14 @@
     },
     {
       "name": "public-export-sweep",
-      "result": "failed",
-      "scope": "6048 declarations",
-      "detail": "duplicate CompressedAdam in mixle.models.memory_efficient_training.__all__"
+      "result": "passed",
+      "scope": "803 modules, 6047 declarations"
     },
     {
       "name": "ast-contract-census",
       "result": "completed",
-      "scope": "803 production modules",
-      "detail": "no syntax errors, duplicate executable definitions, mutable defaults, or ndarray defaults"
-    },
-    {
-      "name": "workflow-contracts",
-      "result": "passed",
-      "scope": "release workflows"
+      "scope": "803 production modules, approximately 2.41 million nodes",
+      "detail": "18 executable assertions, 37 swallowed broad exceptions, 34 broad-exception returns of None, 30 built-in hash uses, 59 execution/deserialization sites, 380 randomness sites, 270 ignored numeric-warning sites"
     },
     {
       "name": "pip-check",
@@ -117,15 +133,27 @@
       "scope": "audit environment"
     },
     {
-      "name": "focused-test-executions",
+      "name": "candidate-diff-check",
       "result": "passed",
-      "scope": "1185 passing executions plus reported subtests",
-      "detail": "no CI or full suite; bounded contract-family commands only"
+      "scope": "prior audit commit through exact candidate"
     },
     {
-      "name": "readme-external-quickstart",
+      "name": "focused-test-functions",
       "result": "passed",
-      "scope": "mixed-record workflow"
+      "scope": "411 passed, 2 source-checkout skips",
+      "detail": "554 reported subtests also passed; no CI or full suite"
+    },
+    {
+      "name": "prior-finding-adversarial-probes",
+      "result": "completed",
+      "scope": "all 16 previously open findings",
+      "detail": "7 fixed, 9 remain open; MXR-080-1853 independently reopened"
+    },
+    {
+      "name": "strict-sphinx",
+      "result": "excluded-timeout",
+      "scope": "reached 28 percent before the 28-second cap",
+      "detail": "external Python, NumPy, and SciPy intersphinx inventories were unreachable"
     },
     {
       "name": "wheel-sdist-build",
@@ -135,22 +163,22 @@
     {
       "name": "required-doc-inventory",
       "result": "failed",
-      "detail": "docs/development.md and docs/operations.md absent; .rst variants exist"
+      "detail": "governance .md names absent while docs/development.rst and docs/operations.rst exist"
     },
     {
       "name": "release-document-state",
       "result": "failed",
-      "detail": "0.8.0 changelog state, migration-guide finalization, and charter freeze state incomplete"
+      "detail": "CHANGELOG marks 0.8.0 Unreleased and migration guide remains a development draft"
     },
     {
       "name": "license-provenance-approval",
-      "result": "failed",
-      "detail": "reviewer, review date, and authorization evidence absent"
+      "result": "pending",
+      "detail": "named reviewer, review date, and authorization evidence are not accepted"
     },
     {
       "name": "decision-review-acceptance",
-      "result": "failed",
-      "detail": "D-0001 through D-0132 lack accepted review evidence"
+      "result": "pending",
+      "detail": "decision review acceptance evidence is incomplete"
     },
     {
       "name": "central-release-gates",
@@ -158,9 +186,33 @@
       "scope": "15 of 15 gates"
     }
   ],
+  "adversarial_evidence": {
+    "probe_artifact": "/tmp/mixle_f055_deep_probes.json",
+    "confirmed_fixed_examples": [
+      "Gaussian non-finite mu and derived-cache mutation refused",
+      "DOE budget accounting bounded across both methods",
+      "calibrated prompt collision separated",
+      "failed graph restore atomic",
+      "conditional public export unique",
+      "optimized-mode architecture guards retained"
+    ],
+    "confirmed_open_examples": [
+      "unbound prefetch eviction accepted",
+      "structured run and work measurements contradict",
+      "fit provenance fails strict JSON and fabricates structure-search convergence",
+      "empty categorical fit returns an unsampleable factor",
+      "legacy backoff payload can drop rows",
+      "deep-copy evidence hooks retain or execute caller behavior",
+      "categorical factor sampler renormalizes a different law",
+      "degree-2 TensorSketch returns 5 for a sole value of 1",
+      "summary-tree digit conversion hangs at base 1",
+      "typed runtime receipts remain mutable and malformed"
+    ]
+  },
   "excluded_evidence": [
-    "commands that exceeded the 30-second local cap",
-    "frozen-archive reproducibility checks requiring Git metadata",
+    "the first focused pytest attempt that spent its cap starting automatic xdist workers",
+    "the strict Sphinx process terminated at the 28-second cap",
+    "frozen-archive checks requiring Git metadata",
     "installed-distribution version checks that did not exercise the source candidate",
     "hosted or external release evidence not executed locally"
   ],
