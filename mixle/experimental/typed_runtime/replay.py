@@ -82,6 +82,38 @@ class ReplayStepReceipt:
     mismatches: tuple[str, ...]
     actual_receipt: CommitReceipt | None = None
 
+    def __post_init__(self) -> None:
+        """Bind the verdict to the list that is supposed to justify it (MXR-080-1874).
+
+        ``matched`` and ``mismatches`` are the same fact stated twice, and nothing held them
+        together: ``ReplayStepReceipt(0, "commit-0", True, ("status", "reason"))`` constructed and
+        reported a matched replay while enumerating what did not match. ``ReplayReport.status`` reads
+        ``matched`` alone, so that receipt made a whole-log replay report MATCHED over its own
+        evidence. ``replay_log`` passes ``not mismatches``, so this refuses nothing it produces.
+        """
+        if isinstance(self.index, bool) or not isinstance(self.index, int) or self.index < 0:
+            raise ValueError(f"replay step index must be a non-negative integer, got {self.index!r}.")
+        if not isinstance(self.commit_id, str) or not self.commit_id:
+            raise ValueError("replay step commit_id must be a non-empty string.")
+        if not isinstance(self.matched, bool):
+            raise TypeError(f"replay step matched must be a Boolean verdict, got {type(self.matched).__name__}.")
+        if isinstance(self.mismatches, (str, bytes)) or not isinstance(self.mismatches, (tuple, list)):
+            raise TypeError(
+                f"replay step mismatches must be a sequence of names, got {type(self.mismatches).__name__}."
+            )
+        object.__setattr__(self, "mismatches", tuple(self.mismatches))
+        if any(not isinstance(name, str) or not name.strip() for name in self.mismatches):
+            raise ValueError(f"replay step mismatches must each name a comparison, got {list(self.mismatches)!r}.")
+        if self.matched and self.mismatches:
+            raise ValueError(
+                f"replay step {self.commit_id} reports matched=True while listing mismatches "
+                f"{list(self.mismatches)}; a replay matched exactly when nothing differed."
+            )
+        if self.actual_receipt is not None and not isinstance(self.actual_receipt, CommitReceipt):
+            raise TypeError(
+                f"replay step actual_receipt must be a CommitReceipt, got {type(self.actual_receipt).__name__}."
+            )
+
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible replay comparison."""
 
