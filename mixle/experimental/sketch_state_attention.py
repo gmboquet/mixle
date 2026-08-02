@@ -372,7 +372,15 @@ if _HAS_TORCH:
             # A public constructor argument check, so not an assert: `python -O` strips asserts, and
             # this one gates a real architectural invariant -- with d_model not divisible by n_head
             # the head split is lossy and the model silently builds wrong (MXR-080-1861).
-            if n_head < 1 or d_model % n_head != 0:
+            # Every constructor argument, not only the two an assert used to cover: a fractional
+            # n_head passes a `d_model % n_head` test whenever the remainder happens to be zero and
+            # then makes head_dim a float, and zero layers builds a model with nothing in it
+            # (MXR-080-1863).
+            vocab = _positive_integer(vocab, "LinearAttentionSpine vocab")
+            d_model = _positive_integer(d_model, "LinearAttentionSpine d_model")
+            n_layer = _positive_integer(n_layer, "LinearAttentionSpine n_layer")
+            n_head = _positive_integer(n_head, "LinearAttentionSpine n_head")
+            if d_model % n_head != 0:
                 raise ValueError(
                     f"LinearAttentionSpine requires d_model divisible by a positive n_head, got "
                     f"d_model={d_model}, n_head={n_head}."
@@ -653,6 +661,13 @@ class TensorSketchState:
     # TensorSketch applies random signs, so a sketched normalizer is only an unbiased estimate and can
     # come out zero or negative, which is what _phi's non-negativity is supposed to rule out.
     Z: list[Any] = field(default_factory=list)
+    # per layer: (batch, n_head, sketch_dim) -- sum TS(phi(k_t)), the DEGREE-MATCHED normalizer used
+    # when degree > 1. The exact Z above is degree one: it estimates sum <phi(q), phi(k_t)>, while a
+    # degree-p numerator estimates sum <phi(q), phi(k_t)>^p. Dividing one by the other left a stray
+    # <phi(q), phi(k)>^(p-1) factor in the readout, so a single-key degree-2 scan returned 5 where a
+    # normalized readout must return 1 (MXR-080-1853). Only the sketch can supply the degree-p sum,
+    # so degree > 1 uses this and degree 1 keeps the exact Z, which already matches.
+    Z_ts: list[Any] = field(default_factory=list)
     cache_k: list[Any] = field(default_factory=list)
     cache_v: list[Any] = field(default_factory=list)
     pos: int = 0
@@ -665,6 +680,7 @@ if _HAS_TORCH:
         q_raw: Any,
         C: Any,
         Z: Any,
+        Z_ts: Any,
         evicted_k: Any,
         evicted_v: Any,
         hashes: list[Any],
@@ -675,7 +691,7 @@ if _HAS_TORCH:
         sketch_dim: int,
         head_dim: int,
         far_count_before: int,
-    ) -> tuple[Any, Any, Any, float | None]:
+    ) -> tuple[Any, Any, Any, Any, float | None]:
         """Advance TensorSketch numerator and denominator at every query's exact window crossing."""
         t = q_raw.shape[1]
         n_evict = 0 if evicted_k is None else evicted_k.shape[1]
@@ -684,6 +700,7 @@ if _HAS_TORCH:
         min_denominator: float | None = None
         phi_q = _phi(q_raw)
         ts_q = tensor_sketch_project(phi_q, hashes, signs, sketch_dim)
+        degree = len(hashes)
         for query_index in range(t):
             target = max(0, cache_len + query_index + 1 - window)
             if target > n_evict:
@@ -692,7 +709,8 @@ if _HAS_TORCH:
                 phi_key = _phi(evicted_k[:, processed])
                 ts_key = tensor_sketch_project(phi_key, hashes, signs, sketch_dim)
                 C = C + torch.einsum("bhm,bhe->bhme", ts_key, evicted_v[:, processed])
-                Z = Z + phi_key  # exact, not TS(phi(k)): see TensorSketchState.Z
+                Z = Z + phi_key  # exact, degree one: correct normalizer when degree == 1
+                Z_ts = ts_key if Z_ts is None else Z_ts + ts_key  # degree-p normalizer, see the state
                 processed += 1
             if far_count_before + processed == 0:
                 outputs.append(q_raw.new_zeros(q_raw.shape[0], q_raw.shape[2], head_dim))
@@ -702,35 +720,53 @@ if _HAS_TORCH:
             # phi is elu + 1, so both factors are strictly positive and this is exact: the sum cannot be
             # zero or negative once any token has left the window. Only the NUMERATOR is sketched, which
             # is the standard exact-normalizer form and is what (b) already does.
-            denominator = torch.einsum("bhd,bhd->bh", phi_q[:, query_index], Z)
+            if degree == 1:
+                # Degree one is Count Sketch: the numerator estimates sum <phi(q), phi(k_t)>, which the
+                # exact Z matches. phi is elu + 1 so both factors are strictly positive and a
+                # non-positive value here really does mean corrupted state.
+                denominator = torch.einsum("bhd,bhd->bh", phi_q[:, query_index], Z)
+            else:
+                denominator = torch.einsum("bhm,bhm->bh", query, Z_ts)
             if not bool(torch.isfinite(numerator).all().item()) or not bool(torch.isfinite(denominator).all().item()):
                 raise ValueError("TensorSketch far readout produced non-finite values")
             if bool((denominator <= 0).any().item()):
                 raise ValueError(
-                    "TensorSketch exact kernel normalizer must be strictly positive when far state is "
-                    "non-empty; phi is elu + 1 so this indicates corrupted state, not sketch variance"
+                    "TensorSketch kernel normalizer must be strictly positive when far state is "
+                    "non-empty; got a non-positive value at degree %d. At degree one phi is elu + 1 so "
+                    "this indicates corrupted state; above degree one the normalizer is a sketched "
+                    "estimate whose random signs admit a non-positive draw, and the readout is "
+                    "undefined for it -- raise sketch_dim or reseed the hashes." % degree
                 )
             current_min = float(denominator.min().item())
             min_denominator = current_min if min_denominator is None else min(min_denominator, current_min)
             outputs.append(numerator / denominator.unsqueeze(-1))
         if processed != n_evict:
             raise RuntimeError("TensorSketch far-state scan did not consume every token that left the local window")
-        return C, Z, torch.stack(outputs, dim=1), min_denominator
+        return C, Z, Z_ts, torch.stack(outputs, dim=1), min_denominator
 
     class TensorSketchSpine(nn.Module):
         """(c) Tensor sketch (Count Sketch + circular convolution) of degree-``p`` key features (Pham &
         Pagh 2013). Local half identical in shape to (b); far-field half accumulates
-        ``C_t = C_{t-1} + TS(phi(k_t)) v_t^T`` and
-        ``Z_t = Z_{t-1} + phi(k_t)`` for evicted tokens -- the numerator sketched, the normalizer kept
-        exact, as in (b). The readout is ``TS(phi(q))^T C / phi(q)^T Z``.
+        ``C_t = C_{t-1} + TS(phi(k_t)) v_t^T``, ``Z_t = Z_{t-1} + phi(k_t)``, and
+        ``Zts_t = Zts_{t-1} + TS(phi(k_t))`` for evicted tokens.
 
-        The normalizer is deliberately NOT sketched. TensorSketch applies random signs, so ``TS(phi(q))^T
-        TS(phi(k))`` is an unbiased estimate that can come out zero or negative however non-negative
-        ``phi`` is; a sketched denominator therefore made the readout fail on a chance collision rather
-        than on any invalid state, and the probability of that is not monotone in ``sketch_dim`` (measured
-        on the E7 bake-off: ``sketch_dim`` 16 and 32 succeeded where 12 and 24 failed), so no sketch width
-        fixed it and every width that fit the bake-off's state budget could fail. Keeping ``Z`` exact
-        costs ``O(d_phi)`` per step -- the same the design note already calls cheap for (b) -- and makes
+        **The normalizer matches the numerator's degree.** ``TS(phi(q))^T TS(phi(k))`` estimates
+        ``<phi(q), phi(k)>**p``, so a degree-``p`` numerator needs ``sum_t <phi(q), phi(k_t)>**p``
+        beneath it. An earlier revision divided it by the exact ``phi(q)^T Z``, which is degree ONE:
+        the ratio kept a stray ``<phi(q), phi(k)>**(p-1)`` factor, and a single key with value 1 at
+        degree 2 read out ``5`` where a normalized readout must be ``1`` (MXR-080-1853). The readout
+        is therefore ``TS(phi(q))^T C / phi(q)^T Z`` at degree 1 and
+        ``TS(phi(q))^T C / <TS(phi(q)), Zts>`` above it.
+
+        Degree 1 deliberately keeps the exact normalizer. There it is already the right degree, and it
+        avoids the sketched estimator's one real hazard: TensorSketch applies random signs, so a
+        sketched denominator is an unbiased estimate that can come out zero or negative however
+        non-negative ``phi`` is, and the probability of that is not monotone in ``sketch_dim``
+        (measured on the E7 bake-off: ``sketch_dim`` 16 and 32 succeeded where 12 and 24 failed).
+        Above degree 1 that hazard is unavoidable -- only the sketch can express the degree-``p``
+        sum -- so a non-positive draw raises and names itself as sketch variance rather than
+        corrupted state. Being occasionally undefined is the honest cost of computing the right
+        quantity; the alternative was computing the wrong one deterministically.
         ``phi(q)^T Z > 0`` a theorem again rather than a hope.
 
         This is still a normalized estimator of polynomial-kernel attention, not a probability
@@ -818,6 +854,10 @@ if _HAS_TORCH:
             return TensorSketchState(
                 C=C,
                 Z=Z,
+                Z_ts=[
+                    torch.zeros(batch_size, self.n_head, self.sketch_dim, device=device, dtype=dtype)
+                    for _ in range(self.n_layer)
+                ],
                 cache_k=[None] * self.n_layer,
                 cache_v=[None] * self.n_layer,
                 pos=0,
@@ -827,6 +867,7 @@ if _HAS_TORCH:
             return TensorSketchState(
                 C=[c.detach() for c in state.C],
                 Z=[z.detach() for z in state.Z],
+                Z_ts=[z.detach() if z is not None else None for z in state.Z_ts],
                 cache_k=[k.detach() if k is not None else None for k in state.cache_k],
                 cache_v=[v.detach() if v is not None else None for v in state.cache_v],
                 pos=state.pos,
@@ -842,6 +883,7 @@ if _HAS_TORCH:
             new_cache_v: list[Any] = []
             new_C: list[Any] = []
             new_Z: list[Any] = []
+            new_Z_ts: list[Any] = []
             denominator_minima: list[float | None] = []
             far_counts: list[int] = []
             for layer in range(self.n_layer):
@@ -865,10 +907,11 @@ if _HAS_TORCH:
                 far_count_before = state.pos - cache_len
                 if far_count_before < 0:
                     raise ValueError("state position cannot be smaller than its cache length")
-                C_layer, Z_layer, far_out, denominator_minimum = _tensor_sketch_far_scan(
+                C_layer, Z_layer, Z_ts_layer, far_out, denominator_minimum = _tensor_sketch_far_scan(
                     q_raw,
                     state.C[layer],
                     state.Z[layer],
+                    state.Z_ts[layer] if state.Z_ts else None,
                     evicted_k,
                     evicted_v,
                     hashes,
@@ -888,6 +931,7 @@ if _HAS_TORCH:
 
                 new_C.append(C_layer)
                 new_Z.append(Z_layer)
+                new_Z_ts.append(Z_ts_layer)
                 new_cache_k.append(cache_k)
                 new_cache_v.append(cache_v)
 
@@ -896,6 +940,7 @@ if _HAS_TORCH:
             new_state = TensorSketchState(
                 C=new_C,
                 Z=new_Z,
+                Z_ts=new_Z_ts,
                 cache_k=new_cache_k,
                 cache_v=new_cache_v,
                 pos=state.pos + t,
@@ -903,16 +948,17 @@ if _HAS_TORCH:
                     "far_tokens_per_layer": far_counts,
                     "minimum_positive_denominator_per_layer": denominator_minima,
                     "chunk_boundary_invariant_update": True,
-                    # Only true at degree 1. TS(phi(q))^T TS(phi(k)) estimates
-                    # <phi(q), phi(k)>**degree, but the denominator is phi(q)^T sum(phi(k)), a
-                    # degree-ONE kernel, so above degree 1 the ratio does not normalize its own
-                    # numerator: with one key, value 1, degree 2 and q = k = [2, 1], a normalized
-                    # readout must be 1 and the measured average over 128 hash seeds is 4.90625
-                    # (MXR-080-1853). The exact degree-p normalizer is sum_t <phi(q), phi(k_t)>**p,
-                    # which this single degree-1 accumulator cannot express -- it needs
-                    # sum_t phi(k_t) tensor-powered to p (head_dim**p entries). Until that is
-                    # implemented and benchmarked, report the claim honestly rather than asserting it.
-                    "normalized_kernel_estimator": self.degree == 1,
+                    # True at every degree now that the normalizer matches the numerator's degree
+                    # (MXR-080-1853). The numerator estimates sum_t <phi(q), phi(k_t)>**degree; the
+                    # denominator used to be phi(q)^T sum_t phi(k_t), a degree-ONE kernel, so the
+                    # ratio kept a stray <phi(q), phi(k)>**(degree - 1) factor -- one key, value 1,
+                    # degree 2, q = k = [2, 1] returned 5 where a normalized readout must return 1.
+                    # Relabelling that in the receipt did not repair the computation, so the state now
+                    # carries Z_ts = sum_t TS(phi(k_t)) and degree > 1 divides by <TS(phi(q)), Z_ts>,
+                    # which estimates the degree-p sum directly. Degree 1 keeps the exact
+                    # normalizer -- already the right degree, and free of the sketched estimator's
+                    # sign risk. Verified: the single-key readout is exactly 1.0 at degrees 1, 2, 3.
+                    "normalized_kernel_estimator": True,
                     "nonnegative_attention_weights_guaranteed": False,
                 },
             )

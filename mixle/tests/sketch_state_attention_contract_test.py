@@ -102,11 +102,15 @@ def test_tensor_sketch_far_branch_is_normalized_by_kernel_mass():
     evicted_v = torch.tensor([[[[3.0]], [[3.0]]]])
     C = torch.zeros(1, 1, 2, 1)
     Z = torch.zeros(1, 1, 2)
+    Z_ts = torch.zeros(1, 1, 2)
 
-    _, _, output, minimum = _tensor_sketch_far_scan(
+    # Degree 1 (one hash/sign pair): the exact Z is already the right degree, so this path is
+    # unchanged by the MXR-080-1853 repair -- which is the point of keeping it exact there.
+    _, _, _, output, minimum = _tensor_sketch_far_scan(
         q,
         C,
         Z,
+        Z_ts,
         evicted_k,
         evicted_v,
         hashes,
@@ -133,6 +137,7 @@ def test_tensor_sketch_nonpositive_normalizer_fails_closed():
             q,
             C,
             Z,
+            torch.zeros(1, 1, 2),
             None,
             None,
             hashes,
