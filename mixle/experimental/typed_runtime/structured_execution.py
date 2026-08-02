@@ -53,8 +53,44 @@ class StructuredEstimationReceipt:
 
         Deliberately NOT checked: ``num_workers == len(worker_device_ids)``. A caller may pass
         ``num_workers`` below the placement capacity, so a worker count smaller than the device list
-        is a legitimate plan, not a forged one.
+        is a legitimate plan, not a forged one. Above it is a different matter, and was unchecked:
+        ``num_workers=999`` with one placed device constructed, claiming workers no placement
+        admitted. That direction is now refused, along with blank or repeated ids and empty hashes.
+
+        Note what ``worker_device_ids`` does and does not attest. The executor admits work against
+        these slots -- capacity, device kind and host are all checked before the fold -- but the fold
+        itself runs on a ``ThreadPoolExecutor``, which has no API to pin a task to a device. The list
+        names the slots the work was admitted against, not devices it provably ran on, and the work
+        measurement carries ``placement_admitted`` / ``device_affinity_enforced`` separately so the
+        two are not read as one claim.
         """
+        if isinstance(self.num_workers, bool) or not isinstance(self.num_workers, int) or self.num_workers < 1:
+            raise ValueError(
+                f"structured-estimation receipt num_workers must be a positive integer, got {self.num_workers!r}."
+            )
+        if len(set(self.worker_device_ids)) != len(self.worker_device_ids):
+            raise ValueError(
+                f"structured-estimation receipt repeats a worker device id: {list(self.worker_device_ids)}. "
+                "One slot cannot be two workers."
+            )
+        if self.num_workers > len(self.worker_device_ids):
+            raise ValueError(
+                f"structured-estimation receipt claims {self.num_workers} workers against "
+                f"{len(self.worker_device_ids)} placed device slot(s). A worker count cannot exceed the "
+                "placement it was admitted against."
+            )
+        for name, value in (
+            ("execution_backend", self.execution_backend),
+            ("parallel_statistics_hash", self.parallel_statistics_hash),
+            ("parallel_model_hash", self.parallel_model_hash),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"structured-estimation receipt {name} must name something, got {value!r}.")
+        blank_devices = [item for item in self.worker_device_ids if not isinstance(item, str) or not item.strip()]
+        if blank_devices:
+            raise ValueError(
+                f"structured-estimation receipt worker_device_ids contains an id that names nothing: {blank_devices!r}."
+            )
         present = (self.reference_statistics_hash is not None, self.reference_model_hash is not None)
         if any(present) and not all(present):
             raise ValueError(
@@ -283,7 +319,16 @@ def run_structured_estimation_step(
                 "num_workers": worker_count,
                 "worker_device_ids": list(worker_devices),
                 "parallel_node_ids": list(parallel_node_ids),
-                "placement_enforced": True,
+                # This said "placement_enforced": True, which was not true of anything that happens
+                # below (MXR-080-0647). What IS enforced is admission: the slots were checked against
+                # the plan's capacity, kind and host before the fold started, and a request exceeding
+                # them is refused. What is NOT enforced is affinity -- the fold runs on a
+                # ThreadPoolExecutor, which offers no API to pin a task to a device, so
+                # worker_device_ids names the slots the work was admitted against, not the devices it
+                # provably ran on. Reporting both separately keeps a reader from taking the device
+                # list as placement evidence it cannot be.
+                "placement_admitted": True,
+                "device_affinity_enforced": False,
             },
         ),
         reference_seconds=reference_seconds,
