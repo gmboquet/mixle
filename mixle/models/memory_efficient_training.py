@@ -1066,13 +1066,15 @@ if _HAS_TORCH:
                     state["compressed"] = compressed
             super().load_state_dict(packed)
 
-    __all__.append("CompressedAdam")
+    # No __all__.append here: "CompressedAdam" is already in the static __all__ above, and appending
+    # it under torch listed the name twice (MXR-080-1860). The static entry is the correct one --
+    # both branches bind the name, so the export exists on a torch-less install too.
 else:
-    # __all__ correctly omits it here, but mixle.models.__init__ imports the name unconditionally,
-    # so leaving it undefined breaks `import mixle.models` on a torch-less install with a bare
-    # "cannot import name 'CompressedAdam'". Bind a placeholder that imports cleanly and names the
-    # missing optional dependency when anyone actually constructs it. Same treatment as the
-    # nn.Module placeholders in mixle.models.coarsening.
+    # mixle.models.__init__ imports the name unconditionally, so leaving it undefined breaks
+    # `import mixle.models` on a torch-less install with a bare "cannot import name
+    # 'CompressedAdam'". Bind a placeholder that imports cleanly and names the missing optional
+    # dependency when anyone actually constructs it. Same treatment as the nn.Module placeholders in
+    # mixle.models.coarsening.
     class CompressedAdam:
         """Placeholder for the torch-only optimizer; constructing it reports the missing dependency."""
 

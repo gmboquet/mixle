@@ -77,6 +77,44 @@ class ComposabilityTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "likelihood factors found at indices"):
             MixtureDistribution([factor, _law()], [0.5, 0.5])
 
+    def _mass(self, dist, keys=("a", "b")) -> float:
+        import numpy as np
+
+        return sum(float(np.exp(dist.log_density(key))) for key in keys)
+
+    def test_a_sub_probability_mixture_refuses_to_sample(self):
+        """A scaled component's constant cancels in the E-step, NOT in the composite (MXR-080-1857).
+
+        A mass-0.75 component under weight 0.5 leaves the mixture at total mass 0.875. The mixture
+        reported LIKELIHOOD_FACTOR correctly, but its sampler drew as though the weights were draw
+        probabilities, so the scorer and the sampler described different objects.
+        """
+        mixture = MixtureDistribution([CategoricalDistribution({"a": 0.5, "b": 0.25}), _law()], [0.5, 0.5])
+        self.assertAlmostEqual(self._mass(mixture), 0.875)
+        with self.assertRaisesRegex(ValueError, "likelihood factor, not a normalized law"):
+            mixture.sampler(seed=0)
+
+    def test_an_open_world_component_refuses_to_sample_but_still_scores(self):
+        # An open-world smoothed component has infinite total mass, so there is no finite scale to
+        # absorb and no coherent mixture to sample. Scoring it remains legitimate and is tested
+        # elsewhere (sparse_mixture_test builds exactly this to check a bound), so the object must
+        # stay constructible -- refusing at construction would be the guard overreaching.
+        mixture = MixtureDistribution(
+            [CategoricalDistribution({"a": 0.5, "b": 0.5}, default_value=0.25), _law()], [0.5, 0.5]
+        )
+        self.assertTrue(float(mixture.log_density("a")) < 0.0)
+        with self.assertRaisesRegex(ValueError, "cannot be sampled"):
+            mixture.sampler(seed=0)
+
+    def test_a_normalized_mixture_still_samples(self):
+        mixture = MixtureDistribution([_law(), CategoricalDistribution({"a": 0.9, "b": 0.1})], [0.5, 0.5])
+        self.assertAlmostEqual(self._mass(mixture), 1.0)
+        self.assertEqual(len(mixture.sampler(seed=0).sample(3)), 3)
+
+    def test_a_gaussian_mixture_is_unaffected(self):
+        mixture = MixtureDistribution([GaussianDistribution(0.0, 1.0), GaussianDistribution(2.0, 1.0)], [0.5, 0.5])
+        self.assertEqual(len(mixture.sampler(seed=0).sample(3)), 3)
+
     def test_a_non_categorical_factor_without_the_declaration_is_refused(self):
         # Admissibility is opt-in: absent the declaration a factor is still refused, so this cannot
         # become a blanket hole for every LIKELIHOOD_FACTOR.

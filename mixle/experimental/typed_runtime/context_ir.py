@@ -382,10 +382,37 @@ class ContextGraph:
         invisible in the index. Those two are the untrusted paths -- any state built through
         ``add_edge`` already satisfies this, so nothing the graph produces is rejected here.
         """
-        rebuilt: dict[tuple[str, str, ContextEdgeKind], str] = {}
-        for edge_id, edge in self.edges.items():
+        self._relations = self._validated_relation_index(self.nodes, self.edges)
+
+    @staticmethod
+    def _validated_relation_index(
+        nodes: Mapping[str, ContextNode], edges: Mapping[str, ContextEdge]
+    ) -> dict[tuple[str, str, ContextEdgeKind], str]:
+        """Return the relation index for a candidate ``(nodes, edges)`` pair, or raise.
+
+        Deliberately a pure function of its arguments, touching no instance state, so a caller can
+        check a candidate BEFORE installing it. An earlier revision validated in place, after
+        ``restore`` had already assigned the replacement dictionaries, so rejecting a snapshot left
+        the live graph holding it with a stale index -- the guard corrupted the very state it existed
+        to protect (MXR-080-1859).
+
+        Two conditions, both of which ``add_edge`` enforces at insertion, so no state the graph builds
+        for itself is rejected here:
+
+        * every edge endpoint resolves to a node, since an edge to an absent node is not a relation;
+        * one edge id per ``(source, target, kind)``, since two ids asserting one relation
+          double-count it in every downstream tally (MXR-080-0643).
+        """
+        index: dict[tuple[str, str, ContextEdgeKind], str] = {}
+        for edge_id, edge in edges.items():
+            missing = [end for end in (edge.source_node, edge.target_node) if end not in nodes]
+            if missing:
+                raise ValueError(
+                    "context graph state holds edge %s whose endpoint(s) %s are not nodes in the same "
+                    "state. An edge to an absent node is not a relation." % (edge_id, sorted(missing))
+                )
             relation = (edge.source_node, edge.target_node, edge.kind)
-            held_by = rebuilt.get(relation)
+            held_by = index.get(relation)
             if held_by is not None:
                 raise ValueError(
                     "context graph state holds two edges for one relation %s --%s--> %s: %s and %s. "
@@ -393,8 +420,8 @@ class ContextGraph:
                     "add_edge enforces; merge their provenance into a single edge."
                     % (edge.source_node, edge.kind.value, edge.target_node, held_by, edge_id)
                 )
-            rebuilt[relation] = edge_id
-        self._relations = rebuilt
+            index[relation] = edge_id
+        return index
 
     def remove_node(self, node_id: str) -> None:
         """Remove one node and all incident edges as one versioned mutation."""
@@ -446,11 +473,16 @@ class ContextGraph:
             return self.version, copy.deepcopy(self.nodes), copy.deepcopy(self.edges)
 
     def restore(self, snapshot: tuple[int, dict[str, ContextNode], dict[str, ContextEdge]]) -> None:
-        """Restore an action snapshot after failure."""
+        """Restore an action snapshot after failure, or leave the graph untouched.
 
+        Validation happens on the candidate before anything is installed, so a rejected snapshot is a
+        no-op rather than a half-applied state: this is the recovery path, and a restore that corrupts
+        the graph it is restoring is worse than one that fails (MXR-080-1859).
+        """
         with self._lock:
-            self.version, self.nodes, self.edges = copy.deepcopy(snapshot)
-            self._reindex_relations()
+            version, nodes, edges = copy.deepcopy(snapshot)
+            relations = self._validated_relation_index(nodes, edges)
+            self.version, self.nodes, self.edges, self._relations = version, nodes, edges, relations
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
@@ -464,14 +496,18 @@ class ContextGraph:
         expected: tuple[int, dict[str, ContextNode], dict[str, ContextEdge]],
         replacement: tuple[int, dict[str, ContextNode], dict[str, ContextEdge]],
     ) -> None:
-        """Install a staged state only when the complete base snapshot still matches."""
+        """Install a staged state only when the complete base snapshot still matches.
 
+        Like :meth:`restore`, the replacement is validated before it is installed, so a rejected
+        staging attempt leaves the live graph exactly as it was (MXR-080-1859).
+        """
         with self._lock:
             current = (self.version, self.nodes, self.edges)
             if current != expected:
                 raise RuntimeError("context graph changed while the action adapter was running.")
-            self.version, self.nodes, self.edges = copy.deepcopy(replacement)
-            self._reindex_relations()
+            version, nodes, edges = copy.deepcopy(replacement)
+            relations = self._validated_relation_index(nodes, edges)
+            self.version, self.nodes, self.edges, self._relations = version, nodes, edges, relations
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible graph sorted by stable ids."""

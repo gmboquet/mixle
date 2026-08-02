@@ -55,8 +55,9 @@ to the [release-readiness](https://gmboquet.github.io/mixle/release-readiness.ht
 
 ## Installation
 
-Python 3.11+ (developed on 3.12), on PyPI as `mixle`. CI tests Linux x86_64 and macOS arm64 (Apple
-Silicon) on every PR; Windows is untested.
+Python 3.11 or 3.12 (developed on 3.12), on PyPI as `mixle`. That is the whole supported range --
+`requires-python` is `>=3.11,<3.13`, so 3.13 and later will not install. CI tests Linux x86_64 and
+macOS arm64 (Apple Silicon) on every PR; Windows is untested.
 
 ```sh
 pip install mixle          # base (numpy, scipy): ordinary distributions and local fitting

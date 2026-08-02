@@ -738,7 +738,38 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         Returns:
             ``MixtureSampler`` bound to this distribution.
+
+        Raises:
+            ValueError: If this mixture is a likelihood factor rather than a normalized law.
+
+        A component may be a scaled law -- an unnormalized categorical, an open-world smoothed
+        emission, a component that won zero responsibility -- and ``_owned_generative_components``
+        admits those deliberately, because a constant scale cancels in the E-step's responsibility
+        normalization. It does NOT cancel in the composite: a mass-0.75 component under weight 0.5
+        leaves the mixture with total mass 0.875, and ``density_semantics()`` reports
+        ``LIKELIHOOD_FACTOR`` to say so. The sampler used to ignore that and draw as though the
+        weights described a law, so the scorer and the sampler described different objects
+        (MXR-080-1857).
+
+        Refusing here rather than at construction is the point: scoring such a mixture is legitimate
+        and tested (an open-world component has infinite total mass and no finite scale to absorb),
+        so the object must remain constructible. What it cannot do is pretend to be a generative law.
         """
+        from mixle.stats.compute.pdist import DensitySemantics
+
+        if self.density_semantics() is DensitySemantics.LIKELIHOOD_FACTOR:
+            unnormalized = [
+                index
+                for index, component in enumerate(self.components)
+                if component.density_semantics() is DensitySemantics.LIKELIHOOD_FACTOR
+            ]
+            raise ValueError(
+                "MixtureDistribution is a likelihood factor, not a normalized law, so it cannot be "
+                f"sampled: component(s) {unnormalized} do not integrate to one, and the mixture "
+                "weights therefore do not describe draw probabilities. Normalize those components "
+                "(or drop a zero-evidence one) to obtain a generative mixture; log_density remains "
+                "available either way."
+            )
         return MixtureSampler(self, seed)
 
     def estimator(self, pseudo_count: float | None = None) -> MixtureEstimator:
