@@ -374,8 +374,27 @@ class ContextGraph:
         replace_if_unchanged -- must call this. Refreshing the container and leaving the derived
         index behind is the same stale-cache defect as MXR-080-1192: the guard would keep rejecting
         relations that a restore had already removed, and would stop rejecting ones it reinstated.
+
+        This also enforces the bijection it is rebuilding (MXR-080-0643). A dict comprehension kept
+        only the LAST edge for a repeated relation while ``self.edges`` kept both, so a snapshot
+        handed to ``restore`` or ``replace_if_unchanged`` could reinstate exactly what ``add_edge``
+        refuses: two edge ids asserting one relation, double-counted in every downstream tally and
+        invisible in the index. Those two are the untrusted paths -- any state built through
+        ``add_edge`` already satisfies this, so nothing the graph produces is rejected here.
         """
-        self._relations = {(e.source_node, e.target_node, e.kind): eid for eid, e in self.edges.items()}
+        rebuilt: dict[tuple[str, str, ContextEdgeKind], str] = {}
+        for edge_id, edge in self.edges.items():
+            relation = (edge.source_node, edge.target_node, edge.kind)
+            held_by = rebuilt.get(relation)
+            if held_by is not None:
+                raise ValueError(
+                    "context graph state holds two edges for one relation %s --%s--> %s: %s and %s. "
+                    "A restored or replaced graph must satisfy the same one-edge-per-relation rule "
+                    "add_edge enforces; merge their provenance into a single edge."
+                    % (edge.source_node, edge.kind.value, edge.target_node, held_by, edge_id)
+                )
+            rebuilt[relation] = edge_id
+        self._relations = rebuilt
 
     def remove_node(self, node_id: str) -> None:
         """Remove one node and all incident edges as one versioned mutation."""
