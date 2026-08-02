@@ -837,6 +837,16 @@ class CategoricalAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.count_map = dict()
         self.keys = keys
+        # Every label this accumulator was shown, including ones that earned zero weight. ``count_map``
+        # holds positive counts only, so a component that saw the data but won no responsibility used
+        # to report an EMPTY statistic -- and an empty statistic estimates to a categorical with no
+        # support, which scores -inf everywhere and can therefore never win responsibility again
+        # (MXR-080-1220). Keeping the support lets that estimate be a uniform instead: generative,
+        # and recoverable on the next E-step, which is what the dead-component case actually needs.
+        #
+        # A dict, not a set: ``pmap`` insertion order is load-bearing (CategoricalSampler draws a
+        # positional index from it), and a set's iteration order varies with PYTHONHASHSEED.
+        self._support: dict[Any, None] = {}
 
     def update(self, x: Any, weight: float, estimate: Optional["CategoricalDistribution"]) -> None:
         """Adds weight to the category_count for category x.
@@ -854,6 +864,8 @@ class CategoricalAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         checked = nonnegative_weights([weight], shape=(1,))
+        if x in getattr(estimate, "pmap", ()):  # a label this component models, see seq_update
+            self._support.setdefault(x, None)
         if checked[0] == 0.0:
             return
         self.count_map[x] = self.count_map.get(x, 0.0) + weight
@@ -901,9 +913,16 @@ class CategoricalAccumulator(SequenceEncodableStatisticAccumulator):
         inv_key_map = np.asarray(x[1], dtype=object)
         checked = nonnegative_weights(weights, shape=indices.shape)
         bcnt = np.bincount(indices, weights=checked, minlength=len(inv_key_map))
+        modelled = getattr(estimate, "pmap", None)
         for index, count in enumerate(bcnt):
+            key = inv_key_map[index]
+            # Record the support only for a label the component actually MODELS. A label it assigns
+            # no probability is not part of its support, and resetting a dead component to a uniform
+            # over labels it never modelled would invent a law from evidence it could not explain --
+            # which is what "impossible evidence has zero responsibility" means.
+            if modelled is not None and key in modelled:
+                self._support.setdefault(key, None)
             if count > 0.0:
-                key = inv_key_map[index]
                 self.count_map[key] = self.count_map.get(key, 0.0) + count
 
     def seq_initialize(self, x: Any, weights: np.ndarray, rng: RandomState | None) -> None:
@@ -937,6 +956,12 @@ class CategoricalAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         for k, v in suff_stat.items():
+            self._support.setdefault(k, None)
+            if v == 0.0:
+                # A zero entry carries support, not evidence. Adding it to count_map would enlarge
+                # len(suff_stat) and so change how a pseudo_count is spread; keeping count_map to
+                # positive counts leaves every ordinary fit byte-identical.
+                continue
             self.count_map[k] = self.count_map.get(k, 0.0) + v
 
         return self
@@ -950,7 +975,13 @@ class CategoricalAccumulator(SequenceEncodableStatisticAccumulator):
             Dict[Any, float] of sufficient statistic.
 
         """
-        return self.count_map.copy()
+        if self.count_map:
+            return self.count_map.copy()
+        # No positive counts, but labels were seen: report them at zero rather than reporting
+        # nothing. estimate() turns a zero-count support into a uniform (its nobs_loc == 0 branch),
+        # which is a generative law; an empty statistic estimated to a supportless object whose
+        # sampler raised (MXR-080-1220).
+        return dict.fromkeys(self._support, 0.0)
 
     def from_value(self, x: dict[Any, float]) -> "CategoricalAccumulator":
         """Set CategoricalAccumulator sufficient statistics and member variables from suff_stat dict defined in value().
@@ -966,6 +997,8 @@ class CategoricalAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         self.count_map = x
+        for key in x:
+            self._support.setdefault(key, None)
 
         return self
 
@@ -1125,31 +1158,28 @@ class CategoricalEstimator(ParameterEstimator):
             elif self.suff_stat is not None:
                 suff_stat = {key: 0.0 for key in self.suff_stat}
             # With no prior and no declared support there is nothing to widen an empty count map
-            # into, but that is a state EM legitimately reaches -- a mixture/HMM component can win
-            # zero responsibility for an iteration, and every sequence in a batch can be empty. The
-            # honest result is the empty categorical (no support, everything scored at
-            # ``default_value``), not a raise: raising here aborts the whole fit over a component
-            # that would have recovered on the next iteration.
+            # into. The EM dead-component case that used to justify returning an empty categorical
+            # here is now handled upstream: CategoricalAccumulator records every label it was shown,
+            # so a component that won zero responsibility reports those labels at zero count and
+            # estimates to a uniform below -- generative, and able to win responsibility again, which
+            # an all -inf object never could (MXR-080-1220).
 
         if self.has_conj_prior:
             return self._estimate_conjugate(suff_stat)
 
         if not suff_stat:
-            # Return the empty categorical HERE, before any per-level arithmetic. Every smoothing
-            # branch below divides by a level count, so reaching them with no levels raised
-            # ZeroDivisionError instead of producing the no-evidence estimate this method documents
-            # directly above -- an HMM whose emission component drew zero weight for an iteration
-            # crashed the whole fit rather than recovering on the next E-step. A pseudo_count has
-            # nothing to spread over when there are no levels, so there is no smoothing to apply.
+            # NOTHING was accumulated -- not even a label at zero weight -- so there is no set of
+            # labels to place a distribution over. Raising here was tried and reverted: it is a state
+            # the library legitimately reaches (a learned segment fitted on all-empty sequences, a
+            # gated mixture whose evidence is impossible for a component, hidden association), and
+            # refusing broke all three. The result is the empty categorical, which scores -inf
+            # everywhere and reports LIKELIHOOD_FACTOR rather than posing as a law; a mixture built
+            # over it is a factor too and refuses to sample (MXR-080-1857).
             #
-            # MXR-080-1220 calls the result "unsampleable and non-generative". It is, and that is the
-            # honest description of a fit with no evidence -- but it is not silent about it:
-            # ``log_density`` returns ``-inf`` for every input (correct: nothing is in support), and
-            # ``sampler()`` raises "CategoricalSampler requires pmap to contain at least one
-            # category" rather than inventing a draw. The failure lands at the boundary that cannot
-            # proceed, naming its cause. Promoting it to a raise HERE is what the paragraph above
-            # rules out, and fabricating a uniform over levels never observed would be worse: it
-            # would make a zero-evidence component score and sample as if it had learned something.
+            # The EM dead-component case that used to share this branch no longer reaches it: the
+            # accumulator records every label it was shown, so a component that saw data and won no
+            # weight arrives here with a zero-count support and estimates to a uniform below -- which,
+            # unlike an all -inf object, can win responsibility again (MXR-080-1220).
             return CategoricalDistribution({}, default_value=0.0, name=self.name, keys=self.keys)
 
         stats_sum = sum(suff_stat.values())
