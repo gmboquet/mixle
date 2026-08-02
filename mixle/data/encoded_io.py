@@ -22,9 +22,11 @@ failing the new digest check in a way that reads like corruption.
 
 This digest is corruption-detection, not authentication: it is computed from and stored inside the same
 file, so it catches truncation/bit-rot/header-tampering but cannot prove the file was not replaced wholesale
-by whoever could already write to ``path`` -- callers should still treat ``load_encoded`` like any other
-local pickle load and only point it at a path they trust, exactly as :func:`mixle.lifecycle.Model.load`
-documents for its own pickle-format artifacts.
+by whoever could already write to ``path``. A forged artifact carries a valid digest for its own contents,
+a matching encoder signature, and a body that executes on load. ``load_encoded`` therefore requires an
+explicit ``trusted=True`` (MXR-080-1873): the decision belongs at the call site, where the provenance of
+``path`` is known, not in a docstring the caller may never read. This mirrors what
+:func:`mixle.lifecycle.Model.load` documents for its own pickle-format artifacts.
 """
 
 from __future__ import annotations
@@ -108,7 +110,7 @@ def save_encoded(encoded: Any, path: str, *, encoder: Any = None) -> str:
     return digest
 
 
-def load_encoded(path: str, *, encoder: Any = None) -> Any:
+def load_encoded(path: str, *, encoder: Any = None, trusted: bool | None = None) -> Any:
     """Load encoded data written by :func:`save_encoded`, verifying its integrity digest.
 
     The header is parsed as JSON (never pickle) and the envelope digest -- header fields and body
@@ -120,9 +122,30 @@ def load_encoded(path: str, *, encoder: Any = None) -> Any:
     ``__eq__`` checks) -- e.g. ``CompositeDataEncoder.__str__`` recurses into its component encoders
     and so reflects field count, and ``DiagonalGaussianDataEncoder.__str__`` includes its ``dim`` --
     so a shape mismatch under the same class name (e.g. a one-field vs. two-field
-    ``CompositeDataEncoder``) is caught, not just a mismatch in class."""
+    ``CompositeDataEncoder``) is caught, not just a mismatch in class.
+
+    ``trusted=True`` is required, and is the caller's statement that ``path`` is under their control.
+    The body is pickle, so loading it is equivalent to executing whatever is in the file, and NONE of
+    the checks above change that: the digest is computed from and stored inside the same file, so it
+    detects truncation and header tampering but is worthless against a file replaced wholesale -- a
+    forged artifact carries a valid digest for its own contents and a matching encoder signature, and
+    executes on load (MXR-080-1873). The module docstring said as much and the parameter did not
+    exist, so the warning was addressed to whoever read the source rather than to whoever called the
+    function. Making it an argument puts the decision at the call site, where the provenance of
+    ``path`` is actually known.
+    """
     if encoder is None:
         raise ValueError("load_encoded requires encoder= to verify the payload's structural type binding")
+    if trusted is not True:
+        raise ValueError(
+            f"load_encoded({path!r}) requires trusted=True. The body is pickle, so loading it executes "
+            "whatever the file contains; the integrity digest is stored in the same file and cannot "
+            "distinguish a forged artifact from a genuine one. Pass trusted=True only for a path you "
+            "control, exactly as you would for any other local pickle load."
+            if trusted is None
+            else f"load_encoded({path!r}) was called with trusted={trusted!r}; it will not unpickle a "
+            "path the caller has not vouched for."
+        )
     with open(path, "rb") as f:
         if f.read(len(_MAGIC)) != _MAGIC:
             raise ValueError(f"{path!r} is not a mixle encoded-data file")

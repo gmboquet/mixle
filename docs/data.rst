@@ -165,10 +165,15 @@ reuse the same preprocessing boundary, save encoded data:
 
    encoder = model.dist_to_encoder()
    encoded = encoder.seq_encode(rows)
-   save_encoded("encoded.mixle", encoded)
-   encoded_again = load_encoded("encoded.mixle")
+   save_encoded(encoded, "encoded.mixle", encoder=encoder)
+   encoded_again = load_encoded("encoded.mixle", encoder=encoder, trusted=True)
 
 The encoded payload is the same kind of data consumed by ``optimize`` internally.
+
+``trusted=True`` is required and is not a formality. The body is pickle, so loading
+it executes whatever the file contains, and the stored integrity digest is computed
+from and stored inside that same file -- it detects truncation and header tampering,
+not a file replaced wholesale. Pass it only for a path you control.
 
 Encoded payloads should be versioned with the encoder or fitted model that
 created them. Reusing encoded data after a schema or encoder change can produce
