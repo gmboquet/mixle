@@ -729,6 +729,28 @@ class CategoricalSampler(DistributionSampler):
 
         """
         self.rng = RandomState(seed)
+        # One rule covering every way this object can fail to be a law (MXR-080-1857). The checks
+        # below caught scoring_only and an all-zero pmap; they did not catch the two shapes that
+        # matter most, because both looked like ordinary data:
+        #
+        #   * a pmap whose total is not one -- {a: .25, b: .25} scores total mass .5, and the
+        #     normalization further down silently rescaled it to 1, so the sampler drew from a
+        #     DIFFERENT law than log_density scored;
+        #   * a positive default_value -- every unseen label carries mass the sampler can never
+        #     emit, because it draws only from the registered labels.
+        #
+        # is_normalized_probability is derived from the parameters and is exactly this condition, so
+        # one test replaces three and cannot drift from what the numbers say.
+        if not getattr(dist, "is_normalized_probability", True):
+            raise ValueError(
+                "CategoricalSampler requires a normalized probability law, but this distribution is "
+                f"not one: pmap total {float(sum(dist.pmap.values())) if dist.pmap else 0.0:.6g}, "
+                f"default_value {getattr(dist, 'default_value', 0.0)!r}, "
+                f"scoring_only {getattr(dist, 'scoring_only', False)!r}. Sampling it would draw from "
+                "a renormalized law that log_density does not score -- the scorer and the sampler "
+                "would describe different distributions. Normalize the pmap (and set default_value=0) "
+                "to obtain a generative categorical; log_density remains available either way."
+            )
         if getattr(dist, "scoring_only", False):
             # An explicitly declared scoring-only object is a likelihood factor, not a normalized
             # generative law; there is nothing to draw from. This is the one construction the
@@ -1180,6 +1202,13 @@ class CategoricalEstimator(ParameterEstimator):
             # accumulator records every label it was shown, so a component that saw data and won no
             # weight arrives here with a zero-count support and estimates to a uniform below -- which,
             # unlike an all -inf object, can win responsibility again (MXR-080-1220).
+            # Deliberately NOT scoring_only. Declaring it would be the more honest label and was
+            # tried three times; each attempt broke the learned-segment, gated-mixture and
+            # hidden-association paths, because scoring_only makes it non-composable and those
+            # legitimately build latent models over it. What closes the sampler half of
+            # MXR-080-1220 instead is CategoricalSampler's normalized-law requirement
+            # (MXR-080-1857): this object has is_normalized_probability False, so sampling it is
+            # refused with the reason, and density_semantics() already reports LIKELIHOOD_FACTOR.
             return CategoricalDistribution({}, default_value=0.0, name=self.name, keys=self.keys)
 
         stats_sum = sum(suff_stat.values())

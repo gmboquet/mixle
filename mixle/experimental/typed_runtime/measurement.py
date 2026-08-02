@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import math
 import statistics
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from numbers import Integral, Real
+from types import MappingProxyType
 from typing import Any
 
 from mixle.experimental.typed_runtime.contracts import CostEstimate, CounterSemantics, UpdateKind
@@ -17,11 +18,59 @@ def _nonnegative_integer(value: Any, name: str) -> None:
         raise ValueError(f"{name} must be a non-negative integer.")
 
 
-def _finite_real(value: Any, name: str, *, nonnegative: bool = False) -> None:
+def _finite_real(value: Any, name: str, *, nonnegative: bool = False) -> float:
+    """Validate and return ``value`` as a builtin ``float``.
+
+    Returning the canonical type is the point: this used to validate in place and leave, say, an
+    ``np.float32`` on the frozen record, which then made the advertised JSON-compatible ``as_dict()``
+    raise inside ``json.dumps`` -- the receipt claimed serializability it did not have
+    (MXR-080-1864).
+    """
     if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(float(value)):
         raise ValueError(f"{name} must be a finite number.")
     if nonnegative and value < 0:
         raise ValueError(f"{name} must be non-negative.")
+    return float(value)
+
+
+def _frozen_json_value(value: Any, path: str) -> Any:
+    """Return an immutable, JSON-expressible copy of caller-supplied receipt metadata.
+
+    ``extra`` is caller-owned and was stored by reference on a frozen dataclass, so a mutation after
+    construction rewrote evidence that had already been recorded (MXR-080-1864). NumPy scalars are
+    canonicalized here for the same reason ``_finite_real`` returns a builtin float.
+    """
+    if isinstance(value, bool) or value is None or isinstance(value, (str, int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"work-measurement {path} must be finite to serialize, got {value!r}.")
+        return value
+    if isinstance(value, Real):  # numpy scalar
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            raise ValueError(f"work-measurement {path} must be finite to serialize, got {value!r}.")
+        return int(value) if float(numeric).is_integer() and isinstance(value, Integral) else numeric
+    if isinstance(value, Mapping):
+        frozen = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"work-measurement {path} keys must be strings, got {key!r}.")
+            frozen[key] = _frozen_json_value(item, f"{path}.{key}")
+        return MappingProxyType(frozen)
+    if isinstance(value, (list, tuple)):
+        return tuple(_frozen_json_value(item, f"{path}[{index}]") for index, item in enumerate(value))
+    raise TypeError(
+        f"work-measurement {path} holds {type(value).__name__}, which is neither immutable nor "
+        "JSON-expressible; a receipt that cannot serialize is not evidence."
+    )
+
+
+def _plain_json(value: Any) -> Any:
+    """Undo :func:`_frozen_json_value`'s containers for ``as_dict``'s JSON-compatible output."""
+    if isinstance(value, Mapping):
+        return {key: _plain_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_plain_json(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True)
@@ -56,9 +105,8 @@ class WorkMeasurement:
             raise ValueError("node_type and backend must be non-empty.")
         if not isinstance(self.update_kind, UpdateKind):
             raise TypeError("work-measurement update_kind must be UpdateKind.")
-        _finite_real(self.wall_time_seconds, "wall_time_seconds", nonnegative=True)
-        _finite_real(self.compute_units, "compute_units", nonnegative=True)
-        _finite_real(self.observations, "observations", nonnegative=True)
+        for name in ("wall_time_seconds", "compute_units", "observations"):
+            object.__setattr__(self, name, _finite_real(getattr(self, name), name, nonnegative=True))
         for name in (
             "communication_bytes",
             "peak_memory_bytes",
@@ -73,8 +121,9 @@ class WorkMeasurement:
             _nonnegative_integer(getattr(self, name), name)
         if self.run_id is not None and (not isinstance(self.run_id, str) or not self.run_id):
             raise ValueError("run_id must be a non-empty string when supplied.")
-        if not isinstance(self.extra, dict):
+        if not isinstance(self.extra, Mapping):
             raise TypeError("work-measurement extra metadata must be a dictionary.")
+        object.__setattr__(self, "extra", _frozen_json_value(dict(self.extra), "extra"))
         expected = (
             (self.work_counter_semantics, CounterSemantics.INCREMENTAL, "work counters"),
             (self.peak_memory_semantics, CounterSemantics.HIGH_WATER_MARK, "peak memory"),
@@ -104,7 +153,7 @@ class WorkMeasurement:
             "collective_bytes": self.collective_bytes,
             "staleness_steps": self.staleness_steps,
             "run_id": self.run_id,
-            "extra": dict(self.extra),
+            "extra": _plain_json(self.extra),
             "counter_semantics": {
                 "wall_time_seconds": self.work_counter_semantics.value,
                 "compute_units": self.work_counter_semantics.value,

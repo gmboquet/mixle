@@ -38,7 +38,7 @@ class ReceiptFieldTest(unittest.TestCase):
         placement, work, node_ids, devices = _real_placement_and_work()
         fields = dict(
             placement=placement,
-            observations=10.0,
+            observations=40.0,  # must match work.observations: one run, one row count (MXR-080-0647)
             num_workers=2,
             worker_device_ids=devices[:2],
             execution_backend="local_numpy_thread_pool",

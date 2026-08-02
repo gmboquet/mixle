@@ -210,6 +210,18 @@ class GraphPrefetchReceipt:
         if len(set(self.evicted)) != len(self.evicted):
             raise ValueError("prefetch receipt evicted the same partition twice in one prefetch.")
         if self.resident_before is not None:
+            if isinstance(self.resident_before, (str, bytes)) or not isinstance(self.resident_before, (tuple, list)):
+                # `resident_before="ab"` iterated as characters and constructed (MXR-080-0643).
+                raise TypeError(
+                    "prefetch receipt resident_before must be a sequence of partition ids, got "
+                    f"{type(self.resident_before).__name__}."
+                )
+            object.__setattr__(self, "resident_before", tuple(self.resident_before))
+            blank_prior = [item for item in self.resident_before if not isinstance(item, str) or not item.strip()]
+            if blank_prior:
+                raise ValueError(
+                    f"prefetch receipt resident_before contains an id that names nothing: {blank_prior!r}."
+                )
             if len(set(self.resident_before)) != len(self.resident_before):
                 raise ValueError("prefetch receipt resident_before lists the same partition twice.")
             # Only two ways to be evictable: resident when the prefetch began, or loaded during it.
@@ -230,10 +242,22 @@ class GraphPrefetchReceipt:
         if self.resident_tokens < 0:
             raise ValueError(f"prefetch receipt resident_tokens must be non-negative; got {self.resident_tokens}.")
 
+    @property
+    def eviction_claim_verified(self) -> bool:
+        """Whether this receipt's eviction claim was checked against real residency.
+
+        A machine-readable verdict rather than an inference from a field being ``None``
+        (MXR-080-0643). ``False`` means the receipt was built without ``resident_before``, so its
+        eviction list is an assertion nothing was able to test -- the cache's own producer always
+        supplies it, so a receipt that reports ``False`` did not come from a prefetch.
+        """
+        return self.resident_before is not None
+
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible prefetch receipt."""
 
         return {
+            "eviction_claim_verified": self.eviction_claim_verified,
             "requested": list(self.requested),
             "loaded": list(self.loaded),
             "evicted": list(self.evicted),

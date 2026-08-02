@@ -149,6 +149,10 @@ class FitProvenance:
             count = getattr(self, field_name)
             if isinstance(count, bool) or not isinstance(count, (int, np.integer)) or int(count) < 0:
                 raise ValueError(f"FitProvenance {field_name} must be a non-negative integer, got {count!r}")
+            # Canonicalize to a builtin int. An np.int64 passed validation and then made the
+            # advertised JSON-compatible as_dict() raise inside json.dumps, so the receipt claimed a
+            # serializability it did not have (MXR-080-1190/1202).
+            object.__setattr__(self, field_name, int(count))
         if int(self.iterations) > int(self.max_iterations):
             raise ValueError(
                 f"FitProvenance iterations ({self.iterations}) cannot exceed max_iterations "

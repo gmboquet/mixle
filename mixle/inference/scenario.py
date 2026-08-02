@@ -16,6 +16,7 @@ re-exported under the same bare name from ``mixle.inference``).
 from __future__ import annotations
 
 import copy
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -314,9 +315,22 @@ def _frozen_point_mass(record: Any) -> Any:
     # stops tracking anything the caller does to its evidence afterwards. An object that refuses to
     # be copied is returned as-is -- there is nothing to copy and nothing to freeze.
     try:
-        return copy.deepcopy(record)
-    except Exception:  # noqa: BLE001 - an uncopyable payload is returned unchanged, see above
+        detached = copy.deepcopy(record)
+    except Exception as exc:  # noqa: BLE001 - reported below rather than silently aliased
+        warnings.warn(
+            f"scenario point mass retained a {type(record).__name__} it could not copy ({exc!r}); "
+            "every draw shares the caller's object and the snapshot is NOT immutable (MXR-080-1850).",
+            stacklevel=3,
+        )
         return record
+    if detached is record:
+        warnings.warn(
+            f"scenario point mass retained a {type(record).__name__} whose __deepcopy__ returned the "
+            "same object; every draw shares the caller's object and the snapshot is NOT immutable "
+            "(MXR-080-1850).",
+            stacklevel=3,
+        )
+    return detached
 
 
 def _exact_draw_count(n: Any) -> int:

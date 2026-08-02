@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from threading import RLock
+from types import MappingProxyType
 from typing import Any
 
 from mixle.experimental.typed_runtime.contracts import (
@@ -189,6 +190,33 @@ class CommitStatus(StrEnum):
     ROLLBACK_FAILED = "rollback_failed"
 
 
+def _finite_seconds(value: Any, label: str) -> float:
+    """Return ``value`` as a finite non-negative float, or raise."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{label} must be a real number, got {value!r}.")
+    numeric = float(value)
+    if not math.isfinite(numeric) or numeric < 0.0:
+        raise ValueError(f"{label} must be finite and non-negative, got {value!r}.")
+    return numeric
+
+
+def _immutable_mapping(value: Any, label: str, *, values_must_be_str: bool = False) -> MappingProxyType:
+    """Return a detached read-only view of a caller-supplied receipt mapping (MXR-080-1865).
+
+    Copied then wrapped: the copy severs the caller's alias so a later mutation cannot rewrite a
+    recorded decision, and the proxy stops anyone editing the receipt through the field itself.
+    """
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{label} must be a mapping, got {type(value).__name__}.")
+    copied = dict(value)
+    for key, item in copied.items():
+        if not isinstance(key, str):
+            raise TypeError(f"{label} keys must be strings, got {key!r}.")
+        if values_must_be_str and not isinstance(item, str):
+            raise TypeError(f"{label}[{key!r}] must be a string fingerprint, got {type(item).__name__}.")
+    return MappingProxyType(copied)
+
+
 @dataclass(frozen=True)
 class CommitReceipt:
     """Coordinator decision, state fingerprints, and version transition."""
@@ -212,10 +240,34 @@ class CommitReceipt:
     elapsed_seconds: float = 0.0
 
     def __post_init__(self) -> None:
+        """Make the receipt a record of a decision rather than an annotation of one.
+
+        Every field below was annotation-only (MXR-080-1865). ``status="accepted"`` -- the string,
+        not the enum -- constructed, then reported ``accepted=False`` because ``is`` never matches a
+        string, and crashed in ``as_dict()`` where ``.value`` does not exist. The version and
+        fingerprint maps were stored by reference on a frozen dataclass, so a caller mutating its own
+        dict afterwards rewrote a committed decision. A receipt that changes after the fact, or that
+        cannot serialize, is not evidence of anything.
+        """
         if not self.commit_id or not self.batch_id or not self.reason:
             raise ValueError("commit receipt identity must be complete.")
         if not self.run_id or not self.model_id:
             raise ValueError("commit receipt must bind run and model identity.")
+        if not isinstance(self.status, CommitStatus):
+            raise TypeError(
+                f"commit receipt status must be a CommitStatus, got {type(self.status).__name__} "
+                f"({self.status!r}). A string never matches the accepted check and has no .value."
+            )
+        if self.canary is not None and not isinstance(self.canary, CanaryVerdict):
+            raise TypeError(f"commit receipt canary must be a CanaryVerdict, got {type(self.canary).__name__}.")
+        if self.rollback_verified is not None and not isinstance(self.rollback_verified, bool):
+            raise TypeError("commit receipt rollback_verified must be a boolean verdict or None.")
+        _finite_seconds(self.elapsed_seconds, "commit receipt elapsed_seconds")
+        for name in ("versions_before", "versions_after"):
+            object.__setattr__(self, name, _immutable_mapping(getattr(self, name), f"commit receipt {name}"))
+        for name in ("participant_fingerprints_before", "participant_fingerprints_after"):
+            mapping = _immutable_mapping(getattr(self, name), f"commit receipt {name}", values_must_be_str=True)
+            object.__setattr__(self, name, mapping)
 
     @property
     def accepted(self) -> bool:
@@ -233,8 +285,8 @@ class CommitReceipt:
             "status": self.status.value,
             "accepted": self.accepted,
             "reason": self.reason,
-            "versions_before": self.versions_before,
-            "versions_after": self.versions_after,
+            "versions_before": dict(self.versions_before),
+            "versions_after": dict(self.versions_after),
             "invalidated_nodes": list(self.invalidated_nodes),
             "canary": self.canary.as_dict() if self.canary is not None else None,
             "participant_fingerprints_before": dict(self.participant_fingerprints_before),

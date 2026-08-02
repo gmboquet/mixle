@@ -914,21 +914,27 @@ def learn_structure(
             factors[i] = fit(list(zip(keys, cols[i])), est, max_its=max_its, out=None, rng=rng)
             edge_binners[i] = binners[p]
     learned = DependencyTreeDistribution(parents, factors, edge_binners)
-    # This is a public fitting entry point, so its result says how it was fitted like every other
-    # one (MXR-080-1190/1202). The structure search is not an EM run over a single objective -- it
-    # scores candidate edges and then fits each factor -- so the receipt reports what is true of it:
-    # the algorithm, the rows consumed, and the per-factor iteration cap, with no convergence claim
-    # the search does not make.
+    # This is a public fitting entry point, so its result says how it was fitted like every other one
+    # (MXR-080-1190/1202). What it must NOT do is borrow EM's vocabulary for quantities it never
+    # measured. An earlier revision reported iterations=len(fields), converged=bool(fields), and the
+    # per-factor iteration cap as a numerical "repair" -- a field count is not an iteration count,
+    # having fields is not a convergence verdict, and a cap is not a repair applied to parameters.
+    # That fabricated exactly the semantics the receipt exists to make trustworthy.
+    #
+    # A structure search scores candidate edges and then fits each factor; it runs no iterative
+    # optimization of its own and reaches no convergence criterion. So it reports one search pass,
+    # declares itself unconverged -- which makes is_approximate() true, correctly, since the greedy
+    # forest is not a certified optimum -- and records nothing under repairs, because none were
+    # applied. The per-factor cap is descriptive detail and belongs in the algorithm name.
     return learned.with_fit_provenance(
         FitProvenance(
-            algorithm="dependency-tree-structure-search",
+            algorithm="dependency-tree-structure-search(per-factor-em-cap=%d)" % max_its,
             estimator="learn_structure",
             objective="dependency-gain",
-            iterations=len(parents),
-            max_iterations=max(len(parents), 1),
-            converged=bool(parents),
+            iterations=1,
+            max_iterations=1,
+            converged=False,
             n_observations=len(data),
-            repairs=("per-factor-em-cap(%d)" % max_its,),
         )
     )
 

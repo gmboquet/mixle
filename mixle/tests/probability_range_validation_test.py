@@ -236,37 +236,49 @@ class CategoricalValidationTestCase(unittest.TestCase):
 
 
 class CategoricalSamplerValidationTestCase(unittest.TestCase):
-    def test_sampler_from_non_normalized_pmap_does_not_crash(self):
-        # Regression for the fourth-wave finding in this module's docstring: a pmap that
-        # legitimately doesn't sum to 1 (test_probabilities_not_summing_to_one_construct_by_design
-        # above pins that this constructs fine) used to crash at RandomState.choice(p=...) time
-        # instead, since CategoricalSampler passed pmap's raw values through unnormalized.
+    def test_sampler_from_non_normalized_pmap_fails_legibly(self):
+        # The original finding here was an opaque crash inside RandomState.choice(p=...). Silently
+        # normalizing fixed the opacity and introduced a worse problem -- the sampler drew from a law
+        # log_density does not score -- so the refusal is now explicit and names the reason
+        # (MXR-080-1857). Failing legibly was always the point; drawing anyway was not.
         d = CategoricalDistribution({"a": 0.1, "x": 0.1}, default_value=0.3)  # pmap sums to 0.2
-        samples = d.sampler(seed=0).sample(2000)
-        self.assertEqual(len(samples), 2000)
-        # Sampling can only ever draw pmap's registered levels, never a synthesized "default" label
-        # (the sampler has no way to generatively produce an out-of-vocabulary label).
-        self.assertTrue(set(samples) <= {"a", "x"})
+        with self.assertRaisesRegex(ValueError, "requires a normalized probability law"):
+            d.sampler(seed=0)
+        # The reason it could never be sampled correctly: a positive default_value puts mass on every
+        # unseen label, and the sampler can only draw pmap's registered ones.
+        self.assertTrue(float(d.log_density("out-of-vocabulary")) > float("-inf"))
 
-    def test_sampler_from_non_normalized_pmap_preserves_relative_proportions(self):
-        # "b" is 3x as likely as "a" (relative proportion 0.3:0.1) even though pmap sums to 0.4,
-        # not 1 -- normalizing must preserve relative proportions, not just avoid crashing.
+    def test_sampler_from_non_normalized_pmap_is_refused(self):
+        """Superseded contract (MXR-080-1857).
+
+        This used to assert that the sampler silently renormalized {a: .1, b: .3} and preserved the
+        3:1 ratio. Not crashing was the improvement it was written for, but renormalizing is not the
+        right answer either: log_density scores that pmap as total mass 0.4, so the sampler was
+        drawing from a law the scorer does not score. Refusing states which distribution is missing
+        rather than inventing one, and the message names the pmap total.
+        """
         d = CategoricalDistribution({"a": 0.1, "b": 0.3})
-        samples = d.sampler(seed=0).sample(20000)
-        ratio = samples.count("b") / samples.count("a")
-        self.assertAlmostEqual(ratio, 3.0, delta=0.3)  # loose tolerance: large-sample frequency check
+        with self.assertRaisesRegex(ValueError, "requires a normalized probability law"):
+            d.sampler(seed=0)
+        self.assertFalse(d.is_normalized_probability)
 
-    def test_sampler_from_default_value_dominant_pmap_does_not_crash(self):
-        # The exact construction sparse_mixture_test.py relies on for a different reason (making
-        # default_value dominate every in-pmap probability): pmap sums to 0.01, far from 1.
+    def test_sampler_from_default_value_dominant_pmap_is_refused(self):
+        """An open-world default has mass the sampler can never emit (MXR-080-1857).
+
+        The construction sparse_mixture_test.py relies on for a different reason. Its default_value
+        assigns 0.99 to every unseen label, but the sampler draws only from the registered ones, so
+        it used to return exclusively "a"/"b" while log_density said most of the mass lay elsewhere.
+        Scoring it stays legitimate and is what sparse_mixture_test actually needs.
+        """
         d = CategoricalDistribution({"a": 0.005, "b": 0.005}, default_value=0.99)
-        samples = d.sampler(seed=0).sample(1000)
-        self.assertTrue(set(samples) <= {"a", "b"})
+        with self.assertRaisesRegex(ValueError, "requires a normalized probability law"):
+            d.sampler(seed=0)
+        self.assertTrue(float(d.log_density("unseen")) > float("-inf"))
 
     def test_sampler_rejects_explicitly_scoring_only_models(self):
-        # The one refusal that survives: an *explicit* scoring_only=True declaration marks the
-        # object a likelihood factor rather than a generative law, so there is nothing to draw
-        # from. A merely non-1-summing pmap is not such a declaration (the tests above).
+        # An explicit scoring_only=True declaration marks the object a likelihood factor rather than
+        # a generative law. It is now one of several ways to fail the same normalized-law test
+        # (MXR-080-1857) rather than the only refusal.
         for distribution in (
             CategoricalDistribution({"a": 0.1, "x": 0.1}, default_value=0.3, scoring_only=True),
             CategoricalDistribution({"a": 0.1, "b": 0.3}, scoring_only=True),
@@ -276,8 +288,7 @@ class CategoricalSamplerValidationTestCase(unittest.TestCase):
                 distribution.sampler(seed=0)
 
     def test_sampler_from_normalized_pmap_still_matches_relative_proportions(self):
-        # Sanity check that normalizing by pmap's own sum leaves the common already-normalized
-        # case (pmap sums to 1) numerically unaffected.
+        # The case that remains sampleable, and the one that always mattered: a proper law.
         d = CategoricalDistribution({"a": 0.25, "b": 0.75})
         samples = d.sampler(seed=0).sample(20000)
         freq_b = samples.count("b") / len(samples)
@@ -287,12 +298,12 @@ class CategoricalSamplerValidationTestCase(unittest.TestCase):
         # np.random.RandomState.choice cannot sample from an all-zero-weight distribution either;
         # this must fail clearly at sampler construction, not as a confusing 0/0 or numpy error.
         d = CategoricalDistribution({"a": 0.0, "b": 0.0})
-        with self.assertRaisesRegex(ValueError, "positive probability"):
+        with self.assertRaisesRegex(ValueError, "positive probability|normalized probability law"):
             d.sampler(seed=0)
 
     def test_sampler_rejects_empty_pmap(self):
         d = CategoricalDistribution({})
-        with self.assertRaisesRegex(ValueError, "positive probability"):
+        with self.assertRaisesRegex(ValueError, "positive probability|normalized probability law"):
             d.sampler(seed=0)
 
 

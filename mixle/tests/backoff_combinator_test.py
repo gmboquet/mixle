@@ -184,7 +184,7 @@ class ChildScoreRankTest(unittest.TestCase):
         # two-dimensional "log-density" (MXR-080-1843).
         backoff = BackoffDistribution(self._TwoDimensional(), self._TwoDimensional())
         with self.assertRaisesRegex(ValueError, "one-dimensional"):
-            backoff.seq_log_density(("enc", "enc"))
+            backoff.seq_log_density(("enc", "enc", 4))
 
     class _DropsARow:
         """A child that silently returns one score for a two-row batch."""
@@ -215,6 +215,13 @@ class ChildScoreRankTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "score.* for 2 encoded observation"):
             backoff.seq_log_density(("enc", "enc", 2))
 
+    def test_an_encoding_without_a_row_count_is_refused(self):
+        # The legacy two-element encoding is what let a short child vector through: with no count to
+        # check against, both children could return one score for a two-row payload (MXR-080-1843).
+        backoff = BackoffDistribution(_sparse_base(), PoissonDistribution(16.0), escape_weight=0.01)
+        with self.assertRaisesRegex(ValueError, "must carry its observation count"):
+            backoff.seq_log_density(("enc", "enc"))
+
     def test_the_row_count_travels_with_a_real_encoding(self):
         dist = BackoffDistribution(_sparse_base(), PoissonDistribution(16.0), escape_weight=0.01)
         xs = [11, 21, 17]
@@ -227,7 +234,7 @@ class ChildScoreRankTest(unittest.TestCase):
         for weight in (0.0, 1.0):
             backoff = BackoffDistribution(self._TwoDimensional(), self._TwoDimensional(), escape_weight=weight)
             with self.assertRaisesRegex(ValueError, "one-dimensional"):
-                backoff.seq_log_density(("enc", "enc"))
+                backoff.seq_log_density(("enc", "enc", 4))
 
 
 if __name__ == "__main__":
