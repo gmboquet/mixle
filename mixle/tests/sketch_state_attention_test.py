@@ -415,7 +415,11 @@ def _build_e7_mechanisms():
         n_layer=_E7_N_LAYER,
         n_head=_E7_N_HEAD,
         window=_E7_WINDOW,
-        sketch_dim=12,
+        # 16, not 12. Now that the degree-2 normalizer is degree-matched (MXR-080-1853) it is a
+        # sketched estimate, and this module's own note records 12 and 24 as widths where a random
+        # sign collision drives it non-positive while 16 and 32 hold. The old degree-1 denominator
+        # never failed here because it was computing the wrong quantity.
+        sketch_dim=16,
         degree=2,
     )
     return {

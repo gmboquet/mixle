@@ -68,8 +68,47 @@ def _require_torch() -> None:
         raise ImportError("mixle.experimental.summary_tree requires torch.")
 
 
+def _exact_int(value, name, *, minimum):
+    """Return ``value`` as an exact int at or above ``minimum``, or raise (MXR-080-1863).
+
+    Replacing two optimized-away asserts fixed the two contracts they covered and left the rest of
+    the constructor unvalidated: a fractional ``n_head`` passes a ``d_model % n_head`` test whenever
+    the remainder happens to be zero and then makes ``head_dim`` a float, zero layers or a zero
+    window build a model with nothing in it, and a negative horizon silently alters the architecture.
+    Each fails later in a state or tensor operation, if at all, far from the argument that caused it.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an exact integer, got {value!r}.")
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {value}.")
+    return int(value)
+
+
+def _finite_float(value, name, *, minimum=None):
+    """Return ``value`` as a finite float, or raise. NaN poisons a loss without ever raising."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a real number, got {value!r}.")
+    numeric = float(value)
+    if numeric != numeric or numeric in (float("inf"), float("-inf")):
+        raise ValueError(f"{name} must be finite, got {value!r}.")
+    if minimum is not None and numeric < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {value!r}.")
+    return numeric
+
+
 def digits_of(n: int, base: int) -> tuple[int, ...]:
-    """Base-``base`` digits of ``n``, least-significant first. ``digits_of(0, base) == (0,)``."""
+    """Base-``base`` digits of ``n``, least-significant first. ``digits_of(0, base) == (0,)``.
+
+    Both arguments are validated because this is a public export and neither degenerate case has an
+    answer to return (MXR-080-1862): ``base=1`` never terminates -- ``n // 1 == n`` forever, so the
+    loop appends zeros until memory runs out -- ``base=0`` divides by zero, and a negative ``n``
+    skips the loop entirely and silently reports the empty digit sequence, which is not a
+    representation of anything.
+    """
+    if isinstance(base, bool) or not isinstance(base, int) or base < 2:
+        raise ValueError(f"digits_of base must be an integer >= 2, got {base!r}: base 1 has no positional expansion.")
+    if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+        raise ValueError(f"digits_of n must be a non-negative integer, got {n!r}.")
     if n == 0:
         return (0,)
     out = []
@@ -207,7 +246,15 @@ if _HAS_TORCH:
             # Public constructor argument checks, so not asserts: `python -O` strips asserts, and
             # both gate real architectural invariants -- an indivisible head split is lossy, and a
             # fanout below 2 is not a tree (MXR-080-1861).
-            if n_head < 1 or d_model % n_head != 0:
+            vocab = _exact_int(vocab, "SummaryTreeSpine vocab", minimum=1)
+            d_model = _exact_int(d_model, "SummaryTreeSpine d_model", minimum=1)
+            n_layer = _exact_int(n_layer, "SummaryTreeSpine n_layer", minimum=1)
+            n_head = _exact_int(n_head, "SummaryTreeSpine n_head", minimum=1)
+            window = _exact_int(window, "SummaryTreeSpine window", minimum=1)
+            max_level_cap = _exact_int(max_level_cap, "SummaryTreeSpine max_level_cap", minimum=1)
+            detach_horizon_nodes = _exact_int(detach_horizon_nodes, "SummaryTreeSpine detach_horizon_nodes", minimum=0)
+            aux_weight = _finite_float(aux_weight, "SummaryTreeSpine aux_weight", minimum=0.0)
+            if d_model % n_head != 0:
                 raise ValueError(
                     f"SummaryTreeSpine requires d_model divisible by a positive n_head, got "
                     f"d_model={d_model}, n_head={n_head}."
@@ -218,7 +265,7 @@ if _HAS_TORCH:
             self.n_head = int(n_head)
             self.head_dim = d_model // n_head
             self.window = int(window)
-            self.fanout = int(fanout)
+            self.fanout = _exact_int(fanout, "SummaryTreeSpine fanout", minimum=2)
             if self.fanout < 2:
                 raise ValueError(
                     f"SummaryTreeSpine requires fanout >= 2, got {fanout}: a fanout of one never "
