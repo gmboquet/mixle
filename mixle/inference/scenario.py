@@ -15,6 +15,7 @@ re-exported under the same bare name from ``mixle.inference``).
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -307,7 +308,15 @@ def _frozen_point_mass(record: Any) -> Any:
         return frozenset(_frozen_point_mass(item) for item in record)
     if isinstance(record, Sequence):
         return tuple(_frozen_point_mass(item) for item in record)
-    return record
+    # A custom object has no immutable counterpart to convert into, so this used to return it by
+    # reference and every draw shared the caller's object (MXR-080-1850). A deep copy cannot make it
+    # immutable, but it severs the alias, which is what the point mass needs: the retained record
+    # stops tracking anything the caller does to its evidence afterwards. An object that refuses to
+    # be copied is returned as-is -- there is nothing to copy and nothing to freeze.
+    try:
+        return copy.deepcopy(record)
+    except Exception:  # noqa: BLE001 - an uncopyable payload is returned unchanged, see above
+        return record
 
 
 def _exact_draw_count(n: Any) -> int:

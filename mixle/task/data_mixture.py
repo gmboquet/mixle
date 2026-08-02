@@ -310,6 +310,23 @@ _DOE_FINALISTS = 3
 _DOE_CONFIRM_RUNS = 2
 
 
+def _largest_doe_search(budget: int) -> int:
+    """Search runs that fit in ``budget`` once confirmations and the audit are paid for.
+
+    One search run costs itself; the confirmation round costs ``_DOE_CONFIRM_RUNS`` per finalist, and
+    there are ``min(_DOE_FINALISTS, search_runs)`` finalists to confirm; the audit costs one. This
+    returns the largest search whose total is within budget, or 0 when even the smallest does not fit
+    -- so the number the caller passes is an actual ceiling rather than an estimate the run exceeds
+    (MXR-080-1847).
+    """
+    best = 0
+    for candidate in range(1, int(budget) + 1):
+        total = candidate + min(_DOE_FINALISTS, candidate) * _DOE_CONFIRM_RUNS + 1
+        if total <= budget:
+            best = candidate
+    return best
+
+
 def _logits_from_free(free_logits: Any, n: int) -> np.ndarray:
     """Expand ``n - 1`` free logits to ``n`` by pinning the last at 0 -- the identifiable softmax chart."""
     free = np.asarray(free_logits, dtype=np.float64).reshape(-1)
@@ -435,8 +452,22 @@ def optimize_mixture(
     # runs on top. Charging only budget - 1 undercounted the real work -- a budget of four issued ten
     # proxy calls -- so the public budget and the receipt both lied about resource use (MXR-080-1847).
     # Reserve the confirmations out of the caller's budget instead of spending them beside it.
-    confirm_runs = _DOE_FINALISTS * _DOE_CONFIRM_RUNS if method == "doe" else 0
-    search_runs = max(budget - 1 - confirm_runs, 1)
+    # Solve for the largest search that fits INSIDE the budget, rather than reserving a fixed block
+    # and then overrunning when the reservation does not fit. The previous arithmetic floored the
+    # search at one run, so budget=3 spent four proxy calls -- the public number was still false, just
+    # in a smaller way, and a test recorded the overrun as permitted (MXR-080-1847).
+    if method == "doe":
+        search_runs = _largest_doe_search(budget)
+        if search_runs < 1:
+            raise ValueError(
+                f"budget={budget} cannot cover a DOE search: one search run plus its "
+                f"{_DOE_CONFIRM_RUNS} confirmations plus the reserved audit already costs "
+                f"{2 + _DOE_CONFIRM_RUNS}. Raise the budget or use method='bandit'."
+            )
+        confirm_runs = min(_DOE_FINALISTS, search_runs) * _DOE_CONFIRM_RUNS
+    else:
+        confirm_runs = 0
+        search_runs = max(budget - 1, 1)
     if method == "bandit":
         weights, spent = _bandit_search(domains, proxy_steps, search_runs, kwargs, seed)
     elif method == "doe":

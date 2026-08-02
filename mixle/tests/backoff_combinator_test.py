@@ -186,6 +186,42 @@ class ChildScoreRankTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "one-dimensional"):
             backoff.seq_log_density(("enc", "enc"))
 
+    class _DropsARow:
+        """A child that silently returns one score for a two-row batch."""
+
+        def log_density(self, x):
+            return 0.0
+
+        def seq_log_density(self, enc):
+            return np.zeros(1)
+
+        def sampler(self, seed=None):
+            return None
+
+        def estimator(self, pseudo_count=None):
+            return None
+
+        def dist_to_encoder(self):
+            return None
+
+        def density_semantics(self):
+            return DensitySemantics.EXACT
+
+    def test_both_children_dropping_the_same_row_is_still_rejected(self):
+        # Agreement between the children is not enough: both can drop the SAME row and return a
+        # matching shorter vector, which re-aligns every score with the wrong observation. The count
+        # recorded at encode time ties the answer to the question (MXR-080-1843).
+        backoff = BackoffDistribution(self._DropsARow(), self._DropsARow())
+        with self.assertRaisesRegex(ValueError, "score.* for 2 encoded observation"):
+            backoff.seq_log_density(("enc", "enc", 2))
+
+    def test_the_row_count_travels_with_a_real_encoding(self):
+        dist = BackoffDistribution(_sparse_base(), PoissonDistribution(16.0), escape_weight=0.01)
+        xs = [11, 21, 17]
+        encoded = dist.dist_to_encoder().seq_encode(xs)
+        self.assertEqual(encoded[2], len(xs))
+        self.assertEqual(len(dist.seq_log_density(encoded)), len(xs))
+
     def test_the_degenerate_escape_weights_check_too(self):
         # w == 0 and w == 1 short-circuit past the two-child comparison entirely.
         for weight in (0.0, 1.0):

@@ -170,6 +170,12 @@ class GraphPrefetchReceipt:
     loaded: tuple[str, ...]
     evicted: tuple[str, ...]
     resident_tokens: int
+    # The residency the prefetch started from. Without it the receipt had no identity to check an
+    # eviction against, and an earlier revision documented that gap rather than closing it: a
+    # partition that was never resident could be claimed as evicted, which is a claim about cache
+    # state that nothing could refute (MXR-080-0643). Defaulted to None so an existing caller still
+    # constructs, but then the eviction claim is explicitly unverified rather than quietly trusted.
+    resident_before: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         """Bind the receipt to a prefetch that could actually have happened (MXR-080-0643).
@@ -201,12 +207,22 @@ class GraphPrefetchReceipt:
         # ``evicted`` was unchecked entirely, so evicted=("", "ghost", "ghost") constructed
         # (MXR-080-0643). A partition leaves residency once per prefetch: re-entering requires a
         # load, and ``requested`` ids are unique, so a repeat is not a state the cache can reach.
-        # What the receipt CANNOT check is whether an evicted id was ever resident -- prior
-        # residency is not carried here, and LRU legitimately evicts partitions this prefetch never
-        # requested, so there is no id set to test membership against. That gap is left open rather
-        # than papered over with a rule that would reject real evictions.
         if len(set(self.evicted)) != len(self.evicted):
             raise ValueError("prefetch receipt evicted the same partition twice in one prefetch.")
+        if self.resident_before is not None:
+            if len(set(self.resident_before)) != len(self.resident_before):
+                raise ValueError("prefetch receipt resident_before lists the same partition twice.")
+            # Only two ways to be evictable: resident when the prefetch began, or loaded during it.
+            # LRU legitimately evicts a partition this prefetch never requested, which is why the
+            # test is against prior residency rather than against ``requested``.
+            evictable = set(self.resident_before) | set(self.loaded)
+            never_resident = sorted(set(self.evicted) - evictable)
+            if never_resident:
+                raise ValueError(
+                    f"prefetch receipt claims to have evicted partition(s) {never_resident} that were "
+                    "neither resident when it began nor loaded during it. An eviction is a transition "
+                    "out of residency, so there is nothing there to evict."
+                )
         if isinstance(self.resident_tokens, bool) or not isinstance(self.resident_tokens, int):
             raise ValueError(
                 f"prefetch receipt resident_tokens must be an exact integer; got {self.resident_tokens!r}."
@@ -222,6 +238,7 @@ class GraphPrefetchReceipt:
             "loaded": list(self.loaded),
             "evicted": list(self.evicted),
             "resident_tokens": self.resident_tokens,
+            "resident_before": None if self.resident_before is None else list(self.resident_before),
         }
 
 
@@ -387,6 +404,7 @@ class GraphMemoryCache:
                 raise ValueError("graph partition plan boundary edges do not match the current graph.")
 
             staged = self._entries.copy()
+            resident_before = tuple(self._entries)  # binds every eviction claim below to real state
             loaded = []
             evicted = []
             for partition_id in partition_ids:
@@ -405,6 +423,7 @@ class GraphMemoryCache:
                 tuple(loaded),
                 tuple(evicted),
                 self._resident_tokens(staged),
+                resident_before=resident_before,
             )
 
     def as_dict(self) -> dict[str, Any]:

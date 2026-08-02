@@ -87,6 +87,26 @@ def _checked_variance(value: Any) -> float:
     return numeric
 
 
+def _checked_location(value: Any) -> float:
+    """Return ``value`` as a finite real mean, or raise.
+
+    The counterpart to :func:`_checked_variance` for the other parameter. Without it ``mu`` could be
+    mutated to NaN or an infinity, which turns every density into NaN with no error raised anywhere
+    -- the same silently-wrong-answer failure a negative variance used to cause (MXR-080-1192).
+    """
+    if isinstance(value, (bool, np.bool_)) or not np.isscalar(value):
+        raise TypeError(f"GaussianDistribution mu must be a real scalar mean, got {value!r}")
+    numeric = float(value)
+    if not np.isfinite(numeric):
+        raise ValueError(f"GaussianDistribution mu must be finite, got {value!r}")
+    return numeric
+
+
+# Cached normalizers computed from ``sigma2``. They are outputs of the parameters, not parameters,
+# so they are writable only through the variance that defines them (MXR-080-1192).
+_DERIVED_FROM_VARIANCE = frozenset({"log_const", "const"})
+
+
 def _record_variance_floor(dist: Any, unfloored: float, floored: float, floor: float) -> Any:
     """Note on ``dist`` when the variance floor actually bound, so a fit can report it.
 
@@ -199,9 +219,11 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
         if sigma2 <= 0.0 or not np.isfinite(sigma2):
             raise ValueError("GaussianDistribution requires finite sigma2 > 0.")
         self.mu = float(mu)
+        # Assigning sigma2 computes log_const and const through __setattr__, which is the single
+        # place they are derived. Recomputing them here as well was redundant, and now that they are
+        # writable only through the variance (MXR-080-1192) it would be the constructor asking to
+        # bypass its own rule.
         self.sigma2 = float(sigma2)
-        self.log_const = -0.5 * log(2.0 * pi * self.sigma2)
-        self.const = 1.0 / sqrt(2.0 * pi * self.sigma2)
         self.name = name
         self.keys = keys
         self.set_prior(prior)
@@ -222,9 +244,25 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
         answer, which is the failure this class exists to avoid. Deserialization builds through
         ``__init__`` and is unaffected: this is the mutation path only, and it now agrees with the
         constructor instead of contradicting it.
+
+        Both parameters are checked, not just the variance. ``mu = float("nan")`` was still accepted
+        and produced a NaN scorer -- the same silently-wrong-answer failure as the negative variance
+        above, reached through the other parameter. And ``log_const``/``const`` are DERIVED, not
+        parameters: assigning one directly changed every score while the model's own parameters said
+        nothing had changed, so a reader comparing ``mu``/``sigma2`` against the densities could not
+        tell why they disagreed. Those two are now writable only through the variance that defines
+        them (MXR-080-1192).
         """
         if name == "sigma2":
             value = _checked_variance(value)
+        elif name == "mu":
+            value = _checked_location(value)
+        elif name in _DERIVED_FROM_VARIANCE and hasattr(self, name):
+            raise AttributeError(
+                f"GaussianDistribution.{name} is derived from sigma2, not an independent parameter; "
+                f"assigning it would change every density while mu and sigma2 still describe the old "
+                f"model. Set sigma2 instead, which recomputes {sorted(_DERIVED_FROM_VARIANCE)}."
+            )
         object.__setattr__(self, name, value)
         if name != "sigma2":
             return

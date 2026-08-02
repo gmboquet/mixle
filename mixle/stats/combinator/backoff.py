@@ -79,7 +79,16 @@ DEFAULT_ESCAPE_WEIGHT = 0.01
 DEFAULT_MAX_ESCAPE_WEIGHT = 0.05
 
 
-def _checked_child_scores(scores: Any, role: str) -> np.ndarray:
+def _encoded_rows(x: Any) -> int | None:
+    """The observation count recorded by :meth:`BackoffDataEncoder.seq_encode`, when present.
+
+    ``None`` for a hand-built two-element encoding, which some tests and callers still pass; the
+    rank and agreement checks then still apply, only the row-count binding is unavailable.
+    """
+    return int(x[2]) if isinstance(x, (tuple, list)) and len(x) > 2 else None
+
+
+def _checked_child_scores(scores: Any, role: str, rows: int | None = None) -> np.ndarray:
     """Return a child's sequence scores as the one-per-observation vector the contract requires.
 
     Equal shapes are not enough. Two children each returning a ``(2, 2)`` array agreed with one
@@ -92,6 +101,14 @@ def _checked_child_scores(scores: Any, role: str) -> np.ndarray:
         raise ValueError(
             f"backoff {role} child returned shape {array.shape}; a sequence score is one log-density "
             "per observation, so it must be one-dimensional."
+        )
+    if rows is not None and array.shape[0] != rows:
+        # Agreement between the two children is not enough: both can drop the same row and return a
+        # matching shorter vector, which re-aligns every score with the wrong observation. The count
+        # recorded at encode time is the only thing that ties the answer to the question asked.
+        raise ValueError(
+            f"backoff {role} child returned {array.shape[0]} score(s) for {rows} encoded "
+            "observation(s); a sequence score is one log-density per observation."
         )
     return array
 
@@ -216,9 +233,10 @@ class BackoffDistribution(SequenceEncodableProbabilityDistribution):
 
     def component_log_densities(self, x: tuple[Any, Any]) -> tuple[np.ndarray, np.ndarray]:
         """Return the two weighted component log-density vectors for encoded data ``x``."""
-        base_enc, fallback_enc = x
-        base = _checked_child_scores(self.base.seq_log_density(base_enc), "base")
-        fallback = _checked_child_scores(self.fallback.seq_log_density(fallback_enc), "fallback")
+        base_enc, fallback_enc = x[0], x[1]
+        rows = _encoded_rows(x)
+        base = _checked_child_scores(self.base.seq_log_density(base_enc), "base", rows)
+        fallback = _checked_child_scores(self.fallback.seq_log_density(fallback_enc), "fallback", rows)
         if base.shape != fallback.shape:
             # The children encode the same observations independently, so nothing upstream guarantees
             # they agree on the batch. numpy would broadcast a (1,) against an (n,) and score every row
@@ -232,10 +250,11 @@ class BackoffDistribution(SequenceEncodableProbabilityDistribution):
 
     def seq_log_density(self, x: tuple[Any, Any]) -> np.ndarray:
         """Vectorized mixture log-density over sequence-encoded observations."""
+        rows = _encoded_rows(x)
         if self.escape_weight == 0.0:
-            return _checked_child_scores(self.base.seq_log_density(x[0]), "base")
+            return _checked_child_scores(self.base.seq_log_density(x[0]), "base", rows)
         if self.escape_weight == 1.0:
-            return _checked_child_scores(self.fallback.seq_log_density(x[1]), "fallback")
+            return _checked_child_scores(self.fallback.seq_log_density(x[1]), "fallback", rows)
         base, fallback = self.component_log_densities(x)
         return np.logaddexp(base, fallback)
 
@@ -343,7 +362,7 @@ class BackoffAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: tuple[Any, Any], weights: np.ndarray, estimate: BackoffDistribution) -> None:
         """Accumulate a sequence-encoded batch."""
-        base_enc, fallback_enc = x
+        base_enc, fallback_enc = x[0], x[1]
         ww = np.asarray(weights, dtype=np.float64)
         base_ll, fallback_ll = estimate.component_log_densities(x)
         base_share, fallback_share = self._responsibilities(base_ll, fallback_ll)
@@ -551,5 +570,10 @@ class BackoffDataEncoder(DataSequenceEncoder):
         Both components see every observation -- unlike the zero-inflated/hurdle encoders, there is no
         mask here, because a backoff does not partition the data. Which component explains a row is a
         posterior quantity settled at fit time, not a property of the row.
+
+        The row count travels with the encoding so scoring can check its answer against the input it
+        was asked about. Requiring only that the two children AGREE was not enough: both can drop the
+        same row and return a plausible shorter vector, which then silently re-aligns every score with
+        the wrong observation (MXR-080-1843).
         """
-        return self.base_encoder.seq_encode(x), self.fallback_encoder.seq_encode(x)
+        return self.base_encoder.seq_encode(x), self.fallback_encoder.seq_encode(x), len(x)
