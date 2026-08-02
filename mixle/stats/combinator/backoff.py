@@ -79,13 +79,23 @@ DEFAULT_ESCAPE_WEIGHT = 0.01
 DEFAULT_MAX_ESCAPE_WEIGHT = 0.05
 
 
-def _encoded_rows(x: Any) -> int | None:
-    """The observation count recorded by :meth:`BackoffDataEncoder.seq_encode`, when present.
+def _encoded_rows(x: Any) -> int:
+    """The observation count recorded by :meth:`BackoffDataEncoder.seq_encode`.
 
-    ``None`` for a hand-built two-element encoding, which some tests and callers still pass; the
-    rank and agreement checks then still apply, only the row-count binding is unavailable.
+    Required, not optional. Tolerating a two-element encoding left the exact hole the row count was
+    added to close: with no count to check against, both children could return one score for a
+    two-row payload and the public scorer accepted it (MXR-080-1843). An encoding that does not say
+    how many observations it holds cannot be scored against that number, so it is refused here
+    rather than scored on weaker terms.
     """
-    return int(x[2]) if isinstance(x, (tuple, list)) and len(x) > 2 else None
+    if not isinstance(x, (tuple, list)) or len(x) < 3:
+        raise ValueError(
+            "backoff sequence encoding must carry its observation count; got a "
+            f"{len(x) if isinstance(x, (tuple, list)) else type(x).__name__}-element encoding. Build it "
+            "with BackoffDistribution.dist_to_encoder().seq_encode(...), which records the row count "
+            "so a child cannot silently return a shorter score vector."
+        )
+    return int(x[2])
 
 
 def _checked_child_scores(scores: Any, role: str, rows: int | None = None) -> np.ndarray:

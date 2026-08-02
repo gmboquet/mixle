@@ -38,6 +38,7 @@ import inspect
 import itertools
 import math
 import threading
+import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
@@ -211,9 +212,25 @@ def _detached(value: Any) -> Any:
     silent: a payload like that is out of contract for a forensic receipt to begin with.
     """
     try:
-        return copy.deepcopy(value)
-    except Exception:  # noqa: BLE001 - an uncopyable payload is returned unchanged, see above
+        detached = copy.deepcopy(value)
+    except Exception as exc:  # noqa: BLE001 - reported below rather than silently aliased
+        warnings.warn(
+            f"late-oracle receipt retained a {type(value).__name__} it could not copy ({exc!r}); it "
+            "stays aliased to the caller's object and the receipt is NOT an immutable record of it "
+            "(MXR-080-1851).",
+            stacklevel=3,
+        )
         return value
+    if detached is value:
+        # A __deepcopy__ that returns self defeats the copy and restores the alias, and executing
+        # caller-defined copy code is itself a side effect a forensic receipt should disclose.
+        warnings.warn(
+            f"late-oracle receipt retained a {type(value).__name__} whose __deepcopy__ returned the "
+            "same object; it stays aliased to the caller's object and the receipt is NOT an "
+            "immutable record of it (MXR-080-1851).",
+            stacklevel=3,
+        )
+    return detached
 
 
 def _deeply_frozen(value: Any) -> Any:

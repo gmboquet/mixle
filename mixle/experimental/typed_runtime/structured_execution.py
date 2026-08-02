@@ -120,6 +120,25 @@ class StructuredEstimationReceipt:
         ):
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"structured-estimation receipt {name} must name something, got {value!r}.")
+        # Internal consistency, not just per-field plausibility (MXR-080-0647). A genuine placement
+        # and a genuine work measurement could be paired with contradictory scalars: observations=10
+        # beside work.observations=40, a backend naming one executor beside work.backend naming
+        # another, and a non-Boolean parity. Each field passed on its own and the receipt as a whole
+        # described two different runs.
+        if float(self.observations) != float(self.work.observations):
+            raise ValueError(
+                f"structured-estimation receipt reports observations={self.observations} while its own "
+                f"work measurement reports {self.work.observations}; one run processed one row count."
+            )
+        if self.exact_parity is not None and not isinstance(self.exact_parity, bool):
+            raise TypeError(
+                f"structured-estimation receipt exact_parity must be a Boolean verdict or None, got "
+                f"{self.exact_parity!r}."
+            )
+        for name in ("reference_statistics_hash", "reference_model_hash"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"structured-estimation receipt {name} must name something when set, got {value!r}.")
         blank_devices = [item for item in self.worker_device_ids if not isinstance(item, str) or not item.strip()]
         if blank_devices:
             raise ValueError(
