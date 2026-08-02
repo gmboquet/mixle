@@ -24,6 +24,7 @@ import numpy as np
 
 from mixle.inference.estimation import fit
 from mixle.stats.combinator.conditional import ConditionalDistributionEstimator
+from mixle.stats.compute.pdist import FitProvenance, FitProvenanceCarrier
 
 
 def _columns(data: Sequence[tuple]) -> list[list[Any]]:
@@ -401,7 +402,7 @@ def _safe_seq_log_density(fac: Any, values: list[Any]) -> np.ndarray:
     return out
 
 
-class DependencyTreeDistribution:
+class DependencyTreeDistribution(FitProvenanceCarrier):
     """A directed-forest joint over a heterogeneous record: each field is a marginal or a conditional on its parent.
 
     ``log_density(record) = sum_root log P(f_root) + sum_child log P(f_child | f_parent)``. The dependence a
@@ -912,7 +913,24 @@ def learn_structure(
             )
             factors[i] = fit(list(zip(keys, cols[i])), est, max_its=max_its, out=None, rng=rng)
             edge_binners[i] = binners[p]
-    return DependencyTreeDistribution(parents, factors, edge_binners)
+    learned = DependencyTreeDistribution(parents, factors, edge_binners)
+    # This is a public fitting entry point, so its result says how it was fitted like every other
+    # one (MXR-080-1190/1202). The structure search is not an EM run over a single objective -- it
+    # scores candidate edges and then fits each factor -- so the receipt reports what is true of it:
+    # the algorithm, the rows consumed, and the per-factor iteration cap, with no convergence claim
+    # the search does not make.
+    return learned.with_fit_provenance(
+        FitProvenance(
+            algorithm="dependency-tree-structure-search",
+            estimator="learn_structure",
+            objective="dependency-gain",
+            iterations=len(parents),
+            max_iterations=max(len(parents), 1),
+            converged=bool(parents),
+            n_observations=len(data),
+            repairs=("per-factor-em-cap(%d)" % max_its,),
+        )
+    )
 
 
 def _init_matrix(data: list[tuple], *, numeric_only: bool) -> np.ndarray:

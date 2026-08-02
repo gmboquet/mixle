@@ -10,6 +10,7 @@ import math
 import operator
 import sys
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Generic, Optional, TypeVar
@@ -153,12 +154,33 @@ class FitProvenance:
                 f"FitProvenance iterations ({self.iterations}) cannot exceed max_iterations "
                 f"({self.max_iterations}); a run cannot outlast its own cap"
             )
+        if not isinstance(self.converged, (bool, np.bool_)):
+            raise TypeError(f"FitProvenance converged must be a boolean verdict, got {self.converged!r}")
+        object.__setattr__(self, "converged", bool(self.converged))
         if self.converged and int(self.iterations) == 0:
             raise ValueError("FitProvenance cannot report convergence after zero iterations")
-        if self.delta is not None and (not math.isfinite(float(self.delta)) or float(self.delta) < 0.0):
+        # Optional measurements were checked for VALUE but not for TYPE, so a receipt could carry a
+        # string or a list where a number belongs and only fail much later, if at all (MXR-080-1190/1202).
+        for field_name in ("delta", "final_objective", "objective_gain"):
+            measured = getattr(self, field_name)
+            if measured is None:
+                continue
+            if isinstance(measured, (bool, np.bool_)) or not isinstance(measured, (int, float, np.number)):
+                raise TypeError(f"FitProvenance {field_name} must be a real number when set, got {measured!r}")
+            object.__setattr__(self, field_name, float(measured))
+        for field_name in ("n_observations", "seed"):
+            count = getattr(self, field_name)
+            if count is None:
+                continue
+            if isinstance(count, (bool, np.bool_)) or not isinstance(count, (int, np.integer)):
+                raise TypeError(f"FitProvenance {field_name} must be an exact integer when set, got {count!r}")
+            object.__setattr__(self, field_name, int(count))
+        if self.delta is not None and (not math.isfinite(self.delta) or self.delta < 0.0):
             raise ValueError(f"FitProvenance delta must be finite and non-negative when set, got {self.delta!r}")
-        if self.n_observations is not None and int(self.n_observations) < 0:
+        if self.n_observations is not None and self.n_observations < 0:
             raise ValueError(f"FitProvenance n_observations must be non-negative, got {self.n_observations!r}")
+        if not isinstance(self.repairs, (tuple, list)) or isinstance(self.repairs, (str, bytes)):
+            raise TypeError(f"FitProvenance repairs must be a sequence of names, got {self.repairs!r}")
         # The first EM iteration has no baseline, so its gain is legitimately infinite, and a run over
         # an impossible model can leave the objective at -inf. Those are real observations but they
         # are not strict JSON (the library emits `allow_nan=False`, MXR-080-1762), and a receipt that
@@ -180,20 +202,37 @@ class FitProvenance:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "FitProvenance":
-        """Rebuild a receipt from :meth:`as_dict` output, re-validating every field."""
+        """Rebuild a receipt from :meth:`as_dict` output, re-validating every field.
+
+        Fields are passed through as they were recorded rather than coerced. The coercions here used
+        to be lossy in exactly the direction that matters: ``bool("false")`` is ``True``, so a
+        persisted record whose convergence verdict had been corrupted to a string was rebuilt as a
+        CONVERGED fit, and ``int("3")``/``float("nan")`` accepted text where a measurement belongs
+        (MXR-080-1190/1202). ``__post_init__`` now type-checks each field, so handing it the recorded
+        value makes a malformed record fail loudly instead of being silently reinterpreted.
+        """
+        if not isinstance(value, Mapping):
+            raise TypeError(f"FitProvenance.from_dict expects a mapping, got {type(value).__name__}")
+        missing = [
+            key
+            for key in ("algorithm", "estimator", "objective", "iterations", "max_iterations", "converged")
+            if key not in value
+        ]
+        if missing:
+            raise ValueError(f"FitProvenance record is missing required field(s): {missing}")
         return cls(
-            algorithm=str(value["algorithm"]),
-            estimator=str(value["estimator"]),
-            objective=str(value["objective"]),
-            iterations=int(value["iterations"]),
-            max_iterations=int(value["max_iterations"]),
-            converged=bool(value["converged"]),
-            delta=None if value.get("delta") is None else float(value["delta"]),
-            final_objective=None if value.get("final_objective") is None else float(value["final_objective"]),
-            objective_gain=None if value.get("objective_gain") is None else float(value["objective_gain"]),
-            n_observations=None if value.get("n_observations") is None else int(value["n_observations"]),
-            repairs=tuple(str(entry) for entry in value.get("repairs", ())),
-            seed=None if value.get("seed") is None else int(value["seed"]),
+            algorithm=value["algorithm"],
+            estimator=value["estimator"],
+            objective=value["objective"],
+            iterations=value["iterations"],
+            max_iterations=value["max_iterations"],
+            converged=value["converged"],
+            delta=value.get("delta"),
+            final_objective=value.get("final_objective"),
+            objective_gain=value.get("objective_gain"),
+            n_observations=value.get("n_observations"),
+            repairs=tuple(value.get("repairs", ())),
+            seed=value.get("seed"),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -293,7 +332,38 @@ def child_enumerator(child: "ProbabilityDistribution", path: str) -> "Distributi
         raise EnumerationError(e.leaf, path=new_path, reason=e.reason) from None
 
 
-class ProbabilityDistribution(ABC):
+class FitProvenanceCarrier:
+    """Mixin giving a fitted object the three provenance accessors.
+
+    Split out of :class:`ProbabilityDistribution` because not every fitted result inherits from it:
+    ``learn_structure`` returns a ``DependencyTreeDistribution``, whose MRO is ``(cls, object)``, so
+    a public fitting entry point produced a model that could not report how it was fitted at all
+    (MXR-080-1190/1202). The methods are plain attribute lookups with no other base-class dependency,
+    so any fitted type can carry them.
+    """
+
+    def fit_provenance(self) -> "FitProvenance | None":
+        """How this object was fitted, or ``None`` if it was constructed directly.
+
+        A distribution is a value: nothing about its parameters says whether they came from a converged
+        EM run, a run that hit its iteration cap, or a keyboard. :func:`~mixle.inference.estimation.optimize`
+        attaches a :class:`FitProvenance` so that difference is machine-readable (MXR-080-1190/1202).
+        """
+        return getattr(self, "_fit_provenance", None)
+
+    def numerical_repairs(self) -> tuple[str, ...]:
+        """Numerical repairs applied while building this object -- ``()`` when none were recorded."""
+        return tuple(getattr(self, "_numerical_repairs", ()))
+
+    def with_fit_provenance(self, provenance: "FitProvenance") -> "FitProvenanceCarrier":
+        """Record ``provenance`` on this object and return it."""
+        if not isinstance(provenance, FitProvenance):
+            raise TypeError("provenance must be a FitProvenance, got %s" % type(provenance).__name__)
+        object.__setattr__(self, "_fit_provenance", provenance)
+        return self
+
+
+class ProbabilityDistribution(FitProvenanceCarrier, ABC):
     """Base class for all probability distributions in mixle.stats.
 
     A distribution evaluates the (log-)density of a single observation of its data

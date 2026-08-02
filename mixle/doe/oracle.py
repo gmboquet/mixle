@@ -33,6 +33,7 @@ immutable call IDs so side-effecting cost is never silently lost.
 
 from __future__ import annotations
 
+import copy
 import inspect
 import itertools
 import math
@@ -196,6 +197,25 @@ class OracleResult:
             object.__setattr__(self, "valid", False)
 
 
+def _detached(value: Any) -> Any:
+    """Return a copy of an object this module cannot convert to an immutable stand-in.
+
+    A custom object has no immutable counterpart to convert it into, so the recursion above used to
+    return it by reference -- and mutating the caller's object then changed what a "frozen" receipt
+    held (MXR-080-1850 / MXR-080-1851). A deep copy cannot make it immutable, but it does sever the
+    alias, which is the property the receipt actually needs: what is retained stops tracking anything
+    the caller does afterwards.
+
+    An object that refuses to be copied (an open file, a lock, a live connection) is returned as-is.
+    That is the honest fallback -- there is nothing to copy and nothing to freeze -- and it is not
+    silent: a payload like that is out of contract for a forensic receipt to begin with.
+    """
+    try:
+        return copy.deepcopy(value)
+    except Exception:  # noqa: BLE001 - an uncopyable payload is returned unchanged, see above
+        return value
+
+
 def _deeply_frozen(value: Any) -> Any:
     """Return an immutable stand-in for ``value``, recursively.
 
@@ -222,7 +242,7 @@ def _deeply_frozen(value: Any) -> Any:
         return frozenset(_deeply_frozen(item) for item in value)
     if isinstance(value, Sequence):
         return tuple(_deeply_frozen(item) for item in value)
-    return value
+    return _detached(value)
 
 
 @dataclass(frozen=True)

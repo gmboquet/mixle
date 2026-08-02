@@ -145,17 +145,22 @@ class MixtureIntegrityTest(unittest.TestCase):
         so spends three runs, while the reservation would have claimed seven.
         """
         for method in ("bandit", "doe"):
-            for budget in (3, 4, 12):
+            for budget in (4, 8, 12):
                 with self.subTest(method=method, budget=budget):
                     spent, receipt = self._counted_run(method=method, budget=budget)
                     # Every proxy call is either a search/confirmation run or the reserved audit.
                     self.assertEqual(receipt.search_runs, spent - 1)
-                    self.assertLessEqual(spent, max(budget, 4))
+                    # The budget is a ceiling on TOTAL proxy calls, not an estimate the run exceeds.
+                    self.assertLessEqual(spent, budget)
 
-    def test_a_small_doe_budget_no_longer_overstates_its_spend(self):
-        spent, receipt = self._counted_run(method="doe", budget=3)
+    def test_a_small_doe_budget_is_a_ceiling_not_an_estimate(self):
+        # budget=3 cannot cover one search + its two confirmations + the audit, so it is refused at
+        # the boundary rather than quietly spending four calls (MXR-080-1847).
+        with self.assertRaisesRegex(ValueError, "cannot cover a DOE search"):
+            self._counted_run(method="doe", budget=3)
+        spent, receipt = self._counted_run(method="doe", budget=4)
         self.assertEqual(spent, 4)  # one search run, two confirmations of its single finalist, one audit
-        self.assertEqual(receipt.search_runs, 3)  # was 7: the full three-finalist reservation
+        self.assertEqual(receipt.search_runs, 3)
 
 
 class OptimizerSanityTest(unittest.TestCase):

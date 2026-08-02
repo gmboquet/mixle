@@ -64,6 +64,40 @@ class StructuredEstimationReceipt:
         measurement carries ``placement_admitted`` / ``device_affinity_enforced`` separately so the
         two are not read as one claim.
         """
+        # The typed evidence itself, checked first: a receipt whose placement or work measurement is
+        # None carries no evidence at all, yet every field below reads as a claim about a run that
+        # produced them (MXR-080-0647). Node identity is bound to the plan for the same reason -- an
+        # invented node id or an empty parallel set describes no execution the plan could have
+        # scheduled.
+        if not isinstance(self.placement, StructuredPlacementPlan):
+            raise TypeError(
+                "structured-estimation receipt placement must be a StructuredPlacementPlan, got "
+                f"{type(self.placement).__name__}: the device and worker claims below are only "
+                "meaningful against a real plan."
+            )
+        if not isinstance(self.work, WorkMeasurement):
+            raise TypeError(
+                f"structured-estimation receipt work must be a WorkMeasurement, got {type(self.work).__name__}."
+            )
+        # An EMPTY parallel set is deliberately allowed: a graph with no shardable axis executes
+        # atomically, and the executor produces exactly that receipt. Requiring a node here rejected
+        # a real run rather than a forged one.
+        planned_nodes = {row.node_id for row in self.placement.placements}
+        unplanned = sorted(set(self.parallel_node_ids) - planned_nodes)
+        if unplanned:
+            raise ValueError(
+                f"structured-estimation receipt claims parallel node(s) {unplanned} that its own "
+                "placement plan does not contain."
+            )
+        if len(set(self.parallel_node_ids)) != len(self.parallel_node_ids):
+            raise ValueError("structured-estimation receipt repeats a parallel node id.")
+        placed_devices = {shard.device_id for row in self.placement.placements for shard in row.shards}
+        invented = sorted(set(self.worker_device_ids) - placed_devices)
+        if invented:
+            raise ValueError(
+                f"structured-estimation receipt names worker device(s) {invented} that its own "
+                "placement plan never placed."
+            )
         if isinstance(self.num_workers, bool) or not isinstance(self.num_workers, int) or self.num_workers < 1:
             raise ValueError(
                 f"structured-estimation receipt num_workers must be a positive integer, got {self.num_workers!r}."
