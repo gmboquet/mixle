@@ -13,9 +13,17 @@ from typing import Any
 from mixle.experimental.typed_runtime.contracts import CostEstimate, CounterSemantics, UpdateKind
 
 
-def _nonnegative_integer(value: Any, name: str) -> None:
+def _nonnegative_integer(value: Any, name: str) -> int:
+    """Validate and return ``value`` as a builtin ``int``.
+
+    Returning the canonical type is the point, for the same reason :func:`_finite_real` returns a
+    builtin float: an ``np.int64`` satisfies ``Integral`` and was then left on the frozen record, so
+    the advertised JSON-compatible ``as_dict()`` raised inside ``json.dumps`` (MXR-080-1868). The
+    previous fix canonicalized the three float counters and left every integer counter alone.
+    """
     if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
         raise ValueError(f"{name} must be a non-negative integer.")
+    return int(value)
 
 
 def _finite_real(value: Any, name: str, *, nonnegative: bool = False) -> float:
@@ -118,7 +126,7 @@ class WorkMeasurement:
             "collective_bytes",
             "staleness_steps",
         ):
-            _nonnegative_integer(getattr(self, name), name)
+            object.__setattr__(self, name, _nonnegative_integer(getattr(self, name), name))
         if self.run_id is not None and (not isinstance(self.run_id, str) or not self.run_id):
             raise ValueError("run_id must be a non-empty string when supplied.")
         if not isinstance(self.extra, Mapping):
@@ -266,15 +274,25 @@ class EffectiveContextMeasurement:
             "verification_actions",
             "tool_calls",
         ):
-            _nonnegative_integer(getattr(self, name), f"effective-context {name}")
+            # Canonicalized, not merely checked: every counter here had the same np.int64 /
+            # np.float32 leak WorkMeasurement did -- validated in place, left on the frozen record,
+            # and then rejected by json.dumps out of an as_dict() that advertises JSON compatibility
+            # (MXR-080-1868).
+            object.__setattr__(self, name, _nonnegative_integer(getattr(self, name), f"effective-context {name}"))
         if self.source_horizon_tokens is not None:
-            _nonnegative_integer(self.source_horizon_tokens, "source_horizon_tokens")
+            object.__setattr__(
+                self, "source_horizon_tokens", _nonnegative_integer(self.source_horizon_tokens, "source_horizon_tokens")
+            )
             if self.source_horizon_tokens < self.materialized_tokens:
                 raise ValueError("source horizon cannot be smaller than materialized context.")
-        _finite_real(self.latency_seconds, "effective-context latency_seconds", nonnegative=True)
-        _finite_real(self.monetary_cost, "effective-context monetary_cost", nonnegative=True)
+        for name in ("latency_seconds", "monetary_cost"):
+            object.__setattr__(
+                self, name, _finite_real(getattr(self, name), f"effective-context {name}", nonnegative=True)
+            )
         if self.verified_claim_fraction is not None:
-            _finite_real(self.verified_claim_fraction, "verified_claim_fraction")
+            object.__setattr__(
+                self, "verified_claim_fraction", _finite_real(self.verified_claim_fraction, "verified_claim_fraction")
+            )
             if not 0.0 <= self.verified_claim_fraction <= 1.0:
                 raise ValueError("verified_claim_fraction must be in [0, 1].")
         if self.stopped_reason is not None and (not isinstance(self.stopped_reason, str) or not self.stopped_reason):
