@@ -228,6 +228,7 @@ from mixle.inference.planning import (
     VerificationReceipt,
     certify,
     plan_estimation,
+    receipt_subject,
     schedule,
     verify_estimation_conditions,
 )
@@ -505,6 +506,7 @@ __all__ = [
     "Guarantee",
     "ProofObligation",
     "VerificationReceipt",
+    "receipt_subject",
     "verify_estimation_conditions",
     # uq() -- one verb, method auto-selected (Laplace / conformal / semantic entropy)
     "uq",
