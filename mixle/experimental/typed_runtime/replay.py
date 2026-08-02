@@ -156,8 +156,11 @@ StateProbe = Callable[[], Any]
 
 
 def _valid_fingerprints(values: Any) -> bool:
+    # Mapping, not dict: CommitReceipt's fingerprint maps are read-only views now that a receipt
+    # cannot be rewritten after the fact (MXR-080-1865), and MappingProxyType is not a dict subclass.
+    # Testing the concrete type made every replay report missing fingerprints it was actually given.
     return (
-        isinstance(values, dict)
+        isinstance(values, Mapping)
         and bool(values)
         and all(isinstance(name, str) and name and isinstance(value, str) and value for name, value in values.items())
     )
