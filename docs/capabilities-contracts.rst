@@ -210,6 +210,10 @@ Density Semantics
      - The score is an upper bound.
    * - ``ESTIMATE``
      - The score is an approximation without a guaranteed direction.
+   * - ``LIKELIHOOD_FACTOR``
+     - The score is an unnormalized factor. It is comparable across values of
+       the same object, but it is not a density, does not integrate to one, and
+       must not be exponentiated into a probability.
 
 Combinators combine child semantics with ``join_density_semantics``. Callers
 that require true likelihoods should use ``require(obj, ExactDensity)`` rather
@@ -218,6 +222,39 @@ than trusting a numeric value blindly.
 Release artifacts should record when a score is a bound or estimate. This is
 especially important when score tables are later used for model comparison,
 enumeration, or promotion gates.
+
+Estimators May Return a Factor
+------------------------------
+
+An estimator is not required to return a normalized law. When the data it was
+given does not determine one, it may return an object whose
+``density_semantics()`` is ``LIKELIHOOD_FACTOR``. This is part of the contract,
+not a degenerate result to be worked around, and it is deliberate: the
+alternative -- raising -- was tried and reverted, because a learned segment
+fitted on all-empty sequences, a gated mixture whose evidence is impossible for
+one component, and hidden association all legitimately reach this state, and
+refusing broke all three.
+
+The worked case is ``CategoricalEstimator`` with nothing accumulated -- not even
+a label at zero weight. There is no set of labels to place a distribution over,
+so it returns the zero-support categorical: it scores ``-inf`` everywhere,
+reports ``LIKELIHOOD_FACTOR``, and a mixture built over it is a factor too.
+
+What such an object owes the caller is honesty about what it is, and that is
+enforced rather than documented:
+
+* ``density_semantics()`` reports ``LIKELIHOOD_FACTOR``, so
+  ``join_density_semantics`` propagates it through every combinator that
+  contains it -- an exact law mixed with a factor is a factor.
+* ``is_normalized_probability`` is ``False``, and ``sampler()`` refuses on that
+  basis with the reason. A factor cannot be drawn from, because there is no
+  distribution to draw from; ``MixtureDistribution.sampler()`` refuses for the
+  same reason when any component is a factor.
+
+So a factor-returning estimator cannot silently become a generative model. Code
+that requires a law should check ``is_normalized_probability`` or call
+``sampler()`` and let it refuse -- both fail at the boundary, with the reason,
+rather than returning numbers that look like probabilities.
 
 Subsystem Contracts
 -------------------
