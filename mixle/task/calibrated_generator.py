@@ -36,45 +36,88 @@ ABSTAIN = None  # sentinel returned when no candidate clears the calibrated thre
 def _derive_seed(base_seed: int, prompt: Any) -> int:
     """A per-prompt seed derived from ``base_seed``, cross-process stable for canonical prompt types.
 
-    Unlike builtin ``hash()``, which is salted per process, this is reproducible across runs -- but only
-    for prompts whose ``repr`` is itself canonical: ``str``, ``bytes``, ``int``, ``float``, ``bool``,
-    ``None``, and tuples, lists, sets or mappings of those.
+    Unlike builtin ``hash()``, which is salted per process, this is reproducible across runs for the
+    prompt types :func:`_seed_key` can encode canonically: ``str``, ``bytes``, ``int``, ``float``,
+    ``bool``, ``None``, and tuples, lists, sets or mappings of those.
 
-    It is NOT stable for a prompt relying on the default ``object.__repr__``, which embeds a memory
-    address, so two equal prompts can seed differently in one run and the same prompt seeds differently
-    across runs (MXR-080-1848). Re-deriving the key canonically was tried and rejected: it changes every
-    existing seed, so it silently breaks the reproducibility of runs already recorded, and it moved two
-    calibration outcomes that depend on the current draws. The promise is therefore scoped to say what
-    is true rather than widened by breaking compatibility -- pass a canonical prompt (or your own stable
-    key) when a draw must reproduce on another machine.
+    Sets and mappings are encoded from their CONTENTS, not their ``repr`` (MXR-080-1848). Both were
+    previously called canonical while being neither: a set's iteration order follows element hashes, so
+    the same set of strings reordered under a different ``PYTHONHASHSEED``, and a dict's ``repr``
+    follows insertion order, so two equal dicts built in different orders seeded differently. Sorting
+    their encoded members makes the key depend on the value alone, which is what the promise claimed.
+    Sequence order is preserved, because for a tuple or list the order IS part of the value.
 
-    A prompt outside those types warns rather than failing: the seed is unchanged (so recorded runs keep
-    reproducing), but the caller learns the promise does not cover it instead of discovering it when the
-    same prompt draws differently on another machine."""
+    A prompt this cannot encode -- including one that merely defines its own ``__repr__``, which proves
+    nothing about what that repr contains -- warns and falls back to ``repr``, so a recorded run keeps
+    reproducing while the caller learns the promise does not cover it."""
     if not _is_canonically_representable(prompt):
         warnings.warn(
             f"seed derivation for a {type(prompt).__name__} prompt is not reproducible across processes: "
-            "its repr embeds a memory address, so equal prompts can seed differently. Pass a str/bytes/"
-            "number/None, a container of those, or your own stable key when a draw must reproduce "
-            "(MXR-080-1848).",
+            "its repr is not a canonical encoding of its value, so equal prompts can seed differently. "
+            "Pass a str/bytes/number/None, a container of those, or your own stable key when a draw must "
+            "reproduce (MXR-080-1848).",
             stacklevel=3,
         )
-    digest = hashlib.sha256(f"{base_seed}:{prompt!r}".encode()).digest()
+    digest = hashlib.sha256(f"{base_seed}:{_seed_key(prompt)}".encode()).digest()
     return int.from_bytes(digest[:8], "big") % (2**32)
 
 
-_CANONICAL_SCALARS = (str, bytes, bytearray, int, float, bool, type(None))
-
-
 def _is_canonically_representable(value: Any) -> bool:
-    """Whether ``repr(value)`` is stable across processes -- i.e. carries no object address."""
-    if isinstance(value, _CANONICAL_SCALARS):
-        return True
+    """Whether this value has a canonical encoding -- one determined by its VALUE alone.
+
+    Three shapes used to pass here that should not have (MXR-080-1848):
+
+    * a ``set``/``frozenset``, whose iteration order follows element hashes, so a set of strings
+      reorders under a different ``PYTHONHASHSEED`` and two equal sets encoded differently;
+    * a ``Mapping``, whose ``repr`` follows insertion order, so ``{"a": 1, "b": 2}`` and
+      ``{"b": 2, "a": 1}`` -- equal dicts -- encoded differently;
+    * any type merely DEFINING ``__repr__``, which was taken as proof of canonicality. Defining one
+      says nothing about what it contains; a custom ``__repr__`` embedding ``id(self)`` was
+      classified canonical and gave two equal instances different seeds.
+
+    The first two are now encoded order-independently by :func:`_seed_key` rather than declared
+    unusable, so they became correct instead of merely honest. The third cannot be settled by
+    inspection, so it is no longer assumed: an unrecognized type warns.
+    """
+    return _seed_key(value) is not None
+
+
+def _seed_key(value: Any, _depth: int = 0) -> Any:
+    """A canonical string encoding of ``value``, or ``None`` when it has none.
+
+    Returning ``None`` is what drives the warning above; ``_derive_seed`` still falls back to
+    ``repr`` in that case, so an unrecognized prompt keeps the seed it always had and previously
+    recorded runs keep reproducing.
+    """
+    if _depth > 20:  # a self-referential container; repr would print "..." but this would not return
+        return None
+    if isinstance(value, (str, bytes, bytearray)):
+        kind = "s" if isinstance(value, str) else "b"
+        body = value if isinstance(value, str) else bytes(value).hex()
+        return f"{kind}:{body}"
+    if isinstance(value, bool) or value is None:
+        return f"c:{value!r}"
+    if isinstance(value, (int, float)):
+        return f"n:{value!r}"
     if isinstance(value, Mapping):
-        return all(_is_canonically_representable(k) and _is_canonically_representable(v) for k, v in value.items())
-    if isinstance(value, (tuple, list, set, frozenset)):
-        return all(_is_canonically_representable(item) for item in value)
-    return type(value).__repr__ is not object.__repr__
+        items = []
+        for key, item in value.items():
+            encoded_key, encoded_item = _seed_key(key, _depth + 1), _seed_key(item, _depth + 1)
+            if encoded_key is None or encoded_item is None:
+                return None
+            items.append(f"{encoded_key}={encoded_item}")
+        return "m:{" + ",".join(sorted(items)) + "}"  # sorted: a dict's equality ignores its order
+    if isinstance(value, (set, frozenset)):
+        items = [_seed_key(item, _depth + 1) for item in value]
+        if any(item is None for item in items):
+            return None
+        return "e:{" + ",".join(sorted(items)) + "}"  # sorted: iteration order is hash-seed dependent
+    if isinstance(value, (tuple, list)):
+        items = [_seed_key(item, _depth + 1) for item in value]
+        if any(item is None for item in items):
+            return None
+        return "q:[" + ",".join(items) + "]"  # ordered: sequence order IS part of the value
+    return None
 
 
 def _binomial_error_upper(errors: int, accepted: int, tail_probability: float) -> float:
@@ -93,7 +136,7 @@ def smallest_certifiable_calibration_set(
 ) -> int:
     """Smallest ``calibrate(...)`` set size whose risk certificate can reach ``alpha`` at all.
 
-    :meth:`CalibratedGenerator.calibrate` splits the set in half and certifies on the second half with a
+    :meth:`CalibratedGenerator.calibrate` splits the set in half and certifies on the leading half with a
     one-sided Clopper-Pearson bound, Bonferroni-corrected across the thresholds it tests. That bound has a
     floor set by the certification count alone: with ``c`` certification rows and zero observed errors it
     is still ``1 - (tail)**(1/c)``. Below the size returned here, ``alpha`` sits under that floor, no
@@ -225,10 +268,12 @@ class CalibratedGenerator:
     ) -> CalibratedGenerator:
         """Certify a held-out accepted-error threshold using an explicit correctness oracle.
 
-        The first half proposes score-margin thresholds. The independent second
-        half evaluates every proposal with simultaneous exact binomial bounds.
-        If no nonempty accepted subset certifies risk ``<= alpha``, the threshold
-        is ``+inf`` and serving abstains everywhere.
+        The trailing half proposes score-margin thresholds; the independent leading
+        half evaluates every proposal with simultaneous exact binomial bounds. Only
+        the certification half consults ``is_correct``, once per row in order, so a
+        metered or side-effecting oracle is not spent on rows that cannot reach the
+        bound (MXR-080-1849). If no nonempty accepted subset certifies risk
+        ``<= alpha``, the threshold is ``+inf`` and serving abstains everywhere.
         """
         if not callable(is_correct):
             raise TypeError("is_correct must be callable")
@@ -238,36 +283,35 @@ class CalibratedGenerator:
         if seed is not None and (isinstance(seed, (bool, np.bool_)) or not isinstance(seed, (int, np.integer))):
             raise ValueError("seed must be an exact integer or None")
         rng_seed = self.seed if seed is None else int(seed)
-        # ORACLE CONTRACT: is_correct is called exactly once per prompt, for EVERY prompt, in the
-        # order given. That is load-bearing, not incidental. The oracle receives only
-        # (prompt, candidate) -- no row index -- so an oracle that must recover per-row ground truth
-        # has no way to do it except by counting its own calls.
-        # mixle.reason.language_bridge.PosteriorDescriber.calibrate does exactly that: it closes over
-        # a monotone counter and indexes `truths[calls["n"]]`.
+        # ORACLE CONTRACT: is_correct is called exactly once per CERTIFICATION row, in order, starting
+        # at the first prompt. The oracle receives only (prompt, candidate) -- no row index -- so an
+        # oracle that must recover per-row ground truth has no way to do it except by counting its own
+        # calls; mixle.reason.language_bridge.PosteriorDescriber.calibrate does exactly that, closing
+        # over a monotone counter and indexing `truths[calls["n"]]`.
         #
-        # MXR-080-1849 asks for the proposal-half calls to be dropped, since only certification-half
-        # verdicts reach the bound and the oracle may be metered. That is NOT safely actionable while
-        # this contract stands: skipping the first `split` calls restarts any such counter at 0, so
-        # every certification row is scored against the truth of a row `split` positions earlier.
-        # Measured twice -- both attempts moved geoscience_inversion_report's m5 bracketing, and the
-        # counter above is why. Removing the waste requires first giving the oracle a row identity
-        # (passing an index, or a (prompt, index) pair), which changes the public oracle signature.
-        # Until then the extra calls are the price of row alignment, and this comment is here so the
-        # next person to spot the "wasted" calls sees the coupling before deleting them.
+        # That counter is why the proposal half used to be scored too (MXR-080-1849): only
+        # certification verdicts reach the bound, but simply skipping the first calls restarted any
+        # such counter at 0 and scored every certification row against a truth `split` rows earlier.
+        # The fix is not to give the oracle an index -- which would change its public signature -- but
+        # to notice that WHICH half certifies is arbitrary. Certifying the LEADING rows means the
+        # oracle is called on a prefix, so a counting oracle stays aligned with no protocol change,
+        # and the proposal half needs statistics only, which cost no oracle calls at all.
+        n_certify = len(prompts) - len(prompts) // 2  # the larger half when the count is odd
         statistics: list[float] = []
         errors: list[bool] = []
         for i, prompt in enumerate(prompts):
             candidate, statistic = self._selection(prompt, seed=_derive_seed(rng_seed, (i, prompt)))
+            statistics.append(statistic)
+            if i >= n_certify:
+                continue  # a proposal row contributes a threshold, never a verdict
             verdict = is_correct(prompt, candidate)
             if not isinstance(verdict, (bool, np.bool_)):
                 raise TypeError("is_correct must return a boolean")
-            statistics.append(statistic)
             errors.append(not bool(verdict))
 
-        split = len(prompts) // 2
-        proposal_stats = np.asarray(statistics[:split], dtype=float)
-        certification_stats = np.asarray(statistics[split:], dtype=float)
-        certification_errors = np.asarray(errors[split:], dtype=bool)
+        certification_stats = np.asarray(statistics[:n_certify], dtype=float)
+        certification_errors = np.asarray(errors, dtype=bool)
+        proposal_stats = np.asarray(statistics[n_certify:], dtype=float)
         thresholds = np.unique(np.concatenate((np.asarray([-np.inf]), proposal_stats)))
         per_threshold_tail = (1.0 - self.confidence) / len(thresholds)
 
@@ -302,8 +346,9 @@ class CalibratedGenerator:
             "method": "split-selective-risk/clopper-pearson-bonferroni/v1",
             "target_error": self.alpha,
             "confidence": self.confidence,
-            "proposal_count": split,
-            "certification_count": len(prompts) - split,
+            "proposal_count": len(prompts) - n_certify,
+            "certification_count": n_certify,
+            "oracle_calls": n_certify,
             "thresholds_tested": len(thresholds),
             "attainable_error_upper": best_case,
             "target_attainable": None if best_case is None else bool(best_case <= self.alpha),
