@@ -164,7 +164,15 @@ class SquaremPackerContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "overflowed"):
             unpack(overflow)
 
-        model.components[0].mu = np.nan
+        # Assigning a non-finite mean is now refused at the parameter itself (MXR-080-1192), so this
+        # model can no longer be built the obvious way -- which is the stronger guarantee.
+        with self.assertRaisesRegex(ValueError, "mu must be finite"):
+            model.components[0].mu = np.nan
+
+        # pack()'s own check still matters for a model that reached this state some other way (a
+        # corrupted payload, a family without the __setattr__ guard), so exercise it through the
+        # bypass rather than dropping the coverage.
+        object.__setattr__(model.components[0], "mu", np.nan)
         with self.assertRaisesRegex(ValueError, "non-finite"):
             pack(model)
 

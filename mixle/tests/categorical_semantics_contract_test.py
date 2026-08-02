@@ -127,30 +127,85 @@ class ComposabilityTest(unittest.TestCase):
 
 
 class NoEvidenceFitTest(unittest.TestCase):
-    """A fit with no evidence is a defined result that says what it is (MXR-080-1220)."""
+    """A successful estimator call returns a generative law, or does not succeed (MXR-080-1220).
 
-    def _empty_fit(self) -> CategoricalDistribution:
-        return CategoricalEstimator().estimate(None, {})
+    The earlier resolution returned a supportless categorical for a zero-evidence fit and described
+    it honestly as a likelihood factor. That was still a SUCCESSFUL call handing back an object whose
+    sampler raised, and it was worse than it looked: an all ``-inf`` component can never win
+    responsibility again, so the dead-component case it existed to serve could not actually recover.
+    """
 
-    def test_it_does_not_claim_to_be_a_law(self):
-        fitted = self._empty_fit()
+    def _zero_responsibility_statistic(self):
+        """What EM hands the estimator when a component earns no weight on any row."""
+        import numpy as np
+
+        seen = CategoricalDistribution({"a": 0.5, "b": 0.5})
+        accumulator = CategoricalEstimator().accumulator_factory().make()
+        accumulator.seq_update(seen.dist_to_encoder().seq_encode(["a", "b", "a"]), np.zeros(3), seen)
+        return accumulator.value()
+
+    def test_a_seen_label_survives_earning_no_weight(self):
+        # count_map holds positive counts only, so the support had to be recorded separately.
+        self.assertEqual(self._zero_responsibility_statistic(), {"a": 0.0, "b": 0.0})
+
+    def test_a_dead_component_estimates_to_a_uniform_law(self):
+        fitted = CategoricalEstimator().estimate(None, self._zero_responsibility_statistic())
+        self.assertIs(fitted.density_semantics(), DensitySemantics.EXACT)
+        self.assertTrue(fitted.is_normalized_probability)
+        self.assertEqual(fitted.pmap, {"a": 0.5, "b": 0.5})
+
+    def test_that_result_is_generative(self):
+        fitted = CategoricalEstimator().estimate(None, self._zero_responsibility_statistic())
+        self.assertEqual(len(fitted.sampler(seed=0).sample(3)), 3)
+        MixtureDistribution([fitted, _law()], [0.5, 0.5]).sampler(seed=0)
+
+    def test_it_can_win_responsibility_again(self):
+        # The point of the dead-component case: a uniform scores finitely, so the next E-step can
+        # give it weight. The supportless object it replaced scored -inf on every row forever.
+        fitted = CategoricalEstimator().estimate(None, self._zero_responsibility_statistic())
+        self.assertTrue(float(fitted.log_density("a")) > float("-inf"))
+
+    def test_an_estimator_given_nothing_at_all_returns_a_declared_factor(self):
+        """The one case that remains non-generative, and why refusing it is not available.
+
+        With nothing accumulated there is no label set to place a distribution over. Raising was
+        tried and reverted: a learned segment fitted on all-empty sequences, a gated mixture whose
+        evidence is impossible for a component, and hidden association all reach this legitimately,
+        and refusing broke all three. The result says what it is instead of posing as a law, and a
+        mixture built over it is a factor too and refuses to sample (MXR-080-1857).
+        """
+        fitted = CategoricalEstimator().estimate(None, {})
         self.assertIs(fitted.density_semantics(), DensitySemantics.LIKELIHOOD_FACTOR)
         self.assertFalse(fitted.is_normalized_probability)
+        self.assertEqual(fitted.log_density("anything"), float("-inf"))
+        with self.assertRaisesRegex(ValueError, "cannot be sampled|no evidence"):
+            MixtureDistribution([fitted, _law()], [0.5, 0.5]).sampler(seed=0)
 
-    def test_it_scores_everything_as_impossible(self):
-        self.assertEqual(self._empty_fit().log_density("anything"), float("-inf"))
+    def test_a_label_the_component_cannot_explain_is_not_its_support(self):
+        # Impossible evidence must not become a component's support: resetting a dead component to a
+        # uniform over labels it never modelled would invent a law from evidence it cannot explain.
+        import numpy as np
 
-    def test_sampling_it_names_the_cause_rather_than_inventing_a_draw(self):
-        with self.assertRaises(ValueError) as caught:
-            self._empty_fit().sampler(seed=0)
-        message = str(caught.exception)
-        self.assertIn("pmap is empty", message)
-        self.assertIn("no evidence", message)
+        modelled = CategoricalDistribution({"a": 1.0})
+        accumulator = CategoricalEstimator().accumulator_factory().make()
+        encoder = CategoricalDistribution({"a": 0.5, "outside": 0.5}).dist_to_encoder()
+        accumulator.seq_update(encoder.seq_encode(["outside"]), np.zeros(1), modelled)
+        self.assertEqual(accumulator.value(), {})
 
-    def test_it_remains_usable_as_the_component_em_produces(self):
-        # Refusing to construct it would abort a whole fit over a component that recovers on the
-        # next E-step, which is why the result exists at all.
-        MixtureDistribution([self._empty_fit(), _law()], [0.5, 0.5])
+    def test_a_declared_support_still_gives_a_no_data_uniform(self):
+        fitted = CategoricalEstimator(suff_stat={"a": 1.0, "b": 1.0}).estimate(None, {})
+        self.assertEqual(fitted.pmap, {"a": 0.5, "b": 0.5})
+        self.assertTrue(fitted.is_normalized_probability)
+
+    def test_an_ordinary_fit_is_unchanged(self):
+        # count_map still carries positive counts only, so nothing about a normal fit moves.
+        import numpy as np
+
+        seen = CategoricalDistribution({"a": 0.5, "b": 0.5})
+        accumulator = CategoricalEstimator().accumulator_factory().make()
+        accumulator.seq_update(seen.dist_to_encoder().seq_encode(["a", "b", "a"]), np.ones(3), seen)
+        self.assertEqual(accumulator.value(), {"a": 2.0, "b": 1.0})
+        self.assertEqual(CategoricalEstimator().estimate(None, accumulator.value()).pmap, {"a": 2 / 3, "b": 1 / 3})
 
 
 if __name__ == "__main__":
