@@ -9,6 +9,7 @@ torch = pytest.importorskip("torch")
 from mixle.experimental.sketch_state_attention import (  # noqa: E402
     FrequentDirectionsSpine,
     TensorSketchSpine,
+    TensorSketchState,
     _tensor_sketch_far_scan,
     frequent_directions_error_bound,
     frequent_directions_update,
@@ -175,3 +176,57 @@ def test_fd_update_rejects_shape_dtype_and_nonfinite_inputs():
     rows[0, 0] = float("nan")
     with pytest.raises(ValueError, match="finite"):
         frequent_directions_update(torch.zeros(3, 4), rows, ell=3)
+
+
+def _state_with_far_history():
+    """A TensorSketch state whose far field already holds evicted tokens."""
+    spine = TensorSketchSpine(16, d_model=16, n_layer=1, n_head=1, window=1, sketch_dim=16, degree=2, seed=0)
+    state = spine.init_state(1)
+    ids = torch.randint(0, 16, (1, 3))
+    state, _loss = spine.step(state, (ids, ids))
+    return spine, state, ids
+
+
+def test_a_state_without_the_degree_matched_normalizer_is_refused():
+    """Numerator history with no denominator to match it (MXR-080-1870).
+
+    ``Z_ts`` was added to an existing dataclass with a list default, so a state built before it
+    arrived with ``C`` and ``Z`` populated and ``Z_ts == []``. ``step`` read that as "start the
+    denominator from zero" while the numerator kept its whole history, and a deterministic two-key
+    probe returned 4.0 where a normalized readout must return 2.0. There is no migration to offer:
+    ``sum_t TS(phi(k_t))`` is not recoverable from ``C`` or from the exact ``Z``, because TensorSketch
+    is not linear above degree one.
+    """
+    _spine, state, _ids = _state_with_far_history()
+    with pytest.raises(ValueError, match="cannot be migrated"):
+        TensorSketchState(
+            C=list(state.C), Z=list(state.Z), cache_k=list(state.cache_k), cache_v=list(state.cache_v), pos=state.pos
+        )
+
+
+def test_the_far_scan_refuses_a_missing_normalizer_over_existing_history():
+    spine, state, _ids = _state_with_far_history()
+    with pytest.raises(ValueError, match="no degree-matched normalizer"):
+        _tensor_sketch_far_scan(
+            torch.zeros(1, 1, 1, 16),
+            state.C[0],
+            state.Z[0],
+            None,
+            torch.zeros(1, 1, 1, 16),
+            torch.zeros(1, 1, 1, 16),
+            spine._hashes[0],
+            spine._signs[0],
+            cache_len=1,
+            window=1,
+            sketch_dim=16,
+            head_dim=16,
+            far_count_before=2,
+        )
+
+
+def test_an_empty_state_and_a_well_formed_continuation_are_untouched():
+    # The guard must reject only the shape no run can produce.
+    assert TensorSketchState().Z_ts == []
+    spine, state, ids = _state_with_far_history()
+    continued, _loss = spine.step(state, (ids, ids))
+    assert continued.receipt["normalized_kernel_estimator"] is True
