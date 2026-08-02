@@ -117,5 +117,38 @@ class RequestedPostconditionFailureTest(unittest.TestCase):
         self.assertGreaterEqual(int(art.guarantee), 4)
 
 
+class CalibrationSplitSizingTest(unittest.TestCase):
+    """An underpowered split is refused where it is decided, with the counts (MXR-080-1648)."""
+
+    def test_a_set_too_small_for_any_split_says_so(self):
+        # The old check only caught a ZERO-row fit side. These raised deep inside optimize() with
+        # "optimize() received empty data", naming neither calibrate nor the split.
+        for rows, frac in ((1, 0.5), (2, 0.9), (3, 0.99)):
+            with self.subTest(rows=rows, calibrate=frac):
+                with self.assertRaisesRegex(ValueError, "no fraction can split this set"):
+                    create(_scalar(rows, 0), calibrate=frac, seed=0, max_its=2)
+
+    def test_a_fraction_that_starves_the_fit_reports_what_would_work(self):
+        with self.assertRaises(ValueError) as caught:
+            create(_scalar(10, 0), calibrate=0.95, seed=0, max_its=2)
+        message = str(caught.exception)
+        self.assertIn("fitting needs at least 2", message)
+        self.assertIn("lower calibrate", message)
+
+    def test_a_workable_split_is_still_accepted(self):
+        art = create(_scalar(40, 0), calibrate=0.25, seed=0, max_its=5)
+        self.assertEqual(art.calibration.n, 10)
+
+    def test_the_holdout_never_falls_below_the_minimum(self):
+        # round(0.01 * 40) is 0, which would have made a one-row -- then zero-row -- "holdout".
+        art = create(_scalar(40, 0), calibrate=0.01, seed=0, max_its=5)
+        self.assertGreaterEqual(art.calibration.n, 2)
+
+    def test_the_split_is_checked_before_any_fitting_happens(self):
+        # The guard is arithmetic on counts, so it must not depend on the data being fittable.
+        with self.assertRaises(ValueError):
+            create([float("nan")] * 3, calibrate=0.5, seed=0, max_its=2)
+
+
 if __name__ == "__main__":
     unittest.main()
