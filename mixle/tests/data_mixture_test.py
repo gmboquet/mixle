@@ -117,6 +117,46 @@ class MixtureIntegrityTest(unittest.TestCase):
         self.assertEqual(calls[-1]["eval_seed"], receipt.audit_eval_seed)
         np.testing.assert_allclose(weights, receipt.weights)
 
+    def _counted_run(self, *, method, budget):
+        """Run ``optimize_mixture`` against a mocked proxy and return (call count, receipt)."""
+        domains = [
+            SyntheticDomain(name="a", vocab=10, period=1, pattern_seed=0),
+            SyntheticDomain(name="b", vocab=10, period=1, pattern_seed=1),
+        ]
+        calls = []
+
+        def fake_score(weights, called_domains, proxy_steps, **kwargs):
+            calls.append(kwargs)
+            if kwargs.get("return_detail"):
+                return 0.25, {domain.name: 0.25 for domain in called_domains}
+            return float(np.asarray(weights)[1])
+
+        with patch("mixle.task.data_mixture.proxy_run_score", side_effect=fake_score):
+            _weights, receipt = optimize_mixture(
+                domains, proxy_steps=2, budget=budget, method=method, seed=4, return_receipt=True
+            )
+        return len(calls), receipt
+
+    def test_the_receipt_counts_the_runs_that_happened(self):
+        """``search_runs`` is a measurement, not the reservation (MXR-080-1847).
+
+        The DOE path reserves _DOE_FINALISTS * _DOE_CONFIRM_RUNS for its confirmation round, but a
+        small budget leaves fewer candidates than that to rank -- budget=3 confirms ONE finalist and
+        so spends three runs, while the reservation would have claimed seven.
+        """
+        for method in ("bandit", "doe"):
+            for budget in (3, 4, 12):
+                with self.subTest(method=method, budget=budget):
+                    spent, receipt = self._counted_run(method=method, budget=budget)
+                    # Every proxy call is either a search/confirmation run or the reserved audit.
+                    self.assertEqual(receipt.search_runs, spent - 1)
+                    self.assertLessEqual(spent, max(budget, 4))
+
+    def test_a_small_doe_budget_no_longer_overstates_its_spend(self):
+        spent, receipt = self._counted_run(method="doe", budget=3)
+        self.assertEqual(spent, 4)  # one search run, two confirmations of its single finalist, one audit
+        self.assertEqual(receipt.search_runs, 3)  # was 7: the full three-finalist reservation
+
 
 class OptimizerSanityTest(unittest.TestCase):
     """One domain is informative (a short, clean, learnable pattern); the rest are pure noise. A

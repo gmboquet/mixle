@@ -276,7 +276,8 @@ def _simplex_arms(n_domains: int, budget: int) -> np.ndarray:
 
 def _bandit_search(
     domains: Sequence[SyntheticDomain], proxy_steps: int, budget: int, proxy_kwargs: dict[str, Any], seed: int
-) -> np.ndarray:
+) -> tuple[np.ndarray, int]:
+    """Return the selected weights and the number of proxy runs actually spent (MXR-080-1847)."""
     from mixle.task.bandit import ThompsonGaussian
 
     arms = _simplex_arms(len(domains), budget)
@@ -295,7 +296,7 @@ def _bandit_search(
         )
         bandit.update(arm, reward=-loss)  # higher reward = lower held-out loss
     best_arm = int(np.argmax(bandit.means))
-    return arms[best_arm]
+    return arms[best_arm], int(budget)
 
 
 def _softmax(z: np.ndarray) -> np.ndarray:
@@ -319,7 +320,8 @@ def _logits_from_free(free_logits: Any, n: int) -> np.ndarray:
 
 def _doe_search(
     domains: Sequence[SyntheticDomain], proxy_steps: int, budget: int, proxy_kwargs: dict[str, Any], seed: int
-) -> np.ndarray:
+) -> tuple[np.ndarray, int]:
+    """Return the selected weights and the number of proxy runs actually spent (MXR-080-1847)."""
     from mixle.doe.optimizer import BayesianOptimizer
 
     n = len(domains)
@@ -379,7 +381,11 @@ def _doe_search(
             for repeat in range(_DOE_CONFIRM_RUNS)
         ]
         scored.append((float(np.mean(confirmations)), candidate))
-    return _softmax(_logits_from_free(min(scored, key=lambda row: row[0])[1], n))
+    # Count the confirmations that HAPPENED, not the ceiling. A small budget yields fewer than
+    # _DOE_FINALISTS observations to rank, so charging the ceiling overstated the spend -- budget=3
+    # reported seven runs against three real calls (MXR-080-1847).
+    runs = int(budget) + len(finalists) * _DOE_CONFIRM_RUNS
+    return _softmax(_logits_from_free(min(scored, key=lambda row: row[0])[1], n)), runs
 
 
 def optimize_mixture(
@@ -394,9 +400,13 @@ def optimize_mixture(
 ) -> np.ndarray | tuple[np.ndarray, MixtureOptimizationReceipt]:
     """Learn domain mixture weights via repeated short proxy runs (DoReMi-style search).
 
-    ``budget - 1`` proxy runs (each :func:`proxy_run_score` at ``proxy_steps`` gradient steps) search
-    the mixture-weight simplex; the final reserved run audits the selected mixture with independent
-    training and evaluation seeds. ``method="bandit"`` (default) discretizes the simplex into a
+    ``budget`` bounds the total :func:`proxy_run_score` calls (each at ``proxy_steps`` gradient steps):
+    one is reserved to audit the selected mixture with independent training and evaluation seeds, and
+    ``method="doe"`` reserves a further ``_DOE_FINALISTS * _DOE_CONFIRM_RUNS`` for its finalist
+    confirmation round, so the search itself gets what remains. The receipt's ``search_runs`` reports
+    the runs actually spent, which is at most the reservation and is lower when a small budget leaves
+    fewer than ``_DOE_FINALISTS`` candidates to confirm (MXR-080-1847).
+    ``method="bandit"`` (default) discretizes the simplex into a
     lattice of candidate mixtures (``mixle.doe.mixture.simplex_lattice``) and searches them with
     ``mixle.task.bandit.ThompsonGaussian`` (reward = negative held-out loss); ``method="doe"`` searches
     continuously via ``mixle.doe.optimizer.BayesianOptimizer`` over a softmax-reparameterized simplex.
@@ -428,9 +438,9 @@ def optimize_mixture(
     confirm_runs = _DOE_FINALISTS * _DOE_CONFIRM_RUNS if method == "doe" else 0
     search_runs = max(budget - 1 - confirm_runs, 1)
     if method == "bandit":
-        weights = _bandit_search(domains, proxy_steps, search_runs, kwargs, seed)
+        weights, spent = _bandit_search(domains, proxy_steps, search_runs, kwargs, seed)
     elif method == "doe":
-        weights = _doe_search(domains, proxy_steps, search_runs, kwargs, seed)
+        weights, spent = _doe_search(domains, proxy_steps, search_runs, kwargs, seed)
     else:
         raise ValueError(f"unknown method {method!r}; expected 'bandit' or 'doe'.")
 
@@ -452,7 +462,7 @@ def optimize_mixture(
     receipt = MixtureOptimizationReceipt(
         method=method,
         weights=tuple(float(weight) for weight in weights),
-        search_runs=search_runs + confirm_runs,
+        search_runs=spent,
         selection_eval_seed=selection_eval_seed,
         audit_training_seed=audit_training_seed,
         audit_eval_seed=audit_eval_seed,
