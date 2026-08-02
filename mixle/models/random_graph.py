@@ -100,7 +100,11 @@ class StochasticBlockGraphModel:
         self_loops: bool = False,
         name: str | None = None,
     ) -> None:
-        probs = np.asarray(block_probs, dtype=np.float64)
+        # np.asarray does NOT copy an array that is already float64, so the model aliased the
+        # caller's matrix: every validation below passed, and the caller then wrote a different
+        # probability into their own array and changed what this model scores (MXR-080-1889). The
+        # copy is taken before validation so what is checked is what is kept.
+        probs = np.array(block_probs, dtype=np.float64)
         if probs.ndim != 2 or probs.shape[0] != probs.shape[1] or probs.shape[0] == 0:
             raise ValueError("block_probs must be a non-empty square matrix.")
         if np.any(~np.isfinite(probs)) or np.any(probs < 0.0) or np.any(probs > 1.0):
@@ -163,6 +167,10 @@ class StochasticBlockGraphModel:
 
     def sample(self, seed: int | None = None) -> np.ndarray:
         """Draw one graph from the block model."""
+        # Handed straight to RandomState, which accepts True as the seed 1: this method did not use
+        # the module's own _seed validator that ErdosRenyiGraphModel.sample has always used, so the
+        # two public samplers in one module disagreed about what a seed is (MXR-080-1889).
+        seed = _seed(seed)
         rng = np.random.RandomState(seed)
         n = self.block_assignments.shape[0]
         mat = np.zeros((n, n), dtype=np.int8)
@@ -417,8 +425,27 @@ def _edge_values(adj: np.ndarray, directed: bool, self_loops: bool) -> np.ndarra
 
 
 def _bernoulli_log_likelihood(values: np.ndarray, p: float) -> float:
-    pp = float(np.clip(p, _EPS, 1.0 - _EPS))
-    return float(values.sum() * np.log(pp) + (values.size - values.sum()) * np.log1p(-pp))
+    """Exact Bernoulli log-likelihood, including at ``p == 0`` and ``p == 1`` (MXR-080-1889).
+
+    Clipping ``p`` into ``[eps, 1 - eps]`` gave every declared endpoint a finite score: a ``p = 0``
+    model scored a PRESENT edge at ``log(1e-12) = -27.63`` -- finite probability for evidence the
+    model declares impossible -- and scored a graph with no edges at ``-1e-12`` rather than the exact
+    ``0`` that a certain event has. Both directions matter: the first lets impossible evidence enter a
+    likelihood ratio, a BIC, or an EM responsibility as though it were merely unlikely, and the second
+    means a model that predicts its data perfectly does not say so exactly.
+
+    The clip was presumably there for ``0 * log(0)``, which is ``0 * -inf = nan`` computed naively.
+    The convention is that an outcome observed zero times contributes nothing, so the endpoints are
+    handled by counting instead: at ``p == 0`` the likelihood is ``-inf`` if any edge is present and
+    exactly ``0`` otherwise, and symmetrically at ``p == 1``.
+    """
+    present = float(values.sum())
+    absent = float(values.size) - present
+    if p <= 0.0:
+        return float("-inf") if present > 0.0 else 0.0
+    if p >= 1.0:
+        return float("-inf") if absent > 0.0 else 0.0
+    return float(present * np.log(p) + absent * np.log1p(-p))
 
 
 def _initial_assignments(n: int, num_blocks: int, rng: np.random.RandomState) -> np.ndarray:
