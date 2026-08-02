@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Sequence
+import math
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import IntEnum
+from numbers import Integral, Real
+from types import MappingProxyType
 from typing import Any
 
 __all__ = [
@@ -57,6 +60,41 @@ class ProofObligation:
     description: str
 
 
+def _frozen_evidence(value: Any, path: str) -> Any:
+    """Return an immutable, JSON-expressible copy of one receipt evidence value, recursively."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"verification receipt {path} must be finite to serialize, got {value!r}")
+        return value
+    if isinstance(value, Mapping):
+        frozen = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"verification receipt {path} keys must be strings, got {key!r}")
+            frozen[key] = _frozen_evidence(item, f"{path}.{key}")
+        return MappingProxyType(frozen)
+    if isinstance(value, (list, tuple)):
+        return tuple(_frozen_evidence(item, f"{path}[{index}]") for index, item in enumerate(value))
+    if isinstance(value, Real):  # numpy scalar
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            raise ValueError(f"verification receipt {path} must be finite to serialize, got {value!r}")
+        return int(value) if isinstance(value, Integral) else numeric
+    raise TypeError(
+        f"verification receipt {path} holds {type(value).__name__}, which is neither immutable nor "
+        "JSON-expressible; a receipt an audit cannot read or serialize is not evidence"
+    )
+
+
+def _plain_evidence(value: Any) -> Any:
+    """Undo :func:`_frozen_evidence`'s containers for JSON-compatible output."""
+    if isinstance(value, Mapping):
+        return {key: _plain_evidence(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_plain_evidence(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True)
 class VerificationReceipt:
     """Evidence that named checks were performed for one estimation block.
@@ -75,12 +113,33 @@ class VerificationReceipt:
     def __post_init__(self) -> None:
         if not self.receipt_id or not self.block or not self.source:
             raise ValueError("verification receipts require non-empty receipt_id, block, and source")
+        if not isinstance(self.guarantee, Guarantee):
+            raise TypeError(
+                f"verification receipt guarantee must be a Guarantee, got {type(self.guarantee).__name__} "
+                f"({self.guarantee!r}); an int compares against the ladder but has no .label"
+            )
         if self.guarantee <= Guarantee.UNVERIFIED:
             raise ValueError("verification receipt guarantee must be stronger than UNVERIFIED")
-        if not self.checks or any(not isinstance(check, str) or not check for check in self.checks):
+        if isinstance(self.checks, (str, bytes)) or not isinstance(self.checks, (tuple, list)):
+            raise TypeError(
+                f"verification receipt checks must be a sequence of names, got {type(self.checks).__name__}: "
+                "a string would iterate as its characters"
+            )
+        object.__setattr__(self, "checks", tuple(self.checks))
+        if not self.checks or any(not isinstance(check, str) or not check.strip() for check in self.checks):
             raise ValueError("verification receipts require one or more named checks")
         if not isinstance(self.evidence, dict) or not self.evidence:
             raise ValueError("verification receipts require non-empty structured evidence")
+        # ``evidence`` is the audit input the whole class exists to carry, and it was checked only for
+        # being a non-empty dict (MXR-080-1874). It could hold an open socket or a live model object,
+        # which no audit can read and ``as_dict()`` cannot serialize, and it was stored by reference
+        # on a frozen dataclass so the caller could rewrite the measurements after the guarantee they
+        # justify had been recorded.
+        object.__setattr__(self, "evidence", _frozen_evidence(self.evidence, f"{self.receipt_id}.evidence"))
+
+    def evidence_as_dict(self) -> dict[str, Any]:
+        """Return the evidence as plain JSON-compatible data."""
+        return _plain_evidence(self.evidence)
 
 
 @dataclass

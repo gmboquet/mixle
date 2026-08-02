@@ -209,6 +209,57 @@ class ScheduleReceipt:
     budget: float
     spent: float
 
+    def __post_init__(self) -> None:
+        """Refuse a decision record that describes a round no scheduler ran (MXR-080-1874).
+
+        This is the receipt the fairness clocks, the replay comparison and the budget audit all read,
+        and it validated nothing: ``round_index=-5`` with ``model_version=-1``, a negative budget and
+        a negative spend constructed and reported a ``budget_overrun`` computed from them.
+        ``GainEvidence`` and ``SchedulerConfig`` beside it have carried these same bounds since they
+        were written; the record of the decision they feed was the one object exempt.
+
+        ``spent > budget`` is deliberately NOT refused: a fairness-forced selection may legitimately
+        exceed its soft budget, which is exactly what ``budget_overrun`` exists to report.
+        """
+        for name in ("round_index", "model_version"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"schedule receipt {name} must be a non-negative integer, got {value!r}.")
+        for name in ("budget", "spent"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"schedule receipt {name} must be a real number, got {type(value).__name__}.")
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"schedule receipt {name} must be finite and non-negative, got {value!r}.")
+            object.__setattr__(self, name, float(value))
+        if not isinstance(self.target_objective, ObjectiveKind):
+            raise TypeError("schedule receipt target_objective must be an ObjectiveKind.")
+        # The node lists are read as sets of names; a bare string would iterate as its characters.
+        for name in (
+            "selected_nodes",
+            "ranked_nodes",
+            "eligible_nodes",
+            "forced_starvation",
+            "bootstrap_nodes",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, (str, bytes)) or not isinstance(value, (tuple, list)):
+                raise TypeError(f"schedule receipt {name} must be a sequence of node ids, got {type(value).__name__}.")
+            object.__setattr__(self, name, tuple(value))
+        selected = set(self.selected_nodes)
+        for name in ("selected_nodes", "forced_starvation", "bootstrap_nodes"):
+            outside = sorted(set(getattr(self, name)) - set(self.eligible_nodes))
+            if outside:
+                raise ValueError(
+                    f"schedule receipt {name} names {outside} that its own eligible set does not "
+                    "contain; a node cannot be scheduled out of a round it was not eligible for."
+                )
+        overlap = sorted(selected & set(self.skipped))
+        if overlap:
+            raise ValueError(
+                f"schedule receipt both selected and skipped {overlap}; one round reached one decision per node."
+            )
+
     @property
     def budget_overrun(self) -> float:
         """Amount by which a fairness-forced decision exceeds its soft budget."""

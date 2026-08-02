@@ -153,6 +153,16 @@ class CanaryVerdict:
             raise ValueError("proposal objective evidence ids must be non-empty.")
         if any(not isinstance(row, ObjectiveGateEvidence) for row in self.proposal_objectives.values()):
             raise TypeError("proposal objective evidence must use ObjectiveGateEvidence.")
+        if not isinstance(self.accepted, bool):
+            raise TypeError(f"canary verdict accepted must be a Boolean, got {type(self.accepted).__name__}.")
+        if any(not isinstance(key, str) for key in self.metrics):
+            raise TypeError("canary metric names must be strings.")
+        # Both were caller-owned dicts stored by reference on a frozen dataclass, so the measurement
+        # that justified a commit could be rewritten after the commit was recorded (MXR-080-1874).
+        object.__setattr__(
+            self, "metrics", MappingProxyType({key: float(value) for key, value in self.metrics.items()})
+        )
+        object.__setattr__(self, "proposal_objectives", MappingProxyType(dict(self.proposal_objectives)))
 
     @property
     def objective_gain(self) -> float | None:
@@ -200,21 +210,58 @@ def _finite_seconds(value: Any, label: str) -> float:
     return numeric
 
 
+def _frozen_receipt_value(value: Any, label: str) -> Any:
+    """Return an immutable, JSON-expressible copy of one receipt value, recursively.
+
+    The shallow copy this replaces severed only the TOP-level alias (MXR-080-1874). A version vector
+    is ``{"model_version": int, "node_versions": {...}}``, so the nested ``node_versions`` dict was
+    stored by reference behind a read-only proxy and the caller could still rewrite a committed
+    version transition through their own copy. Freezing has to reach as deep as the structure does.
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"{label} must be finite to serialize, got {value!r}.")
+        return value
+    if isinstance(value, Mapping):
+        frozen = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"{label} keys must be strings, got {key!r}.")
+            frozen[key] = _frozen_receipt_value(item, f"{label}[{key!r}]")
+        return MappingProxyType(frozen)
+    if isinstance(value, (list, tuple)):
+        return tuple(_frozen_receipt_value(item, f"{label}[{index}]") for index, item in enumerate(value))
+    raise TypeError(
+        f"{label} holds {type(value).__name__}, which is neither immutable nor JSON-expressible; a "
+        "receipt that cannot serialize is not evidence."
+    )
+
+
+def _plain_receipt_value(value: Any) -> Any:
+    """Undo :func:`_frozen_receipt_value`'s containers for ``as_dict``'s JSON-compatible output."""
+    if isinstance(value, Mapping):
+        return {key: _plain_receipt_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_plain_receipt_value(item) for item in value]
+    return value
+
+
 def _immutable_mapping(value: Any, label: str, *, values_must_be_str: bool = False) -> MappingProxyType:
-    """Return a detached read-only view of a caller-supplied receipt mapping (MXR-080-1865).
+    """Return a detached, deeply read-only view of a caller-supplied receipt mapping (MXR-080-1865).
 
     Copied then wrapped: the copy severs the caller's alias so a later mutation cannot rewrite a
-    recorded decision, and the proxy stops anyone editing the receipt through the field itself.
+    recorded decision, and the proxy stops anyone editing the receipt through the field itself. The
+    copy is deep (MXR-080-1874) -- see :func:`_frozen_receipt_value`.
     """
     if not isinstance(value, Mapping):
         raise TypeError(f"{label} must be a mapping, got {type(value).__name__}.")
-    copied = dict(value)
-    for key, item in copied.items():
-        if not isinstance(key, str):
-            raise TypeError(f"{label} keys must be strings, got {key!r}.")
-        if values_must_be_str and not isinstance(item, str):
-            raise TypeError(f"{label}[{key!r}] must be a string fingerprint, got {type(item).__name__}.")
-    return MappingProxyType(copied)
+    if values_must_be_str:
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"{label} keys must be strings, got {key!r}.")
+            if not isinstance(item, str):
+                raise TypeError(f"{label}[{key!r}] must be a string fingerprint, got {type(item).__name__}.")
+    return _frozen_receipt_value(dict(value), label)
 
 
 @dataclass(frozen=True)
@@ -268,6 +315,35 @@ class CommitReceipt:
         for name in ("participant_fingerprints_before", "participant_fingerprints_after"):
             mapping = _immutable_mapping(getattr(self, name), f"commit receipt {name}", values_must_be_str=True)
             object.__setattr__(self, name, mapping)
+        # An ACCEPTED receipt is the strongest claim this class makes -- that a proposal was measured,
+        # passed its gate, and advanced the model -- and it was the one status nothing checked
+        # (MXR-080-1874). ``CommitStatus.ACCEPTED`` with ``canary=None`` and an unchanged version
+        # vector constructed and reported ``accepted=True``: an acceptance with no measurement behind
+        # it and no state transition in front of it. The coordinator sets both before it builds this
+        # receipt, so neither check can refuse a commit it produced.
+        if self.status is CommitStatus.ACCEPTED:
+            if self.canary is None:
+                raise ValueError(
+                    "an accepted commit receipt must carry the canary verdict that accepted it; "
+                    "acceptance is a measured decision, not a status string."
+                )
+            if not self.canary.accepted:
+                raise ValueError(
+                    f"commit receipt reports status=accepted while its own canary rejected the batch "
+                    f"({self.canary.reason!r})."
+                )
+            before = self.versions_before.get("model_version")
+            after = self.versions_after.get("model_version")
+            if not isinstance(before, int) or not isinstance(after, int):
+                raise ValueError(
+                    "an accepted commit receipt must record the model_version it moved from and to; "
+                    f"got {before!r} -> {after!r}."
+                )
+            if after <= before:
+                raise ValueError(
+                    f"commit receipt reports status=accepted but its model_version did not advance "
+                    f"({before} -> {after}); an accepted transaction is one that changed the model."
+                )
 
     @property
     def accepted(self) -> bool:
@@ -285,8 +361,8 @@ class CommitReceipt:
             "status": self.status.value,
             "accepted": self.accepted,
             "reason": self.reason,
-            "versions_before": dict(self.versions_before),
-            "versions_after": dict(self.versions_after),
+            "versions_before": _plain_receipt_value(self.versions_before),
+            "versions_after": _plain_receipt_value(self.versions_after),
             "invalidated_nodes": list(self.invalidated_nodes),
             "canary": self.canary.as_dict() if self.canary is not None else None,
             "participant_fingerprints_before": dict(self.participant_fingerprints_before),
