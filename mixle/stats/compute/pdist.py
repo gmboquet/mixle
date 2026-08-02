@@ -194,7 +194,18 @@ class FitProvenance:
             measured = getattr(self, field_name)
             if measured is not None and not math.isfinite(float(measured)):
                 object.__setattr__(self, field_name, None)
-        object.__setattr__(self, "repairs", tuple(str(entry) for entry in self.repairs))
+        # A repair entry is the NAME of the repair that was applied, and ``is_approximate()`` reads a
+        # non-empty ``repairs`` as "the returned law is not simply the estimator's answer on this
+        # data". ``repairs=("",)`` therefore downgraded a fit on the strength of a repair that names
+        # nothing, and ``as_dict()`` published the blank as though it were a record (MXR-080-1867).
+        repairs = tuple(str(entry) for entry in self.repairs)
+        blank = [index for index, entry in enumerate(repairs) if not entry.strip()]
+        if blank:
+            raise ValueError(
+                f"FitProvenance repairs entries must name the repair that was applied; entr(ies) "
+                f"{blank} are blank in {list(repairs)!r}"
+            )
+        object.__setattr__(self, "repairs", repairs)
 
     def is_approximate(self) -> bool:
         """Whether this fit is a stopped-early or repaired approximation rather than a clean optimum.
