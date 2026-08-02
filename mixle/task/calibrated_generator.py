@@ -94,30 +94,55 @@ def _seed_key(value: Any, _depth: int = 0) -> Any:
     if isinstance(value, (str, bytes, bytearray)):
         kind = "s" if isinstance(value, str) else "b"
         body = value if isinstance(value, str) else bytes(value).hex()
-        return f"{kind}:{body}"
+        return _tagged(kind, body)
     if isinstance(value, bool) or value is None:
-        return f"c:{value!r}"
+        # Tagged apart from the numbers below even though ``True == 1`` and ``False == 0``. A boolean
+        # prompt and an integer prompt are different prompts, and every other validator in this
+        # package draws the same line (``isinstance(x, bool) or not isinstance(x, int)``). This is
+        # the one deliberate departure from "equal values share a key".
+        return _tagged("c", repr(value))
     if isinstance(value, (int, float)):
-        return f"n:{value!r}"
+        # 1 == 1.0 in Python, so they are the same prompt and must derive the same seed. Encoding
+        # repr() directly gave "1" and "1.0" -- equal values, different draws, which is the same
+        # class of defect as MXR-080-1848 in the other direction.
+        numeric = float(value) if isinstance(value, float) else value
+        if isinstance(numeric, float) and numeric.is_integer():
+            numeric = int(numeric)
+        return _tagged("n", repr(numeric))
     if isinstance(value, Mapping):
-        items = []
+        pairs = []
         for key, item in value.items():
             encoded_key, encoded_item = _seed_key(key, _depth + 1), _seed_key(item, _depth + 1)
             if encoded_key is None or encoded_item is None:
                 return None
-            items.append(f"{encoded_key}={encoded_item}")
-        return "m:{" + ",".join(sorted(items)) + "}"  # sorted: a dict's equality ignores its order
+            pairs.append(encoded_key + encoded_item)  # each half is self-delimiting, so is the pair
+        return _tagged("m", "".join(sorted(pairs)))  # sorted: a dict's equality ignores its order
     if isinstance(value, (set, frozenset)):
         items = [_seed_key(item, _depth + 1) for item in value]
         if any(item is None for item in items):
             return None
-        return "e:{" + ",".join(sorted(items)) + "}"  # sorted: iteration order is hash-seed dependent
+        return _tagged("e", "".join(sorted(items)))  # sorted: iteration order is hash-seed dependent
     if isinstance(value, (tuple, list)):
         items = [_seed_key(item, _depth + 1) for item in value]
         if any(item is None for item in items):
             return None
-        return "q:[" + ",".join(items) + "]"  # ordered: sequence order IS part of the value
+        # Ordered, and tagged by type: order IS part of the value, and ``["x"] != ("x",)`` in Python,
+        # so they are different prompts and must not share a seed. Sets and frozensets DO compare
+        # equal, so they deliberately share the "e" tag above.
+        return _tagged("q" if isinstance(value, tuple) else "l", "".join(items))
     return None
+
+
+def _tagged(kind: str, body: str) -> str:
+    """Wrap ``body`` so the encoding is self-delimiting, and therefore injective.
+
+    An earlier revision joined members with a comma, which is not injective when a member may itself
+    contain the delimiter: ``["x,s:y"]`` and ``["x", "y"]`` both encoded to ``q:[s:x,s:y]`` and
+    derived the same seed (MXR-080-1858). Length-prefixing every chunk means a reader can parse the
+    structure back out unambiguously, so no two distinct values share an encoding regardless of what
+    characters they contain.
+    """
+    return f"{kind}{len(body)}:{body}"
 
 
 def _binomial_error_upper(errors: int, accepted: int, tail_probability: float) -> float:

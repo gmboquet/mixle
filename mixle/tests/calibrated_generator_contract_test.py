@@ -8,6 +8,7 @@ MXR-080-1849: ``calibrate`` scored every row with the correctness oracle althoug
 verdicts reach the bound.
 """
 
+import itertools
 import unittest
 import warnings
 
@@ -53,6 +54,62 @@ class SeedKeyTest(unittest.TestCase):
         cycle: list = [1]
         cycle.append(cycle)
         self.assertIsNone(_seed_key(cycle))
+
+    def test_a_member_containing_the_delimiter_does_not_collide(self):
+        """The encoding is length-delimited, not comma-joined (MXR-080-1858).
+
+        A comma-joined encoding is not injective when a member may itself contain the delimiter:
+        ``["x,s:y"]`` and ``["x", "y"]`` both produced ``q:[s:x,s:y]`` and drew the same seed.
+        """
+        self.assertNotEqual(_seed_key(["x,s:y"]), _seed_key(["x", "y"]))
+        self.assertNotEqual(_derive_seed(7, ["x,s:y"]), _derive_seed(7, ["x", "y"]))
+
+    def test_key_equality_tracks_value_equality(self):
+        # The general property the collision above violated: two prompts share a key exactly when
+        # they are equal. Booleans are the one deliberate exception (see _seed_key).
+        distinct = [
+            "",
+            "a",
+            "x,s:y",
+            "s1:x",
+            ["x", "y"],
+            ["x,s:y"],
+            ["xy"],
+            ("x", "y"),
+            {"a": 1},
+            {"a1": None},
+            {1, 2},
+            [["a"], ["b"]],
+            [["a", "b"]],
+            1.5,
+            None,
+            b"a",
+            "a1:a",
+            {"ab": "c"},
+            {"a": "bc"},
+            [[]],
+            [],
+            [[[]]],
+            {"": ""},
+            (),
+            ("",),
+        ]
+        for left, right in itertools.combinations(distinct, 2):
+            with self.subTest(left=repr(left), right=repr(right)):
+                self.assertEqual(_seed_key(left) == _seed_key(right), left == right)
+
+    def test_equal_numbers_share_a_seed(self):
+        # 1 == 1.0, so they are the same prompt; encoding repr() gave them different draws.
+        self.assertEqual(_seed_key(1), _seed_key(1.0))
+        self.assertEqual(_derive_seed(7, 1), _derive_seed(7, 1.0))
+
+    def test_a_list_and_a_tuple_are_different_prompts(self):
+        self.assertNotEqual(["x"], ("x",))
+        self.assertNotEqual(_seed_key(["x"]), _seed_key(("x",)))
+
+    def test_a_set_and_a_frozenset_are_the_same_prompt(self):
+        self.assertEqual({1, 2}, frozenset({1, 2}))
+        self.assertEqual(_seed_key({1, 2}), _seed_key(frozenset({1, 2})))
 
 
 class CanonicalityTest(unittest.TestCase):

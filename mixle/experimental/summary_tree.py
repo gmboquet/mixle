@@ -204,7 +204,14 @@ if _HAS_TORCH:
         ) -> None:
             super().__init__()
             _require_torch()
-            assert d_model % n_head == 0
+            # Public constructor argument checks, so not asserts: `python -O` strips asserts, and
+            # both gate real architectural invariants -- an indivisible head split is lossy, and a
+            # fanout below 2 is not a tree (MXR-080-1861).
+            if n_head < 1 or d_model % n_head != 0:
+                raise ValueError(
+                    f"SummaryTreeSpine requires d_model divisible by a positive n_head, got "
+                    f"d_model={d_model}, n_head={n_head}."
+                )
             self.vocab = int(vocab)
             self.d_model = int(d_model)
             self.n_layer = int(n_layer)
@@ -212,7 +219,11 @@ if _HAS_TORCH:
             self.head_dim = d_model // n_head
             self.window = int(window)
             self.fanout = int(fanout)
-            assert self.fanout >= 2
+            if self.fanout < 2:
+                raise ValueError(
+                    f"SummaryTreeSpine requires fanout >= 2, got {fanout}: a fanout of one never "
+                    "reduces the sequence, so the summary tree has no levels to build."
+                )
             self.max_level_cap = int(max_level_cap)
             self.detach_horizon_nodes = int(detach_horizon_nodes)
             self.aux_weight = float(aux_weight)

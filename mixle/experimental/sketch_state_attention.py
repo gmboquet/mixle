@@ -369,7 +369,14 @@ if _HAS_TORCH:
 
         def __init__(self, vocab: int, *, d_model: int = 32, n_layer: int = 2, n_head: int = 2) -> None:
             super().__init__()
-            assert d_model % n_head == 0
+            # A public constructor argument check, so not an assert: `python -O` strips asserts, and
+            # this one gates a real architectural invariant -- with d_model not divisible by n_head
+            # the head split is lossy and the model silently builds wrong (MXR-080-1861).
+            if n_head < 1 or d_model % n_head != 0:
+                raise ValueError(
+                    f"LinearAttentionSpine requires d_model divisible by a positive n_head, got "
+                    f"d_model={d_model}, n_head={n_head}."
+                )
             self.vocab = int(vocab)
             self.d_model = int(d_model)
             self.n_layer = int(n_layer)

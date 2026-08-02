@@ -57,6 +57,49 @@ class RelationBijectionTest(unittest.TestCase):
         graph.restore((graph.version, dict(graph.nodes), dict(graph.edges)))
         self.assertEqual(len(graph.edges), 1)
 
+    def test_a_rejected_restore_leaves_the_graph_untouched(self):
+        """The guard must not corrupt the state it exists to protect (MXR-080-1859).
+
+        The first revision of this check validated in place, AFTER `restore` had already assigned the
+        replacement dictionaries, so a refusal left the live graph holding the rejected snapshot with
+        a stale relation index -- on the recovery path, of all places.
+        """
+        graph = _graph()
+        graph.add_edge(_edge("e1"))
+        before = (graph.version, dict(graph.nodes), dict(graph.edges), dict(graph._relations))
+        with self.assertRaises(ValueError):
+            graph.restore((graph.version, dict(graph.nodes), {"e1": _edge("e1"), "e2": _edge("e2")}))
+        after = (graph.version, dict(graph.nodes), dict(graph.edges), dict(graph._relations))
+        self.assertEqual(before, after)
+
+    def test_a_rejected_replacement_leaves_the_graph_untouched(self):
+        graph = _graph()
+        graph.add_edge(_edge("e1"))
+        expected = (graph.version, graph.nodes, graph.edges)
+        before = (graph.version, dict(graph.nodes), dict(graph.edges), dict(graph._relations))
+        with self.assertRaises(ValueError):
+            graph.replace_if_unchanged(
+                expected, (graph.version + 1, dict(graph.nodes), {"e1": _edge("e1"), "e2": _edge("e2")})
+            )
+        after = (graph.version, dict(graph.nodes), dict(graph.edges), dict(graph._relations))
+        self.assertEqual(before, after)
+
+    def test_an_edge_to_an_absent_node_is_refused(self):
+        # An edge whose endpoint is not in the same state is not a relation. add_edge already
+        # refuses this at insertion; restore accepted it (MXR-080-1859).
+        graph = _graph()
+        dangling = ContextEdge(edge_id="ed", source_node="n1", target_node="ghost", kind=ContextEdgeKind.SUPPORTS)
+        with self.assertRaisesRegex(ValueError, "not nodes in the same state"):
+            graph.restore((graph.version, dict(graph.nodes), {"ed": dangling}))
+        self.assertEqual(graph.edges, {})
+
+    def test_remove_node_still_reindexes(self):
+        graph = _graph()
+        graph.add_edge(_edge("e1"))
+        graph.remove_node("n1")
+        self.assertEqual(graph.edges, {})
+        self.assertEqual(graph._relations, {})
+
     def test_distinct_relations_between_the_same_nodes_coexist(self):
         # The relation key includes the KIND, so "supports" and "contradicts" are different claims.
         graph = _graph()
