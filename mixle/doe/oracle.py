@@ -206,6 +206,12 @@ def _deeply_frozen(value: Any) -> Any:
     """
     if isinstance(value, np.ndarray):
         frozen = value.copy()
+        if frozen.dtype.hasobject:
+            # ``copy()`` duplicates the POINTERS an object array holds, and ``write=False`` only stops
+            # an element being rebound -- neither stops ``frozen[0].append(...)`` reaching the
+            # caller's list. Freeze what the pointers point at, in place, before sealing the buffer.
+            for index in np.ndindex(frozen.shape):
+                frozen[index] = _deeply_frozen(frozen[index])
         frozen.setflags(write=False)
         return frozen
     if isinstance(value, Mapping):
