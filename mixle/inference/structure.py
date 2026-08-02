@@ -708,9 +708,25 @@ def learn_mixture_structure(
         weights = np.asarray(counts, dtype=np.float64) / float(n)
         model = MixtureOfDependencyTrees(comps, weights)
         ll = float(np.sum(model.seq_log_density(model.dist_to_encoder().seq_encode(data))))
-        if ll > best_ll:
+        # A restart that scores NaN is not a candidate: `nan > best_ll` is False, so it never wins,
+        # and if EVERY restart scores NaN nothing is ever selected. -inf is different -- a legitimate
+        # verdict that the model cannot explain the data -- but it also never beats the -inf floor,
+        # so a run of only -inf restarts left `best` at None too. Both used to arrive at the assert
+        # below (MXR-080-1909).
+        if not np.isfinite(ll):
+            continue
+        if ll > best_ll or best is None:
             best_ll, best = ll, model
-    assert best is not None
+    if best is None:
+        # Was `assert best is not None`, which `python -O` strips: under -O this returned None to a
+        # caller annotated as returning a model, and the failure surfaced as an AttributeError
+        # somewhere downstream instead of here (MXR-080-1909). Public validation cannot live in an
+        # assert.
+        raise ValueError(
+            f"mixture-of-trees search over {restarts} restart(s) selected no candidate: every restart "
+            "scored a non-finite log-likelihood, so none can be compared or returned. This usually "
+            "means the data cannot be represented by the requested component structure."
+        )
     return best
 
 
@@ -1006,14 +1022,26 @@ def _quantile_binner(column: Sequence[Any], n_bins: int) -> _QuantileBinner:
 def _clone(estimator: Any) -> Any:
     """A fresh, independent copy of an estimator template so structure-search candidates never share state.
 
-    The older ``eval(str(estimator))`` path failed for estimators with the default ``<object at 0x...>`` repr
-    and fell back to sharing the same object -- safe only because estimators are stateless
-    templates. ``deepcopy`` gives real isolation with no source-level eval; the fallback keeps the old
-    same-object behavior for any estimator that can't be copied (e.g. one holding an uncopyable handle)."""
+    The older ``eval(str(estimator))`` path failed for estimators with the default ``<object at 0x...>``
+    repr and fell back to sharing the same object -- safe only because estimators are stateless
+    templates. ``deepcopy`` gives real isolation with no source-level eval.
+
+    The uncopyable fallback used to return the ORIGINAL estimator, which is the one thing this
+    function exists to prevent: every structure-search candidate then held the same object, so any
+    estimator that is not in fact a stateless template had its state shared across candidates that
+    are supposed to be independent, and the search silently compared contaminated fits
+    (MXR-080-1909). The docstring's own premise -- "safe only because estimators are stateless
+    templates" -- is exactly the premise an uncopyable estimator breaks, since what makes it
+    uncopyable is usually the state it holds. Refusing is louder than a wrong answer, and it names
+    the estimator so the caller can supply a copyable template."""
     try:
         return copy.deepcopy(estimator)
-    except Exception:  # noqa: BLE001 - some estimators hold uncopyable state; sharing was the prior behavior
-        return estimator
+    except Exception as error:
+        raise TypeError(
+            f"structure search cannot clone a {type(estimator).__name__} template ({error!r}), and "
+            "will not share one object across candidates: the candidates must be independent for "
+            "their scores to be comparable. Supply an estimator template that deep-copies."
+        ) from error
 
 
 def _num_free_params(dist: Any) -> int:
