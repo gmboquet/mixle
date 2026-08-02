@@ -105,11 +105,12 @@ def detect_secrets(text: str) -> SecretScan:
     return SecretScan(findings=findings)
 
 
-def redact_secrets(text: str, *, mask: str = "[REDACTED:{rule}]", keep_prefix: int = 0) -> str:
-    """Return ``text`` with every detected secret replaced by a rule-labelled mask (destructive to secrets).
+# Redaction is applied until it stops changing the text. A rule can match only the credential and
+# leave its assignment context, so the mask itself may re-trigger a broader rule; see redact_secrets.
+_MAX_REDACTION_PASSES = 8
 
-    ``keep_prefix`` leaves that many leading characters of the secret visible (0 = fully masked) so a
-    reader can still tell which credential it was without recovering it."""
+
+def _redact_once(text: str, *, mask: str, keep_prefix: int) -> str:
     scan = detect_secrets(text)
     if scan.clean:
         return text
@@ -123,6 +124,37 @@ def redact_secrets(text: str, *, mask: str = "[REDACTED:{rule}]", keep_prefix: i
         cursor = f.end
     out.append(text[cursor:])
     return "".join(out)
+
+
+def redact_secrets(text: str, *, mask: str = "[REDACTED:{rule}]", keep_prefix: int = 0) -> str:
+    """Return ``text`` with every detected secret replaced by a rule-labelled mask (destructive to secrets).
+
+    ``keep_prefix`` leaves that many leading characters of the secret visible (0 = fully masked) so a
+    reader can still tell which credential it was without recovering it.
+
+    Applied to a FIXED POINT, because one pass did not deliver what this docstring promises
+    (MXR-080-1882). A rule may match only the credential and leave its assignment context in place:
+    ``token=ghp_...`` masks to ``token=[REDACTED:github_token]``, which still matches the
+    ``sensitive_assignment`` rule, so the "redacted" text was still detected as carrying a secret. That
+    only became visible once the store began re-scanning what it was about to write; before that, the
+    single pass simply returned text nobody checked again.
+
+    Iteration is bounded and monotone in practice -- each pass replaces at least one match with a mask
+    that is not itself that rule's shape -- but the bound is explicit rather than assumed, and a text
+    that has not converged is refused instead of returned dirty.
+    """
+    current = text
+    for _ in range(_MAX_REDACTION_PASSES):
+        nxt = _redact_once(current, mask=mask, keep_prefix=keep_prefix)
+        if nxt == current:
+            return current
+        current = nxt
+    if not detect_secrets(current).clean:
+        raise ValueError(
+            f"redaction did not converge in {_MAX_REDACTION_PASSES} passes; the masked text still "
+            "matches a secret rule. Refusing to return text that would be stored in the clear."
+        )
+    return current
 
 
 def safe_text(text: str) -> str:
@@ -152,23 +184,54 @@ def item_surface(item: Any) -> str:
 
 
 def redact_value(value: Any, *, mask: str = "[REDACTED:{rule}]", keep_prefix: int = 0) -> Any:
-    """Recursively redact secrets from a JSON-like value (str / dict / list / tuple, arbitrarily nested).
+    """Recursively redact secrets from a stored value, over the whole surface :func:`item_surface` reads.
 
-    Structured substrate fields like ``payload`` are exactly this shape -- a dict potentially nesting
-    more dicts/lists/strings. Every string leaf is passed through :func:`redact_secrets`; non-string
-    leaves (numbers, bools, ``None``, or any other opaque object) carry no secrets and pass through
-    unchanged. This is what lets ``payload`` get the same "masked before it's stored" treatment
-    :func:`safe_text` gives free text.
+    Redaction has to cover exactly what the scanner covers, and it did not (MXR-080-1882).
+    ``item_surface`` serializes ``payload`` with ``json.dumps`` -- which writes dictionary KEYS as well
+    as values -- and falls back to ``str(payload)`` when that fails, which stringifies sets and any
+    opaque object's ``repr``. This function reached only dict values, lists and tuples, so three
+    reachable places were detected by the scan and then stored in the clear:
+
+    * a dictionary key, e.g. ``{"api_key=abcdefghi": "v"}``. Detected, stored intact.
+    * a ``set``/``frozenset``, which fell to the untouched-passthrough at the bottom.
+    * an opaque object whose ``str``/``repr`` carries the secret, likewise.
+
+    Keys are redacted too, and a redaction that would collapse two distinct keys onto one masked
+    string raises rather than silently dropping an entry -- losing a payload field to sanitization is
+    a different failure from masking one. An opaque leaf is replaced by its redacted string form only
+    when its own string carries a secret; otherwise it passes through unchanged, since converting
+    every opaque value to text would destroy payloads that were never at risk.
     """
     if isinstance(value, str):
         return redact_secrets(value, mask=mask, keep_prefix=keep_prefix)
     if isinstance(value, dict):
-        return {k: redact_value(v, mask=mask, keep_prefix=keep_prefix) for k, v in value.items()}
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            safe_key = redact_secrets(key, mask=mask, keep_prefix=keep_prefix) if isinstance(key, str) else key
+            if safe_key in redacted:
+                raise ValueError(
+                    f"redacting payload keys collapsed two distinct keys onto {safe_key!r}; storing "
+                    "the sanitized payload would silently drop a field. Rename the key that carries "
+                    "the secret, or store it under secret_policy='reject'."
+                )
+            redacted[safe_key] = redact_value(item, mask=mask, keep_prefix=keep_prefix)
+        return redacted
     if isinstance(value, list):
         return [redact_value(v, mask=mask, keep_prefix=keep_prefix) for v in value]
     if isinstance(value, tuple):
         return tuple(redact_value(v, mask=mask, keep_prefix=keep_prefix) for v in value)
-    return value
+    if isinstance(value, (set, frozenset)):
+        # Reachable through item_surface's str(payload) fallback, and previously untouched.
+        redacted_members = {redact_value(v, mask=mask, keep_prefix=keep_prefix) for v in value}
+        return frozenset(redacted_members) if isinstance(value, frozenset) else redacted_members
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    rendered = str(value)
+    if detect_secrets(rendered).clean:
+        return value
+    # The object's own text carries a secret and that text is what reaches the stored/indexed
+    # surface, so the masked text is what may be kept.
+    return redact_secrets(rendered, mask=mask, keep_prefix=keep_prefix)
 
 
 def scan_item(item: Any) -> SecretScan:
@@ -255,4 +318,13 @@ def enforce_secret_policy(item: Any, *, policy: SecretPolicy = "redact") -> tupl
         payload=redact_value(getattr(item, "payload", None) or {}),
         tags=[safe_text(str(t)) for t in (getattr(item, "tags", None) or [])],
     )
+    # Verify the sanitization on the same surface the detection used, before anything is stored
+    # (MXR-080-1882). Redaction previously covered strictly less of the surface than the scan did, so
+    # an item could be detected dirty, "redacted", and stored with the secret intact -- and nothing
+    # in the write path ever looked again. This closes that as a class rather than as three cases: if
+    # any future payload shape is reachable by item_surface but not by redact_value, the write fails
+    # here instead of leaking.
+    residual = detect_secrets(item_surface(sanitized))
+    if not residual.clean:
+        raise SecretPolicyError(residual, item_id=getattr(item, "id", None))
     return sanitized, scan
