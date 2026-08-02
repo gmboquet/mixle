@@ -190,6 +190,19 @@ class GraphPrefetchReceipt:
         produces. ``loaded`` and ``evicted`` are deliberately allowed to intersect: a partition
         loaded early in one prefetch can be evicted by LRU later in that same prefetch.
         """
+        # The id-list fields were annotated ``tuple[str, ...]`` and never checked to be one, so
+        # ``requested="ab"`` iterated as the characters ``"a"`` and ``"b"`` and constructed a receipt
+        # for two partitions nobody named -- the same string-as-character-sequence hole
+        # ``resident_before`` was repaired for, left open on the three fields beside it
+        # (MXR-080-1869).
+        for name in ("requested", "loaded", "evicted"):
+            ids = getattr(self, name)
+            if isinstance(ids, (str, bytes)) or not isinstance(ids, (tuple, list)):
+                raise TypeError(
+                    f"prefetch receipt {name} must be a sequence of partition ids, got "
+                    f"{type(ids).__name__}: a string would iterate as its characters."
+                )
+            object.__setattr__(self, name, tuple(ids))
         for field, ids in (("requested", self.requested), ("loaded", self.loaded), ("evicted", self.evicted)):
             blank = [item for item in ids if not isinstance(item, str) or not item.strip()]
             if blank:
@@ -235,6 +248,20 @@ class GraphPrefetchReceipt:
                     "neither resident when it began nor loaded during it. An eviction is a transition "
                     "out of residency, so there is nothing there to evict."
                 )
+        elif self.evicted:
+            # Defaulting ``resident_before`` to None kept an existing caller constructing, but it also
+            # left the whole eviction check optional: ``evicted=("ghost",)`` with no prior residency
+            # still constructed, and ``eviction_claim_verified`` merely LABELLED that as unchecked
+            # (MXR-080-1869). Labelling an unfalsifiable claim does not make it evidence. A receipt
+            # may still omit prior residency -- but then it may not claim an eviction, because there
+            # is no state for the eviction to be a transition out of. ``GraphMemoryCache.prefetch``
+            # always supplies it, so nothing the cache produces is refused here.
+            raise ValueError(
+                f"prefetch receipt claims to have evicted {list(self.evicted)} without recording the "
+                "residency it started from. An eviction is a transition out of residency, so a "
+                "receipt that does not say what was resident cannot make the claim: pass "
+                "resident_before=(...) -- empty is a valid answer -- or claim no evictions."
+            )
         if isinstance(self.resident_tokens, bool) or not isinstance(self.resident_tokens, int):
             raise ValueError(
                 f"prefetch receipt resident_tokens must be an exact integer; got {self.resident_tokens!r}."
