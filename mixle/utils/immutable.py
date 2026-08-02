@@ -27,10 +27,14 @@ import datetime
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import Enum
-from numbers import Number
+from fractions import Fraction
 from types import MappingProxyType
 from typing import Any
+from uuid import UUID
+
+import numpy as np
 
 __all__ = [
     "OpaqueSnapshot",
@@ -43,18 +47,32 @@ __all__ = [
 
 _IN_PROGRESS = threading.local()
 
-_IMMUTABLE_ATOMS: tuple[type, ...] = (
-    bool,
-    str,
-    bytes,
-    Number,  # int, float, complex, Decimal, Fraction, and numpy scalars -- all immutable
-    Enum,
-    type,
-    range,
-    slice,
-    datetime.date,  # also covers datetime.datetime
-    datetime.time,
-    datetime.timedelta,
+# A CLOSED set, matched by exact type rather than by isinstance (MXR-080-1880). The first version
+# tested `isinstance(value, (Number, Enum, type, datetime.date, ...))`, which is an open question, not
+# a closed one: `Number` is an abstract base any class may register against, so a caller's mutable
+# object that subclasses it answered "immutable" and stayed aliased. Subclassing is exactly how a
+# mutable value arrives wearing an immutable value's type.
+_ATOM_TYPES: frozenset[type] = frozenset(
+    {
+        type(None),
+        bool,
+        int,
+        float,
+        complex,
+        str,
+        bytes,
+        frozenset,
+        range,
+        slice,
+        Decimal,
+        Fraction,
+        UUID,  # an ordinary immutable domain value; snapshotting it destroyed a rollout draw
+        datetime.date,
+        datetime.datetime,
+        datetime.time,
+        datetime.timedelta,
+        datetime.timezone,
+    }
 )
 
 
@@ -66,8 +84,36 @@ def is_immutable_atom(value: Any) -> bool:
     which previously routed through ``copy.deepcopy`` -- and deep-copying an ``int`` returns the
     ``int``. Replacing that fallback without this predicate turned every scalar the container branches
     did not name into a snapshot of itself.
+
+    Membership is by EXACT type, against a closed set (MXR-080-1880). The predicate has to fail in the
+    safe direction on both sides, and an ``isinstance`` test failed in the unsafe direction on one and
+    the destructive direction on the other:
+
+    * too permissive -- ``numbers.Number`` is an abstract base class, so
+      ``class Sneaky(Number): self.payload = []`` answered "immutable" and was retained by reference,
+      leaving the caller's mutable object aliased inside a receipt that claims not to be.
+    * too destructive -- ``UUID`` matched nothing in the old tuple, so an ordinary immutable domain
+      value became an ``OpaqueSnapshot``, changing what a fully observed rollout draw contains.
+
+    NumPy scalars are admitted separately below: they are genuinely immutable, and ``np.generic`` is a
+    concrete leaf hierarchy rather than a registrable ABC, so it does not carry the same risk. An enum
+    MEMBER is admitted when its value is itself an atom -- ``Enum`` alone is not enough, since a
+    subclass may attach mutable state to its members.
     """
-    return value is None or isinstance(value, _IMMUTABLE_ATOMS)
+    if type(value) in _ATOM_TYPES:
+        return True
+    if isinstance(value, np.generic):  # np.int64, np.float32, np.datetime64 -- immutable leaves
+        return True
+    if isinstance(value, Enum):
+        # Only the member's own value. A subclass may hang mutable attributes off its members, and
+        # those live in the instance __dict__ alongside the enum machinery's own bookkeeping
+        # (_name_, _value_, _sort_order_, __objclass__). Bookkeeping is excluded by SHAPE -- dunder,
+        # or a single-underscore-wrapped private -- rather than by an explicit name list, so a future
+        # interpreter adding another internal does not read as caller state. A caller's own attribute
+        # is an ordinary name and still counts.
+        extra = [name for name in getattr(value, "__dict__", {}) if not (name.startswith("_") and name.endswith("_"))]
+        return not extra and is_immutable_atom(value._value_)
+    return False
 
 
 @dataclass(frozen=True)
