@@ -61,8 +61,8 @@ def _worker_main(conn) -> None:
         try:
             if cmd == "setup":
                 _, encoder_b, shard_b, sub_chunks = msg
-                encoder = pickle.loads(encoder_b)
-                shard = pickle.loads(shard_b)
+                encoder = pickle.loads(encoder_b)  # nosec B301 # IPC: a field of the command tuple this worker just took off its own mp.Pipe, which Connection.recv already unpickled; the only writer is the parent that spawned it
+                shard = pickle.loads(shard_b)  # nosec B301 # IPC: a field of the command tuple this worker just took off its own mp.Pipe, which Connection.recv already unpickled; the only writer is the parent that spawned it
                 n = len(shard)
                 k = max(1, min(int(sub_chunks), n)) if n else 1
                 enc_chunks = []
@@ -74,8 +74,8 @@ def _worker_main(conn) -> None:
 
             elif cmd == "update":
                 _, estimator_b, model_b = msg
-                estimator = pickle.loads(estimator_b)
-                model = pickle.loads(model_b)
+                estimator = pickle.loads(estimator_b)  # nosec B301 # IPC: a field of the command tuple this worker just took off its own mp.Pipe, which Connection.recv already unpickled; the only writer is the parent that spawned it
+                model = pickle.loads(model_b)  # nosec B301 # IPC: a field of the command tuple this worker just took off its own mp.Pipe, which Connection.recv already unpickled; the only writer is the parent that spawned it
                 accumulator = estimator.accumulator_factory().make()
                 count = 0.0
                 for sz, x in enc_chunks:
@@ -85,7 +85,7 @@ def _worker_main(conn) -> None:
 
             elif cmd == "init":
                 _, estimator_b, seed, p = msg
-                estimator = pickle.loads(estimator_b)
+                estimator = pickle.loads(estimator_b)  # nosec B301 # IPC: a field of the command tuple this worker just took off its own mp.Pipe, which Connection.recv already unpickled; the only writer is the parent that spawned it
                 accumulator = estimator.accumulator_factory().make()
                 rng_loc = np.random.RandomState(seed)
                 rng_w = np.random.RandomState(seed=rng_loc.randint(2**31))
@@ -99,7 +99,7 @@ def _worker_main(conn) -> None:
 
             elif cmd == "llsum":
                 _, model_b = msg
-                model = pickle.loads(model_b)
+                model = pickle.loads(model_b)  # nosec B301 # IPC: a field of the command tuple this worker just took off its own mp.Pipe, which Connection.recv already unpickled; the only writer is the parent that spawned it
                 cnt, ll = 0.0, 0.0
                 for sz, x in enc_chunks:
                     cnt += sz
@@ -264,7 +264,7 @@ class MPEncodedData(EncodedDataHandle):
         accumulator = estimator.accumulator_factory().make()
         nobs = 0.0
         for raw in payloads:
-            count, stats = pickle.loads(raw)
+            count, stats = pickle.loads(raw)  # nosec B301 # IPC: a (count, stats) payload this handle's own worker pickled and returned over the pipe this process opened; it never leaves the process tree
             nobs += count
             accumulator.combine(stats)
         stats_dict = dict()

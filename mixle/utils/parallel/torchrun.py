@@ -153,7 +153,7 @@ class TorchRunEncodedData(EncodedDataHandle):
             return value
         box = [pickle.dumps(value, protocol=_PROTO) if self.rank == self.root else None]
         self.dist.broadcast_object_list(box, src=self.root, group=self.group)
-        return pickle.loads(box[0])
+        return pickle.loads(box[0])  # nosec B301 # IPC: the root rank's own value, and dist.broadcast_object_list on the line above already pickles/unpickles the box -- this decodes the payload that transport just delivered
 
     def _gather_object(self, value: Any) -> Sequence[Any] | None:
         """Gather a payload only on root; non-root ranks never materialize peers."""
@@ -173,7 +173,7 @@ class TorchRunEncodedData(EncodedDataHandle):
         )
         if self.rank != self.root:
             return None
-        return [pickle.loads(raw) for raw in gathered]
+        return [pickle.loads(raw) for raw in gathered]  # nosec B301 # IPC: per-rank values dist.gather_object just collected from this job's own process group, which pickles/unpickles them in transit anyway
 
     def _all_reduce_pair(self, count: float, total: float) -> tuple[float, float]:
         if self.world == 1:

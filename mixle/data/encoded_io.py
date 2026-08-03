@@ -170,4 +170,4 @@ def load_encoded(path: str, *, encoder: Any = None, trusted: bool | None = None)
     }
     if meta.get("format_version") != 3 or meta.get("encoder") != expected_encoder:
         raise ValueError(f"encoder mismatch: file was encoded with {meta.get('encoder')!r}, got {expected_encoder!r}")
-    return pickle.loads(body)  # noqa: S301 - digest-verified above; still a local-trust artifact, see module docstring
+    return pickle.loads(body)  # noqa: S301 - digest-verified above; still a local-trust artifact, see module docstring  # nosec B301 # MXR-080-1873: unreachable unless the caller passed trusted=True, vouching for this path; the digest above catches truncation/header tampering, not a wholesale forgery, and says so

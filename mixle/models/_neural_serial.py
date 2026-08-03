@@ -110,10 +110,13 @@ def module_from_bytes(data: bytes) -> Any:
 
     buf = io.BytesIO(raw)
     try:
-        module = torch.load(buf, weights_only=False)  # full module (arch + weights); trust gate above
+        # weights_only=False is required, not incidental: a full nn.Module (architecture *and* weights)
+        # cannot be reconstructed under weights_only=True. That is precisely why the
+        # _require_trusted_deserialization() gate at the top of this function exists.
+        module = torch.load(buf, weights_only=False)  # nosec B614 # gated by _require_trusted_deserialization() above
     except TypeError:  # torch < 2.0 has no weights_only kwarg
         buf.seek(0)
-        module = torch.load(buf)
+        module = torch.load(buf)  # nosec B614 # torch<2.0 fallback for the call above, behind the same trust gate
     if not isinstance(module, torch.nn.Module):
         raise _serialization_error("embedded torch artifact did not contain a torch.nn.Module")
     return module

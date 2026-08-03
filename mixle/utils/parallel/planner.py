@@ -1472,7 +1472,7 @@ class SparkEncodedData(EncodedDataHandle):
         def acc(split_index, itr):
             del split_index
             estimator_loc = estimator_b.value
-            model_loc = pickle.loads(model_b.value)
+            model_loc = pickle.loads(model_b.value)  # nosec B301 # IPC: model_b is the Spark broadcast this method created from its own pickle.dumps below; the closure and the broadcast are themselves shipped to executors by pickle
             accumulator = estimator_loc.accumulator_factory().make()
             count = 0.0
             for sz, enc in itr:
@@ -1488,7 +1488,7 @@ class SparkEncodedData(EncodedDataHandle):
             nobs = 0.0
             accumulator = estimator.accumulator_factory().make()
             for raw in temp.collect():
-                count, value = pickle.loads(raw)
+                count, value = pickle.loads(raw)  # nosec B301 # IPC: a (count, value) payload the acc closure above pickled on this job's own Spark executors
                 nobs += count
                 accumulator.combine(value)
             _global_key_merge(accumulator)
@@ -1605,7 +1605,7 @@ class DaskEncodedData(EncodedDataHandle):
         accumulator = estimator.accumulator_factory().make()
         nobs = 0.0
         for raw in payloads:
-            count, value = pickle.loads(raw)
+            count, value = pickle.loads(raw)  # nosec B301 # IPC: a (count, value) payload this planner's own dask tasks pickled and returned
             nobs += count
             accumulator.combine(value)
         _global_key_merge(accumulator)
@@ -1729,7 +1729,7 @@ def _dask_encode_partition(
 def _dask_encode_shard(
     encoder_b: bytes, shard: Sequence[Any], sub_chunks: int
 ) -> tuple[int, tuple[tuple[int, Any], ...]]:
-    encoder = pickle.loads(encoder_b)
+    encoder = pickle.loads(encoder_b)  # nosec B301 # IPC: the encoder the driver pickled into this dask task's arguments; dask ships the task itself by pickle, so these bytes cross no boundary the submission did not already cross
     nobs = len(shard)
     chunks = []
     part_count = max(1, min(int(sub_chunks), nobs)) if nobs else 1
@@ -1747,8 +1747,8 @@ def _dask_payload_size(payload: tuple[int, tuple[tuple[int, Any], ...]]) -> int:
 def _dask_update_partition(
     payload: tuple[int, tuple[tuple[int, Any], ...]], estimator_b: bytes, model_b: bytes
 ) -> bytes:
-    estimator = pickle.loads(estimator_b)
-    model = pickle.loads(model_b)
+    estimator = pickle.loads(estimator_b)  # nosec B301 # IPC: the estimator the driver pickled into this dask task's arguments, alongside a task graph dask already transports by pickle
+    model = pickle.loads(model_b)  # nosec B301 # IPC: the model the driver pickled into this dask task's arguments, alongside a task graph dask already transports by pickle
     accumulator = estimator.accumulator_factory().make()
     count = 0.0
     for sz, enc in payload[1]:
@@ -1760,7 +1760,7 @@ def _dask_update_partition(
 def _dask_initialize_partition(
     payload: tuple[int, tuple[tuple[int, Any], ...]], estimator_b: bytes, seed: int, p: float
 ) -> bytes:
-    estimator = pickle.loads(estimator_b)
+    estimator = pickle.loads(estimator_b)  # nosec B301 # IPC: the estimator the driver pickled into this dask task's arguments, alongside a task graph dask already transports by pickle
     accumulator = estimator.accumulator_factory().make()
     rng_loc = np.random.RandomState(seed)
     rng_w = np.random.RandomState(seed=rng_loc.randint(2**31))
@@ -1774,7 +1774,7 @@ def _dask_initialize_partition(
 
 
 def _dask_log_density_sum(payload: tuple[int, tuple[tuple[int, Any], ...]], model_b: bytes) -> tuple[float, float]:
-    model = pickle.loads(model_b)
+    model = pickle.loads(model_b)  # nosec B301 # IPC: the model the driver pickled into this dask task's arguments, alongside a task graph dask already transports by pickle
     count = 0.0
     total = 0.0
     for sz, enc in payload[1]:

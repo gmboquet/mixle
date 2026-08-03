@@ -86,11 +86,11 @@ def _clip():
         import torch
         from transformers import CLIPModel, CLIPProcessor
 
-        model = CLIPModel.from_pretrained(_CLIP_ID, revision=_CLIP_REVISION, use_safetensors=True)
+        model = CLIPModel.from_pretrained(_CLIP_ID, revision=_CLIP_REVISION, use_safetensors=True)  # nosec B615 # false positive: revision IS pinned, to the 40-hex commit named by the module constant on this line (see scientist_asset_manifest); B615 only resolves string literals, not named constants
         model.eval()
         _CACHE["clip"] = (
             model,
-            CLIPProcessor.from_pretrained(_CLIP_ID, revision=_CLIP_REVISION, use_fast=True),
+            CLIPProcessor.from_pretrained(_CLIP_ID, revision=_CLIP_REVISION, use_fast=True),  # nosec B615 # false positive: revision IS pinned, to the 40-hex commit named by the module constant on this line (see scientist_asset_manifest); B615 only resolves string literals, not named constants
             torch,
         )
     return _CACHE["clip"]
@@ -101,8 +101,8 @@ def _lm():
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        tok = AutoTokenizer.from_pretrained(_LM_ID, revision=_LM_REVISION, use_fast=True)
-        model = AutoModelForCausalLM.from_pretrained(_LM_ID, revision=_LM_REVISION, use_safetensors=True)
+        tok = AutoTokenizer.from_pretrained(_LM_ID, revision=_LM_REVISION, use_fast=True)  # nosec B615 # false positive: revision IS pinned, to the 40-hex commit named by the module constant on this line (see scientist_asset_manifest); B615 only resolves string literals, not named constants
+        model = AutoModelForCausalLM.from_pretrained(_LM_ID, revision=_LM_REVISION, use_safetensors=True)  # nosec B615 # false positive: revision IS pinned, to the 40-hex commit named by the module constant on this line (see scientist_asset_manifest); B615 only resolves string literals, not named constants
         model.eval()
         _CACHE["lm"] = (model, tok, torch)
     return _CACHE["lm"]

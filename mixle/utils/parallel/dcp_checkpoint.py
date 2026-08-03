@@ -373,7 +373,7 @@ def load_sharded(module: Any, optimizer: Any, path: str) -> None:
     from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_dict
 
     model_sd, optim_sd = get_state_dict(module, optimizer)  # templates with the right sharded shapes
-    dcp.load({"model": model_sd, "optimizer": optim_sd}, checkpoint_id=str(path))
+    dcp.load({"model": model_sd, "optimizer": optim_sd}, checkpoint_id=str(path))  # nosec B614 # loads a sharded checkpoint directory the caller names into pre-shaped template state dicts; same local-trust model as torch.load on a path you control -- see load_training_state for the digest-verified variant
     set_state_dict(module, optimizer, model_state_dict=model_sd, optim_state_dict=optim_sd)
 
 
@@ -571,7 +571,7 @@ def load_training_state(
     # any live model, optimizer, scheduler, scaler, or RNG state is mutated.
     model_state, optimizer_state = get_state_dict(module, optimizer)
     state = {"model": model_state, "optimizer": optimizer_state}
-    dcp.load(state, checkpoint_id=str(source))
+    dcp.load(state, checkpoint_id=str(source))  # nosec B614 # _resolve_and_validate_generation above re-hashes every file against the manifest and matches the manifest digest to _SUCCESS before this runs, so a partial or altered generation is rejected first
     set_state_dict(
         module,
         optimizer,

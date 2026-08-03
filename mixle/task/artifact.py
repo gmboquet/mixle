@@ -155,7 +155,10 @@ def _atomic_artifact_write(path: str, write_fn: Callable[[str], None]) -> None:
     os.makedirs(parent, exist_ok=True)
     _recover_artifact(target)
     staging = tempfile.mkdtemp(dir=parent, prefix=".tmp-artifact-")
-    os.chmod(staging, 0o755)  # mkdtemp defaults to 0o700; match the world-readable dirs os.makedirs would make
+    # mkdtemp defaults to 0o700; match the world-readable dirs os.makedirs would make. 0o755 grants no
+    # group or world WRITE bit, so no other local user can inject a file into the generation being
+    # staged here -- it only makes the published directory as readable as the one it replaces.
+    os.chmod(staging, 0o755)  # nosec B103 # 0o755 is read/execute for others, never writable by them
     published = False
     try:
         write_fn(staging)  # if this raises, `path` has not been touched at all

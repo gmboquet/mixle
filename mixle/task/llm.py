@@ -18,11 +18,17 @@ import inspect
 import json
 import math
 import re
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 _MAX_HTTP_RESPONSE_BYTES = 8 * 1024 * 1024
+#: The only URL schemes an LLM endpoint may use. ``urlopen`` honors every scheme its opener knows --
+#: ``file:``, ``ftp:`` and ``data:`` among them -- so an endpoint string that reached this module from
+#: configuration, a CLI argument or an environment variable could name a local path rather than a
+#: server, and ``urlopen`` would happily read it and hand the bytes back as the "model's" reply.
+_ALLOWED_ENDPOINT_SCHEMES = frozenset({"http", "https"})
 
 
 class LLMResponseError(ValueError):
@@ -66,13 +72,33 @@ class CallableLLM:
         return self.fn(prompt)
 
 
+def validated_endpoint_url(url: str) -> str:
+    """Return ``url`` unchanged if it names an ``http``/``https`` endpoint; raise ``ValueError`` otherwise.
+
+    Every request this module makes goes through this check first (see :data:`_ALLOWED_ENDPOINT_SCHEMES`
+    for why): the scheme is validated against an allowlist *before* a request object is built, so a
+    ``file:``/``ftp:``/``data:`` "endpoint" is rejected rather than opened.
+    """
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("LLM endpoint URL must be a non-empty string")
+    scheme = urllib.parse.urlsplit(url).scheme.lower()
+    if scheme not in _ALLOWED_ENDPOINT_SCHEMES:
+        raise ValueError(
+            f"LLM endpoint URL must use one of {sorted(_ALLOWED_ENDPOINT_SCHEMES)}, got "
+            f"{scheme!r} in {url!r}. Only an HTTP(S) server can serve a chat-completions endpoint; "
+            "any other scheme would make urlopen read a local or non-HTTP resource instead."
+        )
+    return url
+
+
 def _http_post_json(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float) -> dict[str, Any]:
     """POST JSON and parse JSON back, with only the standard library (monkeypatched in tests)."""
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be a finite positive number")
+    url = validated_endpoint_url(url)
     data = json.dumps(payload).encode()
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", **headers})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - caller-provided trusted endpoint
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310 # validated_endpoint_url allowlisted the scheme to http/https on the line above, so file:/ftp:/data: never reach urlopen
         status = getattr(resp, "status", 200)
         if not isinstance(status, int) or not 200 <= status < 300:
             raise LLMResponseError(f"LLM endpoint returned HTTP status {status!r}")

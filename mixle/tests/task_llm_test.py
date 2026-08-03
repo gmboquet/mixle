@@ -4,7 +4,10 @@ CallableLLM drives the labeler deterministically; OpenAICompatLLM is exercised w
 so the request shape and response parsing are verified without a server.
 """
 
+import os
+import tempfile
 import unittest
+from unittest import mock
 
 from mixle.task import llm as L
 from mixle.task.llm import (
@@ -15,6 +18,7 @@ from mixle.task.llm import (
     extract_json_object,
     llm_labeler,
     pick_label,
+    validated_endpoint_url,
 )
 
 
@@ -160,6 +164,58 @@ class OpenAICompatTest(unittest.TestCase):
                 OpenAICompatLLM("http://localhost/v1", "model").complete("hi")
         finally:
             L._http_post_json = orig
+
+
+class EndpointSchemeAllowlistTest(unittest.TestCase):
+    """A non-HTTP endpoint is rejected before ``urlopen`` is ever reached.
+
+    ``base_url`` reaches this module from a caller -- often by way of a config file, a CLI flag or an
+    environment variable -- and ``urlopen`` honors ``file:``, ``ftp:`` and ``data:`` just as readily as
+    ``http:``. Without a scheme check, ``file:///etc/passwd`` is a valid "LLM endpoint": urlopen reads
+    the local file and the bytes come back to be parsed as the model's reply.
+    """
+
+    def test_http_and_https_pass_through_unchanged(self):
+        for url in (
+            "http://localhost:11434/v1/chat/completions",
+            "https://api.example.com/v1/chat/completions",
+            "HTTPS://api.example.com/v1/chat/completions",  # scheme comparison is case-insensitive
+        ):
+            self.assertEqual(validated_endpoint_url(url), url)
+
+    def test_other_schemes_and_non_urls_are_rejected(self):
+        for url in (
+            "file:///etc/passwd",
+            "ftp://example.com/model",
+            "data:application/json,%7B%7D",
+            "gopher://example.com/1",
+            "/v1/chat/completions",  # no scheme at all
+            "",
+        ):
+            with self.assertRaises(ValueError):
+                validated_endpoint_url(url)
+
+    def test_post_rejects_a_local_file_endpoint_without_opening_it(self):
+        """The rejection must happen before the request is opened, not after reading the response."""
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            # Shaped exactly like a valid chat-completions reply: were the scheme check missing, this
+            # file's contents would be returned to the caller as though a model had produced them.
+            fh.write('{"choices": [{"message": {"content": "attacker-controlled"}}]}')
+            local_path = fh.name
+        try:
+            with mock.patch("urllib.request.urlopen") as urlopen:
+                with self.assertRaises(ValueError):
+                    L._http_post_json(f"file://{local_path}", {}, {"model": "m"}, 1.0)
+            urlopen.assert_not_called()
+        finally:
+            os.unlink(local_path)
+
+    def test_the_ordinary_http_path_still_reaches_urlopen(self):
+        """Guard against the allowlist being tightened into rejecting everything."""
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value = mock.Mock(status=200, read=lambda _n: b'{"choices": []}')
+            self.assertEqual(L._http_post_json("http://localhost:11434/v1", {}, {"model": "m"}, 1.0), {"choices": []})
+        urlopen.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -352,7 +352,7 @@ class Embedder:
             raise ValueError(f"{path!r} failed its integrity check (corrupt, truncated, or a tampered manifest)")
         if meta.get("mixle_artifact") != _ARTIFACT_ID:
             raise ValueError(f"{path!r} declares artifact {meta.get('mixle_artifact')!r}, expected {_ARTIFACT_ID!r}")
-        payload = pickle.loads(body)  # noqa: S301 - trust-gated above and digest-verified; see the docstring
+        payload = pickle.loads(body)  # noqa: S301 - trust-gated above and digest-verified; see the docstring  # nosec B301 # MXR-080-1881: Embedder.load requires trust_code to be the True singleton (or an already-open trusted_deserialization scope) before reaching this envelope
         expected = {"featurizer", "result", "kind", "corpus_vectors"}
         if not isinstance(payload, dict) or set(payload) != expected:
             raise ValueError(f"{path!r} does not contain an Embedder state payload")

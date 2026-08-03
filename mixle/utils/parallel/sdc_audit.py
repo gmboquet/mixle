@@ -122,8 +122,8 @@ def _canonical_statistic_bytes(value: Any) -> bytes:
 def _compare_statistic_payloads(primary: bytes, audit: bytes, *, rtol: float, atol: float) -> _StatisticComparison:
     """Compare typed statistics numerically while retaining exact canonical evidence digests."""
     try:
-        primary_value = pickle.loads(primary)
-        audit_value = pickle.loads(audit)
+        primary_value = pickle.loads(primary)  # nosec B301 # IPC: the sufficient-statistic payload one of this run's own workers pickled; a decode failure is caught below and reported as an audit mismatch rather than trusted
+        audit_value = pickle.loads(audit)  # nosec B301 # IPC: the duplicate-execution payload from this run's own audit worker, compared against primary purely to detect silent data corruption
         primary_canonical = _canonical_statistic_bytes(primary_value)
         audit_canonical = _canonical_statistic_bytes(audit_value)
     except Exception as error:  # noqa: BLE001 - corrupt bytes are themselves an audit mismatch
@@ -327,7 +327,7 @@ def finite_guarded_fold(
     accumulator = estimator.accumulator_factory().make()
     nobs = 0.0
     for i, raw in enumerate(payloads):
-        count, stats = pickle.loads(raw)
+        count, stats = pickle.loads(raw)  # nosec B301 # IPC: a (count, stats) payload this run's own workers pickled and returned
         _assert_finite_value(count, "%s (payload index %d count)" % (where, i))
         nobs += count
         _assert_finite_value(nobs, "%s (running observation count)" % where)
@@ -417,7 +417,7 @@ def _receipt(
 
     def _safe_repr(payload: bytes) -> str:
         try:
-            return repr(pickle.loads(payload))[:2000]
+            return repr(pickle.loads(payload))[:2000]  # nosec B301 # IPC: renders one of this run's own worker payloads into the audit receipt; already-decoded bytes from the comparison above, and an undecodable payload is caught and recorded as such
         except Exception as e:  # noqa: BLE001 - a corrupted payload may not even unpickle; still a receipt
             return "<unpicklable: %s>" % e
 

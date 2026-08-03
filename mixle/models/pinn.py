@@ -294,7 +294,7 @@ def _decode_residual_fn(payload: Any) -> Any:
     if not isinstance(environment, Mapping) or dict(environment) != _environment():
         raise _serialization_error("PINN residual environment does not match the current runtime")
     try:
-        residual_fn = pickle.loads(data)
+        residual_fn = pickle.loads(data)  # nosec B301 # _decode_residual_fn calls _require_trusted_deserialization() before anything else, then bounds, base64-validates and sha256-verifies these exact bytes and pins them to this interpreter/torch
     except Exception as exc:
         raise _serialization_error("PINN residual pickle could not be decoded") from exc
     if not callable(residual_fn):

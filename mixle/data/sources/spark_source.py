@@ -87,7 +87,7 @@ def sample_rdd(sc, dist, count_per_split, num_splits, seed=None):
     seeds = RandomState(seed).randint(0, maxrandint, size=num_splits)
 
     def fmap(u):
-        ddist = pickle.loads(distB.value)
+        ddist = pickle.loads(distB.value)  # nosec B301 # IPC: distB is a Spark broadcast of the bytes this same function pickled from its dist argument, and the closure reading it is shipped to executors by pickle too
         sampler = [ddist.sampler(seed=h) for h in u]
         return iter([v for h in sampler for v in h.sample(size=count_per_split)])
 
