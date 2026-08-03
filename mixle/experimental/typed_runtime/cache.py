@@ -8,6 +8,7 @@ from threading import RLock
 from types import MappingProxyType
 from typing import Any
 
+from mixle.experimental.typed_runtime._exact_controls import require_id_sequence
 from mixle.experimental.typed_runtime.contracts import ArtifactKind
 from mixle.experimental.typed_runtime.graph import UpdateGraph
 
@@ -172,25 +173,41 @@ class VersionedArtifactCache:
     ) -> InvalidationReceipt:
         """Atomically invalidate the union of several dependency closures."""
 
-        sources = tuple(dict.fromkeys(source_nodes))
+        # Stage, receipt, THEN commit (MXR-080-1905). Every check below used to run after the
+        # generations had already advanced and the entries had already been deleted, so
+        # ``cache.invalidate("node", "parameters")`` -- the string, not the ``ArtifactKind`` --
+        # bumped the node's generation from 0 to 1, dropped its cached value, and only then raised
+        # out of ``InvalidationReceipt``. The invalidation happened; the record of it did not, and a
+        # late worker comparing its captured generation could no longer tell why. Nothing is written
+        # to ``self._generations``/``self._entries`` until the receipt for it exists.
+        source_ids = require_id_sequence(source_nodes, "invalidate_many source_nodes")
+        sources = tuple(dict.fromkeys(source_ids))
         if not sources:
             raise ValueError("invalidate_many requires at least one source node.")
+        if not isinstance(written_artifact, ArtifactKind):
+            raise TypeError(
+                f"written_artifact must be an ArtifactKind, got {type(written_artifact).__name__} "
+                f"({written_artifact!r}); a string has no .value and cannot be recorded."
+            )
         closures = {node_id for source in sources for node_id in self.graph.invalidated_by(source)}
         invalidated = tuple(node_id for node_id in self.graph.topological_order() if node_id in closures)
         invalidated_set = set(invalidated)
         with self._lock:
+            staged_generations = dict(self._generations)
             for node_id in invalidated:
-                self._generations[node_id] += 1
+                staged_generations[node_id] += 1
             removed = tuple(
                 sorted(
                     (key for key in self._entries if key[0] in invalidated_set),
                     key=lambda key: (key[0], key[1].value),
                 )
             )
+            generations = {node_id: staged_generations[node_id] for node_id in invalidated}
+            receipt = InvalidationReceipt(sources, written_artifact, invalidated, removed, generations)
+            self._generations = staged_generations
             for key in removed:
                 del self._entries[key]
-            generations = {node_id: self._generations[node_id] for node_id in invalidated}
-        return InvalidationReceipt(sources, written_artifact, invalidated, removed, generations)
+        return receipt
 
     def clear(self) -> None:
         """Invalidate all nodes and remove all entries."""

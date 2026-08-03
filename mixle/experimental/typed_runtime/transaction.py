@@ -11,6 +11,7 @@ from threading import RLock
 from types import MappingProxyType
 from typing import Any
 
+from mixle.experimental.typed_runtime._exact_controls import require_exact_bool, require_exact_int
 from mixle.experimental.typed_runtime.contracts import (
     ArtifactKind,
     ObjectiveKind,
@@ -37,13 +38,38 @@ class RuntimeVersions:
     def for_graph(cls, graph: UpdateGraph, *, model_version: int = 0) -> RuntimeVersions:
         """Create a zero-node-version vector for a compiled graph."""
 
-        if model_version < 0:
-            raise ValueError("model_version must be non-negative.")
         return cls(model_version, {node.node_id: 0 for node in graph.nodes})
 
     def __post_init__(self) -> None:
-        if self.model_version < 0 or any(version < 0 for version in self.node_versions.values()):
-            raise ValueError("runtime versions must be non-negative.")
+        """Make the version vector exact and coordinator-owned (MXR-080-1905).
+
+        Two reproduced holes, both about a value that is a version everywhere except where it has to
+        be recorded:
+
+        * ``RuntimeVersions(0.0, {"node": 0})`` constructed, and the coordinator built on it
+          committed once -- advancing ``model_version`` 0.0 -> 1.0 and the node version 0 -> 1 --
+          and then raised out of ``CommitReceipt``, whose accepted-commit check is
+          ``isinstance(before, int)``. The transaction's state moved and no receipt recorded it.
+          ``np.int64`` constructed the same way and failed the same way, one layer earlier, in the
+          receipt's serializability check.
+        * ``node_versions`` was the caller's own dict, stored by reference. A caller that kept a
+          handle to it could set ``owned["node"] = 999`` and rewrite the coordinator's version
+          vector from outside, which is the exact state every preflight version check is there to
+          compare against. It is copied now; ``as_dict`` already returned a detached view, so
+          nothing downstream changes.
+
+        NumPy integers are canonicalized rather than refused -- see
+        :func:`~mixle.experimental.typed_runtime._exact_controls.require_exact_int`.
+        """
+        self.model_version = require_exact_int(self.model_version, "model_version", minimum=0)
+        if not isinstance(self.node_versions, Mapping):
+            raise TypeError(f"node_versions must be a mapping, got {type(self.node_versions).__name__}.")
+        versions: dict[str, int] = {}
+        for node_id, version in self.node_versions.items():
+            if not isinstance(node_id, str) or not node_id.strip():
+                raise ValueError(f"runtime node version names no node: {node_id!r}.")
+            versions[node_id] = require_exact_int(version, f"node version for {node_id!r}", minimum=0)
+        self.node_versions = versions
 
     def as_dict(self) -> dict[str, Any]:
         """Return a detached JSON-compatible version vector."""
@@ -413,14 +439,53 @@ class TransactionalCoordinator:
         if set(self.versions.node_versions) != {node.node_id for node in graph.nodes}:
             raise ValueError("runtime node versions must exactly match the update graph.")
         self.objective_tolerance = objective_tolerance
-        self.enforce_monotone_objective = enforce_monotone_objective
-        self.receipts: list[CommitReceipt] = []
-        self.proposal_receipts: list[dict[str, Any]] = []
-        self.poisoned = False
+        # An exact Boolean, because this flag alone decides whether an objective REGRESSION is
+        # committed. ``enforce_monotone_objective=""`` was stored as ``""`` and read by a bare
+        # ``if``, so a coordinator built from serialized configuration accepted a canary reporting
+        # 5.0 -> 1.0 as ``CommitStatus.ACCEPTED`` (MXR-080-1905).
+        self.enforce_monotone_objective = require_exact_bool(enforce_monotone_objective, "enforce_monotone_objective")
+        # The ledgers are private with read-only views (MXR-080-1905). They were public lists, so
+        # ``coordinator.receipts.clear()`` erased the committed history that ``ledger_fingerprint``
+        # is computed from -- the fingerprint changed and nothing recorded that it had been rewritten.
+        # A caller that wants a mutable copy takes ``list(coordinator.receipts)``.
+        self._receipts: list[CommitReceipt] = []
+        self._proposal_receipts: list[dict[str, Any]] = []
+        self._poisoned = False
         self._commit_sequence = 0
         self._commit_ids: set[str] = set()
         self._seen_proposal_ids: set[str] = set()
         self._lock = RLock()
+
+    @property
+    def receipts(self) -> tuple[CommitReceipt, ...]:
+        """Every terminal commit receipt this coordinator produced, oldest first.
+
+        A detached tuple: the receipts themselves are frozen and sealed, and the sequence they form
+        is the coordinator's own record, not a caller-editable list (MXR-080-1905).
+        """
+        with self._lock:
+            return tuple(self._receipts)
+
+    @property
+    def proposal_receipts(self) -> tuple[dict[str, Any], ...]:
+        """Serialized proposals seen by this coordinator, in arrival order.
+
+        Each row is a fresh ``as_dict()`` payload built at commit time, so the tuple shares no
+        structure a caller can reach (MXR-080-1905).
+        """
+        with self._lock:
+            return tuple(self._proposal_receipts)
+
+    @property
+    def poisoned(self) -> bool:
+        """Whether an unverified rollback has disabled further commits.
+
+        Read-only: this was a plain attribute, so ``coordinator.poisoned = False`` un-poisoned a
+        coordinator whose rollback could not be verified and let it accept commits on top of state
+        nothing had confirmed was restored (MXR-080-1905). Only :meth:`commit` sets it, from the
+        rollback verification itself.
+        """
+        return self._poisoned
 
     def _next_commit_id(self) -> str:
         while True:
@@ -437,7 +502,7 @@ class TransactionalCoordinator:
         return frozenset(required)
 
     def _preflight_error(self, batch: ProposalBatch) -> str | None:
-        if self.poisoned:
+        if self._poisoned:
             return "coordinator-poisoned-by-unverified-rollback"
         known_nodes = {node.node_id for node in self.graph.nodes}
         for proposal in batch.proposals:
@@ -575,7 +640,7 @@ class TransactionalCoordinator:
             self._commit_ids.add(commit_id)
             versions_before = self.versions.as_dict()
             proposal_ids = tuple(proposal.proposal_id for proposal in batch.proposals)
-            self.proposal_receipts.extend(proposal.as_dict() for proposal in batch.proposals)
+            self._proposal_receipts.extend(proposal.as_dict() for proposal in batch.proposals)
             error = self._preflight_error(batch)
             if error is not None:
                 receipt = CommitReceipt(
@@ -590,7 +655,7 @@ class TransactionalCoordinator:
                     model_id=self.model_id,
                     elapsed_seconds=time.perf_counter() - started,
                 )
-                self.receipts.append(receipt)
+                self._receipts.append(receipt)
                 return receipt
 
             try:
@@ -611,7 +676,7 @@ class TransactionalCoordinator:
                     model_id=self.model_id,
                     elapsed_seconds=time.perf_counter() - started,
                 )
-                self.receipts.append(receipt)
+                self._receipts.append(receipt)
                 return receipt
 
             verdict: CanaryVerdict | None = None
@@ -634,7 +699,7 @@ class TransactionalCoordinator:
             if rejection_reason is not None:
                 verified, fingerprints_after, restore_error = self._rollback(snapshots, fingerprints_before)
                 status = CommitStatus.ROLLED_BACK if verified else CommitStatus.ROLLBACK_FAILED
-                self.poisoned = not verified
+                self._poisoned = not verified
                 error_value = restore_error or apply_error
                 receipt = CommitReceipt(
                     commit_id,
@@ -654,7 +719,7 @@ class TransactionalCoordinator:
                     model_id=self.model_id,
                     elapsed_seconds=time.perf_counter() - started,
                 )
-                self.receipts.append(receipt)
+                self._receipts.append(receipt)
                 return receipt
 
             invalidated_set = set()
@@ -662,10 +727,25 @@ class TransactionalCoordinator:
                 invalidated_set.update(self.graph.invalidated_by(proposal.node_id))
                 invalidated_set.update(proposal.invalidates)
             invalidated = tuple(node_id for node_id in self.graph.topological_order() if node_id in invalidated_set)
-            self.versions.model_version += 1
-            for node_id in invalidated:
-                self.versions.node_versions[node_id] += 1
-            self._seen_proposal_ids.update(proposal_ids)
+            # Stage, receipt, THEN commit (MXR-080-1905). The version bump used to run first, so a
+            # ``CommitReceipt`` that refused to construct left the coordinator advanced with nothing
+            # recording it. The reproduction was a version vector the receipt could not express
+            # (``RuntimeVersions(0.0, ...)``): ``commit`` raised after ``model_version`` had already
+            # moved 0.0 -> 1.0, the node version 0 -> 1, and the proposal ids had been marked seen --
+            # so the retry got ``duplicate-proposal-id`` for a transaction that produced no receipt.
+            #
+            # ``RuntimeVersions`` now refuses that value outright, so THAT input no longer reaches
+            # here, and no other currently-reachable input makes this receipt fail late. The
+            # reordering is kept anyway because it removes the class rather than the one instance:
+            # building the receipt from the STAGED vector means the only way to reach the
+            # assignments below is for the record of them to already exist.
+            staged = RuntimeVersions(
+                self.versions.model_version + 1,
+                {
+                    node_id: version + 1 if node_id in invalidated_set else version
+                    for node_id, version in self.versions.node_versions.items()
+                },
+            )
             receipt = CommitReceipt(
                 commit_id,
                 batch.batch_id,
@@ -673,7 +753,7 @@ class TransactionalCoordinator:
                 CommitStatus.ACCEPTED,
                 "canary-accepted",
                 versions_before,
-                self.versions.as_dict(),
+                staged.as_dict(),
                 invalidated_nodes=invalidated,
                 canary=verdict,
                 participant_fingerprints_before=fingerprints_before,
@@ -682,14 +762,20 @@ class TransactionalCoordinator:
                 model_id=self.model_id,
                 elapsed_seconds=time.perf_counter() - started,
             )
-            self.receipts.append(receipt)
+            # Applied in place rather than by rebinding ``self.versions``: callers reach the vector
+            # through the coordinator (``coordinator.versions.model_version``), and keeping the same
+            # object keeps any held reference correct.
+            self.versions.model_version = staged.model_version
+            self.versions.node_versions = dict(staged.node_versions)
+            self._seen_proposal_ids.update(proposal_ids)
+            self._receipts.append(receipt)
             return receipt
 
     def ledger_fingerprint(self) -> str:
         """Fingerprint receipt metadata for deterministic replay comparisons."""
 
         payloads = []
-        for receipt in self.receipts:
+        for receipt in self._receipts:
             payload = receipt.as_dict()
             payload.pop("elapsed_seconds")
             payloads.append(payload)
