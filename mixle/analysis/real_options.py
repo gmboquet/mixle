@@ -62,6 +62,7 @@ from typing import Any, NamedTuple
 import numpy as np
 from scipy.sparse.linalg import LinearOperator
 
+from mixle.analysis._evidence import require_delivered_draws
 from mixle.analysis.valuation import NPVDistribution
 from mixle.reason.posterior_protocol import Posterior
 
@@ -455,9 +456,27 @@ def _warn_if_not_gaussian_like(posterior: Posterior, rng: np.random.Generator, *
     Gaussian-conjugate ``observation_model`` path assume the posterior's mean/cov fully characterize its
     shape, which is only true for a genuinely Gaussian belief. Thresholds are generous (roughly 7 standard
     errors at ``n_probe=512`` for true Gaussian data) to keep the false-positive rate low.
+
+    Those thresholds are calibrated to ``n_probe``, so a posterior delivering fewer draws than requested
+    makes the screen quietly weaker than that claim (MXR-080-1900). This now reports the short delivery
+    instead of running a screen at an unknown resolution and then staying silent -- but it WARNS rather
+    than raising, unlike the estimator paths below: this is a diagnostic, and the Gaussian-conjugate path
+    never otherwise samples the posterior, so raising here would newly reject callers whose actual
+    computation does not depend on a draw count at all.
     """
     diagnostic_rng = copy.deepcopy(rng)
     probe = np.asarray(posterior.samples(n_probe, diagnostic_rng), dtype=np.float64)
+    if probe.ndim == 0 or probe.shape[0] != n_probe:
+        delivered = probe.shape[0] if probe.ndim > 0 else 1
+        warnings.warn(
+            f"voi_dollars/voi_estimate: the Gaussian-regime screen requested {n_probe} probe draws and the "
+            f"posterior delivered {delivered}, so the screen was NOT run. Draw no conclusion either way "
+            "about whether this posterior is Gaussian-like: the skew/excess-kurtosis thresholds are "
+            "calibrated to the requested probe size and mean nothing at another.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return
     if probe.ndim == 1:
         probe = probe[:, None]
     sd = probe.std(axis=0, ddof=1)
@@ -727,10 +746,26 @@ def voi_estimate(
     inner_scale = float(np.sqrt(1.0 - reduction))
     mean = np.asarray(posterior.mean, dtype=np.float64)
 
-    centers = mean + center_scale * (posterior.samples(n_outer, rng) - mean)
+    # Exact posterior-delivery receipts on BOTH sampling axes (MXR-080-1900), the same check
+    # `valuation._draw_grade_per_period` already applies to `monte_carlo_npv` (MXR-080-0118).
+    # The outer draw used to fail only incidentally -- `centers[i]` eventually raised `IndexError`,
+    # naming no cause -- and the INNER draw did not fail at all: `decision_fn(base)` reduces however
+    # many draws it is handed to a single float, and `centers[i] + inner_scale * (base - mean)`
+    # broadcasts cleanly at any row count, so a thinned/filtered posterior produced a VOI in dollars
+    # computed on a fraction of the requested inner evidence and reported it as the full estimate.
+    # `VoiEstimate` carries no draw count, so nothing downstream could have detected it either.
+    outer_draws = require_delivered_draws(
+        posterior.samples(n_outer, rng), n_outer, what="voi_estimate: posterior.samples(n_outer, rng)"
+    )
+    centers = mean + center_scale * (outer_draws - mean)
     diffs = np.empty(n_outer, dtype=np.float64)
     for i in range(n_outer):
-        base = posterior.samples(n_inner, rng)  # shared by both sides of this replicate -- see docstring
+        # shared by both sides of this replicate -- see docstring
+        base = require_delivered_draws(
+            posterior.samples(n_inner, rng),
+            n_inner,
+            what=f"voi_estimate: posterior.samples(n_inner, rng) at replicate {i}",
+        )
         no_info = _require_decision_value(decision_fn(base), replicate=i, side="without information")
         refined = centers[i] + inner_scale * (base - mean)
         with_info = _require_decision_value(decision_fn(refined), replicate=i, side="with information")

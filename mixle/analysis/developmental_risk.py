@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from scipy import optimize, stats
 
+from mixle.analysis._evidence import require_delivered_draws
 from mixle.analysis._interval import validated_level
 
 if TYPE_CHECKING:
@@ -581,8 +582,16 @@ def rfd_exceedance(
         prior_dominated = getattr(derived, "prior_dominated", None)
         if not isinstance(prior_dominated, (bool, np.bool_)):
             raise TypeError("posterior-derived exposure result must carry a Boolean prior_dominated flag")
+        # Exact posterior-delivery receipt (MXR-080-1900). `fn` already rejects an INPUT draw set that
+        # is not exactly `n` long, but that only fires if `derived_quantity` actually calls it with
+        # everything it intends to return: a `derived_quantity` that pushes forward `n` draws and then
+        # subsamples, filters or caches its own OUTPUT delivered a shorter exceedance distribution,
+        # and `_SampleDerivedQuantity` checks non-empty/1-D/finite but never the count. `P(exposure >
+        # RfD)` read off a fraction of the requested draws is indistinguishable from the full answer.
         return _SampleDerivedQuantity(
-            samples=np.asarray(getattr(derived, "samples", None), dtype=float),
+            samples=require_delivered_draws(
+                getattr(derived, "samples", None), n, what="the exposure posterior's derived quantity"
+            ),
             prior_dominated=bool(prior_dominated),
         )
     draws = _as_dose_samples(exposure, n, rng)

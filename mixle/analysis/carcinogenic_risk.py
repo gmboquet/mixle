@@ -31,6 +31,7 @@ from numbers import Real
 
 import numpy as np
 
+from mixle.analysis._evidence import reject_boolean_quantity, require_delivered_draws
 from mixle.analysis._interval import validated_level
 from mixle.reason.posterior_protocol import DerivedQuantity, Posterior
 
@@ -203,11 +204,17 @@ def excess_lifetime_cancer_risk(
         route: ``"oral"`` or ``"inhalation"``.
         n: number of posterior draws to take when ``exposure`` is a ``Posterior``, or the number of
             slope-factor draws to take when ``exposure`` is a bare scalar and ``sf.sigma_log > 0``.
-            Must be a positive exact integer.
+            Must be a positive exact integer. On the ``Posterior`` path this is now a hard delivery
+            receipt (MXR-080-1900): a posterior that returns fewer than ``n`` draws is an error, not
+            a quietly smaller risk distribution.
         rng: numpy random Generator (a fresh default one is created if omitted).
 
     Returns:
         A :class:`DerivedQuantity` of excess lifetime cancer risk (samples + CI + ``prior_dominated``).
+
+    A Boolean ``exposure`` (scalar or ``dtype=bool`` array) is rejected rather than coerced: ``True``
+    is a flag, not a dose, and ``float(True) == 1.0`` made one indistinguishable from a measured
+    1 mg/kg-day LADD once it was inside the LNT product (MXR-080-1900).
     """
     if not isinstance(sf, SlopeFactor):
         raise TypeError(f"sf must be a validated SlopeFactor, got {type(sf).__name__}")
@@ -223,6 +230,13 @@ def excess_lifetime_cancer_risk(
     _require_positive_int(n, "n")
     rng = rng if rng is not None else np.random.default_rng()
 
+    # A Boolean is not a dose. `float(True)` is `1.0`, so `exposure=True` -- a policy/exposure FLAG
+    # that reached the dose slot from serialized configuration -- used to be priced as an LADD of
+    # 1 mg/kg-day (or 1 ug/m3) and returned as a real excess-cancer-risk number (MXR-080-1900). This
+    # covers the scalar and bare-array forms; a `Posterior` is neither, so it passes through here and
+    # its draws are checked inside `_apply`.
+    reject_boolean_quantity(exposure, "exposure")
+
     def _apply(draws: np.ndarray) -> np.ndarray:
         # Validation lives here -- not in a separate top-level check on the raw `exposure` -- so it
         # runs identically for all three exposure forms: a bare array/scalar (wrapped and passed
@@ -230,6 +244,7 @@ def excess_lifetime_cancer_risk(
         # pushforward handed to `Posterior.derived_quantity`). Previously only the first two were
         # checked; a mis-specified exposure posterior could emit negative/non-finite draws that flowed
         # straight through to a "risk" sample with no validation at all.
+        reject_boolean_quantity(draws, "exposure draws")
         dose = np.atleast_1d(np.asarray(draws, dtype=float))
         if dose.ndim > 1:
             # The IC-1 `Posterior.samples` contract is always `(n, d)`; `d == 1` is the legitimate
@@ -259,7 +274,12 @@ def excess_lifetime_cancer_risk(
 
     if isinstance(exposure, Posterior):
         dq = exposure.derived_quantity(_apply, n, rng)
-        samples = np.atleast_1d(np.asarray(dq.samples, dtype=float))
+        # Exact posterior-delivery receipt (MXR-080-1900). `_apply` validated the SHAPE PER SAMPLE of
+        # whatever draws it was handed, never the leading count, and `RiskQuantity` validates domain
+        # and finiteness but not the count either -- so a posterior that thins, filters or caches its
+        # draws returned a risk distribution built on a fraction of the requested evidence, with a
+        # mean and credible interval indistinguishable from the full-strength answer.
+        samples = np.atleast_1d(require_delivered_draws(dq.samples, n, what="the exposure posterior"))
         if not isinstance(dq.prior_dominated, (bool, np.bool_)):
             raise TypeError("posterior-derived cancer risk must carry a Boolean prior_dominated flag")
         prior_dominated = bool(dq.prior_dominated)
@@ -311,13 +331,22 @@ def radon_wlm_risk(
     ``n``/``rng`` were previously accepted and never used at all, on any path -- a negative,
     fractional or Boolean draw count was silently taken and discarded (MXR-080-1574). They now drive
     the ``Posterior`` path they were reserved for, and ``n`` is validated on every path so an
-    impossible request is rejected rather than ignored.
+    impossible request is rejected rather than ignored. On that path ``n`` is additionally a delivery
+    receipt: a posterior returning fewer than ``n`` draws raises instead of yielding a thinner risk
+    distribution that reads like the full one (MXR-080-1900). A Boolean ``wlm`` is rejected for the
+    same reason a Boolean dose is -- ``float(True) == 1.0`` is not one working-level-month.
     """
     risk_per_wlm = _require_finite_nonnegative_scalar(risk_per_wlm, "risk_per_wlm")
     _require_positive_int(n, "n")
     generator = rng if rng is not None else np.random.default_rng()
 
+    # Same reason as `excess_lifetime_cancer_risk`: `float(True)` is `1.0`, so a Boolean flag in the
+    # `wlm` slot used to be read as one working-level-month of cumulative radon exposure and priced
+    # into a lung-cancer risk (MXR-080-1900).
+    reject_boolean_quantity(wlm, "wlm")
+
     def _apply(draws: np.ndarray) -> np.ndarray:
+        reject_boolean_quantity(draws, "wlm draws")
         exposure = np.atleast_1d(np.asarray(draws, dtype=float))
         if exposure.ndim > 1:
             if exposure.ndim == 2 and exposure.shape[1] == 1:
@@ -333,7 +362,8 @@ def radon_wlm_risk(
 
     if isinstance(wlm, Posterior):
         dq = wlm.derived_quantity(_apply, n, generator)
-        samples = np.atleast_1d(np.asarray(dq.samples, dtype=float))
+        # Exact posterior-delivery receipt (MXR-080-1900) -- see `excess_lifetime_cancer_risk`.
+        samples = np.atleast_1d(require_delivered_draws(dq.samples, n, what="the wlm exposure posterior"))
         if not isinstance(dq.prior_dominated, (bool, np.bool_)):
             raise TypeError("posterior-derived radon risk must carry a Boolean prior_dominated flag")
         prior_dominated = bool(dq.prior_dominated)

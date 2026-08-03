@@ -35,6 +35,7 @@ from scipy.stats import norm
 
 from mixle.analysis.kriging import calibrate_variance
 from mixle.process import InhomogeneousPoissonProcessDistribution
+from mixle.utils.immutable import freeze_receipt_container
 
 __all__ = ["SpeciesObservation", "HabitatModel", "fit_sdm"]
 
@@ -277,8 +278,15 @@ class HabitatModel:
         self._var_scale = var_scale_f
         self._prior_dominated = bool(prior_dominated)
         # Owned + immutable, like the parameter arrays above: a receipt a caller can mutate after the
-        # fact is not a receipt (MXR-080-1590).
-        self.provenance = MappingProxyType(dict(provenance or {}))
+        # fact is not a receipt (MXR-080-1590). The freeze is DEEP (MXR-080-1900):
+        # `MappingProxyType(dict(...))` sealed only the top level, so a nested list or dict inside a
+        # caller-supplied provenance stayed a live view of the caller's own object and could be
+        # rewritten after the field was published -- the exact thing the sentence above rules out.
+        # `freeze_receipt_container` (not the weaker `detach_...`) because this field is already
+        # committed to an immutable mapping type, and a `MappingProxyType` still compares equal to the
+        # dict it wraps, so consumers that compare provenance keep working. `fit_sdm` writes only
+        # scalars and digest strings, so nothing it produces is converted.
+        self.provenance = MappingProxyType(freeze_receipt_container(dict(provenance or {})))
 
     def _log_lambda_moments(self) -> tuple[np.ndarray, np.ndarray]:
         """Per-cell ``(mean, calibrated variance)`` of ``log(lambda_c)`` under the beta-posterior."""

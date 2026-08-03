@@ -38,14 +38,17 @@ from __future__ import annotations
 import hashlib
 import math
 import operator
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
+from mixle.analysis._evidence import reject_boolean_quantity
 from mixle.analysis._interval import validated_level
 from mixle.data.hashing import _canonical
 from mixle.reason.posterior_protocol import DerivedQuantity
+from mixle.utils.immutable import detach_receipt_container
 
 __all__ = [
     "EmissionFactors",
@@ -138,6 +141,14 @@ class Footprint:
     different computations. ``ci`` is normalized to a ``(lo, hi)`` tuple and ``provenance`` to a
     dict this record owns, so a later edit to the caller's own dict cannot retroactively rewrite
     what a footprint claims it was computed from.
+
+    That copy is DEEP (MXR-080-1900). ``dict(provenance)`` detaches only the top level, so a nested
+    container -- ``provenance["scopes"]`` as a list, a nested factor-model dict -- stayed aliased to
+    the caller's own object and could be rewritten after the footprint was reported. Deliberately NOT
+    checked here: that ``total`` equals ``scope1 + scope2 + scope3``. The producer always makes it so,
+    but the record is documented as constructible directly for callers that only need
+    :func:`climate_terms`' point costs, and the test-suite already builds partially-specified
+    footprints; a sum invariant would refuse states the library legitimately accepts.
     """
 
     scope1: float
@@ -151,7 +162,11 @@ class Footprint:
         if self.ci is not None:
             lo, hi = self.ci
             object.__setattr__(self, "ci", (float(lo), float(hi)))
-        object.__setattr__(self, "provenance", dict(self.provenance))
+        # `detach_receipt_container`, not `freeze_receipt_container`: provenance is documented as a
+        # plain `dict` and consumers read it as one (`footprint.provenance.get(...)` in
+        # `transition_risk`, dict/list-typed assertions in the test-suite), so the concrete container
+        # types stay exactly as the caller supplied them -- only the aliasing is severed.
+        object.__setattr__(self, "provenance", detach_receipt_container(dict(self.provenance)))
 
 
 def _scope_dict(factors: EmissionFactors, scope: int) -> dict[str, float]:
@@ -232,8 +247,15 @@ def _validate_unique_scopes(scopes: tuple[int, ...]) -> None:
 
 
 def _validate_activity_values(activity: dict[str, float]) -> None:
-    """Every activity quantity must be a finite, nonnegative physical amount (litres, kWh, kg, t*km, ...)."""
+    """Every activity quantity must be a finite, nonnegative physical amount (litres, kWh, kg, t*km, ...).
+
+    A Boolean is refused outright (MXR-080-1900): ``float(True)`` is ``1.0``, so a flag that reached
+    an activity slot -- ``{"diesel_L": True}`` from a serialized schedule, say -- silently priced as
+    one litre of diesel and entered the reported Scope-1 total with nothing to mark it as not a
+    measurement.
+    """
     for key, value in activity.items():
+        reject_boolean_quantity(value, f"activity[{key!r}]")
         v = float(value)
         if not np.isfinite(v):
             raise ValueError(f"activity[{key!r}] must be finite, got {value!r}")
@@ -248,14 +270,20 @@ def _validate_factor_values(factors: EmissionFactors) -> None:
     a smaller uncertainty, it is a physically meaningless input that must be rejected rather than
     silently treated as exact (``std <= 0`` in the Monte-Carlo sampler below already means "no
     resampling", so a negative sigma was silently collapsing to a fixed, zero-uncertainty factor).
+
+    A Boolean factor or sigma is refused for the same reason an activity quantity is (MXR-080-1900):
+    ``float(True)`` is ``1.0``, so a flag in a factor slot prices every unit of that activity at
+    exactly 1 CO2e and is indistinguishable downstream from a real inventory coefficient.
     """
     for label, scope_dict in (("scope1", factors.scope1), ("scope2", factors.scope2), ("scope3", factors.scope3)):
         for key, value in scope_dict.items():
+            reject_boolean_quantity(value, f"factors.{label}[{key!r}]")
             v = float(value)
             if not np.isfinite(v):
                 raise ValueError(f"factors.{label}[{key!r}] must be finite, got {value!r}")
     if factors.sigma:
         for key, value in factors.sigma.items():
+            reject_boolean_quantity(value, f"factors.sigma[{key!r}]")
             v = float(value)
             if not np.isfinite(v):
                 raise ValueError(f"factors.sigma[{key!r}] must be finite, got {value!r}")
@@ -370,6 +398,95 @@ def emissions_footprint(
     )
 
 
+# Relative agreement tolerance for a summary against the draws it claims to summarize. Tight enough
+# that any real disagreement (a hand-written mean, a stale value, a wrong sign) is orders of magnitude
+# outside it; loose enough that summation ORDER alone -- `_stable_column_means`' fsum-of-quotients vs a
+# vectorized pass -- never trips it. Scaled by the magnitude of the draws so it survives cancellation,
+# where a mean near zero has no useful relative tolerance of its own.
+_SUMMARY_AGREEMENT_RTOL = 1e-9
+
+
+def _require_summaries_agree_with_samples(
+    samples: np.ndarray, scenario_mean: np.ndarray, ranking: tuple[int, ...]
+) -> None:
+    """Reject a :class:`TransitionRiskResult` whose summaries contradict its own draws (MXR-080-1900).
+
+    Two checks, in the order a reader would apply them: the per-scenario mean must actually be the
+    mean of the corresponding column of ``samples``, and the ranking must actually run best -> worst
+    by that mean.
+
+    The mean is first checked with one vectorized pass (dividing before summing, so a column of
+    otherwise-finite draws cannot overflow the accumulator); only if that disagrees is
+    :func:`_stable_column_means` -- the exact estimator :func:`transition_risk` itself uses -- run as
+    the authority. That keeps the common case one cheap pass while guaranteeing the producer's own
+    output can never be refused by a summation-order difference.
+
+    Ties in ``scenario_mean`` may be ordered arbitrarily: ``np.argsort`` promises no stable tie order,
+    so requiring a particular one would refuse rankings :func:`transition_risk` legitimately emits.
+    Only a genuine inversion -- a strictly worse scenario ranked above a strictly better one -- fails.
+    """
+    tolerance = _SUMMARY_AGREEMENT_RTOL * max(1.0, float(np.max(np.abs(samples))))
+    with np.errstate(over="ignore", invalid="ignore"):
+        fast = (samples / samples.shape[0]).sum(axis=0)
+    agrees = bool(np.all(np.isfinite(fast))) and bool(
+        np.allclose(scenario_mean, fast, rtol=_SUMMARY_AGREEMENT_RTOL, atol=tolerance)
+    )
+    if not agrees:
+        exact = _stable_column_means(samples)
+        if not np.allclose(scenario_mean, exact, rtol=_SUMMARY_AGREEMENT_RTOL, atol=tolerance):
+            raise ValueError(
+                "TransitionRiskResult.scenario_mean must be the per-scenario mean of samples; got "
+                f"{scenario_mean.tolist()!r} against column means {exact.tolist()!r}. A summary that "
+                "disagrees with the draws makes the point estimate and credible_interval() describe "
+                "two different distributions."
+            )
+    ordered = scenario_mean[list(ranking)]
+    if np.any(np.diff(ordered) > tolerance):
+        raise ValueError(
+            "TransitionRiskResult.ranking must order scenarios best -> worst by scenario_mean; got "
+            f"ranking {ranking!r} over means {scenario_mean.tolist()!r}. A ranking that contradicts "
+            "the means it is derived from re-orders the scenario comparison this record exists to make."
+        )
+
+
+def _require_provenance_cost_agrees(provenance: Any, carbon_cost: np.ndarray) -> None:
+    """Reject a record whose ``provenance["carbon_cost"]`` contradicts its ``carbon_cost`` field.
+
+    :func:`transition_risk` writes the priced carbon cost twice -- once as the field, once into
+    provenance for the audit trail -- and nothing checked that the two agreed (MXR-080-1900), so a
+    record could report one cost to a consumer reading the field and another to one reading the
+    receipt.
+
+    Only that one key, and only when it is present and shaped like the per-scenario cost vector the
+    producer writes. ``provenance`` is otherwise a free-form dict: a caller who puts something else
+    entirely under that name (a scalar, a nested per-period breakdown) is not making the claim this
+    check is about, and refusing them would be reading a private convention as a contract.
+    """
+    if not isinstance(provenance, Mapping) or "carbon_cost" not in provenance:
+        return
+    recorded = provenance["carbon_cost"]
+    if not isinstance(recorded, (list, tuple, np.ndarray)):
+        return
+    # Every failure to READ the recorded value as a per-scenario float vector is a skip, never a
+    # rejection: a ragged nested list, a non-numeric entry, a different length, or a Boolean (which
+    # would coerce to 0.0/1.0 and could match by accident) all mean the caller is not making the claim
+    # this check is about. Only a readable, same-shaped, genuinely numeric receipt is compared.
+    try:
+        if any(isinstance(v, (bool, np.bool_)) for v in np.asarray(recorded, dtype=object).ravel().tolist()):
+            return
+        as_float = np.asarray(recorded, dtype=float)
+    except (TypeError, ValueError):
+        return
+    if as_float.shape != carbon_cost.shape:
+        return
+    tolerance = _SUMMARY_AGREEMENT_RTOL * max(1.0, float(np.max(np.abs(carbon_cost))))
+    if not np.allclose(as_float, carbon_cost, rtol=_SUMMARY_AGREEMENT_RTOL, atol=tolerance):
+        raise ValueError(
+            "TransitionRiskResult.provenance['carbon_cost'] must agree with the carbon_cost field; got "
+            f"{as_float.tolist()!r} against {carbon_cost.tolist()!r}."
+        )
+
+
 @dataclass(frozen=True)
 class TransitionRiskResult:
     """The carbon-adjusted NPV distribution across carbon-price/policy scenarios (L3).
@@ -397,6 +514,29 @@ class TransitionRiskResult:
     ``scenario_mean`` cannot drift out of agreement with the ``samples`` they were derived from:
     an unfrozen record let a caller reorder the ranking or overwrite a scenario mean while every
     summary method kept reporting off the original draws.
+
+    Freezing only stopped the drift AFTER construction, though. Construction itself accepted any
+    finite ``scenario_mean`` and any permutation ``ranking``, so a record could be born already
+    contradicting its own draws -- ``scenario_mean`` reporting one ordering of the scenarios while
+    :meth:`credible_interval`, computed off ``samples``, reported another (MXR-080-1900). Two
+    agreement invariants now close that, both holding exactly for what :func:`transition_risk`
+    produces:
+
+    * ``scenario_mean`` must equal the per-scenario (column) mean of ``samples``, to a tolerance
+      scaled by the magnitude of the draws -- summation order, not disagreement, is all that is
+      allowed to separate them.
+    * ``scenario_mean[ranking]`` must be non-increasing, i.e. the ranking really does run best ->
+      worst. Ties may be broken in any order, since ``np.argsort`` gives no stable tie order and
+      demanding a particular one would refuse rankings the producer itself emits.
+
+    Additionally, when ``provenance`` carries the module's own ``"carbon_cost"`` key (the doubled
+    representation :func:`transition_risk` writes), it must agree with the ``carbon_cost`` field --
+    the two used to be free to disagree about the very cost the summaries were priced from.
+
+    Deliberately NOT checked: that ``samples[:, j] + carbon_cost[j]`` recovers one common baseline
+    NPV across scenarios. It is true of :func:`transition_risk`'s output, but the record is also
+    constructed directly with independent ``samples``/``carbon_cost`` in this package's own tests,
+    so requiring it would reject states the library legitimately produces.
     """
 
     samples: np.ndarray
@@ -427,12 +567,18 @@ class TransitionRiskResult:
             or sorted(self.ranking) != list(range(n_scenarios))
         ):
             raise ValueError("TransitionRiskResult.ranking must be a permutation of scenario indices.")
+        ranking = tuple(int(i) for i in self.ranking)
+        _require_summaries_agree_with_samples(arr, means, ranking)
+        _require_provenance_cost_agrees(self.provenance, costs)
         for name, source in (("samples", arr), ("scenario_mean", means), ("carbon_cost", costs)):
             owned = np.array(source, copy=True)
             owned.setflags(write=False)
             object.__setattr__(self, name, owned)
-        object.__setattr__(self, "ranking", tuple(int(i) for i in self.ranking))
-        object.__setattr__(self, "provenance", dict(self.provenance))
+        object.__setattr__(self, "ranking", ranking)
+        # Deep detach, matching `Footprint` (MXR-080-1900): the shallow `dict()` left every nested
+        # container -- notably the `carbon_cost` list `transition_risk` writes -- aliased to the
+        # caller's object, so a later edit rewrote a cost the record had already reported.
+        object.__setattr__(self, "provenance", detach_receipt_container(dict(self.provenance)))
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
         """Per-scenario central ``level`` interval of the carbon-adjusted NPV, each shape ``(k,)``.
@@ -622,23 +768,63 @@ def transition_risk(
     )
 
 
+_MISSING_EVIDENCE = object()
+"""Sentinel for "the attribute was not there at all", distinct from a present-but-``None`` value.
+
+``getattr(water, "shortfall_m3", 0.0)`` used a NUMERIC default, which is how an object carrying no
+water evidence whatsoever came to report a definite "no shortfall" (MXR-080-1900). The sentinel keeps
+absence expressible so it can be routed to Unknown instead.
+"""
+
+
+def _water_volume_m3(value: Any) -> float | None:
+    """Return ``value`` as a usable physical water volume in m3, or ``None`` when it is not one.
+
+    Every unusable form collapses to the same explicit Unknown, because they are the same thing as
+    far as a feasibility verdict goes -- there is no evidence to decide on (MXR-080-1900):
+
+    * absent (:data:`_MISSING_EVIDENCE`) or ``None`` -- the shortfall was never computed;
+    * a Boolean -- ``float(True)`` is ``1.0``, so a flag in this slot used to read as a one-cubic-metre
+      shortfall, i.e. a confirmed binding constraint, off no measurement at all;
+    * non-numeric (text, an array, an object) -- ``float("5")`` succeeds and silently turns
+      configuration text into a physical volume;
+    * non-finite, or negative -- a volume in m3 cannot be either, so it is malformed evidence rather
+      than evidence of headroom (already handled before this refactor; kept here so all the
+      "unusable" cases live in one place).
+
+    A 0-d numeric array is accepted: it is an ordinary scalar carrier the array paths in this module
+    produce, and refusing it would reject values the library itself creates.
+    """
+    if value is _MISSING_EVIDENCE or value is None or isinstance(value, (bool, np.bool_)):
+        return None
+    arr = np.asarray(value)
+    if arr.ndim != 0 or arr.dtype.kind not in "iuf":
+        return None
+    volume = float(arr)
+    if not np.isfinite(volume) or volume < 0.0:
+        return None
+    return volume
+
+
 def _water_demand_m3(water: Any) -> float | None:
     """Best-effort scalar water demand off an L2 `WaterBudget`-shaped object, or ``None`` if absent.
 
     Checks a direct ``.demand_m3`` attribute first (a convenience some callers may attach), then falls
     back to ``water.provenance["demand_m3"]`` -- `water_balance`'s own ``demand_m3`` argument (L2) is
     exactly the kind of input the provenance dict is documented to retain.
+
+    The result goes through :func:`_water_volume_m3`, so an unusable demand (Boolean, text, negative,
+    non-finite) reports the same explicit ``None`` as an absent one rather than a coerced number.
     """
     demand = getattr(water, "demand_m3", None)
-    if demand is not None:
-        return float(demand)
-    provenance = getattr(water, "provenance", None)
-    if isinstance(provenance, dict) and "demand_m3" in provenance:
-        return float(provenance["demand_m3"])
-    return None
+    if demand is None:
+        provenance = getattr(water, "provenance", None)
+        if isinstance(provenance, dict) and "demand_m3" in provenance:
+            demand = provenance["demand_m3"]
+    return _water_volume_m3(demand)
 
 
-def _shortfall_time_fraction(water: Any, shortfall_m3: float) -> float | None:
+def _shortfall_time_fraction(water: Any, shortfall_m3: float | None) -> float | None:
     """Fraction of ONE deterministic water-budget trajectory's time steps sitting at a binding (zero)
     storage -- a duration/occupancy statistic, NOT a probability: it summarizes a single
     already-simulated trajectory and carries no information about uncertainty. A genuine probability
@@ -653,9 +839,13 @@ def _shortfall_time_fraction(water: Any, shortfall_m3: float) -> float | None:
     trajectory is available (e.g. a caller-supplied summary rather than a full `WaterBudget`). Returns
     ``None`` -- an explicit "not evaluable", rather than a silently wrong number -- when the available
     evidence is unusable: a storage trajectory containing non-finite entries, or a ``shortfall_m3``
-    that is non-finite or negative with no trajectory to fall back on. A shortfall is an unmet volume
-    in m3 and cannot be negative; reading one as ``0.0`` ("never short") would report a definite
-    all-clear off malformed evidence.
+    that :func:`_water_volume_m3` could not read as a volume (absent, ``None``, Boolean, non-numeric,
+    non-finite, or negative) with no trajectory to fall back on. A shortfall is an unmet volume in m3
+    and cannot be negative; reading one as ``0.0`` ("never short") would report a definite all-clear
+    off malformed -- or, in the case this closes, entirely missing -- evidence (MXR-080-1900).
+
+    ``shortfall_m3`` therefore arrives as ``float | None``, already normalized by the caller; ``None``
+    means "no readable shortfall", which is exactly the case that must not become ``0.0``.
     """
     storage = getattr(water, "storage", None)
     if storage is not None:
@@ -664,7 +854,7 @@ def _shortfall_time_fraction(water: Any, shortfall_m3: float) -> float | None:
             if not np.all(np.isfinite(arr)):
                 return None
             return float(np.mean(arr <= 0.0))
-    if not np.isfinite(shortfall_m3) or shortfall_m3 < 0.0:
+    if shortfall_m3 is None:
         return None
     return 1.0 if shortfall_m3 > 0.0 else 0.0
 
@@ -755,6 +945,15 @@ def climate_terms(
       evidence of comfortable headroom (or, for a negative demand/limit, of a violation). The two
       binding checks combine via three-valued (Kleene) OR: a confirmed binding signal from either
       check always wins, an unknown never gets rounded down to "feasible".
+    - When a ``water`` object is supplied but carries **no readable shortfall** -- the attribute is
+      absent, ``None``, a Boolean, or non-numeric -- the shortfall check likewise contributes
+      ``None``. This is the case the promise above used to skip (MXR-080-1900): the ``water is None``
+      branch abstained correctly, but a present-but-empty water object took ``getattr(...,
+      shortfall_m3, 0.0)``'s numeric default and reported ``water_feasible=True``, a definite
+      all-clear on a hard constraint from an object holding no water evidence at all.
+      ``shortfall_time_fraction`` reports ``None`` in the same case rather than a confident ``0.0``
+      ("never short over the whole trajectory") -- unless a real ``storage`` trajectory is present,
+      which is genuine evidence and is still used.
     """
     footprint_total = _finite_real_scalar(footprint.total, name="climate_terms: footprint.total")
     price = _finite_real_scalar(carbon_price, name="climate_terms: carbon_price", nonnegative=True)
@@ -770,27 +969,22 @@ def climate_terms(
             "shortfall_time_fraction": None,
         }
 
-    raw_shortfall = getattr(water, "shortfall_m3", 0.0)
-    shortfall_m3 = float(raw_shortfall) if raw_shortfall is not None else 0.0
-    # Shortfall, demand and the configured limit are physical volumes in m3 and cannot be negative
-    # under the documented contract. A negative one is malformed evidence, not evidence of anything:
-    # treating it as a finite number let a negative shortfall read as "comfortably non-binding"
-    # (feasible) and a negative demand or limit manufacture a binding violation out of nothing. Both
-    # directions are wrong, so a negative volume joins non-finite as UNKNOWN and rides the same
-    # Kleene path -- never rounded down to feasible.
-    shortfall_known = np.isfinite(shortfall_m3) and shortfall_m3 >= 0.0
-    shortfall_binding: bool | None = (shortfall_m3 > 0.0) if shortfall_known else None
+    # Shortfall, demand and the configured limit are physical volumes in m3. `_water_volume_m3`
+    # returns one only when the evidence actually supports a number, and `None` for every unusable
+    # form -- ABSENT, `None`, Boolean, non-numeric, non-finite, or negative. The absent/`None` cases
+    # are the ones this closes (MXR-080-1900): `getattr(water, "shortfall_m3", 0.0)` defaulted to a
+    # numeric zero, and `None` was coerced to the same, so a water object carrying no shortfall
+    # evidence at all reported a definite `water_feasible=True` on a hard H4 constraint -- the exact
+    # permissive pass this function's docstring promises never to give.
+    shortfall_m3 = _water_volume_m3(getattr(water, "shortfall_m3", _MISSING_EVIDENCE))
+    shortfall_binding: bool | None = None if shortfall_m3 is None else (shortfall_m3 > 0.0)
 
     demand_binding: bool | None = False  # no water_limit_m3 configured: this check is inapplicable, not unknown
     if water_limit_m3 is not None:
-        limit = float(water_limit_m3)
+        limit = _water_volume_m3(water_limit_m3)
         demand = _water_demand_m3(water)
-        if demand is None:
-            demand_binding = None  # a limit was configured but there is no demand evidence to check it against
-        elif not (np.isfinite(limit) and np.isfinite(demand)) or limit < 0.0 or demand < 0.0:
-            demand_binding = None
-        else:
-            demand_binding = demand > limit
+        # A limit was configured but one side of the comparison is unreadable: unknown, not passing.
+        demand_binding = None if (limit is None or demand is None) else demand > limit
 
     water_binding = _kleene_or(shortfall_binding, demand_binding)
     water_feasible = None if water_binding is None else (not water_binding)
