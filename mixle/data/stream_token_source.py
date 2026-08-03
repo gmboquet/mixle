@@ -29,6 +29,8 @@ from typing import Any
 
 import numpy as np
 
+from mixle.utils.exact import require_exact_bool
+
 _INT64_MIN = int(np.iinfo(np.int64).min)
 _INT64_MAX = int(np.iinfo(np.int64).max)
 
@@ -124,8 +126,16 @@ def stream_token_source(
     block = _require_positive_int(block, "block")
     batch_size = _require_positive_int(batch_size, "batch_size")
     epochs = _require_nonnegative_int(epochs, "epochs")
-    rng = np.random.RandomState(seed)  # validates seed eagerly too (rejects non-int / out-of-range here)
-    return _stream_token_source(ids, block, batch_size, epochs, bool(shuffle), rng)
+    # `bool(shuffle)` is truthiness, and shuffle decides dataset ORDER: shuffle="false" -- the string a
+    # flag arrives as from a config file, an env var or a CLI argument -- shuffled anyway, silently
+    # changing what the model sees and making a "deterministic order" run non-deterministic
+    # (MXR-080-1886).
+    shuffle = require_exact_bool(shuffle, "stream_token_source shuffle")
+    # RandomState does NOT reject a Boolean -- RandomState(True) seeds with 1 -- so the comment that
+    # used to sit here claiming it "validates seed eagerly" was wrong about the one case that matters.
+    seed = _require_nonnegative_int(seed, "seed")
+    rng = np.random.RandomState(seed)
+    return _stream_token_source(ids, block, batch_size, epochs, shuffle, rng)
 
 
 def _stream_token_source(
