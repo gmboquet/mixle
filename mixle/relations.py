@@ -88,6 +88,119 @@ class Solution(NamedTuple):
 
 
 # ---------------------------------------------------------------------------
+# Shared input contracts (MXR-080-1903)
+#
+# These APIs answer combinatorial questions, and the answers are consumed as certificates: a flow, a
+# cut, an optimum, a k-best list. That makes silent coercion at the boundary worse here than in a
+# reporting function -- the caller cannot tell a certificate for the problem they posed from a
+# certificate for a different one. The recurring shapes are collected here so every entry point
+# refuses the same way.
+# ---------------------------------------------------------------------------
+def _require_count(value: Any, name: str, *, minimum: int = 0, allow_none: bool = False) -> int | None:
+    """An EXACT integer count -- never silently truncated or rounded (MXR-080-1903).
+
+    Sizes, caps and result budgets were read with a bare comparison or ``int()``, so ``max_size=2.9``
+    became ``2``, ``max_size="3"`` became ``3``, and ``max_size=True`` became a size-one search --
+    each answering a smaller question than the caller asked, with a confident optimum to show for it.
+
+    Accepts a Python/numpy integer or an exactly-integer-valued float (``3.0``), matching the contract
+    :mod:`mixle.enumeration` already uses. ``bool`` is refused: it is a yes/no answer, not a count.
+    """
+    if value is None and allow_none:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
+        raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
+    if isinstance(value, (float, np.floating)):
+        if not np.isfinite(value) or value != np.floor(value):
+            raise ValueError(f"{name} must be a whole number, not a fractional value, got {value!r}")
+    ivalue = int(value)
+    if ivalue < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}, got {ivalue}")
+    return ivalue
+
+
+def _require_square(value: Any, name: str) -> np.ndarray:
+    """A square 2-D float matrix, refusing a rectangular one rather than reading its leading block.
+
+    ``n = matrix.shape[0]`` with no shape check silently DISCARDED every column past ``n``
+    (MXR-080-1903): a 2x3 capacity matrix answered ``max_flow`` for its 2x2 corner, a 3x4 distance
+    matrix produced a "tour" over three of four cities. :func:`min_cost_flow` and
+    :func:`multicommodity_flow` already checked this; the rest did not.
+    """
+    array = np.asarray(value, dtype=np.float64)
+    if array.ndim != 2 or array.shape[0] != array.shape[1]:
+        raise ValueError(f"{name} must be a square (n, n) matrix, got shape {array.shape}")
+    return array
+
+
+def _reject_nan(array: np.ndarray, name: str, *, also_negative_inf: bool = False) -> None:
+    """Refuse NaN (and optionally ``-inf``) in a matrix whose entries gate a comparison.
+
+    Every one of these algorithms decides arc presence with a comparison -- ``residual[u, v] > tol``,
+    ``cap[u, v] > 0.0``, ``np.isfinite(d[i, j])``. NaN fails ALL of them, so a NaN entry silently
+    means "this arc does not exist" and the answer is a confident certificate for a different graph:
+    ``min_cut`` returned capacity ``0.0`` with an EMPTY cut-edge list on a graph that has arcs
+    (MXR-080-1903). ``-inf`` gets the same treatment where ``+inf`` legitimately marks a missing arc:
+    a ``-inf`` cost means an unbounded objective, not an absent one, and collapsing the two hides it.
+
+    ``+inf`` is deliberately NOT rejected -- :func:`min_cost_flow`, :func:`min_arborescence` and
+    :func:`tsp_held_karp` all document it as "unbounded capacity" / "missing arc", and the suite
+    exercises exactly that.
+    """
+    if np.isnan(array).any():
+        raise ValueError(
+            f"{name} must not contain NaN: every arc test here is a comparison, and NaN fails all of "
+            "them, so a NaN entry would silently read as an absent arc"
+        )
+    if also_negative_inf and np.isneginf(array).any():
+        raise ValueError(f"{name} must not contain -inf: a -inf entry means an unbounded objective, not a missing arc")
+
+
+def _require_adjacency(value: Any, name: str) -> np.ndarray:
+    """A square, symmetric, 0/1 (or Boolean) adjacency matrix -- the contract the docstrings state.
+
+    These three graph routines all documented "symmetric 0/1 (or boolean) matrix" and none of them
+    checked it, so they returned certificates that are false on their face (MXR-080-1903):
+
+    * asymmetry -- ``graph_coloring([[0, 1], [0, 0]])`` returned chromatic number 1 with both vertices
+      the SAME color despite ``a[0, 1] = 1``, because the neighbour lists are built per-row and vertex
+      1's row never mentions vertex 0. ``max_clique([[0, 0], [1, 0]])`` likewise returned ``[0, 1]``,
+      which is not a clique.
+    * truthiness -- adjacency was read as ``if a[i, j]``, so a 0.4 weight, a NaN and the STRING
+      ``"false"`` all meant "adjacent", while :func:`max_independent_set` read the same matrix through
+      ``dtype=int`` where 0.4 truncates to 0. The same 0.4 matrix therefore reported ``{0, 1}`` as both
+      a maximum clique and a maximum independent set -- two mutually exclusive claims, from one input.
+
+    The DIAGONAL is deliberately not checked. Every loop here already skips ``j == i``, so a self-loop
+    changes no answer, and refusing it would reject inputs that are only cosmetically off-contract.
+    """
+    array = np.asarray(value)
+    if array.dtype == bool:
+        array = array.astype(np.int64)
+    else:
+        try:
+            array = np.asarray(array, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{name} must be a Boolean or numeric 0/1 matrix, got dtype {np.asarray(value).dtype}"
+            ) from exc
+    if array.ndim != 2 or array.shape[0] != array.shape[1]:
+        raise ValueError(f"{name} must be a square (n, n) matrix, got shape {array.shape}")
+    if not np.isin(array, (0, 1)).all():
+        raise ValueError(
+            f"{name} must contain only 0/1 (or Boolean) entries: adjacency is read as a yes/no fact, "
+            "so a weight, a NaN or a non-empty string would silently mean 'adjacent'"
+        )
+    if not np.array_equal(array, array.T):
+        raise ValueError(
+            f"{name} must be symmetric (these routines model an UNDIRECTED graph); an asymmetric "
+            "matrix yields per-row neighbour lists that disagree, and the returned coloring/clique is "
+            "then not one -- symmetrize explicitly to say which reading you meant"
+        )
+    return array.astype(np.int64)
+
+
+# ---------------------------------------------------------------------------
 # Shared low-level engine: lazy best-first / A* over an arbitrary state graph
 # ---------------------------------------------------------------------------
 def best_first_paths(
@@ -123,6 +236,14 @@ def best_first_paths(
     """
     if sense not in ("min", "max"):
         raise ValueError("sense must be 'min' or 'max'")
+    # MXR-080-1903. `emitted += 1` ran BEFORE `emitted >= max_results`, so a budget of 0 still yielded
+    # one goal -- and `top(0)`, which routes here, returned a one-element list. A float budget was
+    # effectively ceiled (2.1 gave 3 results, because `1 >= 2.1` is False but `3 >= 2.1` is True), and
+    # a negative one behaved like 1. A result budget is an exact count, so it is validated as one; 0
+    # now means what it says.
+    max_results = _require_count(max_results, "max_results", minimum=0, allow_none=True)
+    if max_results == 0:
+        return
     flip = 1.0 if sense == "min" else -1.0
     h = heuristic or (lambda _s: 0.0)
     cnt = itertools.count()
@@ -177,6 +298,10 @@ def nearest_first(
         nondecreasing order.
     """
     key = key or (lambda s: s)
+    # Same off-by-one and same float/negative coercion as :func:`best_first_paths` (MXR-080-1903).
+    max_results = _require_count(max_results, "max_results", minimum=0, allow_none=True)
+    if max_results == 0:
+        return
     cnt = itertools.count()
     heap: list[tuple[float, int, Any]] = [(0.0, next(cnt), start)]
     seen: set = set()
@@ -275,9 +400,22 @@ def max_flow(capacity: Any, source: int, sink: int) -> tuple[float, np.ndarray]:
     ``flow[u, v]`` is the flow on arc ``u -> v`` (conserved at every node but the source/sink) and
     ``value`` is the total flow out of ``source``. Edmonds-Karp augments along BFS shortest paths in the
     residual network, so it runs in ``O(V E^2)`` and terminates on real-valued capacities.
+
+    ``capacity`` must be square and NaN-free, and ``source``/``sink`` must be distinct in-range nodes;
+    see :func:`_require_square`, :func:`_reject_nan` and the note below for what each of those used to
+    do instead (MXR-080-1903).
     """
-    cap = np.asarray(capacity, dtype=np.float64)
+    cap = _require_square(capacity, "capacity")
+    _reject_nan(cap, "capacity")
     n = cap.shape[0]
+    # `source == sink` never cleared `parent[sink] == -1`, so the augmenting loop ran forever with an
+    # infinite bottleneck: the call HUNG rather than answering or refusing (MXR-080-1903).
+    source = _require_count(source, "source", minimum=0)
+    sink = _require_count(sink, "sink", minimum=0)
+    if source >= n or sink >= n:
+        raise ValueError(f"source/sink must be nodes in 0..{n - 1}, got source={source}, sink={sink}")
+    if source == sink:
+        raise ValueError("source and sink must be distinct nodes; a self-flow has no maximum")
     residual = cap.copy()
     value = 0.0
     while True:
@@ -314,10 +452,13 @@ def min_cut(capacity: Any, source: int, sink: int) -> tuple[float, list[int], li
     Returns ``(capacity, source_side, cut_edges)``: the cut capacity (equal to the max-flow value), the
     set of nodes on the source side (reachable from ``source`` in the final residual graph), and the
     saturated arcs crossing from the source side to the sink side.
+
+    Input contract as :func:`max_flow`'s, and enforced there: a NaN capacity used to make this return
+    capacity ``0.0`` with an EMPTY cut-edge list on a graph that plainly has arcs (MXR-080-1903).
     """
     cap = np.asarray(capacity, dtype=np.float64)
-    n = cap.shape[0]
     value, flow = max_flow(cap, source, sink)
+    n = cap.shape[0]
     residual = cap - flow + flow.T  # residual of the optimal flow
     reachable = {source}
     q = deque([source])
@@ -497,6 +638,15 @@ def min_cost_flow(cap: Any, cost: Any, supply: Any) -> Flow:
     n = supply.shape[0]
     if cap.shape != (n, n) or cost.shape != (n, n):
         raise ValueError("cap/cost must be (n, n), matching supply's length n")
+    # `abs(nan) >= 1e-6` is False, so a NaN supply entry sailed through the balance check that exists
+    # to catch exactly this -- and then `supply[i] > 1e-12` and `supply[i] < -1e-12` were BOTH False,
+    # so the node was wired up as balanced. The result was a confident "min-cost feasible flow" for an
+    # instance that has none (MXR-080-1903). `cap`/`cost` reject NaN for the same reason arc tests are
+    # comparisons; +inf capacity stays legal (it is how an uncapacitated arc is spelled here).
+    if not np.isfinite(supply).all():
+        raise ValueError("supply must be finite at every node; a non-finite entry has no balance to check")
+    _reject_nan(cap, "cap")
+    _reject_nan(cost, "cost")
     if abs(float(supply.sum())) >= 1.0e-6:
         raise ValueError("supply must sum to (approximately) zero")
 
@@ -622,7 +772,16 @@ def multicommodity_flow(cap: Any, cost: Any, demands: Any) -> Flow:
     a_eq_rows: list[np.ndarray] = []
     b_eq: list[float] = []
     for kk in range(k):
-        src, snk, qty = int(demands[kk, 0]), int(demands[kk, 1]), float(demands[kk, 2])
+        # `int(demands[kk, 0])` truncated: a demand row of `[0.9, 2.7, 4.0]` routed commodity kk from
+        # node 0 to node 2 without a word (MXR-080-1903). A node index is an exact identity, not a
+        # measurement, so a fractional one is refused rather than rounded to a neighbour.
+        src = _require_count(demands[kk, 0], f"demands[{kk}] source node", minimum=0)
+        snk = _require_count(demands[kk, 1], f"demands[{kk}] sink node", minimum=0)
+        if src >= n or snk >= n:
+            raise ValueError(f"demands[{kk}] references a node outside 0..{n - 1}: source={src}, sink={snk}")
+        qty = float(demands[kk, 2])
+        if not np.isfinite(qty):
+            raise ValueError(f"demands[{kk}] quantity must be finite, got {qty!r}")
         for node in range(n):
             row = np.zeros(n_vars)
             for ai, (u, v) in enumerate(arcs):
@@ -689,6 +848,13 @@ def network_design(nodes: Sequence[int], arcs: Sequence[tuple[int, int]], fixed_
         raise ValueError("fixed_costs must align with arcs, one entry per candidate arc")
     if demand.shape != (n,):
         raise ValueError("demands must align with nodes, one net supply/demand entry per node")
+    # `abs(nan) > 1e-6` is False, so the balance guard below could not see a non-finite demand; the
+    # NaN then reached linprog and surfaced as a solver complaint about the constraint matrix rather
+    # than as the input error it is (MXR-080-1903).
+    if not np.isfinite(demand).all():
+        raise ValueError("network_design: demands must be finite at every node")
+    if not np.isfinite(fixed).all():
+        raise ValueError("network_design: fixed_costs must be finite for every candidate arc")
     if abs(float(demand.sum())) > 1.0e-6:
         raise ValueError("network_design: demands must sum to (approximately) zero")
 
@@ -748,13 +914,17 @@ def network_design(nodes: Sequence[int], arcs: Sequence[tuple[int, int]], fixed_
 def tsp_held_karp(distance: Any) -> tuple[float, list[int]]:
     """Exact minimum-cost Hamiltonian cycle through all nodes (Held-Karp).
 
-    ``distance`` is an ``n x n`` matrix of arc costs (may be asymmetric); a non-finite cost marks a
-    missing arc. Returns ``(cost, tour)`` where ``tour`` starts at node 0, visits every node once, and
+    ``distance`` is an ``n x n`` matrix of arc costs (may be asymmetric); ``+inf`` marks a missing arc.
+    NaN and ``-inf`` are refused (MXR-080-1903): the DP decides arc presence with ``np.isfinite``, so
+    both used to read as "missing", silently answering for a smaller graph -- and a ``-inf`` arc means
+    an unboundedly profitable one, which is not the same fact as an absent one at all.
+    Returns ``(cost, tour)`` where ``tour`` starts at node 0, visits every node once, and
     the cost includes the closing arc back to 0. Raises :class:`ValueError` when the finite arcs admit
     no Hamiltonian cycle. The Held-Karp bitmask DP is exact in ``O(2^n n^2)`` time / ``O(2^n n)``
     memory, so it is intended for small ``n`` (roughly <= 15-18); beyond that use a heuristic.
     """
-    d = np.asarray(distance, dtype=np.float64)
+    d = _require_square(distance, "distance")
+    _reject_nan(d, "distance", also_negative_inf=True)
     n = d.shape[0]
     no_cycle = "no Hamiltonian cycle: the finite arcs admit no tour visiting every node once"
     if n <= 1:
@@ -821,7 +991,7 @@ def graph_coloring(adjacency: Any) -> tuple[int, list[int]]:
     may introduce at most one new color), trying ``k = 1, 2, ...`` until colorable -- exact, but
     worst-case exponential, so intended for small/medium graphs.
     """
-    a = np.asarray(adjacency)
+    a = _require_adjacency(adjacency, "adjacency")
     n = a.shape[0]
     if n == 0:
         return 0, []
@@ -863,7 +1033,7 @@ def max_clique(adjacency: Any) -> list[int]:
     current clique plus the remaining candidates cannot beat the incumbent) -- exact, worst-case
     exponential, intended for small/medium graphs.
     """
-    a = np.asarray(adjacency)
+    a = _require_adjacency(adjacency, "adjacency")
     n = a.shape[0]
     nb = [{j for j in range(n) if j != i and a[i, j]} for i in range(n)]
     best: list[int] = []
@@ -887,9 +1057,9 @@ def max_clique(adjacency: Any) -> list[int]:
 
 def max_independent_set(adjacency: Any) -> list[int]:
     """A maximum independent set (largest pairwise-non-adjacent vertex set) -- a max clique of the complement."""
-    a = np.asarray(adjacency)
+    a = _require_adjacency(adjacency, "adjacency")
     n = a.shape[0]
-    complement = 1 - np.asarray(a, dtype=int)
+    complement = 1 - a
     if n:
         np.fill_diagonal(complement, 0)
     return max_clique(complement)
@@ -960,12 +1130,16 @@ def _edmonds(nodes: set[int], edges: list[tuple[int, int, float]], root: int) ->
 def min_arborescence(weight: Any, root: int = 0) -> tuple[float, list[int]] | None:
     """Minimum-weight spanning arborescence rooted at ``root`` (directed MST; Chu-Liu/Edmonds).
 
-    ``weight`` is an ``n x n`` matrix of directed arc costs with ``inf`` for absent arcs. Returns
+    ``weight`` is an ``n x n`` matrix of directed arc costs with ``+inf`` for absent arcs. Returns
     ``(total, parent)`` where ``parent[v]`` is the chosen in-arc tail for each non-root ``v`` (and
     ``parent[root] = -1``), forming the minimum-cost arborescence in which every node is reachable from
     ``root``; returns ``None`` if no such arborescence exists.
+
+    NaN and ``-inf`` are refused for the same reason as in :func:`tsp_held_karp`: arc presence is
+    decided by ``np.isfinite``, so both used to read as "absent arc" (MXR-080-1903).
     """
-    w = np.asarray(weight, dtype=np.float64)
+    w = _require_square(weight, "weight")
+    _reject_nan(w, "weight", also_negative_inf=True)
     n = w.shape[0]
     edges = [
         (u, v, float(w[u, v])) for u in range(n) for v in range(n) if u != v and v != root and np.isfinite(w[u, v])
@@ -1002,6 +1176,10 @@ def branch_and_bound_milp(
     continuous relaxation with ``scipy.optimize.linprog`` (HiGHS) and, if an integer variable is
     fractional, branches into ``x_i <= floor`` and ``x_i >= ceil``; best-bound search prunes nodes that
     cannot beat the incumbent. Exact for bounded integer feasible regions.
+
+    ``tol`` is the integrality/pruning tolerance and must be finite and strictly below ``0.5``: it is
+    the width within which a relaxation coordinate counts as already integral, and half a unit is the
+    most that can ever mean. See the note at its validation below for what a wider one returned.
     """
     from scipy.optimize import linprog
 
@@ -1010,7 +1188,37 @@ def branch_and_bound_milp(
     obj = -cvec if sense == "max" else cvec
     if sense not in ("min", "max"):
         raise ValueError("sense must be 'min' or 'max'")
+    # MXR-080-1903. `tol` was unvalidated, and it is compared against, never computed with -- so a NaN
+    # made `abs(x[i] - round(x[i])) > tol` False for EVERY coordinate, declaring the LP relaxation
+    # integral. The relaxation point was then snapped by np.round while the incumbent kept the
+    # UN-rounded LP objective, so the call returned an x that violates `a_ub @ x <= b_ub` together
+    # with an objective that is not even `c @ x`. Any tol >= 0.5 does the same thing deliberately.
+    # This is the shared solver behind network_design, cardinality_constrained_milp, blending,
+    # stochastic_opt and precedence_scheduling; none of them passes `tol`, so nothing legitimate in
+    # the repo produces the state now refused.
+    if isinstance(tol, bool) or not isinstance(tol, (int, float, np.integer, np.floating)):
+        raise ValueError(f"tol must be a finite number in (0, 0.5), got {tol!r}")
+    tol = float(tol)
+    if not np.isfinite(tol) or not 0.0 < tol < 0.5:
+        raise ValueError(
+            f"tol must be finite and in (0, 0.5), got {tol!r}: it is the width within which a "
+            "relaxation coordinate counts as integral, so anything at or past half a unit accepts a "
+            "fractional point as an integer solution"
+        )
     integer = list(range(n)) if integer is None else list(integer)  # materialize once: consumed at every node
+    # A negative index silently addressed a DIFFERENT variable (-1 read as x[n-1]), so the variable the
+    # caller named as integral came back fractional; duplicates were accepted and re-branched.
+    seen: set[int] = set()
+    for position, i in enumerate(integer):
+        index = _require_count(i, f"integer[{position}]", minimum=0)
+        if index >= n:
+            raise ValueError(f"integer[{position}]={index} is outside the variable range 0..{n - 1}")
+        if index in seen:
+            raise ValueError(f"integer lists variable {index} more than once")
+        seen.add(index)
+    integer = [int(i) for i in integer]
+    if bounds is not None and len(bounds) != n:
+        raise ValueError(f"bounds must have one (lo, hi) pair per variable: expected {n}, got {len(bounds)}")
     lo0 = [(-np.inf if bounds is None else bounds[i][0]) for i in range(n)]
     hi0 = [(np.inf if bounds is None else bounds[i][1]) for i in range(n)]
 
@@ -1070,6 +1278,9 @@ def cardinality_constrained_milp(
     """
     c = np.asarray(c, dtype=np.float64)
     n = c.size
+    # A cardinality bound counts variables, so it is an exact integer: `max_nonzero=2.9` used to be
+    # floored into the `sum z_i <= 2.9` row and answer the max-2 problem instead (MXR-080-1903).
+    max_nonzero = _require_count(max_nonzero, "max_nonzero", minimum=0)
     a = np.asarray(a_ub, dtype=np.float64) if a_ub is not None else np.zeros((0, n))
     b = np.asarray(b_ub, dtype=np.float64) if b_ub is not None else np.zeros(0)
     lo = np.array([bd[0] for bd in bounds], dtype=np.float64)
@@ -1168,12 +1379,36 @@ def admm_bounded_least_squares(
     the box), and the scaled dual update ``u += x - z``. This is the augmented-Lagrangian path "beyond
     pure penalty": it converges to the exact constrained optimum (``lower=0, upper=inf`` recovers
     non-negative least squares). Returns the bounded solution ``x``.
+
+    ``lower <= upper`` elementwise, neither NaN; ``rho > 0`` (the ridge term is SPD only then);
+    ``max_iter >= 1``. An infinite ``upper`` stays legal -- it is how the NNLS case is spelled.
     """
     a = np.asarray(a, dtype=np.float64)
     b = np.asarray(b, dtype=np.float64)
     n = a.shape[1]
     lo = np.broadcast_to(np.asarray(lower, dtype=np.float64), (n,))
     hi = np.broadcast_to(np.asarray(upper, dtype=np.float64), (n,))
+    # MXR-080-1903. Each of these returned a plausible vector for a problem the caller did not pose:
+    #   * `lower=5, upper=0` -- np.clip applies its bounds in order, so the upper one wins and the
+    #     returned point VIOLATES `lower <= x` with no complaint at all.
+    #   * NaN in a bound -- np.clip propagates it, so every coordinate came back NaN as "the solution".
+    #   * `max_iter=0` -- `range(0)` runs no iterations, so the initial all-zero z was returned as the
+    #     converged answer, indistinguishable from a real one.
+    #   * `rho <= 0` -- the docstring's own SPD precondition; at rho=0 the Cholesky is of A^T A alone.
+    # `upper=np.inf` is deliberately still accepted: admm_test.py's NNLS case depends on it.
+    if np.isnan(lo).any() or np.isnan(hi).any():
+        raise ValueError("admm_bounded_least_squares: lower/upper must not contain NaN")
+    if (lo > hi).any():
+        raise ValueError("admm_bounded_least_squares: every lower bound must be <= its upper bound")
+    if isinstance(rho, bool) or not isinstance(rho, (int, float, np.integer, np.floating)):
+        raise ValueError(f"admm_bounded_least_squares: rho must be a positive finite number, got {rho!r}")
+    rho = float(rho)
+    if not np.isfinite(rho) or rho <= 0.0:
+        raise ValueError(
+            f"admm_bounded_least_squares: rho must be positive and finite, got {rho!r}; the "
+            "augmented-Lagrangian term A^T A + rho I is symmetric positive definite only for rho > 0"
+        )
+    max_iter = _require_count(max_iter, "max_iter", minimum=1)
     chol = np.linalg.cholesky(a.T @ a + rho * np.eye(n))  # SPD for rho > 0; factor once
     atb = a.T @ b
     x = np.zeros(n)
@@ -1211,8 +1446,13 @@ class Relation(ABC):
         return next(self.enumerator(k=1), None)
 
     def top(self, k: int) -> list[Solution]:
-        """The ``k`` best solutions as a list."""
-        return list(self.enumerator(k=k))
+        """The ``k`` best solutions as a list.
+
+        ``k`` is an exact non-negative count: ``top(0)`` used to return ONE solution and ``top(2.9)``
+        three, because the engines counted emissions after yielding and compared against the raw float
+        (MXR-080-1903).
+        """
+        return list(self.enumerator(k=_require_count(k, "k", minimum=0)))
 
     def sampler(
         self,
@@ -1270,9 +1510,26 @@ class RelationSampler:
     ) -> None:
         self.relation = relation
         self.rng = rng if rng is not None else np.random.RandomState(seed)
+        # MXR-080-1903. `uniform` was read with a bare `if self.uniform or ...`, so `uniform="false"`
+        # -- the shape a flag arrives in from serialized configuration -- produced the UNIFORM stream,
+        # byte-for-byte identical to `uniform=True`. Assignment.maximize and
+        # BestSubsetRegression.intercept were already converted to the exact contract; this one was
+        # missed. `temperature` was equally unguarded: NaN fell into the `not np.isfinite` branch and
+        # silently sampled uniformly (only +inf is documented to do that), and a NEGATIVE temperature
+        # fell into `<= 0.0` and silently became a point mass on the optimum -- the opposite of what a
+        # negative Gibbs temperature would mean.
+        self.uniform = require_exact_bool(uniform, "uniform")
+        if isinstance(temperature, bool) or not isinstance(temperature, (int, float, np.integer, np.floating)):
+            raise ValueError(f"temperature must be a non-negative number (inf = uniform), got {temperature!r}")
+        temperature = float(temperature)
+        if np.isnan(temperature) or temperature < 0.0:
+            raise ValueError(
+                f"temperature must be non-negative, got {temperature!r}; 0 is the zero-temperature "
+                "point mass on the optimum and +inf is the uniform measure, but NaN and a negative "
+                "temperature name no measure at all"
+            )
         self.temperature = temperature
-        self.k = k
-        self.uniform = uniform
+        self.k = _require_count(k, "k", minimum=1, allow_none=True)
         self._values: list[Any] | None = None
         self._p: np.ndarray | None = None  # categorical over members; None at zero temperature
         self._point: int | None = None  # index of the optimum when temperature == 0
@@ -1522,11 +1779,20 @@ class BestSubsetRegression(Relation):
         self.y = np.asarray(y, dtype=np.float64)
         if self.X.ndim != 2 or self.X.shape[0] != self.y.shape[0]:
             raise ValueError("X must be (n, p) and y must have length n")
+        # A non-finite response makes EVERY subset score NaN, and NaN comparisons in the ranking sort
+        # are all False -- so the enumeration came out in input order and `solve()` returned the first
+        # subset it happened to build as "the optimum", with objective NaN (MXR-080-1903). A ranking
+        # over an unordered set is not a ranking; refuse the input rather than rank it.
+        if not np.isfinite(self.y).all():
+            raise ValueError("BestSubsetRegression: y must be finite; a non-finite response scores every subset NaN")
         if criterion not in ("aic", "bic", "rss"):
             raise ValueError("criterion must be 'aic', 'bic', or 'rss'")
         self.criterion = criterion
         self.n, self.p = self.X.shape
-        self.max_size = self.p if max_size is None else int(max_size)
+        # `int(max_size)` truncated: max_size=2.9 searched subsets up to size 2, max_size="3" was
+        # accepted outright, max_size=True searched size 1, and max_size=-1 made solve() return None
+        # as though the problem were infeasible (MXR-080-1903).
+        self.max_size = self.p if max_size is None else _require_count(max_size, "max_size", minimum=0)
         self.intercept = require_exact_bool(intercept, "intercept")
 
     def _score(self, subset: tuple[int, ...]) -> float:

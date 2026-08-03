@@ -137,6 +137,42 @@ def _canonical_mapping(value: Any, label: str) -> dict[str, Any]:
     return normalized
 
 
+def _own_sequence(value: Any, label: str) -> tuple[Any, ...]:
+    """Copy a caller-owned sequence field into the tuple the contract declares (MXR-080-1903).
+
+    One boundary, two defects that only show up together:
+
+    * *retained mutable evidence.* These fields are annotated ``tuple[...]`` but nothing enforced it,
+      so a record built from a ``list`` kept the CALLER's list by reference.  Appending to that list
+      afterwards changed what the record contains -- while ``identity``, the digest cached at
+      construction, went on reporting the content the record had when it was built.  A durable record
+      then advertises an identity that no longer matches it, and validated invariants (a decision's
+      ``utility`` closing over its ``alternatives``, a posterior's likelihood closing over its
+      observations) silently stop holding.
+    * *a string read as a sequence of characters.* ``alternatives="ab"`` and
+      ``observation_ids="o1"`` satisfied every length/uniqueness/membership check by iterating
+      characters, and ``to_record`` then emitted a JSON string where the schema declares an array.
+
+    Only ``list``/``tuple`` are admitted.  Unordered containers are refused rather than sorted:
+    element order is part of the canonical JSON the semantic digest is taken over, so accepting a
+    ``set`` would make a record's durable identity depend on iteration order.  Generators are refused
+    for the same reason a second pass over one yields nothing -- these fields are re-read by the
+    validations below.
+
+    Not checked here, deliberately: the *elements*.  Each record validates its own element types
+    immediately after this call, and a shared helper cannot know whether a field holds ids, specs, or
+    scalars.
+    """
+    if isinstance(value, (str, bytes, bytearray)):
+        raise TypeError(
+            f"{label} must be a list or tuple of items, not {type(value).__name__}; a string here "
+            "would be read as its individual characters"
+        )
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"{label} must be a list or tuple, got {type(value).__name__}")
+    return tuple(value)
+
+
 def _measured_shape(value: Any, label: str) -> tuple[int, ...]:
     """The shape ``value`` actually has: ``()`` for a scalar, ``(n, ...)`` for rectangular nested lists."""
     if not isinstance(value, (list, tuple)):
@@ -214,6 +250,7 @@ class ConstraintSpec:
 
     def __post_init__(self) -> None:
         _require_schema_version(self.schema_version, "constraint")
+        object.__setattr__(self, "allowed_values", _own_sequence(self.allowed_values, "constraint allowed_values"))
         if self.lower is not None and not math.isfinite(self.lower):
             raise ValueError("constraint lower bound must be finite")
         if self.upper is not None and not math.isfinite(self.upper):
@@ -379,6 +416,8 @@ class ValueSpec:
     def __post_init__(self) -> None:
         _require_schema_version(self.schema_version, "value")
         object.__setattr__(self, "role", _coerce_enum(self.role, ValueRole, "value role"))
+        object.__setattr__(self, "shape", _own_sequence(self.shape, "value shape"))
+        object.__setattr__(self, "dependencies", _own_sequence(self.dependencies, "value dependencies"))
         _require_id(self.id, "value id")
         if not self.unit:
             raise ValueError("value unit is required; use '1' for dimensionless")
@@ -458,6 +497,7 @@ class LikelihoodSpec:
 
     def __post_init__(self) -> None:
         _require_schema_version(self.schema_version, "likelihood")
+        object.__setattr__(self, "observation_ids", _own_sequence(self.observation_ids, "likelihood observation_ids"))
         _require_id(self.id, "likelihood id")
         _require_id(self.family, "likelihood family")
         if not self.observation_ids or len(self.observation_ids) != len(set(self.observation_ids)):
@@ -627,6 +667,11 @@ class PosteriorArtifact:
 
     def __post_init__(self) -> None:
         _require_schema_version(self.schema_version, "posterior")
+        # Own the evidence before anything below reads it: the checks that follow, and the identity
+        # cached at the end, must describe a sequence the caller can no longer edit (MXR-080-1903).
+        object.__setattr__(self, "values", _own_sequence(self.values, "posterior values"))
+        object.__setattr__(self, "observations", _own_sequence(self.observations, "posterior observations"))
+        object.__setattr__(self, "uncertainty", _own_sequence(self.uncertainty, "posterior uncertainty"))
         _require_id(self.id, "posterior id")
         if not self.values or not self.observations or not self.method:
             raise ValueError("posterior values, observations, and method are required")
@@ -678,6 +723,8 @@ class PredictiveArtifact:
 
     def __post_init__(self) -> None:
         _require_schema_version(self.schema_version, "predictive")
+        object.__setattr__(self, "target_value_ids", _own_sequence(self.target_value_ids, "predictive targets"))
+        object.__setattr__(self, "uncertainty", _own_sequence(self.uncertainty, "predictive uncertainty"))
         _require_id(self.id, "predictive id")
         if not _SHA256.fullmatch(self.posterior_identity) or not _SHA256.fullmatch(self.content_digest):
             raise ValueError("predictive posterior and content identities must be SHA-256")
@@ -716,6 +763,8 @@ class DecisionArtifact:
 
     def __post_init__(self) -> None:
         _require_schema_version(self.schema_version, "decision")
+        object.__setattr__(self, "alternatives", _own_sequence(self.alternatives, "decision alternatives"))
+        object.__setattr__(self, "assumptions", _own_sequence(self.assumptions, "decision assumptions"))
         _require_id(self.id, "decision id")
         if len(self.alternatives) < 2 or len(set(self.alternatives)) != len(self.alternatives):
             raise ValueError("decision alternatives must contain at least two unique values")

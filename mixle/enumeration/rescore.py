@@ -41,6 +41,32 @@ __all__ = ["RescoredIndex", "RescoreResult"]
 _LOG2 = math.log(2.0)
 
 
+def _require_exact_int(value: Any, name: str, *, minimum: int) -> int:
+    """Validate ``value`` is an EXACT integer ``>= minimum`` -- never silently truncated (MXR-080-1903).
+
+    ``rerank_window = int(rerank_window)`` ran BEFORE the ``< 0`` guard that MXR-080-0233 added, so
+    the guard could not see what it was meant to reject: ``-0.5`` truncated to ``0`` and was accepted
+    as "no reranking window at all", which is precisely the silently-degraded pulled set that guard
+    exists to refuse. ``2.9`` became ``2`` and the string ``"5"`` became ``5``, both without a word.
+    A window and a rank are exact counts; a fractional or textual one is a caller error, and rounding
+    it picks a query the caller never asked for.
+
+    Accepts a Python/numpy integer, or a float that is exactly integer-valued (``4.0``) -- the same
+    contract as :func:`mixle.enumeration.envelope._require_positive_int` and
+    :func:`mixle.enumeration.autoregressive._require_positive_int`, so the package answers one way.
+    ``bool`` is refused: ``True`` is a yes/no answer, not a window of size one.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
+        raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
+    if isinstance(value, (float, np.floating)):
+        if not math.isfinite(value) or value != math.floor(value):
+            raise ValueError(f"{name} must be a whole number, not a fractional value, got {value!r}")
+    ivalue = int(value)
+    if ivalue < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}, got {ivalue}")
+    return ivalue
+
+
 @dataclass
 class RescoreResult:
     """Outcome of a :class:`RescoredIndex` query: target-exact items plus an explicit certificate.
@@ -106,12 +132,13 @@ class RescoredIndex:
         rerank_window: int = 64,
         assumed_gap: float | None = None,
     ) -> None:
-        rerank_window = int(rerank_window)
-        if rerank_window < 0:
-            # MXR-080-0233: a negative window used to make n = k + rerank_window collapse to <= 0,
-            # so `range(n)` pulled NOTHING and top_k/slice still returned certified=True on an empty
-            # result -- reject it outright rather than silently degrading the pulled set.
-            raise ValueError(f"rerank_window must be non-negative, got {rerank_window!r}")
+        # MXR-080-0233: a negative window used to make n = k + rerank_window collapse to <= 0, so
+        # `range(n)` pulled NOTHING and top_k/slice still returned certified=True on an empty result
+        # -- reject it outright rather than silently degrading the pulled set. MXR-080-1903: the
+        # rejection now happens on the value the caller passed, not on an int()-truncated stand-in
+        # that had already turned -0.5 into an acceptable 0. Zero stays legal -- rescore_test.py's
+        # certification cases use rerank_window=0 to mean "no window".
+        rerank_window = _require_exact_int(rerank_window, "rerank_window", minimum=0)
         if assumed_gap is not None:
             assumed_gap = float(assumed_gap)
             if not math.isfinite(assumed_gap) or assumed_gap < 0:
@@ -210,8 +237,9 @@ class RescoredIndex:
         Returns a :class:`RescoreResult` -- target-exact scores, draft+window-approximate
         completeness (see the class/module docstrings for exactly what ``certified`` proves).
         """
-        if k < 1:
-            raise ValueError("k must be >= 1")
+        # `k` sizes the pulled head and slices the target-ordered result, so it must be an exact
+        # count: `k=True` used to pass `k < 1` and quietly return exactly one item (MXR-080-1903).
+        k = _require_exact_int(k, "k", minimum=1)
         n = k + self.rerank_window
         seqs, draft_lps, target_lps = self._pull(n)
         if not seqs:
@@ -229,8 +257,8 @@ class RescoredIndex:
         Same semantics as :meth:`top_k`: order within the pulled set is target-exact; the certificate
         covers whether an unpulled sequence could belong in (or before) the slice.
         """
-        if start < 0 or k < 1:
-            raise ValueError("start must be >= 0 and k >= 1")
+        start = _require_exact_int(start, "start", minimum=0)
+        k = _require_exact_int(k, "k", minimum=1)
         n = start + k + self.rerank_window
         seqs, draft_lps, target_lps = self._pull(n)
         if not seqs:
