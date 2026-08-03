@@ -84,12 +84,12 @@ workers under the same estimation contract.
      - ``mpi``
      - Tree-fold reduction of sufficient statistics across ranks.
      - Tested, not CI-gated
-     - E1 — ``parallel_test.MPIBackendTestCase`` exists; mpi4py not installed in CI.
+     - E1 — ``parallel_test.MPIBackendTestCase`` exists; mpi4py not installed in CI. Retained local execution evidence: ``release-checklists/0.8.0-backend-execution-evidence.md``.
    * - Spark
      - ``spark``
      - Map/fold over an RDD.
      - Tested, not CI-gated
-     - E1 — backend test skips in CI (pyspark not installed).
+     - E1 — backend test skips in CI (pyspark not installed). Retained local execution evidence: ``release-checklists/0.8.0-backend-execution-evidence.md``.
    * - Dask
      - ``dask``
      - Map/fold over a Dask cluster.
@@ -99,7 +99,7 @@ workers under the same estimation contract.
      - ``ray``
      - Map/fold over a Ray cluster.
      - Tested, not CI-gated
-     - E1 — backend test skips in CI.
+     - E1 — backend test skips in CI. Retained local execution evidence: ``release-checklists/0.8.0-backend-execution-evidence.md``. Retained local execution evidence: ``release-checklists/0.8.0-backend-execution-evidence.md``.
    * - Lightning
      - ``lightning``
      - Mini-batch iteration driving stochastic/mini-batch EM.
@@ -111,8 +111,20 @@ Reading this honestly
 
 "Tested, not CI-gated" is deliberate wording: the code and its tests exist, but because the backend is
 not installed in any CI lane, a regression would not be caught automatically today. Dask is installed in
-a scheduled CI lane; the other rows with this label still skip there. Until retained external or hardware
-receipts exist, prefer the Supported and Optional-CI rows for anything you
-depend on, and validate a "Tested, not CI-gated" backend in your own environment before relying on it.
+a scheduled CI lane; the other rows with this label still skip there.
+
+Every one of these backends HAS now been executed against the release candidate, and the commands,
+versions and results are retained in ``release-checklists/0.8.0-backend-execution-evidence.md`` --
+including a two-rank ``mpiexec`` fit agreeing with the serial fit to 1e-10. That evidence is
+deliberately not treated as promotion to "Supported", for three reasons stated in the file itself: it
+is single-machine (macOS arm64, multi-process on one host -- no multi-node, no network transport, no
+GPU), it does not cover interruption/recovery, corruption rejection or rollback, and it was produced
+by the implementer rather than an independent reviewer. A backend is CI-gated or it is not, and none
+of these are.
+
+So the guidance is unchanged: prefer the Supported and Optional-CI rows for anything you depend on,
+and validate a "Tested, not CI-gated" backend in your own environment before relying on it. What the
+evidence file changes is that you can now see exactly what was run, and repeat it, instead of taking
+"tested" on trust.
 Multi-node/multi-GPU *frontier-scale* training is out of scope for this release: mixle sits above the
 trainer, not as a replacement for a dedicated large-scale training system.
