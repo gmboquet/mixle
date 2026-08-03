@@ -104,9 +104,18 @@ def to_pseudocomponents(blends: np.ndarray, lower: Sequence[float]) -> np.ndarra
         raise ValueError(
             f"blends must be non-negative (canonical simplex points), got a minimum of {float(x.min())!r}."
         )
+    # (MXR-080-1901) The sum test is an explicit |row_sum - 1| > atol comparison rather than
+    # np.allclose/np.isclose. Those two carry a DEFAULT rtol of 1e-5, which is added to whatever atol is
+    # passed: `np.allclose(s, 1.0, atol=1e-9)` really admits |s - 1| <= 1e-9 + 1e-5*1.0 ~= 1e-5, so the
+    # declared _SIMPLEX_ATOL was being overruled by a tolerance four orders of magnitude looser. A row
+    # summing to 1.000005 (5000x the declared tolerance) was accepted and mapped through, and the result
+    # then contradicted this function's own "Rows still sum to 1" guarantee by ~4e-6. Comparing the
+    # absolute deviation directly makes _SIMPLEX_ATOL the ONLY tolerance in force, so the constant on
+    # line 65 means what it says.
     row_sums = x.sum(axis=1)
-    if not np.allclose(row_sums, 1.0, atol=_SIMPLEX_ATOL):
-        bad_rows = np.flatnonzero(~np.isclose(row_sums, 1.0, atol=_SIMPLEX_ATOL))
+    sum_error = np.abs(row_sums - 1.0)
+    if np.any(sum_error > _SIMPLEX_ATOL):
+        bad_rows = np.flatnonzero(sum_error > _SIMPLEX_ATOL)
         raise ValueError(
             "blends must be canonical simplex points (each row summing to 1); row(s) "
             f"{bad_rows.tolist()} sum to {row_sums[bad_rows].tolist()}."

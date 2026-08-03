@@ -16,7 +16,43 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
-from mixle.doe.designs import _as_rng
+from mixle.doe.designs import _as_rng, _require_exact_positive_int
+
+
+def _require_policy_weight(value: Any, name: str) -> float:
+    """Validate a merit-blending weight: a finite, non-negative, non-Boolean scalar.
+
+    (MXR-080-1901) These weights were previously passed straight into the merit sum with no check, and
+    two invalid classes got through:
+
+    * NEGATIVE. Every one of them is documented as directional ("Higher uncertainty/preference and
+      better coverage increase merit; higher ``cost`` lowers it"), and a negative weight silently
+      INVERTS that: ``uncertainty_weight=-5.0`` selected the three LEAST uncertain candidates
+      (0.06/0.13/0.21) instead of the three most (0.68/0.70/0.94), while the returned receipt's
+      ``metadata["weights"]["uncertainty"]`` cheerfully recorded ``-5.0``. A result record that
+      contradicts the control that produced it is worse than an error.
+    * NON-FINITE. ``uncertainty_weight=nan`` poisoned every candidate's merit and surfaced as
+      ``"no finite-merit eligible candidates remain"`` -- an error that blames the candidate pool for a
+      defect in the caller's control, sending the reader to inspect the wrong input entirely.
+
+    Zero IS accepted: switching a term off is the documented way to isolate the others, and the
+    existing tests rely on it (``diversity_weight=0.0``, ``uncertainty_weight=0.0``). Booleans are
+    refused because ``True`` as a weight is far more likely a mis-passed flag than an intended 1.0.
+    """
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a finite non-negative number, got bool ({value!r}).")
+    try:
+        weight = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite non-negative number, got {value!r}.") from exc
+    if not np.isfinite(weight):
+        raise ValueError(f"{name} must be finite, got {value!r}.")
+    if weight < 0.0:
+        raise ValueError(
+            f"{name} must be non-negative, got {value!r}; a negative weight inverts the documented "
+            "direction of the term instead of down-weighting it."
+        )
+    return weight
 
 
 @dataclass(frozen=True)
@@ -68,6 +104,14 @@ def distillation_design(
     """
     if isinstance(n, (bool, np.bool_)) or not isinstance(n, (int, np.integer)) or n <= 0:
         raise ValueError("n must be positive.")
+    # (MXR-080-1901) Validate every merit weight before any work: an invalid control must be named as
+    # such, not left to reappear downstream as a nonsense selection or a misattributed pool error.
+    uncertainty_weight = _require_policy_weight(uncertainty_weight, "uncertainty_weight")
+    diversity_weight = _require_policy_weight(diversity_weight, "diversity_weight")
+    task_coverage_weight = _require_policy_weight(task_coverage_weight, "task_coverage_weight")
+    modality_coverage_weight = _require_policy_weight(modality_coverage_weight, "modality_coverage_weight")
+    preference_weight = _require_policy_weight(preference_weight, "preference_weight")
+    cost_weight = _require_policy_weight(cost_weight, "cost_weight")
     x = _as_2d_features(features, "features")
     n_pool = x.shape[0]
     if n_pool == 0:
@@ -190,8 +234,14 @@ def cross_modal_distillation_design(
     n_pool = arrays[0].shape[0]
     if any(arr.shape[0] != n_pool for arr in arrays):
         raise ValueError("all modality feature matrices must have the same number of rows.")
-    if int(min_modalities) <= 0:
-        raise ValueError("min_modalities must be positive.")
+    # (MXR-080-1901) `int(min_modalities)` silently TRUNCATED a fractional count: `min_modalities=2.9`
+    # became 2 and admitted 2-modality rows that `min_modalities=3` correctly excluded (on an 8-row pool
+    # it returned rows [0, 1, 6] instead of [5, 6, 7]), and `min_modalities=True` was accepted as 1.
+    # This is a modality COUNT -- an exact integer -- so it routes through the same exact-integer gate
+    # every other count-like control in the doe package uses (designs._require_exact_positive_int,
+    # MXR-080-0174), which accepts 3 and 3.0, and rejects 2.9, 0, and bool.
+    min_modalities = _require_exact_positive_int(min_modalities, "min_modalities")
+    alignment_weight = _require_policy_weight(alignment_weight, "alignment_weight")
 
     z_by_mod: list[np.ndarray] = []
     present_cols: list[np.ndarray] = []
@@ -206,7 +256,7 @@ def cross_modal_distillation_design(
     fused = np.hstack([*fused_parts, presence.astype(np.float64)])
 
     row_modalities = [tuple(name for name, ok in zip(names, presence[i]) if ok) for i in range(n_pool)]
-    eligible = presence.sum(axis=1) >= int(min_modalities)
+    eligible = presence.sum(axis=1) >= min_modalities
     if required_modalities is not None:
         required = set(required_modalities)
         missing = required.difference(names)
@@ -216,7 +266,7 @@ def cross_modal_distillation_design(
 
     alignment = _alignment_disagreement(z_by_mod, presence)
     base_unc = _as_score(uncertainty, n_pool, default=0.0, name="uncertainty")
-    combined_unc = _unit_scale(base_unc) + float(alignment_weight) * _unit_scale(alignment)
+    combined_unc = _unit_scale(base_unc) + alignment_weight * _unit_scale(alignment)
     combined_pref = _unit_scale(_as_score(preference, n_pool, default=0.0, name="preference"))
 
     design = distillation_design(

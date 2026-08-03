@@ -189,9 +189,31 @@ def register_propagator(name: str) -> Callable[[Callable[..., dict[str, Any]]], 
 
     The decorated callable receives ``(func, mean, cov, *, n, quantiles, seed)`` (``mean``/``cov``
     already coerced to float arrays) and returns the output-statistics dict.
+
+    (MXR-080-1901) Registering a name that is already taken raises instead of replacing it. The old
+    ``_PROPAGATORS[name] = fn`` silently overwrote, so re-registering ``"montecarlo"`` (by import order,
+    a name collision between two plugins, or a module imported twice) changed what EVERY existing
+    ``propagate(..., method="montecarlo")`` call in the process returns -- the same call site, the same
+    documented method name, different outputs, and nothing anywhere recording the substitution. This is
+    the registry's only mutation point, so refusing the collision here is enough to make a resolved
+    method name mean one fixed thing for the life of the process. Adding a NEW name is unaffected: that
+    is the extension point and it stays open. To deliberately replace a built-in, delete the existing
+    entry from ``_PROPAGATORS`` first -- an explicit, greppable act rather than an invisible one.
     """
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(f"propagator name must be a non-empty string, got {name!r}.")
 
     def decorator(fn: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+        if not callable(fn):
+            raise TypeError(f"propagator {name!r} must be callable, got {type(fn).__name__}.")
+        existing = _PROPAGATORS.get(name)
+        if existing is not None and existing is not fn:
+            raise ValueError(
+                f"propagation method {name!r} is already registered (to "
+                f"{getattr(existing, '__qualname__', existing)!r}); refusing to silently replace it, "
+                "which would change the result of every existing propagate(method=%r) call. Register "
+                "under a different name, or delete the existing entry first if replacement is intended." % name
+            )
         _PROPAGATORS[name] = fn
         return fn
 

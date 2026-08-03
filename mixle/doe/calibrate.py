@@ -88,6 +88,40 @@ def _numerical_hessian(f: Callable[[np.ndarray], float], x0: np.ndarray) -> np.n
     return hess
 
 
+def _is_positive_definite(hessian: np.ndarray) -> bool:
+    """Return whether ``hessian`` is finite, symmetric, and genuinely positive-definite.
+
+    (MXR-080-1901) ``theta_standard_error`` is documented to degrade to ``nan`` when the Hessian at the
+    optimum "is not numerically invertible (or not positive-definite)", but the code only ever tested
+    that ``np.linalg.inv`` did not raise and that the THETA BLOCK of the inverse had a non-negative
+    diagonal. Neither implies positive-definiteness, so the documented claim was never actually proved:
+    ``H = [[-1, 2], [2, -1]]`` has eigenvalues ``1`` and ``-3`` -- indefinite, a saddle rather than a
+    minimum, so the Laplace approximation does not hold at all -- yet it inverts cleanly to
+    ``[[1/3, 2/3], [2/3, 1/3]]``, whose diagonal is entirely positive. The old code therefore reported a
+    confident standard error of ``0.577`` where it had promised ``nan``. Nelder-Mead can and does stop
+    at points that are not local minima, and the central-difference stencil on a noisy likelihood can
+    produce an indefinite matrix at a genuine one, so this is reachable, not hypothetical.
+
+    A Cholesky factorization succeeds exactly when a symmetric matrix is positive-definite, so it is the
+    proof the docstring's claim needs. Finiteness is checked first because ``np.linalg.cholesky``'s
+    behaviour on NaN/Inf input is not part of its contract. Symmetry is asserted rather than tolerated:
+    :func:`_numerical_hessian` writes ``hess[i, j]`` and ``hess[j, i]`` from the same stencil value, so
+    an asymmetric matrix here would mean that invariant broke, not that the input was merely noisy.
+    """
+    hessian = np.asarray(hessian, dtype=np.float64)
+    if hessian.ndim != 2 or hessian.shape[0] != hessian.shape[1] or hessian.shape[0] == 0:
+        return False
+    if not np.all(np.isfinite(hessian)):
+        return False
+    if not np.array_equal(hessian, hessian.T):
+        return False
+    try:
+        np.linalg.cholesky(hessian)
+    except np.linalg.LinAlgError:
+        return False
+    return True
+
+
 class CalibrationIdentifiabilityError(ValueError):
     """Raised when simulator sensitivity cannot identify every calibration-parameter direction."""
 
@@ -451,13 +485,19 @@ def calibrate(
     # (not an error) if the Hessian is not numerically invertible/positive-definite at the optimum --
     # the point estimate above does not depend on this and stays valid either way.
     theta_se = None
-    try:
-        cov = np.linalg.inv(_numerical_hessian(neg_ll, res.x))
-        theta_var = np.diag(cov)[:nth]
-        if np.all(np.isfinite(theta_var)) and np.all(theta_var >= 0):
-            theta_se = np.sqrt(theta_var)
-    except np.linalg.LinAlgError:
-        theta_se = None
+    hessian = _numerical_hessian(neg_ll, res.x)
+    if _is_positive_definite(hessian):
+        try:
+            cov = np.linalg.inv(hessian)
+        except np.linalg.LinAlgError:
+            theta_se = None
+        else:
+            theta_var = np.diag(cov)[:nth]
+            # A positive-definite Hessian has a positive-definite inverse, so these diagonal entries are
+            # positive in exact arithmetic; the check only catches float64 roundoff on a near-singular
+            # matrix that still passed the Cholesky above.
+            if np.all(np.isfinite(theta_var)) and np.all(theta_var >= 0):
+                theta_se = np.sqrt(theta_var)
 
     if discrepancy:
         amp, noise = np.exp(res.x[nth : nth + 2])

@@ -45,8 +45,12 @@ def _validate_moments(mean: Any, std: Any) -> tuple[np.ndarray, np.ndarray]:
     NaN acquisition values; and a negative ``std`` (never legitimate -- a standard deviation cannot be
     negative, so this means corrupted upstream input, not a numerical-precision edge case) was floored
     to the same ``1e-9`` epsilon used for a legitimately tiny-but-valid std instead of being rejected.
-    This rejects all of those up front and floors only genuinely nonnegative std, for numerical
-    stability in the divisions/logs that follow.
+    This rejects all of those up front.
+
+    (MXR-080-1901) It no longer floors the surviving std at ``1e-9``. That floor was applied to BOTH
+    consumers, but only one of them needs it: see :func:`sample_max_values` (which still floors locally,
+    for its bracket search) and :func:`max_value_entropy_search` (which now evaluates the exact
+    ``sd -> 0`` limit instead of standing in a fictitious ``1e-9``).
     """
     mu = np.asarray(mean, dtype=np.float64).ravel()
     sd = np.asarray(std, dtype=np.float64).ravel()
@@ -60,7 +64,7 @@ def _validate_moments(mean: Any, std: Any) -> tuple[np.ndarray, np.ndarray]:
         raise ValueError("std contains non-finite values (NaN/Inf).")
     if np.any(sd < 0.0):
         raise ValueError("std must be nonnegative (a standard deviation cannot be negative).")
-    return mu, np.maximum(sd, 1e-9)
+    return mu, sd
 
 
 def _gumbel_quantile(loc: float, scale: float, r: Any) -> np.ndarray:
@@ -109,6 +113,15 @@ def sample_max_values(mean: Any, std: Any, n_samples: int = 64, *, seed: int | R
             negative; or if ``n_samples`` is not a positive integer.
     """
     mu, sd = _validate_moments(mean, std)
+    # (MXR-080-1901) The 1e-9 floor stays HERE, deliberately. Unlike the acquisition below, the
+    # sd -> 0 limit of this routine's CDF-of-the-maximum is a step function (Phi((y - mu)/sd) -> the
+    # indicator y > mu), which has no interior for the bisection to converge on: a wholly deterministic
+    # candidate cloud would make `cdf_max` piecewise constant and every quantile degenerate to the same
+    # point, collapsing the Gumbel IQR fit. Flooring keeps the bracket search well posed. This is an
+    # acknowledged approximation of the degenerate case, not an exact limit, and it is scoped to the
+    # y*-sampling heuristic -- which is itself an approximation (Wang & Jegelka's Gumbel fit) -- rather
+    # than to the acquisition value the optimizer ranks candidates by.
+    sd = np.maximum(sd, 1e-9)
     n = _require_positive_int(n_samples, "n_samples")
     rng = seed if isinstance(seed, RandomState) else RandomState(seed)
 
@@ -159,7 +172,9 @@ def max_value_entropy_search(mean: Any, std: Any, max_samples: Any, *, maximize:
     Given samples ``max_samples`` of the global optimum value ``y*``, returns the per-candidate mutual
     information ``I(y; y*) = (1/M) sum_m [ gamma_m phi(gamma_m)/(2 Phi(gamma_m)) - log Phi(gamma_m) ]``
     with ``gamma_m = (y*_m - mu)/sd`` (maximization; for minimization the sense is flipped by the
-    caller). Higher is better -- it favors uncertain candidates near the believed optimum.
+    caller). Higher is better -- it favors uncertain candidates near the believed optimum. A candidate
+    with ``sd == 0`` is deterministic and scores exactly ``0``: its observation is a constant, which
+    carries no mutual information with ``y*`` (MXR-080-1901).
 
     Raises:
         ValueError: if ``mean``/``std`` are empty, mismatched in shape, non-finite, or ``std`` is
@@ -178,13 +193,31 @@ def max_value_entropy_search(mean: Any, std: Any, max_samples: Any, *, maximize:
         raise ValueError("max_samples contains non-finite values (NaN/Inf).")
     if not maximize:
         mu, ystar = -mu, -ystar
+    # (MXR-080-1901) A candidate with sd == 0 is DETERMINISTIC: observing it returns a constant, and the
+    # mutual information between a constant and anything is exactly 0. That is the limiting law, and it
+    # is what this function claims to return. The closed form below is derived from the truncated-
+    # Gaussian entropy of y | y*, a derivation that assumes sd > 0, so it must not be evaluated at a
+    # substituted sd for these rows: the old code floored sd to 1e-9 and, whenever a y* sample equalled
+    # the candidate's own mean (routine -- `sample_max_values` clamps every draw up to `mu.max()`, so the
+    # incumbent candidate hits gamma == 0 exactly), returned log(2) ~= 0.693 nats of information for a
+    # candidate that carries none. In a two-candidate cloud that spurious value was the LARGEST merit
+    # present, so MES proposed the one point guaranteed to teach it nothing.
+    #
+    # The formula's own limit along y* == mu is log(2) rather than 0, i.e. the closed form really is
+    # discontinuous at sd = 0; that is a property of the derivation's domain, not a numerical artifact,
+    # and 0 is the correct value of the quantity being computed. Deliberately NOT changed: candidates
+    # with sd > 0 keep the exact closed form, including the tiny-but-nonzero ones (1e-15 is a legitimate
+    # posterior sd, not a stand-in for zero), so this narrows the substituted region to sd == 0 only.
+    deterministic = sd <= 0.0
+    safe_sd = np.where(deterministic, 1.0, sd)  # placeholder divisor; those rows are overwritten below
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        gamma = (ystar[None, :] - mu[:, None]) / sd[:, None]  # (n_candidates, M)
+        gamma = (ystar[None, :] - mu[:, None]) / safe_sd[:, None]  # (n_candidates, M)
     if not np.all(np.isfinite(gamma)):
         raise ValueError("max_value_entropy_search produced non-finite standardized optimum values.")
     cdf = np.clip(norm.cdf(gamma), 1e-12, 1.0)
     pdf = norm.pdf(gamma)
     info = gamma * pdf / (2.0 * cdf) - np.log(cdf)
+    info[deterministic, :] = 0.0
     result = np.asarray(info.mean(axis=1))
     if not np.all(np.isfinite(result)):
         raise ValueError("max_value_entropy_search produced non-finite information for at least one candidate.")

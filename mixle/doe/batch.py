@@ -26,7 +26,7 @@ from typing import Any
 import numpy as np
 from numpy.random import RandomState
 
-from mixle.doe.bayesopt import _fit_surrogate, _require_finite_scalar, _validate_xy
+from mixle.doe.bayesopt import _fit_surrogate, _require_finite_scalar, _validate_xy, expected_improvement
 from mixle.doe.designs import Bounds, _as_bounds, _as_rng, _require_exact_positive_int, latin_hypercube
 
 _PSD_EIGENVALUE_RATIO = 1e-9
@@ -322,10 +322,37 @@ def propose_local_penalization(
     # bound keeps every pick's exclusion radius r_j = mu(x_j) - M_hat strictly positive.
     m_star = float((obj_mean - std).min())
 
-    signed = (mean - best) if maximize else (best - mean)
-    z = signed / np.maximum(std, 1e-12)
-    ei = np.maximum(signed, 0.0) * norm.cdf(z) + std * norm.pdf(z)
-    merit = np.log(np.maximum(ei, 1e-300))  # log-acquisition so penalties multiply as sums
+    # (MXR-080-1901) This used to re-derive EI inline, and got it wrong twice over; it now defers to the
+    # canonical `expected_improvement` instead of keeping a second, divergent copy of the formula.
+    #   * WRONG LAW. It computed `max(signed, 0) * Phi(z) + std * phi(z)`. EI's closed form is
+    #     `E[max(improve, 0)] = improve * Phi(z) + sigma * phi(z)` -- the first factor is the SIGNED
+    #     improvement, not its positive part. Clamping it deleted the negative contribution of
+    #     non-improving candidates, leaving only `sigma * phi(z)` and overstating them: at mean=2,
+    #     best=1, std=1 this returned 0.2420 against a true EI of 0.0833 (2.9x). The inflation depends
+    #     on z, so it is not a monotone reparameterization -- it reorders candidates and so changes
+    #     which points the batch actually contains.
+    #   * CLAMPED SIGMA INSTEAD OF ITS LIMIT. Dividing by `max(std, 1e-12)` evaluates the finite-sigma
+    #     formula at a fictitious sigma for a deterministic candidate rather than the sigma -> 0 limit,
+    #     which is exact and closed-form: EI -> max(improve, 0). At std=0 with a guaranteed improvement
+    #     of 1e-13 the clamp returned 0.54x the exact value (and 0.84x at 1e-12).
+    # `expected_improvement` applies that exact limit for std <= 1e-12. Deliberately NOT changed here:
+    # the penalization factor below still uses its own `norm.cdf`, which is a soft exclusion weight
+    # rather than a probability law with a degenerate limit, so it has no sigma -> 0 case to evaluate.
+    #
+    # Scoring is restricted to the candidates whose posterior moments are usable, and the rest are left
+    # at -inf. `expected_improvement` validates its ENTIRE input and rejects any non-finite entry, but
+    # this driver is separately specified -- and covered by
+    # `test_propose_local_penalization_never_selects_a_nan_merit_candidate_over_a_finite_one` -- to
+    # tolerate a surrogate that returns NaN at SOME candidates and still return a batch drawn from the
+    # remainder. Handing it the raw arrays would convert that supported partial-NaN case into a hard
+    # failure, so the unusable rows are excluded from the acquisition call rather than allowed to fail
+    # the whole proposal. The all-NaN case still reaches the loop guard below, unchanged.
+    merit = np.full(mean.shape, -np.inf, dtype=np.float64)
+    scorable = np.isfinite(mean) & np.isfinite(std) & (std >= 0.0)
+    if np.any(scorable):
+        ei = expected_improvement(mean[scorable], std[scorable], best, maximize=maximize)
+        # log-acquisition so penalties multiply as sums
+        merit[scorable] = np.log(np.maximum(ei, 1e-300))
     # np.argmax treats NaN as the maximum -- np.argmax([1, nan, 5]) returns 1, not 2 -- so a single
     # non-finite merit would otherwise silently outrank every genuinely-scored candidate. Mask any
     # non-finite entry to -inf first so it can never win selection over a finite one, then require at
