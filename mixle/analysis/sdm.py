@@ -209,8 +209,8 @@ class HabitatModel:
     ``beta``/``beta_cov`` are the Laplace-approximate posterior over the log-linear intensity
     coefficients; ``design`` is the ``(K, p)`` covariate design matrix (intercept + environmental
     covariates); ``cell_area`` is the per-cell area used as the Poisson offset during fitting. The
-    suitability field is the fitted intensity ``lambda_c = exp(design_c @ beta)`` (:pyattr:`mean`);
-    :meth:`samples`/:pyattr:`cov`/:meth:`credible_interval` push the beta-posterior forward through the
+    suitability field is the fitted intensity ``lambda_c = exp(design_c @ beta)`` (:attr:`mean`);
+    :meth:`samples`/:attr:`cov`/:meth:`credible_interval` push the beta-posterior forward through the
     same log-link (a delta-method / lognormal approximation), scaled by a held-out-calibrated variance
     multiplier, so every downstream consumer (N2's no-mine mask, N4's resistance raster) sees one
     calibrated field posterior.

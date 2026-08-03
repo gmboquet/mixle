@@ -1,7 +1,7 @@
 """Ask-tell Bayesian-optimization interface for mixle.doe (WS-E).
 
 A small stateful optimizer object for the common human/experiment-in-the-loop workflow, where the
-objective is expensive or physical and evaluated *outside* the loop:
+objective is expensive or physical and evaluated *outside* the loop::
 
     opt = BayesianOptimizer(bounds, acq="ei")
     for _ in range(n):

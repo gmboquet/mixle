@@ -371,7 +371,8 @@ class IntegerMultinomialDistribution(SequenceEncodableProbabilityDistribution):
         """Vectorized evaluation of log-density for an encoded sequence of iid observations from integer multinomial
             distribution.
 
-        Arg 'x' is a Tuple of length 5 containing:
+        Arg 'x' is a Tuple of length 5 containing::
+
             sz (int): Total number of observed integermultinomial samples.
             idx (ndarray): Numpy index array for each Tuple[value, count] in flattened x.
             cnt (ndarray): Number of successes for each value in flattened x.
@@ -891,13 +892,15 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         """Vectorized update of IntegerMultinomialAccumulator sufficient statistics for encoded sequence of
             independent observations x.
 
-        Encoded sequence 'x' is a Tuple of length 5 containing:
+        Encoded sequence 'x' is a Tuple of length 5 containing::
+
             sz (int): Total number of observed integermultinomial samples.
             idx (ndarray): Numpy index array for each Tuple[value, count] in flattened x.
             cnt (ndarray): Number of successes for each value in flattened x.
             val (ndarray): Integer-category value array in flattened x.
             tcnt (Optional[E0]): Sequence encoded number of trials for each sequence (length sz), with type E0 if
                 length DataSequenceEncoder is not NullDataEncoder and returns type E0.
+
         Args:
             x (See above): Encoded sequence of iid observations of integer multinomial distribution.
             weights (ndarray): Weights for observations in encoded sequence.
@@ -1032,7 +1035,8 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
 
         This delegates to :meth:`seq_update`.
 
-        Encoded sequence 'x' is a Tuple of length 5 containing:
+        Encoded sequence 'x' is a Tuple of length 5 containing::
+
             sz (int): Total number of observed integermultinomial samples.
             idx (ndarray): Numpy index array for each Tuple[value, count] in flattened x.
             cnt (ndarray): Number of successes for each value in flattened x.
@@ -1526,7 +1530,8 @@ class IntegerMultinomialDataEncoder(DataSequenceEncoder):
     ) -> tuple[int, np.ndarray, np.ndarray, np.ndarray, Any | None]:
         """Encode a sequence of iid integer multinomial observations.
 
-        The returned tuple contains:
+        The returned tuple contains::
+
             sz (int): Total number of observed integermultinomial samples.
             idx (ndarray): Numpy index array for each Tuple[value, count] in flattened x.
             cnt (ndarray): Number of successes for each value in flattened x.

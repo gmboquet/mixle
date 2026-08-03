@@ -2757,7 +2757,8 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         The input 'x' is a sequence encoded HMM sequence of iid observations produced by
         'HiddenMarkovDataEncoder.seq_encode()'. Arg x is either Tuple[None, enc] or Tuple[None, enc_numba].
 
-        For the first case, enc is Tuple[Tuple[....], T_topic, T_len], where the first tuple is given by a Tuple of
+        For the first case, enc is Tuple[Tuple[....], T_topic, T_len], where the first tuple is given by a Tuple of ::
+
             enc[0][0] (int): Total number of observed emissions from all HMM sequences.
             enc[0][1] (List[Tuple[int, int]]): Contains bands for t^th observation in HMM sequences stored in 'seq_x'.
             enc[0][2] (List[ndarray[int]]): List of numpy array on sequence indices that have a next observed emission.
@@ -2767,7 +2768,9 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 is stored if the sequence length has already been met.
             enc[0][5] (ndarray): Numpy array containing lists index 'i' corresponding to x[i][t] block of 'seq_x'.
             enc[0][6] (T_topic): Sequence encoded value of 'seq_x'.
-        The next two entries of the Tuple are,
+
+        The next two entries of the Tuple are, ::
+
             enc[1] (T_topic): Sequence encoded observation values in order. Just for seq_init consistency.
             enc[1] (Optional[T_len]): Sequence encoded value of lengths of HMM distribution. None if len_encoder is
                 the NullDataEncoder.
@@ -2972,7 +2975,8 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         The input 'x' is a sequence encoded HMM sequence of iid observations produced by
         'HiddenMarkovDataEncoder.seq_encode()'. Arg x is either Tuple[None, enc] or Tuple[None, enc_numba].
 
-        For the first case, enc is Tuple[Tuple[....], T_topic, T_len], where the first tuple is given by a Tuple of
+        For the first case, enc is Tuple[Tuple[....], T_topic, T_len], where the first tuple is given by a Tuple of ::
+
             enc[0][0] (int): Total number of observed emissions from all HMM sequences.
             enc[0][1] (List[Tuple[int, int]]): Contains bands for t^th observation in HMM sequences stored in 'seq_x'.
             enc[0][2] (List[ndarray[int]]): List of numpy array on sequence indices that have a next observed emission.
@@ -2982,7 +2986,9 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 is stored if the sequence length has already been met.
             enc[0][5] (ndarray): Numpy array containing lists index 'i' corresponding to x[i][t] block of 'seq_x'.
             enc[0][6] (T_topic): Sequence encoded value of 'seq_x'.
-        The next two entries of the Tuple is,
+
+        The next two entries of the Tuple is, ::
+
             enc[1] (T_topic): Sequence encoded observation values in order. Just for seq_init consistency.
             enc[2] (Optional[T_len]): Sequence encoded value of lengths of HMM distribution. None if len_encoder is
                 the NullDataEncoder.
@@ -3764,7 +3770,8 @@ class HiddenMarkovEstimator(ParameterEstimator):
     ) -> HiddenMarkovModelDistribution:
         """Estimate HiddenMarkovModel from aggregated sufficient statistics contained in arg 'suff_stat'.
 
-        Sufficient statistics in arg 'suff_stat' are a Tuple containing:
+        Sufficient statistics in arg 'suff_stat' are a Tuple containing::
+
             suff_stat[0] (int): Number of hidden states.
             suff_stat[1] (np.ndarray): Initial state counts.
             suff_stat[2] (np.ndarray): State counts.
@@ -4036,7 +4043,7 @@ class HiddenMarkovDataEncoder(DataSequenceEncoder):
 
         Numba sequence encoding: Return type Tuple[Tuple[np.ndarray, np.ndarray, T_topic], Optional[T_len]] where
         T_topicis the type for 'emission_encoder.seq_encode()' and T_len is the type for 'len_encoder.seq_encode()'.
-        The first entry of the returned value (rv_numba) is a Tuple of length-3,
+        The first entry of the returned value (rv_numba) is a Tuple of length-3, ::
 
             rv_numba[0][0] (ndarray[int]): Sequence id's for observed values.
             rv_numba[0][1] (ndarray[int]): Sequence lengths for each observed HMM sequence.

@@ -346,7 +346,7 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
 
         If x is a missing value: return log(p) if p is not None, else return 0.0
         If x is not the missing_value: if p is not None, return the log_denisty(x) at base dist + log(1-p) else: return
-            log_density(x).
+        log_density(x).
 
         Args:
             x (T): Observation from base dist or missing value.

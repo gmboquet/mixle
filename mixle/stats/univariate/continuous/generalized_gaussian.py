@@ -4,7 +4,7 @@ A symmetric location-scale family with a tunable tail/peakedness shape ``beta`` 
 Laplace (``beta = 1``), Gaussian (``beta = 2``), and uniform (``beta -> inf``) laws. With location
 ``mu``, scale ``alpha > 0`` and shape ``beta > 0``,
 
-    f(x; mu, alpha, beta) = beta / (2 alpha Gamma(1/beta)) * exp(-(|x - mu| / alpha)^beta).
+    ``f(x; mu, alpha, beta) = beta / (2 alpha Gamma(1/beta)) * exp(-(|x - mu| / alpha)^beta)``.
 
 The normalizer is closed form (a Gamma function), so density/CDF/quantile/moments/entropy are all exact;
 it samples exactly via a Gamma draw with a random sign. Parameters are fit by the method of moments:
@@ -117,7 +117,7 @@ class GeneralizedGaussianDistribution(SequenceEncodableProbabilityDistribution):
 
     @staticmethod
     def backend_log_density_from_params(x: Any, mu: Any, alpha: Any, beta: Any, engine: Any) -> Any:
-        """Engine-neutral generalized-Gaussian log-density: log_norm - (|x-mu|/alpha)**beta."""
+        """Engine-neutral generalized-Gaussian log-density: ``log_norm - (|x-mu|/alpha)**beta``."""
         log_norm = (
             engine.log(beta) - engine.log(engine.asarray(2.0) * alpha) - engine.gammaln(engine.asarray(1.0) / beta)
         )

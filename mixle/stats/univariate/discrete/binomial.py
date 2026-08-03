@@ -1149,12 +1149,12 @@ class BinomialDataEncoder(DataSequenceEncoder):
         )
 
     def encoding_signature(self) -> tuple:
-        """The part of this encoder's identity that determines the encoded column layout: none of it.
+        r"""The part of this encoder's identity that determines the encoded column layout: none of it.
 
         ``min_val``/``max_val`` are *acceptance* bounds -- :meth:`seq_encode` passes them to
         ``exact_integer_observations`` as ``minimum``/``maximum`` and nothing else. The columns it
         emits carry the observed range of the data itself, not the encoder's bounds, so two
-        ``BinomialDataEncoder``s differing only in bounds encode any mutually-acceptable data
+        ``BinomialDataEncoder``\ s differing only in bounds encode any mutually-acceptable data
         identically.
 
         That distinction matters to consumers that hold an already-encoded batch and need to know

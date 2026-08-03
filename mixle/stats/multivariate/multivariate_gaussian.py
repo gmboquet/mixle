@@ -425,7 +425,9 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         """Evaluate the log-density at x.
 
         The log-density is given by
+
             log(p(x)) = -0.5*k*log(2*pi) - 0.5*log|covar| - 0.5*(x-mu)' covar^{-1} (x-mu).
+
         Args:
             x (np.ndarray): Observation from multivariate Gaussian distribution.
 
@@ -1212,7 +1214,7 @@ class MultivariateGaussianDataEncoder(DataSequenceEncoder):
         return other.dim == self.dim if isinstance(other, MultivariateGaussianDataEncoder) else False
 
     def seq_encode(self, x: Sequence[list[float]] | Sequence[list[np.ndarray]] | np.ndarray):
-        """Encode a sequence of iid length-dim observations for vectorized 'seq_' calls.
+        """Encode a sequence of iid length-dim observations for vectorized ``seq_`` calls.
 
         Args:
             x (Union[Sequence[List[float]], Sequence[List[np.ndarray]], np.ndarray]): Sequence of

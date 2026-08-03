@@ -1066,7 +1066,7 @@ def optimize(
             infers an estimator from raw ``data`` (``mixle.utils.automatic.get_estimator``).
         max_its (int): Maximum number of EM iterations to be performed. Default value is 10 iterations.
         delta (Optional[float]): Stopping criteria for EM algorithm used if max_its is not set: Iterate until
-            |old_loglikelihood - new_loglikelihood| < delta or iterations == max_its.
+            ``|old_loglikelihood - new_loglikelihood| < delta`` or iterations == max_its.
         init_estimator (Optional[ParameterEstimator]): ParameterEstimator to used to initialize EM algorithm parameters.
             If None, estimator is used. Must be consistent with estimator.
         init_p (float): Value in (0.0,1.0] for randomizing the proportion of data points used in initialization.
@@ -1679,7 +1679,7 @@ def best_of(
         trials (int): Integer number >= 1, of randomized initial conditions to perform EM algorithm for.
         max_its (int): Integer value >=1, sets the maximum number of iterations of EM to be performed as stopping criteria.
         init_p (float): Value in (0.0,1.0] for randomizing the proportion of data points used in initialization.
-        delta (float): Stopping criteria for EM when |old-log-likelihood - new-log-likelihood| < delta.
+        delta (float): Stopping criteria for EM when ``|old-log-likelihood - new-log-likelihood| < delta``.
         rng (RandomState): RandomState for setting seed. An integer is coerced to ``RandomState(rng)``;
             ``None`` (default) resolves to the fixed default seed. Mutually exclusive with ``seed``.
         init_estimator (Optional[ParameterEstimator]): Optional ParameterEstimator used for fitting.

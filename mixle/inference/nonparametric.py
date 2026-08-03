@@ -6,6 +6,8 @@ standard -- an effect size. Statistics are computed here (mid-ranks for ties); t
 the asymptotic reference distributions (normal / chi-square / Student-t / Kolmogorov) with the usual
 tie and continuity corrections, matching the conventions of SciPy / R.
 
+.. parsed-literal::
+
   Two independent samples : :func:`mann_whitney_u` (Wilcoxon rank-sum), :func:`brunner_munzel`,
                             :func:`cliffs_delta`, :func:`ks_2samp`
   k independent samples   : :func:`kruskal_wallis`, :func:`mood_median_test`, :func:`dunn_test` (post-hoc)

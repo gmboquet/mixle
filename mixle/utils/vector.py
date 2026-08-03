@@ -402,7 +402,7 @@ def batched_pd_logdet(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
     Returns:
         Tuple (is_pd, logdet), each shape x.shape[:-2]. is_pd[i] is True iff x[i] is positive
-        definite (every eigenvalue > 0). logdet[i] is log(|det(x[i])|) regardless of definiteness
+        definite (every eigenvalue > 0). logdet[i] is ``log(|det(x[i])|)`` regardless of definiteness
         (finite whenever x[i] is nonsingular) -- combine with is_pd via np.where the same way
         slogdet's sign output is used, discarding logdet where is_pd is False.
 

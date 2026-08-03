@@ -52,7 +52,7 @@ support, and the surfaces being claimed:
 * CPU fallback status should be stated for GPU-oriented workflows;
 * Windows should not be listed as supported unless it is actually tested; and
 * the final manifest should record exact Python, OS, Node, Xcode, SDK, and
-package-manager versions used during release validation.
+  package-manager versions used during release validation.
 
 An optional extra resolving on another platform or Python version is allowed
 by metadata, not a validated support claim. This distinction preserves the

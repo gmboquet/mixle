@@ -185,7 +185,9 @@ def update_embed(
     """One delta-bar-delta gradient step of KL(P || Q) on the embedding Y.
 
     Gradient of the heavy-tailed kernel:
+
         dC/dy_i = (2(alpha+1)/alpha) * sum_j (p_ij - q_ij) num_ij (y_i - y_j),
+
     computed in matrix form (no per-row Python loop). ``center=False`` skips the mean-centering
     for gauge-fixing goals (anchors, see :mod:`mixle.utils.hvis.goals`), which centering would
     otherwise undo each step.

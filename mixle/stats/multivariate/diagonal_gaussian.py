@@ -994,7 +994,7 @@ class DiagonalGaussianDataEncoder(DataSequenceEncoder):
             return False
 
     def seq_encode(self, x: Sequence[list[float] | np.ndarray]) -> np.ndarray:
-        """Encode a sequence of iid length-dim observations for vectorized 'seq_' calls.
+        """Encode a sequence of iid length-dim observations for vectorized ``seq_`` calls.
 
         Args:
             x (Sequence[Union[List[float], np.ndarray]]): Sequence of length-dim observation vectors.

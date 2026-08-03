@@ -747,6 +747,8 @@ def assemble_for_receivers(
     budget, shape, and, via ``compress``, which sentences survive. The result is not the same blob
     truncated to fit each consumer.
 
+    ::
+
         packets = assemble_for_receivers(substrate, task, [
             ReceiverProfile("frontier_llm", max_chars=2000, shape="passages"),
             ReceiverProfile("local_student", max_chars=200, shape="features", compress=True),

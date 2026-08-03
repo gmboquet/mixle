@@ -446,7 +446,8 @@ class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodablePr
         See log_density() function for details on the log-likelihood.
 
         The encoded sequence 'x' is a Tuple length 2. The first component contains data type Optional[T1]
-        corresponding to the sequence encoding of the lengths. The second component is a Tuple of length 6 containing
+        corresponding to the sequence encoding of the lengths. The second component is a Tuple of length 6 containing ::
+
             xv (ndarray[int]): Numpy array of flattened word values.
             xc (ndarray[float]): Numpy array of flattened counts for word values above.
             xd (ndarray[int]): Document id for each word-count pair in the arrays above.
@@ -519,7 +520,8 @@ class IntegerProbabilisticLatentSemanticIndexingDistribution(SequenceEncodablePr
         See component_log_density() function for details on component log-likelihood evaluation.
 
         The encoded sequence 'x' is a Tuple length 2. The first component contains data type Optional[T1]
-        corresponding to the sequence encoding of the lengths. The second component is a Tuple of length 6 containing
+        corresponding to the sequence encoding of the lengths. The second component is a Tuple of length 6 containing ::
+
             xv (ndarray[int]): Numpy array of flattened word values.
             xc (ndarray[float]): Numpy array of flattened counts for word values above.
             xd (ndarray[int]): Document id for each word-count pair in the arrays above.
@@ -917,7 +919,8 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
         """Vectorized initialization of sufficient statistics form an encoded sequence of observations in arg 'x'.
 
         The encoded sequence 'x' is a Tuple length 2. The first component contains data type Optional[T1]
-        corresponding to the sequence encoding of the lengths. The second component is a Tuple of length 6 containing
+        corresponding to the sequence encoding of the lengths. The second component is a Tuple of length 6 containing ::
+
             xv (ndarray[int]): Numpy array of flattened word values.
             xc (ndarray[float]): Numpy array of flattened counts for word values above.
             xd (ndarray[int]): Document id for each word-count pair in the arrays above.
@@ -962,7 +965,8 @@ class IntegerProbabilisticLatentSemanticIndexingAccumulator(SequenceEncodableSta
         """Vectorized update of sufficient statistics for encoded sequence of iid observations in x.
 
         The encoded sequence 'x' is a Tuple length 2. The first component contains data type Optional[T1]
-        corresponding to the sequence encoding of the lengths. The second component is a Tuple of length 6 containing
+        corresponding to the sequence encoding of the lengths. The second component is a Tuple of length 6 containing ::
+
             xv (ndarray[int]): Numpy array of flattened word values.
             xc (ndarray[float]): Numpy array of flattened counts for word values above.
             xd (ndarray[int]): Document id for each word-count pair in the arrays above.

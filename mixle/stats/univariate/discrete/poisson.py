@@ -226,7 +226,9 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         """Log-density of Poisson distribution evaluated at x.
 
         Log-density given by,
+
             log(p_mat(x_mat=x; lam) = x*log(lam) - log(x!) - lam, for x in {0,1,2,...}
+
         and -np.inf else.
 
         Note: log(Gamma(x+1.0)) = log(x!), where Gamma is the gamma function.
@@ -251,7 +253,8 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         """Vectorized log-density evaluated on sequence encoded x.
 
         Arg value x (Tuple[np.ndarray[int], np.ndarray[float]]) is seq_encoded Poisson data from
-        PoissonDataEncoder.seq_encode(), containing
+        PoissonDataEncoder.seq_encode(), containing ::
+
             x[0] (np.ndarray[int]): Non-negative integer valued Poisson iid observations,
             x[1] (np.ndarray[float]): np.log(Gamma(x[0]+1.0)), Gamma is the gamma function.
 
@@ -571,7 +574,8 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
         This delegates to :meth:`seq_update`.
 
         Arg value x (Tuple[np.ndarray[int], np.ndarray[float]]) is seq_encoded Poisson data from
-        PoissonDataEncoder.seq_encode(), containing
+        PoissonDataEncoder.seq_encode(), containing ::
+
             x[0] (np.ndarray[int]): Non-negative integer valued Poisson iid observations,
             x[1] (np.ndarray[float]): np.log(Gamma(x[0]+1.0)), Gamma is the gamma function.
 
@@ -608,7 +612,8 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
         """Vectorized update of PoissonAccumulator sufficient statistics with weighted observations.
 
         Arg value x (Tuple[np.ndarray[int], np.ndarray[float]]) is seq_encoded Poisson data from
-        PoissonDataEncoder.seq_encode(), containing
+        PoissonDataEncoder.seq_encode(), containing ::
+
             x[0] (np.ndarray[int]): Non-negative integer valued Poisson iid observations,
             x[1] (np.ndarray[float]): np.log(Gamma(x[0]+1.0)), Gamma is the gamma function.
 
@@ -800,7 +805,7 @@ class PoissonDataEncoder(DataSequenceEncoder):
         return isinstance(other, PoissonDataEncoder)
 
     def seq_encode(self, x: np.ndarray | Sequence[int]) -> tuple[np.ndarray, np.ndarray]:
-        """Encode iid sequence of Poisson observations for vectorized "seq_" function calls.
+        """Encode iid sequence of Poisson observations for vectorized ``seq_`` function calls.
 
         Data type must be int. Values must be non-negative integers.
         Returns the integer observations and ``log(Gamma(x + 1))`` values used by the vectorized scorer.

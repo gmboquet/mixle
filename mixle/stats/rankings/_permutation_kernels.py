@@ -3,7 +3,7 @@
 Every right-invariant permutation distance ``d(a, b)`` between two orderings (``a[r]`` / ``b[r]`` is the
 item at rank ``r``) is a function of the single *relative-rank* permutation ``r``, where ``r[i]`` is the
 rank, under ``b``, of the item placed at rank ``i`` by ``a`` (``r = rank_b[a]``). Writing each distance
-as a property of ``r`` versus the identity lets one O(n^2)/O(n log n) integer kernel serve all of them:
+as a property of ``r`` versus the identity lets one O(n^2)/O(n log n) integer kernel serve all of them::
 
     Kendall tau     inversions(r)              (discordant pairs)
     Cayley          n - cycles(r)              (minimum transpositions)

@@ -48,12 +48,14 @@ class FreshnessState(StrEnum):
     check some of it, so I don't actually know" -- exactly the fail-open overclaim this finding fixes.
 
     FRESH: every staleness check ran to completion and no signal fired.
+
     STALE: at least one CONFIRMED signal fired -- moved, changed, superseded, aged out past policy, or
-        an invalid (NaN / future-dated) recorded timestamp.
+    an invalid (NaN / future-dated) recorded timestamp.
+
     UNVERIFIABLE: a referenced path exists and an ingest-time hash was recorded for it, but the
-        CURRENT content could not be read to compare against that hash (a directory, a permission
-        error, or any other read failure). Never silently promoted to FRESH just because nothing
-        contradicted the recorded hash -- there was no comparison to contradict it WITH.
+    CURRENT content could not be read to compare against that hash (a directory, a permission
+    error, or any other read failure). Never silently promoted to FRESH just because nothing
+    contradicted the recorded hash -- there was no comparison to contradict it WITH.
     """
 
     FRESH = "fresh"

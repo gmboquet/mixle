@@ -376,10 +376,10 @@ else:
 
 
 def gaussian_kl(p: GaussianLaw, q: GaussianLaw) -> float:
-    """Closed-form ``KL(p || q)`` for two multivariate Gaussians -- the standard textbook formula
+    """Closed-form ``KL(p || q)`` for two multivariate Gaussians -- the standard textbook formula::
 
-        ``KL(p||q) = 0.5 * ( tr(Sigma_q^-1 Sigma_p) + (mu_q - mu_p)^T Sigma_q^-1 (mu_q - mu_p)
-                              - k + ln(det Sigma_q / det Sigma_p) )``
+        KL(p||q) = 0.5 * ( tr(Sigma_q^-1 Sigma_p) + (mu_q - mu_p)^T Sigma_q^-1 (mu_q - mu_p)
+                              - k + ln(det Sigma_q / det Sigma_p) )
 
     computed ANALYTICALLY, not via Monte Carlo -- both ``p`` (the "teacher" law) and ``q`` (the "student"
     law) are already :class:`~mixle.stats.multivariate.multivariate_gaussian.MultivariateGaussianDistribution`

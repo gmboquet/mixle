@@ -14,7 +14,7 @@ normalizer and moment ``E_theta[d]``:
     cayley    Z = prod_{i=1}^{n-1} (1 + i phi)
     hamming   Z = sum_{m=0}^{n} C(n, m) D_m phi^m                       (D_m = subfactorial)
 
-The other three are #P-hard and use exact algorithms within explicit resource caps:
+The other three are #P-hard and use exact algorithms within explicit resource caps::
 
     footrule  Z = perm(phi^{|i-j|})    exact log-domain subset permanent
     spearman  Z = perm(phi^{(i-j)^2})  exact log-domain subset permanent

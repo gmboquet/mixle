@@ -26,6 +26,8 @@ Three pieces of existing machinery are integrated here, not rebuilt:
   vs. monolithic recipe is recorded under a ``family`` tag on the existing design ledger, so which
   approach has actually won persists across tasks the same way a structural-family prior does elsewhere.
 
+::
+
     forest = discover_decomposition(examples, candidate_intermediates)
     forest.chosen                                  # ["m1", "m2"], not [] (monolithic) -- for a genuinely
                                                      # decomposable task

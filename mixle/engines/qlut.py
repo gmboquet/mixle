@@ -317,7 +317,7 @@ def lse_error_bound(bits: int, span: float, *, scores: Any = None, weights: Any 
 
 
 def error_bound(sup_abs_derivative: float, step: float) -> float:
-    """The nearest-code lookup error bound ``(step/2) * sup|f'|`` (e.g. sigmoid sup|f'|=0.25)."""
+    """The nearest-code lookup error bound ``(step/2) * sup|f'|`` (e.g. sigmoid ``sup|f'|=0.25``)."""
     if not np.isfinite(sup_abs_derivative) or sup_abs_derivative <= 0:
         raise ValueError(f"sup_abs_derivative must be finite and positive, got {sup_abs_derivative}")
     if not np.isfinite(step) or step <= 0:

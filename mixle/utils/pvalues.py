@@ -34,7 +34,7 @@ def binomial_rank(
         log_p_vec: Vector with log probabilities for each binomial distribution
         log_p1_vec: Optional vector with log one minus probabilities for each binomial distribution (for high-precision)
         count_vec: Vector with the number of draws for each binomial distribution
-        ll_eps: Bin spacing is determined so that |LL - floor(LL/space)*space| < ll_eps
+        ll_eps: Bin spacing is determined so that ``|LL - floor(LL/space)*space| < ll_eps``
         max_len: Maximum number of bins for histogram
     Returns:
         log_density array, corresponding probs array, Tuple[ll0, dll, total_count]

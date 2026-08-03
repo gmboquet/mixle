@@ -4,6 +4,7 @@ Where Bayesian optimization places points to find an optimum, **active learning*
 a surrogate accurate everywhere, and **Bayesian optimal design** places them to learn model parameters.
 
 Active learning (GP surrogate):
+
 * :func:`alm_scores` -- Active Learning MacKay: the posterior predictive variance (pick the most
   uncertain point). Low-cost but myopic.
 * :func:`alc_scores` -- Active Learning Cohn / IMSE: the *integrated* reduction in posterior variance a
@@ -11,6 +12,7 @@ Active learning (GP surrogate):
 * :func:`active_learning_design` -- the sequential loop that grows an accurate surrogate.
 
 Bayesian optimal design (parametric model):
+
 * :func:`expected_information_gain_linear` -- the exact EIG of a linear-Gaussian model (= Bayesian
   D-optimality), in closed form.
 * :func:`expected_information_gain_nmc` -- the nested-Monte-Carlo EIG for a general nonlinear simulator,
