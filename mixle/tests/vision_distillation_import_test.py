@@ -5,10 +5,18 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "examples" / "vision_edge_distillation" / "distill_clip_features.py"
 
+# The script imports torch at module scope, so EXECUTING it needs torch. The companion test
+# below only reads its source, and deliberately keeps running without it -- that check is about
+# what sits under the __main__ guard, which is exactly what should stay verifiable everywhere.
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 
+
+@pytest.mark.skipif(not HAS_TORCH, reason="importing the trainer executes its torch import")
 def test_import_defines_student_without_execution(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     spec = importlib.util.spec_from_file_location("_distill_clip_features", SCRIPT)

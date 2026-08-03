@@ -168,6 +168,7 @@ class PrivateCacheBaseDirTest(unittest.TestCase):
                     result = build_kernels._private_cache_base_dir()
             self.assertIsNone(result)
 
+    @unittest.skipUnless(HAS_CYTHON, "compiling the kernel needs the Cython toolchain")
     def test_compile_raises_when_the_cache_base_is_untrusted(self):
         with mock.patch("mixle.engines.build_kernels._private_cache_base_dir", return_value=None):
             with self.assertRaises(RuntimeError):

@@ -2463,7 +2463,21 @@ def vi_fit(
             method="Nelder-Mead",
             options={"maxiter": min(max_iter, steps), "xatol": 1e-5, "fatol": 1e-5},
         )
-        if not bool(res.success) or not np.isfinite(res.fun) or not np.all(np.isfinite(res.x)):
+        # Exhausting the budget the CALLER asked for is not a failure. `maxiter` above is
+        # `min(max_iter, steps)` -- both supplied by the caller -- so Nelder-Mead reporting
+        # "Maximum number of iterations has been exceeded" means it did exactly what it was told and
+        # stopped, returning the best point it reached. Treating that as an error made an explicit
+        # step budget raise: `vi_fit(..., steps=5, max_iter=5)` failed outright on any install where
+        # the autograd path is unavailable and this derivative-free fallback runs. It surfaced as a
+        # scipy-version difference (1.17 happened to converge inside the budget, 1.18 does not),
+        # which is how a latent fail-closed guard usually surfaces -- as a dependency bump.
+        #
+        # The result must still be USABLE, so finiteness is checked regardless of status, and a
+        # genuinely failed solve (bad status, non-finite objective or point) still raises.
+        budget_exhausted = int(getattr(res, "status", -1)) in (1, 2)
+        if not np.isfinite(res.fun) or not np.all(np.isfinite(res.x)):
+            raise RuntimeError(f"variational optimization produced a non-finite result: {res.message}")
+        if not bool(res.success) and not budget_exhausted:
             raise RuntimeError(f"variational optimization failed: {res.message}")
         mean, std = res.x[:d], np.exp(res.x[d:])
         cholesky = None  # this backend is meanfield-only (checked above); there is no factor to report

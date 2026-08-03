@@ -1,5 +1,6 @@
 """Contracts for identity-preserving inference graphs and shaped posterior parameters."""
 
+import importlib.util
 import math
 import unittest
 from types import SimpleNamespace
@@ -49,6 +50,11 @@ from mixle.ppl.inference import (
     vi_fit,
 )
 from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
+
+# The hard-budget core CI tier installs no optional extras, so this failed there as a bare
+# ModuleNotFoundError rather than skipping -- which reads as a broken candidate instead of an
+# absent optional dependency.
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 
 class SharedParameterGraphContractTest(unittest.TestCase):
@@ -265,6 +271,7 @@ class InferenceControlContractTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "not positive definite"):
             _laplace_covariance(np.array([[-1.0]]))
 
+    @unittest.skipUnless(HAS_TORCH, "asserts the advi_meanfield algorithm, which only the torch autograd path produces")
     def test_vi_rejects_unexecuted_variants_and_records_the_executed_algorithm(self):
         with self.assertRaises(ValueError):
             vi_fit(self.model, self.data, samples=1)
