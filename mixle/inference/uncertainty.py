@@ -78,18 +78,44 @@ def _entropy_last(p: np.ndarray) -> np.ndarray:
         return -np.sum(np.where(p > 0.0, p * np.log(p), 0.0), axis=-1)
 
 
+def _owned_readonly(value: Any) -> Any:
+    """Return an owned, write-locked copy of an array field; pass scalars through unchanged.
+
+    A decomposition and a clustering are records of a computation that already happened, and each
+    carries an invariant across its own fields: ``total == aleatoric + epistemic``, and a ``probs``
+    vector that sums to one over exactly the classes ``labels`` indexes. While those fields were
+    plain writable arrays, either could be rewritten after construction -- through the array the
+    caller passed in, or through the field itself -- and the record then described numbers it no
+    longer held, with ``fraction_epistemic`` silently reporting the edited version (MXR-080-1899).
+
+    Scalars (Python and numpy) are returned as they are: they are already immutable, and wrapping
+    them in 0-d arrays would change what ``.item()`` and the float-valued single-point path return.
+    """
+    if isinstance(value, np.ndarray):
+        owned = np.array(value, copy=True)
+        owned.setflags(write=False)
+        return owned
+    return value
+
+
 @dataclass(frozen=True)
 class UncertaintyDecomposition:
     """A predictive uncertainty split into ``aleatoric`` + ``epistemic`` (summing to ``total``).
 
     ``kind`` is ``"entropy"`` (values in nats) or ``"variance"`` (values in the outcome's squared
-    units). Each field is a scalar for a single query point, or an array over query points.
+    units). Each field is a scalar for a single query point, or an array over query points. Array
+    fields are owned read-only copies, so the ``total = aleatoric + epistemic`` identity the record
+    asserts cannot be broken after the fact (MXR-080-1899).
     """
 
     total: np.ndarray
     aleatoric: np.ndarray
     epistemic: np.ndarray
     kind: str
+
+    def __post_init__(self) -> None:
+        for name in ("total", "aleatoric", "epistemic"):
+            object.__setattr__(self, name, _owned_readonly(getattr(self, name)))
 
     @property
     def fraction_epistemic(self) -> np.ndarray:
@@ -217,11 +243,23 @@ def posterior_ensemble(param_post: Any, build: Callable[[Any], Any], n: int = 20
 
 @dataclass(frozen=True)
 class Clustering:
-    """Samples grouped into equivalence classes: ``representatives``, class ``probs``, per-sample ``labels``."""
+    """Samples grouped into equivalence classes: ``representatives``, class ``probs``, per-sample ``labels``.
 
-    representatives: list[Any]
+    The three fields are one interlocking statement -- ``probs[c]`` is the mass of the class whose
+    member ``representatives[c]`` stands for, and ``labels[i]`` says which class sample ``i`` landed
+    in -- so the record owns them: ``representatives`` is a tuple and the arrays are write-locked
+    copies (MXR-080-1899). Consumers in this repository only read them (index, iterate, ``zip``,
+    ``argmax``, ``tolist``), which is why the sequence can be a tuple without breaking a caller.
+    """
+
+    representatives: tuple[Any, ...]
     probs: np.ndarray
     labels: np.ndarray
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "representatives", tuple(self.representatives))
+        object.__setattr__(self, "probs", _owned_readonly(np.asarray(self.probs)))
+        object.__setattr__(self, "labels", _owned_readonly(np.asarray(self.labels)))
 
 
 def cluster_samples(samples: Sequence[Any], equivalent: Callable[[Any, Any], bool] | None = None) -> Clustering:

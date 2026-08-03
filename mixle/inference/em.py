@@ -23,6 +23,26 @@ from mixle.stats.compute.pdist import (
 )
 from mixle.stats.compute.sequence import seq_estimate, seq_log_density_sum
 from mixle.stats.parameter_packing import squarem_packer
+from mixle.utils.exact import require_exact_bool
+
+
+def _annealing_temperature(value: Any, name: str) -> float:
+    """Return an annealing temperature as a finite non-negative float.
+
+    Two values used to get through ``if temperature < 0.0`` and then be coerced by ``float(...)``
+    (MXR-080-1899). ``float("nan")`` compares false against every bound, and a NaN temperature makes
+    ``_transform`` divide the log-responsibilities by NaN: every row comes out non-finite, the
+    ``row_sum > 0`` guard then writes zeros, and the M-step silently runs on all-zero
+    responsibilities instead of reporting that the schedule was nonsense. And a Boolean is not a
+    temperature -- ``True`` would quietly mean ordinary soft EM (1.0) and ``False`` hard EM (0.0),
+    which are the two *opposite* algorithms this control selects between.
+    """
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.integer, np.floating)):
+        raise TypeError(f"{name} must be a real number (not a Boolean), got {value!r}")
+    temperature = float(value)
+    if not np.isfinite(temperature) or temperature < 0.0:
+        raise ValueError(f"{name} must be finite and non-negative, got {temperature!r}")
+    return temperature
 
 
 @dataclass
@@ -147,10 +167,12 @@ class PosteriorTransformEM:
     """
 
     def __init__(self, temperature: float = 1.0, hard: bool = False) -> None:
-        if temperature < 0.0:
-            raise ValueError("temperature must be non-negative.")
-        self.temperature = float(temperature)
-        self.hard = bool(hard)
+        self.temperature = _annealing_temperature(temperature, "temperature")
+        # `bool(hard)` made `hard="false"` a HARD/classification EM run (MXR-080-1899): a non-empty
+        # string is truthy, so a strategy configured from serialized text with the word that names
+        # the opposite ran a different algorithm than the configuration says, and the fitted model
+        # is the only place that difference shows up.
+        self.hard = require_exact_bool(hard, "hard")
 
     def step(
         self,
@@ -212,10 +234,8 @@ class AnnealedEM:
     def __init__(self, temperatures: Sequence[float], hard_final: bool = False) -> None:
         if len(temperatures) == 0:
             raise ValueError("AnnealedEM requires at least one temperature.")
-        self.temperatures = tuple(float(t) for t in temperatures)
-        if any(t < 0.0 for t in self.temperatures):
-            raise ValueError("temperatures must be non-negative.")
-        self.hard_final = bool(hard_final)
+        self.temperatures = tuple(_annealing_temperature(t, f"temperatures[{i}]") for i, t in enumerate(temperatures))
+        self.hard_final = require_exact_bool(hard_final, "hard_final")
         self.iteration = 0
 
     @property

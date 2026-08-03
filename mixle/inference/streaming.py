@@ -262,6 +262,10 @@ class IncrementalEstimator(_StreamingBase):
         ``chunk_id`` is keyword-only so this matches :meth:`StreamingEstimator.update`'s
         ``(data, *, enc_data)`` shape across the streaming surface; it is required (a ``None``
         ``chunk_id`` raises) because the Neal-Hinton update keys each batch's contribution by it.
+
+        The chunk store, running statistics and model are committed only once the M-step has
+        succeeded, so a failed update leaves the estimator exactly where it was -- in particular the
+        previous payload for a revisited ``chunk_id`` survives -- and the caller can retry.
         """
         if chunk_id is None:
             raise ValueError("IncrementalEstimator.update requires a non-None chunk_id (pass chunk_id=...).")
@@ -270,23 +274,57 @@ class IncrementalEstimator(_StreamingBase):
         batch_nobs, batch_acc = streaming_accumulate(enc_batch, self.estimator, self.model)
         batch_nobs = _finite_count(batch_nobs, "incremental batch nobs")
 
+        # Stage, then commit (MXR-080-1899). The chunk store used to be overwritten *before* the
+        # pooled rebuild and the M-step, so an estimator that refused the new state was left holding
+        # a chunk contribution that was never accepted: revisiting chunk "a" with a bad batch
+        # destroyed "a"'s previous good payload, advanced `nobs` and the running accumulator to
+        # include the rejected batch, and left `self.model` behind at the value from before -- an
+        # internally inconsistent estimator whose very next successful update silently baked the
+        # rejected batch in. StreamingEstimator.update already promised exactly this ("a failed
+        # update leaves the estimator exactly where it was and the caller can retry"); this is the
+        # sibling path that did not.
         replacing = chunk_id in self.chunk_values
-        self.chunk_values[chunk_id] = copy.deepcopy(batch_acc.value())
+        staged_value = copy.deepcopy(batch_acc.value())
+        # The append path folds the batch into the LIVE accumulator, so its pre-update value is
+        # captured for rollback; the replace path pools into a fresh accumulator and needs no copy.
+        previous_running_value = (
+            None if replacing or self.running_accumulator is None else copy.deepcopy(self.running_accumulator.value())
+        )
+        try:
+            if replacing:
+                # Rebuild into a FRESH accumulator (mergeable statistics are a monoid, not a group --
+                # see the class docstring), substituting the staged payload for the revisited chunk so
+                # the stored one survives untouched until the M-step has succeeded.
+                pooled = self.estimator.accumulator_factory().make()
+                pooled_nobs = 0.0
+                for stored_id, value in self.chunk_values.items():
+                    contribution = staged_value if stored_id == chunk_id else value
+                    pooled.combine(copy.deepcopy(contribution))
+                    pooled_nobs += batch_nobs if stored_id == chunk_id else self.nobs_by_chunk[stored_id]
+            else:
+                pooled = (
+                    self.estimator.accumulator_factory().make()
+                    if self.running_accumulator is None
+                    else self.running_accumulator
+                )
+                pooled.combine(batch_acc.value())
+                pooled_nobs = self.nobs + batch_nobs
+            model = self.estimator.estimate(pooled_nobs, pooled.value())
+        except Exception:
+            # Only the append path mutates the live accumulator in place (the replace path builds a
+            # fresh one), so that is the only state needing restoration -- and it is restored the
+            # same way StreamingEstimator.update restores its own: from the value captured before
+            # the combine. Everything else (chunk store, nobs, model, step) is still untouched
+            # because it is written only in the commit block below.
+            if not replacing and previous_running_value is not None:
+                self.running_accumulator.from_value(previous_running_value)
+            raise
+
+        self.chunk_values[chunk_id] = staged_value
         self.nobs_by_chunk[chunk_id] = batch_nobs
-
-        if replacing:
-            self.running_accumulator = self.estimator.accumulator_factory().make()
-            self.nobs = 0.0
-            for stored_id, value in self.chunk_values.items():
-                self.running_accumulator.combine(copy.deepcopy(value))
-                self.nobs += self.nobs_by_chunk[stored_id]
-        else:
-            if self.running_accumulator is None:
-                self.running_accumulator = self.estimator.accumulator_factory().make()
-            self.running_accumulator.combine(batch_acc.value())
-            self.nobs += batch_nobs
-
-        self.model = self.estimator.estimate(self.nobs, self.running_accumulator.value())
+        self.running_accumulator = pooled
+        self.nobs = pooled_nobs
+        self.model = model
         self.step += 1
         return self.model
 

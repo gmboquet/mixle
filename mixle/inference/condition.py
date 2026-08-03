@@ -52,10 +52,43 @@ def _norm_path(key: Any) -> FieldPath:
     return tuple(int(i) for i in key)
 
 
+def _exact_draw_count(n: Any) -> int:
+    """``n`` as an exact positive integer.
+
+    ``int(n)`` accepted ``True`` as one draw and truncated ``2.7`` to two (MXR-080-1899) -- the
+    caller asked for a sample size and silently got a different one. Same contract, and the same
+    reason, as ``mixle.inference.scenario._exact_draw_count`` (MXR-080-1850); ``np.integer`` is
+    accepted because the library's own array paths produce it.
+    """
+    if isinstance(n, (bool, np.bool_)) or not isinstance(n, (int, np.integer)):
+        raise TypeError(f"n must be an exact positive integer, not {type(n).__name__} ({n!r})")
+    return int(n)
+
+
 def _norm_evidence(evidence: dict[Any, Any]) -> dict[FieldPath, Any]:
+    """Normalize caller keys to :data:`FieldPath`, refusing two keys that name the same field.
+
+    ``{0: a, (0,): b}`` and ``{0: a, np.int64(0): b}`` are distinct dict keys that normalize to the
+    same path, so the dict comprehension used to keep whichever came last and drop the other with no
+    message (MXR-080-1899): the caller believes they conditioned on ``a`` and the posterior was
+    actually built from ``b``. Duplicates are refused rather than merged even when the two values
+    look equal, because "equal" is not decidable here -- evidence values are arbitrary records,
+    arrays included, and an ``==`` that returns an array cannot answer the question.
+    """
     if not evidence:
         raise ValueError("condition()/do() require at least one evidence/assignment field.")
-    return {_norm_path(k): v for k, v in evidence.items()}
+    normalized: dict[FieldPath, Any] = {}
+    sources: dict[FieldPath, Any] = {}
+    for key, value in evidence.items():
+        path = _norm_path(key)
+        if path in normalized:
+            raise ValueError(
+                f"evidence/assignment keys {sources[path]!r} and {key!r} both refer to field path "
+                f"{path}; only one value per field can be applied, so pass exactly one of them."
+            )
+        normalized[path] = value
+        sources[path] = key
+    return normalized
 
 
 def _split(evidence: dict[FieldPath, Any]) -> tuple[dict[int, Any], dict[int, dict[FieldPath, Any]]]:
@@ -214,7 +247,7 @@ class Posterior:
     def sample(self, n: int = 1, *, seed: int | None = None) -> Any:
         """Draw ``n`` complete native records, including the clamped evidence fields."""
         self._require_possible()
-        n = int(n)
+        n = _exact_draw_count(n)
         if n < 1:
             raise ValueError("n must be >= 1")
         return self._sample_fn(n, seed)
@@ -300,13 +333,18 @@ def condition(
     if method not in ("auto", "exact", "sir"):
         raise ValueError(f"unknown method {method!r}; expected 'auto', 'exact', or 'sir'.")
     ev = _norm_evidence(evidence)
+    # Validated here, not at the SIR call below: the particle count is part of what the caller asked
+    # for, so `n_particles=True` (one particle, an ESS receipt of 1.0, and a "posterior" that is a
+    # single prior draw) must be refused whether or not the exact path ends up being taken
+    # (MXR-080-1899).
+    particles = _exact_draw_count(n_particles)
     if method in ("auto", "exact"):
         try:
             return _condition_exact(model, ev, seed=seed)
         except _NoExactRule:
             if method == "exact":
                 raise
-    return _condition_sir(model, ev, n_particles=int(n_particles), seed=seed)
+    return _condition_sir(model, ev, n_particles=particles, seed=seed)
 
 
 def _condition_exact(model: Any, ev: dict[FieldPath, Any], *, seed: int | None) -> Posterior:
