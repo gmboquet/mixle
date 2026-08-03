@@ -45,6 +45,7 @@ import numpy as np
 from mixle.enumeration.assignment import k_best_assignments
 from mixle.enumeration.hmm_paths import hmm_best_paths
 from mixle.enumeration.spanning import k_best_spanning_trees
+from mixle.utils.exact import require_exact_bool
 
 __all__ = [
     "admm_bounded_least_squares",
@@ -1354,7 +1355,7 @@ class Assignment(Relation):
         self.cost = np.asarray(cost, dtype=np.float64)
         if self.cost.ndim != 2:
             raise ValueError("cost must be a 2-D matrix")
-        self.maximize = bool(maximize)
+        self.maximize = require_exact_bool(maximize, "maximize")
         self.sense = "max" if maximize else "min"
 
     def enumerator(self, k: int | None = None) -> Iterator[Solution]:
@@ -1526,7 +1527,7 @@ class BestSubsetRegression(Relation):
         self.criterion = criterion
         self.n, self.p = self.X.shape
         self.max_size = self.p if max_size is None else int(max_size)
-        self.intercept = bool(intercept)
+        self.intercept = require_exact_bool(intercept, "intercept")
 
     def _score(self, subset: tuple[int, ...]) -> float:
         cols = [self.X[:, j] for j in subset]

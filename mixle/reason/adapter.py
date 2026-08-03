@@ -31,6 +31,8 @@ from typing import Any
 
 import numpy as np
 
+from mixle.utils.exact import require_exact_bool
+
 # Rows at or below this L2 norm are treated as degenerate: normalizing one would silently divide
 # into NaN (exact zero) or blow up to Inf (float32 underflow), rather than raise a clear error.
 _MIN_NORM = 1e-12
@@ -126,7 +128,7 @@ class StructuredAdapter:
         self.dim = int(dim)
         self.rank = int(rank)
         self.weight_decay = float(weight_decay)
-        self.full = bool(full)
+        self.full = require_exact_bool(full, "full")
         self._params: list[Any] | None = None
         self._logit_scale: Any = None
         self._built: tuple[list[Any], Any] | None = None

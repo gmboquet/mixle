@@ -175,6 +175,7 @@ from mixle.inference.fisher import (
     _seq_encode_model,
     to_fisher,
 )
+from mixle.utils.exact import require_exact_bool
 
 
 class SequenceDistribution(SequenceEncodableProbabilityDistribution):
@@ -220,7 +221,7 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
         self.len_dist = len_dist if len_dist is not None else NullDistribution()
         if not isinstance(len_normalized, (bool, np.bool_)):
             raise TypeError("len_normalized must be bool.")
-        self.len_normalized = bool(len_normalized)
+        self.len_normalized = require_exact_bool(len_normalized, "len_normalized")
         self.name = name
 
         self.null_len_dist = supports(self.len_dist, Neutral)
@@ -874,7 +875,7 @@ class SequenceAccumulator(SequenceEncodableStatisticAccumulator):
         self.keys = keys
         if not isinstance(len_normalized, (bool, np.bool_)):
             raise TypeError("len_normalized must be bool.")
-        self.len_normalized = bool(len_normalized)
+        self.len_normalized = require_exact_bool(len_normalized, "len_normalized")
 
         self.null_len_accumulator = supports(self.len_accumulator, Neutral)
         self.element_nobs = 0.0
@@ -1227,7 +1228,7 @@ class SequenceAccumulatorFactory(StatisticAccumulatorFactory):
         self.len_factory = len_factory
         if not isinstance(len_normalized, (bool, np.bool_)):
             raise TypeError("len_normalized must be bool.")
-        self.len_normalized = bool(len_normalized)
+        self.len_normalized = require_exact_bool(len_normalized, "len_normalized")
         self.keys = keys
 
     def make(self) -> SequenceAccumulator:
@@ -1283,7 +1284,7 @@ class SequenceEstimator(ParameterEstimator):
         self.keys = keys
         if not isinstance(len_normalized, (bool, np.bool_)):
             raise TypeError("len_normalized must be bool.")
-        self.len_normalized = bool(len_normalized)
+        self.len_normalized = require_exact_bool(len_normalized, "len_normalized")
         self.name = name
         self.set_prior(prior)
 

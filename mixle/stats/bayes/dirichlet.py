@@ -22,6 +22,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.utils.exact import require_exact_bool
 from mixle.utils.special import *
 
 _MIN_DIRICHLET_ALPHA = 1.0e-10
@@ -1178,7 +1179,7 @@ class DirichletEstimator(ParameterEstimator):
         self.delta = checked_delta
         self.suff_stat = checked_suff_stat
         self.keys = keys
-        self.use_mpe = bool(use_mpe)
+        self.use_mpe = require_exact_bool(use_mpe, "use_mpe")
         self.name = name
 
     def accumulator_factory(self) -> "DirichletAccumulatorFactory":

@@ -1079,7 +1079,7 @@ class StructuredHMM:
         seqs = _validated_sequences(seqs, "StructuredHMM fit data")
         weights = _validated_weights(weights, len(seqs))
         active_indices = np.flatnonzero(weights > 0.0)
-        use_fast = bool(fast) and self._can_fast_fb()
+        use_fast = require_exact_bool(fast, "fast") and self._can_fast_fb()
         fb = _dense_fb_numba() if use_fast else None
         ll_trace: list[float] = []
         iterations = 0
@@ -1566,6 +1566,7 @@ from mixle.stats.compute.pdist import (  # noqa: E402
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.utils.exact import require_exact_bool
 
 
 def _add_nested(a, b):

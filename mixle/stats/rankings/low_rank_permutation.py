@@ -47,6 +47,7 @@ from mixle.stats.rankings._contracts import (
     weights as validate_weights,
 )
 from mixle.stats.rankings._permutation_kernels import log_matrix_permanent, sinkhorn_bethe
+from mixle.utils.exact import require_exact_bool
 
 
 def _log_normalizer(s: np.ndarray, max_exact: int, sinkhorn_iter: int) -> float:
@@ -355,7 +356,7 @@ class LowRankPermutationEstimator(ParameterEstimator):
         self.prior_marginals = prior
         if not isinstance(require_convergence, (bool, np.bool_)):
             raise TypeError("require_convergence must be a Boolean.")
-        self.require_convergence = bool(require_convergence)
+        self.require_convergence = require_exact_bool(require_convergence, "require_convergence")
         self.name = name
         self.keys = keys
 

@@ -73,6 +73,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.utils.exact import require_exact_bool
 
 _EPS = 1.0e-12
 
@@ -164,7 +165,7 @@ class CommonNeighbourMotif:
         if not isinstance(directed, (bool, np.bool_)):
             raise ValueError("directed must be Boolean.")
         self.bins = tuple(checked)
-        self.directed = bool(directed)
+        self.directed = require_exact_bool(directed, "directed")
         self.names = tuple(
             f"cn>={self.bins[-1]}" if i == len(self.bins) - 1 else f"cn={b}" for i, b in enumerate(self.bins)
         )
@@ -323,7 +324,7 @@ class TemporalGraphGrammarDistribution(SequenceEncodableProbabilityDistribution)
             raise ValueError("directed must be Boolean.")
         if motif is not None and not isinstance(motif, CommonNeighbourMotif):
             raise ValueError("motif must be a CommonNeighbourMotif or None.")
-        if motif is not None and motif.directed != bool(directed):
+        if motif is not None and motif.directed != require_exact_bool(directed, "directed"):
             raise ValueError("motif.directed must agree with directed.")
         source_motif = motif if motif is not None else CommonNeighbourMotif(directed=directed)
         self.motif = CommonNeighbourMotif(source_motif.bins, directed=source_motif.directed)
@@ -916,7 +917,7 @@ class TemporalGraphGrammarDataEncoder(DataSequenceEncoder):
     """Pass-through encoder for dynamic graph sequence observations."""
 
     def __init__(self, directed: bool = False) -> None:
-        self.directed = bool(directed)
+        self.directed = require_exact_bool(directed, "directed")
 
     def seq_encode(self, x: Sequence[Sequence[np.ndarray]]) -> Sequence[Sequence[np.ndarray]]:
         """Validate and own every adjacency in a temporal graph batch."""
@@ -2325,7 +2326,7 @@ class ChurningTemporalGraphGrammarDataEncoder(DataSequenceEncoder):
     """Validate and encode identity-tracked temporal graph sequences."""
 
     def __init__(self, directed: bool) -> None:
-        self.directed = bool(directed)
+        self.directed = require_exact_bool(directed, "directed")
 
     def seq_encode(self, x: Sequence[Any]) -> tuple[tuple, ...]:
         return tuple(_validate_churning_sequence(observation, self.directed) for observation in x)

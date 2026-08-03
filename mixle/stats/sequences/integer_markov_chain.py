@@ -46,6 +46,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
+from mixle.utils.exact import require_exact_bool
 
 E1 = TypeVar("E1")  ## init encoding
 E2 = TypeVar("E2")  ## len encoding
@@ -1054,7 +1055,7 @@ class IntegerMarkovChainSampler(DistributionSampler):
         if size is None:
             return self.single_sample()
         if isinstance(batched, (np.bool_, bool)):
-            batched = bool(batched)
+            batched = require_exact_bool(batched, "batched")
         else:
             raise TypeError("batched must be bool.")
         if isinstance(size, (bool, np.bool_)) or not isinstance(size, (int, np.integer)):

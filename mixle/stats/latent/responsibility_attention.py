@@ -66,6 +66,7 @@ from mixle.stats.latent.effective_sample import (
     validated_observation_weight,
     validated_statistic_tuple,
 )
+from mixle.utils.exact import require_exact_bool
 from mixle.utils.vector import ImpossibleEvidenceError
 
 
@@ -427,7 +428,7 @@ class ResponsibilityAttentionEstimator(ParameterEstimator):
         self.query_dim = query_dim
         self.num_targets = num_targets
         self.sigma2 = float(sigma2)
-        self.estimate_sigma2 = bool(estimate_sigma2)
+        self.estimate_sigma2 = require_exact_bool(estimate_sigma2, "estimate_sigma2")
         self.min_sigma2 = float(min_sigma2)
         self.emission_smoothing = float(emission_smoothing)
         self.pseudo_count = pseudo_count

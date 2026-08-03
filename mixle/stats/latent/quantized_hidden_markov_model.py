@@ -71,6 +71,7 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.latent.hidden_markov import HiddenMarkovAccumulatorFactory, HiddenMarkovModelDistribution
 from mixle.stats.sequences.markov_chain import stationary_distribution
 from mixle.stats.univariate.discrete.categorical import CategoricalDistribution, CategoricalEstimator
+from mixle.utils.exact import require_exact_bool
 from mixle.utils.optional_deps import HAS_NUMBA
 
 STRUCTURAL_ZERO = -1
@@ -1078,13 +1079,13 @@ class QuantizedHiddenMarkovEstimator(ParameterEstimator):
             raise ValueError("keys must be a three-item tuple or None")
         if use_numba is not None and not isinstance(use_numba, (bool, np.bool_)):
             raise TypeError("use_numba must be boolean or None")
-        self.use_numba = HAS_NUMBA if use_numba is None else bool(use_numba)
+        self.use_numba = HAS_NUMBA if use_numba is None else require_exact_bool(use_numba, "use_numba")
         self.max_quant_its = _positive_exact_integer(max_quant_its, "max_quant_its")
         if self.max_quant_its < 2 and self.fixed_theta is None:
             raise ValueError("max_quant_its must be at least two when theta is optimized")
         if not isinstance(split_collapsed, (bool, np.bool_)):
             raise TypeError("split_collapsed must be boolean")
-        self.split_collapsed = bool(split_collapsed)
+        self.split_collapsed = require_exact_bool(split_collapsed, "split_collapsed")
         self.split_nats = _nonnegative_finite(split_nats, "split_nats")
         if self.split_nats <= 0.0:
             raise ValueError("split_nats must be positive")

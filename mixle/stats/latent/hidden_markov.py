@@ -118,6 +118,7 @@ from mixle.inference.fisher import (
     _structured_values_matrix,
     to_fisher,
 )
+from mixle.utils.exact import require_exact_bool
 
 _STATE_POOLS: dict[int, Any] = {}  # cached thread pools by worker count (pool creation is not free)
 
@@ -3683,7 +3684,7 @@ class HiddenMarkovEstimator(ParameterEstimator):
         self.len_estimator = len_estimator if len_estimator is not None else NullEstimator()
         self.name = name
         self.use_numba = HAS_NUMBA if use_numba is None else use_numba
-        self.steady_state_init = bool(steady_state_init)
+        self.steady_state_init = require_exact_bool(steady_state_init, "steady_state_init")
         self.terminal_states = terminal_states
         if terminal_states is not None:
             # The terminal-state forward/backward use the non-numba per-sequence layout (mirrors the
