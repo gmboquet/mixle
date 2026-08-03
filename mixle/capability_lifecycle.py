@@ -23,7 +23,7 @@ authenticating them before their contents are given any authority.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -57,10 +57,51 @@ def _require_schema_version(value: Mapping[str, Any], record: str) -> None:
 
     Records persisted before the version was emitted are read as v1, which is
     what they are; anything else is refused rather than silently reinterpreted.
+
+    The mapping check is part of the same job (MXR-080-1903).  These loaders parse untrusted
+    persisted content, so a JSON string or list where an object belongs is ordinary malformed input,
+    not a programming error -- but ``value.get(...)`` raised ``AttributeError`` straight out of
+    ``from_dict``, past every caller guarding the documented ``ValueError`` contract.
     """
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{record} record must be a mapping, got {type(value).__name__}")
     declared = value.get("schema_version", SCHEMA_VERSION)
     if declared != SCHEMA_VERSION:
         raise ValueError(f"unsupported {record} schema version: {declared!r}")
+
+
+def _require_text(value: Any, field_name: str) -> str:
+    """Return ``value`` as a string, refusing anything that is not already one (MXR-080-1903).
+
+    The loaders used ``str(value)``, which never fails: a persisted ``null`` became the string
+    ``"None"``, an integer became its digits, and a nested object became its ``repr``.  Every one of
+    those passes the non-empty checks in ``__post_init__``, so a malformed record produced a
+    *valid-looking* identity -- and ``capability_id``/``issued_by`` are exactly the fields an
+    authorization is bound to.  Coercion is refused rather than repaired because there is no correct
+    repair: ``None`` does not mean the capability is called "None".
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string, got {type(value).__name__} ({value!r})")
+    return value
+
+
+def _parse_scopes(value: Any) -> frozenset[str]:
+    """Parse the persisted scope list, refusing a bare string (MXR-080-1903).
+
+    ``frozenset(str(scope) for scope in value)`` iterates a string by CHARACTER, so a record whose
+    ``scopes`` field is the JSON string ``"admin"`` -- the shape a hand-written or single-scope
+    record most plausibly arrives in -- was loaded as the five separate scopes ``a``, ``d``, ``i``,
+    ``m``, ``n``.  That authorizes five things nobody granted, which is the fail-open direction.  A
+    bare ``"*"`` was worse: it loaded as the wildcard.
+    """
+    if isinstance(value, (str, bytes, bytearray)):
+        raise ValueError(
+            f"scopes must be a list of scope strings, not {type(value).__name__}; a bare string "
+            "would be read as its individual characters"
+        )
+    if not isinstance(value, Iterable):
+        raise ValueError(f"scopes must be a list of scope strings, got {type(value).__name__}")
+    return frozenset(_require_text(scope, "scope") for scope in value)
 
 
 class CapabilityMaturity(StrEnum):
@@ -141,6 +182,11 @@ def _timestamp(value: datetime) -> str:
 
 
 def _parse_timestamp(value: str, field_name: str) -> datetime:
+    # A non-string reaching here is malformed persisted content, not a caller bug: ``from_dict``
+    # parses untrusted records. ``value.replace(...)`` raised ``AttributeError`` for an integer epoch
+    # or a JSON ``null``, escaping the ``ValueError`` contract this loader documents (MXR-080-1903).
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be an ISO-8601 timestamp string, got {type(value).__name__}")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (TypeError, ValueError) as exc:
@@ -213,9 +259,9 @@ class CapabilityIdentity:
     def from_dict(cls, value: Mapping[str, Any]) -> CapabilityIdentity:
         _require_schema_version(value, "capability identity")
         return cls(
-            capability_id=str(value["capability_id"]),
-            version=str(value["version"]),
-            digest=None if value.get("digest") is None else str(value["digest"]),
+            capability_id=_require_text(value["capability_id"], "capability_id"),
+            version=_require_text(value["version"], "version"),
+            digest=None if value.get("digest") is None else _require_text(value["digest"], "digest"),
         )
 
 
@@ -273,7 +319,11 @@ class AuthorizationDecision:
             raise ValueError("decision_id must not be empty")
         if not self.issued_by.strip():
             raise ValueError("issued_by must not be empty")
-        normalized_scopes = frozenset(scope.strip() for scope in self.scopes if scope.strip())
+        # Direct construction has the same bare-string hazard the loader does -- ``scopes="admin"``
+        # iterates by character -- so it goes through the same parse (MXR-080-1903). Any iterable of
+        # strings is still accepted, which is what in-process callers (a frozenset, a set literal,
+        # a list) already pass.
+        normalized_scopes = frozenset(scope.strip() for scope in _parse_scopes(self.scopes) if scope.strip())
         if not normalized_scopes:
             raise ValueError("authorization requires at least one non-empty scope")
         object.__setattr__(self, "scopes", normalized_scopes)
@@ -387,21 +437,21 @@ class AuthorizationDecision:
         """
         _require_schema_version(value, "authorization decision")
         return cls(
-            decision_id=str(value["decision_id"]),
+            decision_id=_require_text(value["decision_id"], "decision_id"),
             capability=CapabilityIdentity.from_dict(value["capability"]),
             outcome=AuthorizationOutcome(value["outcome"]),
-            issued_by=str(value["issued_by"]),
-            scopes=frozenset(str(scope) for scope in value["scopes"]),
+            issued_by=_require_text(value["issued_by"], "issued_by"),
+            scopes=_parse_scopes(value["scopes"]),
             decided_at=_parse_timestamp(value["decided_at"], "decided_at"),
             expires_at=(
                 None if value.get("expires_at") is None else _parse_timestamp(value["expires_at"], "expires_at")
             ),
-            reason=str(value.get("reason", "")),
+            reason=_require_text(value.get("reason", ""), "reason"),
             revoked_at=(
                 None if value.get("revoked_at") is None else _parse_timestamp(value["revoked_at"], "revoked_at")
             ),
-            revoked_by=None if value.get("revoked_by") is None else str(value["revoked_by"]),
-            revocation_reason=str(value.get("revocation_reason", "")),
+            revoked_by=None if value.get("revoked_by") is None else _require_text(value["revoked_by"], "revoked_by"),
+            revocation_reason=_require_text(value.get("revocation_reason", ""), "revocation_reason"),
             # Deserializing proves the bytes parse, nothing more. A persisted record is LOADED even if
             # it claims otherwise -- provenance is deliberately not read from the content, because the
             # content is exactly what an attacker controls. Re-establishing trust is `mark_verified`.

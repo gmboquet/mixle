@@ -928,7 +928,19 @@ def summarize(obj: Any) -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001 - the report records each broken advertised method
             status[name] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
             return None
-        array = np.asarray(value)
+        try:
+            array = np.asarray(value)
+        except Exception as exc:  # noqa: BLE001 - a moment with no rectangular array form
+            # `np.asarray` sat OUTSIDE the try, so a RAGGED moment -- per-component means of
+            # differing dimension, which a mixture over unlike components legitimately produces --
+            # made the whole report raise, contradicting the "never raises" contract two lines up
+            # and losing every other statistic that had already been computed (MXR-080-1903).
+            # The value is still reported: it is what the object's advertised method returned, and
+            # a report that drops it is less honest than one that says it could not be measured.
+            # Its shape/finiteness are deliberately NOT reported -- there is no array to measure.
+            status[name] = {"status": "unmeasurable", "error": f"{type(exc).__name__}: {exc}"}
+            out[name] = value
+            return value
         if array.ndim == 0:
             value = array.item()
         elif isinstance(value, np.ndarray):
