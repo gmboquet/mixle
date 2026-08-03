@@ -115,5 +115,117 @@ class SelectAlphaForCostTest(unittest.TestCase):
             )
 
 
+class _FailingModel(_FakeCalibratedModel):
+    """Fails partway through the sweep, the way an unavailable scoring backend would."""
+
+    def __init__(self, escalation_by_alpha, fail_at_alpha):
+        super().__init__(escalation_by_alpha)
+        self.alpha = 0.05
+        self.qhat = "certified@0.05"
+        self._fail_at = fail_at_alpha
+
+    def escalation_rate(self, texts):
+        if self.alpha == self._fail_at:
+            raise RuntimeError("scoring backend unavailable")
+        return self._curve[self.alpha]
+
+
+class FailedSweepLeavesNoPartialMutationTest(unittest.TestCase):
+    """MXR-080-1895: a failed alpha sweep left the model partially mutated.
+
+    Reproduced: with the sweep raising on its third candidate, the model was abandoned at
+    ``alpha=0.1`` carrying a threshold fitted on the POLICY-SELECTION rows -- the rows this function's
+    docstring promises never bear coverage -- instead of its entry state or the certification result.
+    A caller that caught the error and kept serving was serving an uncertified threshold.
+    """
+
+    CURVE = {0.01: 0.9, 0.05: 0.5, 0.1: 0.15, 0.15: 0.2}
+    ARGS = dict(volume=100, n_label=1, alphas=(0.01, 0.05, 0.1, 0.15))
+
+    def _call(self, model):
+        return select_alpha_for_cost(
+            model,
+            ["cal a", "cal b"],
+            ["x", "y"],
+            ["probe a"],
+            CostModel(c_frontier=1.0, c_local=0.01),
+            certification_texts=["cert a", "cert b"],
+            certification_labels=["x", "y"],
+            **self.ARGS,
+        )
+
+    def test_state_is_unchanged_after_a_failed_sweep(self):
+        model = _FailingModel(self.CURVE, fail_at_alpha=0.1)
+        before = (model.alpha, model.qhat)
+        with self.assertRaises(RuntimeError):
+            self._call(model)
+        self.assertEqual((model.alpha, model.qhat), before)
+
+    def test_the_shallow_snapshots_stated_limit_holds_in_practice(self):
+        # Pinning the documented boundary of the fix rather than leaving it to the docstring: the
+        # rollback rebinds attributes, so state MUTATED IN PLACE through an attribute (here an audit
+        # list the fake model appends to) survives. That is why _attribute_snapshot says so plainly --
+        # a caller whose calibrate() mutates nested state in place still has cleanup of its own to do.
+        # Undoing it generically would mean deep-copying an arbitrary model, which for a real
+        # torch-backed student is both expensive and not always possible.
+        model = _FailingModel(self.CURVE, fail_at_alpha=0.1)
+        with self.assertRaises(RuntimeError):
+            self._call(model)
+        self.assertEqual(len(model.calibration_batches), 3)  # in-place appends are NOT rolled back
+        self.assertEqual(model.alpha, 0.05)  # the load-bearing calibration state IS
+
+    def test_state_is_unchanged_when_the_final_certification_fails(self):
+        # The certification calibrate() is the last mutation; failing there used to leave the model on
+        # the winning alpha with the LAST SWEEP's threshold -- the most dangerous shape of all, since
+        # alpha reads as certified.
+        class _FailingCertification(_FakeCalibratedModel):
+            def __init__(self, curve):
+                super().__init__(curve)
+                self.alpha = 0.05
+                self.qhat = "certified@0.05"
+
+            def calibrate(self, texts, labels):
+                if "cert a" in list(texts):
+                    raise RuntimeError("certification rows rejected")
+                return super().calibrate(texts, labels)
+
+        model = _FailingCertification(self.CURVE)
+        before = (model.alpha, model.qhat)
+        with self.assertRaises(RuntimeError):
+            self._call(model)
+        self.assertEqual((model.alpha, model.qhat), before)
+
+    def test_a_successful_sweep_still_recalibrates_the_model(self):
+        # Negative control: rollback must not undo the documented in-place effect of a sweep that
+        # SUCCEEDS. The model must end up on the winning alpha with the certification threshold.
+        model = _FakeCalibratedModel(self.CURVE)
+        best_alpha, _, _ = self._call(model)
+        self.assertEqual(model.alpha, best_alpha)
+        self.assertEqual(model.qhat, f"qhat@alpha={best_alpha}")
+        self.assertEqual(model.calibration_batches[-1][0], ["cert a", "cert b"])
+
+    def test_a_slotted_model_restores_the_attribute_the_contract_names(self):
+        # A model without __dict__ cannot be snapshotted wholesale; alpha is the one attribute the
+        # duck-typed contract names, and it is restored rather than left on an abandoned candidate.
+        class _Slotted:
+            __slots__ = ("alpha", "qhat")
+
+            def __init__(self):
+                self.alpha = 0.05
+                self.qhat = "certified@0.05"
+
+            def calibrate(self, texts, labels):
+                self.qhat = f"qhat@alpha={self.alpha}"
+                return self
+
+            def escalation_rate(self, texts):
+                raise RuntimeError("scoring backend unavailable")
+
+        model = _Slotted()
+        with self.assertRaises(RuntimeError):
+            self._call(model)
+        self.assertEqual(model.alpha, 0.05)
+
+
 if __name__ == "__main__":
     unittest.main()

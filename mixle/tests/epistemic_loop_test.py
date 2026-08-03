@@ -6,7 +6,7 @@ import warnings
 
 import numpy as np
 
-from mixle.epistemic.loop import _add_hypothesis, _portfolio_eig_nmc, step
+from mixle.epistemic.loop import _add_hypothesis, _portfolio_eig_nmc, _reported_eig, step
 from mixle.epistemic.portfolio import Hypothesis, HypothesisPortfolio
 
 
@@ -370,6 +370,200 @@ class ActionEvidenceValidationTest(unittest.TestCase):
         outcome = self._step(n_outer=8, n_inner=8, lam=0.5, cost_fn=lambda a: 1.0)
         self.assertEqual(outcome.next_action, 1.0)
         self.assertTrue(math.isfinite(outcome.next_action_eig))
+
+
+class ActionConditionedLikelihoodTest(unittest.TestCase):
+    """MXR-080-1896: ACT's ``p(y|h,a)`` had nowhere to live, so it silently scored ``p(y|h)``."""
+
+    @staticmethod
+    def _simulate_shifted(hypothesis, action, rng):
+        """An outcome law that genuinely depends on the action (the whole point of an experiment)."""
+        return float(hypothesis.payload + action + rng.normal(scale=0.2))
+
+    @staticmethod
+    def _unconditional(hypothesis, observation):
+        return float(np.exp(-0.5 * ((observation - hypothesis.payload) / 0.2) ** 2))
+
+    @staticmethod
+    def _conditional(hypothesis, action, observation):
+        return float(np.exp(-0.5 * ((observation - hypothesis.payload - action) / 0.2) ** 2))
+
+    def _portfolio(self):
+        hyps = [Hypothesis("h0", 0.0), Hypothesis("h1", 3.0)]
+        return HypothesisPortfolio(hyps, np.array([0.5, 0.5]), w_open=0.0)
+
+    def test_the_two_argument_density_scores_a_shifted_experiment_as_impossible(self):
+        # The reproduction: with a large action the draws move away from every hypothesis's own
+        # payload, so the unconditional density evaluates all of them near zero and the log-ratio
+        # collapses onto the 1e-300 floor -- a number that is not the EIG of anything.
+        blind = _portfolio_eig_nmc(
+            self._portfolio(),
+            50.0,
+            self._unconditional,
+            self._simulate_shifted,
+            np.random.RandomState(0),
+            n_outer=64,
+            n_inner=32,
+        )
+        conditioned = _portfolio_eig_nmc(
+            self._portfolio(),
+            50.0,
+            self._unconditional,
+            self._simulate_shifted,
+            np.random.RandomState(0),
+            n_outer=64,
+            n_inner=32,
+            action_likelihood=self._conditional,
+        )
+        self.assertLess(blind, 0.1)
+        # The action shifts both hypotheses equally, so it discriminates exactly as well as action 0
+        # does: ~log 2 nats. Only the action-conditioned density can see that.
+        self.assertGreater(conditioned, 0.4)
+
+    def test_the_two_argument_path_is_untouched_when_no_action_likelihood_is_given(self):
+        # Negative control: the existing (correct) case -- an outcome law that does NOT depend on the
+        # action -- must produce exactly the number it produced before this parameter existed.
+        def simulate_fn(hypothesis, action, rng):
+            return float(hypothesis.payload + rng.normal(scale=0.2))
+
+        with_default = _portfolio_eig_nmc(
+            self._portfolio(),
+            0.0,
+            self._unconditional,
+            simulate_fn,
+            np.random.RandomState(0),
+            n_outer=64,
+            n_inner=32,
+        )
+        with_explicit_none = _portfolio_eig_nmc(
+            self._portfolio(),
+            0.0,
+            self._unconditional,
+            simulate_fn,
+            np.random.RandomState(0),
+            n_outer=64,
+            n_inner=32,
+            action_likelihood=None,
+        )
+        self.assertEqual(with_default, with_explicit_none)
+        self.assertGreater(with_default, 0.4)
+
+    def test_an_outcome_the_drawing_hypothesis_calls_impossible_contributes_nothing(self):
+        # A finite-budget rejection sampler legitimately returns a fallback draw outside the accepted
+        # set its density is normalized over. That draw must contribute 0, not a ~-690 nat artifact of
+        # the log floor. Here hypothesis payloads are 0.0 and 3.0; the density supports only the
+        # window [action-0.5, action+0.5], and the simulator always returns a far-away draw.
+        def simulate_far(hypothesis, action, rng):
+            return 1000.0
+
+        def windowed(hypothesis, action, observation):
+            return 1.0 if abs(observation - action) <= 0.5 else 0.0
+
+        eig = _portfolio_eig_nmc(
+            self._portfolio(),
+            0.0,
+            self._unconditional,
+            simulate_far,
+            np.random.RandomState(0),
+            n_outer=16,
+            n_inner=8,
+            action_likelihood=windowed,
+        )
+        self.assertEqual(eig, 0.0)
+
+
+class SelectionVersusFinalEvidenceTest(unittest.TestCase):
+    """MXR-080-1896: ``next_action_eig`` was the winning score, i.e. the winner's curse."""
+
+    @staticmethod
+    def _simulate_fn(hypothesis, action, rng):
+        return float(hypothesis.payload + rng.normal(scale=1.0))
+
+    @staticmethod
+    def _likelihood(hypothesis, observation):
+        return float(np.exp(-0.5 * (observation - hypothesis.payload) ** 2))
+
+    def test_the_reported_eig_is_not_the_score_that_won_the_argmax(self):
+        # With several candidates whose true EIGs are close, `max_a EIG_hat(a)` is biased high for the
+        # winner: an upward error is precisely what makes a candidate win. The reported number must be
+        # an independent re-estimate, so it must differ from the winning selection score.
+        hyps = [Hypothesis("h0", 0.0), Hypothesis("h1", 1.0)]
+        portfolio = HypothesisPortfolio(hyps, np.array([0.5, 0.5]), w_open=0.0)
+        actions = [0.0, 0.25, 0.5, 0.75, 1.0]
+
+        selection_scores = []
+        rng = np.random.RandomState(3)
+        for action in actions:
+            selection_scores.append(
+                _portfolio_eig_nmc(portfolio, action, self._likelihood, self._simulate_fn, rng, n_outer=32, n_inner=32)
+            )
+        winning_score = max(selection_scores)
+
+        outcome = step(
+            portfolio,
+            0.5,
+            self._likelihood,
+            action_space=actions,
+            simulate_fn=self._simulate_fn,
+            n_outer=32,
+            n_inner=32,
+            rng=3,
+        )
+        self.assertIsNotNone(outcome.next_action_eig)
+        self.assertNotAlmostEqual(outcome.next_action_eig, winning_score, places=9)
+
+    def test_the_reported_eig_is_reproducible_from_the_callers_single_rng(self):
+        # The confirming stream is seeded FROM the caller's rng, so the whole step stays deterministic.
+        portfolio = _toy_portfolio()
+        kwargs = dict(
+            action_space=[1.0, 2.0, 4.0],
+            simulate_fn=self._simulate_fn,
+            n_outer=16,
+            n_inner=16,
+        )
+        first = step(portfolio, 2.0, _gaussian_likelihood, rng=11, **kwargs)
+        second = step(portfolio, 2.0, _gaussian_likelihood, rng=11, **kwargs)
+        self.assertEqual(first.next_action, second.next_action)
+        self.assertEqual(first.next_action_eig, second.next_action_eig)
+
+    def test_a_single_candidate_action_still_reports_a_usable_eig(self):
+        # Negative control: with one candidate there is no selection at all and therefore no curse,
+        # but the reported value must still be a real, non-degenerate measurement.
+        hyps = [Hypothesis("h0", 0.0), Hypothesis("h1", 3.0)]
+        portfolio = HypothesisPortfolio(hyps, np.array([0.5, 0.5]), w_open=0.0)
+        outcome = step(
+            portfolio,
+            1.5,
+            self._likelihood,
+            action_space=[0.0],
+            simulate_fn=lambda h, a, r: float(h.payload + r.normal(scale=0.2)),
+            n_outer=64,
+            n_inner=32,
+            rng=0,
+        )
+        self.assertEqual(outcome.next_action, 0.0)
+        self.assertGreater(outcome.next_action_eig, 0.4)
+
+
+class NegativeEigProjectionTest(unittest.TestCase):
+    """MXR-080-1896: a near-zero EIG re-estimate lands negative ~half the time; that is noise."""
+
+    def test_a_negative_estimate_within_the_noise_is_reported_as_zero(self):
+        self.assertEqual(_reported_eig("a", -0.004, 0.01), 0.0)
+        self.assertEqual(_reported_eig("a", -1e-17, 0.0), 0.0)  # float drift with no measurable spread
+
+    def test_a_negative_estimate_far_outside_the_noise_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            _reported_eig("a", -1.15, 0.01)
+        # The message must name the actual remedy, not just complain about the number.
+        self.assertIn("action_likelihood", str(caught.exception))
+
+    def test_a_positive_estimate_is_passed_through_untouched(self):
+        self.assertEqual(_reported_eig("a", 0.42, 0.01), 0.42)
+
+    def test_an_unmeasurable_spread_never_refuses(self):
+        # n_outer == 1 reports an infinite standard error ("unknown"), which must stay permissive.
+        self.assertEqual(_reported_eig("a", -5.0, math.inf), 0.0)
 
 
 if __name__ == "__main__":

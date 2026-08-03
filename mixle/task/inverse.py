@@ -68,6 +68,7 @@ from scipy.stats import chi2, norm
 from mixle.inference.condition import ConditionReceipt, Posterior
 from mixle.inference.estimation import optimize
 from mixle.models.grad_leaf import GradLeaf
+from mixle.utils.immutable import detach_receipt_container
 
 __all__ = ["InverseModel", "InverseReceipts", "learn_inverse"]
 
@@ -550,6 +551,58 @@ class InverseReceipts:
     ess_ratio: float | None = None
     warnings: list[str] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        """Sever the caller's alias on every container this record holds (MXR-080-1894).
+
+        A calibration report is evidence about a fit that already happened. Every container field
+        here was stored by reference, so whoever built or passed one kept a live handle: mutating
+        ``warnings`` or ``round_training`` afterwards silently rewrote a receipt that had already
+        been produced, and nothing re-validates. :func:`~mixle.utils.immutable.detach_receipt_container`
+        (not the stronger freezer) because these fields' concrete types are load-bearing --
+        ``coverage`` is keyed by float and read as a ``dict``, ``coverage_intervals`` holds lists of
+        tuples that callers index, and this dataclass is not frozen, so a ``mappingproxy`` here would
+        change the observable type of a documented field for no additional protection.
+
+        Deliberately NOT done: the dataclass is left mutable. Making it frozen is the stronger fix,
+        but ``ConditionReceipt`` was frozen by MXR-080-1876 and that silently broke every
+        :meth:`InverseModel.posterior` call (see :class:`InverseConditionReceipt`); repeating the
+        move on a record with more consumers, in a change whose regression tests are ``slow``-marked
+        and therefore outside the default ``-m fast`` gate, is not a trade worth making here.
+        """
+        for name in (
+            "coverage",
+            "coverage_pass",
+            "prior_predictive",
+            "sbc_pvalues_by_dimension",
+            "coverage_by_dimension",
+            "coverage_intervals",
+            "sharpness_by_round",
+            "round_training",
+            "warnings",
+        ):
+            setattr(self, name, detach_receipt_container(getattr(self, name)))
+
+
+@dataclass(frozen=True)
+class InverseConditionReceipt(ConditionReceipt):
+    """A :class:`~mixle.inference.condition.ConditionReceipt` that can carry its inverse receipts.
+
+    MXR-080-1894. :meth:`InverseModel.posterior` used to attach the calibration report by assigning
+    an undeclared attribute onto a plain ``ConditionReceipt``. MXR-080-1876 then froze that class --
+    correctly, it is a record -- and a frozen dataclass refuses assignment to *any* name, declared or
+    not. So every ``posterior()`` call, on both the amortized and the target-corrected path, began
+    raising ``FrozenInstanceError``: the method was completely non-functional. It went unnoticed
+    because ``mixle/tests/inverse_test.py`` needs ``torch`` and is ``slow``-marked, so the default
+    ``-m fast`` run never collected it.
+
+    Declaring the field on a subclass fixes it inside :mod:`mixle.task.inverse` and keeps the freeze
+    intact: the pointer is now part of the record rather than smuggled past its constructor,
+    ``isinstance(receipt, ConditionReceipt)`` still holds, and ``receipt.inverse_receipts`` reads
+    exactly as the docstring and the existing test already promise.
+    """
+
+    inverse_receipts: InverseReceipts | None = None
+
 
 class InverseModel:
     """A fitted amortized posterior ``q(theta | y)`` plus its :class:`InverseReceipts`."""
@@ -581,14 +634,25 @@ class InverseModel:
         if any(correction_parts) and not all(correction_parts):
             raise ValueError("target correction requires y, particles, and normalized weights together")
         if all(correction_parts):
-            reweighted_y = np.asarray(reweighted_y, dtype=float).reshape(-1)
-            reweighted_particles = _as_rows(
-                reweighted_particles,
-                len(reweighted_weights),
-                context="reweighted particles",
-                expected_width=theta_dim,
+            # MXR-080-1894: `np.asarray` does NOT copy an array that already has the requested dtype,
+            # and `reshape` returns a view -- so every check below used to be run against storage the
+            # CALLER still owned. A caller that mutated its own array afterwards silently invalidated
+            # all of them at once: a validated weight vector summing to 1.0 became 5.75 and validated
+            # finite particles picked up a NaN, with no check ever re-run and the corrupted state
+            # flowing straight into `posterior()`'s weighted sampler and mean. Copy first, then
+            # validate the copy, then freeze it -- the same "checked once, true for the object's
+            # lifetime" discipline `HypothesisPortfolio.weights` already uses.
+            reweighted_y = np.array(reweighted_y, dtype=float).reshape(-1)
+            reweighted_particles = np.array(
+                _as_rows(
+                    reweighted_particles,
+                    len(reweighted_weights),
+                    context="reweighted particles",
+                    expected_width=theta_dim,
+                ),
+                dtype=float,
             )
-            reweighted_weights = np.asarray(reweighted_weights, dtype=float).reshape(-1)
+            reweighted_weights = np.array(reweighted_weights, dtype=float).reshape(-1)
             if (
                 reweighted_y.shape != (y_dim,)
                 or not np.all(np.isfinite(reweighted_y))
@@ -598,6 +662,8 @@ class InverseModel:
                 or not np.isclose(float(reweighted_weights.sum()), 1.0, atol=1e-12)
             ):
                 raise ValueError("target-correction arrays must be finite, aligned, and normalized")
+            for array in (reweighted_y, reweighted_particles, reweighted_weights):
+                array.flags.writeable = False
         self.module = module
         self.prior = prior
         self.simulator = simulator
@@ -645,15 +711,15 @@ class InverseModel:
                     raise ValueError(f"posterior field must be in [0, {self.theta_dim})")
                 return float(np.dot(weights, particles[:, idx]))
 
-            receipt = ConditionReceipt(
+            receipt = InverseConditionReceipt(
                 method="sir",
                 sample_contract="theta_particles",
                 ess=self.receipts.ess,
                 ess_ratio=self.receipts.ess_ratio,
                 n_particles=len(particles),
                 warnings=list(self.receipts.warnings),
+                inverse_receipts=self.receipts,
             )
-            receipt.inverse_receipts = self.receipts
             return Posterior(
                 sample_fn=weighted_sample_fn,
                 log_density_fn=None,
@@ -685,15 +751,15 @@ class InverseModel:
             samples = _sample_given(module, y_row, 500, seed=base_seed)
             return float(np.mean(samples[:, idx]))
 
-        receipt = ConditionReceipt(
+        receipt = InverseConditionReceipt(
             method="amortized",
             warnings=[
                 "InverseModel.posterior: a LEARNED amortized approximation "
                 "(mixle.task.inverse.learn_inverse), not exact conditioning -- see "
                 ".receipt.inverse_receipts (SBC/coverage/prior-predictive/ESS) before trusting it."
             ],
+            inverse_receipts=self.receipts,  # the full calibration report (not an M0 field)
         )
-        receipt.inverse_receipts = self.receipts  # pointer to the full calibration report (not an M0 field)
         return Posterior(
             sample_fn=sample_fn, log_density_fn=log_density_fn, mean_fn=mean_fn, receipt=receipt, model=None
         )

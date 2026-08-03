@@ -135,6 +135,113 @@ def default_probe_simulate_fn(
     return closest
 
 
+def _acceptance_mass(payload: Any, action: float, window: float, *, quadrature_nodes: int) -> float:
+    """``P(|Y - action| <= window | payload)`` -- the probe law's ACTION-DEPENDENT normalizer.
+
+    Exact from ``payload.cdf`` when the fitted model exposes one (correct for discrete payloads too,
+    up to the single atom at the closed lower endpoint), otherwise composite Simpson quadrature of
+    ``exp(log_density)`` over ``[action - window, action + window]``. Quadrature rather than Monte
+    Carlo on purpose: this normalizer is legitimately tiny (``~1e-9`` for a probe placed in a
+    hypothesis's far tail, which is exactly the most discriminating kind of probe), and a Monte Carlo
+    estimate of it would read zero there and divide the truncated density by nothing. Quadrature over
+    a bounded interval has no such starvation regime, needs only the ``log_density`` every payload in
+    this loop already has, and is deterministic -- so the EIG does not depend on a nuisance seed.
+    """
+    lo, hi = float(action) - float(window), float(action) + float(window)
+    cdf = getattr(payload, "cdf", None)
+    if callable(cdf):
+        mass = float(cdf(hi)) - float(cdf(lo))
+        if math.isfinite(mass) and mass >= 0.0:
+            return min(mass, 1.0)
+    if hi <= lo:
+        return 0.0
+    xs = np.linspace(lo, hi, quadrature_nodes)
+    densities = np.array([math.exp(float(payload.log_density(float(x)))) for x in xs], dtype=np.float64)
+    if not np.all(np.isfinite(densities)):
+        raise ValueError(
+            f"probe hypothesis payload {type(payload).__name__!r} produced a non-finite density on "
+            f"[{lo!r}, {hi!r}]; the truncated probe law's normalizer cannot be computed from it"
+        )
+    coefficients = np.ones(quadrature_nodes, dtype=np.float64)
+    coefficients[1:-1:2] = 4.0
+    coefficients[2:-1:2] = 2.0
+    mass = float((hi - lo) / (quadrature_nodes - 1) / 3.0 * float(np.dot(coefficients, densities)))
+    return float(min(max(mass, 0.0), 1.0))
+
+
+class TruncatedProbeLikelihood:
+    """``p(y | h, a)`` for the probe :func:`default_probe_simulate_fn` actually performs (MXR-080-1896).
+
+    The probe rejection-samples ``hypothesis``'s predictive until a draw lands within ``window`` of
+    ``action``, so the law it realizes is the predictive TRUNCATED to ``[a - w, a + w]``::
+
+        p(y | h, a) = p(y | h) / P(|Y - a| <= w | h)   for |y - a| <= w,   else 0
+
+    and that normalizer depends on ``a``. The loop previously scored its EIG with
+    ``exp(h.payload.log_density(y))`` -- the untruncated ``p(y|h)``, byte-identical for every action --
+    so the quantity being maximized was not the information gain of the experiment being commissioned.
+    Measured on a two-Gaussian portfolio with five candidate probe locations, that mismatch reported
+    ``-1.15`` nats where the true action-conditioned EIG was ``+0.04``: negative, which an expected
+    information gain cannot be.
+
+    ``0.0`` outside the window is the honest value, not a guard: under the declared experiment such an
+    observation is impossible, and it is only reachable at all through
+    :func:`default_probe_simulate_fn`'s documented budget-exhaustion fallback.
+    :func:`mixle.epistemic.loop._portfolio_eig_nmc` scores those draws as contributing nothing rather
+    than refusing them.
+
+    The normalizer is memoized per ``(hypothesis.id, action)``. That is exact for the way this class is
+    used -- one instance per :func:`run_discrepancy_invention_loop` call, over one portfolio whose ids
+    are unique (its constructor enforces that) and whose payloads are fitted once and never mutated --
+    and it is what makes the cost tolerable, since the estimator asks for the same few normalizers
+    ``n_outer * (1 + n_inner)`` times per action. Do NOT share an instance across portfolios that reuse
+    hypothesis ids for different payloads.
+    """
+
+    def __init__(self, *, window: float, quadrature_nodes: int = 129) -> None:
+        window = float(window)
+        if not math.isfinite(window) or window < 0.0:
+            raise ValueError("probe window must be finite and non-negative")
+        if (
+            isinstance(quadrature_nodes, bool)
+            or not isinstance(quadrature_nodes, (int, np.integer))
+            or quadrature_nodes < 3
+            or quadrature_nodes % 2 == 0
+        ):
+            # Composite Simpson needs an odd node count (an even number of panels) of at least 3.
+            raise ValueError("quadrature_nodes must be an odd integer >= 3")
+        self.window = window
+        self.quadrature_nodes = int(quadrature_nodes)
+        self._mass: dict[tuple[str, float], float] = {}
+
+    def acceptance_mass(self, hypothesis: Hypothesis, action: float) -> float:
+        """``P(|Y - action| <= window | hypothesis)``, memoized."""
+        key = (hypothesis.id, float(action))
+        mass = self._mass.get(key)
+        if mass is None:
+            mass = _acceptance_mass(
+                hypothesis.payload, float(action), self.window, quadrature_nodes=self.quadrature_nodes
+            )
+            self._mass[key] = mass
+        return mass
+
+    def __call__(self, hypothesis: Hypothesis, action: Any, observation: Any) -> float:
+        y = float(observation)
+        a = float(action)
+        if not np.isfinite(y) or not np.isfinite(a):
+            raise ValueError("probe likelihood requires finite scalar action and observation")
+        if abs(y - a) > self.window:
+            return 0.0
+        mass = self.acceptance_mass(hypothesis, a)
+        if mass <= 0.0:
+            # The accepted set carries no probability under this hypothesis (a zero-width window, or a
+            # payload that puts no mass at all in it), so the truncated law does not exist and the
+            # experiment is unrealizable here. 0.0 says "this hypothesis cannot produce this outcome",
+            # which the EIG estimator reads as "no discrimination" rather than dividing by zero.
+            return 0.0
+        return float(math.exp(float(hypothesis.payload.log_density(y))) / mass)
+
+
 @dataclass
 class InventionResult:
     """The full outcome of one discrepancy -> invention loop run, with its replayable journal."""
@@ -384,6 +491,12 @@ def run_discrepancy_invention_loop(
     def simulate_fn(h: Hypothesis, action: Any, r: np.random.RandomState) -> Any:
         return default_probe_simulate_fn(h, action, r, window=window)
 
+    # MXR-080-1896: the density that scores the EIG must be the density of the law `simulate_fn`
+    # draws from -- the predictive TRUNCATED to the probe window, whose normalizer depends on the
+    # action. `likelihood_fn` above stays the UPDATE density: those observations are real held-out
+    # rows, not action-conditioned probe outcomes, so conditioning them on a window would be wrong.
+    probe_likelihood = TruncatedProbeLikelihood(window=window)
+
     subsample = probe_panel[: min(len(probe_panel), int(probe_reweight_n))]
     probe_outcome = None
     for i, y in enumerate(subsample):
@@ -394,6 +507,7 @@ def run_discrepancy_invention_loop(
             likelihood_fn,
             action_space=action_space if is_last else None,
             simulate_fn=simulate_fn if is_last else None,
+            action_likelihood=probe_likelihood if is_last else None,
             rng=rng,
         )
         portfolio = probe_outcome.portfolio_after
@@ -437,6 +551,7 @@ def reconstruct_reasoning_chain(journal: EpistemicJournal) -> list[str]:
 
 __all__ = [
     "InventionResult",
+    "TruncatedProbeLikelihood",
     "default_probe_action_space",
     "default_probe_simulate_fn",
     "reconstruct_reasoning_chain",
