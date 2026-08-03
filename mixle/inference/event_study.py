@@ -33,6 +33,8 @@ from typing import Any
 
 import numpy as np
 
+from mixle.utils.exact import require_exact_bool
+
 
 @dataclass(frozen=True)
 class EventStudyIdentification:
@@ -58,6 +60,11 @@ class EventStudyIdentification:
             not isinstance(self.sensitivity_analysis, str) or not self.sensitivity_analysis.strip()
         ):
             raise ValueError("sensitivity_analysis must be None or a non-empty reference")
+        # Exact Booleans, for the same reason as CausalIdentification (MXR-080-1899): `identified`
+        # is a truthiness conjunction, so a receipt deserialized from configuration text with
+        # `no_anticipation: "false"` declared the assumption FAILS and was still read as identified.
+        for name in ("exchangeability", "positivity", "consistency", "no_interference", "no_anticipation"):
+            object.__setattr__(self, name, require_exact_bool(getattr(self, name), f"EventStudyIdentification.{name}"))
 
     @property
     def identified(self) -> bool:
@@ -91,6 +98,16 @@ def poisson_lograte_effect(k_pre: float, t_pre: float, k_post: float, t_post: fl
     ``k_*`` are event counts, ``t_*`` the window durations (or exposures). Uses a Haldane 0.5 correction so
     zero-count windows are finite; variance is the delta-method log-rate variance ``1/k_post + 1/k_pre``.
     """
+    # A Boolean is not an event count (MXR-080-1899). `float(True)` is 1.0 and `(1.0).is_integer()`
+    # is True, so `poisson_lograte_effect(True, t, False, t)` used to be read as "one event in the
+    # pre-window, zero in the post-window" and returned a confident -1.1 log-rate shift. That is
+    # exactly the shape a mis-wired caller produces -- passing an `any(events)` indicator, or a
+    # pandas Boolean column, where the count belongs -- and there is no count it could plausibly
+    # have meant, so it is refused rather than interpreted. Exposures are checked the same way: a
+    # Boolean window duration is equally meaningless, and `t=True` would silently mean one unit.
+    for name, value in (("k_pre", k_pre), ("k_post", k_post), ("t_pre", t_pre), ("t_post", t_post)):
+        if isinstance(value, (bool, np.bool_)):
+            raise TypeError(f"{name} must be a number, not a Boolean; got {value!r}")
     raw_counts = (float(k_pre), float(k_post))
     durations = (float(t_pre), float(t_post))
     if not all(np.isfinite(value) for value in (*raw_counts, *durations)):

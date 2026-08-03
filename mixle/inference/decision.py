@@ -166,19 +166,64 @@ def _draw_count(value: Any) -> int:
     return count
 
 
+def _real_scalar(value: Any, name: str) -> float:
+    """Return ``value`` as a float, refusing Booleans and anything that is not already a real number.
+
+    ``float(value)`` is a coercion, and two of the values it accepts change what the tail-risk
+    numbers mean without saying so (MXR-080-1899): ``True`` becomes ``1.0`` -- for ``cvar_alpha``
+    that silently turns "worst 10%" into "the whole distribution", so the reported CVaR equals the
+    mean and the tail is not measured at all -- and the string ``"0.5"`` becomes ``0.5``, which is
+    the coercion ``mixle.utils.exact`` documents as the way a flag that arrived from configuration
+    text gets to mean whatever it happens to spell. Real numbers, including numpy scalars, pass.
+    """
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.integer, np.floating)):
+        raise TypeError(f"{name} must be a real number (not a Boolean or a string), got {value!r}")
+    return float(value)
+
+
 def _tail_mass(value: Any) -> float:
     """Return the CVaR tail mass as a finite fraction in ``(0, 1]``."""
-    try:
-        alpha = float(value)
-    except (TypeError, ValueError) as exc:
-        raise TypeError(f"cvar_alpha must be a real number, got {value!r}") from exc
+    alpha = _real_scalar(value, "cvar_alpha")
     if not np.isfinite(alpha) or not 0.0 < alpha <= 1.0:
         raise ValueError(f"cvar_alpha must be finite and in (0, 1], got {alpha!r}")
     return alpha
 
 
+def _quantile_levels(quantiles: Any) -> tuple[float, ...]:
+    """Return the requested loss-quantile levels, validated *before* any loss is evaluated.
+
+    Two things this fixes (MXR-080-1899). First, ``quantiles=(True, False)`` used to reach
+    ``np.quantile`` as ``1.0``/``0.0`` and be reported as the max and min loss under keys ``'1.0'``
+    and ``'0.0'`` -- a Boolean is not a probability level. Second, an out-of-range level was caught
+    only inside ``np.quantile``, i.e. *after* the loss had already been evaluated once per draw for
+    every candidate action; a decision loss can be metered or side-effecting, so the level set is
+    checked up front instead.
+
+    Deliberately NOT rejected: an empty ``quantiles`` (a caller asking for no quantile report is
+    coherent, and the CVaR/VaR fields are unaffected), and repeated levels -- they collapse to one
+    entry in the returned mapping, which is what a caller asking for the same level twice means.
+    """
+    levels = tuple(_real_scalar(q, "each entry of quantiles") for q in quantiles)
+    bad = [q for q in levels if not np.isfinite(q) or not 0.0 <= q <= 1.0]
+    if bad:
+        raise ValueError(f"quantiles must be finite probability levels in [0, 1], got {bad!r}")
+    return levels
+
+
 def _draw_list(draws: Any, requested: int) -> list[Any]:
-    """Normalise a ``samples`` return value to a nonempty, aligned list of per-draw values."""
+    """Normalise a ``samples`` return value to a nonempty, aligned list of per-draw values.
+
+    The count is required to match ``requested`` exactly. A posterior that returns fewer draws than
+    asked for used to be accepted silently (MXR-080-1899), and the whole tail-risk profile is then
+    computed at a resolution the caller never chose: ``bayes_action(..., n=2000, cvar_alpha=0.01)``
+    against a ``samples`` that returns 3 draws reports a "worst 1%" CVaR built from 0.03
+    observations' worth of mass, and the quantiles are three order statistics wearing 2000-draw
+    labels. Both directions are refused because both mean the same thing -- ``samples(n, rng)`` did
+    not honour ``n`` -- and every implementation of that contract in this repository returns exactly
+    ``n`` (the conjugate dict-of-columns, the MCMC chain resample, the plug-in sampler, and the
+    ``Posterior.samples`` base that loops ``sample``). A caller whose posterior holds a fixed draw
+    set should pass ``n=len(draws)``.
+    """
     # ``samples`` may return an ndarray, a list of scalars, or a dict of per-parameter arrays.
     if isinstance(draws, np.ndarray):
         normalised: list[Any] = list(draws)
@@ -196,6 +241,12 @@ def _draw_list(draws: Any, requested: int) -> list[Any]:
         normalised = list(draws)
     if not normalised:
         raise ValueError(f"posterior samples returned no draws for the requested n={requested}")
+    if len(normalised) != requested:
+        raise ValueError(
+            f"posterior samples(n={requested}) returned {len(normalised)} draw(s); the expected loss, "
+            "CVaR and quantiles would be computed at a sample size the caller did not choose. Pass "
+            f"n={len(normalised)} if that is the intended Monte-Carlo size."
+        )
     return normalised
 
 
@@ -267,8 +318,11 @@ def bayes_action(
 
     Raises:
         ValueError: if ``actions`` is empty, ``n`` is not positive, ``cvar_alpha`` is outside ``(0, 1]``,
-            the posterior returns an empty or ragged sample batch, or a loss evaluates to NaN.
-        TypeError: if ``n`` is not an exact integer.
+            a quantile level is outside ``[0, 1]``, the posterior returns an empty, ragged, or
+            wrong-sized sample batch (``samples(n, rng)`` must return exactly ``n`` draws), or a loss
+            evaluates to NaN.
+        TypeError: if ``n`` is not an exact integer, or ``cvar_alpha``/a quantile level is a Boolean,
+            a string, or anything else that is not already a real number.
         CapabilityError: if ``posterior`` does not expose the ``samples(n, rng)`` contract.
     """
     actions = list(actions)
@@ -282,8 +336,12 @@ def bayes_action(
             "pass a mixle.inference.posterior(...) object."
         )
 
+    # Every control is validated before the posterior is drawn and before the loss is called even
+    # once: a loss is caller code that may be metered, stateful, or expensive, so an invalid
+    # quantile level must not cost |actions| x n evaluations before it is reported (MXR-080-1899).
     requested = _draw_count(n)
     alpha = _tail_mass(cvar_alpha)
+    levels = _quantile_levels(quantiles)
     rng = np.random.RandomState(seed)
     draw_list = _draw_list(sample_fn(requested, rng), requested)
 
@@ -292,7 +350,7 @@ def bayes_action(
     mode = vectorized if vectorized is not None else _declared_vectorized(loss)
     for action in actions:
         losses, mode = _loss_samples(loss, action, draw_list, vectorized=mode)
-        prof = _risk_profile(losses, alpha=alpha, quantiles=quantiles)
+        prof = _risk_profile(losses, alpha=alpha, quantiles=levels)
         profiles.append(prof)
         expected.append(prof.expected_loss)
 

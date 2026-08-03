@@ -25,23 +25,47 @@ LogTarget = Callable[[Any], float]
 
 @dataclass(frozen=True)
 class MCMCResult:
-    """Samples and diagnostics returned by an MCMC run."""
+    """Samples and diagnostics returned by an MCMC run.
 
-    samples: list[Any]
+    The record owns its evidence: ``samples`` is a tuple and ``log_probs``/``accepted`` are
+    write-locked copies, so neither the array the caller passed in nor the field itself can be
+    edited after the checks in :meth:`__post_init__` have passed (MXR-080-1899). Those checks assert
+    one finite log-probability per retained sample and a Boolean transition record of matching
+    length; while the fields were writable aliases, ``result.accepted[:] = True`` rewrote
+    :attr:`acceptance_rate` and ``result.samples.append(x)`` broke the very length agreement the
+    constructor had just verified, with nothing anywhere reporting the discrepancy.
+
+    Deliberately NOT frozen: the *elements* of ``samples``. A draw is whatever the target's state
+    space contains -- an ndarray, a dict, a rebuilt distribution -- and deep-freezing those would
+    change what a sample is (and break ``return_distributions=True`` draws). The container is owned;
+    an individual draw's interior is not.
+    """
+
+    samples: tuple[Any, ...]
     log_probs: np.ndarray
     accepted: np.ndarray
     transition_labels: tuple[str, ...] | None = None
     receipt: Any | None = None
 
     def __post_init__(self) -> None:
-        log_probs = np.asarray(self.log_probs)
-        accepted = np.asarray(self.accepted)
-        if log_probs.ndim != 1 or len(log_probs) != len(self.samples) or not np.all(np.isfinite(log_probs)):
+        samples = tuple(self.samples)
+        log_probs = np.array(self.log_probs, copy=True)
+        accepted = np.array(self.accepted, copy=True)
+        if log_probs.ndim != 1 or len(log_probs) != len(samples) or not np.all(np.isfinite(log_probs)):
             raise ValueError("log_probs must contain one finite value per retained sample.")
         if accepted.ndim != 1 or accepted.dtype.kind != "b":
             raise ValueError("accepted must be a one-dimensional boolean transition record.")
-        if self.transition_labels is not None and len(self.transition_labels) != len(accepted):
+        labels = None if self.transition_labels is None else tuple(self.transition_labels)
+        if labels is not None and len(labels) != len(accepted):
             raise ValueError("transition label count does not match accepted count.")
+        # Sealed only after every check has passed, so a rejected construction never installs
+        # half-validated state on the instance.
+        log_probs.setflags(write=False)
+        accepted.setflags(write=False)
+        object.__setattr__(self, "samples", samples)
+        object.__setattr__(self, "log_probs", log_probs)
+        object.__setattr__(self, "accepted", accepted)
+        object.__setattr__(self, "transition_labels", labels)
 
     @property
     def acceptance_rate(self) -> float:

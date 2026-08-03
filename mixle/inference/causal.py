@@ -18,6 +18,8 @@ from typing import Any
 
 import numpy as np
 
+from mixle.utils.exact import require_exact_bool
+
 
 @dataclass(frozen=True)
 class CausalIdentification:
@@ -52,6 +54,20 @@ class CausalIdentification:
             raise ValueError("evidence must contain at least one non-empty design or domain reference")
         if not self.assumptions or any(not isinstance(item, str) or not item.strip() for item in self.assumptions):
             raise ValueError("assumptions must contain at least one non-empty identification assumption")
+        # Each assumption flag is an assertion the author is making, so it must be an actual Boolean
+        # (MXR-080-1899). `identified` used to be `bool(a and b and c and d)`, and this receipt is
+        # exactly the kind of record that arrives from serialized configuration -- a YAML/JSON
+        # `exchangeability: "false"` is a non-empty string, so a receipt that spells out that its
+        # assumptions do NOT hold satisfied every causal gate in this module. Canonicalized in place
+        # (the dataclass is frozen) so `np.bool_` receipts serialize as real Booleans via to_dict().
+        for name in (
+            "exchangeability",
+            "positivity",
+            "consistency",
+            "no_interference",
+            "structural_counterfactuals",
+        ):
+            object.__setattr__(self, name, require_exact_bool(getattr(self, name), f"CausalIdentification.{name}"))
 
     @property
     def identified(self) -> bool:
