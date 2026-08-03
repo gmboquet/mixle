@@ -23,6 +23,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.utils.exact import require_exact_bool
 
 if TYPE_CHECKING:
     from mixle.data.sources.graph_source import GraphDataEncoder, GraphObservation
@@ -126,8 +127,8 @@ class ErdosRenyiGraphDistribution(SequenceEncodableProbabilityDistribution):
         self.p = _clip_prob(p)
         self.log_p = -math.inf if self.p == 0.0 else math.log(self.p)
         self.log_1p = -math.inf if self.p == 1.0 else math.log1p(-self.p)
-        self.directed = bool(directed)
-        self.self_loops = bool(self_loops)
+        self.directed = require_exact_bool(directed, "directed")
+        self.self_loops = require_exact_bool(self_loops, "self_loops")
         self.num_nodes = _optional_num_nodes(num_nodes)
         self.name = name
         self.keys = keys
@@ -385,8 +386,8 @@ class ErdosRenyiGraphAccumulator(SequenceEncodableStatisticAccumulator):
     ) -> None:
         self.edge_opportunities = 0.0
         self.edge_count = 0.0
-        self.directed = bool(directed)
-        self.self_loops = bool(self_loops)
+        self.directed = require_exact_bool(directed, "directed")
+        self.self_loops = require_exact_bool(self_loops, "self_loops")
         self.num_nodes = _optional_num_nodes(num_nodes)
         self.name = name
         self.keys = keys
@@ -490,8 +491,8 @@ class ErdosRenyiGraphAccumulatorFactory(StatisticAccumulatorFactory):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        self.directed = bool(directed)
-        self.self_loops = bool(self_loops)
+        self.directed = require_exact_bool(directed, "directed")
+        self.self_loops = require_exact_bool(self_loops, "self_loops")
         self.num_nodes = _optional_num_nodes(num_nodes)
         self.name = name
         self.keys = keys
@@ -520,8 +521,8 @@ class ErdosRenyiGraphEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        self.directed = bool(directed)
-        self.self_loops = bool(self_loops)
+        self.directed = require_exact_bool(directed, "directed")
+        self.self_loops = require_exact_bool(self_loops, "self_loops")
         self.pseudo_count = None if pseudo_count is None else _finite_nonnegative(pseudo_count, name="pseudo_count")
         from mixle.data.sources.graph_source import _clip_prob
 

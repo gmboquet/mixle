@@ -25,6 +25,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
     child_enumerator,
 )
+from mixle.utils.exact import require_exact_bool
 
 
 class TransformDomainError(ValueError):
@@ -148,7 +149,7 @@ def _uses_density_correction(
     density_correction: bool | None,
 ) -> bool:
     if density_correction is not None:
-        return bool(density_correction)
+        return require_exact_bool(density_correction, "density_correction")
     return _enumerator_or_none(dist) is None
 
 

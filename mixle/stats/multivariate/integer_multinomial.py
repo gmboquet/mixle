@@ -52,6 +52,7 @@ from mixle.stats.multivariate._multinomial_contracts import (
     simplex,
 )
 from mixle.utils.aliasing import coalesce_alias
+from mixle.utils.exact import require_exact_bool
 
 SS0 = TypeVar("SS0")
 D = Sequence[tuple[int, float]]
@@ -803,7 +804,9 @@ class IntegerMultinomialAccumulator(SequenceEncodableStatisticAccumulator):
         # max_val is also the running maximum once observations arrive, so the configured ceiling is
         # kept separately -- otherwise a learned ceiling would start rejecting larger categories.
         self.fixed_max_val = max_val
-        self.fixed_support = (min_val is not None) if fixed_support is None else bool(fixed_support)
+        self.fixed_support = (
+            (min_val is not None) if fixed_support is None else require_exact_bool(fixed_support, "fixed_support")
+        )
         if self.fixed_support and min_val is None:
             raise ValueError("fixed integer multinomial support requires explicit bounds")
         self.name = name
@@ -1248,7 +1251,9 @@ class IntegerMultinomialAccumulatorFactory(StatisticAccumulatorFactory):
                     raise ValueError("integer multinomial factory minimum must not exceed maximum")
         self.min_val = min_val
         self.max_val = max_val
-        self.fixed_support = (min_val is not None) if fixed_support is None else bool(fixed_support)
+        self.fixed_support = (
+            (min_val is not None) if fixed_support is None else require_exact_bool(fixed_support, "fixed_support")
+        )
         self.name = name
         self.len_factory = len_factory if len_factory is not None else NullAccumulatorFactory()
         self.keys = keys

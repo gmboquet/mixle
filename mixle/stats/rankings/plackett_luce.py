@@ -49,6 +49,7 @@ from mixle.stats.rankings._contracts import (
 from mixle.stats.rankings._contracts import (
     weights as validate_weights,
 )
+from mixle.utils.exact import require_exact_bool
 
 _LOG_WORTH_FLOOR = -700.0
 
@@ -159,7 +160,7 @@ class PlackettLuceDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
         if not isinstance(allow_partial, (bool, np.bool_)):
             raise TypeError("allow_partial must be a Boolean.")
-        self.allow_partial = bool(allow_partial)
+        self.allow_partial = require_exact_bool(allow_partial, "allow_partial")
 
     def __str__(self) -> str:
         """Return a constructor-style representation of the Plackett-Luce distribution."""
@@ -480,7 +481,7 @@ class PlackettLuceDataEncoder(DataSequenceEncoder):
         self.dim = None if dim is None else positive_integer(dim, label="dim", minimum=2)
         if not isinstance(allow_partial, (bool, np.bool_)):
             raise TypeError("allow_partial must be a Boolean.")
-        self.allow_partial = bool(allow_partial)
+        self.allow_partial = require_exact_bool(allow_partial, "allow_partial")
 
     def __str__(self) -> str:
         return "PlackettLuceDataEncoder(dim=%s, allow_partial=%s)" % (self.dim, self.allow_partial)

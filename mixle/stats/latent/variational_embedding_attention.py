@@ -69,6 +69,7 @@ from mixle.stats.latent.effective_sample import (
     validated_observation_weight,
     validated_statistic_tuple,
 )
+from mixle.utils.exact import require_exact_bool
 from mixle.utils.vector import ImpossibleEvidenceError
 
 _OPTIMIZER_FAMILY = "variational_embedding_attention"
@@ -275,7 +276,7 @@ class VariationalEmbeddingAttentionSampler(DistributionSampler):
     ) -> None:
         self.dist = dist
         self.rng = RandomState(seed)
-        self.posterior_predictive = bool(posterior_predictive)
+        self.posterior_predictive = require_exact_bool(posterior_predictive, "posterior_predictive")
 
     def sample(self, size: int | None = None, *, batched: bool = True) -> Any:
         """Draw one observation or ``size`` iid synthetic observations."""

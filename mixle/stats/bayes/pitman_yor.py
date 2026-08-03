@@ -36,6 +36,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.utils.exact import require_exact_bool
 from mixle.utils.special import gammaln
 
 _PY_ALPHA_FLOOR = 1.0e-12
@@ -471,7 +472,7 @@ class PitmanYorProcessEstimator(ParameterEstimator):
         if not np.isfinite(checked_max_alpha) or checked_max_alpha <= 0.0:
             raise ValueError("PitmanYorProcessEstimator max_alpha must be a finite positive scalar.")
         self.discount = float(discount)
-        self.estimate_discount = bool(estimate_discount)
+        self.estimate_discount = require_exact_bool(estimate_discount, "estimate_discount")
         self.max_alpha = checked_max_alpha
         self.name = name
         self.keys = keys

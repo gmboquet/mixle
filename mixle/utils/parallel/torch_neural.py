@@ -20,6 +20,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.utils.exact import require_exact_bool
 from mixle.utils.parallel.planner import EncodedDataHandle
 from mixle.utils.vector import validate_initialization_probability
 
@@ -102,7 +103,7 @@ class StreamingTokenEncodedData(EncodedDataHandle):
         # is the CUDA scale-out path, off by default so the validated CPU/gloo (DDP, fp32) path is unchanged.
         self.parallel = parallel
         self.precision = precision
-        self.activation_checkpointing = bool(activation_checkpointing)
+        self.activation_checkpointing = require_exact_bool(activation_checkpointing, "activation_checkpointing")
         # tp_size/pp_size/cp_size: the F1 N-D-parallelism knobs, ORTHOGONAL to this handle's data-parallel
         # axis (DDP/FSDP2 above). The plan is validated against the real module in `pysp_seq_estimate`
         # (fails fast on a bad plan); wiring it into real per-axis NCCL process groups alongside FSDP2 is
@@ -126,7 +127,7 @@ class StreamingTokenEncodedData(EncodedDataHandle):
         if shard_by_rank and self.world > 1:  # each rank keeps its own disjoint slice resident
             ids = ids[self.rank * n_tokens // self.world : (self.rank + 1) * n_tokens // self.world]
         self._ids = ids
-        self.shuffle = bool(shuffle)
+        self.shuffle = require_exact_bool(shuffle, "shuffle")
         self._window_counts, self.steps_per_epoch = _rank_window_schedule(
             n_tokens,
             self.world,

@@ -22,6 +22,7 @@ import numpy as np
 from mixle.engines import NUMPY_ENGINE, NumpyEngine, auto_precision, engine_with_precision, precision_name
 from mixle.stats import ResidentEncodedPayload, move_encoded_payload
 from mixle.stats.compute.pdist import DataSequenceEncoder
+from mixle.utils.exact import require_exact_bool
 from mixle.utils.vector import validate_initialization_probability, validated_initialized_observations
 
 __all__ = [
@@ -1212,7 +1213,7 @@ class LocalEncodedData(EncodedDataHandle):
     ) -> None:
         if len(data) == 0:
             raise ValueError("LocalEncodedData requires non-empty data.")
-        self.parallel_chunks = bool(parallel_chunks)
+        self.parallel_chunks = require_exact_bool(parallel_chunks, "parallel_chunks")
         self._chunk_workers = chunk_workers
         if encoder is None:
             if model is not None and callable(getattr(model, "dist_to_encoder", None)):

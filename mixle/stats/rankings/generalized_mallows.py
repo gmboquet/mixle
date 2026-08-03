@@ -70,6 +70,7 @@ from mixle.stats.rankings._permutation_kernels import (
     metric_id,
     seq_distance_to_center,
 )
+from mixle.utils.exact import require_exact_bool
 
 _MAX_THETA = 700.0
 _CLOSED_FORM = ("kendall", "cayley", "hamming")
@@ -738,7 +739,7 @@ class GeneralizedMallowsEstimator(ParameterEstimator):
         self.center_exact_cap = positive_integer(center_exact_cap, label="center_exact_cap", minimum=2)
         if not isinstance(allow_approximate_center, (bool, np.bool_)):
             raise TypeError("allow_approximate_center must be a Boolean.")
-        self.allow_approximate_center = bool(allow_approximate_center)
+        self.allow_approximate_center = require_exact_bool(allow_approximate_center, "allow_approximate_center")
 
     def accumulator_factory(self) -> GeneralizedMallowsAccumulatorFactory:
         """Return a factory for Mallows sufficient-statistic accumulators."""

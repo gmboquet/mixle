@@ -25,6 +25,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.utils.exact import require_exact_bool
 
 if TYPE_CHECKING:
     from mixle.data.sources.graph_source import GraphDataEncoder, GraphObservation
@@ -95,12 +96,15 @@ class StochasticBlockGraphDistribution(SequenceEncodableProbabilityDistribution)
         positive_prior = prior > 0.0
         self.log_block_prior[positive_prior] = np.log(prior[positive_prior])
         self.log_block_prior.setflags(write=False)
-        self.directed = bool(directed)
-        self.self_loops = bool(self_loops)
+        self.directed = require_exact_bool(directed, "directed")
+        self.self_loops = require_exact_bool(self_loops, "self_loops")
         expected_joint = self.block_assignments is None
         if include_assignment_prior is not None and not isinstance(include_assignment_prior, (bool, np.bool_)):
             raise ValueError("include_assignment_prior must be Boolean or None.")
-        if include_assignment_prior is not None and bool(include_assignment_prior) != expected_joint:
+        if (
+            include_assignment_prior is not None
+            and require_exact_bool(include_assignment_prior, "include_assignment_prior") != expected_joint
+        ):
             mode = "population" if expected_joint else "fixed-assignment"
             required = expected_joint
             raise ValueError(
@@ -428,7 +432,11 @@ class StochasticBlockGraphSampler(DistributionSampler):
             raise ValueError("population SBM samples must retain assignments so the joint outcome is scoreable.")
         if return_assignments is not None and not isinstance(return_assignments, (bool, np.bool_)):
             raise ValueError("return_assignments must be Boolean or None.")
-        include_assignments = sampled_from_prior if return_assignments is None else bool(return_assignments)
+        include_assignments = (
+            sampled_from_prior
+            if return_assignments is None
+            else require_exact_bool(return_assignments, "return_assignments")
+        )
         return (mat, assignments.copy()) if include_assignments else mat
 
     def sample(
@@ -559,8 +567,8 @@ class StochasticBlockGraphAccumulator(SequenceEncodableStatisticAccumulator):
         self.block_counts = np.zeros(k, dtype=np.float64)
         self.total_nodes = 0.0
         self.num_graphs = 0.0
-        self.directed = bool(directed)
-        self.self_loops = bool(self_loops)
+        self.directed = require_exact_bool(directed, "directed")
+        self.self_loops = require_exact_bool(self_loops, "self_loops")
         self.name = name
         self.keys = keys
 
@@ -736,8 +744,8 @@ class StochasticBlockGraphAccumulatorFactory(StatisticAccumulatorFactory):
         self.block_assignments = (
             None if block_assignments is None else _as_assignments(block_assignments, len(block_assignments))
         )
-        self.directed = bool(directed)
-        self.self_loops = bool(self_loops)
+        self.directed = require_exact_bool(directed, "directed")
+        self.self_loops = require_exact_bool(self_loops, "self_loops")
         self.name = name
         self.keys = keys
 
@@ -788,8 +796,8 @@ class StochasticBlockGraphEstimator(ParameterEstimator):
             self.num_blocks = int(self.block_assignments.max()) + 1
         if self.block_assignments is not None and self.num_blocks is not None:
             _validate_block_indices(self.block_assignments, self.num_blocks)
-        self.directed = bool(directed)
-        self.self_loops = bool(self_loops)
+        self.directed = require_exact_bool(directed, "directed")
+        self.self_loops = require_exact_bool(self_loops, "self_loops")
         self.pseudo_count = None if pseudo_count is None else float(pseudo_count)
         if self.pseudo_count is not None and (not np.isfinite(self.pseudo_count) or self.pseudo_count < 0.0):
             raise ValueError("pseudo_count must be finite and non-negative.")
@@ -797,11 +805,14 @@ class StochasticBlockGraphEstimator(ParameterEstimator):
         self.block_prior = (
             None if block_prior is None or self.num_blocks is None else _normalize_prior(block_prior, self.num_blocks)
         )
-        self.estimate_block_prior = bool(estimate_block_prior)
+        self.estimate_block_prior = require_exact_bool(estimate_block_prior, "estimate_block_prior")
         expected_joint = self.block_assignments is None
         if include_assignment_prior is not None and not isinstance(include_assignment_prior, (bool, np.bool_)):
             raise ValueError("include_assignment_prior must be Boolean or None.")
-        if include_assignment_prior is not None and bool(include_assignment_prior) != expected_joint:
+        if (
+            include_assignment_prior is not None
+            and require_exact_bool(include_assignment_prior, "include_assignment_prior") != expected_joint
+        ):
             raise ValueError(
                 f"include_assignment_prior must be {expected_joint} for this SBM estimator's sample space."
             )

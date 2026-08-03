@@ -57,6 +57,7 @@ from mixle.stats.multivariate._multinomial_contracts import (
     log_coefficient,
     observation_weights,
 )
+from mixle.utils.exact import require_exact_bool
 from mixle.utils.optional_deps import HAS_NUMBA, numba
 from mixle.utils.optsutil import count_by_value
 
@@ -245,7 +246,7 @@ class IntegerHiddenAssociationDistribution(SequenceEncodableProbabilityDistribut
         self.init_prob_vec = np.empty(0, dtype=np.float64)
         if use_numba is not None and not isinstance(use_numba, (bool, np.bool_)):
             raise TypeError("use_numba must be a bool or None")
-        self.use_numba = HAS_NUMBA if use_numba is None else bool(use_numba)
+        self.use_numba = HAS_NUMBA if use_numba is None else require_exact_bool(use_numba, "use_numba")
 
     def compute_capabilities(self):
         """Return backend capability metadata for this concrete integer association model."""
@@ -725,7 +726,7 @@ class IntegerHiddenAssociationAccumulator(SequenceEncodableStatisticAccumulator)
         self.prev_accumulator = prev_acc if prev_acc is not None else NullAccumulator()
         if use_numba is not None and not isinstance(use_numba, (bool, np.bool_)):
             raise TypeError("use_numba must be a bool or None")
-        self.use_numba = HAS_NUMBA if use_numba is None else bool(use_numba)
+        self.use_numba = HAS_NUMBA if use_numba is None else require_exact_bool(use_numba, "use_numba")
         self.weight_key, self.state_key = keys if keys is not None else (None, None)
 
         # Data log-likelihood accumulated as a byproduct of the E-step (the per-observation log_density),
@@ -1392,7 +1393,7 @@ class IntegerHiddenAssociationEstimator(ParameterEstimator):
             raise ValueError("pseudo_count must be finite and non-negative")
         if use_numba is not None and not isinstance(use_numba, (bool, np.bool_)):
             raise TypeError("use_numba must be a bool or None")
-        self.use_numba = HAS_NUMBA if use_numba is None else bool(use_numba)
+        self.use_numba = HAS_NUMBA if use_numba is None else require_exact_bool(use_numba, "use_numba")
         self.name = name
         self.keys = keys if keys is not None else (None, None)
 
@@ -1511,7 +1512,7 @@ class IntegerHiddenAssociationDataEncoder(DataSequenceEncoder):
         self.len_encoder = len_encoder
         if not isinstance(use_numba, (bool, np.bool_)):
             raise TypeError("use_numba must be a bool")
-        self.use_numba = bool(use_numba)
+        self.use_numba = require_exact_bool(use_numba, "use_numba")
 
     def __str__(self) -> str:
         """Return a readable encoder summary."""

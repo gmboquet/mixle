@@ -20,6 +20,7 @@ from typing import Any
 from numpy.random import RandomState
 
 from mixle.stats.compute.pdist import DataSequenceEncoder
+from mixle.utils.exact import require_exact_bool
 from mixle.utils.parallel.planner import EncodedDataHandle, LocalEncodedData
 
 
@@ -77,7 +78,7 @@ def _make_datamodule(num_rows: int, batch_size: int, shuffle: bool, seed: int, n
             return DataLoader(
                 _IndexDataset(num_rows),
                 batch_size=int(batch_size),
-                shuffle=bool(shuffle),
+                shuffle=require_exact_bool(shuffle, "shuffle"),
                 generator=generator,
                 num_workers=num_workers,
                 collate_fn=_collate_indices,

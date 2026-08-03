@@ -28,6 +28,7 @@ from mixle.stats.compute.pdist import (
 )
 from mixle.stats.univariate.discrete._count_contracts import nonnegative_weights
 from mixle.utils.aliasing import MISSING, coalesce_alias
+from mixle.utils.exact import require_exact_bool
 from mixle.utils.special import digamma
 
 T = TypeVar("T")
@@ -306,7 +307,7 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         self.name = name
         self.keys = keys
         self.pmap = dict(pmap)
-        self.scoring_only = bool(scoring_only)
+        self.scoring_only = require_exact_bool(scoring_only, "scoring_only")
         # Descriptive, not prescriptive: report whether this instance happens to be a proper
         # finite law so consumers that genuinely need one (packers, exact enumeration) can check
         # instead of assuming. Constructing a non-normalized instance stays legal -- see the

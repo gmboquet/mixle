@@ -33,6 +33,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.directional.von_mises import VonMisesDistribution, VonMisesEstimator
+from mixle.utils.exact import require_exact_bool
 
 __all__ = [
     "to_unix_seconds",
@@ -375,7 +376,7 @@ class SeasonalTimeSeries:
             raise ValueError("SeasonalTimeSeries harmonics must be strictly positive")
         if not isinstance(trend, (bool, np.bool_)):
             raise TypeError("SeasonalTimeSeries trend must be Boolean")
-        self.trend = bool(trend)
+        self.trend = require_exact_bool(trend, "trend")
 
     def _design(self, secs: np.ndarray) -> np.ndarray:
         t_days = (secs - self._t0) / 86400.0

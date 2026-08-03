@@ -55,6 +55,7 @@ from mixle.stats.sequences.markov_transform import (
     _validate_weight_vector,
 )
 from mixle.utils.aliasing import MISSING, coalesce_alias
+from mixle.utils.exact import require_exact_bool
 from mixle.utils.optsutil import count_by_value
 
 T = tuple[list[tuple[int, float]], list[tuple[int, float]]]
@@ -210,7 +211,7 @@ class SparseMarkovAssociationDistribution(SequenceEncodableProbabilityDistributi
             raise TypeError("len_dist must be a sequence-encodable probability distribution or None.")
         self.len_dist = len_dist if len_dist is not None else NullDistribution()
         self.alpha = _unit_interval(alpha, label="alpha")
-        self.low_memory = bool(low_memory)
+        self.low_memory = require_exact_bool(low_memory, "low_memory")
         source_prob = (1.0 - self.alpha) * self.init_prob_vec + self.alpha / self.num_vals
         source_prob.setflags(write=False)
         self._source_prob_vec = source_prob
@@ -478,7 +479,7 @@ class SparseMarkovAssociationAccumulator(InitTransKeyedAccumulator, SequenceEnco
         self.size_accumulator = size_acc if size_acc is not None else NullAccumulator()
         self.init_key = keys[0]
         self.trans_key = keys[1]
-        self.low_memory = bool(low_memory)
+        self.low_memory = require_exact_bool(low_memory, "low_memory")
         # Data log-likelihood accumulated as a byproduct of the E-step (the per-observation
         # log_density), only when _track_ll is enabled. Used by the fused-EM fast path in
         # optimize(reuse_estep_ll=True); not part of value(). Off by default so the standard path
@@ -749,7 +750,7 @@ class SparseMarkovAssociationAccumulatorFactory(StatisticAccumulatorFactory):
 
         """
         self.len_factory = len_factory if len_factory is not None else NullAccumulatorFactory()
-        self.low_memory = bool(low_memory)
+        self.low_memory = require_exact_bool(low_memory, "low_memory")
         self.keys = keys
         self.num_vals = _positive_integer(num_vals, label="num_vals")
 
@@ -806,7 +807,7 @@ class SparseMarkovAssociationEstimator(ParameterEstimator):
             None if suff_stat is None else _validate_statistic_value(suff_stat, self.num_vals, label="prior statistics")
         )
         self.alpha = _unit_interval(alpha, label="alpha")
-        self.low_memory = bool(low_memory)
+        self.low_memory = require_exact_bool(low_memory, "low_memory")
 
     def accumulator_factory(self) -> "SparseMarkovAssociationAccumulatorFactory":
         """Return an accumulator factory configured from this estimator."""
@@ -901,7 +902,7 @@ class SparseMarkovAssociationDataEncoder(DataSequenceEncoder):
 
         """
         self.len_encoder = len_encoder
-        self.low_memory = bool(low_memory)
+        self.low_memory = require_exact_bool(low_memory, "low_memory")
         self.num_vals = None if num_vals is None else _positive_integer(num_vals, label="num_vals")
 
     def __eq__(self, other: object) -> bool:

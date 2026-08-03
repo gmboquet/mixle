@@ -49,6 +49,7 @@ from mixle.stats.rankings._contracts import (
 from mixle.stats.rankings._contracts import (
     weights as validate_weights,
 )
+from mixle.utils.exact import require_exact_bool
 
 _MAX_THETA = 700.0
 
@@ -406,7 +407,7 @@ class MallowsEstimator(ParameterEstimator):
         self.center_exact_cap = positive_integer(center_exact_cap, label="center_exact_cap", minimum=2)
         if not isinstance(allow_approximate_center, (bool, np.bool_)):
             raise TypeError("allow_approximate_center must be a Boolean.")
-        self.allow_approximate_center = bool(allow_approximate_center)
+        self.allow_approximate_center = require_exact_bool(allow_approximate_center, "allow_approximate_center")
         self.name = name
         self.keys = keys
 

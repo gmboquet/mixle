@@ -16,6 +16,8 @@ from typing import Any
 
 import numpy as np
 
+from mixle.utils.exact import require_exact_bool
+
 
 class AmbiguousCountError(ValueError):
     """A histogram/bucket count cannot be certified as a single exact integer.
@@ -128,7 +130,7 @@ class QuantizedEnumerationIndex:
             prev = b
         self.bin_width_bits = float(bin_width_bits)
         self.max_bits = float(max_bits)
-        self.truncated = bool(truncated)
+        self.truncated = require_exact_bool(truncated, "truncated")
         self.counts: dict[int, int] = {b: len(items) for b, items in self._bins}
         self._bin_lookup: dict[int, list[tuple[Any, float]]] = {b: items for b, items in self._bins}
         self._starts: dict[int, int] = {}
@@ -237,7 +239,7 @@ class QuantizedEnumerationIndex:
             b = cls.bin_for_log_prob(lp, bin_width_bits)
             bins.setdefault(b, []).append((value, lp))
 
-        is_truncated = excluded if truncated is None else bool(truncated)
+        is_truncated = excluded if truncated is None else require_exact_bool(truncated, "truncated")
         return cls([(b, bins[b]) for b in sorted(bins)], bin_width_bits, max_bits, is_truncated)
 
     def __len__(self) -> int:
@@ -334,7 +336,7 @@ class LazyQuantizedEnumerationIndex(QuantizedEnumerationIndex):
 
         self.bin_width_bits = float(bin_width_bits)
         self.max_bits = float(max_bits)
-        self.truncated = bool(truncated)
+        self.truncated = require_exact_bool(truncated, "truncated")
         # Certify each bin's count is an exact non-negative integer instead of truncating it with
         # int(): a float-count-mode (or otherwise approximate) count that is not EXACTLY integral
         # cannot be trusted as one exact structural offset -- int(2.9) == 2 would silently shift
@@ -443,7 +445,7 @@ class QuantizedCrossIndex:
             self.items.append((v, lps_t))
         self.max_bits = max_bits_tuple
         self.bin_width_bits = float(bin_width_bits)
-        self.truncated = bool(truncated)
+        self.truncated = require_exact_bool(truncated, "truncated")
         self.num_components = len(self.max_bits)
         self.counts: dict[tuple[int | None, ...], int] = {}
         for _, lps in self.items:

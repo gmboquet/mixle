@@ -42,6 +42,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.utils.exact import require_exact_bool
 from mixle.utils.optional_deps import gmpy2
 
 _LOG2 = math.log(2.0)
@@ -439,7 +440,7 @@ class CountHistogram:
 
     def __init__(self, base: int, data: list[int], *, exact: bool = False) -> None:
         self.base = int(base)
-        self.exact = bool(exact)
+        self.exact = require_exact_bool(exact, "exact")
         self.data = [_validate_count_entry(x, self.exact) for x in data]
         self._normalize()
 

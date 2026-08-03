@@ -91,6 +91,7 @@ key_type = tuple[str, str] | tuple[None, None]
 
 
 from mixle.inference.fisher import FixedFisherView, SufficientStatisticVectorizer, to_fisher
+from mixle.utils.exact import require_exact_bool
 
 
 def _owned_generative_components(
@@ -1547,7 +1548,7 @@ class MixtureEstimator(ParameterEstimator):
         self.keys = keys
         self.name = name
         self.fixed_weights = np.asarray(fixed_weights) if fixed_weights is not None else None
-        self.robust = bool(robust)
+        self.robust = require_exact_bool(robust, "robust")
         # In robust mode default to k-means++ init and a tiny data-independent weight floor.
         if init is None:
             init = "kmeans++" if self.robust else "dirichlet"
