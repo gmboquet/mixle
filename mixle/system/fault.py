@@ -145,11 +145,26 @@ def with_fallback(
 
 def abstain_on_timeout(fn: Callable[[], Any], *, timeout_error: type[BaseException] = TimeoutError) -> DegradedResult:
     """``oracle_timeout`` mode: run ``fn()``; if it raises ``timeout_error``, abstain (``value=None``) rather
-    than guess. Other exceptions propagate."""
+    than guess. Other exceptions propagate.
+
+    The abstention records its :attr:`DegradedResult.attempts` like every other degraded result this
+    module produces (MXR-080-1902). It used to return ``attempts=()``: an ``oracle_timeout``
+    abstention was the one degradation whose receipt carried no structured causal evidence at all, so
+    audit code walking ``attempts`` -- the field :class:`DegradedResult` documents as "the structured
+    causal evidence" -- saw an empty tuple and could not distinguish a timed-out oracle from a route
+    that never degraded, even though :func:`with_fallback` and :func:`route_past` both record theirs.
+    ``reason`` alone is a human-readable string, not the same thing.
+    """
     try:
         return DegradedResult(value=fn(), degraded=False)
     except timeout_error as exc:
-        return DegradedResult(value=None, degraded=True, mode="oracle_timeout", reason=str(exc))
+        return DegradedResult(
+            value=None,
+            degraded=True,
+            mode="oracle_timeout",
+            reason=str(exc),
+            attempts=(("oracle_timeout", repr(exc)),),
+        )
 
 
 def route_past(

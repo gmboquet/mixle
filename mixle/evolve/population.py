@@ -36,7 +36,7 @@ import numpy as np
 
 from mixle.capability import capabilities
 from mixle.evolve.improve import _split
-from mixle.evolve.objective import Objective
+from mixle.evolve.objective import Objective, _exact_int
 from mixle.evolve.operators import Candidate, ImprovementOperator, default_operators
 from mixle.evolve.structure import structural_distance
 from mixle.evolve.verify import Verdict, challenger_beats_champion
@@ -300,17 +300,26 @@ class Population:
         seeds = list(seeds)
         if not seeds:
             raise ValueError("Population needs at least one seed model.")
-        if size < 1:
-            raise ValueError("size must be positive.")
         if not 0.0 < holdout < 1.0:
             raise ValueError("holdout must be in (0, 1).")
+        # Exact controls, validated before anything is stored or handed to the bandit/RNG
+        # (MXR-080-1902). `int(size)` is truncation, not validation: `size=7.9` silently became a
+        # population of 7 and -- because `bool` is an `int` subclass -- `size=True` became a
+        # population of ONE, which also collapses `n_offspring = max(1, size // 2)` to a single
+        # proposal per generation. `max(0, int(diversity_quota))` additionally absorbed a negative
+        # quota as 0, so a sign error in a caller's arithmetic read as "no diversity reserved" rather
+        # than as the mistake it was. A quota of exactly 0 stays legal -- it means "keep the fittest
+        # only", which several callers pass on purpose.
+        size = _exact_int(size, "size", minimum=1)
+        diversity_quota = _exact_int(diversity_quota, "diversity_quota", minimum=0)
+        seed = _exact_int(seed, "seed", minimum=0)
         self.objective = objective
         self.operators = list(operators) if operators is not None else default_operators()
         self.bandit = bandit if bandit is not None else OperatorBandit(self.operators, seed=seed)
-        self.size = int(size)
-        self.diversity_quota = max(0, int(diversity_quota))
+        self.size = size
+        self.diversity_quota = diversity_quota
         self.holdout = float(holdout)
-        self.seed = int(seed)
+        self.seed = seed
         self.rng = np.random.RandomState(seed)
         self._gen = 0
         self._eval_data: Any = None
@@ -503,26 +512,40 @@ class Population:
         else:
             adjusted_by_slot = {}
 
-        # -- pass 3: reward the bandit (in the SAME slot order the parents/operators were drawn in),
-        #    finalizing each compared candidate's promotion against its adjusted p-value. Adjustment
-        #    only ever raises a p-value, never lowers it, so this can only REVOKE a raw "challenger"
-        #    verdict -- it can never promote a candidate the raw, uncorrected test itself refused. A
-        #    slot excluded from the pool above (no finite p-value to adjust) keeps its raw, unadjusted
-        #    verdict.promote as-is instead.
+        # -- pass 3: STAGE each compared candidate's final promotion against its adjusted p-value,
+        #    scoring every promoted candidate into a population member. Adjustment only ever raises a
+        #    p-value, never lowers it, so this can only REVOKE a raw "challenger" verdict -- it can
+        #    never promote a candidate the raw, uncorrected test itself refused. A slot excluded from
+        #    the pool above (no finite p-value to adjust) keeps its raw, unadjusted verdict.promote
+        #    as-is instead.
+        #
+        #    Nothing durable is written here (MXR-080-1902). The bandit used to be rewarded inside
+        #    this loop, one slot at a time, BEFORE `self._member(...)` scored that slot's promoted
+        #    candidate -- and `_member` -> `_score` raises on a non-finite fitness by design. A
+        #    generation whose third candidate scored non-finite therefore left the first three arms
+        #    permanently credited for a generation that produced no report, no survivors, no champion
+        #    update and no `_gen` advance; retrying the generation credited them a second time. The
+        #    rewards are collected as values here and folded in below, once every candidate this
+        #    generation promoted has been successfully scored.
+        staged_rewards: list[tuple[str, float, float]] = []  # (operator name, delta, cost), slot order
         new_members: list[_Member] = []
         for slot in slots:
             if slot.verdict is None:
-                self.bandit.reward(slot.op.name, 0.0, slot.cost)
-                report.rewards.append(0.0)
+                staged_rewards.append((slot.op.name, 0.0, slot.cost))
                 continue
             adj_p = adjusted_by_slot.get(id(slot))
             promote = slot.verdict.promote if adj_p is None else (slot.verdict.promote and bool(adj_p < alpha))
             delta = slot.verdict.delta if promote else 0.0
-            self.bandit.reward(slot.op.name, delta, slot.cost)
-            report.rewards.append(delta)
+            staged_rewards.append((slot.op.name, delta, slot.cost))
             if promote:
                 report.verified += 1
                 new_members.append(self._member(slot.candidate.model, verify))
+
+        # -- COMMIT: every reward is folded in, in the SAME slot order the parents/operators were
+        #    drawn in, and only now that the whole generation's work has succeeded.
+        for op_name, delta, cost in staged_rewards:
+            self.bandit.reward(op_name, delta, cost)
+            report.rewards.append(delta)
 
         # fold survivors + new verified offspring back into the population.
         self._members = self._survivors_with(new_members)
@@ -565,10 +588,16 @@ class Population:
         """
         from mixle.evolve.search import SearchResult
 
+        # exact, non-truncated generation count (MXR-080-1902): `range(int(generations))` ran 2
+        # generations for `generations=2.9` and 1 for `generations=True`, so the search reported a
+        # `history` shorter than the run the caller asked for with nothing to say it had been
+        # reinterpreted. `generations=0` stays legal -- it is the documented "score the seeds and
+        # stop" case that evolve_population_test.py exercises directly.
+        generations = _exact_int(generations, "generations", minimum=0)
         fit_data, verify = (data, verify_data) if verify_data is not None else self._auto_split(data)
         self._ensure_initialized(verify)
         history: list[dict[str, Any]] = []
-        for _ in range(int(generations)):
+        for _ in range(generations):
             # the SAME (fit_data, verify) pair every generation -- resolved ONCE above, not re-derived
             # per call, so every generation is scored against one consistent yardstick (see
             # _auto_split's docstring) and step() never re-triggers its own (redundant, and here

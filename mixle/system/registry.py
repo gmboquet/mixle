@@ -341,6 +341,11 @@ class Registry:
         ``entry_id`` must be a single safe path component (:func:`_safe_entry_id`): an unvalidated value
         such as ``"../escaped"`` would otherwise write the artifact outside ``dir`` instead of inside it.
 
+        Every field of the index row is validated (by constructing the :class:`RegistryEntry`) BEFORE
+        the id is claimed or the artifact written, so a rejected argument leaves the registry
+        byte-for-byte unchanged and the id free to retry -- see the comment at that construction
+        (MXR-080-1902).
+
         Allocating an id and persisting the index is a read-modify-write over the on-disk index: two
         ``Registry`` instances opened on the same ``dir`` (or two threads/processes sharing one) each
         cache their own ``self._entries`` snapshot from construction time and otherwise never refresh it,
@@ -396,6 +401,28 @@ class Registry:
                 path_real = os.path.realpath(path)
                 if path_real != root_real and not path_real.startswith(root_real + os.sep):
                     raise ValueError(f"unsafe entry_id {entry_id!r}: resolves outside the registry root")
+                # Build (and therefore fully VALIDATE) the index row BEFORE anything is persisted
+                # (MXR-080-1902). RegistryEntry's __post_init__ is the real validator for
+                # `capabilities`, `profile` and `cost`, and it used to run only after the claim marker
+                # and the artifact had already been written: `register(model, capabilities=["ok", 123],
+                # entry_id="e0")` raised "capabilities must be strings" having left `e0/` and
+                # `.e0.claim` on disk with no index.json naming them, so the id was permanently
+                # poisoned -- nothing could discover the entry, and every retry of that id, in this
+                # process or a fresh one, was rejected as "registry already has an entry 'e0'". Same
+                # for a non-finite `cost` and an un-copyable `profile`. Constructing the row first is
+                # a pure, side-effect-free check (no disk access anywhere in __post_init__), so an
+                # invalid argument now fails before the registry has written a single byte -- which is
+                # exactly the discipline the `fingerprint` pre-check above already applies, generalized
+                # to the rest of the record instead of the one field that happened to be noticed.
+                entry = RegistryEntry(
+                    entry_id=entry_id,
+                    path=path,
+                    kind=kind,
+                    capabilities=list(capabilities),
+                    fingerprint=list(fingerprint) if fingerprint is not None else None,
+                    profile=dict(profile or {}),
+                    cost=float(cost),
+                )
                 # independent conflict-detection guard, belt-and-suspenders alongside the lock: claim
                 # entry_id with an atomically-created marker before writing its artifact, so even a stale
                 # read that somehow slips past the lock (e.g. a filesystem where flock does not actually
@@ -427,15 +454,6 @@ class Registry:
                     except OSError:
                         pass
                     raise
-                entry = RegistryEntry(
-                    entry_id=entry_id,
-                    path=path,
-                    kind=kind,
-                    capabilities=list(capabilities),
-                    fingerprint=list(fingerprint) if fingerprint is not None else None,
-                    profile=dict(profile or {}),
-                    cost=float(cost),
-                )
                 previous_entries = list(self._entries)
                 self._entries.append(entry)
                 try:

@@ -68,7 +68,7 @@ import numpy as np
 from mixle.data.hashing import model_hash
 from mixle.evolve.improve import _split
 from mixle.evolve.ledger import EvolutionLedger
-from mixle.evolve.objective import Objective, _ScalarObjective
+from mixle.evolve.objective import Objective, _exact_int, _ScalarObjective
 from mixle.evolve.operators import AutoSelect, ImprovementOperator, Mutate, Refit
 from mixle.evolve.verify import challenger_beats_champion
 from mixle.task.acquire import acquire
@@ -192,6 +192,24 @@ def default_challenger_operators() -> dict[str, ImprovementOperator]:
       (grow/shrink/perturb), mixle.evolve's own structure-search operator.
     """
     return {"distill": AutoSelect(), "refine": Refit(), "evolve": Mutate()}
+
+
+def _budget_amount(value: Any, name: str) -> float:
+    """A finite, nonnegative budget figure, or ``ValueError`` (MXR-080-1902).
+
+    A budget is a hard ceiling, and every comparison this module makes against one is an ordered
+    comparison (``cost <= budget_remaining``, ``spent >= budget``). Every ordered comparison against
+    NaN is ``False``, so a NaN budget did not fail closed *or* open consistently -- it made
+    :meth:`ClosedLoopSelfEvolution.run` walk the entire stream while refusing every single operator
+    as unaffordable and charging nothing: many steps of measured, reported, zero-work progress with
+    no error anywhere. A negative budget made ``run`` stop before its first step, silently reporting
+    an empty run rather than naming the impossible ceiling. Neither is a smaller budget; neither is a
+    budget at all.
+    """
+    amount = float(value)
+    if not math.isfinite(amount) or amount < 0.0:
+        raise ValueError(f"{name} must be a finite, nonnegative budget, got {value!r}")
+    return amount
 
 
 def principled_crossover(model_a: Any, model_b: Any, *, weight_a: float = 0.5) -> Any:
@@ -402,18 +420,28 @@ class ClosedLoopSelfEvolution:
         holdout: float = 0.25,
         seed: int = 0,
     ) -> None:
+        # Every control is validated BEFORE any of it is stored or handed to a sub-object, so a
+        # rejected argument leaves no half-built loop behind (MXR-080-1902).
         if not 0.0 < holdout < 1.0:
             raise ValueError("holdout must be in (0, 1).")
+        # exact controls, not truncated ones: `int(acquire_k)` turned 7.9 into 7 and True into 1, so
+        # the loop spent a different acquisition budget than the caller asked for -- and
+        # `acquire_k=0`/negative made _acquire_priority silently fall back to the WHOLE harvested
+        # pool, i.e. no acquisition at all, which is the opposite of what the argument names.
+        acquire_k = _exact_int(acquire_k, "acquire_k", minimum=1)
+        # every derived seed is `self.seed + step_index`, and the RNGs downstream (np.random.
+        # RandomState via _split / the gate) require a nonnegative integer seed.
+        seed = _exact_int(seed, "seed", minimum=0)
         self.champion = champion
         self.objective = objective
         self.operators = dict(operators) if operators is not None else default_challenger_operators()
         self.context_fn = context_fn or (lambda batch: "default")
-        self.acquire_k = int(acquire_k)
+        self.acquire_k = acquire_k
         self.acquire_strategy = acquire_strategy
         self.holdout = float(holdout)
         self.bandit = OperatorCreditBandit(list(self.operators), c=bandit_c, seed=seed)
         self.genealogy = GenealogyLedger()
-        self.seed = int(seed)
+        self.seed = seed
         self._n_steps = 0
         self.history: list[LoopStepResult] = []
 
@@ -476,11 +504,27 @@ class ClosedLoopSelfEvolution:
         skipped exactly like an inapplicable one (no ``propose``/gate attempted, nothing charged).
         ``result.cost`` reports what this step actually charges: the operator's ``cost_hint`` iff the
         attempt was genuinely applicable and completed without raising, ``0.0`` otherwise -- see
-        :meth:`run`, which sums ``result.cost`` to track total spend.
+        :meth:`run`, which sums ``result.cost`` to track total spend. It must be a finite,
+        nonnegative amount: every budget comparison here is an ordered one, and every ordered
+        comparison against NaN is false, so a NaN ceiling is not a ceiling (:func:`_budget_amount`).
         """
-        self._n_steps += 1
+        # Validate before touching anything: a rejected control must leave the loop exactly as it
+        # was, not half-advanced (MXR-080-1902).
+        if budget_remaining is not None:
+            budget_remaining = _budget_amount(budget_remaining, "budget_remaining")
         batch = list(batch)
         ctx = context if context is not None else self.context_fn(batch)
+
+        # STAGE the step index too. `self._n_steps` is both the loop's own count of the steps it has
+        # taken and the offset that seeds THIS step's split, proposal and gate, so advancing it up
+        # front broke the all-or-nothing contract this method documents in two ways at once
+        # (MXR-080-1902): a step that raised still left the counter advanced, so `len(history)` and
+        # `_n_steps` permanently disagreed about how many steps had happened, and the retry the
+        # contract promises re-ran with a DIFFERENT seed -- a different split, a different proposal,
+        # a different gate -- rather than reproducing the step that failed. It is committed with
+        # everything else at the bottom, so only a completed step advances it.
+        step_index = self._n_steps + 1
+        step_seed = self.seed + step_index
 
         if verify is not None:
             verify_data = list(verify)
@@ -489,7 +533,7 @@ class ClosedLoopSelfEvolution:
             # split FIRST, before harvest/acquire touch anything -- see the Note on `verify` above for
             # why the complement of acquire's OWN selection would be a biased, unrepresentative verify
             # set rather than a merely smaller one.
-            candidate_pool, verify_data = _split(batch, self.holdout, self.seed + self._n_steps)
+            candidate_pool, verify_data = _split(batch, self.holdout, step_seed)
 
         failures = harvest_failures(self.champion, candidate_pool, self.objective)
         pool = failures if failures else candidate_pool
@@ -499,7 +543,7 @@ class ClosedLoopSelfEvolution:
 
         op_name = self.bandit.select(ctx)
         operator = self.operators[op_name]
-        op_ctx = {"parent_hash": None, "seed": self.seed + self._n_steps, "objective": self.objective}
+        op_ctx = {"parent_hash": None, "seed": step_seed, "objective": self.objective}
         cost = float(getattr(operator, "cost_hint", 1.0))
         fits_budget = budget_remaining is None or cost <= budget_remaining
 
@@ -518,7 +562,7 @@ class ClosedLoopSelfEvolution:
                     verify_data,
                     objective=self.objective,
                     nonnested=nonnested,
-                    seed=self.seed + self._n_steps,
+                    seed=step_seed,
                 )
                 # a genuinely applicable, completed attempt -- charged regardless of promotion.
                 charged = cost
@@ -568,6 +612,10 @@ class ClosedLoopSelfEvolution:
             cost=charged,
         )
         self.history.append(result)
+        # LAST: the step is now fully recorded, so the counter that says "a step happened" advances
+        # exactly here and nowhere earlier (MXR-080-1902). Anything that raises above this line
+        # leaves `_n_steps` where a retry needs it -- same seed, same split, same reproducible step.
+        self._n_steps = step_index
         return result
 
     def run(
@@ -586,7 +634,31 @@ class ClosedLoopSelfEvolution:
         genuinely free, exactly as documented; only a genuinely-applicable, genuinely-completed attempt
         is charged its ``cost_hint``. The loop stops early once the budget is fully spent, leaving the
         champion at whatever it last became.
+
+        ``verify_batches`` and ``contexts``, when given, are per-step and must line up ONE-TO-ONE
+        with ``stream``. Both are validated here, before the first step runs, rather than being
+        indexed as the loop goes (MXR-080-1902): a short ``contexts`` used to raise ``IndexError``
+        part-way through, after the earlier steps had already deployed champions, written adoption
+        receipts, rewarded per-context bandit arms and appended history -- an argument error
+        discovered only once it had produced durable, half-finished state that no return value
+        described. A long one was worse, because it raised nothing at all: the surplus entries were
+        silently dropped, so a caller who had mis-zipped their stream against their contexts got a
+        completed-looking run in which every step had been attributed to the wrong context.
+        ``budget`` is validated the same way and for the same reason (:func:`_budget_amount`).
         """
+        stream = list(stream)
+        if budget is not None:
+            budget = _budget_amount(budget, "budget")
+        if verify_batches is not None and len(verify_batches) != len(stream):
+            raise ValueError(
+                f"verify_batches has {len(verify_batches)} entries for {len(stream)} stream batches; "
+                "they must correspond one-to-one."
+            )
+        if contexts is not None and len(contexts) != len(stream):
+            raise ValueError(
+                f"contexts has {len(contexts)} entries for {len(stream)} stream batches; "
+                "they must correspond one-to-one."
+            )
         results: list[LoopStepResult] = []
         spent = 0.0
         for i, batch in enumerate(stream):

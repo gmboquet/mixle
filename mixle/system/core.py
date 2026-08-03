@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mixle.system.fault import with_fallback
-from mixle.system.spend import Spend
+from mixle.system.spend import Spend, _count
 from mixle.task.llm import LLM, OpenAICompatLLM
 
 
@@ -173,7 +173,19 @@ class System:
         never be able to change what a later call to this same method returns. Every other observable
         (the reply, the receipt fields a scorer reads, whether the call degraded) is identical to a
         normal call, since a snapshot must still faithfully measure the real answering path.
+
+        ``budget`` is validated as an exact, non-Boolean, nonnegative call count -- the same
+        :func:`~mixle.system.spend._count` contract :class:`~mixle.system.spend.Spend` holds its own
+        dimensions to, since the ceiling is compared directly against
+        :meth:`~mixle.system.spend.Spend.total_units` (MXR-080-1902). ``int(budget)`` TRUNCATED
+        instead: ``budget=1.9`` silently became a one-call ceiling and ``budget=True`` became one
+        too, and the receipt then reported the truncated number as if it were what the caller
+        asked for. A negative budget is a caller error and raises, matching :meth:`improve`, rather
+        than being served back as an ordinary "refused, shortfall N" receipt that reads like a
+        legitimately under-funded request.
         """
+        if budget is not None:
+            budget = _count("budget", budget)
         cache_key = (query.text, query.task, query.scope)
         if cache_key in self._captured:
             return self._captured[cache_key], {
@@ -181,7 +193,7 @@ class System:
                 "status": "answered",
                 "spend": Spend().to_dict(),
                 "total_spend": self.total_spend.to_dict(),
-                "budget": self.config.default_budget if budget is None else int(budget),
+                "budget": self.config.default_budget if budget is None else budget,
                 "captured": True,
                 "task": query.task,
                 "degraded_mode": None,
@@ -189,7 +201,7 @@ class System:
                 "read_only": read_only,
             }
 
-        requested = self.config.default_budget if budget is None else int(budget)
+        requested = self.config.default_budget if budget is None else budget
         cost = Spend(frontier_calls=1)
         if requested < cost.total_units():
             return None, {
@@ -352,10 +364,15 @@ class System:
         local cache (see :meth:`answer`). The return value reports both the requested ceiling
         (``budget``) and the realized spend (``realized_spend``) so a caller can tell a fully-funded
         round from a partial one.
+
+        ``budget`` is an exact, non-Boolean, nonnegative promotion count
+        (:func:`~mixle.system.spend._count`, MXR-080-1902). ``int(budget)`` truncated first and only
+        then rejected a negative, so ``improve(1.9)`` quietly promoted one pair against a budget the
+        caller wrote as nearly two, ``improve(True)`` promoted one, and ``improve(-0.5)`` truncated
+        to ``0`` and returned an ordinary "insufficient_budget" report instead of naming the error
+        that the same call written as ``improve(-1)`` raises for.
         """
-        budget = int(budget)
-        if budget < 0:
-            raise ValueError(f"improve budget must be >= 0, got {budget}")
+        budget = _count("improve budget", budget)
         if not self._harvest:
             return {
                 "status": "nothing_to_improve",
