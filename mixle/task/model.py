@@ -254,7 +254,17 @@ _ADAPTERS: dict[str, Callable[[dict[str, Any]], Any]] = {}
 
 
 def register_adapter(kind: str, from_spec: Callable[[dict[str, Any]], Any]) -> None:
-    """Register an adapter's ``from_spec`` factory under ``kind`` so a saved ``io`` block can rebuild it."""
+    """Register an adapter's ``from_spec`` factory under ``kind`` so a saved ``io`` block can rebuild it.
+
+    The discriminator is validated BEFORE the registry is mutated (MXR-080-1893). Nothing checked it,
+    so ``register_adapter(None, f)`` was accepted and stored under the key ``None`` -- which is exactly
+    what ``spec.get("kind")`` returns for an ``io`` block that declares no kind at all, so any
+    kind-less spec silently rebuilt as ``f``. An empty-string kind stored just as quietly.
+    """
+    if not isinstance(kind, str) or not kind.strip():
+        raise ValueError(f"adapter kind must be a non-empty string, got {kind!r}")
+    if not callable(from_spec):
+        raise TypeError("adapter from_spec must be callable")
     existing = _ADAPTERS.get(kind)
     if existing is not None and existing is not from_spec:
         raise ValueError(f"adapter {kind!r} already registered to a different factory")

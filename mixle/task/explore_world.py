@@ -97,13 +97,17 @@ class ExplorationWorld:
             return {"type": None, "cell": None, "accepted": False, "reason": "invalid_action"}
         kind = action.get("type")
         raw_cell = action.get("cell")
-        if isinstance(raw_cell, bool):
+        # MXR-080-1895: this was ``int(raw_cell)``, which is a coercion, not a check. ``cell="3"`` and
+        # ``cell=3.7`` were both ACCEPTED -- the second silently truncating to a different cell than the
+        # caller named, and both spending real budget on an action the world never validated. Exactness
+        # matches the constructor's own rule for every other integer field. ``Integral`` still admits
+        # numpy integers, which is what a learned policy's ``argmax`` produces. Refusal stays graceful
+        # (a recorded, zero-effect observation) rather than raising: that is this method's declared
+        # contract for a bad action, and a policy that emits one should degrade, not crash.
+        if isinstance(raw_cell, bool) or not isinstance(raw_cell, Integral):
             cell = -1
         else:
-            try:
-                cell = int(raw_cell)
-            except (TypeError, ValueError):
-                cell = -1
+            cell = int(raw_cell)
         if self.done or not (0 <= cell < self.n_cells):
             obs = {"type": kind, "cell": cell, "accepted": False, "reason": "done_or_invalid_cell"}
             self.history.append(obs)

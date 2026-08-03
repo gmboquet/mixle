@@ -64,6 +64,19 @@ def _evidence_digest(inputs: Sequence[Any], labels: Sequence[Any]) -> str:
     return sha256(repr(list(zip(inputs, labels))).encode("utf-8")).hexdigest()
 
 
+def _split_holdout_roles(count: int) -> int:
+    """How many of ``count`` reserved rows take the CONFORMAL role; the rest take the SELECTION role.
+
+    ``holdout=`` is documented as the fraction reserved for "calibration + verification" -- two roles.
+    They were one set, so :meth:`Solution.improve` chose the student with the same rows that then set its
+    conformal threshold, and the reported agreement was a running maximum over one fixed set rather than
+    a held-out estimate (MXR-080-1891). Conformal takes the larger half because its quantile is the part
+    with a coverage claim attached; the split is deterministic in the count alone, so the two roles are
+    fixed the moment the holdout is drawn and are never re-drawn or swapped.
+    """
+    return max(1, (count + 1) // 2)
+
+
 def load_harvested(path: str) -> tuple[list, list]:
     """Read harvested serving feedback into ``(inputs, answers)``.
 
@@ -87,6 +100,9 @@ def load_harvested(path: str) -> tuple[list, list]:
     return inputs, answers
 
 
+_INPUT_KINDS = ("text", "record")
+
+
 def _input_kind(x: Any) -> str:
     """Infer whether one input should use the text or record student path."""
     if isinstance(x, str):
@@ -97,6 +113,19 @@ def _input_kind(x: Any) -> str:
         "solve() handles text or record (tuple/dict) inputs; got %r. Pass kind='text'|'record' to override."
         % type(x).__name__
     )
+
+
+def _validated_kind(kind: Any) -> str:
+    """Check the student-path discriminator BEFORE anything dispatches on it (MXR-080-1893).
+
+    Every dispatch site spells the discriminator ``"text" if kind == "text" else <record>``, so an
+    unrecognized kind was never refused -- it silently meant "record". ``kind="txt"`` fitted a record
+    student over text inputs, stored ``kind="txt"`` in the artifact, and reloaded to the same wrong
+    path, with no error anywhere in the chain.
+    """
+    if kind not in _INPUT_KINDS:
+        raise ValueError(f"kind must be one of {list(_INPUT_KINDS)}, got {kind!r}")
+    return str(kind)
 
 
 def _fit_student(kind: str, inputs: list, labels: list, distill_kw: dict) -> TaskModel:
@@ -245,6 +274,20 @@ class Solution:
     device_space: Any = None  # EdgeSpace the edge search used (None = default); reused to warm-start from edge.design
     propose_budget: int = 8  # edge-search effort improve() reuses when re-searching under device
     verification_digest: str | None = None
+    # MXR-080-1891: the reserved holdout carries two IMMUTABLE roles. ``cal_*`` sets the conformal
+    # threshold and is never read by a selection decision; ``sel_*`` produces holdout_agreement /
+    # escalation_rate and is the only evidence improve() promotes on. ``selection_uses`` is the one-use
+    # receipt: 1 means the reported agreement is a genuine single-use held-out estimate, >1 means the
+    # same rows have now decided more than one promotion and the number is selection-contaminated.
+    sel_inputs: list = field(default_factory=list)
+    sel_labels: list = field(default_factory=list)
+    selection_uses: int = 0
+    selection_receipt: list[dict] = field(default_factory=list)
+
+    @property
+    def selection_evidence_is_single_use(self) -> bool:
+        """True while ``holdout_agreement`` is still an untouched-once held-out number."""
+        return self.selection_uses <= 1
 
     def _teacher_call(self) -> TeacherCaller:
         """The teacher view this Solution routes through, resolved once and kept.
@@ -276,6 +319,11 @@ class Solution:
             "live_escalated": stats.n_escalated,
             "harvested_labels": len(stats.escalated_labels),
             "synthesized_inputs": self.synthesized,
+            # MXR-080-1891: how many promotion decisions the reported agreement's own rows have now made.
+            # 1 = a single-use held-out number; >1 = the same rows picked more than one student, so read
+            # it as a selection score, not a generalization estimate.
+            "selection_uses": self.selection_uses,
+            "selection_evidence_is_single_use": self.selection_evidence_is_single_use,
         }
         if self.edge is not None:
             out["device"] = {
@@ -287,11 +335,19 @@ class Solution:
             }
         return out
 
-    def improve(self) -> bool:
+    def improve(self, evidence_inputs: Sequence[Any] | None = None) -> bool:
         """Re-distill with the harvested (escalated) labels; promote only if it verifies at least as well.
 
-        Returns True when a better student was promoted. The calibration slice is never trained on, so the
-        conformal guarantee and the agreement comparison remain valid across rounds.
+        Returns True when a better student was promoted. Neither reserved role is ever trained on.
+
+        **Roles (MXR-080-1891).** The promote/reject decision reads only the SELECTION rows and the
+        conformal threshold is set only from the CALIBRATION rows, so the promoted student is no longer
+        chosen with the same data that certifies its coverage. Passing ``evidence_inputs`` supplies a
+        fresh, teacher-labeled batch that REPLACES both roles, which is the only way to keep the reported
+        agreement a genuine single-use held-out number across rounds; without it the existing selection
+        rows decide again and ``selection_uses`` records that the number is now a selection score. The
+        reuse is recorded rather than refused because the no-argument loop is the documented serving
+        workflow and a caller with no fresh traffic still needs the anti-regression gate.
 
         When the original ``solve()`` ran under a device budget (``self.edge`` is set), the harvested
         labels are re-searched under that SAME ``DeviceSpec``/``EdgeSpace`` -- warm-started from the
@@ -299,7 +355,7 @@ class Solution:
         candidate that no longer fits the device is rejected exactly like any other anti-regression
         failure, so a promoted student never silently exceeds the budget ``device=`` promised.
         """
-        if not self.cal_inputs:
+        if not self.cal_inputs or not self.sel_inputs:
             raise RuntimeError(
                 "this Solution was loaded from an artifact and has no training/calibration data; "
                 "collect cascade.harvested() and re-solve(real + harvested inputs) to improve."
@@ -307,6 +363,7 @@ class Solution:
         new_inputs, new_labels = self.cascade.harvested()
         if not new_inputs:
             return False
+        cal_in, cal_lab, sel_in, sel_lab, fresh = self._evidence_roles(evidence_inputs)
         inputs = self.train_inputs + list(new_inputs)
         labels = self.train_labels + [str(y) for y in new_labels]
         new_edge = None
@@ -329,14 +386,50 @@ class Solution:
         # the gate stays real-inputs-only: harvested escalations are real, synthetic training rows are not
         gate_inputs = self.gate_inputs + list(new_inputs)
         gate = _fit_gate(self.kind, gate_inputs, self.ood, self.seed) if self.ood is not None else None
-        cal = CalibratedTaskModel(student, alpha=alpha, density_gate=gate).calibrate(self.cal_inputs, self.cal_labels)
-        agree = agreement(student, self.cal_labels, self.cal_inputs)
-        esc = cal.escalation_rate(self.cal_inputs)
-        if agree < self.holdout_agreement or esc > self.escalation_rate:
+        # calibrate on the CALIBRATION role, decide on the SELECTION role -- the two never cross.
+        cal = CalibratedTaskModel(student, alpha=alpha, density_gate=gate).calibrate(cal_in, cal_lab)
+        agree = agreement(student, sel_lab, sel_in)
+        esc = cal.escalation_rate(sel_in)
+        # On fresh evidence the incumbent's stored numbers came from different rows, so re-measure it on
+        # the same rows the candidate is judged on; otherwise the stored numbers already are that.
+        if fresh:
+            incumbent_agree = agreement(self.cascade.model.task, sel_lab, sel_in)
+            incumbent_esc = self.cascade.model.escalation_rate(sel_in)
+        else:
+            incumbent_agree, incumbent_esc = self.holdout_agreement, self.escalation_rate
+        promoted_now = not (agree < incumbent_agree or esc > incumbent_esc)
+        uses = 1 if fresh else self.selection_uses + 1
+        self.selection_receipt.append(
+            {
+                "round": len(self.selection_receipt) + 1,
+                "fresh_evidence": fresh,
+                "selection_uses": uses,
+                "n_calibration": len(cal_in),
+                "n_selection": len(sel_in),
+                "evidence_sha256": _evidence_digest([*cal_in, *sel_in], [*cal_lab, *sel_lab]),
+                "incumbent_agreement": float(incumbent_agree),
+                "candidate_agreement": float(agree),
+                "promoted": bool(promoted_now),
+            }
+        )
+        if not promoted_now:
+            # A rejected candidate still consumed a look at the selection rows when the evidence was
+            # fresh (those rows are spent either way); reusing rows only counts once they decide.
+            if fresh:
+                self.cal_inputs, self.cal_labels = cal_in, cal_lab
+                self.sel_inputs, self.sel_labels = sel_in, sel_lab
+                self.selection_uses = uses
+                self.holdout_agreement, self.escalation_rate = incumbent_agree, incumbent_esc
+            else:
+                self.selection_uses = uses
             return False  # anti-regression: keep the current student
         self.cascade.model = cal
         self.train_inputs, self.train_labels = inputs, labels
         self.gate_inputs = gate_inputs
+        self.cal_inputs, self.cal_labels = cal_in, cal_lab
+        self.sel_inputs, self.sel_labels = sel_in, sel_lab
+        self.selection_uses = uses
+        self.verification_digest = _evidence_digest([*cal_in, *sel_in], [*cal_lab, *sel_lab])
         self.holdout_agreement, self.escalation_rate = agree, esc
         self.promoted = self.promoted or self._passes_target(agree)
         self.cascade.stats.escalated_texts.clear()
@@ -344,6 +437,21 @@ class Solution:
         if new_edge is not None:
             self.edge = new_edge  # keep report()'s device fields honest about what's actually deployed
         return True
+
+    def _evidence_roles(self, evidence_inputs: Sequence[Any] | None) -> tuple[list, list, list, list, bool]:
+        """Resolve the (calibration, selection) rows this improve() round judges on.
+
+        ``None`` reuses the roles fixed by ``solve()``. A fresh batch is teacher-labeled and split with
+        the same deterministic role rule, which is what restores a one-use receipt (MXR-080-1891).
+        """
+        if evidence_inputs is None:
+            return list(self.cal_inputs), list(self.cal_labels), list(self.sel_inputs), list(self.sel_labels), False
+        rows = list(evidence_inputs)
+        if len(rows) < 2:
+            raise ValueError("fresh evidence needs at least two rows to fill both the calibration and selection roles")
+        fresh_labels = [str(y) for y in self._teacher_call()(rows)]
+        n_conf = _split_holdout_roles(len(rows))
+        return rows[:n_conf], fresh_labels[:n_conf], rows[n_conf:], fresh_labels[n_conf:], True
 
     def _passes_target(self, agree: float) -> bool:
         return self.target_agreement is None or agree >= self.target_agreement
@@ -407,9 +515,16 @@ class Solution:
                     "promoted": self.promoted,
                     "n_train": len(self.train_inputs),
                     "n_calibration": len(self.cal_inputs),
+                    # MXR-080-1891: the artifact says which rows certified what, and how many promotion
+                    # decisions the reported agreement's own rows have made. selection_uses > 1 means
+                    # read holdout_agreement as a selection score, not a generalization estimate.
+                    "n_selection": len(self.sel_inputs),
+                    "selection_uses": self.selection_uses,
+                    "selection_evidence_is_single_use": self.selection_evidence_is_single_use,
                     "synthesized_inputs": self.synthesized,
                     "verified_at": time.time(),
-                    "evidence_sha256": self.verification_digest or _evidence_digest(self.cal_inputs, self.cal_labels),
+                    "evidence_sha256": self.verification_digest
+                    or _evidence_digest([*self.cal_inputs, *self.sel_inputs], [*self.cal_labels, *self.sel_labels]),
                     # Task artifacts bind the entire manifest (including this decision) and payload with
                     # SHA-256. Loading may promote only when this marker and the strict evidence record
                     # survive that integrity check.
@@ -469,7 +584,10 @@ class Solution:
         return cls(
             cascade=Cascade(cal, _batch_view(teacher), cost=cost),
             teacher=teacher,
-            kind=str(meta.get("kind", "text")),
+            # MXR-080-1893: validate the stored discriminator before it dispatches. A serving process
+            # that reloads an artifact carrying an unrecognized kind would otherwise silently take the
+            # record path -- including for a text model -- on every improve()/re-fit.
+            kind=_validated_kind(meta.get("kind", "text")),
             train_inputs=[],
             train_labels=[],
             cal_inputs=[],
@@ -513,7 +631,10 @@ def solve(
             ``>= 1 - alpha``; otherwise fall back to the teacher.
         target_agreement: Optional gate. If the student's held-out agreement with the teacher misses it,
             the returned Solution routes *everything* to the teacher (``promoted=False``).
-        holdout: Fraction reserved for calibration + verification (never trained on).
+        holdout: Fraction reserved for calibration + verification (never trained on). Those are two
+            IMMUTABLE roles, split deterministically the moment the holdout is drawn: the calibration
+            rows set the conformal threshold and the selection rows produce ``holdout_agreement`` /
+            ``escalation_rate`` and decide every :meth:`Solution.improve` promotion. Nothing reads both.
         kind: Force the student path, ``'text'`` or ``'record'``; default sniffs the first input.
         ood: Fit a ``p(x)`` gate over the training inputs and escalate inputs whose ``log p(x)`` falls
             below this quantile floor — so a wildly novel input escalates even when the softmax looks
@@ -560,7 +681,7 @@ def solve(
     items = list(inputs)
     if len(items) < 8:
         raise ValueError("solve() needs at least 8 example inputs to train and calibrate honestly")
-    k = kind or _input_kind(items[0])
+    k = _validated_kind(kind) if kind is not None else _input_kind(items[0])
     # one view for the whole call: the calling convention is discovered once, not per labeling pass,
     # and the same resolved view is handed to the Cascade so escalation never re-probes either.
     call = as_batch_view(teacher, teacher_mode)
@@ -572,8 +693,14 @@ def solve(
     cal_idx, train_idx = order[:n_cal], order[n_cal:]
     train_inputs = [items[i] for i in train_idx]
     train_labels = [labels[i] for i in train_idx]
-    cal_inputs = [items[i] for i in cal_idx]
-    cal_labels = [labels[i] for i in cal_idx]
+    # MXR-080-1891: the reserved rows carry two roles, fixed here and never re-drawn. Conformal
+    # calibration reads cal_*; every selection/verification number reads sel_*. Nothing reads both.
+    n_conf = _split_holdout_roles(n_cal)
+    conf_idx, sel_idx = cal_idx[:n_conf], cal_idx[n_conf:]
+    cal_inputs = [items[i] for i in conf_idx]
+    cal_labels = [labels[i] for i in conf_idx]
+    sel_inputs = [items[i] for i in sel_idx]
+    sel_labels = [labels[i] for i in sel_idx]
 
     if prelabeled is not None:
         pre_in, pre_lab = prelabeled
@@ -608,8 +735,11 @@ def solve(
             distill_kw = _tune_recipe(k, train_inputs, train_labels, distill_kw, propose_budget, seed)
         student = _fit_student(k, train_inputs, train_labels, distill_kw)
     cal = CalibratedTaskModel(student, alpha=alpha, density_gate=gate).calibrate(cal_inputs, cal_labels)
-    agree = agreement(student, cal_labels, cal_inputs)
-    esc = cal.escalation_rate(cal_inputs)
+    # Verification reads the selection role only. Measuring it on the calibration rows made the
+    # escalation rate mechanically equal to alpha (those rows DEFINED the threshold) and handed
+    # improve() the calibration set as its selection set (MXR-080-1891).
+    agree = agreement(student, sel_labels, sel_inputs)
+    esc = cal.escalation_rate(sel_inputs)
     promoted = target_agreement is None or agree >= target_agreement
     if edge_result is not None and not edge_result.feasible:
         promoted = False  # nothing fit the device: serve the teacher, never a budget-busting student
@@ -637,5 +767,8 @@ def solve(
         device=device,
         device_space=device_space,
         propose_budget=propose_budget,
-        verification_digest=_evidence_digest(cal_inputs, cal_labels),
+        verification_digest=_evidence_digest([*cal_inputs, *sel_inputs], [*cal_labels, *sel_labels]),
+        sel_inputs=sel_inputs,
+        sel_labels=sel_labels,
+        selection_uses=1,  # solve() itself is the selection role's first and, so far, only use
     )
