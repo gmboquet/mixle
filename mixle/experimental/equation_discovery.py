@@ -124,7 +124,7 @@ def random_experiments(budget: int, radius: float, rng: np.random.Generator) -> 
     return rng.uniform(-radius, radius, budget)
 
 
-@dataclass
+@dataclass(frozen=True)
 class DiscoveryReceipt:
     recovered_coef: np.ndarray
     recovered_terms: frozenset[int]

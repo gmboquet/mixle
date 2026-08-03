@@ -1,6 +1,7 @@
 """Reproducibility receipts (N2): record a fit, replay it, check it comes out bit-for-bit."""
 
 import unittest
+from dataclasses import FrozenInstanceError, replace
 
 import numpy as np
 
@@ -140,7 +141,15 @@ class RecordAndVerifyTest(unittest.TestCase):
         est = st.GaussianEstimator()
         model, rec = fit_and_record(d, est, seed=4)
         self.assertTrue(rec.matches_model(model))
-        rec.seed = 9
+        # `rec.seed = 9` used to do the tampering here. MXR-080-1908 froze the receipt, so an
+        # in-place edit now raises instead -- which is a stronger outcome than detecting it, but it
+        # is NOT the threat this test exists for. The integrity check defends a receipt that was
+        # serialized, altered elsewhere, and read back, where nothing stopped the write. `replace`
+        # reconstructs exactly that: a receipt whose seed no longer matches the digests recorded
+        # beside it.
+        rec = replace(rec, seed=9)
+        with self.assertRaises(FrozenInstanceError):
+            rec.seed = 11  # and the in-place path is genuinely closed
         tampered = verify_reproducible(st.GaussianEstimator(), d, rec)
         self.assertFalse(tampered["checks"]["receipt_integrity"])
         self.assertFalse(tampered["reproducible"])

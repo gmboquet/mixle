@@ -53,6 +53,8 @@ from typing import Any
 
 import numpy as np
 
+from mixle.utils.immutable import detach_receipt_container
+
 __all__ = [
     "TaskResult",
     "EvalReport",
@@ -166,7 +168,7 @@ class TaskResult:
             raise ValueError("a failed task must carry score=None and a non-empty error")
 
 
-@dataclass
+@dataclass(frozen=True)
 class EvalReport:
     """The per-rung receipt: every task's score for one checkpoint, JSON-serializable via :meth:`report`."""
 
@@ -176,6 +178,12 @@ class EvalReport:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "tasks", detach_receipt_container(self.tasks))
+        object.__setattr__(self, "metadata", detach_receipt_container(self.metadata))
         if not isinstance(self.checkpoint_id, str) or not self.checkpoint_id:
             raise ValueError("checkpoint_id must be a non-empty string")
         _seed(self.seed)
@@ -497,7 +505,7 @@ class RegressionFlag:
     threshold: float
 
 
-@dataclass
+@dataclass(frozen=True)
 class RegressionReport:
     """The regression-tracking receipt over an ordered sequence of :class:`EvalReport`."""
 
@@ -505,6 +513,13 @@ class RegressionReport:
     n_checkpoints: int
     threshold: float
     reference: str
+
+    def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "flags", detach_receipt_container(self.flags))
 
     @property
     def has_regressions(self) -> bool:

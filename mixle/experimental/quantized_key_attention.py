@@ -229,7 +229,7 @@ class CellCountTree:
 # ---------------------------------------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class QuantizedSoftmaxReceipt:
     """Verified error scope for one quantized-softmax evaluation."""
 

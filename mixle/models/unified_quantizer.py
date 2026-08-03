@@ -56,6 +56,7 @@ from mixle.task.bandit import UCB1
 from mixle.task.quantize import _QMAX, _pack_nibbles, _unpack_nibbles
 from mixle.task.quantize import dequantize_symmetric as _dequantize_symmetric
 from mixle.task.quantize import quantize_dequantize_array as _symmetric_quantize
+from mixle.utils.immutable import detach_receipt_container
 
 __all__ = [
     "METHODS",
@@ -282,7 +283,7 @@ class MethodCandidate:
     reward: float  # what the picker actually compared (−inf-ish for ineligible)
 
 
-@dataclass
+@dataclass(frozen=True)
 class QuantizationReceipt:
     """Explains why ``method`` was used for one tensor: its own measured numbers, plus -- for
     auto-pick -- the same real numbers for every OTHER method that was considered and rejected."""
@@ -297,6 +298,13 @@ class QuantizationReceipt:
     target_bytes: int
     candidates: dict[str, MethodCandidate] = field(default_factory=dict)
     notes: str = ""
+
+    def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "candidates", detach_receipt_container(self.candidates))
 
     def rejected(self) -> dict[str, MethodCandidate]:
         """The candidates NOT chosen (empty for an explicit, non-auto dispatch)."""

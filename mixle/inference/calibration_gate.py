@@ -42,6 +42,7 @@ from mixle.inference.calibration import (
     pit_calibration_error,
     pit_ensemble,
 )
+from mixle.utils.immutable import detach_receipt_container
 
 __all__ = [
     "CalibrationStatus",
@@ -54,7 +55,7 @@ __all__ = [
 CalibrationStatus = Literal["passed", "failed", "indeterminate"]
 
 
-@dataclass
+@dataclass(frozen=True)
 class CalibrationVerdict:
     """The outcome of a calibration check with an explicit three-way decision state.
 
@@ -83,6 +84,11 @@ class CalibrationVerdict:
     kind: str = "calibration"
 
     def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "reasons", detach_receipt_container(self.reasons))
         if self.calibration_status not in ("passed", "failed", "indeterminate"):
             raise ValueError(
                 "calibration_status must be exactly 'passed', 'failed', or 'indeterminate'; "

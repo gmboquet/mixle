@@ -38,6 +38,7 @@ from enum import StrEnum
 from typing import Any
 
 from mixle.substrate.core import Substrate, SubstrateItem
+from mixle.utils.immutable import detach_receipt_container
 
 
 class Corroboration(StrEnum):
@@ -54,7 +55,7 @@ class Corroboration(StrEnum):
     UNVERIFIED = "unverified"
 
 
-@dataclass
+@dataclass(frozen=True)
 class ClaimVerdict:
     """One claim from an answer, with what the substrate said about it and the evidence either way.
 
@@ -73,13 +74,28 @@ class ClaimVerdict:
     contradicted: bool = False
     contradictions: list[dict[str, Any]] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "citations", detach_receipt_container(self.citations))
+        object.__setattr__(self, "contradictions", detach_receipt_container(self.contradictions))
 
-@dataclass
+
+@dataclass(frozen=True)
 class FactualityReceipt:
     """A per-claim grounding of an answer against the substrate -- the receipt behind 'is this true?'."""
 
     answer: str
     verdicts: list[ClaimVerdict] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "verdicts", detach_receipt_container(self.verdicts))
 
     @property
     def grounded_fraction(self) -> float | None:

@@ -16,6 +16,7 @@ from typing import Any
 
 from mixle.data.hashing import dataset_hash
 from mixle.system.core import Query, System
+from mixle.utils.immutable import detach_receipt_container
 
 #: Bumped whenever :func:`_default_scorer`'s judgement changes, so cards judged by different versions
 #: of the default judge get different :func:`question_set_identity` values and cannot be compared.
@@ -237,7 +238,7 @@ def evaluate(
     )
 
 
-@dataclass
+@dataclass(frozen=True)
 class RegressionReport:
     """Whether ``current`` is worse than ``baseline`` on any tracked axis, and exactly why.
 
@@ -249,6 +250,13 @@ class RegressionReport:
     regressed: bool
     reasons: list[str] = field(default_factory=list)
     comparable: bool = True
+
+    def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "reasons", detach_receipt_container(self.reasons))
 
 
 def detect_regression(

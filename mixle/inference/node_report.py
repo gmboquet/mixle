@@ -60,6 +60,7 @@ from typing import Any
 import numpy as np
 
 from mixle.stats.compute.pdist import ProbabilityDistribution
+from mixle.utils.immutable import detach_receipt_container
 
 _DEFAULT_MC_SAMPLES = 64
 _GRADIENT_STEPS = 50.0  # proxy M-step iteration count for gradient-based estimators
@@ -68,7 +69,7 @@ _NEAR_DEGENERATE_VARIANCE = 1e-10
 _ILL_CONDITIONED_COND_NUMBER = 1e8
 
 
-@dataclass
+@dataclass(frozen=True)
 class NodeReport:
     """Per-node diagnostics for one point in a composed distribution tree.
 
@@ -87,6 +88,13 @@ class NodeReport:
     param_count: int
     health: dict[str, Any] = field(default_factory=dict)
     residual_kind: str = "self_entropy_diagnostic"
+
+    def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "health", detach_receipt_container(self.health))
 
     @property
     def is_healthy(self) -> bool:

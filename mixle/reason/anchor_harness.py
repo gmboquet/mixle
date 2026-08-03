@@ -31,6 +31,7 @@ from mixle.reason.task_projection import TaskReadout, read_out, task_sufficient_
 from mixle.stats.latent.gaussian_mixture import GaussianMixtureDistribution
 from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
 from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
+from mixle.utils.immutable import detach_receipt_container
 
 _LITHOLOGIES = ("basalt", "shale", "granite")
 _BOOTSTRAPS = 8
@@ -59,7 +60,7 @@ class _BootstrapModel:
     baseline_variance: float
 
 
-@dataclass
+@dataclass(frozen=True)
 class AnchorHarnessReport:
     """Measured train/calibration/test report for the anchor task."""
 
@@ -87,6 +88,17 @@ class AnchorHarnessReport:
     calibration_rows: int
     test_rows: int
     notes: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "modalities", detach_receipt_container(self.modalities))
+        object.__setattr__(self, "hop_names", detach_receipt_container(self.hop_names))
+        object.__setattr__(self, "coverage_by_hop", detach_receipt_container(self.coverage_by_hop))
+        object.__setattr__(self, "abstained_site_ids", detach_receipt_container(self.abstained_site_ids))
+        object.__setattr__(self, "notes", detach_receipt_container(self.notes))
 
     @property
     def walk_mae(self) -> float:

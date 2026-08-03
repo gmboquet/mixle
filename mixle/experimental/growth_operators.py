@@ -75,7 +75,7 @@ __all__ = [
 ]
 
 
-@dataclass
+@dataclass(frozen=True)
 class ParityReceipt:
     """A real, measured before/after forward-pass comparison -- the function-preservation receipt this
     track requires "at the moment of the edit". ``max_abs_diff``/``max_rel_diff`` are computed over every

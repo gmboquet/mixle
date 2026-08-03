@@ -42,6 +42,7 @@ from typing import Any
 
 from mixle.substrate.core import Substrate, SubstrateItem
 from mixle.substrate.spaces import AccessPolicy
+from mixle.utils.immutable import detach_receipt_container
 
 
 class LineageState(StrEnum):
@@ -65,7 +66,7 @@ class LineageState(StrEnum):
     UNVERIFIED = "unverified"
 
 
-@dataclass
+@dataclass(frozen=True)
 class LineageReport:
     """Whether an item's provenance chain resolves end to end -- and exactly why, if it doesn't.
 
@@ -81,6 +82,16 @@ class LineageReport:
     truncated: list[str] = field(default_factory=list)  # ids at max_depth with further, unexplored edges
     depth: int = 0  # how many levels of ancestry resolved before a leaf or a stop
     visited: int = 0  # distinct, resolved-and-authorized ancestors reached (cycle-safe count)
+
+    def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "dangling", detach_receipt_container(self.dangling))
+        object.__setattr__(self, "cycles", detach_receipt_container(self.cycles))
+        object.__setattr__(self, "unverified", detach_receipt_container(self.unverified))
+        object.__setattr__(self, "truncated", detach_receipt_container(self.truncated))
 
     @property
     def intact(self) -> bool:

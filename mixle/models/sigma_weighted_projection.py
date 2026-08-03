@@ -36,6 +36,8 @@ from typing import Any
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
+from mixle.utils.immutable import detach_receipt_container
+
 __all__ = [
     "sigma_weighted_error",
     "sigma_weighted_low_rank",
@@ -576,7 +578,7 @@ def sigma_weighted_butterfly(
 # --------------------------------------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class ProjectionReport:
     """Uniform report shape :func:`project` returns alongside ``What``, regardless of ``structure``.
 
@@ -590,6 +592,13 @@ class ProjectionReport:
     structure: str
     sigma_weighted_error: float
     stats: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "stats", detach_receipt_container(self.stats))
 
 
 def project(w: Any, sigma: Any, structure: str, **kw: Any) -> tuple[Any, ProjectionReport]:

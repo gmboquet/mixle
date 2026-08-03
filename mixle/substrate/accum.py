@@ -47,7 +47,7 @@ class QAItem:
     answer: str
 
 
-@dataclass
+@dataclass(frozen=True)
 class FlywheelMeasurement:
     """Held-out answer quality and grounding rate for one flywheel measurement.
 
@@ -65,7 +65,7 @@ class FlywheelMeasurement:
     trial_grounded_fractions: tuple[float, ...] = field(default_factory=tuple)
 
 
-@dataclass
+@dataclass(frozen=True)
 class FlywheelReport:
     """Before/after/withheld flywheel measurements with an attribution check."""
 

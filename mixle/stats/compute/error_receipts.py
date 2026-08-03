@@ -195,7 +195,7 @@ def kahan_reduce(values: Iterable[float], weights: Iterable[float] | None = None
     return acc
 
 
-@dataclass
+@dataclass(frozen=True)
 class ConditioningReceipt:
     """A real, computed numerical-conditioning diagnostic for a (multivariate) fit.
 
