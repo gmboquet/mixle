@@ -86,7 +86,18 @@ def _aleatoric_from_noise(R: Any, k: int) -> np.ndarray:
 
 
 def _exact_int(value: Any, name: str) -> int:
-    """Return ``value`` as an exact integer, rejecting fractional input (no silent ``int()`` truncation)."""
+    """Return ``value`` as an exact integer, rejecting fractional input (no silent ``int()`` truncation).
+
+    The fractional check was made through ``float(value)``, which is not a type check at all:
+    ``float(True)`` is ``1.0`` and ``float("3")`` is ``3.0``, so a Boolean and a numeric string both
+    passed and became dimensions and step counts (MXR-080-1898). A dimension read from configuration
+    text arrives as a string, and ``True`` as a dimension is the kind of value that produces a
+    silently wrong-shaped computation rather than an error.
+    """
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be an integer, not a Boolean; got {value!r}")
+    if not isinstance(value, (int, float, np.integer, np.floating)):
+        raise TypeError(f"{name} must be a real number; got {value!r} ({type(value).__name__})")
     f = float(value)
     if not np.isfinite(f) or f != int(f):
         raise ValueError(f"{name} must be an integer; got {value!r}")
