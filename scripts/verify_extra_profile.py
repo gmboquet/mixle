@@ -9,8 +9,6 @@ import json
 import tomllib
 from pathlib import Path
 
-from packaging.requirements import Requirement
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -22,7 +20,15 @@ def applicable_modules(profile: str) -> list[str]:
     workflow's floor environment is built from an exact constraint set and its full ``pip freeze``
     is recorded as release evidence, so installing a tooling dependency into it would put
     ``packaging`` in the recorded floor graph of a profile that does not declare it.
+
+    The import is FUNCTION-LOCAL for exactly that reason. At module scope it defeated the split
+    entirely: ``--modules``, the standard-library-only path, still failed on
+    ``ModuleNotFoundError: No module named 'packaging'`` before reaching ``main``. That went
+    unnoticed locally because pytest depends on ``packaging``, so every environment used for testing
+    happened to have it; the workflow's floor environment installs neither.
     """
+    from packaging.requirements import Requirement
+
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     extras = project["optional-dependencies"]
     if profile not in extras:
