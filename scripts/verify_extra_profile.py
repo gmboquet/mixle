@@ -6,14 +6,23 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-import re
 import tomllib
 from pathlib import Path
+
+from packaging.requirements import Requirement
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def verify(profile: str) -> list[str]:
+def applicable_modules(profile: str) -> list[str]:
+    """Modules a profile's requirements contribute *in this environment*.
+
+    Needs ``packaging`` to evaluate environment markers, so it is separated from :func:`verify`,
+    which needs only the standard library and must run inside the environment under test. The
+    workflow's floor environment is built from an exact constraint set and its full ``pip freeze``
+    is recorded as release evidence, so installing a tooling dependency into it would put
+    ``packaging`` in the recorded floor graph of a profile that does not declare it.
+    """
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     extras = project["optional-dependencies"]
     if profile not in extras:
@@ -21,30 +30,61 @@ def verify(profile: str) -> list[str]:
     mapping = json.loads((ROOT / "manifests" / "optional_dependency_imports.json").read_text(encoding="utf-8"))[
         "distribution_to_imports"
     ]
-    imported = []
+    modules = []
     for requirement in extras[profile]:
-        match = re.match(r"[A-Za-z0-9_.-]+", requirement)
-        if match is None:
-            raise ValueError(f"invalid optional requirement {requirement!r}")
-        distribution = match.group(0)
-        if distribution not in mapping:
-            raise ValueError(f"no import mapping for {distribution}")
-        for module in mapping[distribution]:
-            importlib.import_module(module)
-            imported.append(module)
-    return sorted(set(imported))
+        parsed = Requirement(requirement)
+        if parsed.name not in mapping:
+            raise ValueError(f"no import mapping for {parsed.name}")
+        # Honour the environment marker. The requirement was previously matched with a bare name
+        # regex, which DISCARDS the marker, so this tried to import a distribution pip had correctly
+        # declined to install: `tbb; platform_machine == "x86_64"` failed the whole numba profile on
+        # every non-x86_64 machine. A requirement that does not apply here is not a verification
+        # failure -- there is nothing installed to verify.
+        if parsed.marker is not None and not parsed.marker.evaluate():
+            continue
+        modules.extend(mapping[parsed.name])
+    return sorted(set(modules))
+
+
+def verify(modules: list[str]) -> list[str]:
+    """Import each module, in the interpreter being verified. Standard library only, by design."""
+    for module in modules:
+        importlib.import_module(module)
+    return sorted(set(modules))
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--profile", required=True)
+    parser.add_argument("--profile")
+    parser.add_argument(
+        "--print-modules",
+        action="store_true",
+        help="resolve the profile's applicable modules and print them, without importing",
+    )
+    parser.add_argument(
+        "--modules",
+        help="comma-separated modules to import, as produced by --print-modules in a matching environment",
+    )
     args = parser.parse_args()
     try:
-        imported = verify(args.profile)
+        if args.print_modules:
+            if not args.profile:
+                raise ValueError("--print-modules requires --profile")
+            print(",".join(applicable_modules(args.profile)))
+            return 0
+        if args.modules is not None:
+            names = [name for name in args.modules.split(",") if name]
+            imported = verify(names)
+            profile = args.profile or "(supplied)"
+        else:
+            if not args.profile:
+                raise ValueError("supply --profile or --modules")
+            profile = args.profile
+            imported = verify(applicable_modules(profile))
     except (ImportError, OSError, KeyError, TypeError, ValueError) as exc:
         print(str(exc))
         return 1
-    print(json.dumps({"artifact": "mixle.extra_profile_imports/v1", "profile": args.profile, "imports": imported}))
+    print(json.dumps({"artifact": "mixle.extra_profile_imports/v1", "profile": profile, "imports": imported}))
     return 0
 
 

@@ -1,51 +1,144 @@
 {
   "artifact": "mixle.optional_dependency_imports/v1",
   "distribution_to_imports": {
-    "Cython": ["Cython"],
-    "PyYAML": ["yaml"],
-    "dask": ["dask"],
-    "datasets": ["datasets"],
-    "distributed": ["distributed"],
-    "fsspec": ["fsspec"],
-    "furo": ["furo"],
-    "gmpy2": ["gmpy2"],
-    "h5py": ["h5py"],
-    "hmmlearn": ["hmmlearn"],
-    "import-linter": ["importlinter"],
-    "jax": ["jax"],
-    "lightning": ["lightning"],
-    "mongomock": ["mongomock"],
-    "mpmath": ["mpmath"],
-    "mpi4py": ["mpi4py"],
-    "mypy": ["mypy"],
-    "myst-parser": ["myst_parser"],
-    "networkx": ["networkx"],
-    "numba": ["numba"],
-    "numpyro": ["numpyro"],
-    "pandas": ["pandas"],
-    "passagemath-symbolics": ["sage"],
-    "peft": ["peft"],
-    "pomegranate": ["pomegranate"],
-    "pyarrow": ["pyarrow"],
-    "pymongo": ["pymongo"],
-    "pyspark": ["pyspark"],
-    "pytest": ["pytest"],
-    "pytest-cov": ["pytest_cov"],
-    "pytest-xdist": ["xdist"],
-    "ray": ["ray"],
-    "ruff": ["ruff"],
-    "safetensors": ["safetensors"],
-    "scikit-learn": ["sklearn"],
-    "sentence-transformers": ["sentence_transformers"],
-    "setuptools": ["setuptools"],
-    "sphinx": ["sphinx"],
-    "sphinx-polyversion": ["sphinx_polyversion"],
-    "sqlalchemy": ["sqlalchemy"],
-    "sympy": ["sympy"],
-    "tbb": ["tbb"],
-    "torch": ["torch"],
-    "transformers": ["transformers"],
-    "umap-learn": ["umap"],
-    "zarr": ["zarr"]
+    "Cython": [
+      "Cython"
+    ],
+    "PyYAML": [
+      "yaml"
+    ],
+    "dask": [
+      "dask"
+    ],
+    "datasets": [
+      "datasets"
+    ],
+    "distributed": [
+      "distributed"
+    ],
+    "fsspec": [
+      "fsspec"
+    ],
+    "furo": [
+      "furo"
+    ],
+    "gmpy2": [
+      "gmpy2"
+    ],
+    "h5py": [
+      "h5py"
+    ],
+    "hmmlearn": [
+      "hmmlearn"
+    ],
+    "import-linter": [
+      "importlinter"
+    ],
+    "jax": [
+      "jax"
+    ],
+    "lightning": [
+      "lightning"
+    ],
+    "mongomock": [
+      "mongomock"
+    ],
+    "mpi4py": [
+      "mpi4py"
+    ],
+    "mpmath": [
+      "mpmath"
+    ],
+    "mypy": [
+      "mypy"
+    ],
+    "myst-parser": [
+      "myst_parser"
+    ],
+    "networkx": [
+      "networkx"
+    ],
+    "numba": [
+      "numba"
+    ],
+    "numpyro": [
+      "numpyro"
+    ],
+    "pandas": [
+      "pandas"
+    ],
+    "passagemath-symbolics": [
+      "sage"
+    ],
+    "peft": [
+      "peft"
+    ],
+    "pomegranate": [
+      "pomegranate"
+    ],
+    "pyarrow": [
+      "pyarrow"
+    ],
+    "pymongo": [
+      "pymongo"
+    ],
+    "pyspark": [
+      "pyspark"
+    ],
+    "pytest": [
+      "pytest"
+    ],
+    "pytest-cov": [
+      "pytest_cov"
+    ],
+    "pytest-xdist": [
+      "xdist"
+    ],
+    "ray": [
+      "ray"
+    ],
+    "ruff": [
+      "ruff"
+    ],
+    "safetensors": [
+      "safetensors"
+    ],
+    "scikit-learn": [
+      "sklearn"
+    ],
+    "sentence-transformers": [
+      "sentence_transformers"
+    ],
+    "setuptools": [
+      "setuptools"
+    ],
+    "sphinx": [
+      "sphinx"
+    ],
+    "sphinx-polyversion": [
+      "sphinx_polyversion"
+    ],
+    "sqlalchemy": [
+      "sqlalchemy"
+    ],
+    "sympy": [
+      "sympy"
+    ],
+    "tbb": [],
+    "torch": [
+      "torch"
+    ],
+    "transformers": [
+      "transformers"
+    ],
+    "umap-learn": [
+      "umap"
+    ],
+    "zarr": [
+      "zarr"
+    ]
+  },
+  "notes": {
+    "tbb": "The tbb wheel ships only shared libraries (libtbb.so and friends under .data/data/lib) and provides no importable Python module -- verified against tbb-2021.13.1. numba consumes it through the native threading layer, not through an import. The empty list means 'this distribution is deliberately not import-verifiable', not 'not yet mapped': mapping it to ['tbb'] made verify_extra_profile fail the whole numba profile on every platform where the wheel actually installs."
   }
 }

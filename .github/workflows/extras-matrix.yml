@@ -64,6 +64,14 @@ jobs:
           if [ "${{ matrix.extra }}" = "mpi" ]; then
             sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin
           fi
+      # `packaging` parses the requirement strings (markers included) for the two helper scripts.
+      # It lives in its own venv on purpose: both the candidate and the floor environments have their
+      # full `pip freeze --all` recorded as release evidence, so installing a tooling dependency into
+      # either would put `packaging` in the recorded graph of a profile that does not declare it.
+      - name: Profile tooling (isolated from every recorded environment)
+        run: |
+          python -m venv "$RUNNER_TEMP/profile-tool"
+          "$RUNNER_TEMP/profile-tool/bin/python" -m pip install --upgrade pip "packaging>=24,<26"
       - name: Install .[${{ matrix.extra }}] in isolation
         run: |
           python -m pip install --upgrade pip
@@ -73,7 +81,9 @@ jobs:
       - name: mixle still imports
         run: |
           python -c "import mixle; print('mixle', mixle.__version__, 'imports with [${{ matrix.extra }}]')"
-          python scripts/verify_extra_profile.py --profile "${{ matrix.extra }}"
+          MODULES="$("$RUNNER_TEMP/profile-tool/bin/python" scripts/verify_extra_profile.py \
+            --profile "${{ matrix.extra }}" --print-modules)"
+          python scripts/verify_extra_profile.py --profile "${{ matrix.extra }}" --modules "$MODULES"
       - name: Record exact candidate and resolved graph
         env:
           PROFILE: ${{ matrix.extra }}
@@ -93,14 +103,21 @@ jobs:
         env:
           PROFILE: ${{ matrix.extra }}
         run: |
-          python scripts/generate_extra_floor_constraints.py \
+          # Run through the tool venv: this script imports `packaging`, and the ambient interpreter
+          # only ever had mixle[<extra>] installed -- mixle does not depend on packaging, and pip
+          # vendors its copy privately rather than exposing it. Every profile died here on
+          # `ModuleNotFoundError: No module named 'packaging'` before generating a single constraint.
+          "$RUNNER_TEMP/profile-tool/bin/python" scripts/generate_extra_floor_constraints.py \
             --profile "$PROFILE" --out "floor-$PROFILE.txt"
           python -m venv "$RUNNER_TEMP/floor-env"
           "$RUNNER_TEMP/floor-env/bin/python" -m pip install --upgrade pip
           "$RUNNER_TEMP/floor-env/bin/python" -m pip install \
             -c "floor-$PROFILE.txt" ".[${{ matrix.extra }}]"
           "$RUNNER_TEMP/floor-env/bin/python" -m pip check
-          "$RUNNER_TEMP/floor-env/bin/python" scripts/verify_extra_profile.py --profile "$PROFILE"
+          FLOOR_MODULES="$("$RUNNER_TEMP/profile-tool/bin/python" scripts/verify_extra_profile.py \
+            --profile "$PROFILE" --print-modules)"
+          "$RUNNER_TEMP/floor-env/bin/python" scripts/verify_extra_profile.py \
+            --profile "$PROFILE" --modules "$FLOOR_MODULES"
       - name: Record exact floor dependency graph
         env:
           PROFILE: ${{ matrix.extra }}
