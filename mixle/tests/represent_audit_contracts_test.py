@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import unittest
 
 import numpy as np
@@ -18,6 +19,11 @@ from mixle.represent.segment import (
     WholeSegmenter,
     WindowSegmenter,
 )
+
+# The hard-budget core CI tier installs no optional extras, so this failed there as a bare
+# ModuleNotFoundError rather than skipping -- which reads as a broken candidate instead of an
+# absent optional dependency.
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 
 class SegmentContractTest(unittest.TestCase):
@@ -135,6 +141,7 @@ class QuantizerContractTest(unittest.TestCase):
             quantizer.quantize(np.asarray([[1.0, 2.0, 3.0]]))
 
 
+@unittest.skipUnless(HAS_TORCH, "the heterogeneous graph encoder is torch-backed")
 class GraphContractTest(unittest.TestCase):
     def test_graph_encoder_rejects_malformed_or_nonfinite_graphs(self):
         encoder = GraphEncoder(GraphEmbedding(in_features=2, dim=3))

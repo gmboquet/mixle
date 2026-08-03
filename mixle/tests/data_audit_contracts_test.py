@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import tempfile
@@ -19,6 +20,11 @@ from mixle.data.sources.text_source import read_json
 from mixle.data.structure import partially_exchangeable
 from mixle.data.validate import check_dataset
 from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
+
+# The hard-budget core CI tier installs no optional extras, so this failed there as a bare
+# ModuleNotFoundError rather than skipping -- which reads as a broken candidate instead of an
+# absent optional dependency.
+HAS_PANDAS = importlib.util.find_spec("pandas") is not None
 
 
 class _LengthAwareIterator:
@@ -124,6 +130,7 @@ class ConnectorAndDiagnosticContractTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "top-level array"):
                 list(read_json(path).records())
 
+    @unittest.skipUnless(HAS_PANDAS, "the dataframe connector needs pandas")
     def test_dataframe_aliases_use_logical_names(self):
         import pandas as pd
 

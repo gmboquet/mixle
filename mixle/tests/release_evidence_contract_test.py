@@ -9,6 +9,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+# The hard-budget core CI tier installs no optional extras, so this failed there as a bare
+# ModuleNotFoundError rather than skipping -- which reads as a broken candidate instead of an
+# absent optional dependency.
+HAS_YAML = importlib.util.find_spec("yaml") is not None
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -130,6 +135,7 @@ class HostedWorkflowContractTest(unittest.TestCase):
         self.assertIn("verify_published_artifacts.py", post)
         self.assertIn("public-artifacts/*.whl", post)
 
+    @unittest.skipUnless(HAS_YAML, "check_workflows parses the workflow YAML")
     def test_release_artifacts_and_automation_fail_closed(self):
         tests = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
         publish = (ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")

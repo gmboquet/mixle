@@ -1,4 +1,5 @@
 import copy
+import importlib.util
 import io
 import unittest
 
@@ -41,6 +42,11 @@ from mixle.stats import (
 )
 from mixle.stats.compute.kernel import GenericKernel, KernelFactory
 from mixle.stats.compute.stacked import StackedMixtureKernel, estimate_component_shard_value, tie_component_shard_values
+
+# The hard-budget core CI tier installs no optional extras, so this failed there as a bare
+# ModuleNotFoundError rather than skipping -- which reads as a broken candidate instead of an
+# absent optional dependency.
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 
 def _assert_stats_close(test_case, actual, expected):
@@ -795,6 +801,7 @@ class ComputeKernelTestCase(unittest.TestCase):
         self.assertEqual(wrapped.nbytes, wrapped.payload.nbytes)
         self.assertEqual(wrapped.nbytes, data.size * np.dtype("float32").itemsize)
 
+    @unittest.skipUnless(HAS_TORCH, "the engine under test is torch-backed")
     def test_encoded_data_rejects_an_engine_that_does_not_own_payload(self):
         from mixle.engines import TorchEngine
 

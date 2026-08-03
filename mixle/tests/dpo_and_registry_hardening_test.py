@@ -7,11 +7,17 @@
    now constrained to a single path component.
 """
 
+import importlib.util
 import os
 import tempfile
 
 import numpy as np
 import pytest
+
+# mixle.models.dpo_leaf is torch-backed, and the hard-budget core CI tier installs no optional
+# extras -- these failed there as a bare ModuleNotFoundError rather than skipping.
+HAS_TORCH = importlib.util.find_spec("torch") is not None
+requires_torch = pytest.mark.skipif(not HAS_TORCH, reason="the DPO leaf is torch-backed")
 
 # --------------------------------------------------------------------------- DPO weights
 
@@ -24,6 +30,7 @@ def _dpo_accumulator():
     return est.accumulator_factory().make()
 
 
+@requires_torch
 def test_dpo_accumulator_carries_the_weight():
     lo, hi = _dpo_accumulator(), _dpo_accumulator()
     lo.update((np.zeros(3), 0, 1), 0.01, None)
@@ -32,6 +39,7 @@ def test_dpo_accumulator_carries_the_weight():
     assert lo.value()[3].tolist() != hi.value()[3].tolist()
 
 
+@requires_torch
 def test_dpo_seq_update_and_combine_preserve_weights():
     enc = (np.zeros((2, 3)), np.array([0, 0]), np.array([1, 1]))
     a = _dpo_accumulator()
