@@ -15,6 +15,7 @@ The empty import list is therefore a deliberate statement — "this distribution
 import-verifiable" — not an unfinished mapping.
 """
 
+import ast
 import importlib.util
 import json
 import tomllib
@@ -86,6 +87,26 @@ class ImportMapHonestyTest(unittest.TestCase):
 
 class SplitResponsibilityTest(unittest.TestCase):
     """`verify` runs inside the environment under test and must not need `packaging` there."""
+
+    def test_the_import_path_does_not_need_packaging_at_module_scope(self):
+        """The `--modules` path must import with the standard library alone.
+
+        `from packaging.requirements import Requirement` sat at MODULE scope, which defeated the
+        split entirely: the standard-library-only path died on ModuleNotFoundError before reaching
+        main(). It passed every local check because pytest itself depends on `packaging`, so every
+        environment used for testing happened to have it -- the workflow's floor environment,
+        built from an exact constraint set, installs neither. Asserting on the SOURCE is what
+        catches that, because this interpreter cannot help having packaging available.
+        """
+        source = (ROOT / "scripts" / "verify_extra_profile.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        module_level = {
+            alias.name.split(".")[0]
+            for node in tree.body
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+            for alias in (node.names if isinstance(node, ast.Import) else [ast.alias(name=node.module or "")])
+        }
+        self.assertNotIn("packaging", module_level)
 
     def test_verify_imports_a_supplied_module_list(self):
         self.assertEqual(_verifier().verify(["json", "json"]), ["json"])
