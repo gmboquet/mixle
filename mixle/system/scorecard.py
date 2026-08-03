@@ -14,6 +14,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from mixle.data.hashing import dataset_hash
 from mixle.system.core import Query, System
 
 #: Bumped whenever :func:`_default_scorer`'s judgement changes, so cards judged by different versions
@@ -52,8 +53,38 @@ def _default_scorer(reply: str | None, expected: str) -> bool:
 
 
 def _scorer_identity(scorer: Callable[[str | None, str], bool]) -> str:
-    """A stable name for the judge used to produce a scorecard (part of the card's held-out identity)."""
-    name = f"{getattr(scorer, '__module__', '?')}.{getattr(scorer, '__qualname__', repr(scorer))}"
+    """A stable name for the judge used to produce a scorecard (part of the card's held-out identity).
+
+    ``repr(scorer)`` is NOT an acceptable fallback (MXR-080-1902). An ordinary callable object's repr
+    is ``<pkg.Judge object at 0x10c3f5a90>`` -- a memory address, so two structurally identical judges
+    in one process got two different identities, and the same judge got a new one in every process.
+    That does not weaken the gate, it inverts it: :func:`detect_regression` reads a mismatched
+    identity as ``comparable=False, regressed=True``, so an improved round measured by the same judge
+    in a fresh process is reported as a regression it never had.
+
+    A judge that exposes ``__qualname__`` (a function, a lambda, a bound method) has a genuine,
+    content-determined name and is used as-is. Anything else is refused rather than fingerprinted by
+    process-dependent text -- the same closed-schema discipline
+    :func:`mixle.data.hashing._canonical` applies to provenance digests.
+
+    What this deliberately does NOT do is derive an identity from a callable object's attributes.
+    ``vars(judge)`` does not determine what a judge decides: a closure it holds, a model it calls, or
+    module state it reads are all invisible there, so a digest over them would assert that two judges
+    are the same evidence on grounds that cannot support the claim -- and a false MATCH lets
+    :func:`detect_regression` compare cards from different judges, which is the failure this identity
+    exists to prevent. Wrapping the judge in a module-level ``def`` (which the error names) is the
+    caller-side fix, and it is the caller who knows whether two configurations are the same judge.
+    """
+    qualname = getattr(scorer, "__qualname__", None)
+    if not isinstance(qualname, str) or not qualname:
+        raise ValueError(
+            f"scorer {type(scorer).__name__} has no stable identity: a scorecard is bound to the judge "
+            "that produced it, and this one exposes no __qualname__, leaving only repr() -- which for a "
+            "callable object or a functools.partial embeds a memory address and so names a different "
+            "judge in every process. Wrap it in a module-level function (def my_judge(reply, expected): "
+            "...) and pass that instead."
+        )
+    name = f"{getattr(scorer, '__module__', '?')}.{qualname}"
     return f"{name}@{DEFAULT_SCORER_VERSION}" if scorer is _default_scorer else name
 
 
@@ -67,14 +98,35 @@ def question_set_identity(
     by a laxer scorer, is not evidence that a round did not regress. Digesting the ``(query, expected)``
     pairs in order plus the scorer's identity turns that documented precondition into something
     :func:`detect_regression` can actually check, instead of silently accepting mismatched evidence.
+
+    The pairs are digested by CONTENT (:func:`mixle.data.hashing.dataset_hash`, order-sensitive),
+    never by ``repr`` (MXR-080-1902). ``Query.fingerprint`` is typed ``Any``, and ``repr`` of an
+    ordinary object embeds its memory address, so two equal question sets built from equal
+    fingerprint objects digested differently -- and :func:`detect_regression` then reported an
+    improved round against the same held-out set as ``comparable=False, regressed=True``, a
+    fabricated regression on the exact gate this identity exists to make trustworthy.
+    ``dataset_hash`` encodes a ``Query`` structurally by its declared dataclass fields and refuses
+    (rather than repr-ing) any value it cannot encode canonically, which is what makes an identity
+    computed in one process match one computed in another.
+
+    Note that this changes the digest of every question set relative to the ``repr``-based scheme, so
+    an identity persisted by an older build will not match one computed here. That is unavoidable and
+    correct: the old digest's whole problem is that it did not identify what it claimed to.
     """
     h = hashlib.sha256()
     h.update(_scorer_identity(scorer or _default_scorer).encode())
-    for query, expected in question_set:
-        h.update(b"\x00")
-        h.update(repr(query).encode())
-        h.update(b"\x01")
-        h.update(repr(expected).encode())
+    h.update(b"\x00")
+    try:
+        pairs_digest = dataset_hash([(query, expected) for query, expected in question_set])
+    except TypeError as exc:
+        raise ValueError(
+            f"this question set has no stable identity: {exc}. A scorecard is bound to the held-out "
+            "set it was measured on, and a value with no content-determined encoding (typically a "
+            "custom object in Query.fingerprint or Query.expected_output) can only be identified by "
+            "repr(), whose memory address makes the same question set look like a different one in "
+            "the next process."
+        ) from exc
+    h.update(pairs_digest.encode())
     return h.hexdigest()
 
 

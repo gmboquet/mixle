@@ -85,6 +85,32 @@ def _positive_int(value: Any, name: str) -> int:
     return count
 
 
+def _exact_int(value: Any, name: str, *, minimum: int) -> int:
+    """Validate an exact, non-Boolean integer control that must be at least ``minimum``.
+
+    The ``minimum=0`` generalization of :func:`_positive_int`, shared with the population/loop size
+    and acquisition controls in :mod:`mixle.evolve.population` and :mod:`mixle.evolve.closed_loop`
+    (MXR-080-1902). Those read their controls with a bare ``int(value)``, which is not validation but
+    TRUNCATION: ``size=7.9`` became 7, ``acquire_k=7.9`` became 7, and -- because ``bool`` is an
+    ``int`` subclass -- ``size=True`` became 1 and ``acquire_k=True`` became 1. Each of those runs a
+    genuinely different, smaller experiment than the one the caller wrote, with nothing in the result
+    to say the control was reinterpreted. An integral float (``7.0``) is still accepted, exactly as
+    :func:`_positive_int` accepts one: it names the same count unambiguously.
+
+    Deliberately NOT checked here: an upper bound. These are search-budget controls whose sensible
+    ceiling depends on the caller's data and compute, not on anything this function can see.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an exact integer >= {minimum}, got {value!r}")
+    try:
+        count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{name} must be an exact integer >= {minimum}, got {value!r}") from None
+    if count != value or count < minimum:
+        raise ValueError(f"{name} must be an exact integer >= {minimum}, got {value!r}")
+    return count
+
+
 def pointwise_log_density(model: Any, data: Sequence[Any]) -> np.ndarray:
     """Per-observation ``log p(y_i)`` under ``model`` via the vectorized ``seq_log_density`` path.
 
