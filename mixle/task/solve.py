@@ -30,7 +30,6 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from hashlib import sha256
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -42,6 +41,7 @@ from mixle.task.density import DensityGate
 from mixle.task.distill import agreement, distill_from_labels, distill_records_from_labels
 from mixle.task.model import HashedNGram, HashedRecord, TaskModel
 from mixle.task.tune import RecipeSpace
+from mixle.utils.paths import contained_path
 
 
 def _label_with(teacher: Callable[..., Any], items: list) -> list:
@@ -422,8 +422,14 @@ class Solution:
 
     def deploy(self, name: str, root: str = "./mixle_data/registry") -> str:
         """Save into the serving layout — ``{root}/tasks/{name}`` — the directory the mixle-mlops
-        ``/v1/tasks`` routes serve from. Returns the artifact path."""
-        return self.save(str(Path(root) / "tasks" / name))
+        ``/v1/tasks`` routes serve from. Returns the artifact path.
+
+        ``name`` must be a single path component. It was joined onto ``root`` unchecked, and both
+        ``pathlib`` and ``os.path.join`` will leave a root when asked to: ``name="../../escaped"``
+        traversed out of it and an absolute ``name`` discarded it entirely, so a deployment could
+        write anywhere the process could (MXR-080-1910). A serving name arrives from an API request
+        or a config file, so this is the ordinary case, not an exotic one."""
+        return self.save(str(contained_path(root, "tasks", name, kind="deployment name")))
 
     @classmethod
     def load(cls, path: str, teacher: Callable[..., Any], *, cost: Any = None, device: str = "cpu") -> Solution:
