@@ -18,6 +18,7 @@ except Exception:  # pragma: no cover - scipy is a package dependency in normal 
     sp = None
 
 from mixle.stats.compute.pdist import DataSequenceEncoder
+from mixle.utils.exact import require_exact_bool
 
 # Retained as an internal compatibility constant for graph families that use
 # epsilon stabilization for quantities other than Bernoulli support endpoints.
@@ -373,7 +374,12 @@ class GraphDataEncoder(DataSequenceEncoder):
     _SIGNATURE_VERSION = 1
 
     def __init__(self, directed: bool = False, fallback_assignments: Any | None = None) -> None:
-        self.directed = bool(directed)
+        # `bool(directed)` is truthiness, and this flag changes graph SEMANTICS -- which entries of the
+        # adjacency matrix are read, and what the symmetry constraint is. directed="false" therefore
+        # built and recorded a DIRECTED encoder, and because `directed` participates in _signature()
+        # the wrong semantics were written into the encoder identity that save_encoded/load_encoded
+        # compatibility is keyed on (MXR-080-1886).
+        self.directed = require_exact_bool(directed, "GraphDataEncoder directed")
         self.fallback_assignments = (
             None
             if fallback_assignments is None
