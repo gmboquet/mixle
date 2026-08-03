@@ -21,6 +21,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+import numpy as np
+
+from mixle.utils.exact import require_exact_bool
+
 
 class Confidence(StrEnum):
     """The three-state verdict on an external answer's semantic-entropy assessment (MXR-080-0270) --
@@ -57,6 +61,27 @@ class ExternalAnswer:
     answer: Any
     entropy: float
     state: Confidence
+
+    def __post_init__(self) -> None:
+        """Reject an answer record whose own fields contradict what it reports (MXR-080-1885).
+
+        Nothing here was checked. ``state="confident"`` -- the string, not the enum -- constructed and
+        then read ``confident=False``, because ``is`` never matches a string; and a non-finite entropy
+        described a measurement no clustering produces. Both are read as evidence about an external
+        model's reliability, which is the last place a field should be able to say something its own
+        type contradicts.
+        """
+        if not isinstance(self.state, Confidence):
+            raise TypeError(
+                f"ExternalAnswer state must be a Confidence, got {type(self.state).__name__} "
+                f"({self.state!r}); a string never matches the confident check."
+            )
+        if isinstance(self.entropy, bool) or not isinstance(self.entropy, (int, float, np.integer, np.floating)):
+            raise TypeError(f"ExternalAnswer entropy must be a real number, got {self.entropy!r}")
+        entropy = float(self.entropy)
+        if not math.isfinite(entropy) or entropy < 0.0:
+            raise ValueError(f"ExternalAnswer entropy must be finite and non-negative, got {self.entropy!r}")
+        object.__setattr__(self, "entropy", entropy)
 
     @property
     def confident(self) -> bool:
@@ -108,6 +133,14 @@ class ExternalModel:
         from mixle.inference.uq import uq
 
         self.generate = generate
+        # `int(samples)` truncated 8.9 to 8, read True as 1, and let samples=0 through to fail much
+        # later inside entropy clustering -- where the message is about clusters, not about the
+        # argument that caused it. Sample count decides how much evidence the entropy estimate has,
+        # so a silently-changed value silently changes the confidence verdict (MXR-080-1885).
+        if isinstance(samples, bool) or not isinstance(samples, (int, np.integer)):
+            raise TypeError(f"ExternalModel samples must be an exact integer, got {samples!r}")
+        if int(samples) < 1:
+            raise ValueError(f"ExternalModel samples must be at least 1, got {samples!r}")
         self.samples = int(samples)
         self._uq = uq(generate, calibration_prompts, alpha=alpha, equivalent=equivalent)
         if max_entropy is not None:
@@ -185,6 +218,12 @@ def external_action(
     carries the model's entropy and verdict so the trace records how sure the external source was, and
     why. Cost defaults high -- external calls are the escalation of last resort."""
     from mixle.substrate.act import Action
+
+    # `not trust_uncertain` is truthiness, and this flag decides whether an UNCALIBRATED or
+    # self-contradicting external answer is admitted as evidence. trust_uncertain="false" -- the
+    # string a flag arrives as from configuration -- read as True and trusted exactly the answers the
+    # default exists to withhold (MXR-080-1885).
+    trust_uncertain = require_exact_bool(trust_uncertain, "external_action trust_uncertain")
 
     def _run(question: str) -> list[str]:
         result = model.answer(question)
