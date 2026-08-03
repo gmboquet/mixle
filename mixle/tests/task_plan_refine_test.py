@@ -104,8 +104,16 @@ class OutcomeRefinementTest(unittest.TestCase):
         cls.planner = sft_planner(cls.world.teacher, train_reqs, tools, seed=0, epochs=40, d_model=64, n_layer=2)
         cls.held_out = cls.world.requests(40, seed=7)
 
-    def test_solve_rate_improves_over_the_imitation_baseline(self):
-        """The C4 acceptance: outcome training beats imitation-only, measured on the same held-out set."""
+    def test_refinement_decides_on_selection_and_reports_on_an_untouched_test_split(self):
+        """MXR-080-1896: the accept/reject decision and the reported rate came from ONE held-out set.
+
+        This test used to assert ``solve_rate_after >= solve_rate_before``, which was a tautology: both
+        rates were measured on the same tasks that had just chosen between the incumbent and the
+        candidate, and the module kept whichever scored higher on them. It could not fail, so it was
+        not evidence that outcome training beats imitation. The roles are now disjoint -- discovery
+        trains, selection decides, test reports -- so what is asserted here is the decision RULE and the
+        disjointness, not an improvement the reported split does not independently support.
+        """
         from mixle.task import outcome_refine_planner
 
         _planner, report = outcome_refine_planner(
@@ -113,7 +121,23 @@ class OutcomeRefinementTest(unittest.TestCase):
         )
         self.assertEqual(report.tasks, len(self.held_out))
         self.assertGreater(report.verified_gain_pairs, 0)  # the loop actually harvested a training signal
-        self.assertGreaterEqual(report.solve_rate_after, report.solve_rate_before)
+        # three disjoint roles that partition the task list
+        self.assertEqual(report.selection_tasks + report.test_tasks, report.evaluation_tasks)
+        self.assertEqual(report.discovery_tasks + report.evaluation_tasks, report.tasks)
+        self.assertGreater(report.selection_tasks, 0)
+        self.assertGreater(report.test_tasks, 0)
+        # the decision is made on the selection role and nowhere else
+        self.assertEqual(
+            report.accepted,
+            bool(
+                report.verified_gain_pairs and report.selection_solve_rate_after >= report.selection_solve_rate_before
+            ),
+        )
+        # a rejected candidate leaves the incumbent, so the reported rate cannot move
+        if not report.accepted:
+            self.assertEqual(report.solve_rate_after, report.solve_rate_before)
+        else:
+            self.assertEqual(report.solve_rate_after, report.candidate_solve_rate)
 
     def test_verification_is_real_execution_not_the_teacher_text(self):
         """A syntactically-plausible but factually wrong plan (mismatched owner) must fail verification."""
