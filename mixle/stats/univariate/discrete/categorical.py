@@ -706,6 +706,22 @@ class CategoricalDistribution(SequenceEncodableProbabilityDistribution):
         return self.quantized_multi_cross_index([other], max_bits=max_bits, bin_width_bits=bin_width_bits)
 
 
+def _exact_sample_count(size: object) -> int:
+    """Return ``size`` as an exact non-negative draw count, or raise (MXR-080-1904).
+
+    The same contract ``BackoffSampler.sample`` enforces (MXR-080-1845): ``int()`` reads ``True`` as
+    one draw, truncates ``2.7`` to two, and turns a negative count into an empty sample that looks
+    like a successful zero-draw request.
+    """
+    if isinstance(size, (bool, np.bool_)):
+        raise TypeError(f"size must be an exact non-negative integer, got {size!r}")
+    if not isinstance(size, (int, np.integer)):
+        raise ValueError(f"size must be an exact non-negative integer, got {size!r}")
+    if int(size) < 0:
+        raise ValueError(f"size must be an exact non-negative integer, got {size!r}")
+    return int(size)
+
+
 class CategoricalSampler(DistributionSampler):
     """Sampler for categorical labels according to the configured probability map."""
 
@@ -728,6 +744,10 @@ class CategoricalSampler(DistributionSampler):
                 since there is then no relative proportion of registered labels to sample from.
 
         """
+        # RandomState does not reject a Boolean -- RandomState(True) seeds with 1 -- so a bool seed
+        # silently produced a specific, reproducible stream nobody asked for (MXR-080-1904).
+        if seed is not None and (isinstance(seed, (bool, np.bool_)) or not isinstance(seed, (int, np.integer))):
+            raise TypeError(f"CategoricalSampler seed must be an exact integer or None, got {seed!r}")
         self.rng = RandomState(seed)
         # One rule covering every way this object can fail to be a law (MXR-080-1857). The checks
         # below caught scoring_only and an all-zero pmap; they did not catch the two shapes that
@@ -794,21 +814,31 @@ class CategoricalSampler(DistributionSampler):
         """Draw iid samples from the categorical distribution.
 
         Args:
-            size: Number of iid samples to draw. ``None`` returns a scalar label.
+            size: Number of iid samples to draw. ``None`` returns a scalar label. Must be an exact
+                non-negative integer -- ``int()`` would have read ``True`` as one draw, truncated
+                ``2.7`` to two, and turned a negative count into an empty "successful" sample, which
+                is the contract ``BackoffSampler.sample`` already enforces (MXR-080-1845/1904).
+            batched: Whether to draw the whole batch in one vectorized call (the default) or one
+                draw at a time. Both yield iid samples from the same law and differ only in how the
+                random stream is consumed, so a fixed seed gives different -- individually valid --
+                sequences. This argument was previously declared and then ignored entirely: passing
+                ``batched=False`` did nothing at all and silently returned the batched result
+                (MXR-080-1904).
 
         Returns:
             A scalar label when ``size`` is ``None``; otherwise a list of labels.
 
         """
+        if not isinstance(batched, (bool, np.bool_)):
+            raise TypeError(f"batched must be an actual Boolean, got {batched!r}")
         if size is None:
-            idx = self.rng.choice(self.num_levels, p=self.probs, size=size)
+            idx = self.rng.choice(self.num_levels, p=self.probs, size=None)
             return self.levels[idx]
-
-        else:
-            levels = self.levels
-            rv = self.rng.choice(self.num_levels, p=self.probs, size=size)
-
-            return [levels[i] for i in rv]
+        count = _exact_sample_count(size)
+        levels = self.levels
+        if not batched:
+            return [levels[int(self.rng.choice(self.num_levels, p=self.probs, size=None))] for _ in range(count)]
+        return [levels[i] for i in self.rng.choice(self.num_levels, p=self.probs, size=count)]
 
 
 class CategoricalEnumerator(DistributionEnumerator):

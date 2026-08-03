@@ -198,6 +198,19 @@ class FitProvenance:
         # non-empty ``repairs`` as "the returned law is not simply the estimator's answer on this
         # data". ``repairs=("",)`` therefore downgraded a fit on the strength of a repair that names
         # nothing, and ``as_dict()`` published the blank as though it were a record (MXR-080-1867).
+        # `str(entry)` on an arbitrary object publishes its default repr, which embeds a memory
+        # address: a receipt would then carry "<Repair object at 0x10f3c2a10>" as the name of the
+        # repair applied -- not durable across processes, not comparable between runs, and not a name
+        # at all (MXR-080-1904). A repair identity is a string the caller chose.
+        non_names = [
+            (index, entry) for index, entry in enumerate(self.repairs) if not isinstance(entry, (str, np.str_))
+        ]
+        if non_names:
+            raise TypeError(
+                f"FitProvenance repairs entries must be strings naming the repair applied; got "
+                f"{non_names!r}. str() on an object publishes an address-bearing default repr, which "
+                "is not durable across processes and cannot be compared between runs."
+            )
         repairs = tuple(str(entry) for entry in self.repairs)
         blank = [index for index, entry in enumerate(repairs) if not entry.strip()]
         if blank:
