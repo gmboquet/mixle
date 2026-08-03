@@ -202,5 +202,50 @@ class ReceiptConsistencyTest(unittest.TestCase):
         self.assertEqual(timed_out.mode, "oracle_timeout")
 
 
+class DegradedAttemptsAreConsistentTest(unittest.TestCase):
+    """MXR-080-1902 (High): ``DegradedResult.attempts`` is documented as "the structured causal
+    evidence" for a degradation, and ``with_fallback``/``route_past`` both record it -- but an
+    ``oracle_timeout`` abstention returned ``attempts=()``. Audit code walking ``attempts`` could not
+    tell a timed-out oracle from a route that never degraded at all; ``reason`` is a human-readable
+    string, not the same field."""
+
+    def test_a_timeout_abstention_records_its_causal_evidence(self):
+        def slow():
+            raise TimeoutError("oracle call exceeded budget")
+
+        result = abstain_on_timeout(slow)
+        self.assertTrue(result.degraded)
+        self.assertEqual(len(result.attempts), 1, "a degraded result carried no causal evidence")
+        name, exc_repr = result.attempts[0]
+        self.assertEqual(name, "oracle_timeout")
+        self.assertIn("oracle call exceeded budget", exc_repr)
+        self.assertIn("TimeoutError", exc_repr)
+
+    def test_every_degraded_helper_now_names_at_least_one_failed_attempt(self):
+        def boom():
+            raise ConnectionError("provider outage")
+
+        degraded = [
+            with_fallback(boom, lambda exc: "fallback", mode="teacher_down"),
+            route_past([boom, lambda: "second tier"], names=["first", "second"]),
+            abstain_on_timeout(lambda: (_ for _ in ()).throw(TimeoutError("slow"))),
+        ]
+        for result in degraded:
+            with self.subTest(mode=result.mode):
+                self.assertTrue(result.degraded)
+                self.assertTrue(result.attempts, f"{result.mode} degraded with no attempts recorded")
+                self.assertTrue(all(isinstance(n, str) and isinstance(r, str) for n, r in result.attempts))
+
+    def test_a_non_degraded_result_still_records_no_attempts(self):
+        # Negative control: attempts are evidence of a FAILED attempt, so a clean run has none.
+        for result in (
+            with_fallback(lambda: 1, lambda exc: 0, mode="teacher_down"),
+            route_past([lambda: 1]),
+            abstain_on_timeout(lambda: 1),
+        ):
+            self.assertFalse(result.degraded)
+            self.assertEqual(result.attempts, ())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -506,5 +506,70 @@ class RegistryControlFileTest(unittest.TestCase):
             self.assertEqual([e.entry_id for e in Registry(tmp)._entries], ["e"])
 
 
+class RegisterValidatesBeforeItPersistsTest(unittest.TestCase):
+    """MXR-080-1902 (High): ``RegistryEntry.__post_init__`` is the real validator for
+    ``capabilities``/``profile``/``cost``, and ``register`` used to construct the row only AFTER it
+    had claimed the id and written the artifact. A rejected field therefore raised with ``<id>/`` and
+    ``.<id>.claim`` left on disk and no ``index.json`` naming them -- the id was permanently
+    poisoned: no read could discover the entry, and every retry of that id (in this process or a
+    fresh one) was rejected as "registry already has an entry". The ``fingerprint`` pre-check already
+    in place proves the intent; this generalizes it to the rest of the record."""
+
+    def _assert_nothing_persisted(self, root, entry_id):
+        self.assertFalse(os.path.exists(os.path.join(root, entry_id)), "an artifact survived a rejected register")
+        self.assertFalse(
+            os.path.exists(os.path.join(root, f".{entry_id}.claim")), "a claim marker survived a rejected register"
+        )
+        self.assertFalse(os.path.exists(os.path.join(root, "index.json")))
+
+    def test_a_rejected_entry_field_leaves_no_artifact_claim_or_index_behind(self):
+        cases = {
+            "non-string capability": (dict(capabilities=["ok", 123]), "capabilities must be strings"),
+            "non-finite cost": (dict(capabilities=["ok"], cost=float("nan")), "cost must be finite"),
+            "non-finite fingerprint": (
+                dict(capabilities=["ok"], fingerprint=[1.0, float("nan")]),
+                "non-finite fingerprint",
+            ),
+        }
+        for label, (kwargs, message) in cases.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                reg = Registry(tmp)
+                with self.assertRaisesRegex(ValueError, message):
+                    reg.register(_json_task_model(), entry_id="e0", **kwargs)
+                self._assert_nothing_persisted(tmp, "e0")
+                self.assertEqual(reg._entries, [])
+                # the id is genuinely free again: the retry the caller would naturally make succeeds
+                entry = reg.register(_json_task_model(), capabilities=["ok"], entry_id="e0")
+                self.assertEqual(entry.entry_id, "e0")
+                self.assertEqual([e.entry_id for e in Registry(tmp)._entries], ["e0"])
+
+    def test_a_rejected_auto_id_register_does_not_consume_the_id(self):
+        # The auto-id path leaked the same way, just less visibly: the orphaned artifact made the
+        # next auto-generated id scan past it, so a rejected call silently burned entry_0000.
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = Registry(tmp)
+            with self.assertRaises(ValueError):
+                reg.register(_json_task_model(), capabilities=["ok", None])
+            self._assert_nothing_persisted(tmp, "entry_0000")
+            self.assertEqual(reg.register(_json_task_model(), capabilities=["ok"]).entry_id, "entry_0000")
+
+    def test_a_valid_register_is_unaffected(self):
+        # Negative control: reordering validation ahead of the write must not change the happy path.
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = Registry(tmp)
+            entry = reg.register(
+                _json_task_model(),
+                capabilities=["cap"],
+                fingerprint=[1.0, 2.0],
+                profile={"k": "v"},
+                cost=0.5,
+                entry_id="good",
+            )
+            self.assertEqual(entry.entry_id, "good")
+            self.assertEqual(entry.fingerprint, [1.0, 2.0])
+            self.assertTrue(os.path.exists(os.path.join(tmp, "good")))
+            self.assertEqual([e.entry_id for e in Registry(tmp)._entries], ["good"])
+
+
 if __name__ == "__main__":
     unittest.main()

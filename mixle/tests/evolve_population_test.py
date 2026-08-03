@@ -518,3 +518,101 @@ def test_population_run_reports_the_same_evaluation_semantics_as_other_backends(
     assert result.n_evaluations == len(seeds)  # the seed scorings really happened
     assert result.n_successes == result.n_evaluations
     assert math.isfinite(result.best_score)
+
+
+# ---------------------------------------------------------------------------
+# MXR-080-1902: exact population controls, and a generation that commits only after it succeeds
+# ---------------------------------------------------------------------------
+class _WinningObjective:
+    """Champion = a fixed baseline; every challenger = the baseline shifted by a large, genuine
+    improvement, so every proposal promotes. ``explode_on`` makes scoring one particular candidate
+    into a population member fail, the way a non-finite fitness legitimately does (``_score`` raises
+    on one by design)."""
+
+    name = "winning_diff"
+    lower_is_better = True
+
+    def __init__(self, n_obs, base_seed=999):
+        self._base = np.random.RandomState(base_seed).normal(0.0, 1.0, n_obs)
+        self.explode_on = None
+
+    def pointwise(self, model, data):
+        base = self._base[: len(data)]
+        return base.copy() if model.noise_seed is None else base - 3.0
+
+    def scalar(self, model, data):
+        if self.explode_on is not None and model.noise_seed == self.explode_on:
+            raise RuntimeError("fitness backend blew up scoring the promoted candidate")
+        return float(np.mean(self.pointwise(model, data)))
+
+
+def _bandit_pulls(pop):
+    return {name: row["pulls"] for name, row in pop.bandit.report()["operators"].items()}
+
+
+def test_population_controls_are_exact_not_truncated():
+    # Reproduced pre-fix: `int(size)` turned size=7.9 into 7 and size=True into 1 (bool is an int
+    # subclass), `max(0, int(diversity_quota))` turned 2.6 into 2 and absorbed -3 as 0.
+    obj = _NullObjective(_N_OBS)
+    seed_model = _NullModel(None)
+    for bad in (7.9, True, 0, -1):
+        with pytest.raises(ValueError, match="size must be an exact integer"):
+            Population([seed_model], objective=obj, size=bad)
+    for bad in (2.6, True, -3):
+        with pytest.raises(ValueError, match="diversity_quota must be an exact integer"):
+            Population([seed_model], objective=obj, diversity_quota=bad)
+    for bad in (1.5, True, -1):
+        with pytest.raises(ValueError, match="seed must be an exact integer"):
+            Population([seed_model], objective=obj, seed=bad)
+    # negative controls -- the states the library legitimately produces are all still accepted
+    assert Population([seed_model], objective=obj, size=8).size == 8
+    assert Population([seed_model], objective=obj, size=8.0).size == 8  # unambiguous integral float
+    assert Population([seed_model], objective=obj, diversity_quota=0).diversity_quota == 0
+    assert Population([seed_model], objective=obj, seed=0).seed == 0
+
+
+def test_population_run_generations_must_be_an_exact_count():
+    # Reproduced pre-fix: `range(int(generations))` ran 2 generations for 2.9 and 1 for True, so
+    # `history` was shorter than the run the caller asked for with nothing saying why.
+    pop = Population([_NullModel(None)], objective=_NullObjective(_N_OBS), size=4, seed=0)
+    for bad in (2.9, True, -1):
+        with pytest.raises(ValueError, match="generations must be an exact integer"):
+            pop.run(list(range(_N_OBS)), generations=bad)
+    # negative control: generations=0 ("score the seeds and stop") is a real, tested state
+    assert pop.run(list(range(_N_OBS)), generations=0).history == []
+
+
+def test_a_generation_that_fails_mid_scoring_leaves_the_bandit_uncredited():
+    # Reproduced pre-fix: pass 3 rewarded the bandit one slot at a time BEFORE that slot's promoted
+    # candidate was scored into a member, and `_member` -> `_score` raises on a non-finite fitness by
+    # design. A generation that failed there left the earlier arms permanently credited for a
+    # generation that produced no report, no survivors, no champion update and no `_gen` advance --
+    # and retrying it credited them a second time.
+    n = _N_OBS
+    obj = _WinningObjective(n)
+    ops = [_NullOp("op0", noise_seed=1), _NullOp("op1", noise_seed=2)]
+    pop = Population([_NullModel(None)], objective=obj, operators=ops, size=4, diversity_quota=0, seed=0)
+    data = list(range(n))
+
+    # Do the documented lazy seed-scoring up front so the snapshot below isolates the GENERATION's
+    # own state changes from `_ensure_initialized`, which any first step performs and which is
+    # idempotent by design.
+    pop._ensure_initialized(data)
+
+    obj.explode_on = 2  # the SECOND slot's candidate fails while being scored into a member
+    before = (pop._gen, _bandit_pulls(pop), pop.champion, pop._champion_score, len(pop._members))
+    with pytest.raises(RuntimeError, match="fitness backend blew up"):
+        pop.step(data, data)
+
+    assert _bandit_pulls(pop) == before[1], "arms were credited for a generation that never completed"
+    assert pop._gen == before[0], "the generation counter advanced for a generation that never completed"
+    assert pop.champion is before[2]
+    assert pop._champion_score == before[3]
+    assert len(pop._members) == before[4], "a failed generation folded offspring into the population"
+
+    # and the retry, once the backend recovers, credits each arm exactly once
+    obj.explode_on = None
+    report = pop.step(data, data)
+    assert pop._gen == before[0] + 1
+    assert len(report.rewards) == len(report.operators_used)
+    assert sum(_bandit_pulls(pop).values()) == pytest.approx(len(report.operators_used), rel=0.05)

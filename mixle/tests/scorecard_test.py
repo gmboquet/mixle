@@ -263,5 +263,111 @@ class DefaultJudgeContractTest(unittest.TestCase):
         self.assertIn("task-specific", doc)
 
 
+class _Fingerprint:
+    """A plain caller-supplied fingerprint object. ``Query.fingerprint`` is typed ``Any``, so this is
+    an ordinary value to put there -- and it has the default, address-bearing ``repr``."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def __eq__(self, other):
+        return isinstance(other, _Fingerprint) and self.value == other.value
+
+    def __hash__(self):
+        return hash(self.value)
+
+
+class _CallableJudge:
+    """A judge that is a callable object rather than a function -- no ``__qualname__``."""
+
+    def __call__(self, reply, expected):
+        return reply is not None and expected in reply
+
+
+def _named_judge(reply, expected):
+    return reply is not None and expected in reply
+
+
+class IdentityIsContentBasedNotReprBasedTest(unittest.TestCase):
+    """MXR-080-1902 (High): ``question_set_identity`` digested ``repr(query)`` and
+    ``_scorer_identity`` fell back to ``repr(scorer)``. An ordinary object's repr embeds its memory
+    address, so two EQUAL question sets (and the same judge in a fresh process) produced different
+    identities -- and ``detect_regression`` reads a mismatched identity as
+    ``comparable=False, regressed=True``. The gate did not merely weaken; it manufactured a
+    regression that never happened."""
+
+    def test_two_equal_question_sets_share_one_identity(self):
+        set_a = [(Query("q", task="t", fingerprint=_Fingerprint(1)), "paris")]
+        set_b = [(Query("q", task="t", fingerprint=_Fingerprint(1)), "paris")]
+        self.assertEqual(set_a, set_b)
+        # pre-fix these two digested differently, because repr(_Fingerprint(1)) carries an address
+        with self.assertRaisesRegex(ValueError, "no stable identity"):
+            question_set_identity(set_a)
+        # ...and the same set expressed with content-determined coordinates identifies stably
+        set_c = [(Query("q", task="t", fingerprint=[1.0]), "paris")]
+        set_d = [(Query("q", task="t", fingerprint=[1.0]), "paris")]
+        self.assertEqual(question_set_identity(set_c), question_set_identity(set_d))
+
+    def test_an_improved_round_on_the_same_set_is_not_reported_as_a_regression(self):
+        # The end-to-end consequence: the fabricated identity mismatch turned a genuine improvement
+        # into ``comparable=False, regressed=True``.
+        question_set = [(Query("q1", fingerprint=[0.5, 1.0]), "yes")]
+        baseline = SystemScorecard(
+            quality=0.5,
+            realized_cost=1.0,
+            grounded_fraction=1.0,
+            n=1,
+            question_set_id=question_set_identity(question_set),
+        )
+        rebuilt = [(Query("q1", fingerprint=[0.5, 1.0]), "yes")]  # the same set, constructed again
+        improved = SystemScorecard(
+            quality=0.9,
+            realized_cost=1.0,
+            grounded_fraction=1.0,
+            n=1,
+            question_set_id=question_set_identity(rebuilt),
+        )
+        report = detect_regression(baseline, improved)
+        self.assertTrue(report.comparable, report.reasons)
+        self.assertFalse(report.regressed, report.reasons)
+
+    def test_different_content_still_gets_different_identities(self):
+        # Negative control: the digest must still DISTINGUISH genuinely different evidence.
+        base = [(Query("q1", fingerprint=[1.0]), "yes")]
+        for different in (
+            [(Query("q2", fingerprint=[1.0]), "yes")],
+            [(Query("q1", fingerprint=[2.0]), "yes")],
+            [(Query("q1", task="other", fingerprint=[1.0]), "yes")],
+            [(Query("q1", fingerprint=[1.0]), "no")],
+            [(Query("q1", fingerprint=[1.0]), "yes"), (Query("q2", fingerprint=[1.0]), "yes")],
+        ):
+            with self.subTest(different=different):
+                self.assertNotEqual(question_set_identity(base), question_set_identity(different))
+        # order-sensitive, as the old digest was
+        pair = [(Query("q1"), "yes"), (Query("q2"), "yes")]
+        self.assertNotEqual(question_set_identity(pair), question_set_identity(list(reversed(pair))))
+
+    def test_a_judge_with_no_stable_name_is_refused_rather_than_addressed(self):
+        # Pre-fix: _scorer_identity(_CallableJudge()) returned
+        # "module.<module._CallableJudge object at 0x...>" -- a new identity per instance and per
+        # process, so a card could never be compared with another measured by the same judge.
+        question_set = [(Query("q1"), "yes")]
+        system = System(SystemConfig(teacher=lambda p: "yes"))
+        with self.assertRaisesRegex(ValueError, "no stable identity"):
+            question_set_identity(question_set, scorer=_CallableJudge())
+        with self.assertRaisesRegex(ValueError, "no stable identity"):
+            evaluate(system, question_set, scorer=_CallableJudge())
+
+    def test_ordinary_named_and_lambda_judges_still_identify(self):
+        # Negative control against guard overreach: functions, lambdas and the default judge -- the
+        # only judge forms anything in this repo actually passes -- all still work.
+        question_set = [(Query("q1"), "yes")]
+        default_id = question_set_identity(question_set)
+        named_id = question_set_identity(question_set, scorer=_named_judge)
+        lambda_id = question_set_identity(question_set, scorer=lambda reply, expected: True)
+        self.assertEqual(len({default_id, named_id, lambda_id}), 3)
+        self.assertEqual(named_id, question_set_identity(question_set, scorer=_named_judge))
+
+
 if __name__ == "__main__":
     unittest.main()

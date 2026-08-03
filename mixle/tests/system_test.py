@@ -546,5 +546,56 @@ class TeacherAnswerContractTest(unittest.TestCase):
         self.assertEqual(receipt["status"], "answered")
 
 
+class BudgetIsAnExactCountTest(unittest.TestCase):
+    """MXR-080-1902 (High): ``answer``/``improve`` read their budget ceiling with ``int(budget)``,
+    which TRUNCATES rather than validates -- ``budget=1.9`` silently became a one-call ceiling,
+    ``budget=True`` became one too (``bool`` is an ``int`` subclass), and ``improve(-0.5)`` truncated
+    to ``0`` and returned an ordinary report where ``improve(-1)`` already raised. A budget is
+    checked directly against ``Spend.total_units()``, so it is held to the same exact non-Boolean
+    nonnegative count contract every ``Spend`` dimension is."""
+
+    def _system(self):
+        return System(SystemConfig(teacher=_fake_teacher))
+
+    def test_answer_refuses_a_truncatable_or_boolean_budget(self):
+        system = self._system()
+        for bad in (1.9, True, False, -1, "5"):
+            with self.subTest(budget=bad), self.assertRaisesRegex(ValueError, "budget must be an exact"):
+                system.answer(Query("q"), budget=bad)
+        # nothing was charged or harvested by the rejected calls
+        self.assertEqual(system.total_spend.total_units(), 0.0)
+        self.assertEqual(system._harvest, {})
+
+    def test_answer_still_accepts_the_ordinary_integer_ceilings(self):
+        # Negative control against guard overreach: 0 (a refusal the suite already asserts) and any
+        # positive int are exactly the states the library legitimately produces.
+        system = self._system()
+        _, refused = system.answer(Query("a"), budget=0)
+        self.assertEqual(refused["status"], "refused")
+        _, served = system.answer(Query("b"), budget=5)
+        self.assertEqual(served["status"], "answered")
+        self.assertEqual(served["budget"], 5)
+        _, default = system.answer(Query("c"))
+        self.assertEqual(default["budget"], system.config.default_budget)
+
+    def test_improve_refuses_a_truncatable_or_boolean_budget(self):
+        system = self._system()
+        system.answer(Query("a"))
+        system.answer(Query("b"))
+        harvested = dict(system._harvest)
+        self.assertEqual(len(harvested), 2)
+        for bad in (1.9, True, -0.5, -1):
+            with self.subTest(budget=bad), self.assertRaisesRegex(ValueError, "improve budget must be an exact"):
+                system.improve(bad)
+        self.assertEqual(system._harvest, harvested, "a rejected improve() promoted something anyway")
+        self.assertEqual(system._captured, {})
+
+    def test_improve_still_accepts_zero_and_positive_integer_budgets(self):
+        system = self._system()
+        system.answer(Query("a"))
+        self.assertEqual(system.improve(0)["n_captured"], 0)
+        self.assertEqual(system.improve(1)["n_captured"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
