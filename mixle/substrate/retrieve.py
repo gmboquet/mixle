@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mixle.substrate.core import Substrate, SubstrateItem, _require_count
+from mixle.utils.exact import require_exact_bool
 
 
 def _require_finite_weight(value: Any, kind: str) -> float:
@@ -178,7 +179,9 @@ class Retrieval:
         from mixle.substrate.context import ContextBudget, ContextPacket, compress_text
 
         budget = assemble_kw.pop("budget", None) or ContextBudget()
-        compress = bool(assemble_kw.pop("compress", False))
+        # Truthiness: compress="false" summarized anyway, silently replacing retrieved item text with
+        # a lossy summary for a caller who asked for the text (MXR-080-1885).
+        compress = require_exact_bool(assemble_kw.pop("compress", False), "pack compress")
         telemetry = assemble_kw.pop("telemetry", None)
         if assemble_kw:
             raise TypeError(
