@@ -23,10 +23,6 @@ def _probe_one(x):
     return x
 
 
-def _probe_two(x):
-    return x
-
-
 class CanonicalIdentityTest(unittest.TestCase):
     def test_one_callable_cannot_take_a_second_id(self):
         def fn(x):
@@ -44,11 +40,23 @@ class CanonicalIdentityTest(unittest.TestCase):
         self.assertIs(register_serializable_callable(fn, "identity-same"), fn)
 
     def test_two_callables_still_cannot_share_one_id(self):
-        register_serializable_callable(_probe_one, "identity-shared")
+        # Fresh locals, not module-level probes: the registry is process-global and now enforces one
+        # id per callable, so a probe shared with another test makes the outcome depend on which
+        # test registered it first.
+        def first(x):
+            return x
+
+        def second(x):
+            return x
+
+        register_serializable_callable(first, "identity-shared")
         with self.assertRaisesRegex(SerializationError, "already registered"):
-            register_serializable_callable(_probe_two, "identity-shared")
+            register_serializable_callable(second, "identity-shared")
 
     def test_a_derived_id_still_works_without_an_explicit_one(self):
+        self.assertIs(register_serializable_callable(_probe_one), _probe_one)
+        # Idempotent: the derived id is the same on a second call, so this does not trip the
+        # one-id-per-callable rule.
         self.assertIs(register_serializable_callable(_probe_one), _probe_one)
 
     def test_a_lambda_still_requires_an_explicit_id(self):
