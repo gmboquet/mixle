@@ -87,7 +87,7 @@ class Claim:
     quantity: float | None = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class EvidenceEntry:
     """One piece of evidence that moved a belief's credence, in the order it was applied.
 

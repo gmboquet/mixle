@@ -140,7 +140,7 @@ STRUCTURE_EDIT_REGISTRY: dict[str, str] = {
 # --------------------------------------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class StructureEditReceipt:
     """One structure edit's receipt: which edit, the real forward-pass :class:`ParityReceipt` used by
     the function-preservation gate (see :func:`should_apply_edit`), and the edit-specific ``detail``

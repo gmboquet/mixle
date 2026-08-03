@@ -42,7 +42,7 @@ from mixle.inference.condition import (
 from mixle.stats.combinator.composite import CompositeDistribution
 from mixle.stats.compute.posterior import MarkovChainLatentPosterior
 from mixle.stats.latent.hidden_markov import HiddenMarkovModelDistribution
-from mixle.utils.immutable import is_immutable_atom, opaque_snapshot
+from mixle.utils.immutable import detach_receipt_container, is_immutable_atom, opaque_snapshot
 
 __all__ = ["Scenario", "SimulationReceipt", "FieldPosterior", "Simulator", "simulate"]
 
@@ -64,7 +64,7 @@ class Scenario:
     horizon: int = 1
 
 
-@dataclass
+@dataclass(frozen=True)
 class SimulationReceipt:
     """What ``simulate()`` actually did: plausibility of the evidence, and the conditioning health."""
 
@@ -76,6 +76,13 @@ class SimulationReceipt:
     ess_ratio: float | None = None
     composition_order: str = "do-then-condition"
     warnings: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "warnings", detach_receipt_container(self.warnings))
 
 
 class FieldPosterior:

@@ -35,6 +35,7 @@ from mixle.stats.compute.posterior import MarkovChainLatentPosterior
 from mixle.stats.latent.hidden_markov import HiddenMarkovModelDistribution
 from mixle.stats.latent.mixture import MixtureDistribution
 from mixle.stats.univariate.discrete.point_mass import PointMassDistribution
+from mixle.utils.immutable import detach_receipt_container
 from mixle.utils.vector import ImpossibleEvidenceError
 
 __all__ = ["FieldPath", "ConditionReceipt", "ImpossibleEvidenceError", "Posterior", "condition", "do"]
@@ -189,7 +190,7 @@ def _analytic_mean(dist: Any, j: int | None = None) -> float:
     raise NotImplementedError(f"no analytic mean available for {type(dist).__name__}; use SIR + Posterior.sample.")
 
 
-@dataclass
+@dataclass(frozen=True)
 class ConditionReceipt:
     """What ``condition()`` actually did: the method used and (for SIR) the importance-sampling health."""
 
@@ -201,6 +202,13 @@ class ConditionReceipt:
     ess_ratio: float | None = None
     n_particles: int | None = None
     warnings: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "warnings", detach_receipt_container(self.warnings))
 
 
 class Posterior:

@@ -213,7 +213,7 @@ class LinearGaussianEvidence:
 Evidence = LinearGaussianEvidence
 
 
-@dataclass
+@dataclass(frozen=True)
 class NonlinearEvidence:
     """One modality's evidence through a nonlinear forward model.
 

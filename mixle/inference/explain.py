@@ -46,6 +46,8 @@ from typing import Any
 
 import numpy as np
 
+from mixle.utils.immutable import detach_receipt_container
+
 
 @dataclass
 class Explanation:
@@ -307,7 +309,7 @@ def _validated_threshold(threshold: float) -> float:
     return t
 
 
-@dataclass
+@dataclass(frozen=True)
 class FaultReport:
     """Structural diagnosis built from :func:`explain` ledgers over failing cases.
 
@@ -321,6 +323,14 @@ class FaultReport:
     evidence: list[tuple[str, float]] = field(default_factory=list)
     suggested_fix: str = ""
     receipt: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "evidence", detach_receipt_container(self.evidence))
+        object.__setattr__(self, "receipt", detach_receipt_container(self.receipt))
 
 
 def diagnose(

@@ -21,6 +21,8 @@ from typing import Any
 
 import numpy as np
 
+from mixle.utils.immutable import detach_receipt_container
+
 
 def population_stability_index(reference: Any, current: Any, *, bins: int = 10) -> float:
     """PSI between two 1-D numeric samples (bin edges from the reference quantiles).
@@ -142,7 +144,7 @@ def score_drift(model: Any, reference: Any, current: Any) -> dict:
     }
 
 
-@dataclass
+@dataclass(frozen=True)
 class DriftReport:
     """Drift decision, aggregate score, feature details, and thresholds.
 
@@ -156,6 +158,16 @@ class DriftReport:
     thresholds: dict = field(default_factory=dict)
     processed_count: int = 0
     reasons: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "score", detach_receipt_container(self.score))
+        object.__setattr__(self, "per_feature", detach_receipt_container(self.per_feature))
+        object.__setattr__(self, "thresholds", detach_receipt_container(self.thresholds))
+        object.__setattr__(self, "reasons", detach_receipt_container(self.reasons))
 
     def __str__(self) -> str:
         flag = "DRIFT" if self.drift else "ok"

@@ -27,12 +27,13 @@ from typing import TYPE_CHECKING, Any
 
 from mixle.inference.explain import Explanation
 from mixle.inference.integrity import canonical_digest, implementation_digest
+from mixle.utils.immutable import detach_receipt_container
 
 if TYPE_CHECKING:
     from mixle.task.replay import ExecutionTrace
 
 
-@dataclass
+@dataclass(frozen=True)
 class Receipt:
     """The bound artifact: an answer plus everything needed to re-verify it offline."""
 
@@ -50,10 +51,23 @@ class Receipt:
 
     def __post_init__(self) -> None:
         """Seal every declared claim without overwriting bindings supplied by a stored receipt."""
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "calibration", detach_receipt_container(self.calibration))
+        object.__setattr__(self, "provenance", detach_receipt_container(self.provenance))
+        object.__setattr__(self, "policy", detach_receipt_container(self.policy))
+        object.__setattr__(self, "executables", detach_receipt_container(self.executables))
+        object.__setattr__(self, "bindings", detach_receipt_container(self.bindings))
         if not self.bindings:
-            self.bindings = {name: canonical_digest(value) for name, value in self._claims().items()}
+            object.__setattr__(
+                self, "bindings", {name: canonical_digest(value) for name, value in self._claims().items()}
+            )
         if not self.receipt_digest:
-            self.receipt_digest = canonical_digest({"content": self._content(), "bindings": self.bindings})
+            object.__setattr__(
+                self, "receipt_digest", canonical_digest({"content": self._content(), "bindings": self.bindings})
+            )
 
     def _claims(self) -> dict[str, Any]:
         claims: dict[str, Any] = {"answer": self.answer}
@@ -126,12 +140,19 @@ class Receipt:
         }
 
 
-@dataclass
+@dataclass(frozen=True)
 class VerificationReport:
     """Which claims were observed and which required observations determine the verdict."""
 
     checks: dict[str, str] = field(default_factory=dict)  # pass | fail | absent | unobserved
     required: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "checks", detach_receipt_container(self.checks))
 
     @property
     def passed(self) -> bool:

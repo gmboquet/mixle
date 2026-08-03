@@ -34,6 +34,7 @@ from mixle.inference.integrity import (
     object_state_digest,
 )
 from mixle.semantics import canonical_json
+from mixle.utils.immutable import detach_receipt_container
 
 _NDIGITS = 10
 
@@ -89,7 +90,7 @@ def _strip_fit_provenance(payload: Any) -> Any:
     return payload
 
 
-@dataclass
+@dataclass(frozen=True)
 class ReproReceipt:
     """The complete executable recipe and observed result needed to re-derive a fit.
 
@@ -122,10 +123,16 @@ class ReproReceipt:
     receipt_digest: str = ""
 
     def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "environment", detach_receipt_container(self.environment))
+        object.__setattr__(self, "fit_policy", detach_receipt_container(self.fit_policy))
         if not self.fit_policy_digest and self.fit_policy:
-            self.fit_policy_digest = canonical_digest(self.fit_policy)
+            object.__setattr__(self, "fit_policy_digest", canonical_digest(self.fit_policy))
         if not self.receipt_digest:
-            self.receipt_digest = canonical_digest(self._content())
+            object.__setattr__(self, "receipt_digest", canonical_digest(self._content()))
 
     def _content(self) -> dict[str, Any]:
         return {

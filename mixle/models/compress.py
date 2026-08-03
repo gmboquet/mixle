@@ -62,6 +62,7 @@ from mixle.models.moment_propagation import GaussianLaw, _as_law, _to_numpy
 from mixle.task.acquire import acquire, register_strategy
 from mixle.task.bandit import UCB1
 from mixle.task.distill_methods import DistillResult, _agreement, kd_loss, response_distill
+from mixle.utils.immutable import detach_receipt_container
 
 try:
     import torch
@@ -101,7 +102,7 @@ class MethodCandidate:
     reward: float  # what the auto-pick bandit compared
 
 
-@dataclass
+@dataclass(frozen=True)
 class CompressionReceipt:
     """Explains why ``method`` was used: its own measured numbers, plus -- for auto-pick -- the
     same real numbers for every OTHER method considered and rejected. Mirrors
@@ -116,6 +117,13 @@ class CompressionReceipt:
     quality_basis: str = "unmeasured"
     candidates: dict[str, MethodCandidate] = field(default_factory=dict)
     notes: str = ""
+
+    def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "candidates", detach_receipt_container(self.candidates))
 
     def rejected(self) -> dict[str, MethodCandidate]:
         return {m: c for m, c in self.candidates.items() if m != self.method}

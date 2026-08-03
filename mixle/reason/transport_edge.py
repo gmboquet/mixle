@@ -28,6 +28,7 @@ from scipy.stats import beta, binomtest
 
 from mixle.inference import optimize
 from mixle.models.mixture_density import NeuralConditionalDensity, build_mdn
+from mixle.utils.immutable import detach_receipt_container
 
 ALPHA = 0.10  # 90% nominal credible-interval coverage
 COVERAGE_P_FLOOR = 0.01  # p-value floor below which coverage is inconsistent with nominal
@@ -182,7 +183,7 @@ def coverage_consistent_with_nominal(covered_flags) -> tuple[float, float]:
     return hits / n, p
 
 
-@dataclass
+@dataclass(frozen=True)
 class EdgeTransportVerdict:
     """Premise decision for one real modality edge, computed on that edge."""
 
@@ -195,6 +196,17 @@ class EdgeTransportVerdict:
     subgroup_coverage_rates: list[list[float]] = field(default_factory=list)
     p_values: list[float] = field(default_factory=list)
     reason: str = ""
+
+    def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "coverage_rates", detach_receipt_container(self.coverage_rates))
+        object.__setattr__(self, "coverage_lower_bounds", detach_receipt_container(self.coverage_lower_bounds))
+        object.__setattr__(self, "relative_interval_widths", detach_receipt_container(self.relative_interval_widths))
+        object.__setattr__(self, "subgroup_coverage_rates", detach_receipt_container(self.subgroup_coverage_rates))
+        object.__setattr__(self, "p_values", detach_receipt_container(self.p_values))
 
     @property
     def usable(self) -> bool:

@@ -22,6 +22,7 @@ from types import MappingProxyType
 from typing import Any
 
 from mixle.utils.exact import require_exact_bool
+from mixle.utils.immutable import detach_receipt_container
 
 __all__ = [
     "Guarantee",
@@ -189,7 +190,7 @@ class BlockPlan:
         return f"{self.name}: {self.method} -> {self.guarantee.label}{candidate}{tag}  ({self.reason})"
 
 
-@dataclass
+@dataclass(frozen=True)
 class EstimationCertificate:
     """The auditable proof of how a model was (or would be) estimated: per-block plans + the aggregate.
 
@@ -201,6 +202,13 @@ class EstimationCertificate:
     guarantee: Guarantee
     blocks: list[BlockPlan] = field(default_factory=list)
     escape_tested: bool = False  # a latent fit that ran saddle-escape restarts (upgrades EM blocks)
+
+    def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "blocks", detach_receipt_container(self.blocks))
 
     @property
     def gradient_blocks(self) -> list[BlockPlan]:

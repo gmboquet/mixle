@@ -30,8 +30,10 @@ from typing import Any
 import numpy as np
 from scipy.stats import rankdata
 
+from mixle.utils.immutable import detach_receipt_container
 
-@dataclass
+
+@dataclass(frozen=True)
 class ExchangeabilityReport:
     """The verdict per numeric field, plus the aggregate label the preconditions record."""
 
@@ -53,6 +55,12 @@ class ExchangeabilityReport:
         compares equal to -- making ``exchangeable`` silently False for a reason no reader could see
         (MXR-080-1887).
         """
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "fields", detach_receipt_container(self.fields))
+        object.__setattr__(self, "multiplicity", detach_receipt_container(self.multiplicity))
         if self.label not in self._LABELS:
             raise ValueError(f"ExchangeabilityReport label must be one of {self._LABELS}, got {self.label!r}")
         if not isinstance(self.fields, list):

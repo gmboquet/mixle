@@ -155,7 +155,7 @@ class AmplificationSeeds:
     round2_pool: int
 
 
-@dataclass
+@dataclass(frozen=True)
 class AmplifyReport:
     """Receipt for a two-round amplify-and-capture run.
 

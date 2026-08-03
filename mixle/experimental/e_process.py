@@ -274,7 +274,7 @@ def normal_mixture_eprocess(stream: Any, *, mu0: float, sigma: float, tau: float
     return values
 
 
-@dataclass
+@dataclass(frozen=True)
 class DriftReport:
     """Outcome of a drift scan: whether/when the e-process crossed ``1/alpha``."""
 

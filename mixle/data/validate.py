@@ -15,8 +15,10 @@ from typing import Any
 
 import numpy as np
 
+from mixle.utils.immutable import detach_receipt_container
 
-@dataclass
+
+@dataclass(frozen=True)
 class DataReport:
     """Result of checking sample records against a model-derived schema and support."""
 
@@ -24,6 +26,14 @@ class DataReport:
     n_checked: int
     schema: list[tuple[str, str]]
     issues: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
+        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
+        # stops the field being rebound through the receipt itself. Containers keep their
+        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        object.__setattr__(self, "schema", detach_receipt_container(self.schema))
+        object.__setattr__(self, "issues", detach_receipt_container(self.issues))
 
     def __str__(self) -> str:
         head = f"DataReport(ok={self.ok}, checked={self.n_checked}, schema=[{', '.join(n + ':' + t for n, t in self.schema)}])"
