@@ -299,11 +299,30 @@ def register_serializable_callable(fn: Callable[..., Any], callable_id: str | No
             raise SerializationError("callable_id is required for lambdas and local callables")
         callable_id = "%s:%s" % (module, qualname)
 
-    previous = _CALLABLE_REGISTRY.get(callable_id)
-    if previous is not None and previous is not fn:
-        raise SerializationError("callable id %r is already registered" % callable_id)
-    _CALLABLE_REGISTRY[callable_id] = fn
-    _CALLABLE_IDS[fn] = callable_id
+    # One canonical id per callable, in BOTH directions, published atomically (MXR-080-1888).
+    #
+    # Only the forward map was guarded. Registering the same function under "probe-a" and then
+    # "probe-b" therefore succeeded: both ids stayed live in _CALLABLE_REGISTRY and resolved to the
+    # same object, while _CALLABLE_IDS was silently rewritten to "probe-b". Everything serialized
+    # afterwards emitted the new id, everything serialized before still carried the old one, and both
+    # decoded -- so one callable had two live identities and the canonical one changed underneath the
+    # caller with no error. That is the same defect the class registry was repaired for
+    # (MXR-080-0724), which is also why the lock is here: this path took none, so two threads could
+    # interleave between the check and the two writes and leave the maps disagreeing.
+    with _REGISTRY_LOCK:
+        previous = _CALLABLE_REGISTRY.get(callable_id)
+        if previous is not None and previous is not fn:
+            raise SerializationError("callable id %r is already registered" % callable_id)
+        existing_id = _CALLABLE_IDS.get(fn)
+        if existing_id is not None and existing_id != callable_id:
+            raise SerializationError(
+                "callable %r is already registered as %r and cannot also be registered as %r; a "
+                "callable has one canonical id, or serialized payloads written before and after this "
+                "call would carry different identities for the same object"
+                % (getattr(fn, "__qualname__", fn), existing_id, callable_id)
+            )
+        _CALLABLE_REGISTRY[callable_id] = fn
+        _CALLABLE_IDS[fn] = callable_id
     return fn
 
 
