@@ -996,7 +996,7 @@ def _build_generic_numba_kernel(
         ) % (arg_list, bind_lines, body)
 
         namespace: dict[str, Any] = {"math": math, "np": np, "_INF": np.inf, "_NAN": np.nan}
-        exec(compile(source, "<generated_numba:%s>" % dist_type.__name__, "exec"), namespace)
+        exec(compile(source, "<generated_numba:%s>" % dist_type.__name__, "exec"), namespace)  # nosec B102 # source is built a few lines above from this module's own template plus identifiers taken from the distribution's declared parameter names (each checked against param_names); no caller string is interpolated
         kernel = numba.njit(cache=False)(namespace["_generic_numba_kernel"])
         result = (kernel, n_data, ordered_params)
     except _UnsupportedNumbaLowering:

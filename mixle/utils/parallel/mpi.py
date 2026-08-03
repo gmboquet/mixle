@@ -168,7 +168,7 @@ class MPIEncodedData(EncodedDataHandle):
             model_b = pickle.dumps(estimator.estimate(nobs, accumulator.value()), protocol=_PROTO)
         else:
             model_b = None
-        return pickle.loads(self.comm.bcast(model_b, root=self.root))
+        return pickle.loads(self.comm.bcast(model_b, root=self.root))  # nosec B301 # IPC: the root rank's own estimate, and mpi4py's lowercase bcast already pickles/unpickles -- anyone able to forge these bytes owns the communicator and has code execution regardless
 
     def _fold_value_and_share(self, estimator, local: tuple[float, Any]) -> tuple[float, Any]:
         """Fold per-rank stats with an O(log W) reduction tree, key-tie on root, broadcast the folded value."""
@@ -182,7 +182,7 @@ class MPIEncodedData(EncodedDataHandle):
             payload_b = pickle.dumps((nobs, accumulator.value()), protocol=_PROTO)
         else:
             payload_b = None
-        return pickle.loads(self.comm.bcast(payload_b, root=self.root))
+        return pickle.loads(self.comm.bcast(payload_b, root=self.root))  # nosec B301 # IPC: the root rank's own folded (nobs, value), and mpi4py's lowercase bcast already pickles/unpickles -- this adds no trust boundary the communicator did not already have
 
     # -- protocol recognized by mixle.stats dispatch -------------------------
 
@@ -190,7 +190,7 @@ class MPIEncodedData(EncodedDataHandle):
         """One distributed EM step; every rank returns the identical model."""
         # broadcast the root's model so all ranks accumulate against the same
         # floating-point parameters even if a caller diverged
-        model = pickle.loads(self.comm.bcast(pickle.dumps(prev_estimate, protocol=_PROTO), root=self.root))
+        model = pickle.loads(self.comm.bcast(pickle.dumps(prev_estimate, protocol=_PROTO), root=self.root))  # nosec B301 # IPC: an exact round-trip of the value pickled on this same line, broadcast so every rank folds against bit-identical parameters
         return self._fold_and_share(estimator, self._local_update(estimator, model))
 
     def pysp_seq_initialize(self, estimator, rng: np.random.RandomState, p: float):
@@ -225,7 +225,7 @@ class MPIEncodedData(EncodedDataHandle):
 
     def pysp_stream_accumulate(self, estimator, model) -> tuple[float, Any]:
         """Globally folded batch sufficient statistics for streaming EM."""
-        model = pickle.loads(self.comm.bcast(pickle.dumps(model, protocol=_PROTO), root=self.root))
+        model = pickle.loads(self.comm.bcast(pickle.dumps(model, protocol=_PROTO), root=self.root))  # nosec B301 # IPC: an exact round-trip of the value pickled on this same line, broadcast so every rank folds against bit-identical parameters
         return self._fold_value_and_share(estimator, self._local_update(estimator, model))
 
     def __len__(self) -> int:

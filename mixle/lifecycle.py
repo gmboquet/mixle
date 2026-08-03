@@ -515,7 +515,7 @@ class Model:
                         "the file. Pass trust_code=True to Model.load() only if you trust its source."
                     )
                 with open(p / model_file, "rb") as f:
-                    fitted = pickle.load(f)  # noqa: S301 - trust_code=True required by the caller above
+                    fitted = pickle.load(f)  # noqa: S301 - trust_code=True required by the caller above  # nosec B301 # MXR-080-1881: Model.load runs require_explicit_true(trust_code) above, so only the True singleton opens this path -- a truthy string out of a config file no longer does
         m = cls(fitted)
         m.fitted = fitted
         m.notes = list(manifest.get("notes", []))

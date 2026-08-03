@@ -176,7 +176,7 @@ def seq_encode(
         temp_encoder = pickle.dumps(encoder, protocol=0)
 
         def encode_partition(rows):
-            return _checked_encode(pickle.loads(temp_encoder), rows, "RDD partition")
+            return _checked_encode(pickle.loads(temp_encoder), rows, "RDD partition")  # nosec B301 # IPC: temp_encoder is the encoder this function pickled three lines above; the closure holding it is itself shipped to Spark executors by pickle
 
         enc_data = data.glom().map(lambda x: list(x)).map(encode_partition)
 
@@ -231,7 +231,7 @@ def seq_log_density_sum(
 
             rv = 0.0
             cnt = 0.0
-            estimate_loc = pickle.loads(estimate_broadcast.value)
+            estimate_loc = pickle.loads(estimate_broadcast.value)  # nosec B301 # IPC: estimate_broadcast is the Spark broadcast this function created from its own pickle.dumps of the current estimate
             for sz, x in itr:
                 rv += estimate_loc.seq_log_density(x).sum()
                 cnt += sz
@@ -277,7 +277,7 @@ def seq_log_density(
         estimate_broadcast = sc.broadcast(temp_estimate)
 
         def acc(itr):
-            loc_estimate = pickle.loads(estimate_broadcast.value)
+            loc_estimate = pickle.loads(estimate_broadcast.value)  # nosec B301 # IPC: estimate_broadcast is the Spark broadcast this function created from its own pickle.dumps of the current estimate
             if is_list:
                 return [np.asarray([ee.seq_log_density(x) for ee in loc_estimate]) for sz, x in itr]
             else:
@@ -379,7 +379,7 @@ def seq_estimate(
         def acc(split_index, itr):
             accumulator_for_split = estimator_broadcast.value.accumulator_factory().make()
             counts_for_split = 0
-            local_estimate = pickle.loads(estimate_broadcast.value)
+            local_estimate = pickle.loads(estimate_broadcast.value)  # nosec B301 # IPC: estimate_broadcast is the Spark broadcast this function created from its own pickle.dumps of the current estimate
 
             for chunk_index, (sz, x) in enumerate(itr):
                 count, weights = _validated_update_chunk(
@@ -396,8 +396,8 @@ def seq_estimate(
             return [rv]
 
         def red(x, y):
-            xx = pickle.loads(x)
-            yy = pickle.loads(y)
+            xx = pickle.loads(x)  # nosec B301 # IPC: a treeReduce operand -- either a payload the acc closure above pickled on an executor or a partial this same reducer produced
+            yy = pickle.loads(y)  # nosec B301 # IPC: a treeReduce operand -- either a payload the acc closure above pickled on an executor or a partial this same reducer produced
             accumulator = estimator_broadcast.value.accumulator_factory().make()
             nobs = xx[0] + yy[0]
             vals = accumulator.from_value(xx[1]).combine(yy[1]).value()
@@ -409,7 +409,7 @@ def seq_estimate(
             # Fold in Spark via treeReduce (O(log W) levels) rather than a single-root collect --
             # the driver-memory/OOM risk at high partition counts flagged by the scaling audit and
             # fixed the same way in mixle.inference.spark_executor's spark_em_step/spark_fit.
-            nobs, stats_value = pickle.loads(enc_data.mapPartitionsWithIndex(acc, True).treeReduce(red))
+            nobs, stats_value = pickle.loads(enc_data.mapPartitionsWithIndex(acc, True).treeReduce(red))  # nosec B301 # IPC: the final operand of the treeReduce on this line, produced by the acc/red closures above
 
             accumulator = estimator.accumulator_factory().make()
             accumulator.combine(stats_value)
@@ -501,8 +501,8 @@ def seq_initialize(
             return [rv]
 
         def red(x, y):
-            xx = pickle.loads(x)
-            yy = pickle.loads(y)
+            xx = pickle.loads(x)  # nosec B301 # IPC: a treeReduce operand -- either a payload the acc closure above pickled on an executor or a partial this same reducer produced
+            yy = pickle.loads(y)  # nosec B301 # IPC: a treeReduce operand -- either a payload the acc closure above pickled on an executor or a partial this same reducer produced
             accumulator = estimator_broadcast.value.accumulator_factory().make()
             nobs = xx[0] + yy[0]
             vals = accumulator.from_value(xx[1]).combine(yy[1]).value()
@@ -514,7 +514,7 @@ def seq_initialize(
             # Fold in Spark via treeReduce (O(log W) levels) rather than a single-root collect --
             # the driver-memory/OOM risk at high partition counts flagged by the scaling audit and
             # fixed the same way in mixle.inference.spark_executor's spark_em_step/spark_fit.
-            nobs, stats_value = pickle.loads(enc_data.mapPartitionsWithIndex(acc, True).treeReduce(red))
+            nobs, stats_value = pickle.loads(enc_data.mapPartitionsWithIndex(acc, True).treeReduce(red))  # nosec B301 # IPC: the final operand of the treeReduce on this line, produced by the acc/red closures above
 
             accumulator = estimator.accumulator_factory().make()
             accumulator.combine(stats_value)
@@ -675,7 +675,7 @@ def estimate(
         def acc(split_index, itr):
             accumulator_for_split = estimator_broadcast.value.accumulator_factory().make()
             counts_for_split = 0.0
-            loc_prev_estimate = pickle.loads(temp_estimate_b.value)
+            loc_prev_estimate = pickle.loads(temp_estimate_b.value)  # nosec B301 # IPC: temp_estimate_b is the Spark broadcast this function created from its own pickle.dumps of the current estimate
 
             for x in itr:
                 counts_for_split = counts_for_split + 1.0

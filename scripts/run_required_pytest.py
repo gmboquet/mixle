@@ -44,7 +44,7 @@ def run(pytest_args: list[str], *, candidate_sha: str, timeout_seconds: int = 90
         duration = time.monotonic() - started
         if result.returncode != 0:
             raise RuntimeError(f"required hosted pytest failed with exit {result.returncode}: {result.stdout[-2000:]}")
-        root = ET.parse(junit).getroot()
+        root = ET.parse(junit).getroot()  # nosec B314 # not untrusted XML: junit is a path inside the TemporaryDirectory this function created, and its only writer is the pytest subprocess this function spawned two statements earlier
     tests = _count(root, "tests")
     skipped = _count(root, "skipped")
     failures = _count(root, "failures")

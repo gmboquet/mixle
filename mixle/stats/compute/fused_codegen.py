@@ -1390,7 +1390,12 @@ def _njit(src: str, fname: str, parallel: bool = False) -> Callable:
     # previous decorator, which is exactly how the ninf/nnan fix below almost didn't ship: the old
     # fastmath=True modules kept serving until the digest learned about the flags. v2 in the salt
     # retires every pre-subset cache entry.
-    digest = hashlib.sha1(f"v2|parallel={parallel}|{src}".encode()).hexdigest()[:16]  # noqa: S324 -- cache key
+    # usedforsecurity=False states what this digest is: a content key over source this module generated
+    # itself, used to name a cache file. It authenticates nothing -- the "never import a file we do not
+    # own" ownership check below is what makes loading the cached module safe, not the digest -- so a
+    # collision would mean a wrong-kernel cache hit, not a bypassed trust boundary. (It also keeps the
+    # call legal on a FIPS build, where an unqualified sha1() is refused outright.)
+    digest = hashlib.sha1(f"v2|parallel={parallel}|{src}".encode(), usedforsecurity=False).hexdigest()[:16]
     modname = f"_pysp_fused_{digest}"
     with _NJIT_LOCK:
         cached_module = sys.modules.get(modname)
@@ -1440,7 +1445,7 @@ def _njit(src: str, fname: str, parallel: bool = False) -> Callable:
                 except OSError:
                     pass
             ns: dict[str, Any] = {"np": np, "numba": numba}
-            exec(src, ns)  # noqa: S102 -- generated from fixed templates, no user input
+            exec(src, ns)  # noqa: S102 -- generated from fixed templates, no user input  # nosec B102 # src is numba kernel source this module generated from fixed templates; this is the in-memory fallback for the identical text the disk path writes and imports, into a namespace holding only np and numba
             # same fastmath subset as the disk template (ninf/nnan off: the -inf guard must hold)
             return numba.njit(fastmath={"reassoc", "contract", "arcp", "afn", "nsz"}, parallel=parallel)(ns[fname])
 

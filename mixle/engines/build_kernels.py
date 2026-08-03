@@ -186,7 +186,7 @@ def _publish_atomically(built_path: str, destination: str) -> None:
         shutil.copy2(built_path, staging)
         with open(staging, "rb") as fh:
             os.fsync(fh.fileno())  # the bytes must be durable BEFORE the name points at them
-        os.chmod(staging, 0o755)
+        os.chmod(staging, 0o755)  # nosec B103 # 0o755 is not group- or world-writable; mkstemp creates 0o600, and a built extension module must be readable/executable by everyone who can import the package once os.replace publishes it
         os.replace(staging, destination)
         staging = None
     except OSError:
