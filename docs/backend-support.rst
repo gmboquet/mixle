@@ -41,7 +41,8 @@ Compute engines
      - E1 — scheduled/optional job.
    * - Torch (CPU)
      - ``torch``
-     - Autograd + neural leaves; GPU via device argument.
+     - Autograd + neural leaves; GPU via device argument (see the note below on
+       device-dependent numerics).
      - Optional (CI)
      - E1 — optional job (CPU).
    * - Torch (CUDA / GPU)
@@ -128,3 +129,21 @@ evidence file changes is that you can now see exactly what was run, and repeat i
 "tested" on trust.
 Multi-node/multi-GPU *frontier-scale* training is out of scope for this release: mixle sits above the
 trainer, not as a replacement for a dedicated large-scale training system.
+
+``device=`` is a numerical choice, not only a performance one
+-------------------------------------------------------------
+
+A fit on a GPU device does **not** reproduce the same fit on CPU. Measured on Apple M4 / Metal
+(MPS) against the candidate, same seed and architecture, the per-observation log-density diverges by
+about **2% relative after a single optimizer iteration**, rising to roughly 4% by ten. The gap is
+present from the first step rather than accumulating from a tiny one, so it is a float32
+kernel difference between the device backends, not drift.
+
+Practically: a log-density, fitted parameter, or model digest recorded on CPU will not match the
+same computation on GPU, and a :mod:`mixle.inference.reproduce` receipt will not verify across
+devices. That is honest behaviour -- the two fits really are different -- but it is a trap if
+``device=`` is read as a speed knob. Pin the device alongside the seed when a result has to
+reproduce.
+
+Measurements and commands: ``release-checklists/0.8.0-backend-execution-evidence.md``. CUDA remains
+unverified for 0.8.0; Metal is a different backend and says nothing about it.
