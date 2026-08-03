@@ -223,6 +223,81 @@ with a regression test that fails on the unfixed code):
   point kept only to preserve that tree-reduce technique, is removed now that the canonical backend
   uses it directly; verified equivalent to the removed transport under real `mpirun` before removal.
 
+### Security
+
+- `load_encoded` requires `trusted=True`. Its body is pickle, so loading it executes whatever the
+  file contains, and the stored integrity digest is computed from and held inside that same file —
+  it detects truncation and header tampering, not a file replaced wholesale. The decision now sits
+  at the call site, where the provenance of the path is known.
+- `Model.load`, `Registry.get`/`current`/`verify_chain`, and `Embedder.load` require `trust_code` to
+  be exactly `True` or `False`. Each previously gated a code-executing decode with truthiness, so
+  the string `"false"` — the form a flag takes in a config file, an environment variable, or a CLI
+  argument — opened the gate it names the closing of.
+- Substrate secret redaction now covers the whole surface the scanner reads: dictionary keys, set
+  members, and opaque objects whose text carries a credential. Redaction is applied to a fixed point
+  (a mask can re-trigger a broader rule), and `enforce_secret_policy` re-scans the sanitized item
+  before returning it, so a future gap fails the write instead of leaking.
+- Deployment names are contained under their declared artifact root. `Solution.deploy` joined a
+  caller-supplied name onto the root unchecked, so `"../../escaped"` traversed out of it and an
+  absolute name discarded it entirely; a symlink already inside the root is caught by resolving the
+  result, which a check on the string alone cannot do.
+- `Governance.approvers` and `.grants` are read-only views, and an approval can no longer redirect
+  its own proposal. `approve(..., to=...)` substituted the target *and* the authorization was then
+  checked against the substituted value, so an approver for one scope could publish into it an item
+  proposed for another.
+
+### Changed — behaviour, including reported values
+
+Several repairs change numbers the library reports. Each is a correction; none is a tuning choice.
+
+- **Acquisition rankings change.** `propose_local_penalization` carried an inline Expected
+  Improvement that was wrong in two ways: the law itself (clamping the improvement term deletes its
+  negative part) and a clamped sigma in place of the exact `sigma -> 0` limit. The error is
+  `z`-dependent, so it reordered candidates. Max-value entropy search separately credited a
+  deterministic candidate with `log 2` nats — the largest merit in the pool — and now returns zero.
+- **Exchangeability verdicts change.** `exchangeability_check` compared each of two probes per field
+  to `alpha` independently, so the aggregate error rate grew with the number of columns. Measured on
+  genuinely exchangeable data with 20 columns, the old rule flagged a violation in 23 of 30 datasets;
+  corrected, 0 of 30. The primary family is corrected together, both raw and adjusted p-values are
+  reported per field, and `exchangeable` is documented as failure-to-reject rather than certification.
+- **Expected-information-gain probes change.** The discrepancy-invention loop's simulator sampled an
+  action-truncated law while its likelihood ignored the action, so four of five probe locations
+  reported a *negative* information gain. The loop's default action moves from `3.3585` to `2.6969`
+  and its reported gain at `probe_reweight_n=1` falls from `+0.2806` to `+0.0319`. The winning score
+  is also re-estimated on an independent stream, removing a measured winner's-curse bias.
+- **Multi-fidelity training budgets change.** LM fidelity rounded to whole epochs, so at
+  `max_epochs=3` the budgets 0.05 through 0.4 all executed exactly one epoch, and at `max_epochs=1`
+  every budget did. Fidelity is now denominated in training tokens; `budget=1.0` is unchanged.
+  Recipe search additionally pins a shared seed — without one, two identical recipes at one budget
+  returned 6.4616 and 7.6456 nats/token.
+- **Endpoint graph laws are exact.** A declared `p=0` scored a present edge at `log(1e-12)` rather
+  than `-inf`, so evidence the model calls impossible entered likelihood ratios and BIC comparisons
+  as merely unlikely; a certain event scored `-1e-12` rather than `0`.
+- **Scorecard identities change.** Question-set and scorer identities are content-based rather than
+  `repr`-based. Identities persisted by an earlier build will not match, and a regression previously
+  fabricated from address-bearing digests no longer is.
+- State-space EM will not report convergence on an objective decrease, and records `monotone` and
+  `max_objective_decrease` on its result. Across 3,200 fits at four tolerances the stopping iteration
+  is unchanged.
+
+### Changed — API
+
+- Caller-supplied Boolean flags are exact at 101 public boundaries. `bool("false")` is `True`, so a
+  flag arriving from configuration text previously enabled the behaviour it named the disabling of —
+  graph directedness and self-loops, dataset shuffling, robust fitting, convergence requirements,
+  normalization, approximation permission, low-memory execution, MCMC adaptation, and others.
+- 35 durable records (`Receipt`, `Report`, `Verdict`, `Certificate`, `Provenance`, …) are frozen and
+  detach their containers at construction. Eight records that are genuinely built incrementally stay
+  mutable, deliberately, and are listed in the migration guide.
+- `VerificationReceipt` carries `subject_hash`; `certify` will not raise a guarantee on a receipt
+  that names no subject or a different one. `receipt_subject(model)` is exported so a caller
+  supplying optimizer evidence can bind it, and `schedule` accepts `receipts=`.
+- `CategoricalSampler.sample` requires an exact non-negative count and honours `batched`, which was
+  previously declared and ignored. Backoff sequence encodings must carry exactly three elements.
+- `System.answer(budget=...)` rejects a negative budget rather than returning a refused receipt,
+  matching `improve`.
+
+
 ## [0.7.0] — 2026-07-09
 
 Workstream: generic AI-capability platform pieces on top of the core estimation engine (task
