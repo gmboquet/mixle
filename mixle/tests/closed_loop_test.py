@@ -471,5 +471,152 @@ class DataRoleDisjointnessTest(unittest.TestCase):
         )
 
 
+class _ScoreFailsOnce(ClosedLoopSelfEvolution):
+    """A loop whose post-gate scoring fails exactly once, then works normally -- the transient
+    scoring-backend outage the retry contract exists for."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.failures_left = 1
+
+    def _score(self, model, data):
+        if self.failures_left:
+            self.failures_left -= 1
+            raise RuntimeError("scoring backend unavailable")
+        return super()._score(model, data)
+
+
+class LoopControlAndStagingTest(unittest.TestCase):
+    """MXR-080-1902 (High): the loop advanced its step counter before the step's work had succeeded,
+    accepted truncated/Boolean population-and-budget controls, accepted non-finite budgets, and
+    indexed per-step ``verify_batches``/``contexts`` as it went -- so an argument-length error was
+    only discovered after earlier steps had already deployed champions and rewarded bandit arms."""
+
+    def _loop_and_batch(self, cls=ClosedLoopSelfEvolution, **kwargs):
+        rng = np.random.RandomState(0)
+        champion = _fit_categorical(_gen_batch([0.7, 0.2, 0.1], 300, rng))
+        loop = cls(champion, objective=accuracy_objective(), seed=0, acquire_k=40, **kwargs)
+        return loop, champion, _gen_batch([0.2, 0.7, 0.1], 60, rng), rng
+
+    # -- the counter must not advance before the work it counts succeeds --------------------------
+    def test_a_failed_step_leaves_the_step_counter_where_a_retry_needs_it(self):
+        # Reproduced pre-fix: `self._n_steps += 1` was step()'s FIRST statement, so a step that raised
+        # still advanced it -- `_n_steps` and `len(history)` permanently disagreed about how many
+        # steps had happened, contradicting the method's own "raises having changed nothing at all"
+        # contract.
+        loop, champion, batch, _ = self._loop_and_batch(cls=_ScoreFailsOnce)
+        with self.assertRaises(RuntimeError):
+            loop.step(batch)
+        self.assertEqual(loop._n_steps, 0, "a failed step advanced the loop's step counter")
+        self.assertEqual(loop.history, [], "a failed step left a history entry")
+        self.assertIs(loop.champion, champion, "a failed step redeployed the champion")
+        self.assertEqual(len(loop.genealogy.ledger.rows), 0, "a failed step stranded an adoption receipt")
+
+    def test_a_retried_step_reproduces_the_failed_step_exactly(self):
+        # The counter is also the offset that seeds the split/proposal/gate, so advancing it on
+        # failure made the promised retry run a DIFFERENT experiment (seed+2, not seed+1).
+        rng = np.random.RandomState(0)
+        champion = _fit_categorical(_gen_batch([0.7, 0.2, 0.1], 300, rng))
+        spy = _RecordingObjective(accuracy_objective())
+        loop = _ScoreFailsOnce(champion, objective=spy, seed=0, acquire_k=40)
+        batch = _gen_batch([0.2, 0.7, 0.1], 60, rng)
+        step_one_pool, step_one_verify = _split(batch, loop.holdout, loop.seed + 1)
+
+        with self.assertRaises(RuntimeError):
+            loop.step(batch)
+        spy.calls.clear()
+        loop.step(batch)  # the retry the docstring promises
+
+        self.assertEqual(loop._n_steps, 1)
+        self.assertEqual(len(loop.history), 1)
+        self.assertTrue(spy.calls)
+        for scored in spy.calls:
+            self.assertTrue(
+                scored == step_one_pool or scored == step_one_verify,
+                "the retry used a different seed, so it re-ran a different split than the step it retried",
+            )
+
+    # -- run() must validate its per-step sequences before mutating anything ----------------------
+    def test_run_rejects_mismatched_contexts_before_running_a_single_step(self):
+        # Reproduced pre-fix: `contexts[i]` raised IndexError on step 3 of 5, by which point two steps
+        # had already run -- two history rows, two per-context bandit arms created and rewarded.
+        loop, champion, _, rng = self._loop_and_batch()
+        stream = [_gen_batch([0.2, 0.7, 0.1], 60, rng) for _ in range(5)]
+        with self.assertRaisesRegex(ValueError, "contexts has 2 entries for 5 stream batches"):
+            loop.run(stream, contexts=["ctx0", "ctx1"])
+        self.assertEqual(loop._n_steps, 0, "steps ran before the argument error was reported")
+        self.assertEqual(loop.history, [])
+        self.assertIs(loop.champion, champion)
+        self.assertEqual(loop.bandit.report(), {}, "bandit arms were created for a run that never started")
+
+    def test_run_rejects_a_surplus_contexts_sequence_rather_than_dropping_it(self):
+        # The silent half of the same bug: extra entries used to be discarded with no error, so a
+        # caller who mis-zipped their stream against their contexts got a completed-looking run in
+        # which every step was attributed to the wrong context.
+        loop, _, _, rng = self._loop_and_batch()
+        stream = [_gen_batch([0.2, 0.7, 0.1], 60, rng) for _ in range(2)]
+        with self.assertRaisesRegex(ValueError, "contexts has 4 entries for 2 stream batches"):
+            loop.run(stream, contexts=["c0", "c1", "c2", "c3"])
+        self.assertEqual(loop._n_steps, 0)
+
+    def test_run_rejects_mismatched_verify_batches_before_running_a_single_step(self):
+        loop, champion, _, rng = self._loop_and_batch()
+        stream = [_gen_batch([0.2, 0.7, 0.1], 60, rng) for _ in range(4)]
+        with self.assertRaisesRegex(ValueError, "verify_batches has 1 entries for 4 stream batches"):
+            loop.run(stream, verify_batches=[stream[0]])
+        self.assertEqual(loop._n_steps, 0)
+        self.assertIs(loop.champion, champion)
+
+    # -- budgets are ceilings, so they must be real numbers ---------------------------------------
+    def test_a_non_finite_budget_is_refused_instead_of_disabling_every_operator(self):
+        # Reproduced pre-fix: `budget=nan` made `cost <= budget_remaining` false forever, so run()
+        # walked the WHOLE stream, skipped every operator as unaffordable, charged nothing and
+        # reported five ordinary-looking zero-cost steps -- no error anywhere.
+        loop, champion, _, rng = self._loop_and_batch()
+        stream = [_gen_batch([0.2, 0.7, 0.1], 60, rng) for _ in range(5)]
+        for bad in (float("nan"), float("inf"), -5.0):
+            with self.subTest(budget=bad):
+                with self.assertRaisesRegex(ValueError, "budget must be a finite, nonnegative budget"):
+                    loop.run(stream, budget=bad)
+        self.assertEqual(loop._n_steps, 0, "a rejected budget still ran steps")
+        self.assertIs(loop.champion, champion)
+
+    def test_step_rejects_a_non_finite_budget_remaining_without_touching_the_loop(self):
+        loop, champion, batch, _ = self._loop_and_batch()
+        for bad in (float("nan"), -1.0):
+            with self.subTest(budget_remaining=bad):
+                with self.assertRaisesRegex(ValueError, "budget_remaining must be a finite, nonnegative"):
+                    loop.step(batch, budget_remaining=bad)
+        self.assertEqual(loop._n_steps, 0)
+        self.assertEqual(loop.history, [])
+        self.assertIs(loop.champion, champion)
+
+    def test_a_zero_budget_remaining_is_still_a_legal_ceiling(self):
+        # Negative control against guard overreach: run() genuinely passes a 0.0 remaining budget
+        # when the last affordable step exhausts it, and "nothing left to spend" is a real state.
+        loop, _, batch, _ = self._loop_and_batch()
+        result = loop.step(batch, budget_remaining=0.0)
+        self.assertEqual(result.cost, 0.0)
+        self.assertFalse(result.promoted)
+        self.assertEqual(loop._n_steps, 1)
+
+    # -- exact controls, not truncated ones --------------------------------------------------------
+    def test_acquire_k_and_seed_must_be_exact_non_boolean_integers(self):
+        rng = np.random.RandomState(0)
+        champion = _fit_categorical(_gen_batch([0.7, 0.2, 0.1], 300, rng))
+        objective = accuracy_objective()
+        # pre-fix: int(7.9) == 7 and int(True) == 1, so the loop silently acquired a different budget
+        for bad in (7.9, True, 0, -4):
+            with self.subTest(acquire_k=bad), self.assertRaisesRegex(ValueError, "acquire_k must be an exact"):
+                ClosedLoopSelfEvolution(champion, objective=objective, acquire_k=bad)
+        for bad in (3.7, True, -1):
+            with self.subTest(seed=bad), self.assertRaisesRegex(ValueError, "seed must be an exact"):
+                ClosedLoopSelfEvolution(champion, objective=objective, seed=bad)
+        # negative control: the ordinary integer forms (and an unambiguous integral float) still work
+        self.assertEqual(ClosedLoopSelfEvolution(champion, objective=objective, acquire_k=8).acquire_k, 8)
+        self.assertEqual(ClosedLoopSelfEvolution(champion, objective=objective, acquire_k=8.0).acquire_k, 8)
+        self.assertEqual(ClosedLoopSelfEvolution(champion, objective=objective, seed=0).seed, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
