@@ -9,8 +9,10 @@ import unittest
 import numpy as np
 
 from mixle.models.train_search import (
+    TrainingSearchResult,
     TrainingSpace,
     extrapolate_learning_curve,
+    lm_train_fn,
     tune_training,
 )
 
@@ -127,6 +129,140 @@ class RealLMCouplingTest(unittest.TestCase):
         self.assertTrue(np.isfinite(loss_full) and loss_full > 0)
         # a real LM trained on a predictable cycle drives held-out nll well below the uniform ln(vocab)
         self.assertLess(loss_full, np.log(vocab) - 0.5)
+
+
+class FidelityIsRealWorkTest(unittest.TestCase):
+    """MXR-080-1890: a declared budget must buy work proportional to it, not a rounded epoch count."""
+
+    CORPUS = list(range(8)) * 200  # 1600 tokens
+    VAL = list(range(8)) * 40
+
+    def _fn(self, **kwargs):
+        return lm_train_fn(self.CORPUS, self.VAL, vocab=8, block=16, **kwargs)
+
+    def test_distinct_budgets_no_longer_execute_identical_work(self):
+        # REPRODUCED before the fix: fidelity was `max(1, round(max_epochs * budget))` whole epochs,
+        # so at the library's own default max_epochs=3 the budgets below ALL executed exactly one
+        # epoch -- a "cheap screening" run and a 4x more expensive one were byte-identical work, and
+        # the multi-fidelity search was comparing recipes at budgets that were secretly the same.
+        budgets = (0.05, 0.1, 0.2, 0.25, 0.3, 0.4)
+        old_epochs = {max(1, int(round(3 * b))) for b in budgets}
+        self.assertEqual(old_epochs, {1}, "the pre-fix mapping collapsed all of these onto one epoch")
+
+        plan = self._fn(max_epochs=3).plan
+        work = [plan(b).total_tokens for b in budgets]
+        self.assertEqual(len(set(work)), len(budgets), f"budgets still collapse onto shared work: {work}")
+        self.assertEqual(work, sorted(work))  # and more budget still means more work
+
+    def test_max_epochs_one_is_no_longer_a_single_fidelity(self):
+        # The worst case of the same defect: with max_epochs=1 EVERY budget rounded to one epoch, so
+        # the low fidelity and the target fidelity ran the identical job and low-fidelity screening
+        # -- the entire premise of the search -- was not happening at all.
+        fn = self._fn(max_epochs=1)
+        work = [fn.plan(b).total_tokens for b in (0.05, 0.25, 0.5, 1.0)]
+        self.assertEqual(len(set(work)), 4, f"max_epochs=1 still yields one fidelity: {work}")
+
+    def test_full_budget_is_unchanged_by_the_fix(self):
+        # The fix must not quietly redefine what a full-budget run is: budget=1.0 still means
+        # max_epochs whole epochs over the whole corpus, exactly as before.
+        full = self._fn(max_epochs=3).plan(1.0)
+        self.assertEqual(full.epochs, 3)
+        self.assertEqual(full.tokens_per_epoch, len(self.CORPUS))
+        self.assertEqual(full.total_tokens, 3 * len(self.CORPUS))
+
+    def test_plan_never_falls_below_one_trainable_window(self):
+        # Guarding against the fix's own failure mode: a tiny budget must not produce a token prefix
+        # too short to form a single training window (LM.fit raises "yielded no training batches").
+        fn = self._fn(max_epochs=3)
+        self.assertGreaterEqual(fn.plan(1e-9).tokens_per_epoch, 16 + 1)  # block + 1
+
+    def test_declared_fidelity_ladder_collapse_is_reported_not_silent(self):
+        # Opt-in (`fidelities=`), so existing callers are unaffected. Token resolution genuinely
+        # runs out on a short corpus; the point is that it is reported rather than assumed away.
+        with self.assertRaises(ValueError) as cm:
+            lm_train_fn(list(range(4)) * 3, [0, 1], vocab=4, block=2, max_epochs=1, fidelities=(0.5, 0.51))
+        self.assertIn("identical work", str(cm.exception))
+        # a well-spaced ladder over the same corpus is accepted
+        lm_train_fn(list(range(4)) * 3, [0, 1], vocab=4, block=2, max_epochs=1, fidelities=(0.25, 1.0))
+
+    def test_seed_is_exact_and_recorded_on_every_trial(self):
+        for bad in (2.9, True, -1, "0"):
+            with self.subTest(seed=repr(bad)), self.assertRaises(ValueError):
+                self._fn(max_epochs=3, seed=bad)
+        fn = self._fn(max_epochs=3, seed=7)
+        self.assertEqual(fn.seed, 7)
+        self.assertEqual(fn.plan(0.5).seed, 7)
+        self.assertEqual(fn.trials, ())  # nothing executed yet
+
+
+class CommonRandomNumbersTest(unittest.TestCase):
+    def test_identical_recipe_and_budget_now_returns_an_identical_loss(self):
+        # REPRODUCED before the fix: LM.__init__ draws its weights from the ambient torch RNG and
+        # lm_train_fn seeded nothing, so two back-to-back calls with the SAME recipe and budget
+        # returned 6.46 then 7.65 nats/token. That run-to-run spread is far wider than the
+        # differences the search is meant to rank, so the search was ranking noise.
+        import pytest
+
+        pytest.importorskip("torch")
+
+        tokens = list(range(8)) * 120
+        fn = lm_train_fn(tokens, list(range(8)) * 20, vocab=8, block=16, max_epochs=2, seed=3)
+        recipe = {"d_model": 16, "n_layer": 1, "batch_size": 8, "lr": 1e-3}
+        first = fn(dict(recipe), 0.5)
+        second = fn(dict(recipe), 0.5)
+        self.assertEqual(first, second, "same recipe + same budget must be the same run")
+        # and the executed work/seed of both runs is recorded, so a finished search is auditable
+        self.assertEqual(len(fn.trials), 2)
+        self.assertEqual(fn.trials[0], fn.trials[1])
+        self.assertEqual(fn.trials[0].seed, 3)
+        self.assertGreater(fn.trials[0].total_tokens, 0)
+
+    def test_seeding_the_search_does_not_reseed_the_callers_torch_rng(self):
+        import pytest
+
+        pytest.importorskip("torch")
+        import torch
+
+        torch.manual_seed(1234)
+        expected = torch.randn(3)
+        torch.manual_seed(1234)
+        fn = lm_train_fn(list(range(8)) * 120, list(range(8)) * 20, vocab=8, block=16, max_epochs=1, seed=99)
+        fn({"d_model": 16, "n_layer": 1, "batch_size": 8, "lr": 1e-3}, 0.5)
+        self.assertTrue(torch.equal(torch.randn(3), expected), "the caller's torch stream was consumed/reseeded")
+
+
+class TrainingSearchResultOwnershipTest(unittest.TestCase):
+    """MXR-080-1890: the recorded outcome must not be editable through the caller's own references."""
+
+    def test_recipe_and_history_are_detached_from_the_caller(self):
+        # REPRODUCED before the fix: both were stored by reference, so mutating the caller's dict
+        # rewrote the recorded winning recipe after the fact.
+        recipe = {"d_model": 64}
+        history = ["step0"]
+        result = TrainingSearchResult(recipe=recipe, loss=1.5, history=history, seed=0)
+        recipe["d_model"] = 999
+        history.append("MUTATED")
+        self.assertEqual(result.recipe, {"d_model": 64})
+        self.assertEqual(result.history, ["step0"])
+        self.assertIsInstance(result.recipe, dict)  # type stays load-bearing for a training callback
+        self.assertIsInstance(result.history, list)
+
+    def test_inconsistent_results_are_refused(self):
+        # REPRODUCED before the fix: loss=nan and loss="not a number" were both accepted, as was a
+        # recipe that was not a mapping at all.
+        for bad in ({"loss": np.nan}, {"loss": np.inf}, {"loss": "not a number"}, {"seed": -1}, {"seed": True}):
+            kwargs = {"recipe": {"lr": 1e-3}, "loss": 1.0, **bad}
+            with self.subTest(bad=repr(bad)), self.assertRaises(ValueError):
+                TrainingSearchResult(**kwargs)
+        with self.assertRaises(TypeError):
+            TrainingSearchResult(recipe="not a mapping", loss=1.0)
+
+    def test_tune_training_records_the_seed_it_searched_under(self):
+        def train(recipe, budget):
+            return float((np.log2(recipe["d_model"]) - 8) ** 2)
+
+        result = tune_training(train, TrainingSpace(), fidelities=(0.25, 1.0), max_cost=15, seed=5)
+        self.assertEqual(result.seed, 5)
 
 
 if __name__ == "__main__":

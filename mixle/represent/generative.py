@@ -62,13 +62,57 @@ class AutoencoderResult:
     """A reconstruction-trained representation with encoder, decoder, optional codebook, and loss curve.
 
     Only returned for a fit that ran every requested epoch to a finite loss: an untrained or diverged
-    encoder is an :class:`AutoencoderFitError`, never a result.
+    encoder is an :class:`AutoencoderFitError`, never a result. That sentence was previously a claim
+    the class did not enforce (MXR-080-1906) -- with no ``__post_init__``,
+    ``AutoencoderResult(encoder=FeatureEmbedding(6, 3), decoder=None, quantizer=None, losses=[])``
+    was accepted and is indistinguishable from a fitted result, which is the exact state
+    :class:`AutoencoderFitError` exists to keep out of the shared representation space.
+
+    Two things are now bound rather than assumed:
+
+    * ``losses`` must be a non-empty run of finite numbers. It is the only evidence that training
+      happened at all, so a result carrying none is not a trained representation.
+    * a ``quantizer``, when present, must be fitted. ``_train`` refits the codebook at epoch 0
+      unconditionally, so every quantizer that reaches a real result has one.
+
+    ``losses`` is also converted to a tuple. ``fit_autoencoder`` used to hand over the SAME list
+    object the training loop was appending to, so the fitted loss curve stayed writable through a
+    reference the result did not know about: ``res.losses.append(-999.0)`` rewrote recorded evidence
+    (verified). Note ``AutoencoderFitError.losses`` stays a ``list`` -- it is type-tested as one by
+    ``represent_generative_test`` and is already a defensive copy.
+
+    Deliberately NOT enforced: that ``losses`` actually descends, or that the final loss is what
+    ``encoder``/``decoder`` would reproduce on the training units. A legitimate fit may plateau or
+    bounce, and re-running the forward pass to check would make constructing a result cost a full
+    inference pass over data the result does not retain.
     """
 
     encoder: FeatureEmbedding
     decoder: Any
     quantizer: VectorQuantizer | None
-    losses: list[float] = field(default_factory=list)
+    losses: tuple[float, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        if self.encoder is None or self.decoder is None:
+            raise ValueError("AutoencoderResult requires both a fitted encoder and a fitted decoder")
+        try:
+            curve = tuple(float(value) for value in self.losses)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("losses must be a sequence of finite reconstruction losses") from exc
+        if not curve:
+            raise ValueError(
+                "AutoencoderResult requires a non-empty loss curve: an empty one means no epoch ever "
+                "ran, and an untrained representation must be an AutoencoderFitError, not a result"
+            )
+        if not all(np.isfinite(value) for value in curve):
+            raise ValueError("losses must all be finite; a non-finite loss is a diverged fit, not a result")
+        self.losses = curve
+        if self.quantizer is not None and getattr(self.quantizer, "codebook", None) is None:
+            raise ValueError(
+                "AutoencoderResult was given an unfitted quantizer (no codebook). Training refits the "
+                "codebook on the current embeddings before the first epoch ends, so a result's "
+                "quantizer is always fitted."
+            )
 
     def encode(self, units: np.ndarray) -> np.ndarray:
         """Encode units through the trained autoencoder encoder."""
