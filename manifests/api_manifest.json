@@ -920,6 +920,7 @@
         "public_api_manifest",
         "purged_kfold",
         "quantile_regression",
+        "receipt_subject",
         "record_fit",
         "reduce_mixture",
         "register_inference_backend",
