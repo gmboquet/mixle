@@ -88,14 +88,19 @@ def _encoded_rows(x: Any) -> int:
     how many observations it holds cannot be scored against that number, so it is refused here
     rather than scored on weaker terms.
     """
-    if not isinstance(x, (tuple, list)) or len(x) < 3:
+    if not isinstance(x, (tuple, list)) or len(x) != 3:
         raise ValueError(
-            "backoff sequence encoding must carry its observation count; got a "
+            "backoff sequence encoding must carry its observation count and nothing else; got a "
             f"{len(x) if isinstance(x, (tuple, list)) else type(x).__name__}-element encoding. Build it "
             "with BackoffDistribution.dist_to_encoder().seq_encode(...), which records the row count "
-            "so a child cannot silently return a shorter score vector."
+            "so a child cannot silently return a shorter score vector. A longer encoding was "
+            "previously accepted and its extra elements ignored, so a payload this scorer does not "
+            "understand was scored as though it did (MXR-080-1904)."
         )
-    return int(x[2])
+    # `int(x[2])` accepted "5", truncated 5.9 to 5, and read True as 1 -- for the very number that
+    # exists to catch a child returning the wrong number of scores. The count has to be exact, or the
+    # check it feeds is checking against a number the caller did not supply (MXR-080-1904).
+    return _checked_count(x[2], label="backoff sequence encoding row count")
 
 
 def _checked_child_scores(scores: Any, role: str, rows: int | None = None) -> np.ndarray:
