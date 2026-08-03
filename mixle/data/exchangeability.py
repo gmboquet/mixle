@@ -40,14 +40,38 @@ class ExchangeabilityReport:
     n_examined: int = 0
     max_records: int | None = None
     bounded: bool = False
+    #: How the multiplicity across the primary test family was corrected, and how large that family
+    #: was. Recorded because the label is only interpretable against it (MXR-080-1887).
+    multiplicity: dict[str, Any] = field(default_factory=dict)
+
+    _LABELS = ("exchangeable", "trend", "shift", "inconclusive")
+
+    def __post_init__(self) -> None:
+        """Refuse a report whose label is outside the closed vocabulary it is read against.
+
+        The label was an unchecked string, so a directly-constructed report could carry one nothing
+        compares equal to -- making ``exchangeable`` silently False for a reason no reader could see
+        (MXR-080-1887).
+        """
+        if self.label not in self._LABELS:
+            raise ValueError(f"ExchangeabilityReport label must be one of {self._LABELS}, got {self.label!r}")
+        if not isinstance(self.fields, list):
+            raise TypeError(f"ExchangeabilityReport fields must be a list, got {type(self.fields).__name__}")
 
     @property
     def exchangeable(self) -> bool:
-        """Return ``True`` only when the probes actually ran and found no order signal.
+        """Return ``True`` only when the probes ran and did not reject exchangeability.
+
+        This is FAILURE TO REJECT, not certification (MXR-080-1887). The probes test for a monotone
+        trend and for a between-halves shift; data can violate exchangeability in ways neither probe
+        looks for, and a real violation can go undetected for want of power. ``True`` means "these
+        tests, at this corrected level, found no order signal" -- it is not evidence the assumption
+        holds. :attr:`multiplicity` records the correction the verdict was decided under, without
+        which the level is not interpretable.
 
         ``False`` both for a detected ``trend``/``shift`` AND for ``inconclusive`` (nothing could be
         tested) -- a caller that only inspects this boolean can never mistake "we could not check"
-        for "we checked and the assumption held".
+        for "we checked and found no signal".
         """
         return self.label == "exchangeable"
 
@@ -60,6 +84,7 @@ class ExchangeabilityReport:
             "n_examined": self.n_examined,
             "max_records": self.max_records,
             "bounded": self.bounded,
+            "multiplicity": dict(self.multiplicity),
         }
 
 
@@ -167,9 +192,18 @@ def exchangeability_check(
     if not cols:
         return ExchangeabilityReport(label="inconclusive", fields=[{"note": "no numeric fields to test"}], **receipt)
 
+    # MULTIPLICITY (MXR-080-1887). Two primary tests run per numeric field, and the old code compared
+    # each raw p-value to `alpha` independently -- so with k fields, 2k chances to reject at level
+    # alpha each, and ANY single one flipped the whole report. The advertised alpha was therefore not
+    # the report's error rate; over enough columns of genuinely exchangeable data the report reads
+    # "trend" as a matter of course. Every primary p-value is corrected together, once, as one family
+    # -- the discipline mixle.evolve.population already applies to simultaneous challengers.
+    #
+    # The within-half probes below are deliberately NOT in this family. They run only after a
+    # rejection and choose between the "trend" and "shift" LABELS; they cannot themselves cause a
+    # rejection, so including them would penalize the family for tests that decide only wording.
+    primary: list[tuple[str, np.ndarray, float, float, float, float]] = []
     fields: list[dict[str, Any]] = []
-    worst = "exchangeable"
-    tested_any = False
     for name, x in cols.items():
         finite = np.isfinite(x)
         if not finite.all():
@@ -182,9 +216,27 @@ def exchangeability_check(
                 }
             )
             continue
-        tested_any = True
         tr_stat, tr_p = _perm_pvalue(x, n_perm=n_perm, seed=seed)
         sh_stat, sh_p = _halves_shift_pvalue(x, n_perm=n_perm, seed=seed + 1)
+        primary.append((name, x, tr_stat, tr_p, sh_stat, sh_p))
+
+    tested_any = bool(primary)
+    correction = {"method": "holm", "family_size": 2 * len(primary), "alpha": alpha}
+    if primary:
+        from mixle.inference.multiple_testing import adjust_pvalues
+
+        raw = np.asarray([p for _n, _x, _ts, p, _ss, _sp in primary] + [sp for *_rest, sp in primary], dtype=float)
+        adjusted = adjust_pvalues(raw, method="holm", alpha=alpha)["pvals_adjusted"]
+        half = len(primary)
+        trend_adjusted = adjusted[:half]
+        shift_adjusted = adjusted[half:]
+    else:
+        trend_adjusted = shift_adjusted = np.asarray([], dtype=float)
+
+    worst = "exchangeable"
+    for index, (name, x, tr_stat, tr_p_raw, sh_stat, sh_p_raw) in enumerate(primary):
+        tr_p = float(trend_adjusted[index])
+        sh_p = float(shift_adjusted[index])
         verdict = "exchangeable"
         if tr_p < alpha or sh_p < alpha:
             # disambiguate: a genuine trend persists WITHIN each half; a step change does not.
@@ -198,10 +250,16 @@ def exchangeability_check(
                 "field": name,
                 "verdict": verdict,
                 "trend_rank_corr": round(tr_stat, 4),
+                # Both the raw and the family-corrected p-value are reported: the corrected one is
+                # what the verdict was decided on, and the raw one is what a reader would otherwise
+                # try to compare against alpha themselves and get a different answer (MXR-080-1887).
                 "trend_p": round(tr_p, 4),
                 "shift_p": round(sh_p, 4),
+                "trend_p_raw": round(tr_p_raw, 4),
+                "shift_p_raw": round(sh_p_raw, 4),
             }
         )
         if verdict == "trend" or (verdict == "shift" and worst == "exchangeable"):
             worst = verdict
+    receipt["multiplicity"] = correction
     return ExchangeabilityReport(label=worst if tested_any else "inconclusive", fields=fields, **receipt)
