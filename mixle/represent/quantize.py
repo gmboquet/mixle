@@ -25,14 +25,52 @@ def _positive_int(value: Any, name: str) -> int:
     return int(value)
 
 
+def _seed_int(value: Any, name: str) -> int:
+    """Exact seed in ``RandomState``'s accepted range, or a ``ValueError`` (MXR-080-1906).
+
+    ``int(seed)`` truncated: ``seed=2.9`` and ``seed=2`` selected the SAME random stream while
+    reading as two different declarations (verified -- both produce a bit-identical codebook), and
+    ``seed=True`` silently became ``1``. A seed identifies a draw; rounding one is running a
+    different experiment than the one that was written down. The range is checked here rather than
+    left to ``np.random.RandomState``, which only rejects a negative seed at ``fit`` time -- long
+    after the constructor accepted it.
+    """
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise ValueError(f"{name} must be an exact integer, got {value!r}")
+    result = int(value)
+    if not 0 <= result < 2**32:
+        raise ValueError(f"{name} must lie in [0, 2**32), got {result!r}")
+    return result
+
+
 class VectorQuantizer:
     """A learned codebook over ``R^dim``: nearest-centroid quantization of embedding vectors into discrete ids."""
 
     def __init__(self, num_codes: int, dim: int, *, seed: int = 0) -> None:
         self.num_codes = _positive_int(num_codes, "num_codes")
         self.dim = _positive_int(dim, "dim")
-        self.seed = int(seed)
-        self.codebook: np.ndarray | None = None  # (num_codes, dim)
+        self.seed = _seed_int(seed, "seed")
+        self._codebook: np.ndarray | None = None  # (num_codes, dim), owned and frozen once fitted
+
+    @property
+    def codebook(self) -> np.ndarray | None:
+        """The fitted ``(num_codes, dim)`` centroids -- read-only, or ``None`` before :meth:`fit`.
+
+        The codebook IS the learned vocabulary: every token id this codec emits or decodes is defined
+        by it, so it is fitted state, not a scratch buffer. It used to be a plain public attribute,
+        and a single post-fit write silently redefined the vocabulary (MXR-080-1906). Verified: after
+        ``vq.fit(x)``, setting ``vq.codebook[0, 0] = nan`` collapsed ``quantize`` from ``[0, 2, 0, 0,
+        2]`` to ``[0, 0, 0, 0, 0]`` -- every vector assigned to code 0, because a NaN distance never
+        wins an ``argmin`` -- and turned ``reconstruction_error`` into ``nan`` rather than an error.
+        Rebinding was just as open: ``vq.codebook = np.zeros((99, 7))`` was accepted beside an
+        unchanged ``dim=2`` and ``num_codes=3``.
+
+        The array is frozen with ``writeable = False`` and reachable only through this property, which
+        matches :class:`mixle.engines.formats.CodebookFormat`, whose codebook is copied and sealed the
+        same way. ``dequantize`` returns ``codebook[ids]``, and NumPy fancy indexing copies, so
+        decoded vectors are still ordinary writable arrays.
+        """
+        return self._codebook
 
     def _as_vectors(self, vectors: Any, what: str) -> np.ndarray:
         """``(n, dim)`` finite float view of ``vectors``, or a ``ValueError`` naming the geometry violated.
@@ -74,7 +112,8 @@ class VectorQuantizer:
                 centers = new
                 break
             centers = new
-        self.codebook = centers
+        centers.setflags(write=False)  # the fitted vocabulary is evidence, not a scratch buffer
+        self._codebook = centers
         self.num_codes = len(centers)  # honest post-fit count; may be < the originally requested cap
         return self
 
@@ -127,9 +166,14 @@ class VectorQuantizer:
         """
         import torch
 
-        if self.codebook is None:
+        if self._codebook is None:
             raise RuntimeError("call fit(...) before straight_through(...)")
-        cb = torch.as_tensor(self.codebook, dtype=vectors.dtype, device=vectors.device)
+        # `torch.tensor` (not `as_tensor`): the fitted codebook is frozen non-writable, and
+        # `as_tensor` would try to SHARE that buffer and warn that PyTorch cannot honour
+        # non-writable memory. Copying is the correct answer rather than the warning's other
+        # suggestion of unfreezing -- the codebook must stay sealed (MXR-080-1906). The copy is
+        # (num_codes, dim), negligible beside the cdist on the next line.
+        cb = torch.tensor(self._codebook, dtype=vectors.dtype, device=vectors.device)
         d = torch.cdist(vectors, cb)
         ids = d.argmin(dim=1)
         q = cb[ids]

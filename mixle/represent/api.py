@@ -30,6 +30,7 @@ import numpy as np
 
 from mixle.data.hashing import _canonical
 from mixle.represent.generative import AutoencoderResult, fit_autoencoder
+from mixle.represent.identity import RetrievalIdentity, exact_count, vectors_digest
 from mixle.utils.exact import require_explicit_true
 
 _ARTIFACT_ID = "represent.Embedder/v2"
@@ -132,6 +133,26 @@ class Embedder:
         """Return embedding dimensionality."""
         return int(self._corpus_vectors.shape[1])
 
+    @property
+    def identity(self) -> RetrievalIdentity:
+        """What this embedder's ``(index, similarity)`` pairs are relative to (MXR-080-1906).
+
+        A bare corpus index names nothing without the corpus it indexes, and a cosine similarity is
+        only interpretable against the model that produced both sides of it. Neither was recorded:
+        the save manifest carried ``kind``/``dim``/``n_corpus`` and no fitted-state identity at all,
+        so two embedders over different corpora returned indistinguishable results.
+
+        The digest covers the fitted corpus vectors, which are frozen at construction, so this is
+        stable for the instance's lifetime and identifies every result it returns. It is computed on
+        each access rather than cached because ``result`` and ``featurizer`` remain rebindable
+        attributes -- see the note in :meth:`retrieve` about what that does and does not cover.
+        """
+        return RetrievalIdentity(
+            model=f"{type(self.result).__module__}.{type(self.result).__name__}",
+            corpus_size=int(self._corpus_vectors.shape[0]),
+            corpus_digest=vectors_digest(self._corpus_vectors),
+        )
+
     def _units(self, items: list) -> np.ndarray:
         coerced = [str(x) for x in items] if self.kind == "text" else list(items)
         return np.asarray(self.featurizer.transform(coerced), dtype=np.float32)
@@ -199,20 +220,25 @@ class Embedder:
     def retrieve(self, query: Any, k: int = 5) -> list[tuple[int, float]]:
         """Top-``k`` fitted-corpus neighbours of ``query`` as ``(corpus index, cosine similarity)``.
 
+        Indices are positions in :attr:`corpus_vectors`; :attr:`identity` records which corpus that
+        is. Note what identity does NOT cover: ``result`` and ``featurizer`` are still plain
+        rebindable attributes, so replacing ``emb.result`` re-points the query encoder while the
+        frozen corpus vectors still come from the old one. Fixing that is a constructor-ownership
+        change to a class that is pickled by :meth:`save` and rebuilt field-by-field by
+        :meth:`load`, which is a wider change than this finding, and it is left deliberately
+        undone rather than half-done.
+
         Raises:
-            ValueError: If ``k`` is negative or not an integer value. A negative ``k`` is never
-                silently accepted here: Python's ``[:k]`` slicing treats a negative ``k`` as "all
-                but the last ``|k|`` items", not empty/error, which is never what a caller passing
-                a negative retrieval count intended.
+            ValueError: If ``k`` is not an exact non-negative integer -- see
+                :func:`mixle.represent.identity.exact_count` for why a Boolean is refused and an
+                integral float is not.
         """
-        kf = float(k)
-        if kf < 0 or kf != round(kf):
-            raise ValueError(f"k must be a non-negative integer, got {k!r}")
+        count = exact_count(k, "k")
         q = self.transform_one(query)  # a query is exactly one item; never guess batch-ness here
         sims = self._corpus_vectors @ q
         if not np.isfinite(sims).all():
             raise ValueError("retrieval similarities are not finite; refusing to rank invalid evidence")
-        order = np.argsort(-sims)[: int(kf)]
+        order = np.argsort(-sims)[:count]
         return [(int(i), float(sims[i])) for i in order]
 
     def save(self, path: str) -> str:

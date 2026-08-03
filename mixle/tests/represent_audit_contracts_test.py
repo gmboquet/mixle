@@ -201,5 +201,166 @@ class GraphContractTest(unittest.TestCase):
         self.assertEqual(sorted(encoder.encoders), ["other", "text"])
 
 
+class QuantizerOwnershipTest(unittest.TestCase):
+    """MXR-080-1906: the codebook is the learned vocabulary, and the seed identifies a draw."""
+
+    def test_fitted_codebook_cannot_be_edited_or_rebound(self):
+        # REPRODUCED before the fix: `codebook` was a plain public attribute. After fit,
+        # `vq.codebook[0, 0] = nan` collapsed quantize() from [0, 2, 0, 0, 2] to [0, 0, 0, 0, 0] --
+        # every vector assigned to code 0, since a NaN distance never wins an argmin -- and
+        # reconstruction_error() returned nan instead of raising. `vq.codebook = np.zeros((99, 7))`
+        # was also accepted, beside an unchanged dim=2 and num_codes=3.
+        vectors = np.random.RandomState(0).randn(40, 2)
+        quantizer = VectorQuantizer(3, 2, seed=0).fit(vectors)
+        before = quantizer.quantize(vectors[:5]).tolist()
+        self.assertFalse(quantizer.codebook.flags.writeable)
+        with self.assertRaises(ValueError):
+            quantizer.codebook[0, 0] = np.nan
+        with self.assertRaises(AttributeError):
+            quantizer.codebook = np.zeros((99, 7))
+        self.assertEqual(quantizer.quantize(vectors[:5]).tolist(), before)
+        # decoded vectors are still ordinary writable arrays (fancy indexing copies)
+        self.assertTrue(quantizer.dequantize(np.asarray([0, 1])).flags.writeable)
+
+    def test_seed_is_an_identifier_not_a_magnitude(self):
+        # REPRODUCED before the fix: `self.seed = int(seed)` truncated, so seed=2.9 and seed=2 named
+        # the same stream and produced a bit-identical codebook, and seed=True became 1. seed=-1 was
+        # accepted at construction and only failed later inside RandomState at fit time.
+        for bad in (2.9, True, np.float64(3.7), -1, 2**32):
+            with self.subTest(seed=repr(bad)), self.assertRaises(ValueError):
+                VectorQuantizer(4, 2, seed=bad)
+        self.assertEqual(VectorQuantizer(4, 2, seed=np.int64(7)).seed, 7)  # exact integers still fine
+
+    def test_straight_through_still_passes_gradients_over_a_frozen_codebook(self):
+        # The freeze must not break the VQ-VAE path: torch.as_tensor would try to SHARE the
+        # non-writable buffer and warn, so straight_through copies instead.
+        import warnings
+
+        import pytest
+
+        pytest.importorskip("torch")
+        import torch
+
+        vectors = np.random.RandomState(0).randn(40, 2)
+        quantizer = VectorQuantizer(3, 2, seed=0).fit(vectors)
+        x = torch.as_tensor(vectors[:5], dtype=torch.float32).requires_grad_(True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            quantizer.straight_through(x).sum().backward()
+        self.assertTrue(bool((x.grad != 0).any()))
+
+
+class AutoencoderResultBindingTest(unittest.TestCase):
+    """MXR-080-1906: a result must be evidence of a fit, not a shape that merely looks like one."""
+
+    def test_untrained_state_cannot_be_dressed_as_a_result(self):
+        # REPRODUCED before the fix: with no __post_init__, this was accepted and indistinguishable
+        # from a trained result -- the exact state AutoencoderFitError exists to keep out of the
+        # shared representation space, and which the class docstring already claimed was impossible.
+        import pytest
+
+        pytest.importorskip("torch")
+        from mixle.represent.embed import FeatureEmbedding
+        from mixle.represent.generative import AutoencoderResult
+
+        with self.assertRaisesRegex(ValueError, "non-empty loss curve"):
+            AutoencoderResult(encoder=FeatureEmbedding(6, 3), decoder=object(), quantizer=None, losses=[])
+        with self.assertRaisesRegex(ValueError, "encoder and a fitted decoder"):
+            AutoencoderResult(encoder=FeatureEmbedding(6, 3), decoder=None, quantizer=None, losses=[1.0])
+        with self.assertRaisesRegex(ValueError, "finite"):
+            AutoencoderResult(encoder=FeatureEmbedding(6, 3), decoder=object(), quantizer=None, losses=[np.nan])
+        with self.assertRaisesRegex(ValueError, "unfitted quantizer"):
+            AutoencoderResult(
+                encoder=FeatureEmbedding(6, 3), decoder=object(), quantizer=VectorQuantizer(2, 3), losses=[1.0]
+            )
+
+    def test_loss_curve_is_not_the_live_training_list(self):
+        # REPRODUCED before the fix: fit_autoencoder handed over the SAME list the training loop was
+        # appending to, so `res.losses.append(-999.0)` rewrote recorded evidence.
+        import pytest
+
+        pytest.importorskip("torch")
+        from mixle.represent.generative import fit_autoencoder
+
+        units = np.random.RandomState(1).randn(20, 6).astype(np.float32)
+        result = fit_autoencoder(units, 3, epochs=5, seed=0)
+        self.assertIsInstance(result.losses, tuple)
+        self.assertEqual(len(result.losses), 5)
+        with self.assertRaises(AttributeError):
+            result.losses.append(-999.0)
+
+
+class RetrievalIdentityTest(unittest.TestCase):
+    """MXR-080-1906: `k` must be a count, and an index must name the corpus it indexes."""
+
+    def test_k_refuses_a_boolean_but_still_accepts_an_integral_float(self):
+        # REPRODUCED before the fix: `float(k)` then `kf != round(kf)` admits True, because
+        # float(True) == 1.0 -- so k=True silently meant "retrieve exactly one".
+        from mixle.represent.identity import exact_count
+
+        for bad in (True, np.True_, -1, 2.5, np.nan, np.inf):
+            with self.subTest(k=repr(bad)), self.assertRaises(ValueError):
+                exact_count(bad, "k")
+        # integral floats stay accepted on purpose: the previous contract allowed them, computed
+        # counts arrive as floats, and nothing is truncated.
+        self.assertEqual(exact_count(5.0, "k"), 5)
+        self.assertEqual(exact_count(np.int64(3), "k"), 3)
+        self.assertEqual(exact_count(0, "k"), 0)
+
+    def test_posterior_retriever_owns_its_corpus_and_weights(self):
+        # REPRODUCED before the fix: `self.corpus = list(corpus)` was public and mutable, so
+        # `r.corpus.append(rec)` silently changed what every previously returned index meant, and
+        # `self.field_weights = field_weights` aliased the caller's array, letting them reweight the
+        # similarity function of an already-built retriever.
+        from mixle.represent.posterior import PosteriorRetriever
+
+        class FakeMixture:
+            components = ()
+            log_w = np.zeros(1)
+
+        rows = [(1.0,), (2.0,), (3.0,)]
+        weights = np.asarray([1.0, 2.0])
+        retriever = PosteriorRetriever(FakeMixture(), rows, field_weights=weights)
+        self.assertIsInstance(retriever.corpus, tuple)
+        with self.assertRaises(AttributeError):
+            retriever.corpus = ()
+        rows.append((4.0,))
+        self.assertEqual(len(retriever.corpus), 3)  # the caller's later append did not move indices
+        self.assertFalse(retriever.field_weights.flags.writeable)
+        weights[0] = 99.0
+        self.assertEqual(retriever.field_weights[0], 1.0)
+        with self.assertRaisesRegex(ValueError, "finite"):
+            PosteriorRetriever(FakeMixture(), rows, field_weights=[1.0, np.nan])
+
+    def test_retrievers_record_which_corpus_their_indices_refer_to(self):
+        # REPRODUCED before the fix: neither retriever recorded model or corpus identity at all, so
+        # results over different corpora were indistinguishable.
+        from mixle.represent.posterior import PosteriorRetriever
+
+        class FakeMixture:
+            components = ()
+            log_w = np.zeros(1)
+
+        a = PosteriorRetriever(FakeMixture(), [(1.0,), (2.0,), (3.0,)])
+        same = PosteriorRetriever(FakeMixture(), [(1.0,), (2.0,), (3.0,)])
+        different = PosteriorRetriever(FakeMixture(), [(1.0,), (2.0,), (9.0,)])
+        self.assertEqual(a.identity.corpus_size, 3)
+        self.assertTrue(a.identity.matches(same.identity))
+        self.assertFalse(a.identity.matches(different.identity))
+
+    def test_corpus_digest_is_absent_rather_than_faked_for_unencodable_records(self):
+        # A retrieval corpus may hold arbitrary payloads, and the canonical encoder is closed over
+        # the types it supports. Reporting `None` keeps the retriever working without inventing a
+        # digest that would not be reproducible run to run.
+        from mixle.represent.identity import RetrievalIdentity, records_digest
+
+        class Opaque:
+            pass
+
+        self.assertIsNone(records_digest([Opaque()]))
+        unknown = RetrievalIdentity(model="m", corpus_size=1, corpus_digest=None)
+        self.assertFalse(unknown.matches(unknown))  # unknown is never evidence of a match
+
+
 if __name__ == "__main__":
     unittest.main()
