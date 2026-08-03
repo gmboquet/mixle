@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import hashlib
 import time
-from collections.abc import Iterator
 from typing import Any, NamedTuple
 
 import numpy as np
+
+from mixle.data.hashing import _records, dataset_hash
 
 
 class PPLFitResult(NamedTuple):
@@ -30,10 +31,28 @@ class PPLFitResult(NamedTuple):
 
 
 def _replayable_data(data: Any) -> Any:
-    """Materialize a one-shot iterator exactly once; preserve replayable data sources."""
-    if isinstance(data, Iterator):
-        return list(data)
-    return data
+    """Take one pre-fit snapshot of ``data`` that both the fit and the hash read.
+
+    The old rule snapshotted only ``isinstance(data, Iterator)`` (MXR-080-1897). A generator is an
+    ``Iterator``, but a one-shot *iterable* that is not one -- an object whose ``__iter__`` drains a
+    file handle, a cursor, or a socket -- passed straight through: the fit consumed it, and the
+    header then hashed the exhausted source, producing the hash of the **empty** dataset and
+    ``n_records=None`` for a fit that saw every record. Nothing in the header disclosed that.
+
+    So everything is materialized exactly once, which is what the estimator-surface counterpart
+    ``mixle.inference.fit_with_provenance`` already does (``list(_records(data))``) and what
+    :class:`mixle.data.core.MaterializedSource` documents as the rule: ``__len__`` is *not* evidence
+    that a source is replayable, since one-shot readers routinely expose a remaining-length hint. The
+    one exception is an ``ndarray``, recognized by exact type rather than by duck-typing: it is
+    already a random-access buffer, so ``.copy()`` is a faithful owned snapshot and the fit keeps
+    receiving an array instead of a list of scalars.
+
+    A ``DataSource`` is snapshotted through its own ``records()`` contract, so the fit receives the
+    records rather than the source object.
+    """
+    if isinstance(data, np.ndarray):
+        return data.copy()
+    return list(_records(data))
 
 
 def _rng_record(rng: np.random.RandomState, requested_seed: int | None, effective_seed: int) -> dict[str, Any]:
@@ -63,11 +82,20 @@ def fit_with_provenance(
 ) -> PPLFitResult:
     """Fit a PPL random variable and return an explicit provenance result.
 
-    One exact replayable representation of one-shot data is used for both fit
-    and hashing. ``seed=None`` has the deterministic effective seed ``0``;
-    otherwise the exact non-negative integer seed initializes the
-    ``RandomState`` passed to ``rv.fit``. Supplying a separate ``rng`` is
-    rejected so the recorded state cannot disagree with the state used.
+    One pre-fit snapshot (see :func:`_replayable_data`) is used for both the fit
+    and the hash, and the snapshot is fingerprinted *before* the fit runs and
+    again when the header is built. Those two fingerprints must agree: if the
+    fit edits its input in place the header would otherwise report a hash of
+    records the fit never saw, and a provenance header that silently describes
+    the wrong dataset is worse than one that refuses to be built. The extra
+    hash is one SHA-256 pass over the snapshot and no extra memory. Mutation
+    *inside* a record object is deliberately still detected by this check but
+    not prevented -- the snapshot is shallow (MXR-080-1897).
+
+    ``seed=None`` has the deterministic effective seed ``0``; otherwise the
+    exact non-negative integer seed initializes the ``RandomState`` passed to
+    ``rv.fit``. Supplying a separate ``rng`` is rejected so the recorded state
+    cannot disagree with the state used.
     """
     from mixle.inference.production.provenance import _resource_usage, build_header
 
@@ -82,6 +110,7 @@ def fit_with_provenance(
     random_state = _rng_record(rng, None if seed is None else int(seed), effective_seed)
     fit_kw["rng"] = rng
     training_data = _replayable_data(data)
+    pre_fit_hash = dataset_hash(training_data)
 
     cpu0 = _resource_usage().get("cpu_time_s")
     t0 = time.time()
@@ -100,6 +129,7 @@ def fit_with_provenance(
         "seed": effective_seed,
         "random_state": random_state,
         "surface": "ppl",
+        "data_materialized": True,  # parity with the estimator surface's own training block
     }
     header = build_header(
         model,
@@ -109,4 +139,11 @@ def fit_with_provenance(
         finished=t1,
         resources=usage,
     )
+    if header.dataset_hash != pre_fit_hash:
+        raise RuntimeError(
+            "the fitted data changed while rv.fit was running, so the provenance header would "
+            f"describe records the fit never saw (pre-fit {pre_fit_hash[:16]}..., post-fit "
+            f"{header.dataset_hash[:16]}...). A fit that edits its input in place cannot be given a "
+            "truthful dataset hash; pass a copy, or use a fitter that does not mutate its input."
+        )
     return PPLFitResult(fitted=fitted, header=header)

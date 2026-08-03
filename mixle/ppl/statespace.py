@@ -9,16 +9,55 @@ E-step is the Kalman/RTS smoother, the M-step updates ``phi, q, r``.
 from __future__ import annotations
 
 import math
+import warnings
 from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
 
 from mixle.ppl.core import RandomVariable, register_composite
+from mixle.utils.exact import require_exact_bool
+
+# Roundoff allowance for the EM monotonicity claim (MXR-080-1897). EM's log likelihood is
+# non-decreasing by construction, so a *material* decrease means the E-step and M-step disagree --
+# but a plateaued fit still jitters at float precision, and refusing that would refuse fits the
+# library legitimately produces. Measured over ~14,000 fits (AR1 + LocalLevel; T from 1 to 200;
+# Gaussian / random-walk / near-constant / heavy-tailed / marginalized-NaN / huge- and tiny-scale
+# series; tol from 0 to 1e-4) the worst single-step decrease was 1.4e-15 relative to |loglik| --
+# pure roundoff, and never the step that fired the tolerance test. A relative allowance of 1e-9
+# leaves six orders of headroom over the measured noise while still catching any decrease big enough
+# to matter. `mixle.stats.latent.lda` uses the same relative-allowance shape at 1e-12.
+#
+# NOT checked, deliberately: whether the M-step's `max(..., 1e-8)` floors on q, r, and P0 can break
+# monotonicity. They cannot in theory (clipping a concave-in-the-parameter Q at a bound still yields
+# the constrained maximizer) and no sweep produced a counterexample, so no allowance is spent on it.
+_MONOTONE_RELATIVE_SLACK = 1.0e-9
+
+# Declared stopping semantics (MXR-080-1897): the reason names the rule that fired, and the
+# `converged` verdict is not free to disagree with it. Adding a stopping rule means adding its
+# reason here -- which is the point: a receipt whose verdict and reason are set independently can
+# report "converged" alongside a reason that says the loop ran out of iterations.
+_TERMINATION_REASONS = {
+    "objective_tolerance": True,  # a non-decreasing step smaller than tol
+    "iteration_limit": False,  # max_its exhausted without such a step
+}
+
+
+def _monotone_slack(objective: float) -> float:
+    """Largest objective decrease attributable to float roundoff at this objective scale."""
+    return _MONOTONE_RELATIVE_SLACK * max(1.0, abs(objective))
 
 
 class StateSpaceResult:
-    """Fitted univariate linear-Gaussian state-space model and smoothed latent path."""
+    """Fitted univariate linear-Gaussian state-space model and smoothed latent path.
+
+    The reported ``loglik`` is bound to ``objective_trace[-1]`` and the ``converged`` verdict is
+    bound to ``termination_reason``: a receipt that can state a final objective unrelated to the
+    trace it came from, or a verdict unrelated to the rule that stopped the loop, is not evidence
+    (MXR-080-1897). The smoothed path and its standard deviations are copied and sealed, so neither
+    the caller's arrays nor a later write through the result can rewrite geometry that was validated
+    at construction.
+    """
 
     def __init__(
         self,
@@ -36,13 +75,17 @@ class StateSpaceResult:
         objective_trace,
         termination_reason,
     ):
-        self.phi = float(phi)
-        self.level_sd = float(math.sqrt(q))  # state innovation sd
-        self.obs_sd = float(math.sqrt(r))  # observation noise sd
-        self.initial_mean = float(x0)
-        self.initial_sd = float(math.sqrt(P0))
-        self.smoothed = np.asarray(smoothed, dtype=float)  # E[x_t | y_{1:T}]
-        variance = np.asarray(smoothed_var, dtype=float)
+        self.phi = _finite_float(phi, "phi")
+        self.level_sd = float(math.sqrt(_positive_finite(q, "state innovation variance q")))  # state innovation sd
+        self.obs_sd = float(math.sqrt(_positive_finite(r, "observation variance r")))  # observation noise sd
+        self.initial_mean = _finite_float(x0, "initial mean x0")
+        self.initial_sd = float(math.sqrt(_positive_finite(P0, "initial variance P0")))
+        # `np.array(..., copy=True)` + `writeable = False`, not `np.asarray`: `np.asarray` returns the
+        # caller's own float64 array, so every check below described an array the caller could still
+        # rewrite afterwards -- a finite, non-negative-variance path that becomes NaN one statement
+        # later (MXR-080-1897).
+        self.smoothed = np.array(smoothed, dtype=float, copy=True)  # E[x_t | y_{1:T}]
+        variance = np.array(smoothed_var, dtype=float, copy=True)
         if (
             self.smoothed.ndim != 1
             or self.smoothed.size == 0
@@ -53,30 +96,52 @@ class StateSpaceResult:
         ):
             raise ValueError("state-space smoothing must return a finite non-empty path and non-negative variances")
         self.smoothed_sd = np.sqrt(variance)
-        self.loglik = float(loglik)
-        self.converged = bool(converged)
-        self.iterations = int(iterations)
-        self.objective_trace = tuple(float(value) for value in objective_trace)
-        self.termination_reason = str(termination_reason)
-        if (
-            not all(
-                np.isfinite(value)
-                for value in (self.phi, self.level_sd, self.obs_sd, self.initial_mean, self.initial_sd, self.loglik)
+        self.smoothed.flags.writeable = False
+        self.smoothed_sd.flags.writeable = False
+        self.loglik = _finite_float(loglik, "loglik")
+        self.converged = require_exact_bool(converged, "converged")
+        self.iterations = _positive_int(iterations, "iterations")
+        self.objective_trace = tuple(_finite_float(value, "objective_trace entry") for value in objective_trace)
+        if not isinstance(termination_reason, str):
+            raise TypeError(f"termination_reason must be one of {sorted(_TERMINATION_REASONS)}, not a coerced object")
+        self.termination_reason = termination_reason
+        if self.termination_reason not in _TERMINATION_REASONS:
+            raise ValueError(
+                f"termination_reason={self.termination_reason!r} is not a declared state-space stopping rule "
+                f"(expected one of {sorted(_TERMINATION_REASONS)})"
             )
-            or self.level_sd <= 0.0
-            or self.obs_sd <= 0.0
-            or self.initial_sd <= 0.0
-            or self.iterations <= 0
-            or len(self.objective_trace) != self.iterations + 1
-            or not np.all(np.isfinite(self.objective_trace))
-        ):
-            raise ValueError("state-space fit produced an invalid parameter or termination receipt")
+        if _TERMINATION_REASONS[self.termination_reason] is not self.converged:
+            raise ValueError(
+                f"termination_reason={self.termination_reason!r} and converged={self.converged} disagree; "
+                "the verdict must be the one the named stopping rule implies"
+            )
+        if len(self.objective_trace) != self.iterations + 1:
+            raise ValueError(
+                f"objective_trace has {len(self.objective_trace)} entries for {self.iterations} iterations; "
+                "it must hold the pre-iteration objective plus one entry per iteration"
+            )
+        if self.loglik != self.objective_trace[-1]:
+            raise ValueError(
+                f"loglik={self.loglik!r} is not the objective the fit ended on ({self.objective_trace[-1]!r}); "
+                "the reported log likelihood must be the one the returned parameters produced"
+            )
+        # Recorded, not enforced (MXR-080-1897): a decrease is *disclosed* rather than refused,
+        # because the trace is the honest record of what EM did and a result that cannot hold a
+        # non-monotone trace cannot report one. `_kalman_em` is what refuses to call a decreasing
+        # step "converged"; this is the evidence a reader needs to see that it happened.
+        steps = np.diff(np.asarray(self.objective_trace, dtype=float))
+        self.max_objective_decrease = float(min(0.0, steps.min())) if steps.size else 0.0
+        self.monotone = bool(
+            all(step >= -_monotone_slack(previous) for previous, step in zip(self.objective_trace, steps))
+        )
         self.termination = {
             "converged": self.converged,
             "iterations": self.iterations,
             "reason": self.termination_reason,
             "objective": self.loglik,
             "objective_trace": self.objective_trace,
+            "monotone": self.monotone,
+            "max_objective_decrease": self.max_objective_decrease,
         }
         self.acceptance_rate = None
         self.predictive = None
@@ -112,7 +177,31 @@ class StateSpaceResult:
             "iterations": self.iterations,
             "termination_reason": self.termination_reason,
             "objective_trace": self.objective_trace,
+            "monotone": self.monotone,
+            "max_objective_decrease": self.max_objective_decrease,
         }
+
+
+def _finite_float(value: Any, name: str) -> float:
+    """Return ``value`` as a finite float, refusing anything that is not already a real number.
+
+    ``float(value)`` accepted ``"0.5"`` and ``True`` for a fitted parameter (MXR-080-1897); a result
+    object records what a fit produced, so a value that had to be parsed or reinterpreted to become a
+    number did not come from the fit.
+    """
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a finite real number, got {type(value).__name__} ({value!r})")
+    result = float(value)
+    if not np.isfinite(result):
+        raise ValueError(f"{name} must be a finite real number, got {result!r}")
+    return result
+
+
+def _positive_finite(value: Any, name: str) -> float:
+    result = _finite_float(value, name)
+    if result <= 0.0:
+        raise ValueError(f"{name} must be a finite positive real number, got {result!r}")
+    return result
 
 
 def _positive_int(value: Any, name: str) -> int:
@@ -212,6 +301,7 @@ def _kalman_em(y, phi_free, max_its, tol, *, missing="error"):
     trace = [float(ll)]
     converged = False
     iterations = 0
+    warned_about_decrease = False
     for iteration in range(max_its):
         # The filter treats (x0, P0) as the state BEFORE the first observation (its first
         # prediction is phi*x0), so the E-step must smooth one extra step back to that same
@@ -237,21 +327,46 @@ def _kalman_em(y, phi_free, max_its, tol, *, missing="error"):
             raise RuntimeError(f"state-space EM objective became non-finite at iteration {iteration + 1}")
         trace.append(float(next_ll))
         iterations = iteration + 1
-        if tol > 0.0 and abs(next_ll - ll) < tol:
+        # Declared stopping semantics (MXR-080-1897). The old rule was `abs(next_ll - ll) < tol`,
+        # which reads a *decrease* as convergence: EM's objective is non-decreasing by construction,
+        # so a decrease is evidence the E-step and M-step disagree, and calling it "converged" hands
+        # the caller a receipt asserting the opposite of what happened. What the rule now requires is
+        # spelled out: a step that did not go downhill (beyond float roundoff at this objective's
+        # scale) *and* moved less than tol. The magnitude test stays `abs(change) < tol` so the
+        # caller's tolerance keeps meaning exactly what it did; the only steps that stop qualifying
+        # are the ones that went materially backwards.
+        change = next_ll - ll
+        slack = _monotone_slack(ll)
+        if change < -slack:
+            # Not raised. A material decrease is a defect in the updates, but the fit still has a
+            # usable smoothed path and the caller keeps the full trace to judge it; a raise here
+            # would also discard results for any future update rule that is only weakly monotone.
+            # It cannot be reported as convergence, and it is disclosed twice: here, and in the
+            # result's `monotone` / `max_objective_decrease` receipt fields.
+            if not warned_about_decrease:
+                warned_about_decrease = True
+                warnings.warn(
+                    f"state-space EM objective decreased by {-change:.3e} at iteration {iterations} "
+                    f"(from {ll!r} to {next_ll!r}). EM is non-decreasing by construction, so this is "
+                    "not convergence and is not reported as such; inspect result.objective_trace.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+        elif tol > 0.0 and abs(change) < tol:
             converged = True
             ll = next_ll
             break
         ll = next_ll
     termination_reason = "objective_tolerance" if converged else "iteration_limit"
     return StateSpaceResult(
-        phi,
-        q,
-        r,
-        x0,
-        P0,
-        xs,
-        Ps,
-        ll,
+        phi=phi,
+        q=q,
+        r=r,
+        x0=x0,
+        P0=P0,
+        smoothed=xs,
+        smoothed_var=Ps,
+        loglik=ll,
         converged=converged,
         iterations=iterations,
         objective_trace=trace,
