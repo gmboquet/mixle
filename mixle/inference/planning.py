@@ -21,6 +21,8 @@ from numbers import Integral, Real
 from types import MappingProxyType
 from typing import Any
 
+from mixle.utils.exact import require_exact_bool
+
 __all__ = [
     "Guarantee",
     "ProofObligation",
@@ -996,7 +998,10 @@ def certify(
     penalized surrogate, not the likelihood, so no block may claim more than STATIONARY however clean
     its own solver is: every stronger block is downgraded with the penalty named in its reason.
     """
-    if escape_tested:
+    # Exact, not truthy (MXR-080-1905). `if escape_tested:` meant escape_tested="false" -- the string
+    # a flag arrives as from configuration -- raised, while escape_tested=0 was a silent no-op. A flag
+    # whose whole purpose is to be refused must at least refuse the right values.
+    if require_exact_bool(escape_tested, "certify escape_tested"):
         raise ValueError("escape_tested=True is not evidence; supply a VerificationReceipt")
     blocks = _prepare_blocks(model)
     if penalized:
@@ -1097,14 +1102,24 @@ class EstimationSchedule:
         return f"EM loop until converged -- each round: E-step, then {len(msteps)} M-step(s): {inner}"
 
 
-def schedule(model: Any, *, escape_tested: bool = False) -> EstimationSchedule:
+def schedule(
+    model: Any, *, escape_tested: bool = False, receipts: Iterable[VerificationReceipt] = ()
+) -> EstimationSchedule:
     """Plan the block-coordinate estimation schedule for ``model`` (planner v2, A3).
 
     Built from the same block classification as :func:`certify`: EM blocks make the schedule a loop
     (E-step + per-block M-steps, repeated until convergence); without a latent block every block is one
     independent pass. Gradient blocks appear as explicit ``gradient`` passes with their pool placement,
-    so the schedule is also the offload plan for the hybrid case."""
-    cert = certify(model, escape_tested=escape_tested)
+    so the schedule is also the offload plan for the hybrid case.
+
+    ``receipts`` exists because ``escape_tested`` was otherwise unusable in both directions
+    (MXR-080-1905). It forwards to :func:`certify`, which refuses ``escape_tested=True`` with
+    "supply a VerificationReceipt" -- and this function had no parameter through which to supply one,
+    so the only non-default value raised an error naming a remedy the caller could not reach. Pass
+    escape evidence here instead, bound to the model via
+    :func:`receipt_subject` (MXR-080-1877).
+    """
+    cert = certify(model, escape_tested=escape_tested, receipts=receipts)
     em_blocks = [b for b in cert.blocks if b.method == "em"]
     param_blocks = [b for b in cert.blocks if b.method != "em"]
 
