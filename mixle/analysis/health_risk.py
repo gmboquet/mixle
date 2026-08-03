@@ -94,6 +94,7 @@ from scipy import stats
 
 from mixle.analysis._interval import validated_level
 from mixle.inference.conformal import split_conformal
+from mixle.utils.exact import require_exact_bool
 
 if TYPE_CHECKING:
     from mixle.reason.posterior_protocol import DerivedQuantity, Posterior
@@ -646,7 +647,7 @@ def exposure_constraints(
         if status == "violating":
             feasible = False
         elif status == "unknown":
-            feasible = bool(treat_unmodeled_as_safe)
+            feasible = require_exact_bool(treat_unmodeled_as_safe, "treat_unmodeled_as_safe")
         else:
             feasible = True
 

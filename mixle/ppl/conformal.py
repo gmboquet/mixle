@@ -30,6 +30,8 @@ from typing import Any
 
 import numpy as np
 
+from mixle.utils.exact import require_exact_bool
+
 
 def _digest(value: Any) -> str:
     """Content digest used to bind a calibrated scorer to one model state."""
@@ -354,7 +356,7 @@ class ConformalLinkPredictor:
             or not np.allclose(self.P, self.P.T, rtol=0.0, atol=1e-10)
         ):
             raise ValueError("edge_prob must be a finite symmetric undirected-graph probability matrix")
-        self.allow_self_loops = bool(allow_self_loops)
+        self.allow_self_loops = require_exact_bool(allow_self_loops, "allow_self_loops")
         if not self.allow_self_loops and not np.allclose(np.diag(self.P), 0.0, rtol=0.0, atol=1e-12):
             raise ValueError("edge_prob diagonal must be zero when self-loops are disabled")
         edges = np.asarray(cal_edges)

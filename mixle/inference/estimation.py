@@ -26,6 +26,7 @@ from mixle.stats.compute.sequence import (
     seq_log_density_sum,
 )
 from mixle.utils.aliasing import coalesce_alias
+from mixle.utils.exact import require_exact_bool
 
 T = TypeVar("T")
 E0 = TypeVar("E0")
@@ -938,7 +939,7 @@ def _resolve_monotone(
     ``monotone=True`` or deliberately use best-seen selection with ``monotone=False``.
     """
     if monotone is not None:
-        return bool(monotone)
+        return require_exact_bool(monotone, "monotone")
 
     from mixle.inference.em import MonteCarloEM, OnlineEM
     from mixle.inference.transaction import has_mutable_state
@@ -987,7 +988,7 @@ def _contains_surrogate_update(root: Any) -> bool:
 def _resolve_track_best(track_best: bool | None, estimator: ParameterEstimator) -> bool:
     """Resolve final-vs-best selection for the estimator's actual update objective."""
     if track_best is not None:
-        return bool(track_best)
+        return require_exact_bool(track_best, "track_best")
     # Observed density is not a valid selector for NCE, DPO, PINN, or another explicitly
     # surrogate-trained leaf. Their estimator owns the fitting objective, so retain its final
     # finite update instead of preferring an initially unnormalized/high-scoring model.

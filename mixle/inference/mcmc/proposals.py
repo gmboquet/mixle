@@ -12,6 +12,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.utils.exact import require_exact_bool
 from mixle.utils.special import logsumexp as _logsumexp
 
 
@@ -92,7 +93,7 @@ class AdaptiveRandomWalkProposal(RandomWalkProposal):
             raise ValueError("adaptation_rate must be positive.")
         self.target_acceptance = float(target_acceptance)
         self.adaptation_rate = float(adaptation_rate)
-        self.adapt_during_burn_in_only = bool(adapt_during_burn_in_only)
+        self.adapt_during_burn_in_only = require_exact_bool(adapt_during_burn_in_only, "adapt_during_burn_in_only")
         self.min_scale = float(min_scale)
         self.max_scale = float(max_scale)
 
@@ -131,7 +132,7 @@ class AdaptiveCovarianceProposal(Proposal):
         self.scale: float | None = None if scale is None else float(scale)
         self.regularization = float(regularization)
         self.adapt_after = int(adapt_after)
-        self.adapt_during_burn_in_only = bool(adapt_during_burn_in_only)
+        self.adapt_during_burn_in_only = require_exact_bool(adapt_during_burn_in_only, "adapt_during_burn_in_only")
         self._dim: int | None = None
         self._shape: tuple[int, ...] | None = None
         self.covariance: np.ndarray | None = None

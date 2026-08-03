@@ -36,6 +36,7 @@ import numpy as np
 from mixle.inference.node_report import node_report
 from mixle.inference.transaction import MutableStateSnapshot
 from mixle.stats.latent.mixture import MixtureDistribution, MixtureEstimator, _component_enc
+from mixle.utils.exact import require_exact_bool
 
 _DEFAULT_Q_GAIN_TOL = 1.0e-6
 _DEFAULT_WEIGHT_TOL = 1.0e-4
@@ -220,7 +221,7 @@ class FreezeRollupCache:
         self.weight_tol = float(weight_tol)
         self.weight_delta_tol = float(weight_delta_tol)
         self.freeze_patience = max(1, int(freeze_patience))
-        self.approximate_freezing = bool(approximate_freezing)
+        self.approximate_freezing = require_exact_bool(approximate_freezing, "approximate_freezing")
         self.max_frozen_rounds = int(max_frozen_rounds)
         self._entries: dict[int, _CacheEntry] = {}
         self._data_signature: bytes | None = None

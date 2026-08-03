@@ -27,6 +27,7 @@ import numpy as np
 
 from mixle.ppl.core import RandomVariable, _LinearPredictor
 from mixle.ppl.core import free as FREE
+from mixle.utils.exact import require_exact_bool
 
 # family -> canonical link name
 _LINK = {"Normal": "identity", "Bernoulli": "logit", "Poisson": "log"}
@@ -179,7 +180,7 @@ class RegressionResult:
         self.link = link
         self._idx_of = idx_of  # id(coef handle) -> column index
         self._columns = columns  # list of (kind, payload) for predict
-        self.converged = bool(converged)
+        self.converged = require_exact_bool(converged, "converged")
         self.iterations = int(iterations)
         self.termination_reason = str(termination_reason)
         self.objective_delta = float(objective_delta)
