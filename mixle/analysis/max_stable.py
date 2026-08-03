@@ -180,6 +180,20 @@ class SmithMaxStableFit:
             empirical and model extremal coefficients across pairs; exactly 0 for a 2-location fit,
             which has one pair and one parameter).
         status: see above.
+
+    Construction validates the record against its own documented domain (MXR-080-1900). It previously
+    validated nothing at all, so ``SmithMaxStableFit(model=None, n_locations=-1, n_replicates=0,
+    n_pairs=-5, residual=nan)`` constructed cleanly and reported ``converged is True`` -- a record
+    claiming a converged fit that had no model, no data and no objective value. The invariants are
+    exactly what :func:`fit_smith_maxstable` produces: a real :class:`SmithMaxStable`; at least two
+    locations (a dependence scale needs a pair) and one replicate; ``n_pairs`` the ``n_locations
+    choose 2`` the docstring above states; a finite, non-negative ``residual`` (it is a mean of
+    squares); and a ``status`` this class actually defines.
+
+    Deliberately NOT changed: the record stays a MUTABLE dataclass. Its frozen siblings in this
+    package were converted under a separate finding, and freezing this one is a broader API change
+    than the shape invariants this validates -- the fields can still be rebound after construction and
+    escape the checks below.
     """
 
     model: SmithMaxStable
@@ -188,6 +202,30 @@ class SmithMaxStableFit:
     n_pairs: int
     residual: float
     status: str = "ok"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.model, SmithMaxStable):
+            raise TypeError(f"SmithMaxStableFit.model must be a fitted SmithMaxStable, got {type(self.model).__name__}")
+        for name, minimum in (("n_locations", 2), ("n_replicates", 1), ("n_pairs", 1)):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or int(value) < minimum:
+                raise ValueError(
+                    f"SmithMaxStableFit.{name} must be an exact non-Boolean integer >= {minimum}, got {value!r}"
+                )
+        expected_pairs = self.n_locations * (self.n_locations - 1) // 2
+        if int(self.n_pairs) != expected_pairs:
+            raise ValueError(
+                f"SmithMaxStableFit.n_pairs must be n_locations choose 2 = {expected_pairs} for "
+                f"{self.n_locations} locations, got {self.n_pairs!r}"
+            )
+        residual = float(self.residual)
+        if not np.isfinite(residual) or residual < 0.0:
+            raise ValueError(
+                "SmithMaxStableFit.residual is a mean squared error and must be finite and non-negative, "
+                f"got {self.residual!r}"
+            )
+        if self.status not in ("ok", "boundary"):
+            raise ValueError(f"SmithMaxStableFit.status must be 'ok' or 'boundary', got {self.status!r}")
 
     @property
     def converged(self) -> bool:

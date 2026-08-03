@@ -41,6 +41,7 @@ from scipy import stats
 
 from mixle.analysis._interval import validated_level
 from mixle.inference.survival import aalen_johansen, cox_ph
+from mixle.utils.immutable import detach_receipt_container
 
 __all__ = ["CohortAttribution", "cohort_attribution"]
 
@@ -157,6 +158,32 @@ class CohortAttribution:
     estimates, the intervals and the ``provenance`` that documents how they were fitted cannot drift
     apart after the fact: rebinding ``hazard_ratio`` without ``hr_ci`` -- or editing a ``cif`` array
     in place through the caller's own handle -- left a record whose parts described different fits.
+
+    Construction now also enforces the record's own domain (MXR-080-1900). It previously enforced
+    none: a ``hazard_ratio`` of ``-2.0`` (impossible -- it is ``exp(coef)``), an
+    ``attributable_fraction`` of ``4.2`` (impossible -- ``(HR - 1) / HR`` approaches but never
+    exceeds 1), and an inverted ``hr_ci`` of ``(9.0, 1.0)`` all constructed silently and were
+    indistinguishable downstream from a real fit. The invariants, each one the producer already
+    guarantees:
+
+    * ``hazard_ratio`` finite and strictly positive.
+    * ``hr_ci`` finite, strictly positive, and ordered ``lo <= hi``.
+    * ``attributable_fraction`` finite and ``<= 1``. It is NOT bounded below by 0: a protective
+      exposure has ``HR < 1`` and a legitimately negative attributable fraction.
+    * ``af_ci`` either two finite values ordered ``lo <= hi``, or ``(nan, nan)`` -- the documented
+      marker for the insufficient-bootstrap-evidence case (see :class:`_InsufficientBootstrapEvidence`),
+      which is a real state the producer emits. A half-NaN interval is not.
+
+    Deliberately NOT checked: that ``attributable_fraction`` equals ``(hazard_ratio - 1) /
+    hazard_ratio`` exactly, or that either interval brackets its point estimate. Both are true of
+    :func:`cohort_attribution`'s own output, but a bootstrap percentile interval is not required to
+    contain the point estimate in general, and pinning the AF identity would turn one documented
+    parameterization into the only constructible one.
+
+    ``provenance`` is copied DEEPLY: the previous ``dict(...)`` detached only the top level, so
+    nested entries -- ``coef``/``se`` lists, the ``rng_state`` mapping that exists precisely so a fit
+    can be replayed -- stayed aliased to the caller's own objects and could be rewritten after the
+    attribution was reported.
     """
 
     hazard_ratio: float
@@ -173,9 +200,39 @@ class CohortAttribution:
             arr.setflags(write=False)
             owned_cif[cause] = arr
         object.__setattr__(self, "cif", owned_cif)
-        object.__setattr__(self, "hr_ci", (float(self.hr_ci[0]), float(self.hr_ci[1])))
-        object.__setattr__(self, "af_ci", (float(self.af_ci[0]), float(self.af_ci[1])))
-        object.__setattr__(self, "provenance", dict(self.provenance))
+        hazard_ratio = float(self.hazard_ratio)
+        if not (np.isfinite(hazard_ratio) and hazard_ratio > 0.0):
+            raise ValueError(
+                f"CohortAttribution.hazard_ratio must be finite and strictly positive (it is exp(coef)), "
+                f"got {self.hazard_ratio!r}"
+            )
+        hr_ci = (float(self.hr_ci[0]), float(self.hr_ci[1]))
+        if not (np.all(np.isfinite(hr_ci)) and 0.0 < hr_ci[0] <= hr_ci[1]):
+            raise ValueError(
+                f"CohortAttribution.hr_ci must be a finite, strictly positive, ordered (lo, hi) hazard-ratio "
+                f"interval, got {self.hr_ci!r}"
+            )
+        attributable_fraction = float(self.attributable_fraction)
+        if not (np.isfinite(attributable_fraction) and attributable_fraction <= 1.0):
+            raise ValueError(
+                f"CohortAttribution.attributable_fraction must be finite and at most 1 -- (HR - 1) / HR "
+                f"approaches 1 but never exceeds it -- got {self.attributable_fraction!r}"
+            )
+        af_ci = (float(self.af_ci[0]), float(self.af_ci[1]))
+        both_nan = bool(np.isnan(af_ci[0]) and np.isnan(af_ci[1]))
+        if not both_nan and not (np.all(np.isfinite(af_ci)) and af_ci[0] <= af_ci[1]):
+            raise ValueError(
+                "CohortAttribution.af_ci must be an ordered finite (lo, hi) interval, or (nan, nan) for the "
+                f"documented insufficient-bootstrap-evidence case; got {self.af_ci!r}"
+            )
+        object.__setattr__(self, "hazard_ratio", hazard_ratio)
+        object.__setattr__(self, "attributable_fraction", attributable_fraction)
+        object.__setattr__(self, "hr_ci", hr_ci)
+        object.__setattr__(self, "af_ci", af_ci)
+        # `detach_receipt_container`, not `freeze_receipt_container`: `provenance` is documented and
+        # consumed as a plain `dict` (and holds a typed `_AFDistribution`/`_InsufficientBootstrapEvidence`
+        # under "af_distribution", which is passed through by identity), so only the aliasing is severed.
+        object.__setattr__(self, "provenance", detach_receipt_container(dict(self.provenance)))
 
 
 def _fit_lagged(x: np.ndarray, time: np.ndarray, event: np.ndarray, latency: float):

@@ -932,6 +932,22 @@ class ExceedanceReport:
     ``warmed_up`` are the honesty flags that qualify ``alerts``; while the record was mutable,
     flipping ``calibrated`` to True or overwriting ``alerts`` in place upgraded a best-effort
     heuristic into an apparently-proven false-alarm bound with nothing else changing.
+
+    Construction additionally enforces the record's own domain (MXR-080-1900), which it previously
+    did not check at all -- ``prob_exceed`` of ``5.0``, ``-3.0`` or ``NaN``, a ``false_alarm_target``
+    of ``7.5``, and a ``prob_exceed``/``warmed_up`` array of a different length than ``alerts`` all
+    constructed silently, so the record could report an alert whose "probability" was not one, at a
+    "target rate" that was not a rate, for timesteps that did not line up with the alerts:
+
+    * ``prob_exceed`` finite and in ``[0, 1]``. It is a survival-function value by construction, so
+      this refuses nothing the producer emits.
+    * ``false_alarm_target`` finite and strictly in ``(0, 1)`` -- the same range
+      :func:`exposure_exceedance_monitor` already requires of its ``alpha``, now also true of a
+      directly constructed report.
+    * ``prob_exceed`` the same length as ``alerts``, one probability per alert.
+    * ``warmed_up`` either the same length as ``alerts`` or EMPTY. Empty is the field's own default
+      and means "warm-up was not recorded"; refusing it would reject reports the package's own tests
+      construct, and it is not the same claim as a per-timestep flag that disagrees with the alerts.
     """
 
     alerts: np.ndarray
@@ -945,7 +961,28 @@ class ExceedanceReport:
             owned = np.array(getattr(self, name), dtype=dtype, copy=True)
             owned.setflags(write=False)
             object.__setattr__(self, name, owned)
-        object.__setattr__(self, "false_alarm_target", float(self.false_alarm_target))
+        target = float(self.false_alarm_target)
+        if not (np.isfinite(target) and 0.0 < target < 1.0):
+            raise ValueError(
+                f"ExceedanceReport.false_alarm_target must be a finite false-alarm RATE strictly in "
+                f"(0, 1), got {self.false_alarm_target!r}"
+            )
+        object.__setattr__(self, "false_alarm_target", target)
+        if not np.isfinite(self.prob_exceed).all() or np.any(self.prob_exceed < 0.0) or np.any(self.prob_exceed > 1.0):
+            raise ValueError(
+                "ExceedanceReport.prob_exceed must be finite probabilities in [0, 1]; refusing to label "
+                f"{self.prob_exceed!r} an exceedance probability"
+            )
+        if self.prob_exceed.shape != self.alerts.shape:
+            raise ValueError(
+                f"ExceedanceReport.prob_exceed must carry one probability per alert; got shape "
+                f"{self.prob_exceed.shape} against alerts {self.alerts.shape}"
+            )
+        if self.warmed_up.size and self.warmed_up.shape != self.alerts.shape:
+            raise ValueError(
+                f"ExceedanceReport.warmed_up must be empty (not recorded) or carry one flag per alert; "
+                f"got shape {self.warmed_up.shape} against alerts {self.alerts.shape}"
+            )
         object.__setattr__(self, "calibrated", _require_exact_bool(self.calibrated, "ExceedanceReport.calibrated"))
 
 
