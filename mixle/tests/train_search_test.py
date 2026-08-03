@@ -4,6 +4,7 @@ The search must find a good recipe spending mostly cheap low-budget runs, wire t
 and extrapolate a partial learning curve to a full-budget loss.
 """
 
+import importlib.util
 import unittest
 
 import numpy as np
@@ -16,7 +17,15 @@ from mixle.models.train_search import (
     tune_training,
 )
 
+# `tune_training` fits a Gaussian-process surrogate over the recipe space, and that surrogate is
+# torch-backed (`mixle.models.gaussian_process._torch_engine`). Every test that calls it therefore
+# needs torch, and the hard-budget core CI tier installs no optional extras -- these failed there as
+# bare ModuleNotFoundError rather than skipping, which reads as a broken candidate instead of an
+# absent optional dependency.
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 
+
+@unittest.skipUnless(HAS_TORCH, "multi-fidelity search fits a torch-backed GP surrogate")
 class MultiFidelitySearchTest(unittest.TestCase):
     def test_space_rejects_invalid_schema_and_points(self):
         invalid_spaces = (
@@ -257,6 +266,9 @@ class TrainingSearchResultOwnershipTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             TrainingSearchResult(recipe="not a mapping", loss=1.0)
 
+    # Only this method drives a real search; the rest construct the record directly and need no
+    # optional dependency, so the guard is per-method rather than on the class.
+    @unittest.skipUnless(HAS_TORCH, "tune_training fits a torch-backed GP surrogate")
     def test_tune_training_records_the_seed_it_searched_under(self):
         def train(recipe, budget):
             return float((np.log2(recipe["d_model"]) - 8) ** 2)
