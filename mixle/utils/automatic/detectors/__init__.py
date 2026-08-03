@@ -11,6 +11,7 @@ This is purely *additive*: the profiler's built-in candidates (gaussian / studen
 and built *alongside* them, so a richer family only ever wins when its BIC actually beats the builtins.
 
 A detector receives the data two ways, matching the leaf profiler:
+
 * ``applies(arr)`` and ``score(arr, nobs)`` and ``cdf(arr)`` take the expanded value array (a NumPy array
   of the observed scalars, repeated by their counts);
 * ``factory(vdict, pseudo_count, emp_suff_stat, use_bstats)`` takes the value->count map and returns a

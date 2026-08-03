@@ -2,6 +2,8 @@
 
 The full chain named by the roadmap item, end to end:
 
+.. parsed-literal::
+
     discrepancy_report(champion, held_out)      -- 1. is the fitted champion's predictive off?
     capacity ladder + ceiling_report(...)        -- 2. "tune it" (same family, needs more capacity/data)
                                                         vs. "the structure CLASS is exhausted" (invention

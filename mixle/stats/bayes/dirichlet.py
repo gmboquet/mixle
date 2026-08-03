@@ -1316,7 +1316,7 @@ class DirichletDataEncoder(DataSequenceEncoder):
         return isinstance(other, DirichletDataEncoder) and self.dimension == other.dimension
 
     def seq_encode(self, x: Sequence[Sequence[float]]):
-        """Encode a sequence of iid probability-vector observations for vectorized 'seq_' calls.
+        """Encode a sequence of iid probability-vector observations for vectorized ``seq_`` calls.
 
         Args:
             x (Sequence[Sequence[float]]): Sequence of length-dim probability vectors.

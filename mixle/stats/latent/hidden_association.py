@@ -5,7 +5,7 @@ a list of ``(value, count)`` entries. The first side defines an empirical
 mixture over latent values, and the second side is generated from a conditional
 emission model marginalized over that empirical mixture.
 
-For grouped counts ``x`` and emissions ``y``, the model scores:
+For grouped counts ``x`` and emissions ``y``, the model scores::
 
     log p(x, y) = log p_given(x) + log p_len(|y|)
         + log(|y|!) - sum_y log(count_y!)

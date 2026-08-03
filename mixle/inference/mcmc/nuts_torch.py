@@ -1,11 +1,11 @@
-"""Torch-native No-U-Turn Sampler.
+r"""Torch-native No-U-Turn Sampler.
 
 A device-resident port of the numpy NUTS in :mod:`mixle.inference.mcmc.samplers`: identical
 algorithm (recursive tree doubling, U-turn termination, multinomial proposal, dual-averaging
 step-size adaptation), but the leapfrog trajectory and the target evaluation stay in torch
 tensors on the target's device. The (unnormalised) log-target is supplied as a torch scalar
 function ``logp(theta) -> Tensor[()]``; its ``value_and_grad`` is built with ``torch.func`` and
-``torch.compile``d once, so the autograd graph is traced a single time and reused on every
+``torch.compile``\ d once, so the autograd graph is traced a single time and reused on every
 leapfrog step instead of being rebuilt (and round-tripped through numpy) per gradient call.
 
 Intended for **GPU and large autodiff targets**, where staying on-device with a compiled target

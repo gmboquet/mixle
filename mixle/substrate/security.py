@@ -13,7 +13,7 @@ just ``.text``; :func:`redact_value` is :func:`redact_secrets` recursed over a w
 the same guard for a whole item -- the store-boundary choke point ``Substrate.put()`` / ``.update()``
 route every write through, so the guard is mandatory rather than something a caller opts into.
 
-    The patterns are deliberately conservative and named -- each finding says which rule matched, so a
+The patterns are deliberately conservative and named -- each finding says which rule matched, so a
 false positive is inspectable rather than mysterious. This is detection, not a vault: it catches the
 common leaks (a pasted key, a token in a log line) so they don't get indexed and served, and it flags
 the rest for review. Redaction preserves a short prefix so a human can still recognize which key it was

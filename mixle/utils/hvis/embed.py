@@ -113,12 +113,14 @@ def htsne(
     to_fisher(), or passing a pre-built affinity factor list, bypasses the
     mixture-posterior affinity path and does not require a DPM/mixture model.
 
-    method:
+    method::
+
         'exact'      - full-matrix gradient descent (supports optimize_alpha)
         'barnes_hut' - sparse model probabilities + internal Barnes-Hut t-SNE
         'auto'       - barnes_hut for n > 10 unless optimize_alpha is set
 
-    affinity:
+    affinity::
+
         'auto' (default) - 'local' whenever raw data is available and the
             model decomposes into leaf fields, else 'bhattacharyya'
         'local'      - per-field posterior overlap plus component-local

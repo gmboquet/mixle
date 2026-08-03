@@ -186,7 +186,7 @@ class NormalWishartDistribution(SequenceEncodableProbabilityDistribution):
         self.log_z = log_z
 
     def expected_log_det(self) -> float:
-        """E[ln |Lambda|] under the Wishart factor."""
+        """``E[ln |Lambda|]`` under the Wishart factor."""
         _, _, _, nu, dimension, log_det_w, _, _ = self._validated_state()
         return _multidigamma(nu / 2.0, dimension) + dimension * np.log(2.0) + log_det_w
 

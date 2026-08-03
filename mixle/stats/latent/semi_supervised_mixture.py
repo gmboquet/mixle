@@ -1015,9 +1015,10 @@ class SemiSupervisedMixtureDataEncoder(DataSequenceEncoder):
     def seq_encode(
         self, x: Sequence[tuple[T0, Sequence[tuple[int, T1]] | None]]
     ) -> tuple[int, Any, tuple[E1, np.ndarray, np.ndarray], Sequence[tuple[T0, Sequence[tuple[int, T1]] | None]]]:
-        """Encode a sequence of iid (value, prior) observations for vectorized "seq_" calls.
+        """Encode a sequence of iid (value, prior) observations for vectorized ``seq_`` calls.
 
-        The encoding is a tuple of length 4:
+        The encoding is a tuple of length 4::
+
             rv[0] (int): Number of observations.
             rv[1]: The values encoded by the shared component encoder.
             rv[2]: Prior arrays ((row index, component index, prob, log prob), per-row prior

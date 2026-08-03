@@ -744,7 +744,7 @@ class GeometricDataEncoder(DataSequenceEncoder):
         return isinstance(other, GeometricDataEncoder)
 
     def seq_encode(self, x: Sequence[int] | np.ndarray) -> np.ndarray:
-        """Encode iid sequence of geometric observations for vectorized "seq_" function calls.
+        """Encode iid sequence of geometric observations for vectorized ``seq_`` function calls.
 
         Note: x should be list of numpy array of positive integers.
 

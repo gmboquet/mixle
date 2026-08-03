@@ -1556,7 +1556,7 @@ def label_set_membership(label_sets, num_alphas=None):
 
     Returns:
             Tuple of the flattened label indices (member_label), the label-set index of each flattened entry
-            (member_set), and the per-set sizes |S| as floats.
+            (member_set), and the per-set sizes ``|S|`` as floats.
 
     """
     canonical = [
@@ -1623,8 +1623,8 @@ def coupled_alpha_objective(alpha, label_sets, set_counts, set_mean_logs):
 def coupled_alpha_gradient(alpha, label_sets, set_counts, set_mean_logs):
     """Gradient of the coupled multi-label alpha objective with respect to alpha.
 
-    dF/d alpha[l,k] = sum_{S contains l} (n_S/|S|) * [ psi(sum_j a_Sj) - psi(a_Sk) + mbar_Sk ], with one
-    term per occurrence of l in S.
+    ``dF/d alpha[l,k] = sum_{S contains l} (n_S/|S|) * [ psi(sum_j a_Sj) - psi(a_Sk) + mbar_Sk ]``, with
+    one term per occurrence of l in S.
 
     Args:
             alpha (np.ndarray): Alphas matrix (num_alphas by num_topics).

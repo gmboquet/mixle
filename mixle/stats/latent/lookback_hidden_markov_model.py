@@ -774,7 +774,7 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
         )
 
     def seq_encode(self, x: Sequence[Sequence[T]]):
-        """Encode a sequence of observed sequences for vectorized 'seq_' calls.
+        """Encode a sequence of observed sequences for vectorized ``seq_`` calls.
 
         Args:
             x (Sequence[Sequence[T]]): Sequence of iid observed sequences.

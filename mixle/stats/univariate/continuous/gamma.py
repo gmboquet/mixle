@@ -4,6 +4,7 @@ For positive real-valued observations, ``GammaDistribution(k, theta)`` uses
 shape ``k > 0`` and scale ``theta > 0`` with log-density:
 
     log(f(x;k,theta)) = -gammaln(k) - k*log(theta) + (k-1) * log(x) - x / theta.
+
 Values outside the positive support score ``-inf``.
 
 
@@ -261,9 +262,13 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
 
         Log-density given by,
         If x > 0.0,
+
             log(f(x;k,theta)) = -gammaln(k) - k*log(theta) + (k-1) * log(x) - x / theta,
+
         else,
+
             -np.inf
+
         Args:
             x (float): Positive real-valued number.
 
@@ -765,7 +770,7 @@ class GammaDataEncoder(DataSequenceEncoder):
         return isinstance(other, GammaDataEncoder)
 
     def seq_encode(self, x: list[float] | np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Encode iid sequence of gamma observations for vectorized "seq_" function calls.
+        """Encode iid sequence of gamma observations for vectorized ``seq_`` function calls.
 
         Note: Each entry of x must be positive float.
 

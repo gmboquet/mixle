@@ -229,7 +229,7 @@ class TruncatedSumBound:
     Attributes:
         num_enumerated: how many top items were enumerated (``< k`` means the support was exhausted).
         enumerated_mass: exact summed probability of the enumerated items (a *lower* bound on the total).
-        last_log_prob: ``log p`` of the smallest enumerated item; every un-enumerated item is ``<= `` this.
+        last_log_prob: ``log p`` of the smallest enumerated item; every un-enumerated item is ``<=`` this.
         support_size: the distribution's support cardinality (``None`` if infinite/unknown), or the number
             enumerated when the support was exhausted.
         exhausted: the enumerator ran dry within ``k`` -- the enumerated items ARE the whole support, so

@@ -918,10 +918,12 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         log p(x) = logsumexp_k (log w_k + log p_k(x)) has no exact structural count -- overlapping
         component supports would need value-level deduplication. This builds the count semiring's
         ``plus``-fold over ``scale(component_index, log w_k)`` instead, which:
+
           * reaches a 2**M budget structurally (no enumeration), and
           * is a conservative UPPER bound -- a value shared by several components is counted once
             per component, and each value is binned by its dominant weighted component (the tropical
             cost, within log2(K) bits of the exact logsumexp).
+
         Every unranked value still carries its exact mixture ``log_density`` (re-evaluated by the
         budget builder). For an exact small-budget index (best-first union with dedup), use
         ``quantized_index``. Components that cannot count structurally raise EnumerationError.

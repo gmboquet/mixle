@@ -26,7 +26,7 @@ Three pieces, in dependency order:
    GRADUATE to a real native leaf (piece 1)?
 
 :func:`add_modality_to_joint` plugs a new per-regime leaf (a native induced leaf, or a lightweight
-    fit over resonance coordinates) into an existing :class:`~mixle.reason.cross_modal.CrossModalJoint`
+fit over resonance coordinates) into an existing :class:`~mixle.reason.cross_modal.CrossModalJoint`
 by rebuilding each regime's :class:`~mixle.stats.combinator.composite.CompositeDistribution` with
 the OLD per-modality distributions reused BY REFERENCE (never refit, never copied) plus the one new
 field -- so every other modality's fitted parameters are bitwise identical before and after.

@@ -3,7 +3,7 @@
 A copula is the joint distribution of ``U = (F_1(X_1), ..., F_d(X_d))`` -- each coordinate is its own
 marginal CDF, so every marginal is Uniform(0,1) and all that remains is the *dependence*. The Gaussian
 copula puts that dependence in a correlation matrix ``R``: pull each uniform back to a standard normal
-``z_i = Phi^{-1}(u_i)`` and let ``z ~ N(0, R)``. Its density on ``(0,1)^d`` is
+``z_i = Phi^{-1}(u_i)`` and let ``z ~ N(0, R)``. Its density on ``(0,1)^d`` is::
 
     c(u) = |R|^{-1/2} exp(-1/2 z^T (R^{-1} - I) z),   z = Phi^{-1}(u),
 

@@ -217,7 +217,7 @@ def digammainv(y: np.ndarray | float) -> np.ndarray | float:
 def log1mexp(x: float) -> float:
     """Return ``log(1 - exp(x))`` for ``x <= 0``, stable across the whole range.
 
-    Uses the two-regime split (Mächler, "Accurately Computing log(1 - exp(-|a|))"):
+    Uses the two-regime split (Mächler, "Accurately Computing ``log(1 - exp(-|a|))``"):
     ``log(-expm1(x))`` when ``exp(x)`` is small and ``log1p(-exp(x))`` when it is close to 1,
     so ``1 - exp(x)`` is never formed by a catastrophically cancelling subtraction. Returns
     ``-inf`` for ``x >= 0`` (where ``1 - exp(x) <= 0``).

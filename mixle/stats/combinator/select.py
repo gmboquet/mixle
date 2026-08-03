@@ -1238,7 +1238,7 @@ class SelectDataEncoder(DataSequenceEncoder):
         )
 
     def seq_encode(self, x: Sequence[T]) -> tuple[tuple[np.ndarray, ...], tuple[int, ...], tuple[Any, ...]]:
-        """Encode a sequence of iid SelectDistribution observations for vectorized "seq_" calls.
+        """Encode a sequence of iid SelectDistribution observations for vectorized ``seq_`` calls.
 
         Observations are grouped by their choice index, in order of first appearance. The
         encoding is a tuple of three aligned tuples (one entry per observed choice index):

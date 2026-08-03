@@ -22,7 +22,7 @@ A benchmark states which phase(s) its headline number covers, and never folds co
 figure.
 
 Warm vs cold
------------
+------------
 
 Compiled kernels have a large first-call cost and a small steady-state cost. Report **warm** and **cold** as
 separate panels, never averaged together:

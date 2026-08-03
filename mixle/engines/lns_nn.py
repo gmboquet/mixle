@@ -210,9 +210,11 @@ class SumProductCircuit:
     """A probabilistic circuit evaluated entirely in integer log-space (product=add, sum=logadd).
 
     ``nodes`` is a topologically ordered list (children before parents), each a tuple:
+
       * ``("leaf", leaf_id)``           -- an input whose log-value is supplied at evaluation,
       * ``("product", [child indices])`` -- log-output = sum of children (integer ADD),
       * ``("sum", [child indices], [log_weights])`` -- log-output = logsumexp of weighted children.
+
     The root is the last node. ``evaluate_lns`` runs the whole forward pass on integers; ``evaluate_float``
     is the float64 reference. Leaf values may be scalars or arrays (the forward broadcasts).
     """

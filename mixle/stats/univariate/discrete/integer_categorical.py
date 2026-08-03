@@ -1033,7 +1033,7 @@ class IntegerCategoricalDataEncoder(DataSequenceEncoder):
         return isinstance(other, IntegerCategoricalDataEncoder)
 
     def seq_encode(self, x: list[int] | np.ndarray) -> np.ndarray:
-        """Sequence encode iid integer categorical observations for "seq_" functions.
+        """Sequence encode iid integer categorical observations for ``seq_`` functions.
 
         Args:
             x (Union[List[int], np.ndarray]): Assumed int observations of integer categorical.

@@ -20,7 +20,7 @@ Estimation alternates:
     with the atoms' estimator updates,
   - global-weight update via the standard expected-table-count approximation
     m_jk = alpha*beta_k*(psi(alpha*beta_k + n_jk) - psi(alpha*beta_k)), with
-    beta set to the Dirichlet(gamma/K + m_.k) posterior mean. Applying this
+    beta set to the Dirichlet(gamma/K + ``m_.k``) posterior mean. Applying this
     table-count formula to fractional responsibility counts is a deterministic
     approximation, not an exact collapsed-HDP CAVI step.
 
@@ -1073,7 +1073,7 @@ class HierarchicalDirichletProcessMixtureEstimator(ParameterEstimator):
         Re-estimates each atom (whose conjugate update carries its posterior
         forward as its prior), updates the global weights beta via the
         expected-table-count approximation followed by the Dirichlet(gamma/K +
-        m_.k) posterior mean, and sets each group's weights to the
+        ``m_.k``) posterior mean, and sets each group's weights to the
         Dirichlet(alpha*beta) posterior mean (deliberately the mean, not the MAP,
         which degenerates when alpha*beta_k < 1).
 

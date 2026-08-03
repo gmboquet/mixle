@@ -737,7 +737,7 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
 
         Computationally efficient implementation of log_density() for sequence encoded data x.
 
-        The arg value x is a Tuple of length 8 with entries:
+        The arg value x is a Tuple of length 8 with entries::
 
             x[0] (int): Number of total observations (number of Markov sequences).
             x[1] (ndarray[int]): Sequence index for initial state observations.
@@ -1732,7 +1732,8 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
         Note that this is the same as seq_update() for the transition and initial state updates. For len_accumulator,
         a call to seq_initialize() must be made.
 
-        The arg value x is a Tuple of length 8 with entries:
+        The arg value x is a Tuple of length 8 with entries::
+
             x[0] (int): Number of total observations (number of Markov sequences).
             x[1] (ndarray[int]): Sequence index for initial state observations.
             x[2] (ndarray[int]): Sequence index for non-initial state observations in a sequence greater than len 1.
@@ -1801,7 +1802,8 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
         Note that estimate must be passed, as the 'estimate' argument of len_accumulator.seq_update() may require
         estimate parameter to not be None.
 
-        The arg value x is a Tuple of length 8 with entries:
+        The arg value x is a Tuple of length 8 with entries::
+
             x[0] (int): Number of total observations (number of Markov sequences).
             x[1] (ndarray[int]): Sequence index for initial state observations.
             x[2] (ndarray[int]): Sequence index for non-initial state observations in a sequence greater than len 1.
@@ -2433,7 +2435,7 @@ class MarkovChainDataEncoder(DataSequenceEncoder):
     def seq_encode(self, x: list[list[T]]) -> enc_data_type:
         """Sequence encoding a sequence of iid Markov chain observations with data type T.
 
-        The returned value is (rv) is a Tuple of length 8 with entries:
+        The returned value is (rv) is a Tuple of length 8 with entries::
 
             rv[0] (int): Number of total observations (number of Markov sequences).
             rv[1] (ndarray[int]): Sequence index for initial state observations.

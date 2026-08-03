@@ -323,6 +323,8 @@ class GraphResult:
 class Graph:
     """A VMP factor graph for arbitrary conjugate-Gaussian DAGs with shared variables.
 
+    ::
+
         mu = Normal(0, 10)                       # one shared latent handle
         fit = (Graph()
                .observe(Normal(mu, 1.0), data_a) # factor A uses mu

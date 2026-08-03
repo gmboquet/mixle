@@ -44,6 +44,7 @@ Algorithm (``notes/designs/M3.md``):
    importance-resampled approximation, not an exact continuous density; ESS and a warning make that
    contract explicit.
 5. **Calibration receipts (always computed).**
+
    - **SBC.** Ties are randomized and every discrete rank cell is jittered into a continuous
      uniform variate. Each parameter dimension gets an equal-probability-bin chi-square test;
      a Bonferroni-adjusted minimum p-value supplies a valid global test under arbitrary

@@ -9,8 +9,11 @@ accept the same observation type ``T`` but do not need to share parameters or en
 
 Example: A heterogeneous mixture with weights [0.5, 0.5] and component distribution Exponential(beta) and Gamma(k,theta),
 has form
+
     p_mat(x_mat) = 0.5*P_0(x; beta) + 0.5*P_1(x; k, theta), for x > 0.0,
+
 where
+
     P_0(x;beta) is an exponential density and P_1(x; k, theta) is a Gamma density.
 """
 
@@ -1209,7 +1212,8 @@ class HeterogeneousMixtureDataEncoder(DataSequenceEncoder):
         Note: The data type for every encoder in the keys of HeterogeneousMixtureDataEncoder attribute
         self.encoder_dict.keys() is T.
 
-        The returned tuple contains:
+        The returned tuple contains::
+
             tag_list (List[ndarray[int]): Heterogeneous mixture component ids for encoded sequences in enc_data list.
             enc_data (List[S1,...,Sm]): A list of 'm' encoded sequences of type Sm, corresponding to component ids
                 in tag_list.

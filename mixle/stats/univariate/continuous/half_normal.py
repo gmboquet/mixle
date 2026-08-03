@@ -279,7 +279,7 @@ class HalfNormalDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class HalfNormalSampler(DistributionSampler):
-    """Draw iid half-normal observations as |N(0, sigma**2)|."""
+    """Draw iid half-normal observations as ``|N(0, sigma**2)|``."""
 
     def __init__(self, dist: HalfNormalDistribution, seed: int | None = None) -> None:
         self.rng = RandomState(seed)

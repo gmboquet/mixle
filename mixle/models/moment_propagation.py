@@ -190,7 +190,9 @@ def layernorm_law(
     m(x))^2)`` is QUADRATIC in ``x``, so evaluating it at ``mu`` alone (``v(mu) = mean((mu - m)^2)``) drops a
     systematic bias term: writing ``P = I - (1/d) 11^T`` for the feature-centering projector (symmetric,
     idempotent), ``v(x) = (1/d) x^T P x``, and the standard quadratic-form expectation identity gives
+
         ``E[v(x)] = v(mu) + (1/d) trace(P @ Sigma) = v(mu) + (1/d) (trace(Sigma) - (1/d) sum(Sigma))``.
+
     The second term is the "spread of x around its own per-token mean" contribution that ``v(mu)`` alone
     misses entirely; it is NOT a higher-order correction that can be dropped once ``Sigma`` is non-negligible
     relative to ``d`` -- for small ``d_model`` (e.g. an 8-wide toy model) it routinely dominates ``v(mu)``,
@@ -204,10 +206,13 @@ def layernorm_law(
 
     The mean is propagated by evaluating the true (nonlinear) LayerNorm map at ``mu`` but with the
     bias-corrected ``v``:
+
         ``mu_out = weight * (mu - m) / sqrt(v + eps) + bias``.
+
     The covariance is propagated via the JACOBIAN of LayerNorm evaluated at ``mu`` with the same
     bias-corrected ``v`` (a standard, textbook LayerNorm-backward-style derivative applied at the corrected
     anchor):
+
         ``d(norm_i)/d(x_j) |_{x=mu} = (1/sqrt(v+eps)) * (delta_ij - 1/d - (mu_i - m)(mu_j - m) / (d*(v+eps)))``
         ``J_ij = weight_i * d(norm_i)/d(x_j)``
         ``Sigma_out ~= J Sigma J^T``.
@@ -462,13 +467,19 @@ def attention_law(
     ----------
     For jointly Gaussian ``(K, V)`` (a key vector and its associated value vector from the SAME token) and a
     fixed query ``q``, the requested MGF identity is
+
         ``E[exp(q^T K / sqrt(d)) V] = exp(q^T mu_K/sqrt(d) + 0.5 q^T Sigma_KK q / d) * (mu_V + Sigma_VK q / sqrt(d))``
+
     which is the standard "``E[Y e^{t^T X}] = M_X(t) (mu_Y + Sigma_YX t)``" identity for jointly Gaussian
     ``(X, Y)`` with ``t = q / sqrt(d)``, ``X = K``, ``Y = V``. The attention DENOMINATOR (the softmax
     normalizer) is exactly the same MGF evaluated with ``V`` replaced by the constant ``1``:
+
         ``E[exp(q^T K / sqrt(d))] = exp(q^T mu_K/sqrt(d) + 0.5 q^T Sigma_KK q / d)``.
+
     Both share the identical exponential prefactor, so it CANCELS in the ratio:
+
         ``softmax-attention-output(q) ~= E[exp(q^T K/sqrt(d)) V] / E[exp(q^T K/sqrt(d))] = mu_V + (Sigma_VK / sqrt(d)) q``.
+
     This is a remarkably clean result: the MGF-approximated attention output, as a function of the query, is
     EXACTLY AFFINE in ``q`` (no exponential term survives). Since ``q`` itself has a propagated Gaussian law
     (the marginal of the joint (Q, K, V) law after the ``qkv`` projection), pushing that law through this

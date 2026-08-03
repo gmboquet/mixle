@@ -227,7 +227,7 @@ class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution)
         """Return the conditional distribution over the unobserved dimensions given ``observed``.
 
         The conditional of a multivariate Student-t is again a multivariate Student-t. With observed
-        dimensions ``o`` (Mahalanobis ``d_o``) and unobserved ``u``:
+        dimensions ``o`` (Mahalanobis ``d_o``) and unobserved ``u``::
 
             dof'   = dof + |o|,
             mu'    = mu_u + S_uo S_oo^{-1} (x_o - mu_o),

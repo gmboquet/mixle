@@ -2513,6 +2513,7 @@ def normalize_input(data, *, rdd_cap: int = 200000):
     """Coerce a profiler input to a list of records, accepting more than a bare Python list.
 
     Recognized inputs (each yields the same record stream the profiler/encoder consume):
+
     * a mixle :class:`~mixle.data.core.DataSource` (typed/structured) -> its ``records()``;
     * a pandas ``DataFrame`` (duck-typed via ``columns``/``itertuples``; pandas is never imported) ->
       one record per row across its columns (scalar for a single column, tuple otherwise);

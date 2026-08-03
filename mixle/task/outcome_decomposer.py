@@ -2,9 +2,9 @@
 
 Candidate plans are proposed by sampling a fitted :class:`~mixle.task.plan_model.PlanModel`, executing
 them in the :mod:`~mixle.task.explore_world`
-    world, keep verifiably successful traces (score above a quantile of that round's own scores), refit
-    the plan model on successes, iterate a few rounds. Training signal is only world score -- verifiable
-by construction, never a proxy or a teacher's opinion.
+world, keep verifiably successful traces (score above a quantile of that round's own scores), refit
+the plan model on successes, iterate a few rounds. Training signal is only world score -- verifiable
+by construction, never a proxy or a teacher's opinion. ::
 
     decomposer = train_outcome_decomposer(seed_worlds=40, n_cells=20, n_targets=3, budget=30)
     decomposer.plan_model.sample(rng)          # a plan shaped by what actually worked, not just imitation

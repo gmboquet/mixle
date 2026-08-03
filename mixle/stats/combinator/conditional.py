@@ -497,7 +497,8 @@ class ConditionalDistribution(SequenceEncodableProbabilityDistribution):
     def seq_log_density(self, x: E0) -> np.ndarray:
         """Arkouda vectorized evaluation of the log-density on sequence encoded data x.
 
-        x Tuple of length 5:
+        x Tuple of length 5::
+
             x[0] (int): length of x (i.e. total observations).
             x[1] (Tuple[T0]): Unique conditional values in data.
             x[2] (Tuple[E0,...]): Tuple of encoded data sequences for each given key.
@@ -1190,7 +1191,8 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
         Note: _rng_initialize is called if _init_rng is False. This allows consistency between seq_initialize and
         initialize.
 
-        E Tuple of length 5:
+        E Tuple of length 5::
+
             E[0] (int): length of x (i.e. total observations).
             E[1] (Tuple[T0]): Unique conditional values in data.
             E[2] (Tuple[Encoded[T1]): Tuple of sequence encoded data of type T1 encoded by
@@ -1243,7 +1245,8 @@ class ConditionalDistributionAccumulator(SequenceEncodableStatisticAccumulator):
 
         Calls seq_update on accumulator_map, default_accumulator, and given_accumualtor.
 
-        E Tuple of length 5:
+        E Tuple of length 5::
+
             E[0] (int): length of x (i.e. total observations).
             E[1] (Tuple[T0]): Unique conditional values in data.
             E[2] (Tuple[Encoded[T1]): Tuple of sequence encoded data of type T1 encoded by
@@ -1798,13 +1801,14 @@ class ConditionalDistributionDataEncoder(DataSequenceEncoder):
     def seq_encode(
         self, x: list[tuple[T0, T1]]
     ) -> tuple[int, tuple[Any, ...], tuple[Any, ...], tuple[np.ndarray, ...], Any | None]:
-        """Encode sequence of iid observations from ConditionalDistribution for vectorized "seq_" function calls.
+        """Encode sequence of iid observations from ConditionalDistribution for vectorized ``seq_`` function calls.
 
         Data must be a List of Tuple of two types, T0 and T1. T0 is the data type compatible with the conditional
         values of the ConditionalDistribution. T1 must be consistent with the data type of the conditional
         distributions.
 
-        E Tuple of length 5:
+        E Tuple of length 5::
+
             E[0] (int): length of x (i.e. total observations).
             E[1] (Tuple[T0]): Unique conditional values in data.
             E[2] (Tuple[Encoded[T1]): Tuple of sequence encoded data of type T1 encoded by

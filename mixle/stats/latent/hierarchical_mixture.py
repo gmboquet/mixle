@@ -903,7 +903,8 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
     ) -> "HierarchicalMixtureEstimatorAccumulator":
         """Combine the sufficient statistics of 'suff_stat; with attribute variables.
 
-        Arg suff_stat is a Tuple of length 4 containing,
+        Arg suff_stat is a Tuple of length 4 containing, ::
+
             suff_stat[0] (ndarray[float]): Aggregated token-level component counts with shape
                 (num_mixtures, num_topics).
             suff_stat[1] (ndarray[float]): Aggregated document-level outer-posterior sums with length num_mixtures.
@@ -1181,6 +1182,9 @@ class HierarchicalMixtureEstimator(ParameterEstimator):
         """Estimate a hierarchical mixture from aggregated sufficient statistics.
 
         ``suff_stat`` is a four-item tuple containing:
+
+        .. parsed-literal::
+
             suff_stat[0] (ndarray[float]): Aggregated token-level component counts with shape
                 (num_mixtures, num_topics). Row-normalized into the topic weights ``taus``.
             suff_stat[1] (ndarray[float]): Aggregated document-level outer-posterior sums with length

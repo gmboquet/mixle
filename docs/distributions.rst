@@ -110,8 +110,7 @@ Combinators build distributions over structured observations.
 ``TransformDistribution``
     Change of variables or deterministic transformations.
 
-``TruncatedDistribution``, ``CensoredDistribution``, ``HurdleDistribution``,
-``ZeroInflatedDistribution``
+``TruncatedDistribution``, ``CensoredDistribution``, ``HurdleDistribution``, ``ZeroInflatedDistribution``
     Support modifications for common data-generation effects.
 
 ``BackoffDistribution``

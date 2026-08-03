@@ -2,7 +2,7 @@
 
 Each class here is a thin subclass of :class:`~mixle.models.neural_density.NeuralDensity` whose ``__init__`` builds
 its torch module from readable hyperparameters. So a neural density is a *first-class distribution object* you drop
-straight into a ``MixtureDistribution`` / composite / HMM emission -- no ``build_* `` + adapter double-wrap::
+straight into a ``MixtureDistribution`` / composite / HMM emission -- no ``build_*`` + adapter double-wrap::
 
     from mixle.models import VAE
     from mixle.stats import GaussianDistribution, MixtureDistribution
