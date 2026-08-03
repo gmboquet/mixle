@@ -133,11 +133,19 @@ class TiedRankTransformTest(unittest.TestCase):
     TIED_ORDERED = [1, 1, 1, 1, 1, 3, 2, 0, 0, 0, 0, 2, 1, 2, 3, 3, 3, 3, 3, 3]
 
     def test_ordered_tied_data_is_not_certified_exchangeable(self):
-        rep = exchangeability_check(self.TIED_ORDERED, alpha=0.01, n_perm=999, seed=19)
+        # alpha raised from 0.01 to 0.02 by MXR-080-1887, which corrected this check's multiplicity.
+        # Two probes run per field, so a valid level-0.01 union-intersection test needs each at 0.005;
+        # this data's raw trend p is 0.008, which clears 0.01 only if the second probe is pretended
+        # not to exist. Demanding rejection at 0.01 was demanding it at an anti-conservative level.
+        #
+        # What this test is actually about is unchanged and still asserted below: the mid-rank
+        # transform is what makes the trend detectable at all, taking the raw p from 0.042 (which
+        # sailed through the original screen) to 0.008.
+        rep = exchangeability_check(self.TIED_ORDERED, alpha=0.02, n_perm=999, seed=19)
         self.assertNotEqual(rep.label, "exchangeable")
         self.assertFalse(rep.exchangeable)
-        # pre-fix this reported trend_p=0.042, which passes an alpha=0.01 screen
-        self.assertLess(rep.fields[0]["trend_p"], 0.01)
+        self.assertLess(rep.fields[0]["trend_p_raw"], 0.01)  # pre-fix this was 0.042
+        self.assertLess(rep.fields[0]["trend_p"], 0.02)  # and it still rejects at a corrected level
 
     def test_rank_correlation_matches_an_independent_mid_rank_spearman(self):
         from scipy import stats
