@@ -1,6 +1,7 @@
 """Reproducible artifacts for the PPL surface: provenance headers for fitted RandomVariables."""
 
 import unittest
+from collections.abc import Iterator
 
 import numpy as np
 
@@ -84,6 +85,70 @@ class PPLProvenanceTest(unittest.TestCase):
         self.assertEqual(fitted.seen, [1.0])
         self.assertEqual(header.training["surface"], "ppl")
         self.assertFalse(hasattr(fitted, "header"))
+
+    def test_one_shot_iterable_that_is_not_an_iterator_is_snapshotted_before_the_fit(self):
+        """MXR-080-1897: only ``Iterator`` was snapshotted, so a one-shot *iterable* was hashed empty."""
+
+        class OneShotIterable:
+            """Iterable, but not an ``Iterator``: re-iterating a drained source yields nothing."""
+
+            def __init__(self, records):
+                self._records = list(records)
+                self._spent = False
+
+            def __iter__(self):
+                if self._spent:
+                    return iter(())
+                self._spent = True
+                return iter(self._records)
+
+        class Spy:
+            def fit(self, data, **_kw):
+                self.seen = list(data)
+                return self
+
+        records = [1.0, 2.0, 3.0, 4.0]
+        source = OneShotIterable(records)
+        self.assertNotIsInstance(source, Iterator)  # why the old rule let it through
+
+        fitted, header = fit_with_provenance(Spy(), source, seed=0)
+        self.assertEqual(fitted.seen, records)
+        # used to be dataset_hash([]) with n_records=None -- a header claiming an empty dataset
+        self.assertNotEqual(header.dataset_hash, dataset_hash([]))
+        self.assertEqual(header.dataset_hash, dataset_hash(records))
+        self.assertEqual(header.n_records, len(records))
+        self.assertTrue(header.training["data_materialized"])
+
+    def test_data_the_fit_mutates_is_refused_rather_than_hashed_after_the_fact(self):
+        """MXR-080-1897: the hash was taken after the fit, so in-place edits rewrote what it described."""
+
+        class MutatingSpy:
+            def fit(self, data, **_kw):
+                self.seen = list(data)
+                for index in range(len(data)):
+                    data[index] = 0.0
+                return self
+
+        payload = [1.0, 2.0, 3.0]
+        with self.assertRaisesRegex(RuntimeError, "changed while rv.fit was running"):
+            fit_with_provenance(MutatingSpy(), payload, seed=0)
+        # the caller's own list is a snapshot source, not the fit's scratch space
+        self.assertEqual(payload, [1.0, 2.0, 3.0])
+
+    def test_arrays_stay_arrays_and_are_detached_from_the_caller(self):
+        """The snapshot must not silently retype an ndarray fit input (MXR-080-1897)."""
+
+        class Spy:
+            def fit(self, data, **_kw):
+                self.seen = data
+                return self
+
+        payload = np.array([1.0, 2.0, 3.0])
+        fitted, header = fit_with_provenance(Spy(), payload, seed=0)
+        self.assertIsInstance(fitted.seen, np.ndarray)
+        self.assertIsNot(fitted.seen, payload)
+        self.assertEqual(header.dataset_hash, dataset_hash(payload))
+        self.assertEqual(header.n_records, 3)
 
     def test_rng_override_and_invalid_seeds_are_rejected(self):
         rv = Normal(free, free)
