@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from numbers import Integral, Real
 from typing import Any
@@ -151,6 +151,44 @@ def recommend_route(
     )
 
 
+def _attribute_snapshot(model: Any) -> Callable[[], None]:
+    """Return a callable that puts ``model``'s instance attributes back the way they are right now.
+
+    MXR-080-1895, the rollback half of :func:`select_alpha_for_cost`'s transactional sweep. The
+    calibration state this function disturbs is rebound *attributes*:
+    :class:`~mixle.task.calibrate.CalibratedTaskModel` keeps its threshold in ``qhat`` and its target
+    in ``alpha``, and ``calibrate()`` rebinds ``qhat`` and nothing else. Snapshotting ``__dict__`` and
+    restoring it therefore returns that model to its exact prior state, including dropping any
+    attribute the sweep added.
+
+    Two stated limits. It is a SHALLOW snapshot: an attribute that is mutated in place (a list
+    appended to, an array written through, a nested model's weights updated by a fit) is not undone,
+    because the object it points at is the same object. And a model defined with ``__slots__`` has no
+    ``__dict__``; for those only ``alpha`` is restored, which is the one attribute the duck-typed
+    contract in :func:`select_alpha_for_cost` actually names. Neither case can be handled generically
+    without knowing what a caller's ``calibrate()`` touches, and guessing would be worse than saying
+    so: the alternative that was in place -- leaving the failed state entirely alone -- is strictly
+    worse than both.
+    """
+    state = getattr(model, "__dict__", None)
+    if isinstance(state, dict):
+        snapshot = dict(state)
+
+        def restore() -> None:
+            state.clear()
+            state.update(snapshot)
+
+        return restore
+
+    alpha = getattr(model, "alpha", None)
+
+    def restore_alpha() -> None:
+        if alpha is not None:
+            model.alpha = alpha
+
+    return restore_alpha
+
+
 def select_alpha_for_cost(
     model: Any,
     cal_texts: Sequence[Any],
@@ -183,6 +221,11 @@ def select_alpha_for_cost(
     ``(best_alpha, best_plan, plan_by_alpha)`` so the full sweep remains
     auditable; the plans are policy-selection cost estimates, while the model's
     final threshold is the independent certification result.
+
+    The in-place recalibration is all-or-nothing (MXR-080-1895): if any step raises, ``model``'s
+    attributes are restored to what they were on entry before the exception propagates, so a failed
+    sweep can never leave a serving model carrying a threshold fitted on policy-selection rows. See
+    :func:`_attribute_snapshot` for what "restored" does and does not cover.
     """
     if not isinstance(cost, CostModel):
         raise TypeError("cost must be a CostModel")
@@ -216,14 +259,28 @@ def select_alpha_for_cost(
     alpha_values = [_probability(alpha, "alpha") for alpha in alpha_values]
     if any(alpha in (0.0, 1.0) for alpha in alpha_values):
         raise ValueError("alpha candidates must be strictly between 0 and 1")
-    plans: dict[float, RoutePlan] = {}
-    for a in alpha_values:
-        model.alpha = a
-        model.calibrate(cal_texts, cal_labels)
-        p_escalate = model.escalation_rate(probe_texts)
-        plans[a] = recommend_route(cost, volume=volume, n_label=n_label, p_escalate=p_escalate)
+    # MXR-080-1895: this sweep recalibrates `model` in place once per candidate, which is its declared
+    # contract -- but only when it RUNS TO COMPLETION. A failure partway (an unavailable scoring
+    # backend, a bad calibration row) used to abandon the model wherever the sweep had got to: alpha
+    # set to a candidate that was never selected, and a threshold fitted on the POLICY-SELECTION rows
+    # this function's own docstring promises never bear coverage. A caller that caught the error and
+    # kept serving was serving an uncertified threshold, with nothing in the object saying so.
+    #
+    # So the sweep is transactional: either it finishes and the model carries the certification-set
+    # threshold, or it raises and the model is left exactly as it was handed over.
+    restore = _attribute_snapshot(model)
+    try:
+        plans: dict[float, RoutePlan] = {}
+        for a in alpha_values:
+            model.alpha = a
+            model.calibrate(cal_texts, cal_labels)
+            p_escalate = model.escalation_rate(probe_texts)
+            plans[a] = recommend_route(cost, volume=volume, n_label=n_label, p_escalate=p_escalate)
 
-    best_alpha = min(plans, key=lambda a: plans[a].total)
-    model.alpha = best_alpha
-    model.calibrate(certification_texts, certification_labels)
+        best_alpha = min(plans, key=lambda a: plans[a].total)
+        model.alpha = best_alpha
+        model.calibrate(certification_texts, certification_labels)
+    except BaseException:
+        restore()
+        raise
     return best_alpha, plans[best_alpha], plans

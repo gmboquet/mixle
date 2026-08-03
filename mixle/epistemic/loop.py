@@ -35,6 +35,27 @@ from mixle.epistemic.portfolio import Hypothesis, HypothesisPortfolio, _checked_
 # `_checked_likelihood` is imported rather than re-implemented: "finite and non-negative, 0.0 allowed"
 # is one contract, and the loop must not police it differently from the portfolio operations it feeds.
 
+ActionLikelihood = Callable[[Hypothesis, Any, Any], float]
+"""``(hypothesis, action, observation) -> p(y | h, a)`` -- the ACTION-CONDITIONED outcome law.
+
+MXR-080-1896. ACT's ``EIG = E[log p(y|h,a) - log sum_h' w_h' p(y|h',a)]`` is an expectation over the
+outcome law *of the experiment ``a``*, and ``simulate_fn(h, a, rng)`` already draws from that law. The
+matching density had nowhere to live: :func:`step`'s ``likelihood`` is a two-argument
+``(hypothesis, observation)`` :class:`~mixle.epistemic.likelihood.LikelihoodStrategy`, so whenever
+``simulate_fn``'s law genuinely depended on ``a`` the estimator was pairing draws from ``q(y|h,a)``
+with a density ``p(y|h)`` from a *different* distribution. That ratio is not a mutual information and
+is not even sign-constrained: :mod:`mixle.task.discrepancy_invention_loop`'s probe, which
+rejection-samples the truncated law ``p(y|h, |y-a| <= w)``, reported "EIG" values of ``-1.15`` nats for
+four of five candidate actions where the true action-conditioned EIG was ``+0.04`` -- so the number
+being maximized was not the information gain of the experiment being commissioned.
+
+This is an *optional* second density, not a replacement: ``action_likelihood=None`` keeps the existing
+two-argument behaviour verbatim, which stays exactly right whenever the outcome law does not depend on
+the action (``p(y|h,a) == p(y|h)``) -- the common case for a ``simulate_fn`` that merely predicts from
+the hypothesis. Nothing here can detect which case a caller is in (a ``simulate_fn`` is opaque), so
+declaring it is the caller's job and there is deliberately no guard that rejects the two-argument form.
+"""
+
 
 def _as_rng(rng: Any) -> np.random.RandomState:
     return rng if isinstance(rng, np.random.RandomState) else np.random.RandomState(rng)
@@ -189,13 +210,49 @@ def _portfolio_eig_nmc(
     *,
     n_outer: int,
     n_inner: int,
+    action_likelihood: ActionLikelihood | None = None,
 ) -> float:
+    """The EIG estimate alone; see :func:`_portfolio_eig_nmc_stats` for the full contract."""
+    return _portfolio_eig_nmc_stats(
+        portfolio,
+        action,
+        likelihood,
+        simulate_fn,
+        rng,
+        n_outer=n_outer,
+        n_inner=n_inner,
+        action_likelihood=action_likelihood,
+    )[0]
+
+
+def _portfolio_eig_nmc_stats(
+    portfolio: HypothesisPortfolio,
+    action: Any,
+    likelihood: Callable[[Hypothesis, Any], float],
+    simulate_fn: Callable[[Hypothesis, Any, np.random.RandomState], Any],
+    rng: np.random.RandomState,
+    *,
+    n_outer: int,
+    n_inner: int,
+    action_likelihood: ActionLikelihood | None = None,
+) -> tuple[float, float]:
     """Nested-MC EIG of ``action`` against the portfolio's own discrete weighted hypothesis set.
+
+    Returns ``(eig, standard_error)``. The standard error is the sample standard error of the mean
+    over the ``n_outer`` per-draw terms, and it is what lets a caller tell "this estimate is noise
+    around zero" from "this estimate is genuinely negative" -- a distinction that matters because a
+    genuinely negative EIG is impossible (it is a mutual information) and therefore diagnoses a
+    ``simulate_fn``/density mismatch rather than a small information gain. See :func:`step`.
 
     ``EIG = E_{h, y}[ log p(y|h,a) - log sum_h' w_h' p(y|h',a) ]``, estimated by drawing ``n_outer``
     hypotheses from the (renormalized active) portfolio, simulating one observation each via
     ``simulate_fn``, and estimating the log-evidence denominator from ``n_inner`` further draws --
     the discrete-portfolio analogue of :func:`mixle.doe.active.expected_information_gain_nmc`.
+
+    ``action_likelihood`` (MXR-080-1896) supplies the ``p(y|h,a)`` that formula actually names; see
+    :data:`ActionLikelihood`. When it is ``None`` the two-argument ``likelihood`` is used unchanged,
+    which is the correct density exactly when ``simulate_fn``'s outcome law does not depend on the
+    action.
 
     The "in play" set is hypotheses that are both ``active`` *and* carry positive weight, not
     ``active`` alone: :class:`~mixle.epistemic.portfolio.HypothesisPortfolio`'s constructor only
@@ -225,24 +282,112 @@ def _portfolio_eig_nmc(
     closed_mass = 1.0 - portfolio.w_open
     active = [(w, h) for w, h in zip(portfolio.weights, portfolio.hypotheses) if h.active and w > 0.0]
     if not active or closed_mass <= 0.0:
-        return 0.0
+        return 0.0, 0.0
     weights = np.array([w for w, _ in active], dtype=np.float64)
     weights = weights / weights.sum()
     hyps = [h for _, h in active]
-    total = 0.0
+
+    if action_likelihood is None:
+
+        def density(hypothesis: Hypothesis, y: Any) -> float:
+            return _checked_likelihood(likelihood(hypothesis, y), source=f"likelihood for {hypothesis.id!r}")
+    else:
+
+        def density(hypothesis: Hypothesis, y: Any) -> float:
+            return _checked_likelihood(
+                action_likelihood(hypothesis, action, y),
+                source=f"action_likelihood for {hypothesis.id!r} at action {action!r}",
+            )
+
+    terms = np.zeros(n_outer, dtype=np.float64)
     outer_idx = rng.choice(len(hyps), size=n_outer, p=weights)
-    for i in outer_idx:
+    for slot, i in enumerate(outer_idx):
         h = hyps[i]
         y = simulate_fn(h, action, rng)
-        ll_true = math.log(max(_checked_likelihood(likelihood(h, y), source=f"likelihood for {h.id!r}"), 1e-300))
+        lik_true = density(h, y)
+        if lik_true <= 0.0:
+            # MXR-080-1896: the outcome law says the hypothesis that just GENERATED this draw could
+            # not have generated it. That is not evidence about anything -- it means `simulate_fn` and
+            # the density describe different experiments, or (the reachable, legitimate case) that
+            # `simulate_fn` is a finite-budget rejection sampler which exhausted its budget and
+            # returned a fallback draw from outside the accepted set its density is normalized over.
+            # Such a draw discriminates nothing, so it contributes exactly 0 to the expectation.
+            #
+            # This is deliberately NOT a raise. A budget-exhaustion fallback is a state the library
+            # legitimately produces (see `mixle.task.discrepancy_invention_loop`'s
+            # `default_probe_simulate_fn`, whose docstring commits to returning the closest real model
+            # draw rather than fabricating one), and rejecting it would refuse exactly the far-from-
+            # the-data actions an EIG search most needs to consider. Previously the two `1e-300` floors
+            # below happened to cancel to the same 0.0 whenever EVERY hypothesis also scored 0 -- but
+            # only then; when any other hypothesis scored positively the term became a ~-690 nat
+            # artifact of the floor. Making the 0.0 explicit removes the dependence on that accident.
+            continue
+        ll_true = math.log(max(lik_true, 1e-300))
         inner_idx = rng.choice(len(hyps), size=n_inner, p=weights)
-        liks = np.array(
-            [_checked_likelihood(likelihood(hyps[j], y), source=f"likelihood for {hyps[j].id!r}") for j in inner_idx],
-            dtype=np.float64,
-        )
+        liks = np.array([density(hyps[j], y) for j in inner_idx], dtype=np.float64)
         log_evidence = math.log(max(float(np.mean(liks)), 1e-300))
-        total += ll_true - log_evidence
-    return float(closed_mass * total / n_outer)
+        terms[slot] = ll_true - log_evidence
+    terms *= closed_mass
+    eig = float(terms.mean())
+    # Standard error of the mean over the outer draws. `ddof=1` needs at least two draws; a single
+    # draw carries no information about its own spread, so its standard error is reported as `inf`
+    # ("unknown"), which keeps any noise test built on it maximally permissive rather than
+    # accidentally strict.
+    standard_error = float(terms.std(ddof=1) / math.sqrt(n_outer)) if n_outer > 1 else math.inf
+    return eig, standard_error
+
+
+_NOISE_SIGMAS = 3.0
+"""How many standard errors below zero an EIG estimate may sit before it stops being noise.
+
+MXR-080-1896. An expected information gain is a mutual information, so it cannot really be negative;
+a nested-MC estimate of one nevertheless can be, purely from sampling. The two cases need opposite
+responses -- round the first to ``0.0``, refuse the second -- and the only thing that separates them
+is whether the shortfall is explainable by the estimator's own spread. Three standard errors is the
+conventional "not attributable to noise" line, and it is stated as a number of sigmas rather than a
+tolerance in nats so that it does not silently become strict or lax when a caller changes
+``n_outer``.
+"""
+
+
+def _reported_eig(action: Any, eig: float, standard_error: float) -> float:
+    """Project a confirming EIG estimate onto the feasible set, or refuse it (MXR-080-1896).
+
+    A negative estimate that is within :data:`_NOISE_SIGMAS` standard errors of zero is a sampling
+    artifact around a genuinely tiny information gain -- and ``0.0`` is already this module's own
+    value for "there is nothing to discriminate between" (see :func:`_portfolio_eig_nmc_stats`), so
+    reporting ``0.0`` is a projection onto the feasible set rather than a new convention. Rounding it
+    is also what keeps a real measurement from being rejected by
+    :meth:`EpistemicStep.__post_init__`'s non-negativity check, whose ``1e-9`` slack is calibrated for
+    floating-point drift, not for Monte Carlo error.
+
+    A negative estimate too large to be noise is not a small EIG at all: the log-ratio being averaged
+    is not a likelihood ratio, and by far the likeliest reason is that ``simulate_fn`` draws from a law
+    the density does not describe -- so the message names that and the ``action_likelihood`` fix rather
+    than leaving a caller to decode a downstream complaint about ``next_action_eig``.
+
+    Honest limit: this is a BACKSTOP, not a detector for that mismatch. It only ever sees the action
+    the argmax already chose, and an argmax preferentially chooses actions whose mismatched ratio
+    happened to come out *positive* -- measured on the two-Gaussian probe that motivated this finding,
+    the mismatch made four of five actions score around ``-1.15`` nats and the selected one ``+0.11``,
+    so this check fired on 0 of 20 seeds. It is here because separating selection from final evidence
+    requires reporting an independent estimate, and an independent estimate of a near-zero EIG lands
+    negative about half the time; without this projection those legitimate measurements would be
+    rejected outright by :meth:`EpistemicStep.__post_init__`. Measured false-positive rate on
+    correctly specified pairs in that same near-zero regime: 0 of 360 runs.
+    """
+    if eig >= 0.0:
+        return eig
+    slack = max(_NOISE_SIGMAS * standard_error, 1e-9) if math.isfinite(standard_error) else math.inf
+    if eig >= -slack:
+        return 0.0
+    raise ValueError(
+        f"EIG estimate for action {action!r} is {eig!r}, which is {abs(eig) / max(standard_error, 1e-300):.1f} "
+        f"standard errors below zero -- an expected information gain cannot be negative, so this is not a small "
+        f"gain but a mismatch: simulate_fn is drawing from an action-conditioned law that the scoring density "
+        f"does not describe. Pass action_likelihood=(hypothesis, action, observation) -> p(y|h,a) so the density "
+        f"matches the experiment being simulated."
+    )
 
 
 def step(
@@ -252,6 +397,7 @@ def step(
     *,
     action_space: Sequence[Any] | None = None,
     simulate_fn: Callable[[Hypothesis, Any, np.random.RandomState], Any] | None = None,
+    action_likelihood: ActionLikelihood | None = None,
     cost_fn: Callable[[Any], float] | None = None,
     lam: float = 1.0,
     surprise_threshold: float | None = None,
@@ -278,6 +424,21 @@ def step(
     posterior are derived from the same evidence, so a stateful or stochastic likelihood can no longer
     make one step report two different beliefs, and an expensive likelihood is not paid for twice.
 
+    ``action_likelihood`` (MXR-080-1896, see :data:`ActionLikelihood`) declares the ACTION-CONDITIONED
+    outcome density ``p(y|h,a)`` that ACT's own formula names. Supply it whenever ``simulate_fn``'s
+    outcome law depends on the action -- with it left at ``None`` the two-argument ``likelihood`` is
+    used for scoring, which is right only when it does not. UPDATE is unaffected either way: it
+    conditions on an observation the caller has already obtained, not on a simulated one, so it keeps
+    using ``likelihood``.
+
+    MXR-080-1896, selection vs. final evidence: ``next_action_eig`` is NOT the score that won the
+    argmax. ``max_a EIG_hat(a)`` over noisy Monte Carlo estimates is the winner's curse -- it is biased
+    high for the winner precisely because an upward error is what made a candidate win (measured at
+    ``+0.054`` nats on a ``~0.2`` nat probe, a ~27% overstatement). The argmax selects; the winner's
+    EIG is then re-estimated once on an INDEPENDENT draw stream and that unbiased number is what gets
+    reported and journaled. Only the reported magnitude changes -- which action is chosen is still
+    decided by the first pass, since re-scoring every candidate would just recreate the same curse.
+
     The ACT economics are validated rather than trusted: ``lam`` and every ``cost_fn`` result must be
     finite and non-negative, and ``n_outer``/``n_inner`` must be exact positive integers. Without
     those checks a NaN cost or EIG made ``score > best_score`` false for every candidate, so a
@@ -303,16 +464,44 @@ def step(
         n_inner = _sample_budget(n_inner, "n_inner")
         rng_ = _as_rng(rng)
         best_score = -math.inf
+        selected = False
         for candidate in action_space:
             eig = _portfolio_eig_nmc(
-                updated, candidate, likelihood, simulate_fn, rng_, n_outer=n_outer, n_inner=n_inner
+                updated,
+                candidate,
+                likelihood,
+                simulate_fn,
+                rng_,
+                n_outer=n_outer,
+                n_inner=n_inner,
+                action_likelihood=action_likelihood,
             )
             if not math.isfinite(eig):
                 raise ValueError(f"EIG estimate for action {candidate!r} is not finite: {eig!r}")
             cost = _nonneg_finite(cost_fn(candidate), f"cost_fn({candidate!r})") if cost_fn is not None else 0.0
             score = eig - lam_ * cost
             if score > best_score:
-                best_score, next_action, next_action_eig = score, candidate, eig
+                best_score, next_action, next_action_eig, selected = score, candidate, eig, True
+        if selected:
+            # MXR-080-1896 -- separate SELECTION from FINAL EVIDENCE. The scores above chose the
+            # action; reporting the winning score as the action's EIG would report the maximum of a
+            # set of noisy estimates, which overstates the winner by construction. The seed is drawn
+            # from `rng_` so the re-estimate is a stream independent of every draw used for selection
+            # while the whole step stays reproducible from the caller's single `rng`.
+            confirm_rng = np.random.RandomState(int(rng_.randint(0, 2**31 - 1)))
+            confirmed, standard_error = _portfolio_eig_nmc_stats(
+                updated,
+                next_action,
+                likelihood,
+                simulate_fn,
+                confirm_rng,
+                n_outer=n_outer,
+                n_inner=n_inner,
+                action_likelihood=action_likelihood,
+            )
+            if not math.isfinite(confirmed):
+                raise ValueError(f"confirming EIG estimate for action {next_action!r} is not finite: {confirmed!r}")
+            next_action_eig = _reported_eig(next_action, confirmed, standard_error)
 
     return EpistemicStep(
         observation=observation,
@@ -324,4 +513,4 @@ def step(
     )
 
 
-__all__ = ["EpistemicStep", "step"]
+__all__ = ["ActionLikelihood", "EpistemicStep", "step"]

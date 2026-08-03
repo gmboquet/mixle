@@ -18,6 +18,8 @@ from mixle.task.capacity import (  # noqa: E402
     DEFAULT_RUNGS,
     KNOWN_RUNGS,
     WordEmbeddingFeaturizer,
+    _prepare_split,
+    _teacher_labels,
     capacity_ladder,
     climb_to,
 )
@@ -269,6 +271,86 @@ class CapacityContractTest(unittest.TestCase):
         np.testing.assert_array_equal(featurizer.vectors["word"], [1.0, 0.0])
         with self.assertRaises(ValueError):
             WordEmbeddingFeaturizer({"a": [1.0], "b": [1.0, 2.0]}, dim=2)
+
+
+class SideEffectingTeacherInvocationCountTest(unittest.TestCase):
+    """MXR-080-1895: the capacity fallback invoked a side-effecting teacher more than once per text.
+
+    Reproduced: ``_teacher_labels`` discovers a teacher's calling convention by CALLING it, batch
+    first. Hand it a per-item teacher and the whole list goes in as one argument, the answer is
+    discarded, and every text is labelled again -- three texts produced four invocations. A metered or
+    logging teacher is billed for the discarded probe and is called on an argument shape it was never
+    written to accept.
+    """
+
+    @staticmethod
+    def _counting_per_item(counter):
+        def teacher(text):
+            counter.append(text)
+            return "positive" if "good" in str(text) else "negative"
+
+        return teacher
+
+    @staticmethod
+    def _counting_batch(counter):
+        def teacher(texts):
+            counter.append(list(texts))
+            return ["positive" if "good" in t else "negative" for t in texts]
+
+        return teacher
+
+    def test_a_declared_item_teacher_is_called_exactly_once_per_text(self):
+        calls = []
+        labels, batched = _teacher_labels(self._counting_per_item(calls), ["good a", "bad b"], batched=False)
+        self.assertEqual(labels, ["positive", "negative"])
+        self.assertFalse(batched)
+        self.assertEqual(len(calls), 2)  # was 3: one discarded probe on the whole list, then two
+
+    def test_a_declared_batch_teacher_is_called_exactly_once(self):
+        calls = []
+        labels, batched = _teacher_labels(self._counting_batch(calls), ["good a", "bad b"], batched=True)
+        self.assertEqual(labels, ["positive", "negative"])
+        self.assertTrue(batched)
+        self.assertEqual(len(calls), 1)
+
+    def test_auto_discovery_reports_the_shape_so_it_is_not_rediscovered(self):
+        # The discovered shape is what lets _prepare_split label a second split without re-probing.
+        calls = []
+        _, batched = _teacher_labels(self._counting_per_item(calls), ["good a"], batched=None)
+        self.assertFalse(batched)
+        probe_cost = len(calls)
+        calls.clear()
+        _teacher_labels(self._counting_per_item(calls), ["bad b", "good c"], batched=batched)
+        self.assertEqual(len(calls), 2)  # no second probe
+        self.assertEqual(probe_cost, 2)  # the one unavoidable auto-discovery probe, documented
+
+    def test_labelling_both_splits_costs_at_most_one_discovery_probe(self):
+        # The end-to-end shape of the defect: _prepare_split labels train AND holdout, and used to
+        # re-discover the convention for each, so a per-item teacher paid two discarded probes.
+        calls = []
+        teacher = self._counting_per_item(calls)
+        _prepare_split(teacher, ["good a", "bad b"], ["good c", "bad d"], None, None, 0.3, 0)
+        # 2 train + 2 holdout labels + exactly one discarded discovery probe.
+        self.assertEqual(len(calls), 5)
+
+    def test_a_teacher_declared_batch_that_is_not_batch_is_refused_not_retried(self):
+        # Negative control against guard overreach in the other direction: a declared-batch teacher
+        # returning a scalar is a contract violation, and re-calling it per text would both hide the
+        # mistake and spend len(texts) more invocations doing it.
+        calls = []
+        with self.assertRaises(ValueError):
+            _teacher_labels(self._counting_per_item(calls), ["good a", "bad b"], batched=True)
+        self.assertEqual(len(calls), 1)  # the single declared batch call, no per-item retry
+
+    def test_capacity_ladder_rejects_an_unknown_teacher_mode(self):
+        with self.assertRaises(ValueError):
+            capacity_ladder(
+                _teacher,
+                ["good one", "bad two"],
+                target=0.8,
+                rungs=("hashed_ngram",),
+                teacher_mode="nonsense",
+            )
 
 
 if __name__ == "__main__":

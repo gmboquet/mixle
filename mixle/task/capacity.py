@@ -320,6 +320,7 @@ def capacity_ladder(
     lr: float = 1e-2,
     seed: int = 0,
     device: str = "cpu",
+    teacher_mode: str = "auto",
 ) -> LadderResult:
     """Fit a student at each rung of ``rungs`` (increasing representation family) and measure held-out agreement.
 
@@ -338,7 +339,17 @@ def capacity_ladder(
     ``LadderResult.outcome`` is ``"target_met"``, ``"capacity_ceiling_measured"`` (all requested
     rungs were evaluated), or ``"not_evaluated"`` (the target was unmet but at least one requested
     family was unavailable). The latter must not be reported as a measured capacity ceiling.
+
+    ``teacher_mode`` declares a callable teacher's calling convention, using the same vocabulary as
+    :func:`mixle.task.distill._as_batched`: ``"batch"`` calls ``teacher(texts)`` once, ``"item"``
+    calls ``teacher(text)`` once per text. The default ``"auto"`` preserves the historical behaviour
+    of discovering the convention by calling -- which costs one extra, discarded invocation when the
+    teacher turns out to be per-item (MXR-080-1895). Declare the mode for any teacher with side
+    effects: a metered API, an audit log, or a request counter should not be invoked on an argument
+    shape it was never written to accept, and ``"auto"`` cannot avoid that without calling first.
     """
+    if teacher_mode not in {"auto", "batch", "item"}:
+        raise ValueError("teacher_mode must be 'auto', 'batch', or 'item'")
     (
         teacher_or_labels,
         texts,
@@ -375,7 +386,14 @@ def capacity_ladder(
         device=device,
     )
     label_list, train_texts, train_labels, hold_texts, hold_labels = _prepare_split(
-        teacher_or_labels, texts, val_texts, val_labels, labels, calibration_frac, seed
+        teacher_or_labels,
+        texts,
+        val_texts,
+        val_labels,
+        labels,
+        calibration_frac,
+        seed,
+        batched={"auto": None, "batch": True, "item": False}[teacher_mode],
     )
 
     results: list[RungResult] = []
@@ -445,10 +463,15 @@ def _prepare_split(
     labels: Sequence[str] | None,
     calibration_frac: float,
     seed: int,
+    batched: bool | None = None,
 ) -> tuple[list[str], list[str], list[Any], list[str], list[Any]]:
     teacher = teacher_or_labels if callable(teacher_or_labels) else None
+    teacher_batched: bool | None = batched
     if teacher is not None:
-        train_labels_all = _teacher_labels(teacher, texts)
+        # MXR-080-1895: the shape discovered here is carried to the holdout call below. Labelling the
+        # two splits used to re-discover it, so a per-item teacher paid TWO wasted invocations per run
+        # instead of one.
+        train_labels_all, teacher_batched = _teacher_labels(teacher, texts, batched=batched)
     else:
         train_labels_all = list(teacher_or_labels)
     if len(train_labels_all) != len(texts):
@@ -461,7 +484,7 @@ def _prepare_split(
         if val_labels is None:
             if teacher is None:
                 raise ValueError("val_labels are required when teacher_or_labels is a label sequence")
-            hold_labels = _teacher_labels(teacher, hold_texts)
+            hold_labels, _ = _teacher_labels(teacher, hold_texts, batched=teacher_batched)
         else:
             hold_labels = list(val_labels)
         if len(hold_labels) != len(hold_texts):
@@ -483,9 +506,34 @@ def _prepare_split(
     return label_list, train_texts, train_labels, hold_texts, hold_labels
 
 
-def _teacher_labels(teacher: Callable[..., Any], texts: list[str]) -> list[Any]:
+def _teacher_labels(
+    teacher: Callable[..., Any], texts: list[str], *, batched: bool | None = None
+) -> tuple[list[Any], bool]:
+    """Label ``texts``, returning ``(labels, batched)`` -- the labels and the teacher's shape.
+
+    MXR-080-1895. This function accepts two teacher shapes, batch (``teacher(texts) -> labels``) and
+    per-item (``teacher(text) -> label``), and it discovers which by *calling*. That probe costs one
+    extra invocation when the teacher turns out to be per-item: the whole list is handed to a function
+    that expects one text, its answer is discarded, and every text is then labelled again -- three
+    texts produced four calls. For a pure function that is merely wasteful; for a teacher with side
+    effects (a metered API, an audit log, a request counter) it is an unaccounted, unrepeatable
+    invocation on an argument the teacher was never meant to see.
+
+    ``batched`` is the fix for repeat use: once a shape has been discovered it is RETURNED, and a
+    caller labelling a second set of texts with the same teacher passes it back instead of probing
+    again. :func:`_prepare_split` labels both the training and the holdout split, so it used to burn
+    two discovery probes per run; it now burns at most one.
+
+    Deliberately NOT done: the first probe is not eliminated. With ``batched=None`` there is no way to
+    tell the two shapes apart without calling -- both are one-argument callables, so signature
+    inspection cannot separate them, and probing the other order merely moves the wasted call onto
+    batch teachers instead. The honest fix for a side-effecting teacher is to declare the shape, which
+    ``batched`` now allows; making some declaration mandatory would break every existing caller.
+    """
     if not callable(teacher):
         raise TypeError("teacher must be callable")
+    if batched is False:
+        return [teacher(t) for t in texts], False
     out = teacher(texts)
     if not isinstance(out, (str, bytes)) and not np.isscalar(out):
         try:
@@ -495,8 +543,16 @@ def _teacher_labels(teacher: Callable[..., Any], texts: list[str]) -> list[Any]:
         else:
             if len(labels) != len(texts):
                 raise ValueError(f"batch teacher returned {len(labels)} labels for {len(texts)} texts")
-            return labels
-    return [teacher(t) for t in texts]
+            return labels, True
+    if batched is True:
+        # The caller declared a batch teacher, so this is a contract violation by the teacher, not a
+        # shape to fall back from -- re-calling it per text would paper over the mismatch and spend
+        # len(texts) further invocations doing it.
+        raise ValueError(
+            f"teacher was declared batched but returned {out!r} for {len(texts)} texts; a batch teacher "
+            "must return one label per text"
+        )
+    return [teacher(t) for t in texts], False
 
 
 def _fit_rung(
