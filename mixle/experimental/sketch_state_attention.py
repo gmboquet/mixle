@@ -346,11 +346,55 @@ if _HAS_TORCH:
 # ---------------------------------------------------------------------------------------------------------
 
 
+def _validated_state(state: Any, groups: tuple[tuple[str, list], ...], *, name: str) -> None:
+    """Establish the invariants a carried attention state must satisfy before ``step`` trusts it.
+
+    Three separate holes, all reachable through the public dataclasses (MXR-080-1879):
+
+    * ``pos`` was an unchecked int. A negative position makes ``far_count_before = pos - cache_len``
+      negative, and a fractional one reaches tensor indexing as a float.
+    * the per-layer lists were independent, so a state could carry three numerator layers and two
+      normalizer layers; ``step`` then indexed past the shorter one, or worse, silently paired layer
+      i's numerator with a different layer's normalizer.
+    * a non-finite accumulator poisons every subsequent readout while looking like ordinary state,
+      and the readout's own finiteness check runs after the arithmetic rather than before it.
+
+    Finiteness is checked only on entry, and that limit is deliberate and stated rather than implied:
+    these lists hold live tensors the caller can mutate afterwards, so this establishes the invariant
+    at construction, not for all time.
+    """
+    if isinstance(state.pos, bool) or not isinstance(state.pos, int):
+        raise TypeError(f"{name} pos must be an exact integer, got {state.pos!r}")
+    if state.pos < 0:
+        raise ValueError(f"{name} pos must be non-negative, got {state.pos}")
+    lengths = {label: len(values) for label, values in groups}
+    distinct = {n for n in lengths.values() if n}
+    if len(distinct) > 1:
+        raise ValueError(
+            f"{name} carries per-layer lists of differing lengths {lengths}; layer i's tensors would "
+            "be paired with another layer's, or indexed past the end of the shorter list."
+        )
+    if not _HAS_TORCH:
+        return
+    for label, values in groups:
+        for index, tensor in enumerate(values):
+            if tensor is None or not hasattr(tensor, "shape"):
+                continue
+            if not bool(torch.isfinite(tensor).all().item()):
+                raise ValueError(
+                    f"{name} {label}[{index}] holds a non-finite value; every readout built from it "
+                    "would be non-finite while the state still looks ordinary."
+                )
+
+
 @dataclass
 class LinearAttentionState:
     S: list[Any] = field(default_factory=list)  # per layer: (batch, n_head, head_dim, head_dim), sum phi(k) v^T
     Z: list[Any] = field(default_factory=list)  # per layer: (batch, n_head, head_dim), sum phi(k)
     pos: int = 0
+
+    def __post_init__(self) -> None:
+        _validated_state(self, (("S", self.S), ("Z", self.Z)), name="LinearAttentionState")
 
 
 if _HAS_TORCH:
@@ -456,6 +500,13 @@ class FrequentDirectionsState:
     cache_v: list[Any] = field(default_factory=list)
     pos: int = 0
     receipt: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _validated_state(
+            self,
+            (("B", self.B), ("Z", self.Z), ("cache_k", self.cache_k), ("cache_v", self.cache_v)),
+            name="FrequentDirectionsState",
+        )
 
 
 if _HAS_TORCH:
@@ -689,6 +740,11 @@ class TensorSketchState:
         the exact degree-one ``Z`` or from ``C`` without the values ``v_t`` that were folded into it.
         Refusing is the only answer that is not a guess.
         """
+        _validated_state(
+            self,
+            (("C", self.C), ("Z", self.Z), ("Z_ts", self.Z_ts), ("cache_k", self.cache_k), ("cache_v", self.cache_v)),
+            name="TensorSketchState",
+        )
         if not self.C:
             return
         if len(self.Z) != len(self.C) or len(self.Z_ts) != len(self.C):
