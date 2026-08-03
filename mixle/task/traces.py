@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from mixle.task.toolcall import ToolSpec
+from mixle.utils.immutable import detach_receipt_container
 
 _DEFAULT_DIR = Path.home() / ".mixle-agent" / "conversations"
 
@@ -54,6 +55,18 @@ class AgentTrace:
     reply: str = ""
     conversation_id: str = ""
     trace_id: str = ""
+    # MXR-080-1892: True when this turn's transcript recorded tool results and EVERY harvested step was
+    # bound to a non-error one -- i.e. the plan is a verified successful execution rather than an
+    # unaudited list of attempts. Vacuously True for a turn with no tool calls. False means the
+    # transcript carried no outcomes for these calls, so nothing here claims they worked.
+    outcomes_verified: bool = False
+
+    def __post_init__(self) -> None:
+        # The plan arrived as a caller-owned list of dicts and was stored by reference, so a consumer
+        # that edited a step (or a nested ``args`` value handed out by the teachers) rewrote the
+        # harvested corpus itself. Detached rather than frozen: plans are JSON-serialized and
+        # type-tested by the distillers, so list/dict must stay list/dict (MXR-080-1892).
+        self.plan = detach_receipt_container(self.plan)
 
 
 @dataclass
@@ -123,7 +136,9 @@ class AgentTraces:
             if t is None or not t.plan:
                 return {"tool": None, "args": {}}
             first = t.plan[0]
-            return {"tool": first["tool"], "args": dict(first.get("args") or {})}
+            # deep, not dict(): a one-level copy still shares every nested args value with the
+            # harvested corpus, so a consumer editing one rewrote the trace (MXR-080-1892).
+            return {"tool": first["tool"], "args": detach_receipt_container(first.get("args") or {})}
 
         return teacher
 
@@ -136,7 +151,8 @@ class AgentTraces:
                 return [teacher(x) for x in r]
             request = str(r)
             t = self._unique_execution(table.get(request, []), request)
-            return [dict(s) for s in t.plan] if t is not None else []
+            # deep, not dict(): see call_teacher (MXR-080-1892).
+            return [detach_receipt_container(s) for s in t.plan] if t is not None else []
 
         return teacher
 
@@ -219,8 +235,15 @@ def _tool_uses(
     source: str = "conversation",
     message_index: int = 0,
     rejections: list[TraceRejection] | None = None,
-) -> list[dict]:
-    uses: list[dict] = []
+) -> list[tuple[dict, str | None, str]]:
+    """Validated ``tool_use`` blocks as ``(step, tool_use_id, location)``.
+
+    The id and location are returned alongside the step -- rather than folded into it -- so
+    :func:`parse_conversation` can bind each call to its result without putting an id in the plan the
+    distillers train on. An id in the plan would make two otherwise identical executions of the same
+    request compare as conflicting in :meth:`AgentTraces._unique_execution` (MXR-080-1892).
+    """
+    uses: list[tuple[dict, str | None, str]] = []
     for block_index, block in enumerate(
         _content_blocks(message, source=source, message_index=message_index, rejections=rejections)
     ):
@@ -238,8 +261,51 @@ def _tool_uses(
         if any(not isinstance(key, str) or not key.isidentifier() for key in raw_input):
             _reject(rejections, source=source, location=location, reason="tool_use argument keys must be identifiers")
             continue
-        uses.append({"tool": name, "args": dict(raw_input)})
+        use_id = block.get("id")
+        uses.append(({"tool": name, "args": dict(raw_input)}, use_id if isinstance(use_id, str) else None, location))
     return uses
+
+
+def _tool_results(
+    message: Any,
+    *,
+    source: str = "conversation",
+    message_index: int = 0,
+    rejections: list[TraceRejection] | None = None,
+) -> dict[str, bool]:
+    """``tool_use_id -> is_error`` for every ``tool_result`` block in one message.
+
+    A result whose ``is_error`` is not a bool is treated as an error rather than a success: an
+    unparseable outcome is not evidence that the call worked (MXR-080-1892). Deliberately NOT checked:
+    the result's ``content`` -- a successful call may legitimately return anything, including nothing.
+    """
+    results: dict[str, bool] = {}
+    for block_index, block in enumerate(
+        _content_blocks(message, source=source, message_index=message_index, rejections=rejections)
+    ):
+        if block.get("type") != "tool_result":
+            continue
+        use_id = block.get("tool_use_id")
+        if not isinstance(use_id, str) or not use_id:
+            _reject(
+                rejections,
+                source=source,
+                location=f"messages[{message_index}].content[{block_index}]",
+                reason="tool_result must carry a string tool_use_id",
+            )
+            continue
+        flag = block.get("is_error", False)
+        results[use_id] = True if not isinstance(flag, bool) else flag
+    return results
+
+
+def _has_tool_result(message: Any) -> bool:
+    """Whether a message carries at least one ``tool_result`` block (validation deferred to
+    :func:`_tool_results`; this is only the turn-boundary question)."""
+    content = message.get("content") if isinstance(message, dict) else None
+    return isinstance(content, list) and any(
+        isinstance(block, dict) and block.get("type") == "tool_result" for block in content
+    )
 
 
 def parse_conversation(
@@ -269,18 +335,60 @@ def parse_conversation(
         if m.get("role") != "user" or not request:
             i += 1
             continue
-        plan: list[dict] = []
+        attempted: list[tuple[dict, str | None, str]] = []
+        outcomes: dict[str, bool] = {}
+        saw_outcomes = False
         reply = ""
         j = i + 1
-        while j < len(messages) and (not isinstance(messages[j], dict) or messages[j].get("role") != "user"):
-            if isinstance(messages[j], dict) and messages[j].get("role") == "assistant":
-                plan.extend(_tool_uses(messages[j], source=source, message_index=j, rejections=rejections))
-                text = _text_of(messages[j], source=source, message_index=j, rejections=rejections)
+        while j < len(messages):
+            mj = messages[j]
+            if not isinstance(mj, dict):
+                _reject(rejections, source=source, location=f"messages[{j}]", reason="message must be an object")
+                j += 1
+                continue
+            if mj.get("role") == "user":
+                # A user turn carrying tool_result blocks is the transcript handing results BACK to the
+                # assistant, not a new request. Treating it as a turn boundary truncated the plan at the
+                # first tool call and silently discarded everything after it -- including the successful
+                # retry that followed a failed call (MXR-080-1892). Its outcomes are harvested either
+                # way; only a turn that also carries request text ends this trace.
+                if _has_tool_result(mj):
+                    outcomes.update(_tool_results(mj, source=source, message_index=j, rejections=rejections))
+                    saw_outcomes = True
+                    if not _text_of(mj, source=source, message_index=j, rejections=rejections):
+                        j += 1
+                        continue
+                break
+            if mj.get("role") == "assistant":
+                attempted.extend(_tool_uses(mj, source=source, message_index=j, rejections=rejections))
+                text = _text_of(mj, source=source, message_index=j, rejections=rejections)
                 if text:
                     reply = text
-            elif not isinstance(messages[j], dict):
-                _reject(rejections, source=source, location=f"messages[{j}]", reason="message must be an object")
             j += 1
+
+        # Bind every attempt to its recorded outcome. A transcript that records outcomes at all is one
+        # this module can audit, so an unbound or errored call is rejected into the ledger rather than
+        # taught as a correct plan step. A transcript with no tool_result blocks anywhere records no
+        # outcomes -- the pre-existing shape of most stored conversations -- so its calls are still
+        # harvested, but the trace says so via ``outcomes_verified=False`` instead of implying success.
+        plan: list[dict] = []
+        for step, use_id, location in attempted:
+            if not saw_outcomes:
+                plan.append(step)
+                continue
+            if use_id is None or use_id not in outcomes:
+                _reject(
+                    rejections,
+                    source=source,
+                    location=location,
+                    reason="tool_use has no bound tool_result in a transcript that records outcomes",
+                )
+                continue
+            if outcomes[use_id]:
+                _reject(rejections, source=source, location=location, reason="tool_use returned an error result")
+                continue
+            plan.append(step)
+
         stable_source = source_id or convo_id or "conversation"
         out.append(
             AgentTrace(
@@ -289,6 +397,7 @@ def parse_conversation(
                 reply=reply,
                 conversation_id=convo_id,
                 trace_id=f"{stable_source}:{i}",
+                outcomes_verified=saw_outcomes or not attempted,
             )
         )
         i = j

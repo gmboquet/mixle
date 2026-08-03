@@ -317,6 +317,10 @@ def _candidate_acceptance(
     validation_max_its: int,
     max_holdout_regret: float,
 ) -> DesignAcceptanceReceipt:
+    # Deliberately NOT restricted to ``train`` (MXR-080-1891): this is a support/shape compatibility
+    # check, part of the acceptance evaluation that legitimately reads the holdout, not a choice among
+    # candidates. Restricting it would only defer the same rejection to ``_fit_scores``'s non-finite
+    # holdout density check, with a less specific message.
     _validate_spec_against_data(spec, [*train, *holdout])
     train_score, holdout_score = _fit_scores(estimator, train, holdout, validation_max_its)
     _, baseline_holdout = _fit_scores(fallback_estimator, train, holdout, validation_max_its)
@@ -377,10 +381,14 @@ def design_model(
 ) -> DesignedModel:
     """Accept an LLM design only on schema-compatible independent predictive evidence.
 
-    A deterministic subset is split before fitting. The LLM estimator sees only the training part and
-    must produce finite holdout density no more than ``max_holdout_regret`` nats/observation below an
-    independently fitted heuristic estimator. A fallback is returned only after it passes the same
-    fit/holdout validity checks. Rejected proposals remain available in ``DesignedModel.failure``.
+    Roles are fixed once, in this order, and never re-drawn (MXR-080-1891): the deterministic subset is
+    split into *train* and *holdout* FIRST; everything that influences the choice of model -- the data
+    profile the LLM designs from and the heuristic recommendation used both as the acceptance baseline
+    and as the fallback structure -- is derived from *train* only; the holdout is then read exactly once
+    per candidate, to score it. So the LLM estimator sees only the training part and must produce finite
+    holdout density no more than ``max_holdout_regret`` nats/observation below an independently fitted
+    heuristic estimator. A fallback is returned only after it passes the same fit/holdout validity
+    checks. Rejected proposals remain available in ``DesignedModel.failure``.
     """
     if isinstance(data, (str, bytes)):
         raise TypeError("data must be a sequence of observations")
@@ -405,10 +413,18 @@ def design_model(
         raise ValueError("max_holdout_regret must be finite and non-negative")
     max_holdout_regret = float(max_holdout_regret)
 
-    profile = data_profile(rows)
+    # MXR-080-1891: both of these are SELECTION inputs -- the profile is what the LLM designs from, and
+    # the recommendation is both the acceptance baseline and the returned fallback structure. Computing
+    # them on ``rows`` showed the holdout to the chooser (a holdout-only extreme reached the prompt as
+    # ``max``/``mean``/``var``, and the baseline's structure was picked with the holdout in hand), so the
+    # advertised "independent held-out density" was not independent. Both now see the training split only;
+    # the split is drawn first and never re-drawn, so the roles are fixed for the whole call.
+    # Deliberately NOT changed: which rows land in which role (the seeded split is unchanged, so existing
+    # receipts stay comparable), and the holdout's use for scoring -- scoring is the holdout's one job.
+    profile = data_profile(train)
     from mixle.task.recommend import recommend_model
 
-    fallback_estimator = recommend_model(rows).estimator
+    fallback_estimator = recommend_model(train).estimator
     stage = "llm_call"
     reply = ""
     proposed_spec: dict[str, Any] | None = None

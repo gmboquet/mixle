@@ -21,7 +21,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
-from mixle.task.replay import ExecutionTrace, TraceStep
+from mixle.task.replay import ExecutionTrace, TraceStep, _rng_state, failure_result
 
 _STOP_TOOLS = (None, "__stop__", "STOP")
 _NO_TOOL_KEY = object()  # distinguishes an EXPLICIT tool=None from a schema with no "tool" key at all
@@ -97,35 +97,34 @@ def _validated_step(step: Any) -> dict[str, Any] | None:
 
 
 def _attempt(world: World, step: dict[str, Any]) -> tuple[TraceStep, bool, Any]:
+    """Execute one step and record it as a replayable :class:`TraceStep`.
+
+    The pre/post RNG states and the success/failure outcome are captured in ONE construction, on both
+    the success and the failure path (MXR-080-1892). Every orchestrator-built step used to omit them,
+    so :func:`~mixle.task.replay.replay` refused the orchestrator's own traces outright
+    (``ValueError: trace step has no captured RNG state``) -- the failure paths this loop exists to
+    record were exactly the ones that could not be re-run. The failure result uses
+    :func:`~mixle.task.replay.failure_result` so a recorded failure and a replayed one are the same
+    shape and can be compared instead of merely both being "an error".
+    """
     before = _snapshot(world)
+    rng_before = _rng_state()
     try:
-        observation = world.step(copy.deepcopy(step))
+        observation, succeeded = world.step(copy.deepcopy(step)), True
     except Exception as exc:  # noqa: BLE001 - external world failures are returned as evidence
-        result = {"error": {"type": type(exc).__name__, "message": str(exc)}}
-        return (
-            TraceStep(
-                tool=_tool_name(step),
-                args=copy.deepcopy(step.get("args") or {}),
-                result=result,
-                action=copy.deepcopy(step),
-                state_before=before,
-                state_after=_snapshot(world),
-            ),
-            False,
-            exc,
-        )
-    return (
-        TraceStep(
-            tool=_tool_name(step),
-            args=copy.deepcopy(step.get("args") or {}),
-            result=observation,
-            action=copy.deepcopy(step),
-            state_before=before,
-            state_after=_snapshot(world),
-        ),
-        True,
-        observation,
+        observation, succeeded = exc, False
+    trace_step = TraceStep(
+        tool=_tool_name(step),
+        args=copy.deepcopy(step.get("args") or {}),
+        result=observation if succeeded else failure_result(observation),
+        action=copy.deepcopy(step),
+        state_before=before,
+        state_after=_snapshot(world),
+        rng_state_before=rng_before,
+        rng_state_after=_rng_state(),
+        succeeded=succeeded,
     )
+    return trace_step, succeeded, observation
 
 
 def orchestrate(

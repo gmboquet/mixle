@@ -147,6 +147,13 @@ class FamilyLadderResult:
     calibration_pool_size: int
     evaluation_set_size: int
     evaluation_set_digest: str
+    # MXR-080-1891: the SELECTION role -- the rows compress() measures its own quality on (and, under
+    # method="auto", chooses a method with). Disjoint from both the calibration rows it fits on and the
+    # evaluation rows the GO/NO-GO gate scores. ``roles_are_disjoint`` is the one-use receipt: False only
+    # when the caller supplied an eval set this module cannot prove disjoint from the pool it carved.
+    selection_set_size: int = 0
+    selection_set_digest: str = ""
+    roles_are_disjoint: bool = True
 
     def passed_rungs(self) -> list[str]:
         return [r.name for r in self.rungs if r.within_eval_budget]
@@ -164,12 +171,47 @@ class FamilyLadderResult:
         return float(self.total_calibration_samples) / denom if denom > 0 else 0.0
 
 
+def _carve_roles(pool: Any, n_roles: int) -> list[Any]:
+    """Cut ``pool`` into ``n_roles`` disjoint contiguous row blocks, largest first.
+
+    Contiguous slicing (not fancy indexing) so the same code works for lists, numpy arrays, and torch
+    tensors without reordering; the partition is a pure function of the row count, so the roles are fixed
+    the moment the pool is handed in and are never re-drawn (MXR-080-1891).
+
+    Each block is DETACHED into its own storage rather than kept as a view. Two reasons, both real:
+    mutating the pool afterwards would otherwise rewrite roles that receipts already bound, and
+    ``compress()``'s own independence check compares ``untyped_storage().data_ptr()``, which is the base
+    pointer shared by every view of one tensor -- disjoint views of a single pool would be reported as
+    the same selection data and stamp every receipt ``quality_basis="training_data"`` again.
+    """
+    total = len(pool)
+    if total < n_roles:
+        raise ValueError(
+            f"calibration_data has {total} rows but {n_roles} disjoint roles must be filled "
+            "(calibration, selection, and evaluation when eval_data is not supplied); "
+            "pass eval_data= and/or selection_data= explicitly, or supply more rows"
+        )
+    base, extra = divmod(total, n_roles)
+    blocks, start = [], 0
+    for i in range(n_roles):
+        size = base + (1 if i < extra else 0)
+        block = pool[start : start + size]
+        if hasattr(block, "clone"):  # torch tensor
+            block = block.clone()
+        elif hasattr(block, "copy"):  # numpy array / list
+            block = block.copy()
+        blocks.append(block)
+        start += size
+    return blocks
+
+
 def build_checkpoint_family(
     headline_model: Any,
     rung_specs: Sequence[RungSpec],
     *,
     calibration_data: Any,
     eval_data: Any = None,
+    selection_data: Any = None,
     eval_seed: int = 0,
     eval_n_examples: int = 256,
 ) -> FamilyLadderResult:
@@ -182,6 +224,20 @@ def build_checkpoint_family(
     this module's docstring for why chaining is unsafe for the default ``non_sampling``/``hybrid``
     methods. The ladder still halts the first time a rung fails its own eval budget, exactly like
     :func:`mixle.task.pilot_ladder.run_pilot_ladder`.
+
+    **Three immutable data roles (MXR-080-1891).** ``eval_data=None`` used to alias ``calibration_data``,
+    so every rung was compressed with, quality-measured on, and then GO/NO-GO gated against one identical
+    set of rows -- ``compress()`` said so itself, stamping every receipt ``quality_basis="training_data"``
+    -- and the ladder's "stayed within its eval budget" claim was in-sample. ``calibration_data`` is now a
+    POOL that is cut into disjoint contiguous roles the moment it arrives: *calibration* (the rows
+    ``compress()`` fits on), *selection* (the rows ``compress()`` measures its own quality on and, under
+    ``method="auto"``, picks a method with), and *evaluation* (the rows the gate scores, carved here only
+    when ``eval_data`` is not supplied). Supplying ``eval_data`` or ``selection_data`` keeps that argument
+    as-is and carves one fewer role. Deliberately NOT checked: whether a caller-supplied ``eval_data`` is
+    actually disjoint from ``calibration_data`` -- this module cannot compare arbitrary row types
+    soundly, ``compress()`` already labels that case ``quality_basis="training_data"``, and refusing it
+    would break callers who legitimately declare their own held-out set. The result records the roles it
+    controls in ``selection_set_size``/``selection_set_digest``/``roles_are_disjoint``.
     """
     _require_torch()
     rung_specs = list(rung_specs)
@@ -195,16 +251,35 @@ def build_checkpoint_family(
     if any(not isinstance(spec.real_target, str) or not spec.real_target for spec in rung_specs):
         raise ValueError("every rung must declare a nonempty real_target")
 
-    eval_data = eval_data if eval_data is not None else calibration_data
     try:
-        calibration_pool_size = len(calibration_data)
-        evaluation_set_size = len(eval_data)
+        pool_size = len(calibration_data)
+        if eval_data is not None and len(eval_data) <= 0:
+            raise ValueError("eval_data must be nonempty")
+        if selection_data is not None and len(selection_data) <= 0:
+            raise ValueError("selection_data must be nonempty")
     except TypeError as exc:
         raise ValueError("calibration_data and eval_data must be sized collections") from exc
-    if calibration_pool_size <= 0:
+    if pool_size <= 0:
         raise ValueError("calibration_data must be nonempty")
-    if evaluation_set_size <= 0:
-        raise ValueError("eval_data must be nonempty")
+
+    # Carve the roles the caller left to this module. Order matters only for reproducibility: the pool
+    # is cut into contiguous blocks, calibration first, so the same pool always yields the same roles.
+    carved = 1 + (selection_data is None) + (eval_data is None)
+    blocks = _carve_roles(calibration_data, carved)
+    calibration_rows = blocks[0]
+    next_block = 1
+    if selection_data is None:
+        selection_data = blocks[next_block]
+        next_block += 1
+    roles_are_disjoint = True
+    if eval_data is None:
+        eval_data = blocks[next_block]
+    else:
+        # A caller-declared eval set is taken at its word; this module did not carve it, so it cannot
+        # certify disjointness (see the docstring).
+        roles_are_disjoint = False
+    calibration_pool_size = len(calibration_rows)
+    evaluation_set_size = len(eval_data)
 
     def data_digest(data: Any) -> str:
         import numpy as np
@@ -221,6 +296,7 @@ def build_checkpoint_family(
         ).hexdigest()
 
     evaluation_set_digest = data_digest(eval_data)
+    selection_set_digest = data_digest(selection_data)
     headline_n_params = count_params(headline_model)
     if headline_n_params <= 0:
         raise ValueError("headline_model must contain at least one parameter")
@@ -245,8 +321,10 @@ def build_checkpoint_family(
         compressed = compress(
             headline_model,
             method=spec.method,
-            calibration_data=calibration_data,
-            eval_data=eval_data,
+            # the compressor gets its OWN roles: it fits on the calibration rows and measures/chooses on
+            # the selection rows. The evaluation rows below are the gate's, and it never sees them.
+            calibration_data=calibration_rows,
+            eval_data=selection_data,
             sample_budget=spec.sample_budget,
             budget=spec.budget,
             trust_region=spec.trust_region,
@@ -332,4 +410,7 @@ def build_checkpoint_family(
         calibration_pool_size=calibration_pool_size,
         evaluation_set_size=evaluation_set_size,
         evaluation_set_digest=evaluation_set_digest,
+        selection_set_size=len(selection_data),
+        selection_set_digest=selection_set_digest,
+        roles_are_disjoint=roles_are_disjoint,
     )

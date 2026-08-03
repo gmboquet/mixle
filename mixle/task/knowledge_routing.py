@@ -596,6 +596,29 @@ def _sequential_plan(n_gaps: int):
     return plan
 
 
+def _bundle_records(bundle: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    """The bundle's ``items``/``gaps`` as a list of records, refusing shapes that would lose them.
+
+    ``list(bundle[key])`` silently yielded the KEYS when the bundle stored its records in a mapping,
+    so every structured item became a bare string, matched nothing, and the gap it should have
+    resolved was re-routed to a tool as if the evidence had never been supplied (MXR-080-1893). A
+    mapping is now read through its values -- the records are preserved, which is the point -- and
+    anything that is neither a mapping nor a sequence of records is refused instead of degraded.
+    """
+    raw = bundle.get(key)
+    if raw is None:
+        return []
+    if isinstance(raw, Mapping):
+        records = list(raw.values())
+    elif isinstance(raw, (list, tuple)):
+        records = list(raw)
+    else:
+        raise TypeError(f"bundle {key!r} must be a list of records or a mapping of them, got {type(raw).__name__}")
+    if any(not isinstance(record, dict) for record in records):
+        raise TypeError(f"every bundle {key!r} entry must be a dictionary")
+    return records
+
+
 def route_task(
     question: str,
     catalog: list[CatalogEntry],
@@ -619,8 +642,8 @@ def route_task(
     if bundle is not None and not isinstance(bundle, dict):
         raise TypeError("bundle must be a dictionary or None")
     bundle = copy.deepcopy(bundle or {})
-    known_items = copy.deepcopy(list(bundle.get("items") or []))
-    seed_gaps = copy.deepcopy(list(bundle.get("gaps") or []))
+    known_items = _bundle_records(bundle, "items")
+    seed_gaps = _bundle_records(bundle, "gaps")
 
     rng = np.random.RandomState(_stable_seed(question))
     sampled = proposer.plan_model.sample(rng)

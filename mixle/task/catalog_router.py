@@ -18,6 +18,7 @@ entry id standing in for an answer.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from numbers import Integral, Real
@@ -130,6 +131,35 @@ class CatalogCalibration:
 
 _JSON_TYPES = frozenset({"object", "array", "string", "number", "integer", "boolean", "null"})
 
+# MXR-080-1893: THE declared schema vocabulary -- exactly the keywords this module both validates and
+# enforces at match time, and nothing else. It used to accept any extra key and silently ignore it, so a
+# schema declaring ``{"type": "integer", "minimum": 100}`` was accepted at registration and then matched
+# by ``0``: the constraint looked supported, was never checked, and the routing decision it was meant to
+# gate happened anyway. Constraints outside this set are now REFUSED at validation rather than dropped,
+# so a registrant learns their schema is not enforceable instead of believing it is.
+_COMMON_KEYWORDS = frozenset({"type", "enum", "description", "title"})
+_KEYWORDS_BY_TYPE: dict[str, frozenset[str]] = {
+    "object": frozenset({"properties", "required"}),
+    "array": frozenset({"items", "minItems", "maxItems"}),
+    "string": frozenset({"minLength", "maxLength", "pattern"}),
+    "number": frozenset({"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"}),
+    "integer": frozenset({"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"}),
+    "boolean": frozenset(),
+    "null": frozenset(),
+}
+_BOUND_KEYWORDS = ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum")
+_COUNT_KEYWORDS = ("minItems", "maxItems", "minLength", "maxLength")
+
+
+def _schema_count(schema: dict[str, Any], keyword: str, path: str) -> int | None:
+    """A non-negative integer bound, or ``None`` when absent."""
+    if keyword not in schema:
+        return None
+    value = schema[keyword]
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral) or int(value) < 0:
+        raise ValueError(f"{path}.{keyword} must be a non-negative integer")
+    return int(value)
+
 
 def _validate_output_schema(schema: Any, *, path: str = "output") -> None:
     if not isinstance(schema, dict):
@@ -137,8 +167,29 @@ def _validate_output_schema(schema: Any, *, path: str = "output") -> None:
     kind = schema.get("type")
     if kind not in _JSON_TYPES:
         raise ValueError(f"{path} schema must declare one JSON type from {sorted(_JSON_TYPES)}")
+    allowed = _COMMON_KEYWORDS | _KEYWORDS_BY_TYPE[kind]
+    unknown = sorted(set(schema) - allowed)
+    if unknown:
+        raise ValueError(
+            f"{path} schema declares keyword(s) {unknown} that this vocabulary does not enforce for "
+            f"type {kind!r}; supported: {sorted(allowed)}"
+        )
     if "enum" in schema and (not isinstance(schema["enum"], list) or not schema["enum"]):
         raise ValueError(f"{path}.enum must be a non-empty list")
+    for keyword in _BOUND_KEYWORDS:
+        if keyword in schema:
+            bound = schema[keyword]
+            if isinstance(bound, (bool, np.bool_)) or not isinstance(bound, Real) or not np.isfinite(float(bound)):
+                raise ValueError(f"{path}.{keyword} must be a finite number")
+    for keyword in _COUNT_KEYWORDS:
+        _schema_count(schema, keyword, path)
+    if "pattern" in schema:
+        if not isinstance(schema["pattern"], str):
+            raise ValueError(f"{path}.pattern must be a string")
+        try:
+            re.compile(schema["pattern"])
+        except re.error as exc:
+            raise ValueError(f"{path}.pattern is not a valid regular expression") from exc
     if kind == "object":
         properties = schema.get("properties", {})
         required = schema.get("required", [])
@@ -162,6 +213,23 @@ def _validate_output_schema(schema: Any, *, path: str = "output") -> None:
         _validate_output_schema(schema["items"], path=f"{path}.items")
 
 
+def _within_bounds(number: float, schema: dict[str, Any]) -> bool:
+    """Every numeric bound in the declared vocabulary, actually applied (MXR-080-1893)."""
+    if "minimum" in schema and number < float(schema["minimum"]):
+        return False
+    if "maximum" in schema and number > float(schema["maximum"]):
+        return False
+    if "exclusiveMinimum" in schema and number <= float(schema["exclusiveMinimum"]):
+        return False
+    return not ("exclusiveMaximum" in schema and number >= float(schema["exclusiveMaximum"]))
+
+
+def _within_count(size: int, schema: dict[str, Any], low: str, high: str) -> bool:
+    if low in schema and size < int(schema[low]):
+        return False
+    return not (high in schema and size > int(schema[high]))
+
+
 def _matches_output_schema(value: Any, schema: dict[str, Any]) -> bool:
     if "enum" in schema and value not in schema["enum"]:
         return False
@@ -176,13 +244,21 @@ def _matches_output_schema(value: Any, schema: dict[str, Any]) -> bool:
             for name, child in schema.get("properties", {}).items()
         )
     if kind == "array":
-        return isinstance(value, list) and all(_matches_output_schema(item, schema["items"]) for item in value)
+        if not isinstance(value, list) or not _within_count(len(value), schema, "minItems", "maxItems"):
+            return False
+        return all(_matches_output_schema(item, schema["items"]) for item in value)
     if kind == "string":
-        return isinstance(value, str)
+        if not isinstance(value, str) or not _within_count(len(value), schema, "minLength", "maxLength"):
+            return False
+        return "pattern" not in schema or re.search(schema["pattern"], value) is not None
     if kind == "number":
-        return not isinstance(value, (bool, np.bool_)) and isinstance(value, Real) and np.isfinite(float(value))
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real) or not np.isfinite(float(value)):
+            return False
+        return _within_bounds(float(value), schema)
     if kind == "integer":
-        return not isinstance(value, (bool, np.bool_)) and isinstance(value, Integral)
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+            return False
+        return _within_bounds(float(value), schema)
     if kind == "boolean":
         return isinstance(value, (bool, np.bool_))
     return value is None

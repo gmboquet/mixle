@@ -359,8 +359,6 @@ def sft_planner(
     """
     import torch
 
-    from mixle.models import LM
-
     if not callable(teacher):
         raise TypeError("teacher must be callable")
     if isinstance(requests, (str, bytes)):
@@ -382,7 +380,57 @@ def sft_planner(
     # remain distinct rows and cannot collapse through a request-keyed dict.
     teacher_plans = [_validated_teacher_plan(teacher(request), specs) for request in reqs]
 
-    torch.manual_seed(seed)  # LM weight init draws from torch's global RNG; pin it so seed= means seed
+    # LM weight init draws from torch's global RNG, so it has to be pinned for seed= to mean seed --
+    # but pinning it used to LEAK: sft_planner() reseeded the caller's whole process, so every torch
+    # draw afterwards silently changed, and calling the planner twice reset an unrelated training run's
+    # stream (MXR-080-1896). Snapshot, pin, restore: determinism inside, no observable effect outside.
+    # Deliberately NOT restored: CUDA generator state. torch.get_rng_state()/set_rng_state() cover the
+    # CPU generator only, and this path builds its LM on CPU unless the caller passes a device.
+    _entry_torch_rng = torch.get_rng_state()
+    try:
+        return _sft_planner_body(
+            reqs=reqs,
+            teacher=teacher,
+            teacher_plans=teacher_plans,
+            specs=specs,
+            holdout=holdout,
+            seed=seed,
+            d_model=d_model,
+            n_layer=n_layer,
+            n_head=n_head,
+            block=block,
+            epochs=epochs,
+            lr=lr,
+            device=device,
+            constrained=constrained,
+        )
+    finally:
+        torch.set_rng_state(_entry_torch_rng)
+
+
+def _sft_planner_body(
+    *,
+    reqs: list[str],
+    teacher: Callable[[str], list[dict]],
+    teacher_plans: list[list[dict]],
+    specs: Any,
+    holdout: float,
+    seed: int,
+    d_model: int,
+    n_layer: int,
+    n_head: int,
+    block: int,
+    epochs: int,
+    lr: float,
+    device: Any,
+    constrained: bool,
+) -> GenerativePlanner:
+    """The body of :func:`sft_planner`, split out so its global-RNG pin is scoped by one try/finally."""
+    import torch
+
+    from mixle.models import LM
+
+    torch.manual_seed(seed)
     rng = np.random.RandomState(seed)
     order = rng.permutation(len(reqs))
     n_evaluation = min(

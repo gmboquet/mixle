@@ -259,6 +259,58 @@ class CalibratedGenerator:
         self.seed = int(seed)
         self.confidence = float(confidence)
         self.risk_receipt: dict[str, Any] | None = None
+        # MXR-080-1894: what the certificate, once issued, is a certificate OF.
+        self._certified_policy: tuple[Any, ...] | None = None
+
+    def _policy(self) -> tuple[Any, ...]:
+        """The exact policy a risk certificate covers.
+
+        ``generate`` and ``score`` are held BY REFERENCE, not by ``id()``: replacing an attribute can
+        free the old callable and a new one can land on the same address, which would make an identity
+        check silently pass on the very swap it exists to catch (MXR-080-1894). Holding the objects
+        keeps the comparison exact, at the cost of pinning two callables the certificate is about
+        anyway. ``qhat`` is included because a hand-set threshold after calibration is a different
+        acceptance rule than the one that was certified.
+        """
+        return (self.generate, self.score, self.k, self.seed, self.alpha, self.confidence, self.qhat)
+
+    def _describe_policy(self) -> dict[str, Any]:
+        """JSON-able identity of the certified policy, for the receipt itself."""
+
+        def name(fn: Any) -> str:
+            return f"{getattr(fn, '__module__', '?')}.{getattr(fn, '__qualname__', type(fn).__name__)}"
+
+        return {
+            "generate": name(self.generate),
+            "score": name(self.score),
+            "k": self.k,
+            "seed": self.seed,
+            "alpha": self.alpha,
+            "confidence": self.confidence,
+            "statistic": "top_score",
+        }
+
+    def _require_certified_policy(self) -> None:
+        """Refuse to serve under a certificate that was issued for a different policy.
+
+        The receipt has always ASSERTED "candidate generation and scoring policies remain fixed after
+        calibration" as an assumption; nothing enforced it. ``generate``, ``score``, ``k``, ``seed`` and
+        ``qhat`` are plain attributes, so swapping the generator and the scorer after ``calibrate()``
+        left the old certificate attached and still gating -- serving arbitrary output under a bound
+        computed for code that no longer runs (MXR-080-1894).
+
+        Deliberately NOT checked: whether a callable's own *behaviour* changed while its identity stayed
+        the same (a closure over mutable state, a stateful model reloaded in place). No in-process check
+        can see that; it remains a stated assumption in the receipt.
+        """
+        if self.risk_receipt is None or self._certified_policy is None:
+            return  # no certificate to invalidate: a hand-set qhat is documented as uncertified
+        if self._policy() != self._certified_policy:
+            raise RuntimeError(
+                "the risk certificate in risk_receipt was issued for a different generate/score/k/seed/"
+                "alpha/confidence/qhat policy than the one now configured; re-run calibrate(...) before "
+                "serving, or construct a fresh CalibratedGenerator"
+            )
 
     def _draw(self, prompt: Any, *, seed: int) -> list[Any]:
         rng = np.random.default_rng(seed)
@@ -384,17 +436,24 @@ class CalibratedGenerator:
             "accepted": 0 if chosen is None else chosen["accepted"],
             "errors": 0 if chosen is None else chosen["errors"],
             "error_upper": None if chosen is None else chosen["error_upper"],
+            # MXR-080-1894: the certificate names the policy it certifies instead of merely assuming
+            # one. ``_certified_policy`` below is the enforcing half; this is the readable half that
+            # survives serialization.
+            "policy": self._describe_policy(),
             "assumptions": [
                 "calibration certification and serving cases are exchangeable",
-                "candidate generation and scoring policies remain fixed after calibration",
+                "the certified generate/score callables behave identically at serving time "
+                "(their identity is enforced; their internal state is not observable here)",
             ],
         }
+        self._certified_policy = self._policy()
         return self
 
     def candidate_set(self, prompt: Any, *, seed: int | None = None) -> list[Any]:
         """Return ``[best_candidate]`` when its calibrated statistic clears the risk gate, else ``[]``."""
         if self.qhat is None:
             raise RuntimeError("call calibrate(...) (or set qhat) before candidate_set(...)")
+        self._require_certified_policy()
         call_seed = _derive_seed(self.seed, prompt) if seed is None else int(seed)
         candidate, statistic = self._selection(prompt, seed=call_seed)
         return [candidate] if statistic >= self.qhat else []

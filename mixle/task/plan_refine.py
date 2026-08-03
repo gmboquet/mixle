@@ -33,7 +33,13 @@ from mixle.task.sft_plan import _PROMPT_SEP, GenerativePlanner, _serialize_plan,
 
 @dataclass
 class RefinementReport:
-    """Measured account of one outcome-refinement round."""
+    """Measured account of one outcome-refinement round.
+
+    Three immutable task roles, and the report says which number came from which (MXR-080-1896).
+    ``solve_rate_before``/``solve_rate_after`` are measured on the TEST role, which decides nothing;
+    ``selection_solve_rate_*`` are the numbers the accept/reject decision was actually made on, and are
+    optimistic by construction because the winner was picked with them.
+    """
 
     tasks: int
     verified_gain_pairs: int  # how many new verified-successful plans entered the training signal
@@ -43,6 +49,10 @@ class RefinementReport:
     accepted: bool
     discovery_tasks: int
     evaluation_tasks: int
+    selection_tasks: int = 0
+    test_tasks: int = 0
+    selection_solve_rate_before: float = float("nan")
+    selection_solve_rate_after: float = float("nan")
 
 
 def _solved(planner: GenerativePlanner, task: str, verify_fn: Callable[[str, list[dict]], bool]) -> bool:
@@ -85,13 +95,23 @@ def outcome_refine_planner(
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise ValueError("seed must be an integer")
     tasks = [str(task) for task in tasks]
-    if len(tasks) < 2 or len(set(tasks)) != len(tasks):
-        raise ValueError("at least two unique tasks are required for independent discovery and evaluation")
+    if len(tasks) < 3 or len(set(tasks)) != len(tasks):
+        raise ValueError(
+            "at least three unique tasks are required for independent discovery, selection, and test roles"
+        )
     order = np.random.RandomState(seed).permutation(len(tasks))
-    n_discovery = min(len(tasks) - 1, max(1, int(round(len(tasks) * discovery_frac))))
+    n_discovery = min(len(tasks) - 2, max(1, int(round(len(tasks) * discovery_frac))))
     discovery = [tasks[i] for i in order[:n_discovery]]
+    # MXR-080-1896: the held-out remainder carries TWO roles, not one. It was a single set that both
+    # decided whether to accept the retrained planner AND supplied the reported solve_rate_after, so the
+    # advertised "after" rate was the maximum of two candidates on the very tasks that picked the
+    # winner -- guaranteed not to decrease, and not a measurement of anything. Selection takes the
+    # larger half; the test half is read once, at the end, and never influences a choice.
     evaluation = [tasks[i] for i in order[n_discovery:]]
-    solved_before = sum(1 for task in evaluation if _solved(planner, task, verify_fn))
+    n_selection = max(1, (len(evaluation) + 1) // 2)
+    selection, test = evaluation[:n_selection], evaluation[n_selection:]
+    selection_before = sum(1 for task in selection if _solved(planner, task, verify_fn)) / len(selection)
+    solved_before = sum(1 for task in test if _solved(planner, task, verify_fn))
     candidate = copy.deepcopy(planner)
 
     new_pairs: list[tuple[list[int], list[int]]] = []
@@ -108,20 +128,27 @@ def outcome_refine_planner(
     if new_pairs:
         candidate.lm.fit_pairs(new_pairs, epochs=epochs, lr=lr, seed=seed)
 
-    solved_after = sum(1 for task in evaluation if _solved(candidate, task, verify_fn))
-    before_rate = solved_before / len(evaluation)
-    candidate_rate = solved_after / len(evaluation)
-    accepted = bool(new_pairs and candidate_rate >= before_rate)
+    # the decision reads SELECTION only; the test rates below are measured but never consulted here.
+    selection_after = sum(1 for task in selection if _solved(candidate, task, verify_fn)) / len(selection)
+    accepted = bool(new_pairs and selection_after >= selection_before)
+
+    before_rate = solved_before / len(test)
+    candidate_rate = sum(1 for task in test if _solved(candidate, task, verify_fn)) / len(test)
     active = candidate if accepted else planner
     report = RefinementReport(
         tasks=len(tasks),
         verified_gain_pairs=len(new_pairs),
         solve_rate_before=before_rate,
+        # the rate of whichever planner is actually returned, on the decision-free test role
         solve_rate_after=candidate_rate if accepted else before_rate,
         candidate_solve_rate=candidate_rate,
         accepted=accepted,
         discovery_tasks=len(discovery),
         evaluation_tasks=len(evaluation),
+        selection_tasks=len(selection),
+        test_tasks=len(test),
+        selection_solve_rate_before=selection_before,
+        selection_solve_rate_after=selection_after,
     )
     return active, report
 

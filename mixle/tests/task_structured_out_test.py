@@ -178,10 +178,15 @@ class StructuredResolveTest(unittest.TestCase):
         cat = sol.fields_cat["queue"]
         joint_count = sol.calibration_receipt["calibration_count"]
         self.assertEqual(len(num.train_inputs), len(base) - joint_count - len(num.cal_inputs) + len(harvested))
-        self.assertEqual(len(cat.train_inputs), len(base) - joint_count - len(cat.cal_inputs) + len(harvested))
+        # the categorical field is a solve() Solution, whose reserved holdout now carries TWO roles --
+        # conformal calibration (cal_*) and selection/verification (sel_*) -- so the rows withheld from
+        # training are cal + sel, not cal alone (MXR-080-1891).
+        cat_reserved = len(cat.cal_inputs) + len(cat.sel_inputs)
+        self.assertEqual(len(cat.train_inputs), len(base) - joint_count - cat_reserved + len(harvested))
         for t in harvested:
             self.assertNotIn(repr(t), [repr(c) for c in num.cal_inputs])
             self.assertNotIn(repr(t), [repr(c) for c in cat.cal_inputs])
+            self.assertNotIn(repr(t), [repr(c) for c in cat.sel_inputs])
 
 
 if __name__ == "__main__":
