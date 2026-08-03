@@ -22,6 +22,7 @@ import numpy as np
 
 from mixle.inference._advi import _advi_optimize  # core-resident ADVI optimizer (ppl -> core)
 from mixle.ppl.core import CompositeFamily, RandomVariable, free
+from mixle.utils.exact import require_exact_bool
 
 
 def torch_available() -> bool:
@@ -175,7 +176,7 @@ class GradTarget:
         self.unpack = unpack
         self.dmean = dmean
         self.dstd = dstd
-        self._jacobian = bool(jacobian)
+        self._jacobian = require_exact_bool(jacobian, "jacobian")
 
         from mixle.engines import TorchEngine
 
@@ -455,7 +456,7 @@ class MixtureGradTarget(GradTarget):
         self.unpack = unpack
         self.dmean = dmean
         self.dstd = dstd
-        self._jacobian = bool(jacobian)
+        self._jacobian = require_exact_bool(jacobian, "jacobian")
         self._eng = TorchEngine(dtype="float64")
         self._scorers = _scorers()
         x_np, _ = _validated_observations(data, missing="error", allow_marginalize=False)

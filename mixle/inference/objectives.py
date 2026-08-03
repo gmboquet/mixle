@@ -23,6 +23,7 @@ from mixle.inference.gradient_fit import (
 from mixle.stats.compute.backend import backend_seq_log_density
 from mixle.stats.compute.gradient import GradientFitError
 from mixle.stats.compute.pdist import SequenceEncodableProbabilityDistribution
+from mixle.utils.exact import require_exact_bool
 
 ObjectiveCallable = Callable[[Any, Any, Any], Any]
 ParameterObjectiveCallable = Callable[[Mapping[str, Any], Any, Any], Any]
@@ -204,7 +205,7 @@ class ExpectedLogDensity:
         self.weights = _validated_objective_weights(weights)
         if not isinstance(normalize, (bool, np.bool_)):
             raise ValueError("normalize must be boolean.")
-        self.normalize = bool(normalize)
+        self.normalize = require_exact_bool(normalize, "normalize")
 
     def __call__(self, model: SequenceEncodableProbabilityDistribution, enc: Any, engine: Any) -> Any:
         scores = backend_seq_log_density(model, enc, engine)
@@ -270,7 +271,7 @@ class UnnormalizedLogLikelihood:
         self.weights = _validated_objective_weights(weights)
         if not isinstance(normalize, (bool, np.bool_)):
             raise ValueError("normalize must be boolean.")
-        self.normalize = bool(normalize)
+        self.normalize = require_exact_bool(normalize, "normalize")
 
     def __call__(self, model: Any, enc: Any, engine: Any) -> Any:
         raw = self.log_unnormalized(model, enc, engine)
@@ -376,7 +377,7 @@ def fit_objective(
         converged=converged,
         initial_value=history[0],
         final_delta=final_delta,
-        maximize=bool(maximize),
+        maximize=require_exact_bool(maximize, "maximize"),
         best_value=best_value,
         best_iteration=best_iteration,
         final_gradient_norm=final_gradient_norm,
@@ -487,7 +488,7 @@ def optimize_torch_objective(
             converged=converged,
             initial_value=history[0],
             final_delta=final_delta,
-            maximize=bool(maximize),
+            maximize=require_exact_bool(maximize, "maximize"),
             best_value=best_value,
             best_iteration=best_iteration,
             final_gradient_norm=_objective_gradient_norm(torch, params, objective),
@@ -573,7 +574,7 @@ def fit_parameter_objective(
         converged=converged,
         initial_value=history[0],
         final_delta=final_delta,
-        maximize=bool(maximize),
+        maximize=require_exact_bool(maximize, "maximize"),
         best_value=best_value,
         best_iteration=best_iteration,
         final_gradient_norm=final_gradient_norm,

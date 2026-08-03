@@ -13,6 +13,7 @@ import numpy as np
 from scipy.optimize import minimize
 
 from mixle.models._kernels import stationary_kernel as _kernel
+from mixle.utils.exact import require_exact_bool
 
 __all__ = ["SparseGaussianProcessRegressor"]
 
@@ -170,7 +171,7 @@ class SparseGaussianProcessRegressor:
         z = self._place_inducing(x, np.random.RandomState(seed))
         lengthscale, amplitude, noise = self.lengthscale, self.amplitude, self.noise
         optimizer_receipt = {
-            "attempted": bool(optimize),
+            "attempted": require_exact_bool(optimize, "optimize"),
             "success": True,
             "status": 0,
             "message": "optimization disabled",

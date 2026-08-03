@@ -41,6 +41,7 @@ from mixle.evolve.operators import Candidate, ImprovementOperator, default_opera
 from mixle.evolve.structure import structural_distance
 from mixle.evolve.verify import Verdict, challenger_beats_champion
 from mixle.inference.multiple_testing import adjust_pvalues
+from mixle.utils.exact import require_exact_bool
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +101,7 @@ class OperatorBandit:
         self.operators: dict[str, ImprovementOperator] = {op.name: op for op in ops}
         self.policy = policy
         self.decay = float(decay)
-        self.prior_cost_aware = bool(prior_cost_aware)
+        self.prior_cost_aware = require_exact_bool(prior_cost_aware, "prior_cost_aware")
         self.rng = np.random.RandomState(seed)
         self.arms: dict[str, _Arm] = {name: _Arm() for name in self.operators}
         self._total_pulls = 0

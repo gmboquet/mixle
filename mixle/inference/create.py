@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from mixle.utils.exact import require_exact_bool
+
 
 @dataclass
 class CreatedModel:
@@ -162,7 +164,7 @@ def create(
     # its guarantee reflects that (see CreatedModel.is_certified).
     postconditions: dict[str, dict[str, Any]] = {
         "calibration": {"requested": holdout is not None, "performed": False, "error": None},
-        "uq": {"requested": bool(quantify_uq), "performed": False, "error": None},
+        "uq": {"requested": require_exact_bool(quantify_uq, "quantify_uq"), "performed": False, "error": None},
     }
 
     calibration = None

@@ -282,7 +282,7 @@ class GeneralizedEM:
         require_improvement: bool = True,
     ) -> None:
         self.candidate_fn = candidate_fn
-        self.require_improvement = bool(require_improvement)
+        self.require_improvement = require_exact_bool(require_improvement, "require_improvement")
 
     def step(
         self,
@@ -321,7 +321,7 @@ class MonotonicEM:
         tolerance: float = 1.0e-9,
     ) -> None:
         self.base_strategy = StandardEM() if base_strategy is None else base_strategy
-        self.require_improvement = bool(require_improvement)
+        self.require_improvement = require_exact_bool(require_improvement, "require_improvement")
         self.tolerance = float(tolerance)
 
     def step(
@@ -379,7 +379,7 @@ class ConditionalMaximizationEM:
         if len(conditional_steps) == 0:
             raise ValueError("ConditionalMaximizationEM requires at least one conditional step.")
         self.conditional_steps = tuple(conditional_steps)
-        self.require_improvement = bool(require_improvement)
+        self.require_improvement = require_exact_bool(require_improvement, "require_improvement")
 
     def step(
         self,
@@ -684,7 +684,7 @@ class AcceleratedEM:
             raise ValueError("step_factors must be positive finite values.")
         self.proposal_fn = proposal_fn
         self.base_strategy = StandardEM() if base_strategy is None else base_strategy
-        self.require_improvement = bool(require_improvement)
+        self.require_improvement = require_exact_bool(require_improvement, "require_improvement")
         self.tolerance = float(tolerance)
 
     def step(

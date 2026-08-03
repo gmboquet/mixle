@@ -23,6 +23,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from mixle.utils.exact import require_exact_bool
+
 try:
     import torch
 
@@ -68,7 +70,7 @@ if _HAS_TORCH:
 
         def __init__(self, uniform: bool) -> None:
             super().__init__()
-            self.uniform = bool(uniform)
+            self.uniform = require_exact_bool(uniform, "uniform")
 
         def forward(self, x: Any) -> Any:
             if x.ndim != 4 or x.shape[-2] == 0 or x.shape[-1] == 0:

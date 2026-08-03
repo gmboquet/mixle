@@ -35,6 +35,7 @@ from scipy.stats import norm
 
 from mixle.analysis.kriging import calibrate_variance
 from mixle.process import InhomogeneousPoissonProcessDistribution
+from mixle.utils.exact import require_exact_bool
 from mixle.utils.immutable import freeze_receipt_container
 
 __all__ = ["SpeciesObservation", "HabitatModel", "fit_sdm"]
@@ -189,7 +190,7 @@ class _PushforwardQuantity:
         if not isinstance(prior_dominated, (bool, np.bool_)):
             raise ValueError("prior_dominated must be Boolean.")
         self.samples = _readonly_owned_view(arr)
-        self.prior_dominated = bool(prior_dominated)
+        self.prior_dominated = require_exact_bool(prior_dominated, "prior_dominated")
 
     def credible_interval(self, level: float) -> tuple[np.ndarray, np.ndarray]:
         """Central ``level`` interval of the pushed-forward samples (empirical quantiles).
@@ -276,7 +277,7 @@ class HabitatModel:
         self.design = _readonly_owned_view(design_arr)
         self.cell_area = _readonly_owned_view(cell_area_arr)
         self._var_scale = var_scale_f
-        self._prior_dominated = bool(prior_dominated)
+        self._prior_dominated = require_exact_bool(prior_dominated, "prior_dominated")
         # Owned + immutable, like the parameter arrays above: a receipt a caller can mutate after the
         # fact is not a receipt (MXR-080-1590). The freeze is DEEP (MXR-080-1900):
         # `MappingProxyType(dict(...))` sealed only the top level, so a nested list or dict inside a

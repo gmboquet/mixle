@@ -59,6 +59,8 @@ import math
 from dataclasses import dataclass
 from typing import Literal
 
+from mixle.utils.exact import require_exact_bool
+
 try:
     import torch.nn as nn
 
@@ -192,7 +194,7 @@ def enable_mup_attention(model, enabled: bool = True) -> None:
     if not _HAS_TORCH:  # pragma: no cover - torch is optional
         raise ImportError("enable_mup_attention requires torch.")
     for block in model.blocks:
-        block.attn.mup_attention = bool(enabled)
+        block.attn.mup_attention = require_exact_bool(enabled, "enabled")
 
 
 def apply_mup_init(model, *, base_width: int, base_std: float = 0.02) -> None:

@@ -24,6 +24,7 @@ from typing import Any
 
 from mixle.data.hashing import dataset_hash
 from mixle.data.hashing import model_hash as _model_hash
+from mixle.utils.exact import require_exact_bool
 
 
 def _version(mod: str) -> str | None:
@@ -388,7 +389,7 @@ def fit_with_provenance(
         "data_hash": dataset_hash(materialized_data),
         "n_records": len(materialized_data),
         "optimize": {k: _request_value(v) for k, v in sorted(request_optimize_kw.items())},
-        "lineage": bool(lineage),
+        "lineage": require_exact_bool(lineage, "lineage"),
     }
     training["fit_request"] = request
     training["fit_request_digest"] = _fit_request_digest(request)

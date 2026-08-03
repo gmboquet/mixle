@@ -42,6 +42,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.utils.exact import require_exact_bool
 
 
 def _torch() -> Any:
@@ -565,7 +566,7 @@ def _build_contrastive_projection_class(torch: Any, nn: Any) -> Any:
             self.hidden = _positive_int(hidden, "hidden")
             if not isinstance(freeze_encoders, (bool, np.bool_)):
                 raise TypeError("freeze_encoders must be Boolean.")
-            self._freeze_encoders = bool(freeze_encoders)
+            self._freeze_encoders = require_exact_bool(freeze_encoders, "freeze_encoders")
             temperature = _positive_float(temperature, "temperature")
             self.encoder_x = encoder_x if encoder_x is not None else nn.Identity()
             self.encoder_y = encoder_y if encoder_y is not None else nn.Identity()

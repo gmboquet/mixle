@@ -274,7 +274,7 @@ class GraphResult:
         self.elbo_trace = np.asarray(elbo_trace, dtype=float).copy()
         self.elbo_trace.setflags(write=False)
         self.elbo = float(self.elbo_trace[-1])
-        self.converged = bool(converged)
+        self.converged = require_exact_bool(converged, "converged")
         self.iterations = int(self.elbo_trace.size)
         self.termination_reason = str(termination_reason)
         self.objective_delta = (
@@ -548,6 +548,8 @@ def vmp_fit(rv: RandomVariable, data, *, max_its: int = 300, tol: float = 1e-8, 
 
 from scipy.special import logsumexp as _logsumexp
 
+from mixle.utils.exact import require_exact_bool
+
 
 def _kmeanspp(x, k, rng):
     first = rng.integers(x.size) if callable(getattr(rng, "integers", None)) else rng.randint(x.size)
@@ -583,7 +585,7 @@ class MixtureVMPResult:
         self.elbo = float(elbo_trace[-1])
         self.elbo_trace = np.asarray(elbo_trace, dtype=float).copy()
         self.responsibility_normalizer_trace = np.asarray(normalizer_trace, dtype=float).copy()
-        self.converged = bool(converged)
+        self.converged = require_exact_bool(converged, "converged")
         self.iterations = int(self.elbo_trace.size)
         self.termination_reason = str(termination_reason)
         self.objective_delta = (
