@@ -8,6 +8,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from mixle.experimental.typed_runtime._exact_controls import (
+    require_exact_bool,
+    require_exact_int,
+    require_id_sequence,
+)
 from mixle.experimental.typed_runtime.contracts import ObjectiveKind, UpdateKind
 from mixle.experimental.typed_runtime.graph import UpdateGraph, UpdateNode
 from mixle.experimental.typed_runtime.validation import validate_update_graph
@@ -39,10 +44,14 @@ class GainEvidence:
             raise ValueError("gain evidence values must be finite.")
         if self.standard_error < 0.0 or self.staleness_risk < 0.0:
             raise ValueError("gain uncertainty and staleness risk must be non-negative.")
-        if self.sample_count < 0:
-            raise ValueError("sample_count must be non-negative.")
-        if self.model_version < 0:
-            raise ValueError("model_version must be non-negative.")
+        # Exact counts, not merely non-negative ones (MXR-080-1905). ``sample_count=2.5``
+        # constructed, and the scheduler's only use of it is ``row.sample_count == 0`` -- so a
+        # fractional count read as *measured* evidence and skipped bootstrapping. A fractional
+        # ``model_version`` was worse: it is compared against the scheduler's version and then
+        # formatted into the rejection reason with ``%d``, so evidence at version 0.5 against a
+        # scheduler at version 0 produced the reason "model-version:0!=0".
+        object.__setattr__(self, "sample_count", require_exact_int(self.sample_count, "sample_count", minimum=0))
+        object.__setattr__(self, "model_version", require_exact_int(self.model_version, "model_version", minimum=0))
 
     @property
     def effective_objective(self) -> ObjectiveKind:
@@ -98,8 +107,17 @@ class SchedulerConfig:
             raise ValueError("scheduler confidence and cost weights must be finite and non-negative.")
         if not math.isfinite(self.minimum_gain_lcb):
             raise ValueError("minimum_gain_lcb must be finite.")
-        if self.max_skip_rounds < 0:
-            raise ValueError("max_skip_rounds must be non-negative.")
+        # A round count and a switch, both exact (MXR-080-1905). ``max_skip_rounds=2.5`` constructed
+        # and was compared against an integer skip counter, so the starvation threshold sat between
+        # two reachable states; ``bootstrap_unmeasured="no"`` was stored as the string and read by a
+        # bare ``if``, so a scheduler configured from serialized text bootstrapped every unmeasured
+        # node while its configuration said not to.
+        object.__setattr__(
+            self, "max_skip_rounds", require_exact_int(self.max_skip_rounds, "max_skip_rounds", minimum=0)
+        )
+        object.__setattr__(
+            self, "bootstrap_unmeasured", require_exact_bool(self.bootstrap_unmeasured, "bootstrap_unmeasured")
+        )
 
 
 @dataclass(frozen=True)
@@ -142,8 +160,11 @@ class NodeTerminalReceipt:
     evidence_id: str
 
     def __post_init__(self) -> None:
-        if self.round_index < 0 or not self.node_id or not self.evidence_id:
+        if not self.node_id or not self.evidence_id:
             raise ValueError("terminal node receipt identity must be complete.")
+        # ``round_index=0.5`` constructed and was then compared for equality against the schedule's
+        # own integer round, so the outcome silently belonged to no round at all (MXR-080-1905).
+        object.__setattr__(self, "round_index", require_exact_int(self.round_index, "round_index", minimum=0))
         if not isinstance(self.status, NodeExecutionStatus):
             raise TypeError("terminal node status must be a NodeExecutionStatus value.")
 
@@ -353,8 +374,12 @@ class GainPerCostScheduler:
 
         if self._pending is not None:
             raise RuntimeError("the previous schedule requires terminal execution receipts.")
-        if model_version < 0:
-            raise ValueError("model_version must be non-negative.")
+        # Checked here, at the boundary, rather than 100 lines later inside ``ScheduleReceipt``
+        # (MXR-080-1905). ``model_version=np.int64(3)`` used to run the whole scheduling pass and
+        # then fail in the receipt, reporting a *receipt* defect for a caller argument; a NumPy
+        # version is a real version and is canonicalized instead. ``round_index=1.5`` failed the
+        # same way. The receipt's own checks stay -- they defend a receipt built by hand.
+        model_version = require_exact_int(model_version, "model_version", minimum=0)
         validate_update_graph(graph, strict=True)
         evidence = dict(evidence or {})
         graph_nodes = {node.node_id for node in graph.nodes}
@@ -364,13 +389,19 @@ class GainPerCostScheduler:
         for node_id, row in evidence.items():
             if row.node_id != node_id:
                 raise ValueError("gain evidence key and node_id differ for %s." % node_id)
-        candidates = graph_nodes if candidate_nodes is None else set(candidate_nodes)
+        # ``candidate_nodes="ab"`` scheduled the nodes ``a`` and ``b``: a string is a Collection of
+        # its own characters, so it passed the membership check by coincidence and named a candidate
+        # set nobody asked for (MXR-080-1905).
+        candidates = (
+            graph_nodes if candidate_nodes is None else set(require_id_sequence(candidate_nodes, "candidate_nodes"))
+        )
         unknown_candidates = sorted(candidates - graph_nodes)
         if unknown_candidates:
             raise KeyError("candidate set refers to unknown nodes: %s" % ", ".join(unknown_candidates))
 
         if round_index is None:
             round_index = self._next_round
+        round_index = require_exact_int(round_index, "round_index", minimum=0)
         if round_index < self._next_round:
             raise ValueError("round_index cannot move backwards.")
         target = target_objective or graph.node(graph.root_node).contract.objective_kind
@@ -518,32 +549,41 @@ class GainPerCostScheduler:
         if actual != expected:
             raise ValueError("terminal outcomes must cover exactly the selected nodes.")
         committed = {row.node_id for row in rows if row.status is NodeExecutionStatus.COMMITTED}
+        # Staged, then published (MXR-080-1905). NOT a reproduced defect: every check above already
+        # ran before the old in-place loop, and ``ScheduleCompletionReceipt.__post_init__`` only
+        # freezes containers, so there is currently no input that reaches the loop and then fails to
+        # build the receipt. This is the same stage-then-commit shape the cache and the coordinator
+        # needed for defects that WERE reproduced, applied here so the fairness clocks cannot get
+        # ahead of the receipt that justifies them if this receipt ever gains a check.
+        staged = dict(self._states)
         for node_id in receipt.eligible_nodes:
-            state = self._states.get(node_id, NodeScheduleState())
+            state = staged.get(node_id, NodeScheduleState())
             if node_id in committed:
-                self._states[node_id] = NodeScheduleState(
+                staged[node_id] = NodeScheduleState(
                     committed_count=state.committed_count + 1,
                     skip_rounds=0,
                     last_committed_round=receipt.round_index,
                 )
             else:
-                self._states[node_id] = NodeScheduleState(
+                staged[node_id] = NodeScheduleState(
                     committed_count=state.committed_count,
                     skip_rounds=state.skip_rounds + 1,
                     last_committed_round=state.last_committed_round,
                 )
-        self._pending = None
         topo_order = tuple(receipt.eligible_nodes)
         committed_nodes = tuple(node_id for node_id in topo_order if node_id in committed)
         unsuccessful = tuple(node_id for node_id in topo_order if node_id not in committed)
-        return ScheduleCompletionReceipt(
+        completion = ScheduleCompletionReceipt(
             terminal_id,
             receipt.round_index,
             tuple(sorted(rows, key=lambda row: row.node_id)),
             committed_nodes,
             unsuccessful,
-            self.states,
+            dict(staged),
         )
+        self._states = staged
+        self._pending = None
+        return completion
 
 
 __all__ = [

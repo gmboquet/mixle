@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -51,11 +51,31 @@ class ReplayEntry:
         }
 
 
-@dataclass
 class ReplayLog:
-    """Append-only sequence of proposal batches and terminal commit receipts."""
+    """Append-only sequence of proposal batches and terminal commit receipts.
 
-    entries: list[ReplayEntry] = field(default_factory=list)
+    :meth:`record` deep-copies its inputs so a later caller mutation cannot rewrite history -- but
+    the list holding them was public, so ``log.entries[0] = other`` and ``log.entries.clear()``
+    rewrote exactly the history the copying protects, and ``replay_log`` would then replay a
+    sequence that no coordinator ever committed (MXR-080-1905). :attr:`entries` is a detached tuple
+    now; indexing into it (``log.entries[0].batch``) is unchanged.
+    """
+
+    def __init__(self, entries: Sequence[ReplayEntry] = ()) -> None:
+        self._entries: list[ReplayEntry] = []
+        for entry in entries:
+            if not isinstance(entry, ReplayEntry):
+                raise TypeError("replay log entries must be ReplayEntry values.")
+            self._entries.append(entry)
+
+    def __repr__(self) -> str:
+        return "ReplayLog(entries=%d)" % len(self._entries)
+
+    @property
+    def entries(self) -> tuple[ReplayEntry, ...]:
+        """The recorded replay entries, oldest first, as a detached tuple."""
+
+        return tuple(self._entries)
 
     def record(self, batch: ProposalBatch, receipt: CommitReceipt, *, expected_state: Any = None) -> None:
         """Record detached replay inputs so later caller mutation cannot rewrite history."""
@@ -64,12 +84,12 @@ class ReplayLog:
             raise TypeError("replay records require a ProposalBatch and CommitReceipt.")
         if receipt.batch_id != batch.batch_id:
             raise ValueError("commit receipt does not belong to the proposal batch.")
-        self.entries.append(ReplayEntry(copy.deepcopy(batch), receipt, copy.deepcopy(expected_state)))
+        self._entries.append(ReplayEntry(copy.deepcopy(batch), receipt, copy.deepcopy(expected_state)))
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible replay manifest."""
 
-        return {"entries": [entry.as_dict() for entry in self.entries]}
+        return {"entries": [entry.as_dict() for entry in self._entries]}
 
 
 @dataclass(frozen=True)

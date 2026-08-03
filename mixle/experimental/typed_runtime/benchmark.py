@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from numbers import Integral, Real
@@ -144,36 +145,60 @@ class BenchmarkPoint:
         }
 
 
-@dataclass
 class TimeToTargetTrace:
-    """Monotone cumulative work trace for one strategy and one target."""
+    """Monotone cumulative work trace for one strategy and one target.
 
-    benchmark_id: str
-    strategy: str
-    target: ObjectiveTarget
-    points: list[BenchmarkPoint] = field(default_factory=list)
+    Not a dataclass any more (MXR-080-1905): ``points`` was a public list, so the chronology and
+    cumulative-counter contract that :meth:`record` enforces could be walked straight past --
+    ``trace.points.append(BenchmarkPoint(0, 0.95, 0.0))`` after a step-1 point produced a trace whose
+    steps ran 1, 0 and whose elapsed times ran 1.0, 0.0, and ``achieved`` then reported True from
+    that out-of-order point. :attr:`points` is a read-only view now and :meth:`record` is the only
+    way in. The constructor signature is unchanged.
+    """
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.benchmark_id, str) or not self.benchmark_id:
+    def __init__(
+        self,
+        benchmark_id: str,
+        strategy: str,
+        target: ObjectiveTarget,
+        points: Sequence[BenchmarkPoint] = (),
+    ) -> None:
+        if not isinstance(benchmark_id, str) or not benchmark_id:
             raise ValueError("benchmark_id and strategy must be non-empty.")
-        if not isinstance(self.strategy, str) or not self.strategy:
+        if not isinstance(strategy, str) or not strategy:
             raise ValueError("benchmark_id and strategy must be non-empty.")
-        if not isinstance(self.target, ObjectiveTarget):
+        if not isinstance(target, ObjectiveTarget):
             raise TypeError("time-to-target trace requires an ObjectiveTarget.")
-        if not isinstance(self.points, list) or any(not isinstance(point, BenchmarkPoint) for point in self.points):
+        if isinstance(points, (str, bytes)) or not isinstance(points, (list, tuple)):
             raise TypeError("time-to-target points must be a list of BenchmarkPoint values.")
-        initial_points = list(self.points)
-        self.points = []
-        for point in initial_points:
+        self.benchmark_id = benchmark_id
+        self.strategy = strategy
+        self.target = target
+        self._points: list[BenchmarkPoint] = []
+        for point in points:
             self.record(point)
+
+    def __repr__(self) -> str:
+        return "TimeToTargetTrace(benchmark_id=%r, strategy=%r, target=%r, points=%d)" % (
+            self.benchmark_id,
+            self.strategy,
+            self.target,
+            len(self._points),
+        )
+
+    @property
+    def points(self) -> tuple[BenchmarkPoint, ...]:
+        """The recorded observations, oldest first, as a detached tuple."""
+
+        return tuple(self._points)
 
     def record(self, point: BenchmarkPoint) -> None:
         """Append a cumulative point after checking chronology and counters."""
 
         if not isinstance(point, BenchmarkPoint):
             raise TypeError("time-to-target traces accept BenchmarkPoint values.")
-        if self.points:
-            previous = self.points[-1]
+        if self._points:
+            previous = self._points[-1]
             if point.step <= previous.step or point.elapsed_seconds < previous.elapsed_seconds:
                 raise ValueError("benchmark points must advance in step and elapsed time.")
             cumulative = (
@@ -189,13 +214,13 @@ class TimeToTargetTrace:
             )
             if any(getattr(point, name) < getattr(previous, name) for name in cumulative):
                 raise ValueError("cumulative benchmark counters cannot decrease.")
-        self.points.append(point)
+        self._points.append(point)
 
     @property
     def first_target_point(self) -> BenchmarkPoint | None:
         """First observed point that reaches the declared quality target."""
 
-        return next((point for point in self.points if self.target.reached(point.objective)), None)
+        return next((point for point in self._points if self.target.reached(point.objective)), None)
 
     @property
     def achieved(self) -> bool:
@@ -274,32 +299,52 @@ class FailureReceipt:
         }
 
 
-@dataclass
 class FailureLedger:
-    """Append-only in-memory ledger for benchmark failure oracles."""
+    """Append-only in-memory ledger for benchmark failure oracles.
 
-    receipts: list[FailureReceipt] = field(default_factory=list)
+    Append-only in fact, not only in the docstring (MXR-080-1905). ``receipts`` was a public list on
+    a dataclass, so a ledger holding one failed oracle answered ``all_oracles_passed: False`` until
+    ``ledger.receipts.clear()``, after which it answered ``True`` -- the negative control it was
+    recording had been erased through the very attribute that reports it, and the duplicate-case
+    check in :meth:`record` was bypassable the same way. :attr:`receipts` is a detached tuple now.
+    """
+
+    def __init__(self, receipts: Sequence[FailureReceipt] = ()) -> None:
+        self._receipts: list[FailureReceipt] = []
+        for receipt in receipts:
+            self.record(receipt)
+
+    def __repr__(self) -> str:
+        return "FailureLedger(receipts=%d)" % len(self._receipts)
+
+    @property
+    def receipts(self) -> tuple[FailureReceipt, ...]:
+        """Every recorded failure-oracle receipt, in the order recorded."""
+
+        return tuple(self._receipts)
 
     def record(self, receipt: FailureReceipt) -> None:
         """Record one uniquely identified case."""
 
+        if not isinstance(receipt, FailureReceipt):
+            raise TypeError("failure ledgers accept FailureReceipt values.")
         key = (receipt.benchmark_id, receipt.case_id)
-        if any((row.benchmark_id, row.case_id) == key for row in self.receipts):
+        if any((row.benchmark_id, row.case_id) == key for row in self._receipts):
             raise ValueError("failure case %s/%s is already recorded." % key)
-        self.receipts.append(receipt)
+        self._receipts.append(receipt)
 
     @property
     def failed_oracles(self) -> tuple[FailureReceipt, ...]:
         """Expected failures missed or clean controls falsely flagged."""
 
-        return tuple(receipt for receipt in self.receipts if not receipt.oracle_passed)
+        return tuple(receipt for receipt in self._receipts if not receipt.oracle_passed)
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible ledger."""
 
         return {
             "all_oracles_passed": not self.failed_oracles,
-            "receipts": [receipt.as_dict() for receipt in self.receipts],
+            "receipts": [receipt.as_dict() for receipt in self._receipts],
         }
 
 

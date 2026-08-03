@@ -7,6 +7,7 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass
 from typing import Any
 
+from mixle.experimental.typed_runtime._exact_controls import require_exact_bool, require_exact_int
 from mixle.experimental.typed_runtime.context_ir import ContextGraph
 from mixle.experimental.typed_runtime.proposal import payload_fingerprint
 
@@ -93,8 +94,11 @@ def partition_context_graph(
 ) -> GraphPartitionPlan:
     """Greedily partition connected/source-local regions under hard bounds."""
 
-    if maximum_tokens <= 0 or maximum_nodes <= 0:
-        raise ValueError("graph partition token and node limits must be positive.")
+    # Exact bounds (MXR-080-1905). ``maximum_nodes`` is compared against ``len(selected)`` and
+    # ``maximum_tokens`` against a sum of integer token counts, so a fractional bound named a limit
+    # no partition could ever sit exactly on: ``maximum_nodes=1.5`` admitted two nodes.
+    maximum_tokens = require_exact_int(maximum_tokens, "maximum_tokens", minimum=1)
+    maximum_nodes = require_exact_int(maximum_nodes, "maximum_nodes", minimum=1)
     oversized = [node.node_id for node in graph.nodes.values() if node.token_count > maximum_tokens]
     if oversized:
         raise ValueError("context nodes exceed maximum partition tokens: %s" % ", ".join(sorted(oversized)))
@@ -160,6 +164,21 @@ class CachedGraphPartition:
     measured_token_count: int
     boundary_edge_ids: tuple[str, ...]
     pinned: bool = False
+
+    def __post_init__(self) -> None:
+        """Make ``pinned`` an actual pin decision (MXR-080-1905).
+
+        ``pinned`` is the only thing standing between a partition and LRU eviction -- ``_evict``
+        reads it as ``if not entry.pinned`` -- and it was never checked. ``put(partition, graph,
+        pinned="no")`` therefore PINNED the partition, evicted the next insertion instead of it, and
+        serialized ``"pinned": "no"`` into the cache's own ``as_dict()``. Pin a whole cache that way
+        and the next insertion raises ``MemoryError("pinned graph partitions exceed cache bounds")``.
+
+        Only ``pinned`` is checked here: the other fields are computed by ``GraphMemoryCache._entry``
+        from the graph itself, and ``_canonical_partition`` already refuses a partition whose
+        declared content does not match the nodes it names.
+        """
+        object.__setattr__(self, "pinned", require_exact_bool(self.pinned, "pinned"))
 
 
 @dataclass(frozen=True)
@@ -346,10 +365,11 @@ class GraphMemoryCache:
     """LRU partition cache bounded by both tokens and partition count."""
 
     def __init__(self, *, maximum_tokens: int, maximum_partitions: int) -> None:
-        if maximum_tokens <= 0 or maximum_partitions <= 0:
-            raise ValueError("graph memory cache limits must be positive.")
-        self.maximum_tokens = maximum_tokens
-        self.maximum_partitions = maximum_partitions
+        # Exact bounds (MXR-080-1905): ``maximum_tokens=True`` and ``maximum_tokens=8.5`` both
+        # passed the ``<= 0`` test and became the eviction threshold every ``_evict`` loop compares
+        # an integer token sum against.
+        self.maximum_tokens = require_exact_int(maximum_tokens, "maximum_tokens", minimum=1)
+        self.maximum_partitions = require_exact_int(maximum_partitions, "maximum_partitions", minimum=1)
         self._entries: OrderedDict[str, CachedGraphPartition] = OrderedDict()
         self._lock = threading.RLock()
 

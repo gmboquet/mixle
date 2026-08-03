@@ -176,7 +176,51 @@ def run_graph_memory_pilot(
     accumulation_steps: int = 2,
     target_accuracy: float = 0.9,
 ) -> GraphMemoryPilotReceipt:
-    """Run a fixed-budget graph-context MoE ablation and deterministic restart drill."""
+    """Run a fixed-budget graph-context MoE ablation and deterministic restart drill.
+
+    The pilot seeds the PROCESS-GLOBAL torch RNG -- it has to, because the restart drill compares
+    bitwise reproducibility and the models it trains draw from the default generator. What it did
+    not do was put it back (MXR-080-1905): a caller who seeded their own process, ran the pilot and
+    then drew got different numbers than if they had not run it, and nothing said so. The entry
+    state is captured and restored here, including on failure, so running the pilot is not itself an
+    observable event in the caller's stream. The pilot's internal determinism is unchanged: it still
+    seeds from ``seed`` on the way in.
+
+    NOT restored: NumPy's global RNG, because the pilot never touches it -- it builds its own
+    ``np.random.default_rng(seed)`` -- and CUDA generator state, because the pilot runs on CPU.
+    """
+    try:
+        import torch
+    except ImportError as error:
+        raise ImportError("run_graph_memory_pilot requires PyTorch.") from error
+    entry_rng_state = torch.random.get_rng_state().clone()
+    try:
+        return _run_graph_memory_pilot(
+            seed=seed,
+            source_nodes=source_nodes,
+            train_examples=train_examples,
+            test_examples=test_examples,
+            updates=updates,
+            microbatch_size=microbatch_size,
+            accumulation_steps=accumulation_steps,
+            target_accuracy=target_accuracy,
+        )
+    finally:
+        torch.random.set_rng_state(entry_rng_state)
+
+
+def _run_graph_memory_pilot(
+    *,
+    seed: int,
+    source_nodes: int,
+    train_examples: int,
+    test_examples: int,
+    updates: int,
+    microbatch_size: int,
+    accumulation_steps: int,
+    target_accuracy: float,
+) -> GraphMemoryPilotReceipt:
+    """Pilot body; :func:`run_graph_memory_pilot` owns saving and restoring the global RNG."""
 
     try:
         import torch
