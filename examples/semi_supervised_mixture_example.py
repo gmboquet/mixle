@@ -74,7 +74,21 @@ if __name__ == "__main__":
     est = SemiSupervisedMixtureEstimator(
         [
             CompositeEstimator(
-                (SequenceEstimator(CategoricalEstimator(pseudo_count=1.0e-3, suff_stat=suff_stat)), GaussianEstimator())
+                (
+                    SequenceEstimator(
+                        CategoricalEstimator(pseudo_count=1.0e-3, suff_stat=suff_stat),
+                        # The length model is not optional here. SequenceEstimator defaults to
+                        # NullEstimator(), which yields a SequenceDistribution with no distribution
+                        # over length -- a law conditional on the length it was handed, which mixle
+                        # reports as a LIKELIHOOD_FACTOR and a generative mixture refuses as a
+                        # component. The ground truth above samples lengths from
+                        # CategoricalDistribution({seq_samp: 1.0}), so fitting without a length
+                        # estimator would also be fitting a different family than the one that
+                        # produced the data.
+                        len_estimator=CategoricalEstimator(pseudo_count=1.0e-3),
+                    ),
+                    GaussianEstimator(),
+                )
             )
         ]
         * 3,
