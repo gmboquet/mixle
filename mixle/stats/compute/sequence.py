@@ -637,15 +637,20 @@ def initialize(
         nobs = 0.0
         rng_w = np.random.RandomState(seed=rng.randint(2**31))
 
-        # Reservoir-samples one fallback observation while streaming, so the same guarantee as the
-        # seq_ path above holds without buffering the data: a pass that selects nothing still hands
-        # the accumulator one uniformly-chosen observation instead of an empty initialization that
-        # some leaves accept and others reject. See the note in the seq_ branch.
+        # Retains the first observation as a fallback so the same guarantee as the seq_ path above
+        # holds without buffering the data: a pass that selects nothing still hands the accumulator
+        # one observation instead of an empty initialization that some leaves accept and others
+        # reject. See the note in the seq_ branch.
+        #
+        # Deliberately NOT reservoir-sampled. Drawing a uniform index per observation would be the
+        # nicer choice in isolation, but it consumes from rng_w on every iteration and therefore
+        # shifts the whole Bernoulli mask that follows it -- silently changing the initialization of
+        # every fit that reaches this path, not just the degenerate one this guards. A fixed choice
+        # touches no random state at all, and in the only case it is ever used the pass had selected
+        # nothing, so there is no distribution left to preserve.
         fallback: tuple[Any, ...] = ()
-        seen = 0
-        for i, x in enumerate(idata):
-            seen += 1
-            if rng_w.randint(seen) == 0:
+        for x in idata:
+            if not fallback:
                 fallback = (x,)
             w = rng_w.binomial(n=1, p=p)
             nobs += w
