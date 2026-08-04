@@ -14,46 +14,14 @@ _CLOSURE_PATHS = (
     "pyproject.toml",
     "release-checklists/0.8.0-repro-environment.json",
     "release-checklists/0.8.0-repro-requirements.txt",
-    "release-checklists/0.8.0-banking77-dataset.json",
     "scripts/build_repro_bundle.py",
     "scripts/run_repro_entry.py",
 )
 
 _ENTRIES = (
-    {
-        "id": "flagship-banking77-cascade",
-        "kind": "flagship",
-        "tier": "hosted-network",
-        "argv": ["examples/real_receipt_banking77.py", "--smoke", "--json"],
-        "script": "examples/real_receipt_banking77.py",
-        "timeout_seconds": 30,
-        "configuration": {
-            "n_seed": 1155,
-            "n_round": 40,
-            "n_rounds": 1,
-            "n_test": 60,
-            "student": "generative",
-            "seed": 0,
-        },
-        "dataset_record": "release-checklists/0.8.0-banking77-dataset.json",
-        "expected": {
-            "format": "json",
-            "assertions": [
-                {"path": "artifact", "equals": "mixle.banking77_reproduction/v1"},
-                {"path": "metrics.task", "equals": "banking77 intents (77 classes)"},
-                {"path": "metrics.n_test", "equals": 60},
-                {"path": "metrics.end_to_end_accuracy", "minimum": 0.0, "maximum": 1.0},
-                {"path": "metrics.local_agreement", "minimum": 0.0, "maximum": 1.0},
-                {"path": "metrics.escalation_rate", "minimum": 0.0, "maximum": 1.0},
-                {
-                    "path": "dataset.source_commit",
-                    "equals": "9d081458ff52e53cf7e848f414e6e9344e4e6696",
-                },
-                {"path": "dataset.splits.train.rows", "equals": 10003},
-                {"path": "dataset.splits.test.rows", "equals": 3080},
-            ],
-        },
-    },
+    # No hosted-network entry: the repository carries no direct dataset usage (release owner's
+    # decision, 2026-08-04) -- real-data demonstrations live in notebooks outside this repo, so every
+    # bundle entry is self-contained and replays offline.
     {
         "id": "gallery-univariate",
         "kind": "self-contained",
@@ -167,11 +135,10 @@ def build() -> dict:
                 "metadata/SHA256SUMS",
                 "metadata/mixle-0.8.0-py3-none-any.whl.json",
                 "metadata/reproduction-*.json",
-                "metadata/network/banking77-reproduction-receipt.json",
             ],
             "rule": (
                 "The final bundle is incomplete unless these retained records bind its source commit, "
-                "approved checks, wheel SHA-256, and local/hosted entry receipts to the signed v0.8.0 tag."
+                "approved checks, wheel SHA-256, and local entry receipts to the signed v0.8.0 tag."
             ),
         },
         "environment": "release-checklists/0.8.0-repro-environment.json",

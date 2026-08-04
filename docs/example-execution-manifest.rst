@@ -21,9 +21,9 @@ over-budget, or wrong-contract receipts abort publication. The manifest also
 binds the versioned dependency-profile digest.
 
 The local required set covers univariate, structured, production/provenance,
-and scaling workflows. The hosted required entry covers immutable-source
-Banking77 data. Other examples remain instructional or optional and are not
-silently counted as release evidence.
+and scaling workflows; every entry is self-contained and replays offline.
+Other examples remain instructional or optional and are not silently counted
+as release evidence.
 
 Current Inventory
 -----------------
@@ -57,9 +57,6 @@ The core package currently ships 64 Python example scripts:
    * - Reasoning, cross-modal, and scientist workflows
      - frontier ecosystem, KG agent, scientist, physics inverse, receipts
      - manual unless dependencies are provisioned
-   * - Vision edge distillation
-     - ``examples/vision_edge_distillation``
-     - manual/GPU or cached-feature validation
 
 Release Execution Status
 ------------------------
@@ -96,26 +93,14 @@ generative mixture refuses as a component. The ground truth it samples from draw
 than the one that produced the data. With a length estimator supplied it recovers the generating
 parameters: weights 0.598/0.296/0.106 against a true 0.6/0.3/0.1.
 
-Separately, the two real-data flagship examples added 2026-07-11 (F10.1/F10.2;
-not part of the base-install set above -- both need network access, and the
-Adult flagship additionally needs the optional ``datasets`` package) were run
-against the same wheel with their dependencies met:
+Real-data flagship demonstrations (Banking77, UCI Adult, sunspots) were removed
+from this repository on 2026-08-04: the repository carries no direct dataset
+usage, and real-data demonstrations live in notebooks outside it. Their
+historical execution evidence remains in this page's git history.
 
-* ``flagship_temporal_sunspots.py`` -- **passed**. Fetches the public monthly
-  sunspot series over the network; no extra package is required for the fit
-  itself (the ``hmmlearn`` comparison degrades to ``None`` if absent, but
-  ``hmmlearn`` was installed for this run). Held-out mean log-likelihood per
-  observation: mixle -2.0762 vs. hmmlearn -2.0776 -- independent-baseline
-  agreement is the receipt.
-* ``flagship_heterogeneous_adult.py`` -- **passed**. Downloads UCI Adult via
-  the optional ``datasets`` package (``pip install datasets``; not a core
-  dependency or always-installed extra). Mean log-density: train -10.719,
-  held-out -10.839 (held-out close to train -- generalized, not memorized).
-
-The remaining examples (task/DOE/reasoning/vision workflows, plus the other
-three flagships) were not executed in this pass -- they need optional extras,
-external datasets, model weights, or services per their Inventory entries
-below, none of which are provisioned in this environment.
+The remaining examples (task/DOE/reasoning workflows) were not executed in
+this pass -- they need optional extras, model weights, or services per their
+Inventory entries below, none of which are provisioned in this environment.
 
 **``hierarchical_mixture_example.py`` follow-up (2026-07-17).** A later
 re-verification pass flagged this example as exceeding its 90s budget against
@@ -166,8 +151,7 @@ before #435 (``2ed006ca``), and current ``release/0.8.0``.
 previously-resolved timed-out cases (``hierarchical_mixture_example.py``,
 ``lookback_hmm_example.py``) were re-run against current ``release-prep/0.8.0``
 source (roughly 40 additional bug-fix commits landed since the 2026-07-17 pass,
-none in these examples' own code paths) and still pass; ``flagship_temporal_sunspots.py``
-reproduces the identical held-out mean log-likelihood (-2.0762). This pass also:
+none in these examples' own code paths) and still pass. This pass also:
 
 * Confirmed ``auto_example.py`` and ``enumeration_showcase_example.py`` --
   both inventoried "Execute." but absent from the 2026-07-17 evidence above --
@@ -193,9 +177,6 @@ reproduces the identical held-out mean log-likelihood (-2.0762). This pass also:
   despite being policy-required by the Minimum Release Run below, had no
   recorded execution evidence: a base install cannot run them at all, and the
   Inventory entries did not say so.
-* Corrected ``real_receipt_banking77.py``'s documented blocker from "dataset
-  download permission" to ``torch`` (same chokepoint as the four examples
-  above) -- the dataset load itself is not the blocker in a base install.
 * Confirmed ``geoscience_inversion_report.py`` -- also absent from the
   2026-07-17 evidence despite exercising ``mixle.task.inverse`` -- passes its
   execution contract. The script's calibration layer detected a poorly
@@ -413,26 +394,16 @@ Inventory
      - Execute or classify as long-running.
    * - ``examples/extensibility_seams_example.py``
      - Execute.
-   * - ``examples/flagship_heterogeneous_adult.py``
-     - Execute with network access and the optional ``datasets`` package
-       (downloads UCI Adult, not a core dependency); intended as an F10.4
-       release gate.
    * - ``examples/flagship_kg_agent.py``
      - Manual unless KG/RAG prerequisites are provisioned.
    * - ``examples/flagship_physics_inverse.py``
      - Execute or mark blocked on PDE/scientific dependencies.
-   * - ``examples/flagship_temporal_sunspots.py``
-     - Execute with network access (fetches the public sunspot series);
-       ``hmmlearn`` comparison is optional and degrades to ``None`` if
-       absent; intended as an F10.4 release gate.
    * - ``examples/flagship_triage_app.py``
      - Manual unless local reasoning prerequisites are provisioned.
    * - ``examples/frontier_family_showcase.py``
      - Manual/integration.
    * - ``examples/geoscience_inversion_report.py``
      - Execute or mark blocked on scientific dependencies.
-   * - ``examples/foundation_to_edge.py``
-     - Manual unless model weights are provisioned.
    * - ``examples/frontier_ecosystem_demo.py``
      - Manual/integration.
    * - ``examples/gallery_combinators_example.py``
@@ -463,8 +434,6 @@ Inventory
      - Execute.
    * - ``examples/label_economics_demo.py``
      - Execute with optional-dependency status recorded.
-   * - ``examples/laptop_scientist.py``
-     - Manual unless local model weights are provisioned.
    * - ``examples/latent_variable_models_example.py``
      - Execute.
    * - ``examples/lookback_hmm_example.py``
@@ -488,14 +457,6 @@ Inventory
      - Execute with optional-dependency status recorded.
    * - ``examples/quickstart_example.py``
      - Execute.
-   * - ``examples/real_receipt_banking77.py``
-     - Blocked on ``torch`` in a base install (``mixle.task.distill._fit_mlp``,
-       same chokepoint as ``win_demo_example.py``); with ``torch`` installed,
-       also needs the Banking77 dataset -- confirmed reachable only via a
-       stale local Hugging Face cache in one run (a live
-       ``load_dataset("banking77")`` Hub lookup failed with "banking77
-       couldn't be found on the Hugging Face Hub"), a separate portability
-       risk worth re-checking on a host without that cache.
    * - ``examples/reasoner_investigation_demo.py``
      - Manual/integration.
    * - ``examples/scaling_example.py``
@@ -534,10 +495,6 @@ Inventory
        does not need it, but the local-student distillation step routes
        through ``mixle.task.distill._fit_mlp``); execute with ``torch``
        installed, not just teacher/provider requirements.
-   * - ``examples/vision_edge_distillation/distill_clip_features.py``
-     - Manual or blocked unless cached features/model weights are present.
-   * - ``examples/vision_edge_distillation/verify_on_laptop.py``
-     - Execute when the distilled artifact exists; otherwise blocked.
    * - ``examples/vlm_trust_receipts_demo.py``
      - Execute with optional-dependency status recorded.
    * - ``examples/win_demo_example.py``

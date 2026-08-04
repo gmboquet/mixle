@@ -42,9 +42,9 @@ Install only the optional integrations you need:
      - Torch engine, GPU/autograd, neural and Transformer leaves
      - using :doc:`neural-llm` or task distillation
    * - ``scientist``
-     - Torch, Transformers, sentence-transformers, and datasets
-     - running :mod:`mixle.scientist`, ``laptop_scientist.py``, or foundation
-       capability distillation workflows
+     - Torch, Transformers, and sentence-transformers
+     - running :mod:`mixle.scientist` or foundation-capability distillation
+       workflows
    * - ``numba``
      - JIT hot paths and TBB support
      - large local fits need faster kernels

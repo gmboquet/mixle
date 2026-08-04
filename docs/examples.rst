@@ -122,10 +122,6 @@ Choose by Workflow
      - ``frontier_ecosystem_demo.py``, ``reasoner_investigation_demo.py``,
        ``flagship_triage_app.py``, ``flagship_kg_agent.py``
      - :doc:`reasoning-ecosystem`, :doc:`reasoning-systems`
-   * - Local scientist and edge distillation
-     - ``laptop_scientist.py``, ``foundation_to_edge.py``,
-       ``vision_edge_distillation/``
-     - :doc:`reasoning-ecosystem`, :doc:`task-distillation`
    * - Scientific inverse problems
      - ``flagship_physics_inverse.py``, ``skeptic_challenge_example.py``
      - :doc:`inference`, :doc:`ppl`, :doc:`uncertainty`
@@ -136,21 +132,22 @@ Choose by Workflow
    * - Extraction and agent-style task behavior
      - ``task_extraction_example.py``, ``win_demo_example.py``
      - :doc:`task-serving`, :doc:`agentic-task-distillation`
-   * - Real-data task workflow
-     - ``real_receipt_banking77.py``
-     - :doc:`task-serving`, :doc:`maturity`
+
+Real Data
+---------
+
+The repository deliberately carries **no direct dataset usage**: no example
+fetches, embeds, or pins an external dataset, and every script here runs on
+synthetic data it generates itself. Demonstrations against real public
+datasets live in notebooks outside this repository, where a dataset download
+is an explicit, interactive act rather than repository behavior.
 
 Dependency Notes
 ----------------
 
 Most examples use only the base package dependencies. Examples that train
 neural students, neural leaves, representation models, or neural-density
-teachers generally need ``mixle[torch]``. The real-data Banking77 receipt
-additionally needs the Hugging Face ``datasets`` package and downloads the
-dataset on first run.
-The ``laptop_scientist.py`` and ``foundation_to_edge.py`` workflows need the
-``scientist`` extra and local Hugging Face model weights where noted by the
-scripts.
+teachers generally need ``mixle[torch]``.
 
 .. code-block:: sh
 
@@ -210,28 +207,16 @@ Complete Inventory
    * - ``extensibility_seams_example.py``
      - Extension
      - Show where new families and backends attach.
-   * - ``flagship_heterogeneous_adult.py``
-     - Real-data evidence
-     - Fit heterogeneous UCI Adult census-income fields in one call and
-       report train/held-out log-density as the generalization receipt.
    * - ``flagship_kg_agent.py``
      - Reasoning ecosystem
      - Ontology-constrained graph facts, KG completion, and cited KG-RAG.
    * - ``flagship_physics_inverse.py``
      - Scientific inference
      - Bayesian inverse problem with coverage-oriented uncertainty checks.
-   * - ``flagship_temporal_sunspots.py``
-     - Real-data evidence
-     - Discrete-emission HMM on real monthly sunspot counts (1749-1983),
-       cross-checked against hmmlearn on the same held-out split.
    * - ``flagship_triage_app.py``
      - Reasoning ecosystem
      - Support triage over substrate, skills, pool-style jobs, monitoring, and
        grounded answering.
-   * - ``foundation_to_edge.py``
-     - Edge distillation
-     - Distill a foundation-model capability into a smaller local artifact and
-       report retained accuracy.
    * - ``frontier_ecosystem_demo.py``
      - Local reasoning ecosystem
      - End-to-end tour of substrate, creation, simulation, skills, reasoning,
@@ -275,10 +260,6 @@ Complete Inventory
    * - ``joint_mixture_example.py``
      - Latent models
      - Joint mixture variants.
-   * - ``laptop_scientist.py``
-     - Local scientist
-     - Optional assembled workflow for cached encoders, local answering, and
-       verified scientific responses.
    * - ``latent_variable_models_example.py``
      - Latent models
      - Latent families beyond the first HMM path.
@@ -299,9 +280,6 @@ Complete Inventory
    * - ``production_example.py``
      - Production
      - Provenance, registry, serving, drift, and checkpoints.
-   * - ``real_receipt_banking77.py``
-     - Real-data task workflow
-     - Banking77 intent classification through the ``solve`` loop.
    * - ``reasoner_investigation_demo.py``
      - Reasoning ecosystem
      - Evidence acquisition over retrieve, compute, simulate, and delegate
@@ -339,10 +317,6 @@ Complete Inventory
    * - ``task_llm_active_example.py``
      - Task workflow
      - LLM teacher, active labeling, local student, and calibrated cascade.
-   * - ``vision_edge_distillation/``
-     - Edge distillation
-     - Train and verify a compact vision student from cached or reproduced
-       foundation-model features.
    * - ``win_demo_example.py``
      - End-to-end workflow
      - Replace a ticket router and invoice extractor with calibrated models.
