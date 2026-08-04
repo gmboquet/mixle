@@ -34,6 +34,16 @@ def test_every_release_profile_generates_exact_floors() -> None:
 def test_hosted_matrix_installs_and_records_floor_profiles() -> None:
     workflow = (ROOT / ".github" / "workflows" / "extras-matrix.yml").read_text(encoding="utf-8")
     assert "generate_extra_floor_constraints.py" in workflow
-    assert 'scripts/verify_extra_profile.py --profile "$PROFILE"' in workflow
+    # Asserted as a CONTRACT rather than as one literal command line. This previously pinned the
+    # exact string `scripts/verify_extra_profile.py --profile "$PROFILE"`, which broke the moment the
+    # invocation was legitimately reformatted: the script's marker resolution needs `packaging` and
+    # its import check must not, so the two now run under different interpreters and the call spans
+    # two lines. The property that matters is that the floor environment is verified against the
+    # profile -- not how the command happens to be wrapped.
+    assert "verify_extra_profile.py" in workflow
+    assert '--profile "$PROFILE"' in workflow
+    assert "--print-modules" in workflow  # markers resolved by the tooling interpreter
+    assert '--modules "$FLOOR_MODULES"' in workflow  # imports checked inside the floor environment
+    assert "$RUNNER_TEMP/floor-env/bin/python" in workflow
     assert "extra-floor-receipt-" in workflow
     assert "extra-floor-profile-set-receipt.json" in workflow
