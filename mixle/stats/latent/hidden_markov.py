@@ -123,6 +123,41 @@ from mixle.utils.exact import require_exact_bool
 _STATE_POOLS: dict[int, Any] = {}  # cached thread pools by worker count (pool creation is not free)
 
 
+#: Unit roundoff of the loosest precision the library folds statistics at.
+#: :class:`~mixle.engines.TorchEngine` documents ``dtype="float32"`` as a supported, explicitly
+#: opted-in precision, so the responsibility-mass identity below must tolerate float32 rounding.
+_REDUCED_PRECISION_EPS = float(np.finfo(np.float32).eps)
+
+
+def _responsibility_mass_tolerance(mass):
+    """Relative tolerance for the responsibility-mass identity, scaled to how much mass was summed.
+
+    The identity compares two sums of the SAME responsibilities, so the only difference between them
+    is summation roundoff -- but roundoff is not a constant. Summing ``n`` values accumulates error
+    that grows like ``sqrt(n) * eps`` for randomly-signed rounding, so a bound has to grow with the
+    number of terms. Since responsibilities sum to the observation count, the mass itself is that
+    term count, and the tolerance is scaled by its square root with a safety factor.
+
+    The previous bound was a flat ``1e-9``, roughly a hundred times TIGHTER than float32 unit roundoff
+    (1.19e-7) before any accumulation at all. Measured on an ordinary two-state, 200-sequence workload
+    under ``TorchEngine(dtype="float32")``: 8000.000276 against 8000.038925, a relative mismatch of
+    4.8e-6 -- float32 rounding over 8000 accumulated values, not a corrupted accumulator. The guard
+    rejected every fit at a precision the engine layer explicitly invites.
+
+    Deliberately NOT keyed to the array's dtype. A float32 engine folds in float32 and hands back
+    float64 arrays, so the storage dtype reports float64 while the VALUES carry float32 rounding;
+    scaling by ``np.finfo(counts.dtype).eps`` looks principled and changes nothing. The bound has to
+    reflect the arithmetic that produced the numbers, which this function cannot inspect, so it
+    assumes the loosest precision the library supports.
+
+    That is a real loosening for float64 callers, and the trade is deliberate: a genuinely corrupted
+    accumulator -- a dropped state, a double-counted transition -- misses this identity by a fraction
+    of the total, not by parts per million. The check still catches that; what it no longer does is
+    refuse a supported engine for arithmetic that engine documents.
+    """
+    return max(1.0e-9, 4.0 * _REDUCED_PRECISION_EPS * math.sqrt(max(float(abs(mass)), 1.0)))
+
+
 def _validated_hmm_transition_matrix(values: Any, n_states: int) -> tuple[np.ndarray, tuple[int, ...]]:
     """Return an owned stochastic transition matrix and explicit unreachable-row metadata."""
     try:
@@ -3403,11 +3438,13 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             (num_states, num_states),
             "hidden-Markov transition counts",
         )
+        _mass = float(init_counts.sum() + trans_counts.sum())
+        _rtol = _responsibility_mass_tolerance(_mass)
         if not np.isclose(
             float(state_counts.sum()),
-            float(init_counts.sum() + trans_counts.sum()),
-            rtol=1.0e-9,
-            atol=1.0e-9,
+            _mass,
+            rtol=_rtol,
+            atol=max(1.0e-9, _rtol * max(1.0, abs(_mass))),
         ):
             raise ValueError("hidden-Markov state counts must equal initial plus transition responsibility mass")
         if not isinstance(acc_values, (tuple, list)) or len(acc_values) != num_states:
@@ -3492,11 +3529,13 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             (num_states, num_states),
             "hidden-Markov transition counts",
         )
+        _mass = float(self.init_counts.sum() + self.trans_counts.sum())
+        _rtol = _responsibility_mass_tolerance(_mass)
         if not np.isclose(
             float(self.state_counts.sum()),
-            float(self.init_counts.sum() + self.trans_counts.sum()),
-            rtol=1.0e-9,
-            atol=1.0e-9,
+            _mass,
+            rtol=_rtol,
+            atol=max(1.0e-9, _rtol * max(1.0, abs(_mass))),
         ):
             raise ValueError("hidden-Markov state counts must equal initial plus transition responsibility mass")
         if not isinstance(accumulators, (tuple, list)) or len(accumulators) != num_states:
@@ -3814,11 +3853,13 @@ class HiddenMarkovEstimator(ParameterEstimator):
         )
         if not isinstance(topic_ss, (tuple, list)) or len(topic_ss) != num_states:
             raise ValueError("hidden-Markov emission statistics must match the state count")
+        _mass = float(init_counts.sum() + trans_counts.sum())
+        _rtol = _responsibility_mass_tolerance(_mass)
         if not np.isclose(
             float(state_counts.sum()),
-            float(init_counts.sum() + trans_counts.sum()),
-            rtol=1.0e-9,
-            atol=1.0e-9,
+            _mass,
+            rtol=_rtol,
+            atol=max(1.0e-9, _rtol * max(1.0, abs(_mass))),
         ):
             raise ValueError("hidden-Markov state counts must equal initial plus transition responsibility mass")
         validate_effective_sample_mass(

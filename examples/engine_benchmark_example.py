@@ -7,22 +7,22 @@ Times three representative workloads across engines and prints a table:
   * batch scoring for a spread of families (Gaussian / GPD / wrapped Cauchy / Watson).
 
 Takeaway: an engine is a placement decision, not a rewrite. The same ``optimize`` call and the same
-model run on every engine, and each workload is parity-checked against the numpy result before its
-timing is reported -- so the table compares equal work, and a speedup that came from silently doing
-something different would fail the check instead of appearing as a win.
+model run on each engine in the table below, and each workload is parity-checked against the numpy
+result before its timing is reported -- so the table compares equal work, and a speedup that came from
+silently doing something different would fail the check instead of appearing as a win.
 
 The table reports current-run measurements without assuming which engine wins. Sizes scale with
 ``--scale`` so the crossover can be measured on the named hardware. Apple-silicon (MPS) runs float32
 (no float64 on MPS), so precision differs and must be reported with timing.
 
-KNOWN ISSUE (0.8.0): the HMM row aborts on ANY float32 engine -- ``TorchEngine(device="mps")`` (MPS
-has no float64, so float32 is forced) and ``TorchEngine(device="cpu", dtype="float32")`` alike -- with
-``ValueError: hidden-Markov state counts must equal initial plus transition responsibility mass``.
-``HiddenMarkovAccumulator.combine`` checks that consistency with ``np.isclose(..., rtol=1e-9,
-atol=1e-9)``, a tolerance ~100x tighter than float32 machine epsilon (1.19e-7); at this workload the
-observed relative mismatch is ~1.2e-7, i.e. exactly float32 rounding. This is a library defect, not an
-example defect. Until it is fixed, this script cannot complete on an Apple-silicon laptop with MPS
-available; it does complete where the engine list is numpy + float64 torch only.
+Reduced precision: the HMM row runs under float32 -- both ``TorchEngine(device="mps")`` (MPS has no
+float64, so float32 is forced) and ``TorchEngine(device="cpu", dtype="float32")``. It did not before
+0.8.0: ``HiddenMarkovAccumulator`` checked its responsibility-mass identity against a flat ``1e-9``,
+tighter than float32 unit roundoff before any accumulation, so the check refused a precision the
+engine layer explicitly invites and this script could not finish on an Apple-silicon laptop. The bound
+is now scaled to the summed mass. Read the float32 rows as reduced-precision results, not as
+disagreement: parity against numpy is checked at a float32-appropriate tolerance, and the numbers
+differ in the last digits accordingly.
 """
 
 from __future__ import annotations
