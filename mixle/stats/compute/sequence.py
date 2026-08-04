@@ -532,31 +532,37 @@ def seq_initialize(
         nobs = 0.0
         rng_w = np.random.RandomState(seed=rng.randint(2**31 - 1))
 
-        # Drawn up front rather than chunk-by-chunk so the pass can be checked for the degenerate
-        # outcome BEFORE any of it reaches an accumulator. The mask is Bernoulli(p) with p defaulting
-        # to 0.1, so selecting nothing at all is not rare on small data -- at two observations it is
-        # the majority outcome (0.81) -- and an initialization that selected nothing carries no
-        # information about the data by construction. Leaves disagreed about what to do with it:
-        # a Gaussian quietly returned a degenerate estimate while RandomForestEstimator and the
-        # streaming transformer leaf raised "weights must contain at least one positive value", so
-        # the copy-paste example in the docs for those two families failed most of the time and the
-        # error named weights the caller never supplied. _initialize_with_support_fallback cannot
-        # cover this: it inspects a model seq_initialize RETURNED, and here seq_initialize raises.
-        draws = [rng_w.binomial(n=1, p=p, size=sz).astype(dtype=np.float64) for sz, _ in enc_data]
-        if draws and not any(draw.sum() > 0.0 for draw in draws):
-            # Force exactly one observation, chosen uniformly over the whole pass so no chunk is
-            # privileged. Only the empty draw is altered; every other outcome keeps its Bernoulli
-            # distribution untouched.
-            sizes = np.array([len(draw) for draw in draws], dtype=np.int64)
-            total = int(sizes.sum())
-            if total > 0:
-                flat = int(rng_w.randint(total))
-                chunk = int(np.searchsorted(np.cumsum(sizes), flat, side="right"))
-                draws[chunk][flat - int(sizes[:chunk].sum())] = 1.0
-
-        for (sz, enc_x), w in zip(enc_data, draws):
+        # Streams chunk by chunk, exactly as before, and repairs only the degenerate outcome at the
+        # end. The mask is Bernoulli(p) with p defaulting to 0.1, so selecting nothing at all is not
+        # rare on small data -- at two observations it is the majority outcome (0.81) -- and an
+        # initialization that selected nothing carries no information about the data by construction.
+        # Leaves disagreed about what to do with it: a Gaussian quietly returned a degenerate
+        # estimate while RandomForestEstimator and the streaming transformer leaf raised "weights
+        # must contain at least one positive value", so the copy-paste example in the docs for those
+        # two families failed most of the time and the error named weights the caller never supplied.
+        # _initialize_with_support_fallback cannot cover this: it inspects a model seq_initialize
+        # RETURNED, and here seq_initialize raises.
+        #
+        # An earlier version of this drew every chunk's mask up front so the whole pass could be
+        # checked before any of it reached the accumulator. That works but holds the entire mask set
+        # in memory at once, which is a real cost on the large inputs this path exists for, so the
+        # repair is deferred to the end instead -- matching the iterable branch below.
+        fallback: tuple[Any, ...] = ()
+        for sz, enc_x in enc_data:
+            if not fallback:
+                fallback = (enc_x,)
+            w = rng_w.binomial(n=1, p=p, size=sz).astype(dtype=np.float64)
             accumulator.seq_initialize(enc_x, w, rng)
             nobs += float(w.sum())  # count the kept (weight-1) observations, matching the RDD/non-seq paths
+
+        if nobs == 0.0 and fallback:
+            # Nothing at all was selected. Seed the accumulator from the first chunk's leading row so
+            # the estimator downstream has something to fit, rather than an empty initialization that
+            # only some leaves tolerate.
+            seed_mask = np.zeros(int(enc_data[0][0]), dtype=np.float64)
+            seed_mask[0] = 1.0
+            accumulator.seq_initialize(fallback[0], seed_mask, rng)
+            nobs = 1.0
 
         stats_dict = dict()
         accumulator.key_merge(stats_dict)
