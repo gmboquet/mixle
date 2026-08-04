@@ -156,7 +156,12 @@ def symmetrized_scatter(scatter: np.ndarray, label: str) -> np.ndarray:
     restores the exact invariant callers rely on and keeps a genuinely asymmetric matrix -- one that
     was never a scatter statistic -- refused.
     """
-    if not scatter.size:
+    if not scatter.size or np.array_equal(scatter, scatter.T):
+        # Fast path, and the overwhelmingly common one: a scatter matrix accumulated in a single
+        # reduction order is already symmetric bit-for-bit, and this is the check the guard used to
+        # perform on its own. Taking it first keeps the hot validation path allocation-free -- the
+        # tolerance branch below builds two temporaries, which is cheap once and not cheap when every
+        # sufficient-statistic validation in an EM loop pays it.
         return scatter
     scale = float(np.max(np.abs(scatter)))
     tolerance = 8.0 * float(np.finfo(np.float64).eps) * max(scale, 1.0)
