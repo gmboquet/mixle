@@ -1069,6 +1069,11 @@ def coarsen(
     block_input_laws: list[GaussianLaw] = []  # law entering each new_blocks[i] entry, same order/length
     receipt_map: dict[str, ScaleReceipt] = {}
     accepted_pairs: list[tuple[int, int]] = []
+    # Each accepted merge, in acceptance order: (original left-block index, merged block, receipt
+    # key). Kept so the end-to-end check below can back off to a PREFIX of the accepted merges
+    # without recomputing any of them -- the first k merges of the pass are identical whether or not
+    # later merges happen, because dropping a merge only changes the law downstream of it.
+    accepted_merges: list[tuple[int, Any, str]] = []
     rejected_pairs: list[tuple[int, int]] = []
     total_kl = 0.0
     law = input_law
@@ -1088,6 +1093,7 @@ def coarsen(
                 block_input_laws.append(law)
                 receipt_map[f"merged[{out_idx}]<-blocks[{i}:{i + 2}]"] = receipt
                 accepted_pairs.append((i, i + 1))
+                accepted_merges.append((i, merged, f"merged[{out_idx}]<-blocks[{i}:{i + 2}]"))
                 total_kl += local_kl
                 law = receipt.student_law
                 out_idx += 1
@@ -1120,22 +1126,54 @@ def coarsen(
         i += 1
 
     # The local merge sum above is useful for choosing candidates, but it is
-    # not an end-to-end bound. Measure the complete executable candidate
-    # against the complete leaf-model law and roll all depth groups back if
-    # their composed error violates the caller's budget.
+    # not an end-to-end bound. Measure the complete executable candidate against the complete
+    # leaf-model law, and when its composed error violates the caller's budget, BACK OFF to the
+    # largest prefix of the accepted merges that fits -- not to the identity.
+    #
+    # The rollback here used to be all-or-nothing, and that made the result non-monotone in
+    # ``budget``: a larger budget admits a locally-greedier merge set, the larger set's composed
+    # error can breach the ceiling the smaller set stayed under, and the caller then got back an
+    # UNCOMPRESSED model at budget 0.3 where budget 0.1 had compressed -- observed on the checkpoint
+    # family ladder, where the identical three rung ratios were dealt to different rungs on
+    # different platforms purely by which side of this cliff each landed on. Asking for a looser
+    # budget must never yield a strictly worse artifact than a tighter one when a feasible subset of
+    # the work exists.
+    #
+    # Prefixes are the right backoff set: the first k accepted merges are byte-identical to the full
+    # pass (a dropped merge only changes laws DOWNSTREAM of itself), so each candidate needs no new
+    # Monte Carlo work -- one law propagation and one KL per step, largest prefix first. The empty
+    # prefix is the original block list, whose end-to-end divergence is zero by construction, so the
+    # loop always terminates in a feasible state and the old behaviour survives as its worst case.
     teacher_output_law = _propagate_sequence_law(input_law, blocks)
     depth_output_law = _propagate_sequence_law(input_law, new_blocks)
     depth_final_kl = gaussian_kl(teacher_output_law, depth_output_law)
     if depth_final_kl > budget:
-        for receipt in receipt_map.values():
-            if receipt.accepted and receipt.name == "depth_merge":
-                receipt.accepted = False
-        rejected_pairs.extend(pair for pair in accepted_pairs if pair not in rejected_pairs)
-        accepted_pairs = []
-        new_blocks = list(blocks)
-        block_input_laws = _entry_input_laws(input_law, new_blocks)
-        depth_output_law = teacher_output_law
-        depth_final_kl = 0.0
+        for keep in range(len(accepted_merges) - 1, -1, -1):
+            kept = accepted_merges[:keep]
+            merge_at = {index: merged for index, merged, _key in kept}
+            prefix_blocks: list[Any] = []
+            i = 0
+            while i < len(blocks):
+                if i in merge_at:
+                    prefix_blocks.append(merge_at[i])
+                    i += 2
+                else:
+                    prefix_blocks.append(blocks[i])
+                    i += 1
+            prefix_output_law = _propagate_sequence_law(input_law, prefix_blocks)
+            prefix_kl = gaussian_kl(teacher_output_law, prefix_output_law) if keep else 0.0
+            if prefix_kl <= budget:
+                dropped = accepted_merges[keep:]
+                for index, _merged, key in dropped:
+                    receipt_map[key].accepted = False
+                    rejected_pairs.append((index, index + 1))
+                accepted_pairs = [(index, index + 1) for index, _merged, _key in kept]
+                accepted_merges = kept
+                new_blocks = prefix_blocks
+                block_input_laws = _entry_input_laws(input_law, new_blocks)
+                depth_output_law = prefix_output_law if keep else teacher_output_law
+                depth_final_kl = prefix_kl
+                break
     depth_only_kl = depth_final_kl
 
     # Budget every structure projection against the final executable model.
