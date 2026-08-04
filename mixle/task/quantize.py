@@ -322,7 +322,22 @@ def _prove_quantized_parity(source: Any, qmodel: QuantizedMLP) -> float:
         probe = torch.randn((8, linears[0].in_features), generator=generator)
         expected = reference(probe).detach().cpu().numpy()
     actual = qmodel.logits(probe.numpy())
-    if expected.shape != actual.shape or not np.allclose(expected, actual, rtol=1e-5, atol=1e-5):
+    # Scaled to float32 resolution and to the magnitude of the logits, not fixed at 1e-5. Both sides
+    # compute the same graph in float32, but Torch and NumPy dispatch to different BLAS kernels that
+    # reassociate a matmul differently, so agreement is bounded by unit roundoff (1.19e-7) times the
+    # accumulation width times the output scale -- for logits of even modest magnitude that lands
+    # right on 1e-5, which is why this passed on macOS/Accelerate and failed on Linux/OpenBLAS with
+    # identical weights. What the check exists to catch is a NumPy graph that computes something
+    # DIFFERENT: a transposed weight, a dropped bias, a misapplied scale. Those disagree by a
+    # fraction of the output, orders of magnitude above this bound, and are still refused.
+    resolution = float(np.finfo(np.float32).eps)
+    magnitude = float(np.max(np.abs(expected), initial=0.0))
+    if expected.shape != actual.shape or not np.allclose(
+        expected,
+        actual,
+        rtol=64.0 * resolution,
+        atol=64.0 * resolution * max(1.0, magnitude),
+    ):
         raise RuntimeError("quantized NumPy graph failed dequantized Torch parity")
     return float(np.max(np.abs(expected - actual), initial=0.0))
 
