@@ -6,6 +6,14 @@ import os
 import subprocess
 import sys
 
+# Each probe pays a COLD mixle import in a fresh interpreter, measured at ~6s unloaded on an Apple
+# M4. The previous 10s budget left almost no headroom, and these tests run under `-n 4`, so ordinary
+# contention pushed them past it: both failed with TimeoutExpired while the thing they exist to check
+# -- that a hash is identical under two PYTHONHASHSEED values -- was never in question. The budget is
+# not the measurement here; it is only a guard against a genuine hang, so it is set well clear of the
+# import cost while still bounded.
+_COLD_IMPORT_TIMEOUT_SECONDS = 120
+
 
 def _run_with_hash_seed(source: str, seed: str) -> str:
     environment = dict(os.environ)
@@ -14,7 +22,7 @@ def _run_with_hash_seed(source: str, seed: str) -> str:
         [sys.executable, "-c", source],
         env=environment,
         text=True,
-        timeout=10,
+        timeout=_COLD_IMPORT_TIMEOUT_SECONDS,
     ).strip()
 
 

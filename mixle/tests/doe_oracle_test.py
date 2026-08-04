@@ -810,8 +810,16 @@ class LateResultAccountingTest(unittest.TestCase):
         self.assertIn("TypeError", late.error)
 
     def test_run_report_reconciles_late_cost_by_call_id(self):
+        # Gated on an Event rather than a sleep. With `time.sleep(0.15)` the test was asserting that
+        # report() gets called within 120ms of the 0.03s timeout firing -- true on an idle laptop,
+        # false on a loaded runner, where the late result had already settled by the time the
+        # provisional report was read and cost_status came back 'settled'. The scheduler is not the
+        # subject here; the reconciliation is. So the late result now cannot land until this test
+        # says so, and the provisional window is exact instead of probable.
+        release = threading.Event()
+
         def finishes_late(candidate):
-            time.sleep(0.15)
+            release.wait(timeout=30.0)
             return OracleResult(score=5.0, receipt={"late": True}, cost=7.5)
 
         oracle = VerifiableOracle(name="settle", tier="simulation", score_fn=finishes_late, timeout=0.03)
@@ -821,6 +829,7 @@ class LateResultAccountingTest(unittest.TestCase):
         self.assertEqual(provisional["cost_status"], "provisional")
         self.assertEqual(provisional["provisional_total_cost"], 0.0)
         self.assertIsNone(provisional["total_cost"])
+        release.set()
         self.assertTrue(self._wait_until(lambda: len(oracle.late_results) == 1))
         settled = run.report()
         self.assertEqual(settled["cost_status"], "settled")
