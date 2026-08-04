@@ -5,6 +5,7 @@ MXR-080-1861: public constructor validation used ``assert``, which ``python -O``
 MXR-080-1320: the README advertised a wider Python range than the metadata installs on.
 """
 
+import importlib.util
 import pathlib
 import subprocess
 import sys
@@ -53,6 +54,10 @@ class ExportUniquenessTest(unittest.TestCase):
         self.assertEqual(repeated, [])
 
 
+@unittest.skipUnless(
+    importlib.util.find_spec("torch") is not None,
+    "the probe constructs nn.Module spines, which exist only with the optional torch extra",
+)
 class OptimizedModeValidationTest(unittest.TestCase):
     """Validation that disappears under ``-O`` is not validation (MXR-080-1861)."""
 

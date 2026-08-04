@@ -45,6 +45,8 @@ from mixle.stats.matrix.wishart import (
 )
 from mixle.utils.vector import owned_backend_parameter
 
+from ._circular import symmetrized_scatter
+
 _MOMENT_ATOL = 1.0e-8
 
 
@@ -214,8 +216,7 @@ def _validated_watson_statistics(
         raise TypeError("Watson count must be a real scalar") from exc
     if scatter.shape != (dim, dim) or np.any(~np.isfinite(scatter)):
         raise ValueError("Watson scatter must be a finite %dx%d matrix" % (dim, dim))
-    if not np.array_equal(scatter, scatter.T):
-        raise ValueError("Watson scatter must be exactly symmetric")
+    scatter = symmetrized_scatter(scatter, "Watson")
     if not np.isfinite(count) or count < 0.0:
         raise ValueError("Watson count must be finite and non-negative")
     if count == 0.0:

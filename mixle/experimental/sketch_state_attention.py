@@ -51,13 +51,16 @@ except ImportError:  # pragma: no cover - torch is optional
 if _HAS_TORCH:
     from mixle.experimental.context_spine import _apply_rope, _rope_angles
 
+# The three *Spine classes subclass nn.Module and are defined only under `if _HAS_TORCH`, so
+# advertising them unconditionally made __all__ describe a module that does not exist without the
+# optional torch extra: `from ... import *` raised AttributeError, and a direct import of any Spine
+# raised ImportError with no indication that a missing optional dependency was the reason. __all__ is
+# a promise about what this module exports, so it has to be conditioned on the same thing the
+# definitions are.
 __all__ = [
     "LinearAttentionState",
-    "LinearAttentionSpine",
     "FrequentDirectionsState",
-    "FrequentDirectionsSpine",
     "TensorSketchState",
-    "TensorSketchSpine",
     "frequent_directions_update",
     "frequent_directions_error_bound",
     "tensor_sketch_project",
@@ -66,6 +69,9 @@ __all__ = [
     "tensor_sketch_misfit_receipt",
     "E3_UNAVAILABLE_COMPARISONS",
 ]
+
+if _HAS_TORCH:
+    __all__ += ["LinearAttentionSpine", "FrequentDirectionsSpine", "TensorSketchSpine"]
 
 # Retained for compatibility with the roadmap-era API. All formerly missing comparison pieces now exist.
 E3_UNAVAILABLE_COMPARISONS: dict[str, str] = {}
