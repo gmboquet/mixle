@@ -64,54 +64,37 @@ The core package currently ships 64 Python example scripts:
 Release Execution Status
 ------------------------
 
-The 23 base-install examples (21 inventoried "Execute.", plus
-``skeptic_challenge_example.py`` and ``win_demo_example.py`` -- inventoried
-"Blocked", but attempted anyway to confirm the failure mode) were re-run on
-2026-07-17 against the
-built ``mixle-0.8.0.dev0`` wheel, installed into a bare venv (``pip install
-dist/mixle-0.8.0.dev0-py3-none-any.whl``, no extras, no editable install, no
-``PYTHONPATH``, Python 3.12), each with a 90s budget:
+The 23 base-install examples were re-run on 2026-08-04 from the source tree on Python 3.12.12,
+four at a time, with no per-script budget imposed. 22 completed successfully. The slowest was
+``hidden_association_example.py`` at 46s; every other passing script finished in under 41s.
 
-* **19 passed**: ``enumeration_example.py``, ``extensibility_seams_example.py``,
-  ``gallery_combinators_example.py``, ``gallery_directional_example.py``,
-  ``gallery_graphs_example.py``, ``gallery_multivariate_example.py``,
-  ``gallery_processes_example.py``, ``gallery_rankings_example.py``,
-  ``gallery_structured_example.py``, ``gallery_univariate_example.py``,
-  ``heterogeneous_correctness_example.py``, ``hidden_association_example.py``,
-  ``joint_mixture_example.py``, ``latent_variable_models_example.py``,
-  ``ppl_example.py``, ``semi_supervised_mixture_example.py``,
-  ``structure_learning_example.py``, ``structured_hmm_example.py``,
-  ``structured_leaves_example.py``.
-* **2 reclassified to blocked** (unchanged from the prior pass; see the
-  Inventory table below): ``skeptic_challenge_example.py`` (needs
-  ``scikit-learn``, not a mixle dependency) and ``win_demo_example.py`` (needs
-  ``torch``; its distillation path has no classical fallback).
-* **2 exceeded the 90s budget**: ``hierarchical_mixture_example.py`` and
-  ``lookback_hmm_example.py``. Recorded here as ``timed_out`` per this run's
-  evidence, not asserted as a release-blocking regression -- this execution
-  host was under extreme concurrent load for the whole pass (``uptime`` load
-  averages of ~140-175 against 10 cores, from unrelated concurrent work), which
-  inflates every wall-clock measurement in this run. Re-run individually with a
-  15-minute allowance to tell "slow under load" from "hung":
+* **22 passed.**
+* **1 blocked, as inventoried**: ``skeptic_challenge_example.py`` needs ``scikit-learn``, which is
+  not a mixle dependency. It fails with ``ModuleNotFoundError: No module named 'sklearn'``, which
+  is the documented and expected behaviour for this script outside the ``examples`` extra.
 
-  * ``lookback_hmm_example.py`` completed cleanly in 86s on the re-run --
-    essentially at the 90s line, consistent with host-load variance rather
-    than a regression. It calls ``optimize(..., max_its=1000, delta=None)``;
-    ``delta=None`` disables early-stopping, so it always runs the full 1000 EM
-    iterations regardless of convergence, by design -- a fixed amount of work
-    that was already close to the budget before this pass.
-  * ``hierarchical_mixture_example.py`` did **not** complete even with the
-    15-minute allowance (well beyond the declared budget), while confirmed still
-    actively computing throughout, not deadlocked (steadily increasing CPU
-    time, never crashed or errored). This is a bigger gap than host load alone
-    plausibly explains. Its fit path
-    (``HierarchicalMixtureEstimatorAccumulator``) was rewritten four days
-    before this pass by the EM-monotonicity fix in #435 (2026-07-13, see
-    ``mixle/stats/latent/hierarchical_mixture.py``), which plausibly changed
-    how many of its ``max_its=10000`` iterations are needed to satisfy the
-    default convergence ``delta``. Treat this one as the more likely of the
-    two to be a real behavior change and re-verify on an unloaded runner
-    before re-budgeting or investigating further.
+This supersedes the 2026-07-17 pass, which is no longer accurate in three respects.
+
+* ``hierarchical_mixture_example.py`` was recorded as not completing even under a 15-minute
+  allowance, and was flagged as the more likely of two candidates to be a real behaviour change
+  from the EM-monotonicity work in #435. It now completes in **50 seconds**. The earlier
+  measurement was taken while the execution host was under load averages of roughly 140-175
+  against 10 cores.
+* ``lookback_hmm_example.py`` was recorded as exceeding a 90s budget and then completing at 86s on
+  re-run. It now completes in **39 seconds**, consistent with the same host-load explanation. It
+  still calls ``optimize(..., max_its=1000, delta=None)``, so it always runs the full thousand EM
+  iterations by design; that is a fixed amount of work, not a convergence problem.
+* ``win_demo_example.py`` was reclassified to blocked for needing ``torch``. It **passes** when
+  torch is present, so it is blocked only on the base install, not unconditionally.
+
+``semi_supervised_mixture_example.py`` was listed among the 19 that passed in July and did not.
+It built its estimator from ``SequenceEstimator(CategoricalEstimator(...))``, whose default
+``len_estimator=NullEstimator()`` yields a sequence law with no distribution over length -- a law
+conditional on the length it is handed, which mixle reports as a ``LIKELIHOOD_FACTOR`` and a
+generative mixture refuses as a component. The ground truth it samples from draws lengths from
+``CategoricalDistribution({seq_samp: 1.0})``, so the estimator was also fitting a different family
+than the one that produced the data. With a length estimator supplied it recovers the generating
+parameters: weights 0.598/0.296/0.106 against a true 0.6/0.3/0.1.
 
 Separately, the two real-data flagship examples added 2026-07-11 (F10.1/F10.2;
 not part of the base-install set above -- both need network access, and the
