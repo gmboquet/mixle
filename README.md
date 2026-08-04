@@ -133,6 +133,7 @@ distributions — you don't know the parameters yet, and that's the point. Nest 
 different learned models — a Gaussian mixture, and the neural density from above.
 
 ```python
+from mixle.inference import optimize
 from mixle.stats import GaussianEstimator, MixtureEstimator, HiddenMarkovEstimator
 from mixle.models import GradEstimator
 
@@ -160,6 +161,13 @@ optimize(..., engine=TorchEngine(device="cuda", dtype="float32"))  # GPU: one ar
 optimize(..., precision="auto")   # mixed precision; stats accumulate in float64
 optimize(..., backend="spark")    # distributed: mp · dask · mpi · ray · lightning
 ```
+
+> **`device=` changes the answer, not just the speed.** A fit on a GPU device does not reproduce the
+> same fit on CPU: measured on Metal, per-observation log-density diverges ~2% relative after a
+> single optimizer iteration, because the device backends use different float32 kernels. Pin the
+> device alongside the seed when a result has to reproduce, and see
+> [backend support](docs/backend-support.rst) for which backends are CI-gated — CUDA is
+> hardware-gated and unverified for 0.8.0.
 
 - The same fit runs on NumPy, Numba, Torch, or a symbolic backend, typically without model changes.
 - New frameworks register a factory (`register_encoded_data_backend`) — no dispatch to edit.
