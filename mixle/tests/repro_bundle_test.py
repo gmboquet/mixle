@@ -47,11 +47,6 @@ def test_every_local_entry_reproduces_exact_expected_output(entry_id):
     assert receipt["entry"] == entry_id
 
 
-def test_network_entry_is_executed_by_the_hosted_optional_lane():
-    workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
-    assert "python scripts/run_repro_entry.py --entry flagship-banking77-cascade" in workflow
-
-
 def test_declared_volatile_spans_do_not_weaken_the_stdout_digest():
     """Normalizing a volatile span must exempt only that span, and must fail if it stops matching.
 

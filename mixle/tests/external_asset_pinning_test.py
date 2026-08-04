@@ -14,8 +14,8 @@ ROOT = Path(__file__).resolve().parents[2]
 SEARCH_ROOTS = ("mixle", "examples", "scripts", "benchmarks", "docs")
 LOADERS = ("from_pretrained", "SentenceTransformer", "load_dataset")
 # ``datasets`` also ships packaged builders whose first argument names a file format, not a repository.
-# Those loads read paths the caller already supplies (and, for Banking77, already authenticated by
-# SHA-256), so an upstream revision is neither available nor meaningful for them.
+# Those loads read paths the caller already supplies, so an upstream revision is neither available
+# nor meaningful for them.
 LOCAL_BUILDERS = frozenset(
     {
         "arrow",
@@ -32,16 +32,11 @@ LOCAL_BUILDERS = frozenset(
         "webdataset",
     }
 )
+# Dataset-driven sources were removed when direct dataset usage moved out of the repository; what
+# remains here are the sources that pin MODEL assets (weights), which stay content-addressed.
 REQUIRED_SOURCES = (
-    "examples/flagship_heterogeneous_adult.py",
-    "examples/foundation_to_edge.py",
-    "examples/laptop_scientist.py",
     "examples/peft_lora_grad_leaf.py",
-    "examples/real_receipt_banking77.py",
-    "examples/vision_edge_distillation/distill_clip_features.py",
-    "examples/vision_edge_distillation/verify_on_laptop.py",
     "mixle/scientist.py",
-    "mixle/tests/flagship_heterogeneous_adult_smoke_test.py",
     "mixle/tests/quotient_leaf_test.py",
     "mixle/tests/scientist_test.py",
 )
@@ -152,7 +147,13 @@ def test_all_external_hugging_face_calls_use_full_commit_revisions() -> None:
         calls_checked += checked
         unpinned.extend(findings)
     assert unpinned == [], "external assets are not content addressed:\n" + "\n".join(unpinned)
-    assert calls_checked >= 24
+    # A floor on how many loader calls the audit actually saw, so a scanner regression that silently
+    # matches nothing cannot pass as "no findings". Re-calibrated 2026-08-04 when the dataset-driven
+    # examples were removed with all direct dataset usage: the remaining pinned calls are the MODEL
+    # loads (mixle/scientist.py CLIP + language model + sentence encoder, the PEFT example, the
+    # quotient-leaf and scientist test fixtures) -- nine today. Eight guards the scanner without
+    # pinning the exact inventory.
+    assert calls_checked >= 8
 
 
 def test_audit_rejects_mutable_and_abbreviated_asset_identities() -> None:
@@ -173,25 +174,6 @@ def test_scientist_asset_manifest_is_content_addressed() -> None:
     assets = scientist_asset_manifest()
     assert set(assets) == {"clip", "language_model", "sentence_encoder"}
     assert all(FULL_REVISION.fullmatch(asset["revision"]) for asset in assets.values())
-
-
-def test_distillation_receipt_binds_assets_and_verifier_checks_them() -> None:
-    distillation = ROOT / "examples" / "vision_edge_distillation"
-    producer = (distillation / "distill_clip_features.py").read_text(encoding="utf-8")
-    verifier = (distillation / "verify_on_laptop.py").read_text(encoding="utf-8")
-    assert '"assets": {' in producer
-    assert '"train_fingerprint": train._fingerprint' in producer
-    assert '"test_fingerprint": test._fingerprint' in producer
-    assert 'if metrics.get("assets") != expected_assets:' in verifier
-
-
-def test_banking77_receipt_binds_source_commit_and_split_digests() -> None:
-    source = (ROOT / "examples" / "real_receipt_banking77.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    constants = _constants(tree)
-    assert FULL_REVISION.fullmatch(constants["BANKING77_SOURCE_COMMIT"])
-    assert '"source_commit": BANKING77_SOURCE_COMMIT' in source
-    assert '"sha256": spec["sha256"]' in source
 
 
 def test_peft_receipt_measures_adapter_movement_and_held_out_likelihood() -> None:

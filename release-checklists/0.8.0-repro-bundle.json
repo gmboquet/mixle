@@ -8,16 +8,15 @@
       "metadata/release-check-evidence.json",
       "metadata/SHA256SUMS",
       "metadata/mixle-0.8.0-py3-none-any.whl.json",
-      "metadata/reproduction-*.json",
-      "metadata/network/banking77-reproduction-receipt.json"
+      "metadata/reproduction-*.json"
     ],
-    "rule": "The final bundle is incomplete unless these retained records bind its source commit, approved checks, wheel SHA-256, and local/hosted entry receipts to the signed v0.8.0 tag."
+    "rule": "The final bundle is incomplete unless these retained records bind its source commit, approved checks, wheel SHA-256, and local entry receipts to the signed v0.8.0 tag."
   },
   "closure": [
     {
       "path": "pyproject.toml",
       "role": "bundle-closure",
-      "sha256": "160b58005321626a6860855e0544c3600a2ae99dd037a6a45c7dba1e3ebbd642"
+      "sha256": "e5b02c0afd64e4f308a332717146b0791ae367325a5b1e1d89015dc1bdac265f"
     },
     {
       "path": "release-checklists/0.8.0-repro-environment.json",
@@ -30,14 +29,9 @@
       "sha256": "4e26350a835224009d920fa36ea79bbd667e019696caa7403bd257ab5d45ae4c"
     },
     {
-      "path": "release-checklists/0.8.0-banking77-dataset.json",
-      "role": "bundle-closure",
-      "sha256": "9b059c2da7b8cf152a03e073418b9abd8485eaee960b98720f4ad2709ea116c7"
-    },
-    {
       "path": "scripts/build_repro_bundle.py",
       "role": "bundle-closure",
-      "sha256": "bf0d6d1453cdefea2ee19b7b9c10b679cfe5cbf3996d7f8957aceda6240d1091"
+      "sha256": "097fcee6dddca4ff3826bd598dbb40805bcf4aa24d30322b86aa35dc8b5dfe40"
     },
     {
       "path": "scripts/run_repro_entry.py",
@@ -53,83 +47,6 @@
     "spdx": "MIT"
   },
   "entries": [
-    {
-      "argv": [
-        "examples/real_receipt_banking77.py",
-        "--smoke",
-        "--json"
-      ],
-      "configuration": {
-        "n_round": 40,
-        "n_rounds": 1,
-        "n_seed": 1155,
-        "n_test": 60,
-        "seed": 0,
-        "student": "generative"
-      },
-      "dataset_record": "release-checklists/0.8.0-banking77-dataset.json",
-      "expected": {
-        "assertions": [
-          {
-            "equals": "mixle.banking77_reproduction/v1",
-            "path": "artifact"
-          },
-          {
-            "equals": "banking77 intents (77 classes)",
-            "path": "metrics.task"
-          },
-          {
-            "equals": 60,
-            "path": "metrics.n_test"
-          },
-          {
-            "maximum": 1.0,
-            "minimum": 0.0,
-            "path": "metrics.end_to_end_accuracy"
-          },
-          {
-            "maximum": 1.0,
-            "minimum": 0.0,
-            "path": "metrics.local_agreement"
-          },
-          {
-            "maximum": 1.0,
-            "minimum": 0.0,
-            "path": "metrics.escalation_rate"
-          },
-          {
-            "equals": "9d081458ff52e53cf7e848f414e6e9344e4e6696",
-            "path": "dataset.source_commit"
-          },
-          {
-            "equals": 10003,
-            "path": "dataset.splits.train.rows"
-          },
-          {
-            "equals": 3080,
-            "path": "dataset.splits.test.rows"
-          }
-        ],
-        "format": "json"
-      },
-      "id": "flagship-banking77-cascade",
-      "inputs": [
-        {
-          "path": "examples/real_receipt_banking77.py",
-          "role": "executable",
-          "sha256": "4094f0306139ca053ca8bfe12f793078c33da580046baffd4ef50d7289d0e7d3"
-        },
-        {
-          "path": "release-checklists/0.8.0-banking77-dataset.json",
-          "role": "dataset-license-and-integrity",
-          "sha256": "9b059c2da7b8cf152a03e073418b9abd8485eaee960b98720f4ad2709ea116c7"
-        }
-      ],
-      "kind": "flagship",
-      "script": "examples/real_receipt_banking77.py",
-      "tier": "hosted-network",
-      "timeout_seconds": 30
-    },
     {
       "argv": [
         "examples/gallery_univariate_example.py"

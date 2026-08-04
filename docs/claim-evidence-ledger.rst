@@ -47,9 +47,10 @@ the 0.8.0 re-run, marked below).
      - E1
      - ``torch_parity_test`` / ``grad_control_test`` check parity, freezing, and checkpointing (torch extra).
    * - Distillation into a small local model with calibrated deferral and a cost/quality receipt
-     - E1 (E3 pending)
-     - Task/calibration/cascade tests are E1. A real Banking77 teacher/student workflow exists, but its
-       exact-candidate hosted run must complete before it counts as 0.8.0 E3 evidence.
+     - E1
+     - Task/calibration/cascade tests are E1 on synthetic teachers. The repository carries no direct
+       dataset usage (2026-08-04 decision), so real-data task evidence lives in notebooks outside it
+       and is not claimed here.
    * - HMM / GMM performance and crossover behavior
      - none
      - The harness is tracked in ``benchmarks/``. Older measurements are archived and are not release

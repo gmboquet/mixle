@@ -379,22 +379,6 @@ jobs:
         run: |
           python -m pip install scikit-learn
           python -m pytest mixle/tests/sklearn_gmm_parity_test.py -q -m ""
-      - name: Run the temporal real-data flagship smoke (sunspots HMM vs hmmlearn, F10.2)
-        # This required-evidence wrapper treats every skip as failure and emits an exact-SHA dependency receipt.
-        run: |
-          python -m pip install hmmlearn
-          python scripts/run_required_pytest.py \
-            --candidate-sha "$GITHUB_SHA" \
-            --receipt sunspots-required-receipt.json \
-            -- mixle/tests/flagship_temporal_sunspots_smoke_test.py -q -n 0 -m ""
-      - name: Run the heterogeneous real-data flagship smoke (Adult, F10.1)
-        # A missing dataset or dependency is a failed required receipt, never a green skip.
-        run: |
-          python -m pip install datasets
-          python scripts/run_required_pytest.py \
-            --candidate-sha "$GITHUB_SHA" \
-            --receipt adult-required-receipt.json \
-            -- mixle/tests/flagship_heterogeneous_adult_smoke_test.py -q -n 0 -m ""
       - name: Exercise the dask distributed backend (worklist D8.3)
         # The dask encoded-data backend has tests that SKIP everywhere else because dask is not installed.
         # Install it and run them, so at least one distributed backend is genuinely exercised in CI (E2),
@@ -402,22 +386,11 @@ jobs:
         run: |
           python -m pip install "dask>=2023.5.0" "distributed>=2023.5.0"
           python -m pytest mixle/tests/dask_encoded_data_test.py -q -m ""
-      - name: Install the Banking77 flagship dataset dependency
-        run: |
-          python -m pip install datasets
-          python -m pip install -r release-checklists/0.8.0-repro-requirements.txt
-      - name: Run the Banking77 real-data flagship smoke
-        # The one flagship on real public data (F10.4): the bundle runner verifies the immutable source
-        # bytes, bounded configuration, strict JSON receipt, and expected result contract.
-        run: python scripts/run_repro_entry.py --entry flagship-banking77-cascade > banking77-reproduction-receipt.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: banking77-reproduction-receipt
+          name: optional-tier-receipt
           path: |
             optional-py3.12.json
-            banking77-reproduction-receipt.json
-            sunspots-required-receipt.json
-            adult-required-receipt.json
             scientist-required-receipt.json
             quotient-required-receipt.json
           if-no-files-found: error

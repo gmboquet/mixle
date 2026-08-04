@@ -318,7 +318,7 @@ def _backoff_over_unobserved(sharp, vdict, min_val, observed_count, *, use_bstat
 
     An inferred support covers only what was observed, so the sharp estimator alone returns ``-inf``
     for any held-out integer outside it -- one such row drives a whole held-out mean log-density to
-    ``-inf`` (this is what broke flagship_heterogeneous_adult).
+    ``-inf`` (observed on real heterogeneous records with mixed-type categorical fields).
 
     The earlier remedy set ``IntegerCategoricalDistribution.default_value``, which is wrong here and
     was reported as MXR-080-1838: the integer support is *unbounded*, so a constant out-of-support

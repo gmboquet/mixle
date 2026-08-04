@@ -360,14 +360,8 @@ jobs:
           test "$(python -c 'import hashlib,json; r=json.load(open("testpypi/testpypi-rehearsal.json")); print(r["sums_sha256"] == hashlib.sha256(open("candidate/metadata/SHA256SUMS","rb").read()).hexdigest())')" = "True"
           cp promotion/release-check-evidence.json candidate/metadata/promotion-check-evidence.json
           (cd candidate/dist && sha256sum -c ../metadata/SHA256SUMS)
-          OPTIONAL_RUN="$(python -c 'import json, re; u=json.load(open("promotion/release-check-evidence.json"))["checks"]["optional extras / py3.12"]["details_url"]; print(re.search(r"/actions/runs/([0-9]+)/", u).group(1))')"
           SECURITY_RUN="$(python -c 'import json, re; u=json.load(open("promotion/release-check-evidence.json"))["checks"]["pip-audit (all runtime features)"]["details_url"]; print(re.search(r"/actions/runs/([0-9]+)/", u).group(1))')"
-          mkdir -p candidate/metadata/network
           mkdir -p candidate/metadata/security
-          gh run download "$OPTIONAL_RUN" \
-            --name banking77-reproduction-receipt \
-            --dir candidate/metadata/network \
-            --repo "$REPOSITORY"
           gh run download "$SECURITY_RUN" \
             --name "sbom-all-$CANDIDATE_SHA" \
             --dir candidate/metadata/security \
@@ -380,12 +374,11 @@ jobs:
             --receipt candidate/metadata/reproduction-gallery-structured.json \
             --receipt candidate/metadata/reproduction-production-provenance.json \
             --receipt candidate/metadata/reproduction-scaling-backend.json \
-            --receipt candidate/metadata/network/banking77-reproduction-receipt.json \
             --out candidate/metadata/example-execution-manifest.json
           gh release upload "$CANDIDATE_TAG" \
             candidate/docs-dist/* \
             candidate/metadata/SHA256SUMS candidate/metadata/*.json \
-            candidate/metadata/network/*.json candidate/metadata/security/*.json \
+            candidate/metadata/security/*.json \
             --clobber
       - name: Publish the already-verified files to PyPI
         uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1
