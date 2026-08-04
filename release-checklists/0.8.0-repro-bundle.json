@@ -117,7 +117,7 @@
         {
           "path": "examples/real_receipt_banking77.py",
           "role": "executable",
-          "sha256": "9243e9844ab909f4429da01185c78604512747b2d32491a5ce31db1c1398ca69"
+          "sha256": "4094f0306139ca053ca8bfe12f793078c33da580046baffd4ef50d7289d0e7d3"
         },
         {
           "path": "release-checklists/0.8.0-banking77-dataset.json",
@@ -152,7 +152,7 @@
         {
           "path": "examples/gallery_univariate_example.py",
           "role": "executable",
-          "sha256": "91720d75a50dc8166c7a1c84a5451ead45d2acae2dfe2d8f08cff198993da320"
+          "sha256": "9f844a1713f76ca3854634cf8e4514f4aa6661d58840b03a287d0baae1a5ed48"
         }
       ],
       "kind": "self-contained",
@@ -182,7 +182,7 @@
         {
           "path": "examples/gallery_structured_example.py",
           "role": "executable",
-          "sha256": "e45d3c177dcb3feae6d7055f1f4b9ff0be78fd935fbb492c7eb0fa55bb323d98"
+          "sha256": "28a6f84fab94299033a8175a1f1a9705fd468f4dfc6e79ec3a87bd505bb77323"
         }
       ],
       "kind": "self-contained",
@@ -218,7 +218,7 @@
         {
           "path": "examples/production_example.py",
           "role": "executable",
-          "sha256": "476b549b6d0554678a412fab542dab6ac6c34e3df325a756f1c80e435200fd08"
+          "sha256": "047bd6bfea2bd31b7597775251e4e12f9e3ab52755f1513bc55c5ac9f992cf8b"
         }
       ],
       "kind": "workflow",
