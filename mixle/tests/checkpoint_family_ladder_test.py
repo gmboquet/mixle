@@ -157,20 +157,24 @@ class FamilyLadderAcceptanceTest(unittest.TestCase):
         # What the ladder itself promises is checked in full below.
         self.assertGreaterEqual(len(result.rungs), 1)
         self.assertLessEqual(len(result.rungs), len(rung_specs))
+        # A rung is refused for any of THREE reasons, and `within_eval_budget` is the conjunction of
+        # all three -- it is not a synonym for "no regression flags". It is false when a task
+        # regressed past budget, when a task failed to evaluate at all, OR when the rung came back
+        # larger than the one before it. A rung refused for growing carries no eval flags, which is
+        # what defeated two earlier versions of this assertion.
+        prior_n_params = result.headline_n_params
         for rung in result.rungs:
             self.assertTrue(rung.reason)
-            # A rung is refused for exactly one of three reasons, and `within_eval_budget` is the
-            # conjunction of all three -- NOT a synonym for "no regression flags". An earlier
-            # version of this assertion equated the two and failed on a rung refused for growing,
-            # which carries no eval flags at all.
-            self.assertEqual(
-                rung.within_eval_budget,
-                not rung.regression_flags and all(t.succeeded for t in rung.eval_report.tasks),
-                rung.reason,
+            expected = (
+                not rung.regression_flags
+                and all(task.succeeded for task in rung.eval_report.tasks)
+                and rung.n_params <= prior_n_params
             )
+            self.assertEqual(rung.within_eval_budget, expected, rung.reason)
             for flag in rung.regression_flags:
                 self.assertIn(flag.task, rung.eval_report.scores())
                 self.assertLess(flag.relative_delta, 0.0)
+            prior_n_params = rung.n_params
         if result.halted_at is None:
             self.assertEqual(len(result.rungs), len(rung_specs))
             self.assertEqual(result.passed_rungs(), [s.name for s in rung_specs])
