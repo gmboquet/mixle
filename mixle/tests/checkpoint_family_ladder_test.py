@@ -193,7 +193,13 @@ class FamilyLadderAcceptanceTest(unittest.TestCase):
         n_params_sequence = [result.headline_n_params] + [r.n_params for r in result.rungs]
         for rung in result.rungs:
             self.assertLessEqual(rung.n_params, result.headline_n_params)
-        self.assertLess(n_params_sequence[-1], n_params_sequence[0], "the ladder must shrink the model somewhere")
+        # "Somewhere" is the operative word, and it was being checked at the LAST rung -- which is
+        # the FAILED rung whenever the ladder halts, so a halt on a rung that compressed nothing made
+        # this read as "the ladder never shrank" even when an earlier rung had shrunk it.
+        self.assertTrue(
+            any(rung.n_params < result.headline_n_params for rung in result.rungs),
+            "the ladder must shrink the model somewhere",
+        )
 
         # (b) total calibration data spent across the WHOLE ladder is small and measured -- report the
         # real number, and show it is a small fraction of what full sampling-KD at every rung would cost.

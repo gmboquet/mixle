@@ -71,11 +71,11 @@ pandas = ["pandas>=2.2.2,<4"]
 arrow = ["pyarrow>=16,<26"]
 sql = ["sqlalchemy>=2.0,<3"]
 mongo = ["pymongo>=4.6,<5"]
-hadoop = ["pyarrow>=16,<26", "fsspec>=2023.1.0,<2027"]
+hadoop = ["pyarrow>=16,<26", "fsspec>=2023.5.0,<2027"]
 # lazy N-D array-store connectors (mixle.data.sources.array_source): zarr + HDF5 volumes for
 # PatchSampler-style streaming reads. numpy-memmap needs no extra dependency, so it is not listed here.
 arrays = ["zarr>=3.0,<4", "h5py>=3.11,<4"]
-data = ["pandas>=2.2.2,<4", "pyarrow>=16,<26", "sqlalchemy>=2.0,<3", "pymongo>=4.6,<5", "fsspec>=2023.1.0,<2027", "zarr>=3.0,<4", "h5py>=3.11,<4"]
+data = ["pandas>=2.2.2,<4", "pyarrow>=16,<26", "sqlalchemy>=2.0,<3", "pymongo>=4.6,<5", "fsspec>=2023.5.0,<2027", "zarr>=3.0,<4", "h5py>=3.11,<4"]
 # graph-grammar models (mixle.stats.sequences.grammar) are the only networkx user; lazy + optional.
 grammar = ["networkx>=3.0,<4"]
 # GMP-backed (FFT) big-integer multiply for the structural count-DP's large histogram convolutions.
@@ -140,7 +140,7 @@ all = [
     "dask>=2023.5.0,<2027",
     "datasets>=3.0,<6",
     "distributed>=2023.5.0,<2027",
-    "fsspec>=2023.1.0,<2027",
+    "fsspec>=2023.5.0,<2027",
     "gmpy2>=2.2,<3",
     "h5py>=3.11,<4",
     "hmmlearn>=0.3,<1",
