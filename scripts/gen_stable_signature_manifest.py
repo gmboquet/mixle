@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import enum
 import importlib
 import importlib.util
 import inspect
@@ -70,6 +71,15 @@ def _module_entries(module_name: str) -> dict[str, dict[str, Any]]:
         if inspect.isfunction(value):
             entries[dotted] = {"kind": "function", "signature": _signature(value)}
         elif inspect.isclass(value):
+            if issubclass(value, enum.Enum):
+                # An Enum's "constructor signature" belongs to CPython's EnumMeta.__call__, not to
+                # this project, and CPython CHANGED it between supported interpreters: 3.11 reports
+                # (value, names=None, ...) and 3.12 reports (*values). Recording it made the manifest
+                # interpreter-dependent, so the 3.11 lane could never match a manifest generated on
+                # 3.12 -- a permanently red gate reporting a stale API that had not changed.
+                # The reviewable surface of an enum is its MEMBER NAMES, which is what is recorded.
+                entries[dotted] = {"kind": "enum", "members": sorted(member.name for member in value)}
+                continue
             entries[dotted] = {"kind": "class-constructor", "signature": _signature(value)}
             for method_name, method in inspect.getmembers(value):
                 if method_name.startswith("_") or not callable(method):

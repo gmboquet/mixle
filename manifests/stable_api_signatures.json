@@ -3402,20 +3402,13 @@
       }
     },
     "mixle.semantics.TransformKind": {
-      "kind": "class-constructor",
-      "signature": {
-        "parameters": [
-          {
-            "annotation": null,
-            "default": {
-              "present": false
-            },
-            "kind": "VAR_POSITIONAL",
-            "name": "values"
-          }
-        ],
-        "return_annotation": null
-      }
+      "kind": "enum",
+      "members": [
+        "AFFINE",
+        "IDENTITY",
+        "LOG",
+        "LOGIT"
+      ]
     },
     "mixle.semantics.TransformSpec": {
       "kind": "class-constructor",
@@ -3652,36 +3645,25 @@
       }
     },
     "mixle.semantics.UncertaintyKind": {
-      "kind": "class-constructor",
-      "signature": {
-        "parameters": [
-          {
-            "annotation": null,
-            "default": {
-              "present": false
-            },
-            "kind": "VAR_POSITIONAL",
-            "name": "values"
-          }
-        ],
-        "return_annotation": null
-      }
+      "kind": "enum",
+      "members": [
+        "ALEATORIC",
+        "EPISTEMIC",
+        "MEASUREMENT",
+        "MODEL_DISCREPANCY",
+        "NUMERICAL"
+      ]
     },
     "mixle.semantics.ValueRole": {
-      "kind": "class-constructor",
-      "signature": {
-        "parameters": [
-          {
-            "annotation": null,
-            "default": {
-              "present": false
-            },
-            "kind": "VAR_POSITIONAL",
-            "name": "values"
-          }
-        ],
-        "return_annotation": null
-      }
+      "kind": "enum",
+      "members": [
+        "CONTROLLED",
+        "DERIVED",
+        "FIXED",
+        "FREE",
+        "LATENT",
+        "OBSERVED"
+      ]
     },
     "mixle.semantics.ValueSpec": {
       "kind": "class-constructor",
