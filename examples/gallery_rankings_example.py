@@ -30,7 +30,7 @@ CASES = [
     (
         "Matching",
         MatchingDistribution(np.array([[2.0, 0.5, 0.1], [0.2, 2.0, 0.3], [0.1, 0.4, 2.0]])),
-        MatchingEstimator(dim=3, max_steps=2000),
+        MatchingEstimator(dim=3),
     ),
 ]
 
