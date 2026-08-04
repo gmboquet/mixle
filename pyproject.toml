@@ -111,7 +111,7 @@ umap = ["umap-learn>=0.5.6,<1"]
 sympy = ["sympy>=1.12,<2"]
 # to_sage symbolic export. Full SageMath is not pip-installable; passagemath is its modular,
 # wheel-distributed fork (the symbolic subset suffices -- it provides sage.all__sagemath_symbolics).
-sage = ["passagemath-symbolics>=10.4.11,<11"]
+sage = ["passagemath-symbolics>=10.5.49,<11"]
 # mongomock is a test-only, in-memory pymongo work-alike (mixle.data.sources.mongo_source itself never
 # imports it): mongo_source_test.py points MongoCursorSource's real `pymongo.MongoClient` reference at
 # it via monkeypatching, the direct Mongo analogue of the SQL connector's tests using a disposable
@@ -152,7 +152,7 @@ all = [
     "numba>=0.64,<1",
     "numpyro>=0.13,<1",
     "pandas>=2.1.1,<4",
-    "passagemath-symbolics>=10.4.11,<11",
+    "passagemath-symbolics>=10.5.49,<11",
     "peft>=0.11,<1",
     "pomegranate>=1.0,<2",
     "pyarrow>=16,<26",
