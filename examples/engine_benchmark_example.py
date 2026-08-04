@@ -6,9 +6,23 @@ Times three representative workloads across engines and prints a table:
   * default HMM EM (the numba encoding scored + E-stepped on the engine),
   * batch scoring for a spread of families (Gaussian / GPD / wrapped Cauchy / Watson).
 
+Takeaway: an engine is a placement decision, not a rewrite. The same ``optimize`` call and the same
+model run on every engine, and each workload is parity-checked against the numpy result before its
+timing is reported -- so the table compares equal work, and a speedup that came from silently doing
+something different would fail the check instead of appearing as a win.
+
 The table reports current-run measurements without assuming which engine wins. Sizes scale with
 ``--scale`` so the crossover can be measured on the named hardware. Apple-silicon (MPS) runs float32
 (no float64 on MPS), so precision differs and must be reported with timing.
+
+KNOWN ISSUE (0.8.0): the HMM row aborts on ANY float32 engine -- ``TorchEngine(device="mps")`` (MPS
+has no float64, so float32 is forced) and ``TorchEngine(device="cpu", dtype="float32")`` alike -- with
+``ValueError: hidden-Markov state counts must equal initial plus transition responsibility mass``.
+``HiddenMarkovAccumulator.combine`` checks that consistency with ``np.isclose(..., rtol=1e-9,
+atol=1e-9)``, a tolerance ~100x tighter than float32 machine epsilon (1.19e-7); at this workload the
+observed relative mismatch is ~1.2e-7, i.e. exactly float32 rounding. This is a library defect, not an
+example defect. Until it is fixed, this script cannot complete on an Apple-silicon laptop with MPS
+available; it does complete where the engine list is numpy + float64 torch only.
 """
 
 from __future__ import annotations

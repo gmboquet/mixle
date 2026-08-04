@@ -104,11 +104,23 @@ def main():
         print(f"  could NOT fit the heterogeneous mixture: {detail}")
         print("  -> the Normal-beside-Categorical path raises inside pomegranate; mixle fits it correctly.")
 
-    print(
+    # The takeaway only claims what THIS run actually measured. Without pomegranate installed there is
+    # no comparison, so the comparative half is withheld rather than asserted from memory.
+    takeaway = (
         "\nTakeaway: composing mixed-family distributions is not the differentiator — *correctly fitting "
         "every field of the composed record* is. mixle's estimator/encoder trees mirror the model, so the "
-        "Categorical updates alongside the Normal; the nearest rival's heterogeneous path does not."
+        "Categorical updates alongside the Normal."
     )
+    if status == "absent":
+        takeaway += (
+            "\n  (No rival was measured in this run: install pomegranate to see the comparison "
+            "for yourself rather than taking the claim on faith.)"
+        )
+    elif status == "ok":
+        takeaway += "\n  The rival also fit this record in this run; compare the recovered parameters above."
+    else:
+        takeaway += "\n  The nearest rival's heterogeneous path failed on this same record, above."
+    print(takeaway)
 
 
 if __name__ == "__main__":

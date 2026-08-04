@@ -6,6 +6,24 @@ so costs are modeled rather than billed. It prints a scorecard and an escalation
 measurements. The tracked source intentionally embeds no prior headline result. Run receipts become
 release evidence only when they bind the exact candidate, dataset digests, dependencies, command,
 duration, and output.
+
+Takeaway: the scorecard is the deliverable, and it is allowed to say the student did not earn its
+keep. Read the escalation rate FIRST -- an all-escalate cascade means the local model never answered,
+so "end-to-end accuracy" is just the oracle's accuracy and the cost line will exceed the teacher's.
+
+KNOWN ISSUE (0.8.0), reproduced on the pinned dataset: the DEFAULT student (``--`` no flag, i.e.
+``student="mlp"``, 250 epochs, 3000 seed examples over 77 classes) never clears the alpha=0.1
+conformal gate, giving escalation rate 1.000, ``nan`` local-agreement / local-accuracy, and a modeled
+cost of $30.10 per 1k against the teacher's $30.00. Two consequences:
+
+  * the headline path currently demonstrates a cascade that saves nothing, and the escalation-decay
+    curve stays flat near 1.0 across all six harvest/re-distill rounds;
+  * ``--json`` then aborts with ``ValueError: Out of range float values are not JSON compliant: nan``,
+    because the nan local metrics meet ``allow_nan=False`` in the emitter below.
+
+``--generative`` (the torch-free student, also what the CI smoke gate exercises) does clear the gate:
+escalation ~0.93 with a well-defined local agreement, and ``--json`` succeeds. The defaults are left
+untouched here rather than re-tuned, so the mlp/conformal behavior stays reproducible for diagnosis.
 """
 
 from __future__ import annotations
@@ -150,8 +168,7 @@ def run(
             "name": "BANKING77",
             "source_commit": BANKING77_SOURCE_COMMIT,
             "splits": {
-                split: {"rows": spec["rows"], "sha256": spec["sha256"]}
-                for split, spec in BANKING77_FILES.items()
+                split: {"rows": spec["rows"], "sha256": spec["sha256"]} for split, spec in BANKING77_FILES.items()
             },
         },
     }
@@ -172,7 +189,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(
             json.dumps(
-                {"artifact": "mixle.banking77_reproduction/v1", **{k: result[k] for k in ("metrics", "rounds", "dataset")}},
+                {
+                    "artifact": "mixle.banking77_reproduction/v1",
+                    **{k: result[k] for k in ("metrics", "rounds", "dataset")},
+                },
                 sort_keys=True,
                 allow_nan=False,
             )

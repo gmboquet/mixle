@@ -11,16 +11,20 @@ pattern (a causal LM's next-token log-likelihood dropped straight into ``GradLea
 swaps the real HF checkpoint for a fully synthetic, dependency-free pair of backbones so the receipt
 runs in milliseconds with only ``torch`` installed.
 
-Design note on A2 (``build_projection_leaf``, PR #127, not yet merged into this branch): that leaf is a
-CONTRASTIVE/InfoNCE bridge between two embedding spaces with no ground-truth targets -- exactly the
-right shape for retrieval, but not for THIS claim. Stage-1 LLaVA-style pretraining supervises the
-projection with real caption tokens via teacher-forced next-token cross-entropy, i.e. a GENERATIVE
-``p(caption | volume)``, which is what ``GradLeaf`` (a bare module's ``log_density(x) -> (n,)``, the
-same bridge the peft example rides) gives for free once the caption-conditioned log-likelihood is
-computed inside the module. So this example writes its own small inline projection rather than
-depending on #127 -- it is also the more independent, mergeable choice while that PR is still open.
+Why not ``mixle.models.build_projection_leaf``? That shipped leaf is a CONTRASTIVE/InfoNCE bridge
+between two embedding spaces with no ground-truth targets -- exactly the right shape for retrieval,
+but not for THIS claim. Stage-1 LLaVA-style pretraining supervises the projection with real caption
+tokens via teacher-forced next-token cross-entropy, i.e. a GENERATIVE ``p(caption | volume)``. That is
+what ``GradLeaf`` (a bare module's ``log_density(x) -> (n,)``, the same bridge the peft example rides)
+gives for free once the caption-conditioned log-likelihood is computed inside the module -- so this
+example writes its own small inline projection instead. Reach for ``build_projection_leaf`` when the
+objective really is contrastive alignment; reach for ``GradLeaf`` when you have a likelihood.
 
-Run: ``python examples/multimodal_stage1_demo.py``
+Takeaway: "train only the adapter" is not a special training mode in mixle -- it falls out of which
+parameters carry gradients. The frozen-backbone claim below is verified, not asserted: the script
+checks the backbone tensors are bitwise identical before and after fitting.
+
+Run: ``python examples/multimodal_stage1_demo.py`` (needs ``pip install "mixle[torch]"``).
 """
 
 from __future__ import annotations

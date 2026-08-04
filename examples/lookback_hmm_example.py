@@ -1,4 +1,20 @@
-"""Fit a lookback HMM whose emissions depend on the previous integer state."""
+"""LookbackHiddenMarkovModel: an HMM whose emission depends on the PREVIOUS observation, not just the state.
+
+A plain HMM emits each observation independently given the hidden state. A lookback HMM (``lag=1``)
+instead emits ``x[t]`` from a conditional model of ``x[t] | x[t-1]``, selected by the hidden state --
+so each of the 3 hidden states here owns an ``IntegerMarkovChainDistribution`` over the observation
+alphabet, and ``init_dist`` supplies the distribution for the first ``lag`` positions that have no
+predecessor.
+
+The planted states are three cyclic shifts of the same sticky transition matrix, which makes them
+distinguishable ONLY through the observation-to-observation dependence -- a lag-0 HMM could not tell
+them apart, because the three states have identical marginal emission distributions.
+
+Takeaway: autocorrelation inside a sequence can live in the emission model rather than being forced
+into extra hidden states, and it is fit by the same ``optimize`` call. The script also shows the
+scoring contract: ``seq_log_density`` on an encoded batch agrees with per-observation ``log_density``.
+Runtime is ~20-25 s (1000 EM iterations with ``delta=None``, i.e. no early stop).
+"""
 
 import numpy as np
 

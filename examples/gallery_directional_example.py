@@ -5,6 +5,7 @@ sphere (Watson). Each true distribution exposes a matching estimator via ``.esti
 fit is a one-liner. (VonMisesFisher lives in the multivariate gallery.) Random data only.
 """
 
+from mixle.inference import estimate
 from mixle.stats import (
     ProjectedNormalDistribution,
     VonMisesDistribution,
@@ -12,19 +13,18 @@ from mixle.stats import (
     WrappedCauchyDistribution,
     WrappedNormalDistribution,
 )
-from mixle.inference import estimate
 
 CASES = [
-    ('VonMises (circle)',       VonMisesDistribution(0.7, 4.0)),
-    ('WrappedNormal (circle)',  WrappedNormalDistribution(0.7, 0.8)),
-    ('WrappedCauchy (circle)',  WrappedCauchyDistribution(0.7, 0.6)),
-    ('ProjectedNormal (circle)', ProjectedNormalDistribution(1.5, -0.5)),
-    ('Watson (axes on sphere)', WatsonDistribution([0.0, 0.0, 1.0], 4.0)),
+    ("VonMises (circle)", VonMisesDistribution(0.7, 4.0)),
+    ("WrappedNormal (circle)", WrappedNormalDistribution(0.7, 0.8)),
+    ("WrappedCauchy (circle)", WrappedCauchyDistribution(0.7, 0.6)),
+    ("ProjectedNormal (circle)", ProjectedNormalDistribution(1.5, -0.5)),
+    ("Watson (axes on sphere)", WatsonDistribution([0.0, 0.0, 1.0], 4.0)),
 ]
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     for label, true_dist in CASES:
         fit = estimate(list(true_dist.sampler(seed=1).sample(8000)), true_dist.estimator())
-        print('%-24s' % label)
-        print('  true: %s' % true_dist)
-        print('  fit : %s' % fit)
+        print("%-24s" % label)
+        print("  true: %s" % true_dist)
+        print("  fit : %s" % fit)

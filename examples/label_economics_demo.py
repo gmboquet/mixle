@@ -1,6 +1,6 @@
 """Expert-label economics: the ``acquire()`` receipt as a runnable, standalone artifact.
 
-A5's ``mixle.task.acquire.acquire(pool, model, k, strategy="eig", ...)`` ranks an unlabeled pool by
+``mixle.task.acquire.acquire(pool, model, k, strategy="eig", ...)`` ranks an unlabeled pool by
 expected information gain (BALD) against an ensemble of scoreable models. ``mixle/tests/task_acquire_test.py``
 already proves the underlying claim as a single test assertion (EIG-ranked labeling reaches a target
 held-out likelihood with no more labels than the seeded random baseline in its bounded fixture). This example
@@ -12,20 +12,19 @@ buy" can run and read directly: a budgeted labeling loop that ends with an expli
 -- plus a small table of held-out likelihood vs. label count for both strategies, so the comparison reads
 as a curve rather than a single ratio number.
 
-**Dataset.** B1 (a synthetic captioned-volume multimodal dataset) is being built concurrently and was not
-available in this worktree at the time this example was written. Rather than block on it, this demo mirrors
-``task_acquire_test.py``'s own synthetic setup directly: a noisy-threshold classification task
-(``y = 1{x > theta_true}``, label noise ``EPS_TRUE``) with a small bootstrap ensemble of ``StumpModel``
-threshold classifiers as the scoreable model family -- a case where pool points near the unknown threshold
-are informative
-about where it is. Swapping in a B1 dataset later (once it exists) is a drop-in replacement for
-``make_task`` below, not a rewrite of the budgeted loop.
+**Takeaway.** Which points you pay to label is a modeling decision, and it is worth more than a bigger
+budget. The curve below is the argument: EIG-chosen labels reach a held-out likelihood that random
+labeling needs several times as many labels to match, on the same pool with the same model family.
 
-**Plot.** The roadmap item's wording ("receipt plot/table") treats a matplotlib plot as nice-to-have.
-matplotlib is not a dependency anywhere else in this repo (not in ``pyproject.toml``, not imported by any
-existing module or example), so this demo does not add it just for one example -- it produces the table
-only, which carries the same information (held-out likelihood vs. label count, both strategies) without a
-new dependency.
+**Dataset.** Deliberately synthetic, mirroring ``task_acquire_test.py``'s own setup: a noisy-threshold
+classification task (``y = 1{x > theta_true}``, label noise ``EPS_TRUE``) with a small bootstrap
+ensemble of ``StumpModel`` threshold classifiers as the scoreable model family -- a case where pool
+points near the unknown threshold are the informative ones, so the ranking has something real to find.
+A real dataset drops into ``make_task`` below without touching the budgeted loop.
+
+**Output format.** A table, not a plot: matplotlib is not a dependency anywhere else in this repo (not
+in ``pyproject.toml``, not imported by any other module or example), and held-out likelihood vs. label
+count for both strategies reads perfectly well as columns.
 
 Run: ``python examples/label_economics_demo.py``
 """

@@ -13,6 +13,14 @@ that shows up as mixture-of-experts heads, Kalman/SSM belief states, GP posterio
 Both are scored by the forward KL to the teacher, ``KL(teacher || reduced)``, estimated on a held-out
 sample from the teacher (lower = closer). We report KL and wall-clock for each, across target sizes M.
 
+Takeaway: read the two columns together. The closed-form path is worth reaching for only where its KL
+is competitive with the refit -- this benchmark exists so you can see where that holds and where it
+does not, rather than assuming "closed-form" means "free and equally good".
+
+Scope: this VALIDATES the primitive on Gaussian mixtures, where ground truth is available. For the
+same primitive applied to a real neural teacher (a trained RealNVP flow projected down to a structured
+model), see ``project_neural_to_structured.py``.
+
 Run:  python examples/mixture_reduction_benchmark.py
 """
 

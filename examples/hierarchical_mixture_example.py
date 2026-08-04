@@ -1,4 +1,19 @@
-"""Generate data and fit a hierarchical mixture model. This is a mixture sequence mixture distribution."""
+"""HierarchicalMixture: an admixture -- a mixture over per-document MIXING PROFILES of shared topics.
+
+Each observation is a bag of tokens. A plain mixture would assign the whole bag to one component; a
+hierarchical mixture instead draws an outer component (a "mixing profile", ``taus``) and then draws
+every token in the bag from the shared topics under that profile. Three of the four profiles here are
+near-degenerate (all mass on one topic) and the fourth is a genuine blend ``[0.3, 0.4, 0.3]`` -- so the
+model can represent both "this document is about topic 2" and "this document mixes all three".
+
+``posterior(bag)`` is shown before any fitting: hand it a bag drawn purely from topic 1/2/3 and it
+returns the outer-component responsibilities, which concentrate on the matching degenerate profile.
+
+Takeaway: this is the general admixture base -- LDA is its Categorical-topic special case, and the
+same class takes Gaussian, Poisson, or heterogeneous topics (see ``latent_variable_models_example.py``).
+The long comment on ``max_its`` below documents why this particular configuration is capped by
+iteration count rather than by a convergence delta. Runtime is on the order of one to two minutes.
+"""
 
 import numpy as np
 

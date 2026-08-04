@@ -1,4 +1,4 @@
-"""Flagship app (G): the ontology-constrained knowledge-graph agent, end to end.
+"""Flagship app: the ontology-constrained knowledge-graph agent, end to end.
 
 Classification: illustrative -- runs on small synthetic / stand-in data. It shows the
 end-to-end workflow shape, not measured results on a real frontier-scale dataset. See
@@ -8,13 +8,13 @@ An LLM-backed agent that maintains and answers from a knowledge graph -- but eve
 ontology, every assertion must clear a confidence floor, and every answer is typed retrieval over the
 constrained graph. The pipeline:
 
-  1. ONTOLOGY    -- classes, relation signatures, axioms (D1): the typed contract on knowledge.
-  2. DECODE      -- a stochastic extractor's outputs are ontology-masked and confidence-floored (D2):
+  1. ONTOLOGY    -- classes, relation signatures, axioms: the typed contract on knowledge.
+  2. DECODE      -- a stochastic extractor's outputs are ontology-masked and confidence-floored:
                     schema-violating hallucinations are structurally rejected, under-confident facts
                     withheld, never silently dropped.
-  3. KG          -- the surviving facts fit a DistMult embedding; completion is ontology-typed (D1):
+  3. KG          -- the surviving facts fit a DistMult embedding; completion is ontology-typed:
                     the model cannot place mass on a forbidden tail.
-  4. KG-RAG      -- questions answer by entity linking + typed triple retrieval (D3), through the
+  4. KG-RAG      -- questions answer by entity linking + typed triple retrieval, through the
                     reasoner with honest abstention.
 
 Everything measured in-process; seconds, no GPU, no network.

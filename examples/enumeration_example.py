@@ -3,26 +3,37 @@
 For any distribution with enumerable support, ``top_k`` returns the k most probable outcomes in
 exact descending order without normalizing the whole support, and ``supports_enumeration`` reports
 whether a model qualifies. (For harder latent models, ``sound_top_k`` gives a certified top-k.)
+
+Takeaway: enumeration is a property of the model tree, not a separate index you build -- a categorical,
+a composed heterogeneous record, and a discrete mixture all answer ``top_k`` through the same recursion
+that scores them.
+
+This is the entry point of a three-example ladder: ``enumeration_showcase_example.py`` goes deeper on
+composed records (rank/unrank/seek, nucleus sets, certified estimates for non-decomposable models), and
+``autoregressive_enumeration_example.py`` covers the other axis -- an autoregressive model's sequence
+space, reached through a ``next_logprobs`` callable rather than a model tree.
 """
 
 import numpy as np
 
+from mixle.enumeration import supports_enumeration, top_k
 from mixle.stats import (
     CategoricalDistribution,
     CompositeDistribution,
     IntegerCategoricalDistribution,
     MixtureDistribution,
 )
-from mixle.enumeration import supports_enumeration, top_k
 
-if __name__ == '__main__':
-    cat = CategoricalDistribution({'a': 0.5, 'b': 0.3, 'c': 0.2})
+if __name__ == "__main__":
+    cat = CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2})
 
     # A heterogeneous record: an integer feature and a categorical feature.
-    comp = CompositeDistribution([
-        IntegerCategoricalDistribution(0, [0.6, 0.4]),
-        CategoricalDistribution({'x': 0.7, 'y': 0.3}),
-    ])
+    comp = CompositeDistribution(
+        [
+            IntegerCategoricalDistribution(0, [0.6, 0.4]),
+            CategoricalDistribution({"x": 0.7, "y": 0.3}),
+        ]
+    )
 
     # A discrete mixture (the latent component is marginalized out).
     mix = MixtureDistribution(
@@ -30,7 +41,7 @@ if __name__ == '__main__':
         [0.5, 0.5],
     )
 
-    for label, dist in [('Categorical', cat), ('Composite', comp), ('Mixture', mix)]:
-        print('%-12s supports_enumeration=%s' % (label, supports_enumeration(dist)))
+    for label, dist in [("Categorical", cat), ("Composite", comp), ("Mixture", mix)]:
+        print("%-12s supports_enumeration=%s" % (label, supports_enumeration(dist)))
         for outcome, log_p in top_k(dist, 3):
-            print('   p=%.3f  %r' % (np.exp(log_p), outcome))
+            print("   p=%.3f  %r" % (np.exp(log_p), outcome))

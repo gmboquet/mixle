@@ -15,6 +15,14 @@ real language model plugs into the exact same ``next_logprobs`` interface; this 
 mechanism, not a specific model integration (see the README's flagship examples for a real pretrained
 model wired into mixle).
 
+Takeaway: "the space is too big to enumerate" is not the end of the conversation. Rank, count, and
+threshold queries over that space cost model calls proportional to the distinct prefixes visited, so
+they stay tractable at ranks where materializing the space never would be.
+
+Scope: this is the SEQUENCE-space axis, driven by a ``next_logprobs`` callable. For enumeration over a
+composed mixle model tree's support, see ``enumeration_showcase_example.py``; for the one-screen
+introduction, ``enumeration_example.py``.
+
 Run: python examples/autoregressive_enumeration_example.py
 """
 

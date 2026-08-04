@@ -1,8 +1,22 @@
-"""Explore foundation encoders and edge students with measurements from the current run.
+"""Foundation encoders and edge students: what survives distillation, and what does not.
 
-Answers two questions the workplan raised, each measured on real data. Needs network on the FIRST run: it
-downloads the CIFAR-10 / banking77 datasets and the CLIP / MiniLM open weights from Hugging Face (cached
-thereafter, so later runs are offline):
+Two questions, each answered with a measurement on real public data rather than an assertion:
+
+  1. Can a frozen foundation encoder plus a cheap certified head do useful work on a LAPTOP? Section 1
+     runs CLIP over CIFAR-10 images and fits a conformally certified head on the embeddings.
+  2. Can that capability be distilled into a torch-free edge artifact? Section 2a distills a MiniLM
+     text classifier down to a sub-500 KB artifact and reports measured accuracy retention. Section 2b
+     is the deliberate NEGATIVE result: the same recipe run on raw pooled PIXELS instead of encoder
+     features loses most of the teacher's agreement.
+
+Takeaway: distillation transfers what the *representation* already separates. The text student keeps
+its teacher because MiniLM's embedding does the work; the pixel student fails because the signal was
+in CLIP's features, not in the pixels -- so choose what you distill FROM before tuning how you distill.
+The complementary vision path, which distils CLIP's feature SPACE rather than bypassing it, is in
+``vision_edge_distillation/``.
+
+Needs network on the FIRST run: it downloads the CIFAR-10 / banking77 datasets and the CLIP / MiniLM
+open weights from Hugging Face (cached thereafter, so later runs are offline).
 
 The script prints raw accuracy, size, and runtime measurements. Those values are environment-dependent
 example output, not 0.8.0 performance claims. Treat them as evidence only when the exact model,
@@ -129,9 +143,7 @@ def main() -> None:
     print("  -> compare this measured agreement with the deployment requirement.")
     print("     vision_edge_distillation/ demonstrates a separately verifiable feature-distillation path.")
 
-    print(
-        "\nRun complete. Preserve exact inputs, environment, command, and output before citing a result."
-    )
+    print("\nRun complete. Preserve exact inputs, environment, command, and output before citing a result.")
 
 
 if __name__ == "__main__":

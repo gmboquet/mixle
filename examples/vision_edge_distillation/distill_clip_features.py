@@ -1,8 +1,30 @@
-"""Feature-distill CLIP's vision capability into a compact CNN on a GPU.
+"""Feature-distill CLIP's vision capability into a compact CNN on a GPU -- the producing half of a
+two-machine round trip.
 
-Importing this module defines the student only. Network access, dataset
-materialization, training, and artifact writes happen exclusively in
-``main()``.
+What it demonstrates: instead of distilling CLIP's *labels*, a small CNN is trained with a cosine loss
+to reproduce CLIP's normalized image EMBEDDING for each CIFAR-10 image. The student therefore inherits
+CLIP's feature geometry, and can then classify zero-shot through CLIP's *frozen text head* -- which is
+saved alongside it. At inference the student never touches CLIP.
+
+Takeaway: what makes a student portable is matching the teacher's representation, not its decisions.
+Copying decisions gives you a classifier for one label set; copying the embedding gives you something
+that still works through a text head, on a machine that has no CLIP and no GPU. (The contrast case --
+distilling from raw pixels instead of from a good representation, which loses most of the teacher --
+is in ``examples/foundation_to_edge.py`` section 2b.)
+
+Writes three artifacts into ``--output-dir``: ``student.pt`` (the CNN weights), ``student_head.pt``
+(the frozen zero-shot text head), and ``metrics.json`` (measurements plus the pinned model/dataset
+revisions and dataset fingerprints). ``verify_on_laptop.py`` consumes all three on CPU, authenticating
+each by SHA-256 -- obtain those digests over the same trusted channel as the release evidence.
+
+Any accuracy this prints is a measurement of THAT run on THAT hardware and dependency set, not a
+release claim; see this directory's README.md.
+
+Requires a CUDA GPU, network access, and ``pip install torch transformers datasets pillow``.
+Importing this module defines the student only. Network access, dataset materialization, training, and
+artifact writes happen exclusively in ``main()``.
+
+Run: ``python examples/vision_edge_distillation/distill_clip_features.py [--output-dir DIR]``
 """
 
 from __future__ import annotations
@@ -74,11 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else ""
     print(f"device={device} {device_name}", flush=True)
 
-    clip = (
-        CLIPModel.from_pretrained(CLIP_ID, revision=CLIP_REVISION, use_safetensors=True)
-        .to(device)
-        .eval()
-    )
+    clip = CLIPModel.from_pretrained(CLIP_ID, revision=CLIP_REVISION, use_safetensors=True).to(device).eval()
     processor = CLIPProcessor.from_pretrained(CLIP_ID, revision=CLIP_REVISION, use_fast=True)
 
     started = time.time()
@@ -168,8 +186,7 @@ def main(argv: list[str] | None = None) -> int:
             schedule.step()
         if epoch % 5 == 4 or epoch == epochs - 1:
             print(
-                f"ep{epoch + 1} loss={loss.item():.4f} student_zs_acc={evaluate():.4f} "
-                f"[{time.time() - started:.0f}s]",
+                f"ep{epoch + 1} loss={loss.item():.4f} student_zs_acc={evaluate():.4f} [{time.time() - started:.0f}s]",
                 flush=True,
             )
 

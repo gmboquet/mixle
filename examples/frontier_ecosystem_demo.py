@@ -1,4 +1,4 @@
-"""The frontier-ecosystem tour: the v0.6.2 workplan, running end to end in one script.
+"""The frontier-ecosystem tour: fit -> certificate -> placement -> calibration -> UQ -> RAG, end to end.
 
 Classification: illustrative -- runs on small synthetic / stand-in data. It shows the
 end-to-end workflow shape, not measured results on a real frontier-scale dataset. See
@@ -12,7 +12,8 @@ Six acts, every number measured in this process. Runtime ~30 s on a laptop, no G
   2. PLACEMENT -- the 99/1 rule: given the certificate, decide which blocks stay local and which (if
      any) a GPU pool would take, with priced reasons.
   3. CALIBRATION -- is the fitted model's uncertainty honest on held-out data? (PIT test.)
-  4. UQ -- one verb, uncertainty over the fitted model (a Laplace parameter posterior).
+  4. UQ -- one verb, uncertainty over the fitted model (a Laplace parameter approximation, which the
+     library will not let you mislabel a posterior).
   5. KNOWLEDGE SUBSTRATE + ALL-DATA RAG -- a typed, provenanced store over documents + a deployed
      artifact + past traces; a question is answered by chaining evidence ACROSS kinds, with citations.
   6. HONEST ABSTENTION -- a question the substrate cannot support returns "I don't know", not a guess.
@@ -91,9 +92,12 @@ def act4_uq():
     data = [float(x) for x in np.random.RandomState(0).normal(5.0, 2.0, 400)]
     model = optimize(data, st.GaussianEstimator(), out=None)
     r = uq(model, data)
-    lo, hi = r.credible_interval(lambda d: d.mean(), alpha=0.1)
+    # uq() on a fitted model returns a LIKELIHOOD-CURVATURE (Laplace) approximation, not a Bayesian
+    # posterior -- no prior was supplied. The library keeps the two straight: parameter_interval() is
+    # the honest verb here; credible_interval() deliberately refuses unless an explicit prior was used.
+    lo, hi = r.parameter_interval(lambda d: d.mean(), alpha=0.1)
     print(f"method: {r.method}")
-    print(f"90% credible interval on the mean: [{lo:.3f}, {hi:.3f}]  (true 5.0, fitted {model.mean():.3f})")
+    print(f"90% parameter interval on the mean: [{lo:.3f}, {hi:.3f}]  (true 5.0, fitted {model.mean():.3f})")
 
 
 def build_substrate() -> Substrate:

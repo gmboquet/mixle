@@ -7,7 +7,7 @@ shifts a real's mean and that real drives a count, ``learn_structure`` discovers
 mixed families. The script prints both held-out scores so the current run can be evaluated without embedding
 a fixed superiority claim in the source.
 
-Run: ``python structure_learning_example.py``
+Run: ``python examples/structure_learning_example.py``
 """
 
 from __future__ import annotations

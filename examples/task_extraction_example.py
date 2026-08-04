@@ -6,7 +6,7 @@ extracts ``{id, amount, date, vendor}`` from example lines; ``distill_extractor`
 tagger to reproduce it; the result is a local ``model(text) -> {field: value}`` that runs with no LLM, no
 network, and can be *retrained* when the format drifts (unlike a brittle regex).
 
-Run: ``python task_extraction_example.py``  (needs ``pip install "mixle[torch]"``).
+Run: ``python examples/task_extraction_example.py``  (needs ``pip install "mixle[torch]"``).
 """
 
 from __future__ import annotations

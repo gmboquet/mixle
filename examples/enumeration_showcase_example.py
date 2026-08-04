@@ -15,6 +15,11 @@ This runs end to end (no downloads). It shows:
   3. the 95% nucleus (smallest set covering 95% of the mass) without materializing the support,
   4. the honest story for a *non-decomposable* model (a mixture): a certified estimate with a
      standard error and an exact/approximate flag -- never a silent approximation.
+
+Scope: this is enumeration over a MODEL TREE's support. For the other axis -- an autoregressive
+model's sequence space, reached through a ``next_logprobs(prefix)`` callable -- see
+``autoregressive_enumeration_example.py``. For the one-screen introduction, see
+``enumeration_example.py``.
 """
 
 import numpy as np

@@ -9,7 +9,18 @@ Everything lives in ``mixle.inference.production``. This walks the lifecycle end
   4. serve scoring through a Service (with activity logging) and check drift vs a reference sample;
   5. checkpoint a long fit and resume it from the latest checkpoint.
 
+Takeaway: the deliverable is not "the calls succeeded" -- it is the CHAIN. Each step emits a hash that
+the next step can check, so ``verify_lineage`` and ``Registry.verify_chain`` answer "is this served
+model really the one that came out of that data and that fit?" without trusting anyone's word. Losing
+the chain is the failure mode; producing a model is the easy part.
+
+Note on ``trust_code``: ``Registry.get`` / ``current`` / ``verify_chain`` take a keyword-only
+``trust_code`` (default ``False``, and it must be exactly ``True`` or ``False`` -- not a truthy value).
+The models here are pure statistical artifacts with no embedded code, so the safe default is left
+alone; pass ``trust_code=True`` only for a registry whose artifacts you are willing to execute.
+
 Fully self-contained: random data, a throwaway registry directory.
+Run: ``python examples/production_example.py``
 """
 
 import tempfile

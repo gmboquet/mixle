@@ -4,6 +4,19 @@ The round-trip receipt: the student was feature-distilled from CLIP on a rented 
 here, on CPU, with no CLIP and no GPU -- carrying CLIP's vision geometry in a few MB. Loads the retrieved
 weights, classifies CIFAR-10 test zero-shot through the frozen text head, and reports laptop accuracy +
 latency next to the GPU-reported number.
+
+Takeaway: the trust boundary is the interesting part. Three files arrive from a machine you do not
+control, so each is authenticated by SHA-256 BEFORE it is opened, and the weights are read with
+``weights_only=True`` so deserialization cannot execute code. A distilled artifact is only as good as
+your ability to say which artifact you actually ran.
+
+Prerequisites: ``student.pt``, ``student_head.pt``, and ``metrics.json`` produced by
+``distill_clip_features.py``, placed next to this script, plus their expected digests obtained over the
+same trusted channel as the release evidence. All three digest arguments are REQUIRED -- the script
+deliberately has no "skip verification" mode.
+
+Run: ``python examples/vision_edge_distillation/verify_on_laptop.py \\
+        --student-sha256 <student.pt> --head-sha256 <student_head.pt> --metrics-sha256 <metrics.json>``
 """
 
 import argparse
