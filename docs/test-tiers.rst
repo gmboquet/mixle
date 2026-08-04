@@ -28,13 +28,13 @@ discovered test module before marker deselection.
      - Enforced now -- 4 tests in an explicit one-file manifest.
    * - ``core``
      - Stable base-install correctness (no optional extras).
-     - <= 4 min per Python CI job
+     - <= 8 min per Python CI job
      - Populated centrally: quick, non-experimental, non-stochastic tests with
        no optional-backend marker.
    * - ``full``
      - All non-optional correctness, including the ``slow`` stochastic,
        integration, and exhaustive tests.
-     - <= 20 min
+     - <= 30 min
      - Populated centrally: every non-optional, non-benchmark correctness test.
    * - ``optional``
      - Tests that require optional extras or external executables; one job per
