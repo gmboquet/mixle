@@ -1012,6 +1012,26 @@ class SemiSupervisedMixtureDataEncoder(DataSequenceEncoder):
         else:
             return False
 
+    def row_count(self, x: Any) -> int:
+        """Return the observation count recorded in the encoded payload.
+
+        The base implementation infers a count only from payloads whose leading axis is
+        unambiguously the observation axis. This encoder's payload is a heterogeneous 4-tuple --
+        count, encoded values, prior arrays, raw observations -- whose members have differing and
+        partly ragged lengths (the prior arrays are indexed by *labelled* row, so they are shorter
+        than the data whenever any observation is unlabelled). Inference declines that, so without
+        this override every metadata wrapper that verifies a row count raised NotImplementedError
+        against a perfectly ordinary semi-supervised fit.
+
+        Element 0 is the count, written by :meth:`seq_encode` from the input length itself.
+        """
+        if not isinstance(x, (tuple, list)) or not x:
+            raise ValueError("semi-supervised mixture encoding must be a non-empty tuple")
+        count = x[0]
+        if isinstance(count, bool) or not isinstance(count, (int, np.integer)) or int(count) < 0:
+            raise ValueError("semi-supervised mixture encoded row count must be a non-negative integer")
+        return int(count)
+
     def seq_encode(
         self, x: Sequence[tuple[T0, Sequence[tuple[int, T1]] | None]]
     ) -> tuple[int, Any, tuple[E1, np.ndarray, np.ndarray], Sequence[tuple[T0, Sequence[tuple[int, T1]] | None]]]:

@@ -86,7 +86,15 @@ def _clip():
         import torch
         from transformers import CLIPModel, CLIPProcessor
 
-        model = CLIPModel.from_pretrained(_CLIP_ID, revision=_CLIP_REVISION, use_safetensors=True)  # nosec B615 # false positive: revision IS pinned, to the 40-hex commit named by the module constant on this line (see scientist_asset_manifest); B615 only resolves string literals, not named constants
+        # No use_safetensors=True here, unlike _lm() below, and the asymmetry is deliberate:
+        # openai/clip-vit-base-patch32 publishes only pytorch_model.bin -- at the pinned revision and
+        # at every other, including current main, which the pin happens to equal. Requiring
+        # safetensors from a repository that has never published any is not a stricter setting, it is
+        # an unsatisfiable one, and it made this function raise on its first call for anyone who ran
+        # it. The protection is not lost: transformers >= 4.40 (this extra's floor) reads .bin through
+        # torch.load(weights_only=True), so a tensor file still cannot execute code on load. Restore
+        # the flag if and when the upstream repository publishes a safetensors weight file.
+        model = CLIPModel.from_pretrained(_CLIP_ID, revision=_CLIP_REVISION)  # nosec B615 # false positive: revision IS pinned, to the 40-hex commit named by the module constant on this line (see scientist_asset_manifest); B615 only resolves string literals, not named constants
         model.eval()
         _CACHE["clip"] = (
             model,

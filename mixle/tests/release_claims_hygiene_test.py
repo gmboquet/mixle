@@ -13,7 +13,14 @@ def test_documentation_does_not_suppress_all_docutils_warnings() -> None:
 
 def test_vision_verifier_authenticates_restricted_tensor_loads() -> None:
     verifier = (ROOT / "examples" / "vision_edge_distillation" / "verify_on_laptop.py").read_text(encoding="utf-8")
-    assert verifier.count("weights_only=True") == 2
+    # Asserted as a property of the CALL SITES, not as a raw occurrence count. The count form read
+    # `== 2` and broke the moment the module docstring mentioned the flag it documents -- a prose edit
+    # that strengthened the file failed a security test, while the actual protection was untouched.
+    # What matters is that no torch.load in this file omits weights_only, however many times the
+    # string appears elsewhere.
+    loads = [line for line in verifier.splitlines() if "torch.load(" in line and "def " not in line]
+    assert len(loads) == 2
+    assert all("weights_only=True" in line for line in loads)
     assert verifier.count("_authenticate(") >= 4
     assert verifier.index("_authenticate(student_path") < verifier.index("torch.load(student_path")
     assert verifier.index("_authenticate(head_path") < verifier.index("torch.load(head_path")
