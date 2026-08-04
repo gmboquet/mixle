@@ -61,12 +61,12 @@ dependencies = [
 # built-in "workqueue" threading layer without it, so it's a performance extra, not a hard requirement
 # -- and it must stay platform-gated: Intel TBB ships no arm64 (Apple Silicon) wheels, so an
 # unconditional floor here makes `pip install mixle[numba]` uninstallable on that platform.
-numba = ["numba>=0.59,<1", "tbb>=2021.6,<2022; platform_machine == 'x86_64'"]
+numba = ["numba>=0.64,<1", "tbb>=2021.6,<2022; platform_machine == 'x86_64'"]
 # The read-side DataFrame data adapter duck-types and never imports pandas; the write-side result
 # egress (ParameterPosterior/CalibrationReport/MarkovChainLatentPosterior .to_dataframe/.to_parquet)
 # constructs a real pandas.DataFrame, so it needs the library itself (mixle.utils.optional_deps).
 # Either way it stays optional so the base install stays lean.
-pandas = ["pandas>=2.0,<4"]
+pandas = ["pandas>=2.1.1,<4"]
 # data-layer connectors (mixle.data.sources) -- each lazy + optional.
 arrow = ["pyarrow>=14,<26"]
 sql = ["sqlalchemy>=2.0,<3"]
@@ -75,7 +75,7 @@ hadoop = ["pyarrow>=14,<26", "fsspec>=2023.1.0,<2027"]
 # lazy N-D array-store connectors (mixle.data.sources.array_source): zarr + HDF5 volumes for
 # PatchSampler-style streaming reads. numpy-memmap needs no extra dependency, so it is not listed here.
 arrays = ["zarr>=2.16,<4", "h5py>=3.10,<4"]
-data = ["pandas>=2.0,<4", "pyarrow>=14,<26", "sqlalchemy>=2.0,<3", "pymongo>=4.3,<5", "fsspec>=2023.1.0,<2027", "zarr>=2.16,<4", "h5py>=3.10,<4"]
+data = ["pandas>=2.1.1,<4", "pyarrow>=14,<26", "sqlalchemy>=2.0,<3", "pymongo>=4.3,<5", "fsspec>=2023.1.0,<2027", "zarr>=2.16,<4", "h5py>=3.10,<4"]
 # graph-grammar models (mixle.stats.sequences.grammar) are the only networkx user; lazy + optional.
 grammar = ["networkx>=3.0,<4"]
 # GMP-backed (FFT) big-integer multiply for the structural count-DP's large histogram convolutions.
@@ -90,7 +90,7 @@ dask = ["dask>=2023.5.0,<2027", "distributed>=2023.5.0,<2027"]
 # mixle.utils.parallel.ray_data's "ray" encoded-data backend (map/fold sufficient statistics over a
 # Ray cluster, same contract as the spark/dask backends); only ray.remote/ray.put/ray.get/ray.init are
 # used, all stable since early 2.x.
-ray = ["ray>=2.9,<3"]
+ray = ["ray>=2.31,<3"]
 # mixle.utils.parallel.lightning_data's "lightning" encoded-data backend (mini-batch iteration via a
 # lightning.pytorch.LightningDataModule + DataLoader, driving stochastic/mini-batch EM).
 lightning = ["lightning>=2.1,<3"]
@@ -105,9 +105,9 @@ scientist = ["torch>=2.4,<3", "safetensors>=0.4,<1", "transformers>=4.40,<6", "s
 # built once during publication and assembled from authenticated archives rather than rebuilt by it.
 docs = ["sphinx>=7,<10", "furo<2027", "myst-parser>=2,<6", "sphinx-polyversion>=2.0,<3"]
 # JaxEngine (XLA arrays, functional autograd) + the NumPyro NUTS sampler backend (how="nuts", backend="jax").
-jax = ["jax>=0.4,<1", "numpyro>=0.13,<1"]
-mpi = ["mpi4py>=3.1.4,<5"]
-umap = ["umap-learn>=0.5.4,<1"]
+jax = ["jax>=0.4.16,<1", "numpyro>=0.13,<1"]
+mpi = ["mpi4py>=4.1,<5"]
+umap = ["umap-learn>=0.5.6,<1"]
 sympy = ["sympy>=1.12,<2"]
 # to_sage symbolic export. Full SageMath is not pip-installable; passagemath is its modular,
 # wheel-distributed fork (the symbolic subset suffices -- it provides sage.all__sagemath_symbolics).
@@ -144,21 +144,21 @@ all = [
     "gmpy2>=2.1,<3",
     "h5py>=3.10,<4",
     "hmmlearn>=0.3,<1",
-    "jax>=0.4,<1",
+    "jax>=0.4.16,<1",
     "lightning>=2.1,<3",
-    "mpi4py>=3.1.4,<5",
+    "mpi4py>=4.1,<5",
     "mpmath>=1.3,<2",
     "networkx>=3.0,<4",
-    "numba>=0.59,<1",
+    "numba>=0.64,<1",
     "numpyro>=0.13,<1",
-    "pandas>=2.0,<4",
+    "pandas>=2.1.1,<4",
     "passagemath-symbolics>=10.4,<11",
     "peft>=0.11,<1",
     "pomegranate>=1.0,<2",
     "pyarrow>=14,<26",
     "pymongo>=4.3,<5",
     "pyspark>=3.4,<5",
-    "ray>=2.9,<3",
+    "ray>=2.31,<3",
     "safetensors>=0.4,<1",
     "scikit-learn>=1.4,<2",
     "sentence-transformers>=3.0,<6",
@@ -168,7 +168,7 @@ all = [
     "tbb>=2021.6,<2022; platform_machine == 'x86_64'",
     "torch>=2.4,<3",
     "transformers>=4.40,<6",
-    "umap-learn>=0.5.4,<1",
+    "umap-learn>=0.5.6,<1",
     "zarr>=2.16,<4",
 ]
 
