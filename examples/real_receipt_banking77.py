@@ -11,19 +11,19 @@ Takeaway: the scorecard is the deliverable, and it is allowed to say the student
 keep. Read the escalation rate FIRST -- an all-escalate cascade means the local model never answered,
 so "end-to-end accuracy" is just the oracle's accuracy and the cost line will exceed the teacher's.
 
-KNOWN ISSUE (0.8.0), reproduced on the pinned dataset: the DEFAULT student (``--`` no flag, i.e.
-``student="mlp"``, 250 epochs, 3000 seed examples over 77 classes) never clears the alpha=0.1
-conformal gate, giving escalation rate 1.000, ``nan`` local-agreement / local-accuracy, and a modeled
-cost of $30.10 per 1k against the teacher's $30.00. Two consequences:
+The default student is the generative one (torch-free, also what the CI smoke gate exercises): it
+clears the alpha=0.1 conformal gate with escalation ~0.93 and a well-defined local agreement, so a
+plain run demonstrates the thing this example teaches. ``--mlp`` selects the MLP student instead,
+and on the pinned dataset that configuration is a REPRODUCIBLE NEGATIVE: 250 epochs and 3000 seed
+examples over 77 classes never clear the gate, escalation is 1.000, the local metrics are undefined
+(no query was ever answered locally), and the modeled cost of $30.10 per 1k exceeds the teacher's
+$30.00. It is kept, behind the explicit flag, precisely because the scorecard is allowed to say the
+student did not earn its keep -- that is the takeaway above, demonstrated on real data.
 
-  * the headline path currently demonstrates a cascade that saves nothing, and the escalation-decay
-    curve stays flat near 1.0 across all six harvest/re-distill rounds;
-  * ``--json`` then aborts with ``ValueError: Out of range float values are not JSON compliant: nan``,
-    because the nan local metrics meet ``allow_nan=False`` in the emitter below.
-
-``--generative`` (the torch-free student, also what the CI smoke gate exercises) does clear the gate:
-escalation ~0.93 with a well-defined local agreement, and ``--json`` succeeds. The defaults are left
-untouched here rather than re-tuned, so the mlp/conformal behavior stays reproducible for diagnosis.
+Undefined local metrics serialize as JSON ``null``, never as ``nan``: a cascade that escalated
+everything has NO local-agreement number, and a serializer that crashes on that state (as this one
+did, via ``allow_nan=False`` meeting a raw ``nan``) turns an honest negative result into a broken
+tool exactly when the negative result is the finding.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -174,15 +175,36 @@ def run(
     }
 
 
+def _json_safe(value):
+    """Map undefined metrics (nan) to JSON null, recursively; leave everything else untouched.
+
+    An all-escalate cascade has no local-agreement or local-accuracy number -- not zero, not a
+    sentinel: undefined. ``null`` is JSON's representation of exactly that, and ``allow_nan=False``
+    stays on below as the guard that no raw ``nan`` ever reaches the wire unmapped.
+    """
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--generative", action="store_true")
+    parser.add_argument("--generative", action="store_true", help="the default student; flag kept for compatibility")
+    parser.add_argument(
+        "--mlp", action="store_true", help="the MLP student: a reproducible negative, see the module docstring"
+    )
     parser.add_argument("--smoke", action="store_true", help="run the bounded release-bundle configuration")
     parser.add_argument("--json", action="store_true", help="emit a strict JSON result")
     args = parser.parse_args(argv)
+    if args.mlp and (args.generative or args.smoke):
+        parser.error("--mlp contradicts --generative/--smoke; pick one student")
     sizes = {"n_seed": 1155, "n_round": 40, "n_rounds": 1, "n_test": 60} if args.smoke else {}
     result = run(
-        student="generative" if args.generative or args.smoke else "mlp",
+        student="mlp" if args.mlp else "generative",
         verbose=not args.json,
         **sizes,
     )
@@ -191,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(
                 {
                     "artifact": "mixle.banking77_reproduction/v1",
-                    **{k: result[k] for k in ("metrics", "rounds", "dataset")},
+                    **_json_safe({k: result[k] for k in ("metrics", "rounds", "dataset")}),
                 },
                 sort_keys=True,
                 allow_nan=False,

@@ -372,7 +372,14 @@ class MatchingEstimator(ParameterEstimator):
         dim: int,
         max_nodes: int = _DEFAULT_MAX_NODES,
         pseudo_count: float | None = 1.0,
-        max_steps: int = 500,
+        # 5000, not 500. Measured on this estimator's OWN samples (400 draws from a seeded
+        # MatchingDistribution, fit back at tol=1e-7): n=3 converges in 164 iterations, n=4 in 869,
+        # n=5 in 1015, n=8 in 1172. The old default of 500 therefore FAILED the round trip for every
+        # dimension above three -- and because non-convergence here raises rather than returning a
+        # flagged fit, the default configuration was a guaranteed RuntimeError on ordinary data. The
+        # loop breaks the moment it converges, so the larger ceiling costs nothing when fewer steps
+        # suffice (~1s worst case measured at the max_nodes=12 permanent cap).
+        max_steps: int = 5000,
         learning_rate: float = 1.0,
         tol: float = 1.0e-7,
         name: str | None = None,

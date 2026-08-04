@@ -245,7 +245,13 @@ class RegistryTest(unittest.TestCase):
                 )
 
             with ThreadPoolExecutor(max_workers=n_writers) as pool:
-                results = [f.result(timeout=10) for f in [pool.submit(writer, i) for i in range(n_writers)]]
+                # The bound is a hang guard, not a measurement: six writers serialize behind the
+                # registry's file lock (~0.3s of injected delay total), but under a loaded host --
+                # these tests once failed inside a fifteen-file parallel batch and passed 5/5 in
+                # isolation and 10/10 on re-run -- thread starvation can stretch wall-clock far past
+                # a tight bound with no registry defect involved. Set well clear of load; a genuine
+                # deadlock still trips it.
+                results = [f.result(timeout=120) for f in [pool.submit(writer, i) for i in range(n_writers)]]
 
             self.assertEqual(sorted(results), [f"writer_{i}" for i in range(n_writers)])
 
@@ -273,7 +279,13 @@ class RegistryTest(unittest.TestCase):
                 return instances[i].register(_json_task_model(), capabilities=["cap"], cost=0.01).entry_id
 
             with ThreadPoolExecutor(max_workers=n_writers) as pool:
-                results = [f.result(timeout=10) for f in [pool.submit(writer, i) for i in range(n_writers)]]
+                # The bound is a hang guard, not a measurement: six writers serialize behind the
+                # registry's file lock (~0.3s of injected delay total), but under a loaded host --
+                # these tests once failed inside a fifteen-file parallel batch and passed 5/5 in
+                # isolation and 10/10 on re-run -- thread starvation can stretch wall-clock far past
+                # a tight bound with no registry defect involved. Set well clear of load; a genuine
+                # deadlock still trips it.
+                results = [f.result(timeout=120) for f in [pool.submit(writer, i) for i in range(n_writers)]]
 
             self.assertEqual(len(set(results)), n_writers, f"expected {n_writers} distinct auto ids, got {results}")
 
@@ -331,7 +343,7 @@ class RegistryTest(unittest.TestCase):
                 p.join(timeout=180)
                 self.assertEqual(p.exitcode, 0, f"writer process pid={p.pid} failed or hung (exitcode={p.exitcode})")
 
-            results = [queue.get(timeout=5) for _ in range(n_writers)]
+            results = [queue.get(timeout=120) for _ in range(n_writers)]
             self.assertEqual(sorted(results), [f"writer_{i}" for i in range(n_writers)])
 
             reg = Registry(root)

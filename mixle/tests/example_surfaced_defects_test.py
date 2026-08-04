@@ -136,3 +136,24 @@ class InitializationDrawSelectsSomethingTest:
         # 400 observations at p=0.1: an empty draw is impossible in practice, so the fallback must
         # not have fired and the mask must still look Bernoulli rather than like a single forced 1.
         assert total > 20.0
+
+
+class MatchingDefaultBudgetTest:
+    """MXR-080-2016: the default optimization budget failed the estimator's own round trip."""
+
+    @pytest.mark.parametrize("n", [3, 4, 5])
+    def test_default_budget_fits_the_estimators_own_samples(self, n: int) -> None:
+        from mixle.stats.rankings.matching import MatchingDistribution, MatchingEstimator
+
+        rng = np.random.RandomState(0)
+        weights = np.exp(rng.normal(0.0, 1.0, size=(n, n)))
+        data = MatchingDistribution(weights).sampler(seed=1).sample(400)
+        # max_steps deliberately NOT passed: the defaults are the subject. Measured need at
+        # tol=1e-7 is 164/869/1015 iterations for n=3/4/5; the old default of 500 raised
+        # RuntimeError for every n above three.
+        estimator = MatchingEstimator(dim=n)
+        accumulator = estimator.accumulator_factory().make()
+        for x in data:
+            accumulator.update(x, 1.0, None)
+        model = estimator.estimate(None, accumulator.value())
+        assert model.fit_diagnostics.converged
