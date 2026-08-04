@@ -23,6 +23,11 @@ behavior regresses. Each row below names that evidence.
        suites, and ``scipy_golden_test`` density parity
    * - ``mixle.stats.parameter_packing``
      - exact pack/unpack shape, ordering, and round-trip contracts
+   * - ``mixle.semantics`` (see :doc:`quantitative-semantics`)
+     - the packaged ``fixtures/quantitative-semantics-v1.json`` cross-project contract round-tripping
+       without loss, the semantic-identity boundary suite (operational fields -- sample location,
+       backend, job -- excluded from identity while priors, units, transforms, constraints and
+       observations are not), and the refusal of any ``schema_version`` other than the supported one
    * - Direct MLE / EM / conjugate fitting through ``optimize``
      - the weighted-estimation contract (weights == replicated sufficient statistics), the fit-seed
        determinism suite, and EM monotonicity/quiet-by-default behavior
@@ -54,8 +59,9 @@ and tested:
 To check a surface's tier programmatically::
 
    from mixle.maturity import maturity_of
-   maturity_of("mixle.stats.latent.hidden_markov")   # -> Maturity.STABLE
-   maturity_of("mixle.ppl")                           # -> Maturity.PROVISIONAL
+   maturity_of("mixle.stats.univariate.continuous.gaussian")  # -> Maturity.STABLE
+   maturity_of("mixle.stats.latent.hidden_markov")            # -> Maturity.PROVISIONAL
+   maturity_of("mixle.ppl")                                   # -> Maturity.PROVISIONAL
 
 The stable list and the machine registry are kept consistent by a test, so this page cannot silently claim
 more than the registry backs.

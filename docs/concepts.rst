@@ -153,7 +153,7 @@ Latent models add posterior queries:
 
 .. code-block:: python
 
-   responsibilities = mixture.posterior(rows)
+   responsibilities = mixture.latent_posterior(rows).marginals()
    path = hmm.viterbi(sequence)
 
 Discrete and structured models may also support enumeration:

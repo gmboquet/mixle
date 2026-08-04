@@ -51,6 +51,15 @@ Scientific workflow building blocks
 Compatibility and dependency changes
 ------------------------------------
 
+0.8.0 tightens several public contracts in ways that are source-incompatible:
+they raise, or return something with a different meaning, rather than warning.
+The classes of change are code-execution gates that now require the ``True``
+singleton rather than a truthy value, public Boolean flags that no longer
+coerce, durable receipt and result records that are now frozen, verification
+receipts that must name their subject, and a set of numerical corrections that
+move recorded values. :doc:`migrations/0.8.0` is the authoritative per-surface
+list and the migration path for each; read it before upgrading.
+
 * Python 3.11 is now the minimum supported runtime. Hosted fast lanes cover
   Python 3.11 and 3.12 on Linux x86_64 and macOS arm64; the full lane uses
   Python 3.12.

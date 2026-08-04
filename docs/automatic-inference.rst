@@ -112,7 +112,8 @@ receipts.
    artifact = create(rows, calibrate=0.2, quantify_uq=True, seed=0)
    model = artifact.model
 
-   print(artifact.certificate.level)
+   print(artifact.certificate.guarantee)
+   print(artifact.certificate.table())
    print(artifact.provenance.get("exchangeability"))
 
 Use ``optimize`` when you want the fitted model directly. Use ``create`` when a

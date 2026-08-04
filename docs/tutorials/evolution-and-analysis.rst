@@ -120,7 +120,7 @@ For a larger model-design question, define a typed search space and a builder.
 
    space = Space({
        "components": Integer(1, 5),
-       "alpha": Real(0.1, 4.0, log=True),
+       "alpha": Real(0.1, 4.0),
        "family": Categorical(["gaussian", "student_t"]),
    })
 

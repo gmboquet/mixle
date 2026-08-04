@@ -135,7 +135,7 @@ versus second-half shifts.
 The report label is one of:
 
 ``exchangeable``
-    No order signal was found at the tested level.
+    The probes ran and found no order signal at the tested level.
 
 ``trend``
     Values co-move with row position; fit a temporal or sequential model
@@ -144,6 +144,22 @@ The report label is one of:
 ``shift``
     The early and late halves differ in location; treat the rows as a regime
     change unless the split is deliberate.
+
+``inconclusive``
+    No probe could run at all: fewer than 20 rows, no numeric field in the
+    record shape, or every numeric field non-finite. This is deliberately
+    *not* ``exchangeable`` -- the assumption was never tested, rather than
+    tested and upheld. ``report.exchangeable`` is ``False`` here for the same
+    reason, so a caller reading only the boolean cannot mistake "we could not
+    check" for "we checked and found nothing".
+
+``exchangeable`` is failure to reject, not certification. The probes look for a
+monotone trend and for a between-halves location shift; data can violate
+exchangeability in ways neither probe examines, and a real violation can go
+undetected for want of power. ``report.multiplicity`` records the correction the
+verdict was decided under (method, family size, and ``alpha``), without which the
+tested level is not interpretable, and each field record carries both the raw and
+the adjusted p-value (``trend_p_raw``/``trend_p``, ``shift_p_raw``/``shift_p``).
 
 ``mixle.inference.create`` and ``mixle.inference.synthesize`` run this check
 when applicable and store the verdict in provenance. It is a warning signal,

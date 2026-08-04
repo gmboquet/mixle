@@ -40,7 +40,10 @@ discovered test module before marker deselection.
      - Tests that require optional extras or external executables; one job per
        installed backend group.
      - per backend group
-     - Usable now -- 277 tests collected.
+     - Usable now. Unlike the other tiers, the collected count depends on which
+       extras are installed, so no single number describes it: this tree
+       collects roughly 1100 with the ``torch`` extra present and roughly 340
+       without it.
    * - ``numerical``
      - Repeated-seed and numerical-stress tests.
      - <= 30 min; scheduled/manual, not a per-commit gate

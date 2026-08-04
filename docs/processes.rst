@@ -153,8 +153,10 @@ never jumps) out to that trajectory's own horizon. Each trajectory carries its
 own horizon rather than sharing one from the distribution, so a dataset's
 trajectories are free to have been observed for different lengths of time (the
 same convention ``BirthDeathSamplingDistribution`` uses for its ``(n0, T,
-events)`` data). ``mixle.inference.certify`` reports this family as
-``GLOBAL_UNIQUE``.
+events)`` data). ``mixle.inference.certify`` gives this family a
+``GLOBAL_UNIQUE`` *candidate* guarantee; the established guarantee stays
+``UNVERIFIED`` until positive exposure has been checked for every fitted row.
+See :doc:`inference` for the candidate-versus-established distinction.
 
 That certificate depends on the fully observed trajectory assumption. If jumps,
 dwell times, or state labels are censored or inferred upstream, record that
@@ -202,14 +204,18 @@ For process models, inspect more than aggregate likelihood:
 Certification
 -------------
 
-Process families now participate in estimation certificates:
+Process families now participate in estimation certificates. The levels below
+are *candidate* guarantees -- the ceiling each route could reach. What
+``certify`` establishes stays ``UNVERIFIED`` until the block's proof obligations
+are evidenced or a bound ``VerificationReceipt`` supplies them; see
+:doc:`inference`.
 
-* inhomogeneous Poisson, birth-death, and CTMC fits are classified as
-  ``GLOBAL_UNIQUE`` when their closed-form count/exposure MLE applies;
-* Hawkes variants are classified as ``STATIONARY`` because branching EM or
+* inhomogeneous Poisson, birth-death, and CTMC fits carry a ``GLOBAL_UNIQUE``
+  candidate when their closed-form count/exposure MLE applies;
+* Hawkes variants carry a ``STATIONARY`` candidate because branching EM or
   ML over self-excitation is non-convex;
-* renewal-process certificates inherit the guarantee of the interarrival
-  family used in the M-step.
+* renewal-process certificates inherit the candidate guarantee of the
+  interarrival family used in the M-step.
 
 Use :doc:`analysis` for extreme-value and spatial diagnostics, :doc:`inference`
 for proper scoring and model comparison, and :doc:`production` for drift

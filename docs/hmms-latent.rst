@@ -23,7 +23,7 @@ A mixture adds one latent component assignment per observation.
 
    est = MixtureEstimator([GaussianEstimator(), GaussianEstimator()])
    model = optimize(data, est, max_its=100, out=None)
-   responsibilities = model.posterior(data)
+   responsibilities = model.latent_posterior(data).marginals()
 
 Use ``best_of`` when local optima matter:
 
@@ -226,7 +226,7 @@ HMMs are useful because they expose latent paths, not just likelihoods.
 
    path = model.viterbi(sequence)
    segments = model.viterbi_segments(sequence)  # explicit-duration models
-   state_posteriors = model.posterior(sequence)
+   state_posteriors = model.latent_posterior(sequence)
 
 Exact method names vary by HMM family; use ``mixle.describe(model)`` to see
 which latent queries are available.
