@@ -25,8 +25,19 @@ def bind(
     if raw.get("bomFormat") != "CycloneDX" or not isinstance(raw.get("components"), list):
         raise ValueError("input is not a CycloneDX component inventory")
     names = {component.get("name") for component in raw["components"] if isinstance(component, dict)}
-    if "mixle" not in names:
-        raise ValueError("CycloneDX inventory does not contain the installed Mixle wheel")
+    # `pip-audit` builds its CycloneDX inventory from packages it can RESOLVE ON PYPI, and it says so
+    # when it cannot: "Dependency not found on PyPI and could not be audited: mixle (0.8.0)". For an
+    # unpublished candidate that is structural, not a defect -- and requiring mixle's presence made
+    # the SBOM gate unsatisfiable for the first release of any package, which is precisely when an
+    # SBOM matters most.
+    #
+    # The property this check protects is that the bound SBOM describes the wheel actually under
+    # audit. That is satisfied without the inventory entry, because the wheel's filename and SHA-256
+    # come from --wheel-metadata, which is authoritative and validated just below. So when the entry
+    # is absent it is SYNTHESIZED from that metadata rather than waved through, and the bound
+    # document records which of the two happened -- an inventory entry pip-audit vouched for is not
+    # the same evidence as one derived from the artifact, and a reader must be able to tell.
+    mixle_audited = "mixle" in names
     if not _GIT_SHA.fullmatch(candidate_sha):
         raise ValueError("candidate SHA must be a full lowercase Git SHA")
     if not isinstance(wheel.get("filename"), str) or not wheel["filename"].endswith(".whl"):
@@ -47,6 +58,27 @@ def bind(
         or not isinstance(waivers.get("waivers"), list)
     ):
         raise ValueError("accepted vulnerability waivers do not match the SBOM profile")
+    inventory = dict(raw)
+    if not mixle_audited:
+        inventory["components"] = [
+            *raw["components"],
+            {
+                "type": "library",
+                "name": "mixle",
+                "version": wheel.get("version"),
+                "description": (
+                    "Synthesized from the audited wheel's own metadata. pip-audit omits a "
+                    "distribution it cannot resolve on PyPI, which is every unpublished candidate; "
+                    "this entry therefore carries NO vulnerability audit."
+                ),
+                "hashes": [{"alg": "SHA-256", "content": wheel["sha256"]}],
+                "properties": [
+                    {"name": "mixle:source", "value": "wheel-metadata"},
+                    {"name": "mixle:audited", "value": "false"},
+                    {"name": "mixle:filename", "value": wheel["filename"]},
+                ],
+            },
+        ]
     return {
         "artifact": "mixle.bound_sbom/v1",
         "candidate_commit": candidate_sha,
@@ -55,10 +87,14 @@ def bind(
             "sha256": wheel["sha256"],
             "size_bytes": wheel.get("size_bytes"),
         },
+        # Whether the mixle component came from pip-audit's inventory or was synthesized from the
+        # artifact. False means the candidate was not resolvable on PyPI at audit time -- expected
+        # before first publication, and a signal worth reading afterwards.
+        "mixle_component_audited": mixle_audited,
         "inventory_scope": f"isolated-wheel-environment:{profile}",
         "profile": profile,
         "accepted_vulnerability_waivers": waivers,
-        "cyclonedx": raw,
+        "cyclonedx": inventory,
     }
 
 

@@ -36,8 +36,45 @@ class BoundSbomTest(unittest.TestCase):
         self.assertEqual(binder.bind(raw, wheel, "b" * 40, profile="all")["profile"], "all")
         with self.assertRaises(ValueError):
             binder.bind(raw, wheel, "b" * 40, profile="unknown")
+        # An inventory pip-audit vouched for is recorded as audited.
+        self.assertTrue(result["mixle_component_audited"])
+
+    def test_an_unpublished_candidate_is_synthesized_and_marked_rather_than_refused(self):
+        """Supersedes the old "absent mixle must raise" contract.
+
+        `pip-audit` builds its inventory from packages it can resolve ON PYPI and reports
+        "Dependency not found on PyPI and could not be audited: mixle (0.8.0)" otherwise. For an
+        unpublished candidate that is structural, so requiring the entry made the SBOM gate
+        unsatisfiable for the first release of any package -- exactly when an SBOM matters most.
+
+        The property worth protecting is that the bound SBOM describes the wheel under audit, and
+        the wheel's identity comes from the authoritative --wheel-metadata. So the entry is
+        synthesized from that, and the document says which of the two it was: an audited entry and a
+        derived one are not the same evidence.
+        """
+        binder = _load("bind_sbom.py")
+        wheel = {"filename": "mixle-0.8.0-py3-none-any.whl", "sha256": "a" * 64, "size_bytes": 10, "version": "0.8.0"}
+        raw = {"bomFormat": "CycloneDX", "components": [{"name": "numpy", "version": "2.4.6"}]}
+        result = binder.bind(raw, wheel, "b" * 40)
+
+        self.assertFalse(result["mixle_component_audited"])
+        components = {c["name"]: c for c in result["cyclonedx"]["components"]}
+        self.assertIn("mixle", components)
+        properties = {p["name"]: p["value"] for p in components["mixle"]["properties"]}
+        self.assertEqual(properties["mixle:audited"], "false")
+        self.assertEqual(properties["mixle:source"], "wheel-metadata")
+        # The synthesized entry must carry the artifact's real digest, not a placeholder.
+        self.assertEqual(components["mixle"]["hashes"][0]["content"], "a" * 64)
+        # And the caller's inventory is not mutated in place.
+        self.assertEqual(len(raw["components"]), 1)
+
+    def test_a_malformed_inventory_is_still_refused(self):
+        binder = _load("bind_sbom.py")
+        wheel = {"filename": "mixle-0.8.0-py3-none-any.whl", "sha256": "a" * 64, "size_bytes": 10}
         with self.assertRaises(ValueError):
-            binder.bind({"bomFormat": "CycloneDX", "components": [{"name": "pip-audit"}]}, wheel, "b" * 40)
+            binder.bind({"bomFormat": "not-cyclonedx", "components": []}, wheel, "b" * 40)
+        with self.assertRaises(ValueError):
+            binder.bind({"bomFormat": "CycloneDX"}, wheel, "b" * 40)  # no component list at all
 
 
 class PublishedArtifactIdentityTest(unittest.TestCase):
