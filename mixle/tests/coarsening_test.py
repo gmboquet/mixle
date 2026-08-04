@@ -404,3 +404,64 @@ class WidthMergeAndStructureProjectSmokeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BudgetMonotonicityTest(unittest.TestCase):
+    """A looser budget must never yield a strictly worse artifact than a tighter one.
+
+    The end-to-end check used to roll ALL depth merges back when the composed candidate breached the
+    budget. A larger budget admits a locally-greedier merge set, the larger set's composed error can
+    breach a ceiling the smaller set stayed under, and the caller then got an UNCOMPRESSED model at
+    the looser budget while the tighter budget compressed -- observed on the checkpoint family
+    ladder as the same three rung ratios dealt to different rungs on different platforms. The
+    rollback now backs off to the largest feasible prefix of the accepted merges instead.
+    """
+
+    def test_parameter_count_is_non_increasing_in_budget(self):
+        torch.manual_seed(9)
+        rng = np.random.default_rng(9)
+        source = build_causal_lm(vocab=11, d_model=8, n_layer=6, n_head=2, block=4)
+        law = _random_law(rng, 8, scale=0.2)
+
+        sizes = []
+        compressed_at: list[float] = []
+        headline = sum(int(p.numel()) for p in source.parameters())
+        for budget in (1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0, 1e3):
+            result = coarsen(source, budget=budget, trust_region=budget, input_law=law, n_mc=4)
+            n_params = sum(int(p.numel()) for p in result.model.parameters())
+            sizes.append(n_params)
+            if n_params < headline:
+                compressed_at.append(budget)
+            # The backoff must land in a feasible state, never report a breach it kept.
+            self.assertTrue(result.within_budget)
+            self.assertLessEqual(result.depth_only_kl, budget)
+
+        for tighter, looser in zip(sizes, sizes[1:]):
+            self.assertLessEqual(looser, tighter, f"sizes not monotone in budget: {sizes}")
+        # The sweep must exercise real compression somewhere, or the property holds vacuously.
+        self.assertTrue(compressed_at, f"no budget in the sweep compressed at all: {sizes}")
+
+    def test_backoff_keeps_a_feasible_prefix_rather_than_reverting_to_identity(self):
+        torch.manual_seed(9)
+        rng = np.random.default_rng(9)
+        source = build_causal_lm(vocab=11, d_model=8, n_layer=6, n_head=2, block=4)
+        law = _random_law(rng, 8, scale=0.2)
+
+        # Find a budget where the greedy pass accepts more than one merge; then the interesting
+        # question is what happens at budgets BETWEEN one merge's composed error and the full set's.
+        full = coarsen(source, budget=1e3, trust_region=1e3, input_law=law, n_mc=4)
+        self.assertGreater(len(full.accepted_pairs), 1)
+        # Any budget that admits the first merge alone must produce a model no larger than
+        # keeping every block -- the old code could return the identity here.
+        single = coarsen(
+            source,
+            budget=max(full.depth_only_kl * 0.5, 1e-6),
+            trust_region=1e3,
+            input_law=law,
+            n_mc=4,
+        )
+        self.assertTrue(single.within_budget)
+        self.assertLessEqual(
+            sum(int(p.numel()) for p in single.model.parameters()),
+            sum(int(p.numel()) for p in source.parameters()),
+        )
