@@ -55,6 +55,8 @@ from mixle.stats.matrix.wishart import (
 )
 from mixle.utils.vector import owned_backend_parameter
 
+from ._circular import symmetrized_scatter
+
 _MOMENT_ATOL = 1.0e-8
 
 
@@ -113,8 +115,7 @@ def _validated_bingham_statistics(value: Any) -> tuple[float, np.ndarray]:
         raise ValueError("Bingham count must be finite and non-negative")
     if scatter.shape != (3, 3) or np.any(~np.isfinite(scatter)):
         raise ValueError("Bingham scatter must be a finite 3x3 matrix")
-    if not np.array_equal(scatter, scatter.T):
-        raise ValueError("Bingham scatter must be exactly symmetric")
+    scatter = symmetrized_scatter(scatter, "Bingham")
     if count == 0.0:
         if np.any(scatter != 0.0):
             raise ValueError("empty Bingham statistics must have zero scatter")

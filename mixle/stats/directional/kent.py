@@ -51,6 +51,8 @@ from mixle.stats.matrix.wishart import (
 )
 from mixle.utils.vector import owned_backend_parameter
 
+from ._circular import symmetrized_scatter
+
 _MOMENT_ATOL = 1.0e-8
 
 
@@ -123,8 +125,7 @@ def _validated_kent_statistics(
         raise ValueError("Kent vector sum must be a finite length-three vector")
     if scatter.shape != (3, 3) or np.any(~np.isfinite(scatter)):
         raise ValueError("Kent scatter must be a finite 3x3 matrix")
-    if not np.array_equal(scatter, scatter.T):
-        raise ValueError("Kent scatter must be exactly symmetric")
+    scatter = symmetrized_scatter(scatter, "Kent")
     if count == 0.0:
         if np.any(vector_sum != 0.0) or np.any(scatter != 0.0):
             raise ValueError("empty Kent statistics must have zero moments")

@@ -137,3 +137,29 @@ def validated_em_statistics(value: Any) -> tuple[float, float, float]:
     if count == 0.0 and (sum_x != 0.0 or sum_y != 0.0):
         raise ValueError("empty projected-normal statistics must have zero moments")
     return sum_x, sum_y, count
+
+
+def symmetrized_scatter(scatter: np.ndarray, label: str) -> np.ndarray:
+    """Accept a scatter matrix that is symmetric to rounding, and return it exactly symmetric.
+
+    Directional scatter statistics are accumulated as sums of outer products ``x x^T``, which are
+    symmetric in exact arithmetic. They are not always symmetric BIT-FOR-BIT: the (i, j) and (j, i)
+    entries are independent floating-point reductions, and a vectorized or multi-threaded BLAS may
+    sum them in different orders. The previous guard required ``np.array_equal(scatter, scatter.T)``,
+    so it rejected accumulators the library itself had just produced -- keyed pooling across sites
+    failed for Bingham, Kent, and Watson on one CI runner while passing on another, with no
+    difference in the data.
+
+    A one-ulp asymmetry is not a corrupt statistic, but it is also not something downstream should
+    have to think about: the eigen-decompositions these families run assume symmetry. So the matrix
+    is checked against a tolerance scaled to its own magnitude and then symmetrized, which both
+    restores the exact invariant callers rely on and keeps a genuinely asymmetric matrix -- one that
+    was never a scatter statistic -- refused.
+    """
+    if not scatter.size:
+        return scatter
+    scale = float(np.max(np.abs(scatter)))
+    tolerance = 8.0 * float(np.finfo(np.float64).eps) * max(scale, 1.0)
+    if float(np.max(np.abs(scatter - scatter.T))) > tolerance:
+        raise ValueError(f"{label} scatter must be symmetric")
+    return (scatter + scatter.T) * 0.5
