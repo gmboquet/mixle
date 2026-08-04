@@ -11,9 +11,16 @@ import sys
 import time
 from pathlib import Path
 
+# Re-baselined 2026-08-04 against measured need, not aspiration. The suite grew from ~10k to ~15k
+# collected tests over the 0.8.0 hardening cycle, and the budgets did not move with it: the hosted
+# 4-vCPU Linux runners were killing the core tier at 240s with ~61% of it executed (measured need
+# ~390s; Apple-silicon runners finish the same tier in ~150s) and the full tier at 1200s with ~94%
+# executed (measured 1279s). A kill at 61% is not a budget, it is a guarantee of failure -- and it
+# presents as an opaque teardown OSError rather than as a timeout, which cost real diagnosis time.
+# The tripwire property is preserved: a genuine 2x regression from today's measured need still trips.
 _BUDGETS = {
-    "core": 240,
-    "full": 1200,
+    "core": 480,
+    "full": 1800,
     "optional": 1800,
     "numerical": 1800,
     "hardware": 1200,

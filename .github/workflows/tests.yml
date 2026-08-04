@@ -103,7 +103,7 @@ jobs:
   fast:
     name: core / py${{ matrix.python-version }}
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 12
     strategy:
       fail-fast: false
       matrix:
@@ -129,7 +129,7 @@ jobs:
           python scripts/run_test_tier.py \
             --tier core \
             --candidate-sha "$GITHUB_SHA" \
-            --budget-seconds 240 \
+            --budget-seconds 480 \
             --receipt "core-py${{ matrix.python-version }}.json" \
             -- -n auto
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -144,7 +144,7 @@ jobs:
     # macOS arm64 is the day-to-day dev platform; this gates it in CI so the "Operating System :: MacOS"
     # classifier and the README's macOS claim are backed by a run, not just ad-hoc local use.
     runs-on: macos-14
-    timeout-minutes: 8
+    timeout-minutes: 12
     strategy:
       fail-fast: false
       matrix:
@@ -167,7 +167,7 @@ jobs:
           python scripts/run_test_tier.py \
             --tier core \
             --candidate-sha "$GITHUB_SHA" \
-            --budget-seconds 240 \
+            --budget-seconds 480 \
             --receipt "core-macos-py${{ matrix.python-version }}.json" \
             -- -n auto
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -183,7 +183,7 @@ jobs:
     # Python and run the fast suite, so a floor that is missing an API, unbuildable, or numerically
     # incompatible fails here instead of silently passing on whatever newer version pip resolves.
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -203,7 +203,7 @@ jobs:
           python scripts/run_test_tier.py \
             --tier core \
             --candidate-sha "$GITHUB_SHA" \
-            --budget-seconds 240 \
+            --budget-seconds 480 \
             --receipt core-minimum-versions.json \
             -- -n auto
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -217,7 +217,7 @@ jobs:
     name: full / py3.12
     # Runs in parallel with `fast` (no `needs:`) to cut wall-clock; -n auto parallelizes within.
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -243,7 +243,7 @@ jobs:
           python scripts/run_test_tier.py \
             --tier full \
             --candidate-sha "$GITHUB_SHA" \
-            --budget-seconds 1200 \
+            --budget-seconds 1800 \
             --receipt full-py3.12.json \
             -- -n auto --cov --cov-report=xml --cov-report=term --cov-fail-under=45
       - name: Upload coverage report
