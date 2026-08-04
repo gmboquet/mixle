@@ -1,4 +1,4 @@
-"""Trust receipts on a VLM -- B4, composing three subsystems around B1's frozen 3-D encoder.
+"""Trust receipts on a VLM: three subsystems composed around a frozen 3-D encoder.
 
 The claim this demo makes checkable: BEFORE any downstream training happens on top of a frozen
 vision-ish encoder, you can already ask (and answer) "does this embedding space secretly merge two
@@ -7,13 +7,13 @@ in a replayable audit trail. Three already-existing subsystems, composed, not re
 
 1. **hvis** (:mod:`mixle.utils.hvis`) -- :func:`~mixle.utils.hvis.topology.model_fit_health` and
    :func:`~mixle.utils.hvis.hvis_map` run over the *raw* (standardized) patch/volume embeddings
-   B1's frozen ``Conv3d`` encoder (``examples/multimodal_stage1_demo.py``) produces for two of its
+   the frozen ``Conv3d`` encoder from ``examples/multimodal_stage1_demo.py`` produces for two of its
    planted structures (blob, stripe). A deliberately UNDER-provisioned single-component reference
    model (K=1: "one visual regime, everything with a bright region") stands in for what a naive
    pre-training visual taxonomy might assume; ``model_fit_health``'s merged-regime detector (a
    deterministic 2-means split of the component's fiber coordinates) catches the fact that blob and
    stripe are actually two well-separated regimes in this space -- exactly the "before any training"
-   framing B4 asks for, since nothing downstream of the frozen encoder has been fit yet.
+   framing this demo is about, since nothing downstream of the frozen encoder has been fit yet.
 
 2. **The disagreement gate** (:mod:`mixle.task.disagreement`) is text/``TaskModel``-native (a small
    distilled n-gram classifier over strings) -- it doesn't fit numeric embedding vectors directly, so
@@ -61,14 +61,14 @@ from mixle.task.disagreement import measure_disagreement_mass  # noqa: E402
 from mixle.task.llm import CallableLLM  # noqa: E402
 from mixle.utils.hvis import hvis_map  # noqa: E402
 
-BLOB, STRIPE = 0, 2  # two of B1's planted structures -- the two "regimes" this demo investigates
+BLOB, STRIPE = 0, 2  # two of the demo encoder's planted structures -- the "regimes" investigated here
 
 
-# -- 1. embeddings from B1's frozen encoder ----------------------------------------------------------
+# -- 1. embeddings from the frozen encoder ----------------------------------------------------------
 
 
 def encode_volumes(labels: list[int], n_per_class: int, seed: int) -> tuple[np.ndarray, list[int]]:
-    """Run B1's frozen ``Conv3d`` encoder over synthetic volumes -- no training, the encoder is
+    """Run the frozen ``Conv3d`` encoder over synthetic volumes -- no training, the encoder is
     exactly the one ``examples/multimodal_stage1_demo.py`` builds and never fits."""
     import torch
 
@@ -223,7 +223,7 @@ def run_epistemic_journal(observations: list[np.ndarray], centroids: dict[str, n
 
 
 def run_demo(*, n_per_class: int = 40, seed: int = 0) -> dict:
-    """The whole B4 pipeline, importable for the smoke test. Returns every receipt this demo composes."""
+    """The whole pipeline, importable for the smoke test. Returns every receipt this demo composes."""
     raw, row_labels = encode_volumes([BLOB, STRIPE], n_per_class=n_per_class, seed=seed)
     embeddings = standardize(raw)
 
@@ -247,7 +247,7 @@ def run_demo(*, n_per_class: int = 40, seed: int = 0) -> dict:
 def main() -> None:
     result = run_demo()
 
-    print("=== 1. hvis model_fit_health / hvis_map over B1's frozen embeddings (before any training) ===")
+    print("=== 1. hvis model_fit_health / hvis_map over the frozen embeddings (before any training) ===")
     print(result["map_summary"])
     merged = [d for d in result["fit_health"]["diagnosis"] if "merged" in d]
     print(f"merged-regime findings: {len(merged)}")

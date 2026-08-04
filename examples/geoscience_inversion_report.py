@@ -1,7 +1,7 @@
-"""B7: Sense -> simulate -> invert -> report -- the track-M full-loop demo.
+"""Sense -> simulate -> invert -> report: the full inference loop on a toy geoscience story.
 
-Domain framing lives ENTIRELY here (a toy geoscience seismic-inversion story), per the roadmap
-card's own instruction: the library modules this example composes (``mixle.inference.scenario``,
+Domain framing lives ENTIRELY here (a toy seismic-inversion narrative) by design: the library
+modules this example composes (``mixle.inference.scenario``,
 ``mixle.task.inverse``, ``mixle.reason.language_bridge``, ``mixle.task.calibrated_generator``) stay
 domain-agnostic. Nothing below teaches mixle anything about geoscience -- it only teaches this
 SCRIPT what "formation", "depth", and "amplitude" mean.
@@ -11,17 +11,17 @@ label), a 3-station seismic AMPLITUDE array (the array modality), and SOURCE DEP
 mixle fits one joint over all three.
 
   1. **Sense.**  Synthetic multi-modal "field" records: (formation: str, amplitude: tuple[3xfloat],
-     depth: float). ``learn_bayesian_network`` (M0's own substrate) discovers the DAG and fits it --
+     depth: float). ``learn_bayesian_network`` discovers the DAG and fits it --
      this is "fit a joint" over heterogeneous data.
-  2. **Simulate** (M2, ``mixle.inference.scenario.simulate``).  A "what-if": ``do(formation="salt")``
+  2. **Simulate** (``mixle.inference.scenario.simulate``).  A "what-if": ``do(formation="salt")``
      -- roll out the implied depth/amplitude regime under that intervention, with a plausibility/ESS
      receipt.
-  3. **Invert** (M3, ``mixle.task.inverse.learn_inverse``).  A NEW field observation arrives -- a
+  3. **Invert** (``mixle.task.inverse.learn_inverse``).  A NEW field observation arrives -- a
      noisy amplitude reading from an actual salt-formation site with an UNKNOWN depth. An amortized
      inverse posterior q(depth | amplitude) is trained against the same salt-regime forward physics
-     M2 just characterized, then inverted on the real observation -- with SBC/coverage receipts that
+     step 2 just characterized, then inverted on the real observation -- with SBC/coverage receipts that
      say whether the inversion is trustworthy, not just a point estimate.
-  4. **Report** (M5's ``mixle.reason.language_bridge.PosteriorDescriber`` + A1's
+  4. **Report** (``mixle.reason.language_bridge.PosteriorDescriber`` +
      ``CalibratedGenerator``).  The depth posterior becomes a calibrated natural-language claim: draft
      candidate claims at several precision widths, score each against the posterior, and serve the
      best one only if it conformally clears a held-out threshold -- otherwise abstain rather than

@@ -1,33 +1,37 @@
-"""The frontier-family lifecycle, end to end: checkpoint -> J2 ladder -> I1 artifacts -> J4 edge
+"""The frontier-family lifecycle, end to end: checkpoint -> size ladder -> quantized artifacts ->
+edge student -> served cascade, with cost/quality receipts at every stage.
 
 Classification: illustrative -- runs on small synthetic / stand-in data. It shows the
 end-to-end workflow shape, not measured results on a real frontier-scale dataset. See
 docs/example-execution-manifest.rst for which examples run on real public data.
-student -> served cascade, with real cost/quality receipts at every stage (roadmap B6).
 
 This example does not build anything new -- every stage is existing, already-receipted machinery,
-composed exactly the way F11 (:mod:`mixle.task.deploy_family`) composes it:
+composed exactly the way :mod:`mixle.task.deploy_family` composes it:
 
-  1. TRAIN a small headline causal LM on F10's own four eval axes (perplexity/arithmetic/parity/
+  1. TRAIN a small headline causal LM on four eval axes (perplexity / arithmetic / parity /
      induction), so it has genuine, above-chance capability -- the same curriculum
      ``checkpoint_family_ladder_test.py`` uses, at reduced steps for a laptop runtime.
-  2. J2 (:mod:`mixle.task.checkpoint_family_ladder`) walks that headline down a two-rung size ladder,
-     collecting J1/G3's own compression receipts and a fresh F10 eval report per rung, gated by
+  2. :mod:`mixle.task.checkpoint_family_ladder` walks that headline down a two-rung size ladder,
+     collecting each rung's own compression receipts and a fresh eval report, gated by
      ``track_regression`` against the previous rung.
-  3. I1 (:mod:`mixle.models.unified_quantizer`) quantizes the headline and every accepted rung's REAL
+  3. :mod:`mixle.models.unified_quantizer` quantizes the headline and every accepted rung's REAL
      parameter tensors into content-addressed deployment artifacts.
-  4. J4 (:mod:`mixle.task.frontier_to_native`) distills a *separate* frontier/teacher model into a
+  4. :mod:`mixle.task.frontier_to_native` distills a *separate* frontier/teacher model into a
      small LNS-compressed, calibrated edge student and serves it behind a two-tier ``Cascade``.
-  5. F11 (:mod:`mixle.task.deploy_family`) prices every accepted J2/I1 artifact off ONE ``CostModel``
-     scaled by measured inference work, reports the family's cost/quality frontier, and carries J4's own served-cascade
-     receipt alongside it (unmerged -- the two quality axes measure different tasks; see
-     ``deploy_family``'s module docstring for why).
+  5. :mod:`mixle.task.deploy_family` prices every accepted ladder/quantizer artifact off ONE
+     ``CostModel`` scaled by measured inference work, reports the family's cost/quality frontier, and
+     carries the served-cascade receipt alongside it (unmerged -- the two quality axes measure
+     different tasks; see ``deploy_family``'s module docstring for why).
 
-Nothing here is mocked or hand-waved: the headline is really trained, the ladder really compresses it,
-I1 really quantizes real tensors, J4 really distills/calibrates/serves a cascade, and every number
-printed below comes out of that real execution.
+Takeaway: shrinking and shipping a model is a receipted pipeline, not a pile of one-off scripts. Every
+stage above really executes -- the headline is trained, the ladder compresses it, the quantizer
+operates on real tensors, the cascade is distilled/calibrated/served -- so the printed numbers are
+measurements of THIS run. They are measurements on a laptop-scale stand-in, though, which is what the
+classification above means: trust the shape of the pipeline and the fact that each receipt is earned,
+not the absolute quality figures.
 
 Run: ``python examples/frontier_family_showcase.py`` (needs ``pip install "mixle[torch]"``; no network).
+Runtime is ~50 s on a laptop CPU.
 """
 
 from __future__ import annotations

@@ -7,8 +7,14 @@ The two differentiators in one run:
   * **active labeling** (DoE applied to the labeling decision) queries that LLM only for the most informative
     examples, reaching the same student quality as random labeling for far fewer paid calls.
 
-Then the distilled student is wrapped in a calibrated cascade and the realized savings are reported. Run:
-``python task_llm_active_example.py``  (needs ``pip install "mixle[torch]"``).
+Then the distilled student is wrapped in a calibrated cascade and the realized savings are reported.
+
+Scope: the LABELING-BUDGET side of the mixle.task loop. ``task_distill_example.py`` is the plain
+distill/save/reload entry point and ``task_cascade_economics_example.py`` prices the serving side;
+``label_economics_demo.py`` makes the same "active beats random" point through the EIG/BALD
+``acquire()`` API instead of a task-level teacher.
+
+Run: ``python examples/task_llm_active_example.py``  (needs ``pip install "mixle[torch]"``).
 """
 
 from __future__ import annotations

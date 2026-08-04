@@ -7,7 +7,7 @@ A single record here carries four modalities at once: a caption (text), an image
   * generative / discrete: fit a ``VectorQuantizer`` on the shared space to get a *learned cross-modal vocabulary*,
     then model the discrete token stream with a plain mixle model -- tokenization inferred, never hardcoded (objective A).
 
-No modality commits to a vocabulary upstream. Run: ``python heterogeneous_representation_example.py``
+No modality commits to a vocabulary upstream. Run: ``python examples/heterogeneous_representation_example.py``
 (needs ``pip install "mixle[torch]"``).
 """
 

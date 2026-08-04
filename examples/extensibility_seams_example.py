@@ -1,4 +1,4 @@
-"""B4 — the extensibility seams: add inference / families / backends without editing dispatch.
+"""The extensibility seams: add inference / families / backends without editing dispatch.
 
 mixle is built around a few small public registries. A new inference algorithm, distribution family,
 or data backend is *added*, never patched into a central switch. This file demonstrates the inference

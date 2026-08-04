@@ -5,7 +5,13 @@ fast local model that does the same job. ``mixle.task`` distills the teacher int
 ``mixle.doe`` search for the cheapest recipe that still matches, saves a durable artifact, and hands you a
 callable you load in any process and just call --- ``task(text) -> label`` --- no server, no GPU, no teacher.
 
-Run: ``python task_distill_example.py``  (needs the torch extra: ``pip install "mixle[torch]"``).
+Scope: this is the ENTRY point of the mixle.task cluster -- distill, tune, save, reload. Its
+neighbours reuse the same spam/ham corpus to make different points:
+``task_cascade_economics_example.py`` (serve a cascade and price it), ``task_llm_active_example.py``
+(an LLM teacher plus active labeling under a budget), ``task_extraction_example.py`` (field
+extraction rather than classification).
+
+Run: ``python examples/task_distill_example.py``  (needs the torch extra: ``pip install "mixle[torch]"``).
 """
 
 from __future__ import annotations

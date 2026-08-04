@@ -6,7 +6,7 @@ in the PPL) declares one embedding and hands the same module to every model that
 analogue of the PPL's ``name=`` scalar tying. This shows the mixture the README builds, but with the word
 embedding shared across its experts.
 
-Run: ``python shared_embedding_example.py``  (needs ``pip install "mixle[torch]"``).
+Run: ``python examples/shared_embedding_example.py``  (needs ``pip install "mixle[torch]"``).
 """
 
 from __future__ import annotations

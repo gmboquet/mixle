@@ -1,4 +1,4 @@
-"""H3 — precedence-constrained scheduling: maximum-weight closure and time-phased MILP scheduling.
+"""Precedence-constrained scheduling: maximum-weight closure and time-phased MILP scheduling.
 
 mixle.precedence_scheduling exposes two general combinatorial-optimization primitives -- maximum-weight
 closure (a min-cut construction) and capacity-limited, discounted time-phased scheduling (a MILP) --

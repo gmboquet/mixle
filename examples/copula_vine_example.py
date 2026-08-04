@@ -1,7 +1,7 @@
 """Copula / vine dependence-structure fitting: joint tails a Gaussian-copula assumption would miss.
 
-mixle's 0.7.0 line added copula/vine dependence-structure fitting -- "fit a copula or vine when continuous
-columns are correlated, heavy joint tails included." This demonstrates the direct, test-proven path:
+Fit a copula or vine when continuous columns are correlated, heavy joint tails included. This
+demonstrates the direct, test-proven path:
 :class:`~mixle.stats.combinator.copula.CopulaDistribution` (mixle.stats.combinator.copula) glues arbitrary
 marginals to a pluggable dependence core via Sklar's theorem, and
 :class:`~mixle.stats.multivariate.rvine_copula.RVineCopulaDistribution` is a regular vine that automatically

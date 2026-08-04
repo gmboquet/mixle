@@ -10,7 +10,10 @@ for?" This runs the full mixle.task spine end to end:
   4. report realized dollars saved vs paying the frontier for every request;
   5. harvest the escalated items (free targeted labels) and re-distill -- the cascade gets cheaper with use.
 
-Run: ``python task_cascade_economics_example.py``  (needs ``pip install "mixle[torch]"``).
+Scope: the ECONOMICS of the mixle.task loop. Start at ``task_distill_example.py`` for the plain
+distill/save/reload story; ``task_llm_active_example.py`` covers the labeling-budget side.
+
+Run: ``python examples/task_cascade_economics_example.py``  (needs ``pip install "mixle[torch]"``).
 """
 
 from __future__ import annotations

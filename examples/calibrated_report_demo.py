@@ -1,4 +1,4 @@
-"""Volume -> claims -> calibrated report: the mission vertical (workstream B2), as a demo.
+"""Volume -> claims -> calibrated report: every sentence in the output carries its own receipt.
 
 "Every sentence carries a receipt" -- literally, here. The full composition on synthetic data:
 
@@ -8,7 +8,7 @@
      a categorical claim (``shape``: which planted pattern the volume shows) and a numeric claim
      (``brightness``: its overall intensity), each distilled into its own calibrated local student.
   3. each claim is gated per-claim, not as one top-level generation:
-       * ``shape`` rides :class:`~mixle.task.calibrated_generator.CalibratedGenerator` (workstream A1)
+       * ``shape`` rides :class:`~mixle.task.calibrated_generator.CalibratedGenerator`
          directly -- draw the 3 candidate labels, score them from the patches, and certify a held-out
          selective-risk gate, so an uncertified volume abstains instead of guessing.
        * ``brightness`` (continuous) rides its own split-conformal regression machinery directly
