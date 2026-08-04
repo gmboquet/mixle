@@ -219,7 +219,6 @@ reference under :doc:`api/modules` covers the broad public module surface;
    stability-and-missing-data
    family-release
    release-notes
-   whats-new-0-6-2
    example-execution-manifest
    changelog
 
