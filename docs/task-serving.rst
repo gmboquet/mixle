@@ -286,10 +286,15 @@ need to change to fit flash, latency, or runtime constraints.
 
 Key objects:
 
-* ``DeviceSpec`` declares hard constraints such as ``max_bytes``, ``max_ops``,
-  and ``torch_free``.
-* ``EdgeFootprint`` records measured bytes, operation count, and torch
-  dependency.
+* ``DeviceSpec`` declares hard constraints: ``max_bytes``, ``max_ops``,
+  ``max_inference_seconds``, and ``torch_free``. ``max_bytes`` gates the exact
+  exported artifact and ``max_inference_seconds`` gates a benchmark of the
+  actual serving path, so both are measurements. ``max_ops`` is only a
+  structural estimate and cannot stand alone: declaring it without
+  ``max_inference_seconds`` raises, rather than letting an op count pose as a
+  latency guarantee.
+* ``EdgeFootprint`` records measured bytes, operation count, torch dependency,
+  and inference seconds.
 * ``EdgeSpace`` describes candidate student families and training recipes.
 * ``DesignModel`` stores a surrogate over design choices and outcomes.
 * ``distill_for_edge`` searches for the best feasible student.
@@ -300,7 +305,12 @@ Key objects:
 
    from mixle.task import DeviceSpec, distill_for_edge
 
-   device = DeviceSpec(max_bytes=128_000, max_ops=40_000, torch_free=True)
+   device = DeviceSpec(
+       max_bytes=128_000,
+       max_ops=40_000,
+       max_inference_seconds=0.05,
+       torch_free=True,
+   )
    result = distill_for_edge(
        teacher,
        examples,

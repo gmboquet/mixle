@@ -347,6 +347,10 @@ Certificates and Placement
 ``certify`` classifies the fitted model's estimation blocks along an ordered
 guarantee ladder:
 
+``UNVERIFIED``
+    Nothing has been established yet. This is the floor, and it is where an
+    ordinary fit lands.
+
 ``HEURISTIC``
     Gradient descent or another heuristic local route.
 
@@ -362,6 +366,46 @@ guarantee ladder:
 ``GLOBAL_UNIQUE``
     Closed-form unique optimum, such as many exponential-family and
     count-rate MLEs.
+
+Structure suggests a level; it does not establish one. A class name or
+capability marker cannot prove that a particular fit is identified, converged,
+or globally optimal, so each block reports two values: ``candidate_guarantee``,
+the upper bound its route could reach, and ``guarantee``, what checked
+conditions or verification receipts actually establish. A plain Gaussian MLE
+therefore certifies as ``UNVERIFIED, candidate=GLOBAL_UNIQUE`` -- the analytic
+route is available, but support and identification remain due. Reading only the
+candidate overstates the result.
+
+Most of the time the way to close that gap is to hand ``certify`` the data, so
+it can run the conditions itself: ``certify(model, data=rows)`` checks support
+and identification and reports ``GLOBAL_UNIQUE`` with ``verified_by`` naming the
+library's own verifier. ``mixle.inference.create`` does this for you, which is
+why a ``CreatedModel`` carries an established guarantee rather than a candidate.
+
+Where the evidence is something the library cannot produce itself (multi-start
+escape testing, a solver's own convergence report), supply it as a
+``VerificationReceipt`` bound to the model with ``receipt_subject``:
+
+.. code-block:: python
+
+   from mixle.inference import Guarantee, VerificationReceipt, certify, receipt_subject
+
+   receipt = VerificationReceipt(
+       receipt_id="restart-sweep-1",
+       block="GaussianDistribution",
+       guarantee=Guarantee.GLOBAL_UNIQUE,
+       checks=("finite_supported_data", "solver_matches_objective", "identified_parameters"),
+       source="my-solver",
+       evidence={"restarts": 8},
+       subject_hash=receipt_subject(model),
+   )
+   certified = certify(model, receipts=[receipt])
+
+``schedule`` accepts the same ``receipts=`` argument. A receipt that names no
+subject, or a different one, is recorded in ``BlockPlan.unbound_receipt_ids``
+and upgrades nothing. ``BlockPlan.verified_by`` names who established each
+guarantee, so a library-checked condition never reads identically to a caller's
+assertion.
 
 .. code-block:: python
 

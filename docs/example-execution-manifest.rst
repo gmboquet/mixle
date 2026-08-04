@@ -195,7 +195,7 @@ reproduces the identical held-out mean log-likelihood (-2.0762). This pass also:
   iterations actually execute, not the full 1000 as previously stated.
   ``delta=None`` does disable the ``delta``-gated convergence check, but a
   separate, ``delta``-independent monotonicity guard in ``_fused_em_loop``
-  (``mixle/inference/estimation.py:598-601``, added by a commit predating even
+  (``mixle/inference/estimation.py:738-741``, added by a commit predating even
   the 2026-07-17 baseline) breaks the loop when a per-iteration log-likelihood
   delta goes slightly negative -- which happens near convergence here. The
   bottom-line ``passed`` status and the ~86s runtime are unaffected; only the

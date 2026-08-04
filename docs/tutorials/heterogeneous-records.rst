@@ -117,7 +117,7 @@ For latent models, inspect responsibilities before naming clusters.
 
 .. code-block:: python
 
-   responsibilities = model.posterior(data)
+   responsibilities = model.latent_posterior(data).marginals()
    print(responsibilities[:3])
 
 High responsibility for one component means the row is strongly associated
@@ -141,17 +141,19 @@ Tuple position is compact, but production records usually have names. Use
    from mixle.stats import RecordEstimator, field
 
    named = RecordEstimator(
+       (field("category"), field("value"), field("counts")),
        (
-           field("category", CategoricalEstimator()),
-           field("value", GaussianEstimator()),
-           field(
-               "counts",
-               SequenceEstimator(PoissonEstimator(), len_estimator=CategoricalEstimator()),
-           ),
-       )
+           CategoricalEstimator(),
+           GaussianEstimator(),
+           SequenceEstimator(PoissonEstimator(), len_estimator=CategoricalEstimator()),
+       ),
    )
 
-The same fitting route applies; only the observation shape changes.
+``field(name)`` declares a model field and the input key it reads; the
+estimators are supplied as a second, positionally matched sequence (or pass a
+single ``{field: estimator}`` mapping instead). The same fitting route applies;
+only the observation shape changes -- rows are now dictionaries keyed by
+``category``, ``value``, and ``counts`` rather than three-element tuples.
 
 Production Checks
 -----------------

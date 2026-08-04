@@ -21,7 +21,7 @@ enumeration is required.
    response_time = GaussianDistribution(120.0, 25.0)
    finite_response_time = quantize(response_time, bits=6)
 
-   likely_bins = finite_response_time.enumerator().top(5)
+   likely_bins = finite_response_time.enumerator().top_k(5)
 
 This is useful when a downstream decision rule expects ranked finite outcomes.
 The original model remains continuous; the quantized version is an operational
