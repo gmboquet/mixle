@@ -37,6 +37,31 @@ cleared data, or an external service call. That metadata does not by itself make
 the artifact safe, but it prevents accidental promotion of an unknown training
 source.
 
+Deserialization Consent
+-----------------------
+
+As of 0.8.0, every loader whose payload can execute code on load requires the
+caller to pass the literal ``True`` for its trust flag. ``load_encoded`` is the
+canonical case::
+
+   from mixle.data import load_encoded
+
+   encoded = load_encoded("encoded.mixle", encoder=encoder, trusted=True)
+
+The body of an encoded payload is pickle, so loading it executes whatever the
+file contains. ``trusted=True`` is therefore consent to code execution, and the
+gate is deliberately strict about what counts as consent: truthy stand-ins such
+as ``1``, ``"true"``, or ``numpy.True_`` are rejected, so a configuration value
+or environment string cannot silently become it. The flag applies to one call;
+nothing a library call does can turn it on for a later one.
+
+Two limits are worth stating plainly. The stored integrity digest is computed
+from and stored inside the same file, so it detects truncation and header
+tampering, not a file replaced wholesale -- pass ``trusted=True`` only for a
+path you control. And the gate governs mixle's own loaders; an optional backend
+that deserializes with its own machinery is covered by that backend's
+guarantees, not this one.
+
 Secrets and Credentials
 -----------------------
 

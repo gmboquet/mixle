@@ -79,6 +79,14 @@ Data, Structure, and Process Families
 * ``ContinuousTimeMarkovChainDistribution`` and its estimator model fully
   observed CTMC trajectories with a closed-form generator MLE that certifies as
   ``GLOBAL_UNIQUE``.
+
+  .. note:: (2026-08-04) True as written when 0.6.2 shipped, under that
+     release's certification semantics. 0.8.0 splits a *candidate* guarantee
+     from an *established* one: ``certify(model)`` now reports this family as
+     ``UNVERIFIED`` with ``candidate=GLOBAL_UNIQUE``, and the guarantee is
+     established by the evidence-bearing path ``certify(model, data=...)``.
+     The sentence above is retained unchanged as the historical record;
+     see :doc:`inference` for the current semantics.
 * Multivariate Gaussian fitting uses a BLAS-backed covariance accumulation
   path and a robust Cholesky fallback so float32/GPU EM fits can recover from
   small numerical indefiniteness instead of crashing.
