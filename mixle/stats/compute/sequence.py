@@ -532,8 +532,29 @@ def seq_initialize(
         nobs = 0.0
         rng_w = np.random.RandomState(seed=rng.randint(2**31 - 1))
 
-        for sz, enc_x in enc_data:
-            w = rng_w.binomial(n=1, p=p, size=sz).astype(dtype=np.float64)
+        # Drawn up front rather than chunk-by-chunk so the pass can be checked for the degenerate
+        # outcome BEFORE any of it reaches an accumulator. The mask is Bernoulli(p) with p defaulting
+        # to 0.1, so selecting nothing at all is not rare on small data -- at two observations it is
+        # the majority outcome (0.81) -- and an initialization that selected nothing carries no
+        # information about the data by construction. Leaves disagreed about what to do with it:
+        # a Gaussian quietly returned a degenerate estimate while RandomForestEstimator and the
+        # streaming transformer leaf raised "weights must contain at least one positive value", so
+        # the copy-paste example in the docs for those two families failed most of the time and the
+        # error named weights the caller never supplied. _initialize_with_support_fallback cannot
+        # cover this: it inspects a model seq_initialize RETURNED, and here seq_initialize raises.
+        draws = [rng_w.binomial(n=1, p=p, size=sz).astype(dtype=np.float64) for sz, _ in enc_data]
+        if draws and not any(draw.sum() > 0.0 for draw in draws):
+            # Force exactly one observation, chosen uniformly over the whole pass so no chunk is
+            # privileged. Only the empty draw is altered; every other outcome keeps its Bernoulli
+            # distribution untouched.
+            sizes = np.array([len(draw) for draw in draws], dtype=np.int64)
+            total = int(sizes.sum())
+            if total > 0:
+                flat = int(rng_w.randint(total))
+                chunk = int(np.searchsorted(np.cumsum(sizes), flat, side="right"))
+                draws[chunk][flat - int(sizes[:chunk].sum())] = 1.0
+
+        for (sz, enc_x), w in zip(enc_data, draws):
             accumulator.seq_initialize(enc_x, w, rng)
             nobs += float(w.sum())  # count the kept (weight-1) observations, matching the RDD/non-seq paths
 
@@ -616,10 +637,23 @@ def initialize(
         nobs = 0.0
         rng_w = np.random.RandomState(seed=rng.randint(2**31))
 
+        # Reservoir-samples one fallback observation while streaming, so the same guarantee as the
+        # seq_ path above holds without buffering the data: a pass that selects nothing still hands
+        # the accumulator one uniformly-chosen observation instead of an empty initialization that
+        # some leaves accept and others reject. See the note in the seq_ branch.
+        fallback: tuple[Any, ...] = ()
+        seen = 0
         for i, x in enumerate(idata):
+            seen += 1
+            if rng_w.randint(seen) == 0:
+                fallback = (x,)
             w = rng_w.binomial(n=1, p=p)
             nobs += w
             accumulator.initialize(x, w, rng)
+
+        if nobs == 0.0 and fallback:
+            accumulator.initialize(fallback[0], 1.0, rng)
+            nobs = 1.0
 
         stats_dict = dict()
         accumulator.key_merge(stats_dict)
