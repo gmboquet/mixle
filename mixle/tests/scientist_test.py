@@ -11,8 +11,11 @@ import pytest
 
 pytestmark = [pytest.mark.optional, pytest.mark.slow, pytest.mark.integration]
 
+# No `datasets` guard: the dataset-driven test classes left with the no-direct-dataset-usage
+# removal (D-0133), and a module-level importorskip on a package that is deliberately no longer
+# installed would skip the ENTIRE module -- which the required-pytest wrapper in CI correctly
+# refuses as "no tests collected". The remaining tests need only the model stack.
 transformers = pytest.importorskip("transformers")
-datasets = pytest.importorskip("datasets")
 
 
 class ScientistConstructorTest(unittest.TestCase):
