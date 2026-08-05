@@ -9,9 +9,10 @@ the trajectory, as a Bayesian inverse problem:
 
   * the PHYSICS enters as the forward-model log-likelihood (a PPL ``potential``): the posterior over
     ``k`` is prior x physics-evidence, sampled by MCMC;
-  * the UQ is HONEST: a credible interval per dataset, and -- the receipt that matters -- calibrated
-    COVERAGE across repeated noise draws (a 90% interval must bracket the truth ~90% of the time; one
-    miss is a statistic, not a bug);
+  * the UQ is HONEST: a credible interval per dataset, plus an ILLUSTRATION of the receipt that
+    would matter at scale -- coverage across repeated noise draws, reported with its exact binomial
+    interval. Twelve replicates cannot validate a 90% coverage claim (12/12 is consistent with any
+    true coverage above ~74%), and the printout says so instead of calling coverage "checked";
   * the CERTIFICATE downgrades: a potential-augmented fit optimizes a modified objective, so the
     block's STATIONARY candidate is CAPPED to UNVERIFIED with the custom potential named in the
     reason, instead of a false closed-form claim. Both numbers are on the certificate --
@@ -24,6 +25,7 @@ Everything measured in-process; ~a minute, no GPU, no network.
 from __future__ import annotations
 
 import numpy as np
+from scipy.stats import beta
 
 from mixle.ppl import Normal, potential
 
@@ -70,14 +72,20 @@ def main() -> None:
     )
     print(f"  {cert.blocks[0].reason.split('[')[-1].rstrip(']')}")
 
-    # the UQ receipt: coverage of the 90% interval over repeated noise draws
+    # coverage of the 90% interval over repeated noise draws -- reported WITH its uncertainty.
+    # STAT-R6: n=12 replicates illustrate the receipt's shape; they cannot validate a coverage
+    # claim, and the exact Clopper-Pearson interval below is what n=12 can actually say.
     n_rep, hits = 12, 0
     for s in range(n_rep):
         d, _ = infer_k(observe(s), s, draws=800)
         lo, hi = np.quantile(d, [0.05, 0.95])
         hits += int(lo <= K_TRUE <= hi)
+    ci_lo = float(beta.ppf(0.025, hits, n_rep - hits + 1)) if hits else 0.0
+    ci_hi = float(beta.ppf(0.975, hits + 1, n_rep - hits)) if hits < n_rep else 1.0
     print(f"\ncoverage    : the 90% interval bracketed the truth {hits}/{n_rep} times")
-    print("one missed interval is a statistic, not a bug -- coverage is the claim, and it is checked.")
+    print(f"              exact 95% binomial CI for the coverage probability: [{ci_lo:.1%}, {ci_hi:.1%}]")
+    print("twelve replicates ILLUSTRATE the coverage receipt -- consistent with the nominal 90%,")
+    print("nowhere near validating it; a real calibration check needs hundreds of replicates.")
 
 
 if __name__ == "__main__":
