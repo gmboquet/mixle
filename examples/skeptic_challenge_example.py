@@ -207,7 +207,8 @@ def act2() -> None:
         f"  mixle system:               {wrong_system / len(fresh):.1%} wrong end-to-end "
         f"({escalated / len(fresh):.1%} of traffic said 'not sure' and escalated to the teacher;"
     )
-    print("                              the answered slice carries conformal risk alpha=0.08 by construction)")
+    print("                              marginal set coverage 1-alpha=0.92 by construction; answered-slice")
+    print("                              error is measured, not guaranteed -- see the printed agreement above)")
     print("  This synthetic demo publishes no 0.8.0 headline performance result.")
 
 

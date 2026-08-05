@@ -24,13 +24,22 @@ def test_build_lock_is_exact_and_matches_build_system() -> None:
     module = _module()
     lock = ROOT / "release-checklists" / "0.8.0-build-requirements.txt"
     locked = module._locked(lock)
-    assert locked == {
+    # The lock is the FULL resolved closure, not just the top-level tools. The equality form of
+    # this assertion pinned exactly five names, which is precisely the incompleteness the systems
+    # review caught (SYS-1): an offline install from the five-pin lock failed on wheel's transitive
+    # requirement packaging>=24, so a lock that omits transitives is not exact. The reviewed tool
+    # versions must still be present and pinned; the closure must contain the transitive that
+    # failed; and every entry must be an exact pin.
+    for name, version in {
         "pip": "26.1.2",
         "build": "1.5.0",
         "setuptools": "83.0.0",
         "wheel": "0.47.0",
         "twine": "7.0.0",
-    }
+    }.items():
+        assert locked.get(name) == version, name
+    assert "packaging" in locked, "the transitive that broke the offline install must be pinned"
+    assert len(locked) > 15, "the closure must include transitive dependencies"
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert '"setuptools==83.0.0"' in pyproject
     assert '"wheel==0.47.0"' in pyproject

@@ -1,6 +1,31 @@
-# Exact release builder reviewed for Mixle 0.8.0.
-pip==26.1.2
+# Fully resolved build closure (transitive dependencies included). Regenerated 2026-08-04 after
+# an offline install from the previous top-level-only pins failed on wheel's transitive
+# requirement packaging>=24 (systems review SYS-1): a lock that omits transitives is not exact.
+# Produced by: pip install -r <top-level pins> into a fresh venv, then pip freeze --all.
+Pygments==2.20.0
 build==1.5.0
+certifi==2026.7.22
+charset-normalizer==3.4.9
+docutils==0.23
+id==1.6.1
+idna==3.18
+jaraco.classes==3.4.0
+jaraco.context==6.1.2
+jaraco.functools==4.6.0
+keyring==25.7.0
+markdown-it-py==4.2.0
+mdurl==0.1.2
+more-itertools==11.1.0
+nh3==0.3.6
+packaging==26.3
+pip==26.1.2
+pyproject_hooks==1.2.0
+readme_renderer==45.0
+requests-toolbelt==1.0.0
+requests==2.34.2
+rfc3986==2.0.0
+rich==15.0.0
 setuptools==83.0.0
-wheel==0.47.0
 twine==7.0.0
+urllib3==2.7.0
+wheel==0.47.0
