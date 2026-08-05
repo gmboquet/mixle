@@ -5,6 +5,7 @@ import pickle
 import unittest
 
 import numpy as np
+import pytest
 
 from mixle.ppl import Bernoulli, Beta, Exponential, Field, Gamma, Group, Mix, Normal, Poisson, free
 from mixle.ppl.inference import ConjugatePosterior
@@ -558,6 +559,11 @@ class PPLVITestCase(unittest.TestCase):
         self.assertAlmostEqual(mb.params["p"], 0.3, delta=0.05)
 
     def test_minibatch_vi_scales(self):
+        # Minibatch VI is autograd-only by the library's own error message ("minibatch requests
+        # require the autograd backend"), so this test needs torch. The hosted full lane installs
+        # no torch by design; the monolithic full job never reached this file before sharding, so
+        # the missing guard was invisible until the tier first ran to completion on 2026-08-04.
+        pytest.importorskip("torch")
         # stochastic minibatch VI (SGVB) recovers the same answer from a small per-step shard,
         # so VB scales to large data.
         rng = np.random.RandomState(6)
@@ -568,6 +574,11 @@ class PPLVITestCase(unittest.TestCase):
         self.assertAlmostEqual(m.params["mean"], 5.0, delta=0.2)
 
     def test_minibatch_vi_positive_support(self):
+        # Minibatch VI is autograd-only by the library's own error message ("minibatch requests
+        # require the autograd backend"), so this test needs torch. The hosted full lane installs
+        # no torch by design; the monolithic full job never reached this file before sharding, so
+        # the missing guard was invisible until the tier first ran to completion on 2026-08-04.
+        pytest.importorskip("torch")
         rng = np.random.RandomState(8)
         data = list(rng.poisson(3.5, 50000).astype(float))
         m = Poisson(Gamma(2, 1, name="rate")).fit(
