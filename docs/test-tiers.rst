@@ -34,7 +34,7 @@ discovered test module before marker deselection.
    * - ``full``
      - All non-optional correctness, including the ``slow`` stochastic,
        integration, and exhaustive tests.
-     - <= 40 min
+     - <= 90 min
      - Populated centrally: every non-optional, non-benchmark correctness test.
    * - ``optional``
      - Tests that require optional extras or external executables; one job per

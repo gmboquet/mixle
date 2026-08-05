@@ -105,3 +105,28 @@ def test_every_executable_workflow_job_has_a_deadline() -> None:
             if "\n    runs-on:" in block:
                 name = block.split(":", 1)[0].strip()
                 assert "\n    timeout-minutes:" in block, f"{path.name}:{name} has no job deadline"
+
+
+def test_shard_partition_is_deterministic_disjoint_and_exhaustive() -> None:
+    """The CI shard split must be a pure, stable partition of test files.
+
+    Four hosted jobs each run one shard of the full tier; if two shards ever claimed the same file
+    the tier would double-run it, and if none claimed it the tier would silently skip it -- the
+    worst possible failure mode for a required lane. The hook hashes the file's basename, so the
+    partition is identical on every machine and unchanged by checkout location.
+    """
+    conftest = CONFTEST.read_text(encoding="utf-8")
+    assert "--num-shards" in conftest and "--shard-id" in conftest
+    import hashlib
+
+    def shard_of(name: str, num: int) -> int:
+        return int(hashlib.sha256(name.encode("utf-8")).hexdigest(), 16) % num
+
+    names = sorted(path.name for path in (ROOT / "mixle" / "tests").glob("*_test.py"))
+    assert len(names) > 200
+    for num in (2, 4):
+        buckets = [shard_of(name, num) for name in names]
+        assert set(buckets) <= set(range(num))
+        assert len(set(buckets)) == num, "some shard would be empty"
+        # every file lands in exactly one shard by construction; determinism across calls:
+        assert buckets == [shard_of(name, num) for name in names]

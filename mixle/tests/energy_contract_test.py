@@ -180,7 +180,11 @@ assert torch.isfinite(output).all()
         [sys.executable, "-c", script],
         input=payload,
         capture_output=True,
-        timeout=10,
+        # A hang guard, not a measurement: the child pays a COLD torch import (~5-8s alone on a
+        # loaded machine), so 10s left no headroom and this failed under a saturated -n 8 run while
+        # the round-trip it exists to check was never in question. Same defect class, same fix, as
+        # the cross-process hash-stability probes.
+        timeout=120,
         check=False,
     )
     assert result.returncode == 0, result.stderr.decode()
