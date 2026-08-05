@@ -147,12 +147,30 @@ class LLMUncertaintyTest(unittest.TestCase):
         uq = LLMUncertainty(MockLLM({"q": "a"}, {"q": 0.0}), n=3)
         with self.assertRaises(ValueError):
             uq.calibrate([("q", "a")], alpha=1.5)
+        # STAT-NEW4: the endpoints are out too -- D-0143 records the open interval for BOTH
+        # selective-risk implementations (risk control is unachievable at 0, vacuous at 1)
+        for alpha in (0.0, 1.0):
+            with self.subTest(alpha=alpha), self.assertRaisesRegex(ValueError, "open interval"):
+                uq.calibrate([("q", "a")], alpha=alpha)
         with self.assertRaises(ValueError):
             uq.calibrate([("q", "a")], delta=0.0)  # delta must be in the OPEN interval (0, 1)
         with self.assertRaises(ValueError):
             uq.calibrate([("q", "a")], delta=1.0)
         with self.assertRaises(ValueError):
             uq.calibrate([])
+
+    def test_non_boolean_correctness_verdicts_are_rejected(self):
+        # STAT-NEW3: bool("false") is True, so a callback returning the string "false" marked 200
+        # genuinely wrong answers correct and certified threshold 0.0 -- the guarantee's entire
+        # evidence base silently inverted. Only booleans and exact 0/1 integers are evidence.
+        uq = LLMUncertainty(MockLLM({"q": "a"}, {"q": 0.0}), n=3)
+        with self.assertRaisesRegex(ValueError, "bool or 0/1"):
+            uq.calibrate([("q", "a")], correct=lambda a, g: "false")
+        with self.assertRaisesRegex(ValueError, "bool or 0/1"):
+            uq.calibrate([("q", "a")], correct=lambda a, g: 0.5)
+        # real booleans and exact 0/1 integers remain acceptable
+        uq.calibrate([("q", "a")], correct=lambda a, g: 1)
+        self.assertEqual(uq._threshold, float("inf"))  # one example certifies nothing, honestly
 
 
 class GenerationNormalizationTest(unittest.TestCase):

@@ -685,15 +685,19 @@ class LLMUncertainty:
 
         Args:
             examples: labeled ``(prompt, gold_answer)`` pairs to calibrate against; must be non-empty.
-            correct: ``(answer, gold) -> bool`` (default the ``equivalent`` relation).
-            alpha: target selective risk (miscoverage), in ``[0.0, 1.0]`` -- the guarantee is on the
-                TRUE risk, not this calibration set's empirical risk.
+            correct: ``(answer, gold) -> bool`` (default the ``equivalent`` relation). The return
+                value must be a real Boolean or an exact 0/1 integer; anything else raises rather
+                than being truthiness-coerced (``bool("false")`` is ``True``).
+            alpha: target selective risk (miscoverage), in the open interval ``(0.0, 1.0)`` -- the
+                guarantee is on the TRUE risk, not this calibration set's empirical risk.
             delta: failure probability of the guarantee itself, in the open interval ``(0.0, 1.0)`` --
                 the guarantee holds with probability ``>= 1 - delta`` over the random calibration set.
             n: samples per prompt (passed to :meth:`assess`).
         """
-        if not 0.0 <= alpha <= 1.0:
-            raise ValueError(f"alpha must be in [0.0, 1.0], got {alpha!r}.")
+        if not 0.0 < alpha < 1.0:
+            # D-0143: the advertised domain is the open interval for BOTH selective-risk
+            # implementations -- risk control is unachievable at 0 and vacuous at 1.
+            raise ValueError(f"alpha must be in the open interval (0.0, 1.0), got {alpha!r}.")
         if not 0.0 < delta < 1.0:
             raise ValueError(f"delta must be in the open interval (0.0, 1.0), got {delta!r}.")
         examples = list(examples)
@@ -704,7 +708,21 @@ class LLMUncertainty:
         for prompt, gold in examples:
             a = self.assess(prompt, n)
             confs.append(a.confidence)
-            errs.append(0.0 if corr(a.answer, gold) else 1.0)
+            verdict = corr(a.answer, gold)
+            # STAT-NEW3: bool("false") is True, so a callback returning the STRING "false" counted
+            # 200 wrong answers as correct and certified threshold 0.0. Correctness evidence is the
+            # foundation the (alpha, delta) guarantee stands on -- only booleans and exact 0/1
+            # integers are accepted, matching D-0143 and the task-route contract.
+            if isinstance(verdict, (bool, np.bool_)):
+                wrong = not bool(verdict)
+            elif isinstance(verdict, (int, np.integer)) and int(verdict) in (0, 1):
+                wrong = int(verdict) == 0
+            else:
+                raise ValueError(
+                    f"correct(answer, gold) must return a bool or 0/1 integer, got {verdict!r} "
+                    f"of type {type(verdict).__name__}"
+                )
+            errs.append(1.0 if wrong else 0.0)
         confs_arr = np.asarray(confs, dtype=float)
         errs_arr = np.asarray(errs, dtype=float)
         self._threshold = _selective_risk_threshold(confs_arr, errs_arr, alpha=alpha, delta=delta)
