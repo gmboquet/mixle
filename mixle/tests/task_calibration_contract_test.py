@@ -12,7 +12,7 @@ from mixle.task.calibrate import (
     _qhat_to_json,
     selective_risk_threshold,
 )
-from mixle.task.model import TaskModel
+from mixle.task.model import ImpossibleEvidenceError, TaskModel
 
 
 class _Adapter:
@@ -232,6 +232,60 @@ class SelectiveRiskThresholdTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "booleans"):
             selective_risk_threshold([0.5, 0.6], [1.0, 0.0], alpha=0.10)
         self.assertIsNotNone(selective_risk_threshold([0.9] * 200, [1] * 200, alpha=0.10))
+
+
+class _ImpossibleAwareAdapter:
+    """Raises the library's impossible-evidence signal whenever a 'bad' row is in the batch."""
+
+    labels = ["a", "b"]
+
+    def proba_batch(self, _model, rows):
+        if any(row == "bad" for row in rows):
+            raise ImpossibleEvidenceError("structurally impossible evidence")
+        return np.repeat([[0.95, 0.05]], len(rows), axis=0)
+
+
+class ServingValidationTest(unittest.TestCase):
+    """STAT-NEW1/NEW2: serving fails CLOSED on malformed adapter output, and mixed batches decide.
+
+    The repair-pass review probed live serving with malformed probability matrices and got the
+    label 'a' back every time -- calibration validated its matrix (STAT-R4) but serving trusted
+    the adapter, and NaN even fails OPEN through the `top < tau` comparison. It also found that a
+    mixed valid/impossible batch survived the first probability pass and crashed on the second:
+    serving made two adapter calls. Serving now makes ONE validated pass per batch.
+    """
+
+    def test_serving_rejects_malformed_live_probabilities(self):
+        # the reviewer's three probes: non-finite, wrong width for the label set, non-stochastic
+        for bad in ([[np.nan, np.nan]], [[0.9]], [[0.9, 0.9]]):
+            for mode in ({"tau": 0.7}, {"qhat": 0.5}, {"qhat": 0.5, "tau": 0.7}):
+                with self.subTest(bad=bad, mode=mode):
+                    model = CalibratedTaskModel(_task(bad), alpha=0.1, **mode)
+                    with self.assertRaises(ValueError):
+                        model.batch_decide(["x"])
+                    with self.assertRaises(ValueError):
+                        model.escalation_rate(["x"])
+
+    def test_predict_sets_rejects_malformed_live_probabilities_too(self):
+        model = CalibratedTaskModel(_task([[np.nan, np.nan]]), alpha=0.1, qhat=0.5)
+        with self.assertRaises(ValueError):
+            model.predict_sets(["x"])
+
+    def test_mixed_valid_and_impossible_evidence_batch_decides_rowwise(self):
+        # STAT-NEW2's exact probe: batch_decide(['good', 'bad']) must be ['a', ESCALATE], not a
+        # crash. Impossible evidence is DATA (escalates); a malformed matrix is an adapter defect
+        # (raises) -- the two must never be conflated.
+        selective = CalibratedTaskModel(
+            SimpleNamespace(adapter=_ImpossibleAwareAdapter(), model=object()), alpha=0.1, tau=0.5
+        )
+        self.assertEqual(selective.batch_decide(["good", "bad"]), ["a", None])
+        self.assertAlmostEqual(selective.escalation_rate(["good", "bad"]), 0.5)
+
+        conformal = CalibratedTaskModel(
+            SimpleNamespace(adapter=_ImpossibleAwareAdapter(), model=object()), alpha=0.1, qhat=0.5
+        )
+        self.assertEqual(conformal.batch_decide(["good", "bad"]), ["a", None])
+        self.assertEqual(conformal.predict_sets(["good", "bad"]), [["a"], []])
 
 
 if __name__ == "__main__":

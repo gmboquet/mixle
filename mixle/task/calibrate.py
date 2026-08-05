@@ -231,7 +231,50 @@ class CalibratedTaskModel:
         return self.task.adapter.labels
 
     def _proba(self, raw_inputs: list[Any]) -> np.ndarray:
-        return self.task.adapter.proba_batch(self.task.model, list(raw_inputs))
+        """Adapter probabilities, validated fail-closed at EVERY ingestion -- serving included.
+
+        The repair-pass review (STAT-NEW1) probed serving with ``[NaN, NaN]``, a one-column row
+        for two labels, and ``[0.9, 0.9]``, and each produced a label: calibration validated its
+        matrix but the live serving path trusted the adapter, and a NaN even fails OPEN through
+        the ``top < tau`` comparison. A malformed matrix is the adapter breaking its contract --
+        that raises, rather than escalating, because an escalation would silently disguise a
+        broken adapter as model uncertainty.
+        """
+        rows = list(raw_inputs)
+        prob = np.asarray(self.task.adapter.proba_batch(self.task.model, rows), dtype=float)
+        if prob.shape != (len(rows), len(self.labels)):
+            raise ValueError(
+                f"adapter probabilities must have shape ({len(rows)}, {len(self.labels)}), got {prob.shape}"
+            )
+        if (
+            np.any(~np.isfinite(prob))
+            or np.any((prob < 0.0) | (prob > 1.0))
+            or not np.allclose(prob.sum(axis=1), 1.0, rtol=1e-7, atol=1e-9)
+        ):
+            raise ValueError("adapter probabilities must be finite row-stochastic values in [0, 1]")
+        return prob
+
+    def _serving_probabilities(self, rows: list[Any]) -> tuple[np.ndarray, np.ndarray]:
+        """ONE validated probability pass per serving batch: ``(probabilities, impossible_mask)``.
+
+        Impossible structured evidence is data, not an adapter defect: those rows get a zero
+        probability row and a True mask entry, and every consumer treats them as escalate. The
+        batch is re-evaluated per row only when the batch call raises. Serving used to make TWO
+        adapter calls (sets, then the tau check), which is how a mixed valid/impossible batch
+        passed the first and crashed the second (STAT-NEW2); everything downstream now shares
+        this single pass.
+        """
+        try:
+            return self._proba(rows), np.zeros(len(rows), dtype=bool)
+        except ImpossibleEvidenceError:
+            prob = np.zeros((len(rows), len(self.labels)))
+            impossible = np.zeros(len(rows), dtype=bool)
+            for i, row in enumerate(rows):
+                try:
+                    prob[i] = self._proba([row])[0]
+                except ImpossibleEvidenceError:
+                    impossible[i] = True
+            return prob, impossible
 
     def _calibration_probabilities(
         self, texts: Sequence[Any], teacher_labels: Sequence[Any]
@@ -250,18 +293,9 @@ class CalibratedTaskModel:
             raise ValueError("calibration data must be non-empty")
         if len(rows) != len(observed):
             raise ValueError("texts and teacher_labels must have identical non-zero lengths")
-        prob = np.asarray(self._proba(rows), dtype=float)
-        if prob.shape != (len(rows), len(self.labels)):
-            raise ValueError(
-                f"adapter probabilities must have shape ({len(rows)}, {len(self.labels)}), got {prob.shape}"
-            )
-        if (
-            np.any(~np.isfinite(prob))
-            or np.any((prob < 0.0) | (prob > 1.0))
-            or not np.allclose(prob.sum(axis=1), 1.0, rtol=1e-7, atol=1e-9)
-        ):
-            raise ValueError("adapter probabilities must be finite row-stochastic values in [0, 1]")
-        return rows, observed, prob
+        # the matrix contract (shape, finiteness, range, row sums) lives in _proba, where serving
+        # inherits it too
+        return rows, observed, self._proba(rows)
 
     def calibrate(self, texts: Sequence[Any], teacher_labels: Sequence[Any]) -> CalibratedTaskModel:
         """Set the conformal threshold from held-out ``(texts, teacher_labels)`` for ``1 - alpha`` set coverage."""
@@ -278,36 +312,36 @@ class CalibratedTaskModel:
         self.qhat = _validated_qhat(qhat, allow_none=False)
         return self
 
+    def _conformal_sets(self, prob: np.ndarray, impossible: np.ndarray) -> list[list[str]]:
+        """Conformal label sets from an already-validated matrix; impossible rows get the empty set."""
+        result: list[list[str]] = [[] for _ in range(prob.shape[0])]
+        valid = np.flatnonzero(~impossible)
+        if valid.size:
+            sets, _ = conformal_label_sets(np.empty(0), prob[valid], alpha=self.alpha, qhat=self.qhat)
+            for j, i in enumerate(valid):
+                result[int(i)] = [self.labels[k] for k in np.flatnonzero(sets[j])]
+        return result
+
+    def _argmax_sets(self, prob: np.ndarray, impossible: np.ndarray) -> list[list[str]]:
+        """Selective-only serving candidates from an already-validated matrix; impossible rows empty."""
+        result: list[list[str]] = [[] for _ in range(prob.shape[0])]
+        for i in np.flatnonzero(~impossible):
+            result[int(i)] = [self.labels[int(prob[int(i)].argmax())]]
+        return result
+
     def predict_sets(self, texts: Sequence[Any]) -> list[list[str]]:
-        """Conformal label set per input (the classes whose score clears the calibrated threshold)."""
+        """Conformal label set per input (the classes whose score clears the calibrated threshold).
+
+        Impossible structured evidence stays an empty prediction set so the calibrated serving
+        contract escalates it; malformed adapter probabilities raise (see :meth:`_proba`).
+        """
         if self.qhat is None:
             raise RuntimeError("call calibrate(...) (or load a calibrated artifact) before predicting sets")
         rows = list(texts)
         if not rows:
             return []
-        try:
-            probabilities = self._proba(rows)
-            sets, _ = conformal_label_sets(np.empty(0), probabilities, alpha=self.alpha, qhat=self.qhat)
-            return [[self.labels[i] for i in np.flatnonzero(row)] for row in sets]
-        except ImpossibleEvidenceError:
-            # Preserve impossible structured evidence as an empty prediction set so the calibrated
-            # serving contract escalates it. Re-evaluate individually to keep valid rows in a mixed batch;
-            # implementation failures other than the explicit impossible-evidence signal still propagate.
-            result: list[list[str]] = []
-            for row in rows:
-                try:
-                    probabilities = self._proba([row])
-                except ImpossibleEvidenceError:
-                    result.append([])
-                    continue
-                sets, _ = conformal_label_sets(
-                    np.empty(0),
-                    probabilities,
-                    alpha=self.alpha,
-                    qhat=self.qhat,
-                )
-                result.append([self.labels[i] for i in np.flatnonzero(sets[0])])
-            return result
+        prob, impossible = self._serving_probabilities(rows)
+        return self._conformal_sets(prob, impossible)
 
     def predict_set(self, text: Any) -> list[str]:
         """Return the conformal label set for one input."""
@@ -337,49 +371,37 @@ class CalibratedTaskModel:
         self.tau = float("inf") if tau is None else float(tau)
         return self
 
-    def _argmax_sets(self, rows: list[Any]) -> list[list[str]]:
-        """Selective-only serving candidates: the argmax label per row; impossible evidence -> empty set."""
-        try:
-            prob = np.asarray(self._proba(rows), dtype=float)
-            return [[self.labels[int(i)]] for i in prob.argmax(axis=1)]
-        except ImpossibleEvidenceError:
-            result: list[list[str]] = []
-            for row in rows:
-                try:
-                    prob = np.asarray(self._proba([row]), dtype=float)
-                except ImpossibleEvidenceError:
-                    result.append([])
-                    continue
-                result.append([self.labels[int(prob.argmax(axis=1)[0])]])
-            return result
+    def _escalate_flags(
+        self, texts: Sequence[Any], sets: list[list[str]], prob: np.ndarray, impossible: np.ndarray
+    ) -> np.ndarray:
+        """Escalate on ambiguous sets, impossible evidence, OOD inputs, or a sub-tau confidence.
 
-    def _serving_sets(self, rows: list[Any]) -> list[list[str]]:
-        """Candidate sets for deciding: conformal sets when ``qhat`` is set, else argmax under the tau gate.
-
-        The re-review's STAT-R3: the docstrings offer ``calibrate_selective`` INSTEAD of
-        ``calibrate``, and serving used to call ``predict_sets`` first, which raises on
-        ``qhat=None`` -- the documented mode could never run.
+        ``prob`` is the SAME validated matrix the sets came from -- the tau comparison must never
+        run on a second, unvalidated adapter call (STAT-NEW1/NEW2).
         """
-        if self.qhat is not None:
-            return self.predict_sets(rows)
-        if self.tau is None:
+        amb = np.asarray([len(s) != 1 for s in sets]) | impossible
+        if self.tau is not None and prob.shape[0]:
+            amb = amb | (prob.max(axis=1) < self.tau)
+        if self.density_gate is None:
+            return amb
+        return amb | self.density_gate.ood_mask(list(texts))
+
+    def _served(self, rows: list[Any]) -> tuple[list[list[str]], np.ndarray]:
+        """One validated serving pass: candidate sets plus escalation flags from the same matrix.
+
+        Conformal sets when ``qhat`` is set, else the argmax label under the ``tau`` gate (the
+        re-review's STAT-R3: serving used to call ``predict_sets`` first, which raises on
+        ``qhat=None``, so the documented selective-only mode could never run).
+        """
+        if self.qhat is None and self.tau is None:
             raise RuntimeError(
                 "call calibrate(...) and/or calibrate_selective(...) (or load a calibrated artifact) before deciding"
             )
         if not rows:
-            return []
-        return self._argmax_sets(rows)
-
-    def _escalate_flags(self, texts: Sequence[Any], sets: list[list[str]]) -> np.ndarray:
-        """Escalate on ambiguous conformal sets, OOD inputs (density gate), or a sub-tau confidence."""
-        amb = np.asarray([len(s) != 1 for s in sets])
-        if self.tau is not None:
-            rows = list(texts)
-            top = np.asarray(self._proba(rows), dtype=float).max(axis=1) if rows else np.empty(0)
-            amb = amb | (top < self.tau)
-        if self.density_gate is None:
-            return amb
-        return amb | self.density_gate.ood_mask(list(texts))
+            return [], np.zeros(0, dtype=bool)
+        prob, impossible = self._serving_probabilities(rows)
+        sets = self._conformal_sets(prob, impossible) if self.qhat is not None else self._argmax_sets(prob, impossible)
+        return sets, self._escalate_flags(rows, sets, prob, impossible)
 
     def decide(self, text: Any) -> Any:
         """Return the label if the input is a confident, in-distribution singleton, else ``ESCALATE`` (``None``)."""
@@ -387,16 +409,13 @@ class CalibratedTaskModel:
 
     def batch_decide(self, texts: Sequence[Any]) -> list[Any]:
         """Return local labels or ``ESCALATE`` for a batch of inputs."""
-        rows = list(texts)
-        sets = self._serving_sets(rows)
-        esc = self._escalate_flags(rows, sets)
+        sets, esc = self._served(list(texts))
         return [ESCALATE if e else s[0] for s, e in zip(sets, esc)]
 
     def escalation_rate(self, texts: Sequence[Any]) -> float:
         """Empirical ``p_escalate`` -- the fraction of inputs escalated (ambiguous set or, if gated, OOD)."""
-        rows = list(texts)
-        sets = self._serving_sets(rows)
-        return float(np.mean(self._escalate_flags(rows, sets))) if len(sets) else 0.0
+        sets, esc = self._served(list(texts))
+        return float(np.mean(esc)) if len(sets) else 0.0
 
     def save(self, path: str) -> str:
         """Persist the model, the full calibration (alpha, qhat, tau), and any density gate in the artifact.
