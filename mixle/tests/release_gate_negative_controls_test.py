@@ -78,11 +78,19 @@ def test_real_reproducibility_gate_rejects_changed_artifact(tmp_path: Path) -> N
         verifier.verify(left, right)
 
 
-def test_real_license_gate_rejects_current_pending_record() -> None:
+def test_real_license_gate_rejects_a_record_stripped_of_approval() -> None:
+    """The negative control must stay negative even though the real record is now approved.
+
+    The live record passed --require-approved on 2026-08-04, so the rejection path is exercised on
+    a copy with the approval fields removed -- the exact shape the record had while pending. The
+    gate must still refuse it, or approval has become a formality the verifier no longer checks.
+    """
     verifier = _load("verify_license_provenance.py")
     record = json.loads((ROOT / "release-checklists" / "0.8.0-license-provenance.json").read_text(encoding="utf-8"))
     assert verifier.validate(record) == []
-    assert verifier.validate(record, require_approved=True)
+    assert verifier.validate(record, require_approved=True) == []
+    stripped = {**record, "status": "pending", "reviewer": None, "review_date": None, "evidence": None}
+    assert verifier.validate(stripped, require_approved=True)
 
 
 def test_real_import_sweep_boundary_reports_missing_module() -> None:

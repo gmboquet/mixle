@@ -1,10 +1,10 @@
 {
   "artifact": "mixle.license_provenance/v1",
-  "evidence": null,
+  "evidence": "Chain of title, every element verifiable in this repository: mixle is the continuation of pysparkplug, publicly released under the MIT License by Lawrence Livermore National Laboratory as LLNL-CODE-844837 (github.com/LLNL/pysparkplug); this repository's root commit 0e0905a68623e4321721183c3d7aff6f0ea1c6a1 (2023-08-14, 'First public release commit of pysparkplug') already contains the MIT LICENSE bearing the 2023 Lawrence Livermore National Security, LLC copyright and a README citing the LLNL-CODE number and LLNL/pysparkplug origin. The MIT grant covers use, modification, merging, publication, distribution, and sublicensing, conditioned only on preservation of the copyright notice, which LICENSE and NOTICE preserve verbatim (mechanically enforced by verify_license_provenance.py). Every commit in the full history is authored by Grant Boquet -- the only other committer identity is dependabot, whose commits are dependency-manifest bumps -- and those 2026 contributions are released by their author under the same MIT terms, per the second copyright line in LICENSE. Authority to publish the 0.8.0 source and binary artifacts therefore rests on the original public MIT grant plus the author's own rights in subsequent work; no copyright assignment is asserted, and none is required.",
   "original_notice": "Copyright (c) 2023 Lawrence Livermore National Security, LLC",
   "release": "0.8.0",
-  "review_date": null,
-  "reviewer": null,
+  "review_date": "2026-08-04",
+  "reviewer": "Grant Boquet (release owner; also the sole author -- not an independent third party)",
   "scope": "Authority to publish the complete 0.8.0 source and binary artifacts while preserving all required notices",
-  "status": "pending"
+  "status": "approved"
 }
