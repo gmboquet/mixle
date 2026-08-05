@@ -595,20 +595,6 @@ def _add_markers(item: pytest.Item, names: Iterable[str], assigned: set[str]) ->
         assigned.add(name)
 
 
-def pytest_addoption(parser) -> None:
-    """Deterministic file-level sharding for splitting one tier across CI jobs.
-
-    ``--num-shards N --shard-id K`` keeps only the test FILES whose stable hash lands in shard K
-    (0-based). File granularity, not test granularity, so module-scoped fixtures and xdist
-    locality are preserved and a file's tests never split across jobs. The default (one shard)
-    changes nothing anywhere; the partition is a pure function of the file's basename, so the K
-    shards are disjoint, exhaustive, and identical on every machine -- CI wall time divides
-    across jobs without any test, marker, or fixture changing behavior.
-    """
-    parser.addoption("--shard-id", type=int, default=0, help="0-based shard index")
-    parser.addoption("--num-shards", type=int, default=1, help="total shard count")
-
-
 def _shard_of(filename: str, num_shards: int) -> int:
     digest = hashlib.sha256(filename.encode("utf-8")).hexdigest()
     return int(digest, 16) % num_shards

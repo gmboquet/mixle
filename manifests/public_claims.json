@@ -47,7 +47,7 @@
     },
     {
       "id": "CLM-080-003",
-      "statement": "\"5000+ tests\"",
+      "statement": "\"15,000+ tests\"",
       "grade": "E1",
       "evidence": [
         ".github/workflows/tests.yml#test",
@@ -133,7 +133,12 @@
     {
       "claim_id": "CLM-080-003",
       "path": "docs/claim-evidence-ledger.rst",
-      "text": "* - \"5000+ tests\""
+      "text": "* - \"15,000+ tests\""
+    },
+    {
+      "claim_id": "CLM-080-003",
+      "path": "README.md",
+      "text": "15,000+ tests, organized into purpose/time-budget tiers (see the"
     }
   ]
 }

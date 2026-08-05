@@ -34,10 +34,12 @@ the 0.8.0 re-run, marked below).
      - E2
      - The exact wheel is installed into an isolated environment; the stable invariant catalog runs
        there with no source-tree import path and retains JUnit evidence.
-   * - "5000+ tests"
+   * - "15,000+ tests"
      - E1
-     - The full suite runs in CI (``fast`` on 3.11–3.12, ``full`` on 3.12). Not yet run from the wheel
-       for the whole suite (only the import sweep is) — that is a 0.8.0 exit criterion.
+     - Measured 2026-08-04: 15,121 collected (``pytest --collect-only -m ""``) on the release-prep
+       tip. The tiers run in CI (``core`` on 3.11–3.12 and both platforms, ``full`` sharded on 3.12,
+       ``optional`` sharded); not yet run from the wheel for the whole suite (only the import sweep
+       is) — that remains a 0.8.0 exit criterion.
    * - One ``optimize(...)`` call fits a heterogeneous composed base model
      - E2
      - The collection-light public fit path runs from the isolated installed wheel and retains JUnit
