@@ -185,12 +185,19 @@ class TorchEngine(ComputeEngine):
         return np.asarray(x)
 
     def stack(self, arrays: Any, axis: int = 0) -> Any:
-        """Stack tensors with ``torch.stack`` and apply default placement."""
-        return self._replicate_tensor(torch.stack(tuple(arrays), dim=axis))
+        """Stack tensors with ``torch.stack`` under the engine's dtype and device policy.
+
+        Elements route through :meth:`asarray` first. Leaf scorers legitimately hand back float64
+        NumPy arrays; stacking them raw produced a float64 tensor that later met float32 engine
+        tensors -- invisible on CPU, but a hard "mat1 double, mat2 float" error inside the HMM
+        forward pass on the first real CUDA execution (rented RTX 3060, 2026-08-04). The engine's
+        dtype policy has to apply at every ingestion point, not only the explicit asarray calls.
+        """
+        return self._replicate_tensor(torch.stack(tuple(self.asarray(a) for a in arrays), dim=axis))
 
     def concatenate(self, arrays: Any, axis: int = 0) -> Any:
-        """Join tensors with ``torch.cat`` without leaving the selected device."""
-        return self._replicate_tensor(torch.cat(tuple(arrays), dim=axis))
+        """Join tensors with ``torch.cat`` under the same ingestion policy as :meth:`stack`."""
+        return self._replicate_tensor(torch.cat(tuple(self.asarray(a) for a in arrays), dim=axis))
 
     def replicate(self, x: Any) -> Any:
         """Return ``x`` replicated across the configured DeviceMesh."""
@@ -311,7 +318,19 @@ class TorchEngine(ComputeEngine):
         return rv.values if isinstance(rv, tuple) else rv
 
     dot = staticmethod(lambda x, y: torch.dot(x, y))
-    matmul = staticmethod(lambda x, y: torch.matmul(x, y))
+
+    def matmul(self, x: Any, y: Any) -> Any:
+        """Matrix-multiply under the engine's dtype policy.
+
+        Both operands route through :meth:`asarray`. Mixed float32/float64 operands reached this
+        point through paths that never crossed an explicit ingestion call, and torch.matmul
+        promotes on CPU but hard-errors on CUDA ("mat1 double, mat2 float") -- found and probed on
+        the first real CUDA execution of the HMM forward pass (rented RTX 3060, 2026-08-04:
+        mat1 float64 [100, 2] against mat2 float32 [2, 2]). The engine's declared dtype IS the
+        policy for floating operands, so applying it here is a correctness boundary, not a cast of
+        convenience.
+        """
+        return torch.matmul(self.asarray(x), self.asarray(y))
 
     @staticmethod
     def cumsum(x, *args, **kwargs):
@@ -433,6 +452,12 @@ class TorchEngine(ComputeEngine):
         # index must be a long tensor on out's device; coerce defensively so a
         # numpy index (or one on another device) does not raise a cryptic error
         index = torch.as_tensor(index, dtype=torch.long, device=out.device)
+        # values must match out's dtype AND device. A float64 numpy array reaching a float32
+        # accumulator worked by accident on CPU (torch promotes there) but raises
+        # "self (Float) and source (Double) must have the same scalar type" on CUDA -- found by
+        # the first real CUDA execution of the HMM float32 path (rented RTX 3060, 2026-08-04),
+        # invisible on CPU and MPS runs of the identical fit.
+        values = torch.as_tensor(values, dtype=out.dtype, device=out.device)
         return out.index_add(0, index, values)
 
     def _replicate_tensor(self, x: Any) -> Any:

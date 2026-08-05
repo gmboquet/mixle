@@ -1,0 +1,32 @@
+{
+  "artifact": "mixle.cuda_execution_evidence/v1",
+  "checks": {
+    "gmm_float32_cpu_vs_cuda": {
+      "cpu": {
+        "ll": -2.4132656205971736,
+        "secs": 0.07
+      },
+      "cuda": {
+        "ll": -2.4132656205971736,
+        "secs": 0.33
+      },
+      "passed": true,
+      "relative_ll_divergence": 0.0
+    },
+    "hmm_float32_cuda": {
+      "passed": true
+    },
+    "quantized_parity": {
+      "note": "module import + parity guard reachable",
+      "passed": true
+    }
+  },
+  "host": {
+    "cuda": "12.4",
+    "driver": "580.126.09",
+    "gpu": "NVIDIA GeForce RTX 3060",
+    "python": "3.11.10",
+    "torch": "2.5.1+cu124"
+  },
+  "passed": true
+}
