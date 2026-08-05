@@ -85,12 +85,12 @@ workers under the same estimation contract.
      - ``mpi``
      - Tree-fold reduction of sufficient statistics across ranks.
      - Tested, not CI-gated
-     - E1 — ``parallel_test.MPIBackendTestCase`` exists; mpi4py not installed in CI. Retained local execution evidence: ``release-checklists/0.8.0-backend-execution-evidence.md``.
+     - E1 — ``parallel_test.MPIBackendTestCase`` exists; mpi4py not installed in CI. Retained local execution evidence: the backend-execution-evidence appendix of ``release-checklists/0.8.0.md``.
    * - Spark
      - ``spark``
      - Map/fold over an RDD.
      - Tested, not CI-gated
-     - E1 — backend test skips in CI (pyspark not installed). Retained local execution evidence: ``release-checklists/0.8.0-backend-execution-evidence.md``.
+     - E1 — backend test skips in CI (pyspark not installed). Retained local execution evidence: the backend-execution-evidence appendix of ``release-checklists/0.8.0.md``.
    * - Dask
      - ``dask``
      - Map/fold over a Dask cluster.
@@ -100,7 +100,7 @@ workers under the same estimation contract.
      - ``ray``
      - Map/fold over a Ray cluster.
      - Tested, not CI-gated
-     - E1 — backend test skips in CI. Retained local execution evidence: ``release-checklists/0.8.0-backend-execution-evidence.md``. Retained local execution evidence: ``release-checklists/0.8.0-backend-execution-evidence.md``.
+     - E1 — backend test skips in CI. Retained local execution evidence: the backend-execution-evidence appendix of ``release-checklists/0.8.0.md``. Retained local execution evidence: the backend-execution-evidence appendix of ``release-checklists/0.8.0.md``.
    * - Lightning
      - ``lightning``
      - Mini-batch iteration driving stochastic/mini-batch EM.
@@ -115,7 +115,7 @@ not installed in any CI lane, a regression would not be caught automatically tod
 a scheduled CI lane; the other rows with this label still skip there.
 
 Every one of these backends HAS now been executed against the release candidate, and the commands,
-versions and results are retained in ``release-checklists/0.8.0-backend-execution-evidence.md`` --
+versions and results are retained in the backend-execution-evidence appendix of ``release-checklists/0.8.0.md`` --
 including a two-rank ``mpiexec`` fit agreeing with the serial fit to 1e-10. That evidence is
 deliberately not treated as promotion to "Supported", for three reasons stated in the file itself: it
 is single-machine (macOS arm64, multi-process on one host -- no multi-node, no network transport, no
@@ -145,5 +145,5 @@ devices. That is honest behaviour -- the two fits really are different -- but it
 ``device=`` is read as a speed knob. Pin the device alongside the seed when a result has to
 reproduce.
 
-Measurements and commands: ``release-checklists/0.8.0-backend-execution-evidence.md``. CUDA remains
+Measurements and commands: the backend-execution-evidence appendix of ``release-checklists/0.8.0.md``. CUDA remains
 unverified for 0.8.0; Metal is a different backend and says nothing about it.
