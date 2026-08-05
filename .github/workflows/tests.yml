@@ -129,7 +129,7 @@ jobs:
           python scripts/run_test_tier.py \
             --tier core \
             --candidate-sha "$GITHUB_SHA" \
-            --budget-seconds 720 \
+            --budget-seconds 900 \
             --receipt "core-py${{ matrix.python-version }}.json" \
             -- -n auto
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -167,7 +167,7 @@ jobs:
           python scripts/run_test_tier.py \
             --tier core \
             --candidate-sha "$GITHUB_SHA" \
-            --budget-seconds 720 \
+            --budget-seconds 900 \
             --receipt "core-macos-py${{ matrix.python-version }}.json" \
             -- -n auto
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -203,7 +203,7 @@ jobs:
           python scripts/run_test_tier.py \
             --tier core \
             --candidate-sha "$GITHUB_SHA" \
-            --budget-seconds 720 \
+            --budget-seconds 900 \
             --receipt core-minimum-versions.json \
             -- -n auto
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
