@@ -9,7 +9,12 @@ the usual exchangeability assumption.
 
 The decision rule the cascade and the cost model consume:
 
-  * **singleton set** -> answer locally (covered at ``1 - alpha``);
+  * **singleton set** -> answer locally. NOTE: the ``1 - alpha`` guarantee is MARGINAL --
+    over the whole population, the set contains the truth with probability ``>= 1 - alpha``.
+    It is NOT a conditional guarantee on the answered slice: error *among singleton answers*
+    can be far higher (an adversarial review measured 9% marginal miscoverage alongside 47%
+    answered-slice error at ``alpha=0.10``). Measure answered-slice agreement per deployment
+    (``report()`` does) rather than reading it off ``alpha``;
   * **empty or multi-label set** -> escalate to the expensive teacher/frontier (genuinely ambiguous).
 
 ``escalation_rate`` is the empirical ``p_escalate`` used by the cost model.
