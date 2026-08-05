@@ -452,32 +452,35 @@ def _clopper_pearson_upper(k: int, n: int, delta: float) -> float:
     return float(beta_dist.ppf(1.0 - delta, k + 1, n - k))
 
 
+# The candidate thresholds: 1001 evenly spaced values, fixed here in code before any data exists.
+# Candidates must NOT come from the calibration sample itself (the earlier revision tested every
+# unique observed confidence): a Bonferroni union bound is over a pre-specified hypothesis family,
+# and deriving the family from the same sample that tests it re-opens the selection-effect hole the
+# correction exists to close. The price is that the threshold is quantized to steps of 0.001.
+_CANDIDATE_GRID = np.linspace(0.0, 1.0, 1001)
+
+
 def _selective_risk_threshold(confs: np.ndarray, errs: np.ndarray, *, alpha: float, delta: float) -> float:
     """The smallest confidence threshold whose TRUE selective risk is ``<= alpha`` with probability
     ``>= 1 - delta`` (MXR-080-0293) -- see :meth:`LLMUncertainty.calibrate` for the full statement of
     the guarantee and its assumptions.
 
-    For each candidate threshold ``tau`` (every unique observed confidence, ``m`` candidates total),
-    replaces the same-sample empirical error on ``{conf >= tau}`` with its exact Clopper-Pearson upper
-    confidence bound (:func:`_clopper_pearson_upper`) at level ``1 - delta / m``. The ``1 / m`` is a
-    Bonferroni correction for testing ``m`` thresholds against the same calibration data -- exactly the
-    correction the previous same-sample selection omitted, which is how it could approve a threshold
-    after one lucky small sample. The correction makes the bound simultaneously valid for every
-    candidate threshold at once, so selecting the smallest ``tau`` whose bound clears ``alpha`` remains
-    valid regardless of the selection rule. Candidates are scanned from smallest to largest (most to
-    least inclusive answered set); the first (most inclusive) one whose bound clears ``alpha`` is
-    returned, maximizing how often the model answers subject to the risk guarantee.
+    For each candidate threshold ``tau`` in the pre-specified grid ``_CANDIDATE_GRID``, replaces the
+    same-sample empirical error on ``{conf >= tau}`` with its exact Clopper-Pearson upper confidence
+    bound (:func:`_clopper_pearson_upper`) at level ``1 - delta / 1001`` -- a Bonferroni correction
+    across the whole grid, exactly the correction the original same-sample selection omitted, which
+    is how it could approve a threshold after one lucky small sample. The correction makes the bound
+    simultaneously valid for every candidate at once, so selecting the smallest ``tau`` whose bound
+    clears ``alpha`` remains valid regardless of the selection rule. Candidates are scanned from
+    smallest to largest (most to least inclusive answered set); the first one whose bound clears
+    ``alpha`` is returned, maximizing how often the model answers subject to the risk guarantee.
 
     Returns ``+inf`` (refuse everything) if no threshold's bound clears ``alpha`` -- too little
     calibration data for the requested ``(alpha, delta)``, or the signal genuinely does not
     discriminate well enough, rather than deploying an uncertified threshold.
     """
-    candidates = np.unique(confs)
-    m = candidates.shape[0]
-    if m == 0:
-        return float("inf")
-    per_test_delta = delta / m
-    for tau in candidates:
+    per_test_delta = delta / float(_CANDIDATE_GRID.size)
+    for tau in _CANDIDATE_GRID:
         answered = confs >= tau
         n_tau = int(answered.sum())
         if n_tau == 0:
@@ -658,12 +661,12 @@ class LLMUncertainty:
         For each labeled example, the model's answer (majority meaning-cluster) and its confidence are
         computed; ``correct(answer, gold)`` (default the ``equivalent`` relation) marks it right or
         wrong. The threshold is chosen by :func:`_selective_risk_threshold` (MXR-080-0293): the
-        smallest confidence ``tau`` (the most inclusive answered set) whose exact Clopper-Pearson upper
-        confidence bound on the selective error rate -- Bonferroni-corrected across every candidate
-        threshold tried -- is ``<= alpha``.
+        smallest confidence ``tau`` (the most inclusive answered set) from a pre-specified 1001-point
+        candidate grid whose exact Clopper-Pearson upper confidence bound on the selective error rate
+        -- Bonferroni-corrected across the whole grid -- is ``<= alpha``.
 
         Statistical guarantee and assumptions: assuming the calibration ``(prompt, gold)`` examples and
-        future queries are exchangeable draws from the same distribution, with probability ``>= 1 -
+        future queries are i.i.d. draws from the same distribution, with probability ``>= 1 -
         delta`` over the randomness of the calibration set, the deployed threshold's TRUE selective
         risk (``P(wrong | confidence >= threshold)`` on a fresh query) is ``<= alpha``. This is a proper
         finite-sample ``(alpha, delta)``-PAC guarantee (Geifman & El-Yaniv 2017 "Selective

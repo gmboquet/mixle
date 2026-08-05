@@ -92,21 +92,23 @@ class LLMUncertaintyTest(unittest.TestCase):
         # Build a calibration + test set mixing easy (knowable) and hard (not) questions.
         #
         # MXR-080-0293: calibrate() now certifies a threshold via an exact Clopper-Pearson bound,
-        # Bonferroni-corrected across every candidate threshold (see _selective_risk_threshold) --
-        # a genuine finite-sample (alpha, delta)-PAC guarantee, not a same-sample point estimate. That
-        # correction legitimately needs more calibration data than the old (unsound) same-sample
-        # selection did to certify a non-trivial threshold at this alpha: 200 questions (120
-        # calibration / 80 test) is comfortably past that point for this signal -- see
-        # test_small_calibration_set_correctly_refuses_to_certify below for what happens with too
-        # little data (the OLD code would have "certified" a threshold there too; the new code
-        # honestly refuses).
-        gold, noise, kinds = self._easy_hard_data(200)
+        # Bonferroni-corrected across the pre-specified 1001-point candidate grid (see
+        # _selective_risk_threshold) -- a genuine finite-sample (alpha, delta)-PAC guarantee, not a
+        # same-sample point estimate. That correction legitimately needs more calibration data than
+        # the old (unsound) same-sample selection did to certify a non-trivial threshold: a
+        # zero-error slice certifies only past log(delta/1001)/log(1-alpha) ~ 61 rows at this
+        # (alpha, delta), so with roughly half the questions knowable the earlier 120-row
+        # calibration split sat exactly on the boundary. 400 questions (240 calibration / 160
+        # test) is comfortably past it -- see test_small_calibration_set_correctly_refuses_to_certify
+        # below for what happens with too little data (the OLD code would have "certified" a
+        # threshold there too; the new code honestly refuses).
+        gold, noise, kinds = self._easy_hard_data(400)
         llm = MockLLM(gold, noise, seed=5)
         uq = LLMUncertainty(llm, n=20)
 
         prompts = list(gold)
-        cal = [(p, gold[p]) for p in prompts[:120]]
-        test = prompts[120:]
+        cal = [(p, gold[p]) for p in prompts[:240]]
+        test = prompts[240:]
         alpha = 0.15
         uq.calibrate(cal, alpha=alpha, delta=0.05)
 
@@ -274,10 +276,14 @@ class SelectiveRiskThresholdTest(unittest.TestCase):
         # Same underlying 0/0.95-confidence generative story, but the high-confidence bucket now has
         # enough examples (all correct) for the Clopper-Pearson bound to actually clear alpha -- so the
         # fix is not simply "always refuse", it correctly certifies once there is real evidence.
-        confs = np.array([0.5] * 10 + [0.95] * 40)
-        errs = np.array([1.0] * 4 + [0.0] * 6 + [0.0] * 40)
+        # A zero-error bucket needs log(delta/1001)/log(1-alpha) ~ 94 rows at these levels, because
+        # every test runs at Bonferroni level delta/1001 across the PRE-SPECIFIED candidate grid; and
+        # the certified threshold is the smallest grid point excluding the bad 0.5 bucket (0.501),
+        # not the observed confidence 0.95 -- candidates are never taken from the sample itself.
+        confs = np.array([0.5] * 10 + [0.95] * 100)
+        errs = np.array([1.0] * 4 + [0.0] * 6 + [0.0] * 100)
         threshold = _selective_risk_threshold(confs, errs, alpha=0.10, delta=0.05)
-        self.assertEqual(threshold, 0.95)
+        self.assertAlmostEqual(threshold, 0.501)
 
     def test_clopper_pearson_upper_bound_matches_closed_form_zero_errors(self):
         # k=0 errors out of n trials: the exact one-sided Clopper-Pearson upper bound has the closed
