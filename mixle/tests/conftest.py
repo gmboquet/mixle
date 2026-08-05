@@ -5,6 +5,7 @@ the collection and CI harness so we can attach stable markers without rewriting
 hundreds of existing tests at once.
 """
 
+import hashlib
 import os
 from collections.abc import Iterable
 from pathlib import Path
@@ -594,7 +595,26 @@ def _add_markers(item: pytest.Item, names: Iterable[str], assigned: set[str]) ->
         assigned.add(name)
 
 
-def pytest_collection_modifyitems(items) -> None:
+def pytest_addoption(parser) -> None:
+    """Deterministic file-level sharding for splitting one tier across CI jobs.
+
+    ``--num-shards N --shard-id K`` keeps only the test FILES whose stable hash lands in shard K
+    (0-based). File granularity, not test granularity, so module-scoped fixtures and xdist
+    locality are preserved and a file's tests never split across jobs. The default (one shard)
+    changes nothing anywhere; the partition is a pure function of the file's basename, so the K
+    shards are disjoint, exhaustive, and identical on every machine -- CI wall time divides
+    across jobs without any test, marker, or fixture changing behavior.
+    """
+    parser.addoption("--shard-id", type=int, default=0, help="0-based shard index")
+    parser.addoption("--num-shards", type=int, default=1, help="total shard count")
+
+
+def _shard_of(filename: str, num_shards: int) -> int:
+    digest = hashlib.sha256(filename.encode("utf-8")).hexdigest()
+    return int(digest, 16) % num_shards
+
+
+def pytest_collection_modifyitems(config, items) -> None:
     """Apply subsystem and tier markers during collection.
 
     The domain registry remains the single triage authority. It also derives
@@ -652,6 +672,16 @@ def pytest_collection_modifyitems(items) -> None:
         # backend-specific cases remain available through full/numerical/optional/hardware.
         if "fast" in routed and not ({"experimental", "stochastic"} | backend_markers) & routed:
             _add_markers(item, ("core",), assigned)
+
+    num_shards = int(config.getoption("--num-shards"))
+    if num_shards > 1:
+        shard_id = int(config.getoption("--shard-id"))
+        if not 0 <= shard_id < num_shards:
+            raise pytest.UsageError(f"--shard-id must be in [0, {num_shards}); got {shard_id}")
+        kept = [item for item in items if _shard_of(Path(str(item.fspath)).name, num_shards) == shard_id]
+        dropped = [item for item in items if _shard_of(Path(str(item.fspath)).name, num_shards) != shard_id]
+        items[:] = kept
+        config.hook.pytest_deselected(items=dropped)
 
 
 @pytest.fixture(autouse=True)

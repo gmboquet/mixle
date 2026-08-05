@@ -182,8 +182,16 @@ class HostedWorkflowContractTest(unittest.TestCase):
         # model-asset scientist gate.
         self.assertEqual(tests.count("scripts/run_required_pytest.py"), 1)
         optional_job = tests.split("\n  optional:\n", 1)[1].split("\n  numerical:\n", 1)[0]
-        self.assertNotIn("if:", optional_job)
+        # The property is "this gate cannot be skipped", and it survives the 2026-08-04 sharding:
+        # the JOB carries no condition (it always runs, on every shard), the tier-run step is
+        # unconditional, and the only `if:` the job may contain is the shard-0 pin on the serial
+        # one-shot gates -- which makes each of them run EXACTLY once per workflow run rather than
+        # once per shard. Any other condition would reintroduce a skippable gate.
+        self.assertNotIn("\n    if:", optional_job)
+        conditions = {line.strip() for line in optional_job.splitlines() if line.strip().startswith("if:")}
+        self.assertLessEqual(conditions, {"if: matrix.shard == 0"})
         self.assertIn("--tier optional", optional_job)
+        self.assertIn("--num-shards 2", optional_job)
         self.assertIn("extras matrix / exact candidate", extras)
         self.assertIn("verify_published_artifacts.py", post)
         self.assertIn("public-artifacts/*.whl", post)

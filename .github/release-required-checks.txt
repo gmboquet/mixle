@@ -7,9 +7,14 @@ core / py3.12
 core / macOS arm64 / py3.11
 core / macOS arm64 / py3.12
 core / minimum versions
-full / py3.12
+full / py3.12 / shard 0
+full / py3.12 / shard 1
+full / py3.12 / shard 2
+full / py3.12 / shard 3
+full / coverage floor
 clean-wheel install + import sweep
-optional extras / py3.12
+optional extras / py3.12 / shard 0
+optional extras / py3.12 / shard 1
 numerical / repeated-seed stress
 hardware / MPI and torchrun
 extras matrix / exact candidate

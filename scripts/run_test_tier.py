@@ -24,9 +24,15 @@ from pathlib import Path
 # tests. A budget at ~1.2x the median is therefore a coin flip per lane per run. Budgets are now
 # ~2x the fastest observed completion (core 342s -> 720; full 1279s -> 2400), which still trips on
 # any real multiplicative regression while no longer failing lanes for drawing a slow runner.
+# Full-tier correction 2026-08-04 (third revision, and the reason is an evidence error, recorded as
+# D-0142): the "fastest observed full completion 1279s" that priced the previous ceiling was a
+# misread -- that summary line belonged to the OPTIONAL tier. The full tier (~14k tests under
+# coverage on 4-vCPU hosted runners) has never completed inside any budget this cycle; the only
+# genuine datum is a kill at 2400s with 72% executed, projecting ~3300s. Its budget is now ~1.6x
+# that projection. Core's 720 held: every core lane on both platforms passed inside it.
 _BUDGETS = {
     "core": 900,
-    "full": 2700,
+    "full": 5400,
     "optional": 2700,
     "numerical": 1800,
     "hardware": 1200,
