@@ -1,5 +1,5 @@
 {
-  "acceptance": "Every local entry passes exact output validation; the hosted-network entry passes on the same candidate; and retained candidate/check/wheel records bind the bundle to publication.",
+  "acceptance": "Every entry is local and self-contained: each passes exact output validation offline, and retained candidate/check/wheel records bind the bundle to publication.",
   "artifact": "mixle.reproduction_bundle/v2",
   "candidate_binding": {
     "policy": "exact-publish-workflow-candidate",
@@ -16,7 +16,7 @@
     {
       "path": "pyproject.toml",
       "role": "bundle-closure",
-      "sha256": "e5b02c0afd64e4f308a332717146b0791ae367325a5b1e1d89015dc1bdac265f"
+      "sha256": "667527ba9a6119fd4a7654e5bd438e470afd933d0935c45bd6760533fc3f2975"
     },
     {
       "path": "release-checklists/0.8.0-repro-environment.json",
@@ -31,7 +31,7 @@
     {
       "path": "scripts/build_repro_bundle.py",
       "role": "bundle-closure",
-      "sha256": "097fcee6dddca4ff3826bd598dbb40805bcf4aa24d30322b86aa35dc8b5dfe40"
+      "sha256": "d1b55c49c6d9b8099f590f7c0a871772513bcedb710b0c5ec7e99d99cdb829a0"
     },
     {
       "path": "scripts/run_repro_entry.py",

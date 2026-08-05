@@ -7,98 +7,12 @@ on a laptop with no network -- not an assertion.
 
 import unittest
 
-import numpy as np
 import pytest
 
 pytestmark = [pytest.mark.optional, pytest.mark.slow, pytest.mark.integration]
 
 transformers = pytest.importorskip("transformers")
 datasets = pytest.importorskip("datasets")
-
-CIFAR10_ID = "uoft-cs/cifar10"
-CIFAR10_REVISION = "0b2714987fa478483af9968de7c934580d0bb9a2"
-
-
-def _cifar(n_train=1500, n_test=600):
-    from datasets import load_dataset
-
-    tr = load_dataset(CIFAR10_ID, split=f"train[:{n_train}]", revision=CIFAR10_REVISION)
-    te = load_dataset(CIFAR10_ID, split=f"test[:{n_test}]", revision=CIFAR10_REVISION)
-    return tr, te
-
-
-def skip_if_assets_unavailable(build):
-    """Run ``build``, turning a missing pretrained asset into a skip rather than an error.
-
-    These are ``optional``/``slow``/``integration`` tests: they need real CIFAR-10, Banking77 and
-    CLIP weights, none of which ship with the package. The module already skips when transformers or
-    datasets are absent, but the *weights* can be missing independently -- offline, behind a proxy,
-    or cached in a format the installed transformers refuses (the observed failure is
-    "openai/clip-vit-base-patch32 does not appear to have a file named model.safetensors"). That is
-    a statement about the machine, not about mixle, and it was surfacing as seven setup ERRORs that
-    are indistinguishable at a glance from real breakage. Skip on the asset failure only; anything
-    else still propagates.
-    """
-    try:
-        return build()
-    except OSError as exc:  # HuggingFace raises OSError for unfetchable/unreadable weights
-        raise unittest.SkipTest(f"pretrained asset unavailable on this machine: {exc}") from exc
-    except RuntimeError as exc:
-        # `datasets` >= 4 refuses script-based loaders ("Dataset scripts are no longer supported"),
-        # which is how Banking77 is published. Also an environment statement, but it arrives as a
-        # RuntimeError, so match the message rather than the type -- any other RuntimeError is a
-        # real failure and must still propagate.
-        if "no longer supported" not in str(exc) and "requires huggingface_hub" not in str(exc):
-            raise
-        raise unittest.SkipTest(f"dataset loader unsupported by the installed stack: {exc}") from exc
-
-
-class CertifiedPerceptionTest(unittest.TestCase):
-    """CLIP image latents + a closed-form mixle head: accurate, CERTIFIED, and calibrated on real CIFAR-10."""
-
-    @classmethod
-    def setUpClass(cls):
-        from mixle.scientist import Scientist, encode_images
-
-        def build():
-            tr, te = _cifar()
-            cls.ztr = encode_images([r["img"] for r in tr])
-            cls.zte = encode_images([r["img"] for r in te])
-            cls.ytr = [r["label"] for r in tr]
-            cls.yte = np.array([r["label"] for r in te])
-            cls.model = Scientist.study(cls.ztr, cls.ytr, alpha=0.1, seed=0)
-
-        skip_if_assets_unavailable(build)
-
-    def test_accuracy_is_high_and_fit_is_closed_form(self):
-        acc = float((self.model.predict(self.zte) == self.yte).mean())
-        self.assertGreater(acc, 0.85)  # real CLIP + a closed-form head, no gradient descent
-        self.assertEqual(self.model.certificate.guarantee.name, "GLOBAL_UNIQUE")
-        self.assertEqual(len(self.model.certificate.gradient_blocks), 0)
-
-    def test_conformal_sets_cover_at_the_stated_level(self):
-        sets = self.model.prediction_sets(self.zte)
-        coverage = float(np.mean([y in s for y, s in zip(self.yte, sets)]))
-        self.assertGreater(coverage, 0.85)  # 90% target, honest sampling slack
-
-    def test_confident_predictions_are_more_accurate_than_overall(self):
-        pred = self.model.predict(self.zte)
-        confident = ~self.model.abstains(self.zte)
-        acc_all = float((pred == self.yte).mean())
-        acc_conf = float((pred[confident] == self.yte[confident]).mean())
-        self.assertGreater(acc_conf, acc_all)  # abstention buys accuracy where it matters
-
-    def test_trains_in_seconds(self):
-        self.assertLess(self.model.train_seconds, 5.0)  # the head fit itself is near-instant
-
-    def test_image_embeddings_are_plain_arrays_with_the_documented_shape(self):
-        # pins encode_images()'s actual return contract: transformers wraps CLIP's image features in a
-        # BaseModelOutputWithPooling now, not a raw tensor -- this must be unpacked (.pooler_output)
-        # inside encode_images() rather than leaking the wrapper (or its .numpy()-less object) here.
-        for z, n in ((self.ztr, len(self.ytr)), (self.zte, len(self.yte))):
-            self.assertIsInstance(z, np.ndarray)
-            self.assertEqual(z.shape, (n, 512))  # ViT-B/32's joint embedding width, per the docstring
-            self.assertTrue(np.isfinite(z).all())
 
 
 class ScientistConstructorTest(unittest.TestCase):

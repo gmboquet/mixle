@@ -4,7 +4,6 @@
   "dependencies": {
     "cython": "<4",
     "dask": "<2027",
-    "datasets": "<6",
     "distributed": "<2027",
     "fsspec": "<2027",
     "gmpy2": "<3",

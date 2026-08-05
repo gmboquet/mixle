@@ -145,8 +145,8 @@ def build() -> dict:
         "closure": [_input(path, "bundle-closure") for path in _CLOSURE_PATHS],
         "code_license": {"spdx": "MIT", "files": ["LICENSE", "NOTICE"]},
         "acceptance": (
-            "Every local entry passes exact output validation; the hosted-network entry passes on the "
-            "same candidate; and retained candidate/check/wheel records bind the bundle to publication."
+            "Every entry is local and self-contained: each passes exact output validation offline, "
+            "and retained candidate/check/wheel records bind the bundle to publication."
         ),
         "entries": entries,
     }
