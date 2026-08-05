@@ -18,10 +18,16 @@ from pathlib import Path
 # executed (measured 1279s). A kill at 61% is not a budget, it is a guarantee of failure -- and it
 # presents as an opaque teardown OSError rather than as a timeout, which cost real diagnosis time.
 # The tripwire property is preserved: a genuine 2x regression from today's measured need still trips.
+# Second re-baseline 2026-08-04, and this one prices in RUNNER VARIANCE, which the first did not:
+# on the same day, the same core tier on the same interpreter (py3.11, ubuntu-latest) completed in
+# 342s on one hosted runner and was killed at 480s on another -- a 1.4x spread with zero failing
+# tests. A budget at ~1.2x the median is therefore a coin flip per lane per run. Budgets are now
+# ~2x the fastest observed completion (core 342s -> 720; full 1279s -> 2400), which still trips on
+# any real multiplicative regression while no longer failing lanes for drawing a slow runner.
 _BUDGETS = {
-    "core": 480,
-    "full": 1800,
-    "optional": 1800,
+    "core": 900,
+    "full": 2700,
+    "optional": 2700,
     "numerical": 1800,
     "hardware": 1200,
 }

@@ -340,8 +340,8 @@ markers = [
     "latent: mixture, DPM, LDA, LLDA, and hidden-association tests.",
     # --- T3.1 test tiers (purpose + time budget; see docs/test-tiers.rst) ---
     "smoke: import, public-API, and critical-fit-path checks; budget <=30 s local / <=60 s CI.",
-    "core: stable base-install correctness; budget <=8 min per Python CI job.",
-    "full: all non-optional correctness incl. slow tests; budget <=30 min.",
+    "core: stable base-install correctness; budget <=12 min per Python CI job.",
+    "full: all non-optional correctness incl. slow tests; budget <=40 min.",
     "numerical: repeated-seed and numerical-stress tests; budget <=30 min, scheduled/manual.",
     "hardware: real MPI/torchrun multi-process receipts; budget <=20 min, scheduled/manual.",
 ]

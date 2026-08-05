@@ -311,7 +311,6 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # fast gate silently regressed by ~9 minutes of wall time across all three of them as these landed.
     # Tagged the same way their nearest existing sibling already is.
     "doe_robust_test.py": ("doe", "stochastic", "slow"),  # 10-seed BO loop averaged for a noise claim
-    "quotient_leaf_test.py": ("torch", "integration", "slow"),  # conv+pool leaf, fits/compares real nets
     "ppl_guide_test.py": ("ppl", "stochastic", "slow"),  # structured VI, admixture/LDA recovery
     "structure_learning_test.py": ("integration", "slow"),  # multi-restart EM structure search
     "task_traces_test.py": ("integration", "slow"),

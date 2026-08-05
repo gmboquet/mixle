@@ -37,8 +37,6 @@ LOCAL_BUILDERS = frozenset(
 REQUIRED_SOURCES = (
     "examples/peft_lora_grad_leaf.py",
     "mixle/scientist.py",
-    "mixle/tests/quotient_leaf_test.py",
-    "mixle/tests/scientist_test.py",
 )
 FULL_REVISION = re.compile(r"^[0-9a-f]{40}$")
 
@@ -148,12 +146,11 @@ def test_all_external_hugging_face_calls_use_full_commit_revisions() -> None:
         unpinned.extend(findings)
     assert unpinned == [], "external assets are not content addressed:\n" + "\n".join(unpinned)
     # A floor on how many loader calls the audit actually saw, so a scanner regression that silently
-    # matches nothing cannot pass as "no findings". Re-calibrated 2026-08-04 when the dataset-driven
-    # examples were removed with all direct dataset usage: the remaining pinned calls are the MODEL
-    # loads (mixle/scientist.py CLIP + language model + sentence encoder, the PEFT example, the
-    # quotient-leaf and scientist test fixtures) -- nine today. Eight guards the scanner without
-    # pinning the exact inventory.
-    assert calls_checked >= 8
+    # matches nothing cannot pass as "no findings". Re-calibrated 2026-08-04 when direct dataset
+    # usage was removed: the remaining pinned calls are the MODEL loads -- mixle/scientist.py's
+    # CLIP, language-model, and sentence-encoder trio plus the PEFT example -- six today. Five
+    # guards the scanner without pinning the exact inventory.
+    assert calls_checked >= 5
 
 
 def test_audit_rejects_mutable_and_abbreviated_asset_identities() -> None:

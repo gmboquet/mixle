@@ -142,11 +142,24 @@ class DecisionReviewTest(unittest.TestCase):
             ["D-0001"],
         )
 
-    def test_current_pending_reviews_are_explicitly_external_and_required(self):
+    def test_decision_reviews_are_resolved_and_honestly_attributed(self):
+        """The gate is closed, and the row must say HOW it was closed.
+
+        The decision log was resolved 2026-08-04 by AI verification that the release owner reviewed
+        and approved. The required CI check still runs the verifier on every push, so a regression to
+        `pending` re-blocks the release; what this test pins is the attribution: the checklist row
+        must keep stating that this was a human-approved AI review rather than the fully independent
+        human review the gate originally contemplated. Deleting that sentence would upgrade the
+        evidence by edit, which is exactly what this file exists to prevent.
+        """
         checklist = (ROOT / "release-checklists" / "0.8.0.md").read_text(encoding="utf-8")
         required = (ROOT / ".github" / "release-required-checks.txt").read_text(encoding="utf-8")
-        self.assertIn("Decision review acceptance | `EXTERNAL`", checklist)
+        self.assertIn("Decision review acceptance | `IMPLEMENTED`", checklist)
+        self.assertIn("human-approved AI review", checklist)
         self.assertIn("release decisions / accepted review", required.splitlines())
+        decisions = (ROOT / "release-checklists" / "0.8.0-decisions.md").read_text(encoding="utf-8")
+        self.assertIn("## Review record · 2026-08-04 resolution campaign", decisions)
+        self.assertIn("reviewed by the release owner, who approved it", decisions)
 
 
 class HostedWorkflowContractTest(unittest.TestCase):
@@ -164,9 +177,10 @@ class HostedWorkflowContractTest(unittest.TestCase):
         self.assertIn("verify_vulnerability_waivers.py", security)
         self.assertIn("accepted-waivers", security)
         self.assertNotIn("continue-on-error: true", security)
-        # Two wrappers remain after the no-direct-dataset-usage removal (2026-08-04) took the
-        # sunspots and Adult flagship lanes with it: the scientist and quotient-leaf model gates.
-        self.assertEqual(tests.count("scripts/run_required_pytest.py"), 2)
+        # One wrapper remains after the no-direct-dataset-usage removal (2026-08-04) took the
+        # sunspots/Adult flagship lanes and the CIFAR-driven quotient-leaf gate with it: the
+        # model-asset scientist gate.
+        self.assertEqual(tests.count("scripts/run_required_pytest.py"), 1)
         optional_job = tests.split("\n  optional:\n", 1)[1].split("\n  numerical:\n", 1)[0]
         self.assertNotIn("if:", optional_job)
         self.assertIn("--tier optional", optional_job)
