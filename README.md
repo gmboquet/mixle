@@ -161,7 +161,8 @@ optimize(..., backend="spark")    # distributed: mp · dask · mpi · ray · lig
 > single optimizer iteration, because the device backends use different float32 kernels. Pin the
 > device alongside the seed when a result has to reproduce, and see
 > [backend support](docs/backend-support.rst) for which backends are CI-gated — CUDA is
-> hardware-gated and unverified for 0.8.0.
+> hardware-gated: executed once for 0.8.0 on rented hardware
+> ([receipt](release-checklists/0.8.0-cuda-receipt.json)), not gated in CI.
 
 New frameworks register a factory (`register_encoded_data_backend`) — no dispatch to edit. The planner
 (`mixle.utils.parallel.planner`) turns a hardware budget into a memory-aware placement you compute once

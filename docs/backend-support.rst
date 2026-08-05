@@ -49,7 +49,9 @@ Compute engines
      - ``torch``
      - GPU arrays and training.
      - Hardware-gated
-     - Unverified for 0.8.0 — historical runs are not candidate evidence.
+     - Executed once for 0.8.0 on a rented RTX 3060 (receipt:
+       ``release-checklists/0.8.0-cuda-receipt.json``); not CI-gated, so regressions between
+       receipts go undetected. Historical runs are not candidate evidence.
    * - JAX
      - ``jax``
      - XLA arrays + the NumPyro NUTS backend.
@@ -145,5 +147,8 @@ devices. That is honest behaviour -- the two fits really are different -- but it
 ``device=`` is read as a speed knob. Pin the device alongside the seed when a result has to
 reproduce.
 
-Measurements and commands: the backend-execution-evidence appendix of ``release-checklists/0.8.0.md``. CUDA remains
-unverified for 0.8.0; Metal is a different backend and says nothing about it.
+Measurements and commands: the backend-execution-evidence appendix of ``release-checklists/0.8.0.md``. CUDA was
+executed once for 0.8.0 on a rented RTX 3060 — the receipt (GPU, driver, torch/CUDA versions, float32 CPU-vs-CUDA
+agreement on a GMM fit, an HMM float32 fit, quantized parity) lives at ``release-checklists/0.8.0-cuda-receipt.json``.
+That run also exposed two CUDA-only dtype-promotion defects in ``TorchEngine`` (fixed at the same commit): an
+existence proof of execution, not a CI gate. Metal is a different backend and says nothing about CUDA.
