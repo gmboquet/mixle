@@ -161,7 +161,11 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         log-mass evaluated at ``x - min_val`` and is ``-inf`` outside support.
 
         Args:
-            p: Success probability in ``(0, 1)``.
+            p: Success probability in the closed interval ``[0, 1]``. The exact boundaries are the
+                degenerate laws (``p=0``: all mass at ``min_val``; ``p=1``: all mass at
+                ``min_val + n``) -- legitimate states an M-step or an MCMC proposal can saturate
+                to, so rejecting them turned a float boundary into a crash (first seen on hosted
+                Linux, where a lowered proposal reached exactly 0.0).
             n: Number of trials.
             min_val: Optional support shift.
             name: Optional distribution name.
@@ -169,15 +173,15 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
 
         Attributes:
             p: Success probability.
-            log_p: ``log(p)``.
-            log_1p: ``log(1 - p)``.
+            log_p: ``log(p)`` (``-inf`` at ``p=0``).
+            log_1p: ``log(1 - p)`` (``-inf`` at ``p=1``).
             n: Number of trials.
             min_val: Optional support shift.
             name: Optional distribution name.
             keys: Optional merge key.
         """
-        if not math.isfinite(p) or p <= 0.0 or p >= 1.0:
-            raise ValueError("Binomial distribution requires p in (0, 1).")
+        if not math.isfinite(p) or p < 0.0 or p > 1.0:
+            raise ValueError("Binomial distribution requires p in [0, 1].")
         else:
             self.p = float(p)
 
@@ -186,8 +190,8 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         else:
             self.n = int(n)
 
-        self.log_p = np.log(p)
-        self.log_1p = np.log1p(-p)
+        self.log_p = -float("inf") if p == 0.0 else np.log(p)
+        self.log_1p = -float("inf") if p == 1.0 else np.log1p(-p)
         self.name = name
         self.keys = keys
         self.min_val = min_val
@@ -209,8 +213,11 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         if name not in ("p",):
             return
         try:
-            object.__setattr__(self, "log_p", np.log(self.p))
-            object.__setattr__(self, "log_1p", np.log1p(-self.p))
+            # exact boundaries are in-domain (the degenerate laws); branching avoids the divide
+            # warning np.log(0.0) emits, while out-of-domain values still go through np.log and
+            # yield the honest NaN documented above
+            object.__setattr__(self, "log_p", -float("inf") if self.p == 0.0 else np.log(self.p))
+            object.__setattr__(self, "log_1p", -float("inf") if self.p == 1.0 else np.log1p(-self.p))
         except (ValueError, TypeError, OverflowError, ZeroDivisionError, AttributeError, FloatingPointError):
             # AttributeError covers __init__, where the first parameter is assigned before the rest.
             object.__setattr__(self, "log_p", float("nan"))
@@ -316,7 +323,11 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         if not np.isfinite(xx) or np.floor(xx) != xx or xx < 0 or xx > n:
             return -np.inf
         xx = int(xx)
-        return (gammaln(n + 1) - gammaln(xx + 1) - gammaln(n - xx + 1)) + self.log_1p * (n - xx) + self.log_p * xx
+        # 0 * log(0) is the empty product (contributes probability one), not IEEE 0 * -inf = nan:
+        # at the exact boundaries p=0 / p=1 the skipped term is vacuous and the surviving term
+        # scores every off-support value -inf.
+        tail = (xx * self.log_p if xx > 0 else 0.0) + ((n - xx) * self.log_1p if xx < n else 0.0)
+        return (gammaln(n + 1) - gammaln(xx + 1) - gammaln(n - xx + 1)) + tail
 
     def seq_log_density(self, x: E) -> np.ndarray:
         """Vectorized evaluation of log-density for sequence encoded data.
@@ -344,7 +355,12 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         good = np.isfinite(xx) & (np.floor(xx) == xx) & (xx >= 0) & (xx <= n)
         cc = np.full_like(xx, -np.inf, dtype=np.float64)
         xg = xx[good]
-        cc[good] = (gn - gammaln(xg + 1) - gammaln(n - xg + 1)) + self.log_1p * (n - xg) + self.log_p * xg
+        # same empty-product guard as log_density: at the boundary parameters a zero count times a
+        # -inf log-constant must contribute 0, not nan (np.where evaluates both branches, so the
+        # discarded 0 * -inf still warns without the errstate)
+        with np.errstate(invalid="ignore"):
+            tail = np.where(xg > 0, xg * self.log_p, 0.0) + np.where(xg < n, (n - xg) * self.log_1p, 0.0)
+        cc[good] = (gn - gammaln(xg + 1) - gammaln(n - xg + 1)) + tail
         return cc[ix]
 
     @staticmethod
