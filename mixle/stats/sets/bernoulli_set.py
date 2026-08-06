@@ -407,6 +407,27 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         rv += self._nelnp_sum
         return rv
 
+    def __getstate__(self) -> dict:
+        """Pickle the read-only parameter view as a plain dict.
+
+        ``pmap`` is a ``MappingProxyType`` so callers cannot mutate a fitted distribution's
+        probabilities in place. ``mappingproxy`` is unpicklable at EVERY protocol, though, which
+        made the whole distribution unserializable -- and serialization is not a corner: shipping a
+        model to Spark or Dask workers, a multiprocessing fit, and checkpoint round-trips all go
+        through pickle. The view is rebuilt on load, so immutability survives the trip.
+        """
+        state = dict(self.__dict__)
+        state["pmap"] = dict(state["pmap"])
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore the read-only parameter view discarded by :meth:`__getstate__`."""
+        from types import MappingProxyType
+
+        state = dict(state)
+        state["pmap"] = MappingProxyType(dict(state["pmap"]))
+        self.__dict__.update(state)
+
     def __str__(self) -> str:
         """Return a constructor-style representation of the distribution."""
         s1 = repr(list(self.pmap.items()))

@@ -672,6 +672,43 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
             differentiable=all(child.differentiable for child in children),
         )
 
+    _PROXIED_MAPS = ("init_prob_map", "transition_map", "loginit_prob_map", "log_transition_map")
+
+    def __getstate__(self) -> dict:
+        """Pickle the read-only parameter views as plain dicts.
+
+        The four probability maps are ``MappingProxyType`` so a fitted chain cannot be mutated in
+        place. ``mappingproxy`` is unpicklable at EVERY protocol, though, which made the whole
+        distribution unserializable -- and serialization is not a corner: shipping a model to Spark
+        or Dask workers, a multiprocessing fit, and checkpoint round-trips all go through pickle.
+        The views are rebuilt on load, so immutability survives the trip. Nested row maps are copied
+        one level down, which is where the transition proxies live.
+        """
+        state = dict(self.__dict__)
+        for attribute in self._PROXIED_MAPS:
+            mapping = state.get(attribute)
+            if mapping is not None:
+                state[attribute] = {
+                    key: dict(value) if hasattr(value, "keys") else value for key, value in mapping.items()
+                }
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore the read-only parameter views discarded by :meth:`__getstate__`."""
+        from types import MappingProxyType
+
+        state = dict(state)
+        for attribute in self._PROXIED_MAPS:
+            mapping = state.get(attribute)
+            if mapping is not None:
+                state[attribute] = MappingProxyType(
+                    {
+                        key: MappingProxyType(dict(value)) if hasattr(value, "keys") else value
+                        for key, value in mapping.items()
+                    }
+                )
+        self.__dict__.update(state)
+
     def __str__(self):
         """Return a constructor-style representation of the distribution."""
         order = lambda item: (type(item[0]).__module__, type(item[0]).__qualname__, repr(item[0]))
