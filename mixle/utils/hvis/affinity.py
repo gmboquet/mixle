@@ -429,7 +429,14 @@ def _component_inv_covariances(x: np.ndarray, z: np.ndarray, ridge: float = 1.0e
             if not np.isfinite(local_scale) or local_scale <= 0.0:
                 local_scale = scale
             cov = cov + np.eye(dim) * (ridge * local_scale + 1.0e-8)
-        inv_covs[k] = np.linalg.pinv(cov)
+        # cov is symmetric by construction (a weighted outer-product sum plus a diagonal ridge), so
+        # its inverse is symmetric too -- but pinv goes through an SVD and returns a matrix that is
+        # only symmetric up to round-off, and badly conditioned components make that gap exceed the
+        # symmetry tolerance the consumer checks. Averaging with the transpose is exact for the true
+        # inverse and removes the asymmetry at the source, rather than loosening the check that
+        # caught it.
+        inverse = np.linalg.pinv(cov)
+        inv_covs[k] = 0.5 * (inverse + inverse.T)
 
     return inv_covs
 
