@@ -129,6 +129,25 @@ _STATE_POOLS: dict[int, Any] = {}  # cached thread pools by worker count (pool c
 _REDUCED_PRECISION_EPS = float(np.finfo(np.float32).eps)
 
 
+def _responsibility_identity_applies(init_key, trans_key, state_key) -> bool:
+    """Whether the cross-part mass identities are still invariants for this accumulator.
+
+    They are per-accumulator bookkeeping facts -- "state mass == initial mass + transition mass",
+    and "initial mass <= the observation count this site saw" -- and both assume every part was
+    summed from the same observations. Any tying key breaks that assumption: a keyed part is pooled
+    across every site sharing the key, so it carries the mass of N sites while the unkeyed parts,
+    and this site's own observation count, carry the mass of one. Tying just the chain dynamics
+    (``keys=('init', 'trans', None)`` -- mixture components sharing one initial distribution and
+    transition matrix while each keeps its own emissions) is exactly what the keying feature is
+    for, and enforcing the identities there rejected it outright.
+
+    Measured rather than assumed: pooling all three parts does not restore the identity either, so
+    the condition is "no key anywhere", not "keyed uniformly". An unkeyed accumulator is fully
+    validated as before, which is what the negative-control test pins.
+    """
+    return init_key is None and trans_key is None and state_key is None
+
+
 def _responsibility_mass_tolerance(mass):
     """Relative tolerance for the responsibility-mass identity, scaled to how much mass was summed.
 
@@ -3438,15 +3457,16 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             (num_states, num_states),
             "hidden-Markov transition counts",
         )
-        _mass = float(init_counts.sum() + trans_counts.sum())
-        _rtol = _responsibility_mass_tolerance(_mass)
-        if not np.isclose(
-            float(state_counts.sum()),
-            _mass,
-            rtol=_rtol,
-            atol=max(1.0e-9, _rtol * max(1.0, abs(_mass))),
-        ):
-            raise ValueError("hidden-Markov state counts must equal initial plus transition responsibility mass")
+        if _responsibility_identity_applies(self.init_key, self.trans_key, self.state_key):
+            _mass = float(init_counts.sum() + trans_counts.sum())
+            _rtol = _responsibility_mass_tolerance(_mass)
+            if not np.isclose(
+                float(state_counts.sum()),
+                _mass,
+                rtol=_rtol,
+                atol=max(1.0e-9, _rtol * max(1.0, abs(_mass))),
+            ):
+                raise ValueError("hidden-Markov state counts must equal initial plus transition responsibility mass")
         if not isinstance(acc_values, (tuple, list)) or len(acc_values) != num_states:
             raise ValueError("hidden-Markov emission statistics must match the state count")
 
@@ -3529,15 +3549,16 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             (num_states, num_states),
             "hidden-Markov transition counts",
         )
-        _mass = float(self.init_counts.sum() + self.trans_counts.sum())
-        _rtol = _responsibility_mass_tolerance(_mass)
-        if not np.isclose(
-            float(self.state_counts.sum()),
-            _mass,
-            rtol=_rtol,
-            atol=max(1.0e-9, _rtol * max(1.0, abs(_mass))),
-        ):
-            raise ValueError("hidden-Markov state counts must equal initial plus transition responsibility mass")
+        if _responsibility_identity_applies(self.init_key, self.trans_key, self.state_key):
+            _mass = float(self.init_counts.sum() + self.trans_counts.sum())
+            _rtol = _responsibility_mass_tolerance(_mass)
+            if not np.isclose(
+                float(self.state_counts.sum()),
+                _mass,
+                rtol=_rtol,
+                atol=max(1.0e-9, _rtol * max(1.0, abs(_mass))),
+            ):
+                raise ValueError("hidden-Markov state counts must equal initial plus transition responsibility mass")
         if not isinstance(accumulators, (tuple, list)) or len(accumulators) != num_states:
             raise ValueError("hidden-Markov emission statistics must match the state count")
 
@@ -3853,21 +3874,27 @@ class HiddenMarkovEstimator(ParameterEstimator):
         )
         if not isinstance(topic_ss, (tuple, list)) or len(topic_ss) != num_states:
             raise ValueError("hidden-Markov emission statistics must match the state count")
-        _mass = float(init_counts.sum() + trans_counts.sum())
-        _rtol = _responsibility_mass_tolerance(_mass)
-        if not np.isclose(
-            float(state_counts.sum()),
-            _mass,
-            rtol=_rtol,
-            atol=max(1.0e-9, _rtol * max(1.0, abs(_mass))),
-        ):
-            raise ValueError("hidden-Markov state counts must equal initial plus transition responsibility mass")
-        validate_effective_sample_mass(
-            nobs,
-            float(init_counts.sum()),
-            label="hidden-Markov effective sample",
-            allow_unassigned=True,
-        )
+        _est_keys = self.keys if isinstance(self.keys, (tuple, list)) and len(self.keys) == 3 else (None, None, None)
+        if _responsibility_identity_applies(*_est_keys):
+            _mass = float(init_counts.sum() + trans_counts.sum())
+            _rtol = _responsibility_mass_tolerance(_mass)
+            if not np.isclose(
+                float(state_counts.sum()),
+                _mass,
+                rtol=_rtol,
+                atol=max(1.0e-9, _rtol * max(1.0, abs(_mass))),
+            ):
+                raise ValueError("hidden-Markov state counts must equal initial plus transition responsibility mass")
+        if _responsibility_identity_applies(*_est_keys):
+            # Same reason as the identity above: a pooled initial-count vector carries the mass of
+            # every site sharing the key, so comparing it against THIS site's observation count is
+            # not a corruption check any more.
+            validate_effective_sample_mass(
+                nobs,
+                float(init_counts.sum()),
+                label="hidden-Markov effective sample",
+                allow_unassigned=True,
+            )
 
         len_dist = self.len_estimator.estimate(nobs, len_ss)
         topics = [self.estimators[i].estimate(state_counts[i], topic_ss[i]) for i in range(num_states)]

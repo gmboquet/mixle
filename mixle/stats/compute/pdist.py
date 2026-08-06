@@ -1602,7 +1602,29 @@ def _encoded_nbytes(x: Any, seen: set[int]) -> int:
     return sys.getsizeof(x)
 
 
-_KEY_ATTRS = ("key", "keys", "weight_key", "comp_key", "init_key", "trans_key", "state_key")
+# Every attribute name a shipped family uses to hold a tying key. A name missing here is not a
+# silent no-op: the estimator side declares the key through its `keys` tuple, the accumulator side
+# holds it under the family's own name, and the reconciliation below then reports the key as
+# "estimator-only" -- so the family's documented `keys=` argument fails for EVERY non-None value.
+# That is how LDA's (alpha_key, topics_key), pLSI's (dc_key, sc_key, wc_key) and the heterogeneous
+# PCFG's (emission_key, rule_key) became unusable; `mixle/tests/key_validation_test.py` now walks
+# the shipped families so a new family cannot reintroduce the gap.
+_KEY_ATTRS = (
+    "key",
+    "keys",
+    "weight_key",
+    "comp_key",
+    "init_key",
+    "trans_key",
+    "state_key",
+    "alpha_key",
+    "topics_key",
+    "dc_key",
+    "sc_key",
+    "wc_key",
+    "emission_key",
+    "rule_key",
+)
 
 
 def _key_attr_value(owner: Any, attr: str) -> Any:
@@ -1765,6 +1787,16 @@ def _iter_children(x: Any) -> list[Any]:
 def _collect_estimator_keys(
     estimator: ParameterEstimator, registry: dict[Any, tuple[Any, str, int, Any]], path: str, visited: set[int]
 ) -> None:
+    """Count every STRUCTURAL occurrence of a keyed site, not every distinct Python object.
+
+    ``visited`` marks the current recursion branch only (added on the way down, removed on the way
+    back up), which still terminates on a cycle. Marking objects permanently instead made
+    ``MixtureEstimator([shared] * 3)`` count one estimator site while its factory necessarily built
+    three accumulators, so the count reconciliation below rejected the model -- even though the
+    identical model written as three separately-constructed estimators carrying the same key was
+    accepted. Reusing one estimator object across slots is the natural way to say "these components
+    share parameters", so the traversal has to count positions the way the accumulator side does.
+    """
     obj_id = id(estimator)
     if obj_id in visited:
         return
@@ -1806,6 +1838,7 @@ def _collect_estimator_keys(
                 _collect_estimator_keys(child, registry, "%s.%s[%d]" % (path, name, i), visited)
         if isinstance(value, ParameterEstimator):
             _collect_estimator_keys(value, registry, "%s.%s" % (path, name), visited)
+    visited.discard(obj_id)  # branch-scoped: a shared child still counts at each position it holds
 
 
 def _collect_accumulator_keys(
@@ -1847,6 +1880,7 @@ def _collect_accumulator_keys(
             for i, child in enumerate(_iter_children(value)):
                 if isinstance(child, StatisticAccumulator):
                     _collect_accumulator_keys(child, registry, "%s.%s[%d]" % (path, name, i), visited)
+    visited.discard(obj_id)  # branch-scoped, mirroring _collect_estimator_keys
 
 
 def _flag_annotation_mismatched_keys(estimator: ParameterEstimator, path: str, visited: set[int]) -> None:
@@ -1918,11 +1952,22 @@ def validate_estimator_keys(estimator: ParameterEstimator) -> None:
         )
 
     def protocol_family(signature: Any) -> tuple[str, str]:
+        """Reduce a class name to the family both protocol halves share.
+
+        Stripped repeatedly, because the shipped names stack the roles: LDA's accumulator is
+        `LDAEstimatorAccumulator`, and removing only the outermost suffix left `LDAEstimator`
+        against the estimator side's `LDA` -- a permanent mismatch that made the family's `keys=`
+        argument unusable no matter what it was set to.
+        """
         module, qualname = signature[0], signature[1]
-        for suffix in ("Estimator", "Accumulator", "AccumulatorFactory"):
-            if qualname.endswith(suffix):
-                qualname = qualname[: -len(suffix)]
-                break
+        changed = True
+        while changed:
+            changed = False
+            for suffix in ("AccumulatorFactory", "Accumulator", "Estimator"):
+                if qualname.endswith(suffix) and len(qualname) > len(suffix):
+                    qualname = qualname[: -len(suffix)]
+                    changed = True
+                    break
         return module, qualname
 
     for canonical in estimator_registry:
