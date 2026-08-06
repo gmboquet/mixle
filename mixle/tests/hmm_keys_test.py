@@ -96,5 +96,66 @@ class TiedChainDynamicsTestCase(unittest.TestCase):
             accumulator.combine(corrupt)
 
 
+class NullLengthModelTestCase(unittest.TestCase):
+    """Refitting without a length estimator must not break the NEXT EM iteration.
+
+    `len_dist` defaults to NullDistribution() -- a log-score-zero identity, not the absence of a
+    model -- so an `is not None` check passes while the null encoder yields an empty array. Encode
+    against a model that has a length law, refit with an estimator that has none, and the first
+    pass succeeds while the second raised "operands could not be broadcast together with shapes
+    (n,) (0,)". That is an ordinary EM loop, which is how two shipped notebooks hit it.
+    """
+
+    @staticmethod
+    def _setup(states=3, vocabulary=12, sequences=60):
+        import numpy as np
+
+        from mixle.stats import (
+            CategoricalDistribution,
+            HiddenMarkovModelDistribution,
+            IntegerCategoricalDistribution,
+            seq_encode,
+        )
+
+        rng = np.random.RandomState(0)
+        topics = [IntegerCategoricalDistribution(0, list(rng.dirichlet(np.ones(vocabulary)))) for _ in range(states)]
+        model = HiddenMarkovModelDistribution(
+            topics,
+            [1.0 / states] * states,
+            np.full((states, states), 1.0 / states),
+            len_dist=CategoricalDistribution({8: 1.0}),
+        )
+        return model, seq_encode(model.sampler(1).sample(sequences), model=model)
+
+    def test_repeated_em_steps_survive_a_null_length_model(self):
+        from mixle.stats import IntegerCategoricalEstimator
+        from mixle.stats.compute.sequence import seq_estimate
+
+        for use_numba in (False, True):
+            with self.subTest(use_numba=use_numba):
+                model, encoded = self._setup()
+                estimator = HiddenMarkovEstimator(
+                    [IntegerCategoricalEstimator(min_val=0, max_val=11, pseudo_count=1.0) for _ in range(3)],
+                    use_numba=use_numba,
+                )
+                fitted = model
+                for _ in range(3):  # the second iteration is the one that used to raise
+                    fitted = seq_estimate(encoded, estimator, prev_estimate=fitted)
+                self.assertIsNotNone(fitted)
+
+    def test_a_real_length_model_is_still_scored(self):
+        from mixle.stats import CategoricalEstimator, IntegerCategoricalEstimator
+        from mixle.stats.compute.sequence import seq_estimate
+
+        model, encoded = self._setup()
+        estimator = HiddenMarkovEstimator(
+            [IntegerCategoricalEstimator(min_val=0, max_val=11, pseudo_count=1.0) for _ in range(3)],
+            len_estimator=CategoricalEstimator(),
+        )
+        fitted = seq_estimate(encoded, estimator, prev_estimate=model)
+        # skipping the null term must not have turned into skipping every length term
+        self.assertEqual(type(fitted.len_dist).__name__, "CategoricalDistribution")
+
+
 if __name__ == "__main__":
     unittest.main()

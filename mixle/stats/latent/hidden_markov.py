@@ -129,6 +129,32 @@ _STATE_POOLS: dict[int, Any] = {}  # cached thread pools by worker count (pool c
 _REDUCED_PRECISION_EPS = float(np.finfo(np.float32).eps)
 
 
+def _length_term(estimate, len_enc, rows: int):
+    """Per-sequence log-contribution of the length model, or None when there is nothing to add.
+
+    ``len_dist`` defaults to ``NullDistribution()`` -- a log-score-zero identity, not the absence
+    of a model -- so ``is not None`` is true even when no length is being modelled, and the null
+    encoder yields an EMPTY array. Adding that to the per-sequence scores raised "operands could
+    not be broadcast together with shapes (n,) (0,)".
+
+    This is reached by an ordinary EM loop, not an exotic call: encode against a model that HAS a
+    length distribution, then refit with an estimator that has no length estimator. The first pass
+    carries the real length law and succeeds; the refit returns a null one, and the SECOND
+    iteration crashes. Scoring zero for the null case is what the identity already means.
+    """
+    if estimate.len_dist is None or len_enc is None:
+        return None
+    values = estimate.len_dist.seq_log_density(len_enc)
+    if values is None:
+        return None
+    values = np.asarray(values)
+    if values.size == 0:
+        return None if rows else values
+    if values.shape[0] != rows:
+        raise ValueError(f"hidden-Markov length model scored {values.shape[0]} sequences but the batch holds {rows}.")
+    return values
+
+
 def _responsibility_identity_applies(init_key, trans_key, state_key) -> bool:
     """Whether the cross-part mass identities are still invariants for this accumulator.
 
@@ -3150,8 +3176,9 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             # An all-zero forward row leaves -inf here, as in seq_log_density; NaN means the row was
             # impossible at every state. The beta pass below is the first thing to touch a statistic.
             ll_ret[np.isnan(ll_ret)] = -np.inf
-            if estimate.len_dist is not None and len_enc is not None:
-                ll_ret = ll_ret + estimate.len_dist.seq_log_density(len_enc)
+            _len_term = _length_term(estimate, len_enc, ll_ret.shape[0])
+            if _len_term is not None:
+                ll_ret = ll_ret + _len_term
             vec.require_possible_log_evidence(ll_ret, context="HiddenMarkovAccumulator.seq_update")
 
             band2 = idx_bands[-1]
@@ -3282,8 +3309,9 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             pr_max_1d = np.ascontiguousarray(pr_max[:, 0])
             numba_seq_log_density(num_states, tz, pr_obs, init_pvec, tran_mat, pr_max_1d, nb_next, nb_buff, ll_ret)
             ll_ret[np.isnan(ll_ret)] = -np.inf
-            if estimate.len_dist is not None and len_enc is not None:
-                ll_ret = ll_ret + estimate.len_dist.seq_log_density(len_enc)
+            _len_term = _length_term(estimate, len_enc, ll_ret.shape[0])
+            if _len_term is not None:
+                ll_ret = ll_ret + _len_term
             vec.require_possible_log_evidence(ll_ret, context="HiddenMarkovAccumulator.seq_update")
             if self._track_ll:
                 self._seq_ll += float(np.dot(weights, ll_ret))
