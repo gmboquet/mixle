@@ -202,6 +202,36 @@ class BackoffDistribution(SequenceEncodableProbabilityDistribution):
         self.name = name
         self.keys = keys
 
+    def compute_declaration(self):
+        """Declare the backoff's support as the support its two children agree on.
+
+        A backoff mixes a sharp ``base`` with a broad ``fallback`` over the SAME sample space, so
+        when both children declare the same support the mixture has it too. Declaring nothing made
+        the composite unusable wherever a caller has to prove what a distribution ranges over:
+        ``SequenceDistribution`` refuses a length model that cannot "prove support on non-negative
+        integers", and ``mixle.utils.automatic`` builds exactly this shape -- a backoff length model
+        over sequence records -- so the automatic path produced a model the library then rejected.
+
+        Children that disagree (or do not declare) leave the support unstated, which is the honest
+        answer rather than a guess.
+        """
+        from mixle.stats.compute.declarations import DistributionDeclaration, StatisticSpec, declaration_for
+
+        children = tuple(declaration_for(child) for child in (self.base, self.fallback))
+        declared = {child.support for child in children if child is not None}
+        support = declared.pop() if len(declared) == 1 and len(children) == 2 else None
+        known = tuple(child for child in children if child is not None)
+        return DistributionDeclaration(
+            name="backoff",
+            distribution_type=type(self),
+            parameters=(),
+            statistics=(StatisticSpec("base"), StatisticSpec("fallback")),
+            support=support,
+            children=known,
+            child_roles=tuple(("base", "fallback")[: len(known)]),
+            differentiable=all(child.differentiable for child in known) if known else False,
+        )
+
     def __str__(self) -> str:
         """Return a constructor-style representation of the backoff mixture."""
         return "BackoffDistribution(%s, %s, escape_weight=%s, name=%s, keys=%s)" % (

@@ -63,12 +63,29 @@ def _type_id(value: Any) -> str:
     return "%s.%s" % (cls.__module__, cls.__qualname__)
 
 
+# Conjugate updating can legitimately return a DIFFERENT concrete class from the prior it updates:
+# a symmetric Dirichlet prior meets asymmetric counts and its posterior is a general Dirichlet.
+# Both spellings are the same conjugate family, so the structure check treats them as one slot --
+# comparing exact classes made the DP mixture reject its own freshly-fitted output, which is what
+# `mixle.utils.automatic.get_dpm_mixture` produces for any categorical-bearing record.
+_CONJUGATE_FAMILY_ALIASES = {
+    "mixle.stats.bayes.symmetric_dirichlet.SymmetricDirichletDistribution": (
+        "mixle.stats.bayes.dirichlet.DirichletDistribution"
+    ),
+}
+
+
+def _prior_family_id(prior: Any) -> str:
+    type_id = _type_id(prior)
+    return _CONJUGATE_FAMILY_ALIASES.get(type_id, type_id)
+
+
 def _prior_structure(prior: Any) -> tuple[Any, ...]:
     if prior is None:
         return ("none",)
     if isinstance(prior, (tuple, list)):
         return ("sequence", len(prior), *(_prior_structure(child) for child in prior))
-    return ("leaf", _type_id(prior))
+    return ("leaf", _prior_family_id(prior))
 
 
 def _validated_hyperprior(prior: Any) -> GammaDistribution | None:

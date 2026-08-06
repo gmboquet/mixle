@@ -141,6 +141,18 @@ def _validate_length_distribution(length_dist: SequenceEncodableProbabilityDistr
                 _validate_length_distribution(component)
         return
 
+    base = getattr(length_dist, "base", None)
+    fallback = getattr(length_dist, "fallback", None)
+    if base is not None and fallback is not None:
+        # A backoff mixes a sharp base with a broad fallback over the SAME sample space, so it is a
+        # valid length model exactly when both halves are -- the same reasoning as the mixture
+        # branch above. It is not itself enumerable, so the Discrete check below cannot see through
+        # it, and `mixle.utils.automatic` builds precisely this shape for sequence records: the
+        # automatic path produced a length model the library then refused.
+        _validate_length_distribution(base)
+        _validate_length_distribution(fallback)
+        return
+
     if not supports(length_dist, Discrete) or support not in _INFINITE_INTEGER_LENGTH_SUPPORTS:
         raise TypeError(
             "length distribution must prove support on non-negative integers; got declared support %r." % support

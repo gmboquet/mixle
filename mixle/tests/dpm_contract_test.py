@@ -270,5 +270,46 @@ class DirichletProcessInitializationAndElboContractTestCase(unittest.TestCase):
             np.testing.assert_array_equal(after[1], before[1])
 
 
+class ConjugatePosteriorFamilyTest(unittest.TestCase):
+    """A conjugate posterior may be a different CLASS from the prior it updates.
+
+    A symmetric Dirichlet prior meeting asymmetric counts has a general Dirichlet posterior. The
+    component-structure check compared exact classes, so the DP mixture rejected its own
+    freshly-fitted output with "component prior structure differs at component 0" -- and
+    `mixle.utils.automatic.get_dpm_mixture` produces exactly that for any categorical-bearing
+    record, which is how two shipped notebooks hit it. The ELBO already handles the mixed pair;
+    only the fingerprint objected.
+    """
+
+    def test_symmetric_and_general_dirichlet_share_a_structure_slot(self):
+        from mixle.stats.bayes.dirichlet import DirichletDistribution
+        from mixle.stats.bayes.dirichlet_process_mixture import _prior_structure
+        from mixle.stats.bayes.symmetric_dirichlet import SymmetricDirichletDistribution
+
+        self.assertEqual(
+            _prior_structure(SymmetricDirichletDistribution(1.0, 3)),
+            _prior_structure(DirichletDistribution(np.array([2.0, 3.0, 4.0]))),
+        )
+
+    def test_an_unrelated_prior_family_is_still_rejected(self):
+        from mixle.stats.bayes.dirichlet import DirichletDistribution
+        from mixle.stats.bayes.dirichlet_process_mixture import _prior_structure
+
+        self.assertNotEqual(
+            _prior_structure(DirichletDistribution(np.array([1.0, 1.0]))),
+            _prior_structure(GammaDistribution(1.0, 1.0)),
+        )
+
+    def test_the_automatic_dp_mixture_fits_sequence_records(self):
+        import io
+
+        from mixle.utils.automatic import get_dpm_mixture
+
+        rng = RandomState(0)
+        data = [[int(v) for v in rng.randint(0, 5, size=rng.randint(1, 6))] for _ in range(120)]
+        model = get_dpm_mixture(data, rng=RandomState(1), max_components=4, max_its=5, out=io.StringIO())
+        self.assertGreater(model.num_components, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
