@@ -627,8 +627,16 @@ def solve(
         teacher: The callable performing the task today (per-item or batched). It labels the dataset and
             remains the fallback for inputs the student does not handle confidently.
         inputs: Example inputs (text, or tuple/dict records) covering the task. The teacher labels them.
-        alpha: Escalation honesty -- answer locally only when a single label is conformally covered at
-            ``>= 1 - alpha``; otherwise fall back to the teacher.
+        alpha: Miscoverage budget for the conformal prediction sets. Under exchangeability of the
+            calibration rows and incoming queries, a set covers the teacher's label with probability
+            ``>= 1 - alpha`` MARGINALLY over queries; the student answers locally only when its set
+            is a single label and escalates otherwise. Marginal set coverage is NOT a bound on the
+            error of the locally-answered slice (answering conditions on the set being a singleton),
+            so answered-slice agreement is reported as a measurement -- certify an answered-slice
+            target separately with
+            :meth:`mixle.task.calibrate.CalibratedTaskModel.calibrate_selective`. Both statements
+            fail silently under distribution shift; the ``ood`` gate below mitigates, and drifted
+            traffic calls for re-measurement.
         target_agreement: Optional gate. If the student's held-out agreement with the teacher misses it,
             the returned Solution routes *everything* to the teacher (``promoted=False``).
         holdout: Fraction reserved for calibration + verification (never trained on). Those are two

@@ -8,8 +8,10 @@ would actually reach for (scikit-learn specialists, raw torch). Three claims, th
      each compared against a scikit-learn specialist trained for that one query.
   2. DISTILLATION — replace a rigid routine with a tiny calibrated student. The comparison is not
      accuracy (a logistic regression matches accuracy); it is HONESTY: the sklearn classifier's
-     errors are all silent, the mixle system's local errors are conformally bounded and everything
-     else escalates to the teacher.
+     errors are all silent, while the mixle system escalates ambiguity to the teacher and MEASURES
+     its local error. (``alpha`` buys marginal conformal set coverage under exchangeability — not a
+     bound on the answered slice — which is why act 2 prints the measured slice agreement instead
+     of claiming a guarantee.)
   3. NEURAL INTEGRATION — a torch normalizing flow is a first-class mixle distribution: it EM-fits
      INSIDE a mixture next to a classical Gaussian with the same ``optimize`` verb. The script prints
      all held-out likelihoods without embedding a winner in the source.

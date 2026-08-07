@@ -4,15 +4,19 @@ The regression shape of the solve loop. ``teacher(x) -> float`` is the scorer/pr
 replaced; a small student learns it, and calibration is split conformal for regression: on a held-out
 slice the absolute-residual quantile ``qhat`` is set so the interval ``[yhat - qhat, yhat + qhat]`` covers
 the teacher's answer with probability ``>= 1 - alpha`` (finite-sample, distribution-free, exchangeable
-inputs). The escalate-or-answer rule becomes a *precision* rule: answer locally only when the guaranteed
-interval is tight enough for the caller's purpose (``qhat <= tol``); otherwise run the real code. So a
-locally answered value is covered by the calibrated interval; if the student cannot achieve that
+inputs). The escalate-or-answer rule becomes a *precision* rule: answer locally only when the interval
+is tight enough for the caller's purpose (``qhat <= tol``); otherwise run the real code. Unlike a
+per-query singleton rule, this gate depends only on the calibration slice -- it opens or closes for the
+WHOLE route, never as a function of the individual query -- so serving does not select a biased answered
+slice: every served request carries the same MARGINAL ``>= 1 - alpha`` interval statement. That coverage
+is marginal over queries under exchangeability, not per-request certainty, and it fails silently under
+distribution shift -- re-measure on drifted traffic. If the student cannot achieve the required
 precision, every request escalates.
 
     def price(item): ...                                   # the rigid pricing routine
     sol = solve_regression(price, items, tol=5.0)          # dataset <- price(i); train; calibrate
-    sol(item)                                              # a float: local (±tol guaranteed) or teacher
-    sol.interval(item)                                     # (yhat, lo, hi) with 1 - alpha coverage
+    sol(item)                                              # a float: local (width <= tol) or teacher
+    sol.interval(item)                                     # (yhat, lo, hi), marginal 1 - alpha coverage
     sol.improve(); sol.report()                            # the same compounding loop
 
 ``qhat`` is one global width, as in standard split conformal regression.

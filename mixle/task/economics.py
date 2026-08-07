@@ -1,13 +1,20 @@
 """Cost comparisons for local distillation, cascades, and teacher-only serving.
 
-Every routing choice has a cost model. This module combines a conformal
+Every routing choice has a cost model. This module combines a measured
 escalation rate (:meth:`mixle.task.calibrate.CalibratedTaskModel.escalation_rate`,
 the empirical ``p_escalate``) with unit costs:
 
   * **frontier-only** -- pay ``c_frontier`` for every request, forever.
   * **local-only** -- distill once (``n_label`` teacher calls + training), then pay ``c_local`` per request.
   * **cascade** -- run the low-cost local model first, escalate only the ambiguous fraction: per request
-    ``c_local + p_escalate * c_frontier``, with the singletons covered at ``1 - alpha``.
+    ``c_local + p_escalate * c_frontier``.
+
+``p_escalate`` is a measured selection rate, and ``alpha`` buys only MARGINAL prediction-set
+coverage under exchangeability -- it is not a bound on the error of the locally-answered
+slice, because answering locally conditions on the set being a singleton. Treat answered-slice
+risk as a measurement, or certify it separately with
+:meth:`mixle.task.calibrate.CalibratedTaskModel.calibrate_selective`; both statements fail
+silently under distribution shift.
 
 :func:`break_even_volume` is the request count at which a distilled route
 recovers its one-time setup cost. :func:`recommend_route` picks the lowest-cost
