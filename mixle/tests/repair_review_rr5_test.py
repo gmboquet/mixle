@@ -489,5 +489,81 @@ class MutatorFinitenessInvariantTest(unittest.TestCase):
         np.testing.assert_allclose(keyed.init_counts, [1.0, 1.0])
 
 
+class TransactionalMutatorTest(unittest.TestCase):
+    """STAT-RR9-1: rollback must cover the WHOLE mutator, not the part that happened to fail.
+
+    Pass eight's repair rolled back only the count arrays, so a child failure mid-combine left the
+    counts and earlier children already merged; a key_merge whose transition pool failed left the
+    initial pool merged one step earlier; and key_replace validated its second candidate after
+    assigning the first. Every mutator now snapshots everything it can touch and restores all of
+    it on any failure.
+    """
+
+    @staticmethod
+    def _accumulator(keys=(None, None, None)):
+        return HiddenMarkovEstimator([GaussianEstimator() for _ in range(2)], keys=keys).accumulator_factory().make()
+
+    @staticmethod
+    def _consistent(accumulator, scale=1.0, children=None):
+        # state mass == initial mass + transition mass, at any scale
+        init = np.array([1.0, 1.0]) * scale
+        trans = np.full((2, 2), 0.25) * scale
+        state = np.array([1.5, 1.5]) * scale
+        return (
+            2,
+            init,
+            state,
+            trans,
+            children if children is not None else tuple(c.value() for c in accumulator.accumulators),
+            None,
+        )
+
+    def test_combine_child_failure_rolls_back_counts_and_children(self):
+        accumulator = self._accumulator()
+        accumulator.combine(self._consistent(accumulator))
+        counts_before = accumulator.init_counts.copy()
+        children_before = [repr(c.value()) for c in accumulator.accumulators]
+        poisoned = self._consistent(accumulator, children=(accumulator.accumulators[0].value(), None))
+        with self.assertRaises((TypeError, ValueError)):  # the poisoned child raises TypeError
+            accumulator.combine(poisoned)
+        np.testing.assert_array_equal(accumulator.init_counts, counts_before)
+        self.assertEqual([repr(c.value()) for c in accumulator.accumulators], children_before)
+
+    def test_key_merge_failure_in_a_later_pool_restores_the_earlier_pool(self):
+        # the transition pool overflows while the initial pool merges cleanly one step earlier
+        merger = self._accumulator(("ik", "tk", None))
+        big = 4.4e307  # statistic aggregate 1.76e308 stays finite; the pooled double overflows
+        statistic = (
+            2,
+            np.array([1.0, 1.0]),
+            np.array([1.0 + 2.0 * big, 1.0 + 2.0 * big]),  # keeps state == init + trans
+            np.full((2, 2), big),
+            tuple(c.value() for c in merger.accumulators),
+            None,
+        )
+        merger.combine(statistic)
+        pool = {"ik": np.array([5.0, 5.0]), "tk": np.full((2, 2), big)}
+        pool_init_before = np.asarray(pool["ik"]).copy()
+        with self.assertRaisesRegex(ValueError, "finite"):
+            merger.key_merge(pool)
+        np.testing.assert_array_equal(np.asarray(pool["ik"]), pool_init_before)
+
+    def test_key_replace_validates_both_candidates_before_assigning_either(self):
+        accumulator = self._accumulator(("ik", "tk", None))
+        accumulator.combine(self._consistent(accumulator))
+        init_before = accumulator.init_counts.copy()
+        with self.assertRaises(ValueError):
+            accumulator.key_replace({"ik": np.array([5.0, 5.0]), "tk": np.array([[np.inf, 0.0], [0.0, 0.0]])})
+        np.testing.assert_array_equal(accumulator.init_counts, init_before)
+
+    def test_legitimate_mutations_still_apply(self):
+        accumulator = self._accumulator(("ik", "tk", None))
+        accumulator.combine(self._consistent(accumulator))
+        pool = {}
+        accumulator.key_merge(pool)
+        accumulator.key_replace(pool)
+        np.testing.assert_allclose(accumulator.init_counts, [1.0, 1.0])
+
+
 if __name__ == "__main__":
     unittest.main()

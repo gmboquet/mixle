@@ -117,6 +117,26 @@ A distilled student's softmax is not a probability guarantee on its own.
    calibrated.decide(new_email)          # a label, or ESCALATE (None) if unsure
    calibrated.escalation_rate(val_texts) # the empirical p(escalate)
 
+**What that guarantee is, exactly -- and what it is not.** ``calibrate()`` gives the
+conformal statement: if calibration rows and future queries are exchangeable draws from the
+same distribution, the prediction *set* contains the true label with probability at least
+``1 - alpha`` -- **marginally**, over the whole query population. It is NOT a conditional
+guarantee on the answered slice: the error rate *among the queries the model chooses to
+answer* can be far higher (an adversarial review measured 9% marginal miscoverage alongside
+47% answered-slice error at ``alpha = 0.10`` on a population built to split the two). If the
+answered slice itself needs a risk bound, calibrate it directly with
+``calibrate_selective()``, whose guarantee -- with probability at least ``1 - delta`` over an
+i.i.d. calibration draw, error among answered queries is at most ``alpha`` -- is the
+answered-slice statement, at the cost of quantized thresholds and more calibration data.
+
+Both statements are conditional on their sampling assumption, and both FAIL SILENTLY under
+distribution shift: if deployment queries drift from the calibration distribution (new topics,
+adversarial inputs, a different upstream data feed), neither the marginal nor the selective
+bound holds any longer, and nothing in the serving path detects the drift for you. The
+density gate (:mod:`mixle.task.density`) catches inputs the calibration set never resembled;
+re-measure ``escalation_rate`` and answered-slice agreement on fresh labeled data whenever
+the query mix changes.
+
 ``distill_for_routing`` (and ``distill_records_for_routing`` for structured
 records) does steps 2 and 3 in one call -- it holds out a calibration slice,
 fits the student, and returns an already-``decide()``-able
