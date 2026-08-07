@@ -164,6 +164,23 @@ class RegressionPersistenceTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             back.improve()  # loaded artifacts serve; improving needs the original data
 
+    def test_save_load_round_trips_the_honesty_ledgers(self):
+        # STAT-RR13-2: selection_uses reset to 0 on load, presenting spent selection evidence
+        # as fresh; the calibration regime must survive too
+        import tempfile
+
+        from mixle.task import RegressionSolution, solve_regression
+
+        sol = solve_regression(_price, _items(150), tol=20.0, alpha=0.1, seed=0, epochs=100)
+        sol.selection_uses = 4
+        sol.calibration_evidence = "fresh-harvest"
+        with tempfile.TemporaryDirectory() as d:
+            back = RegressionSolution.load(sol.save(d + "/pricer"), _price)
+        self.assertEqual(back.calibration_evidence, "fresh-harvest")
+        self.assertEqual(back.selection_uses, 4)
+        self.assertEqual(back.report()["selection_uses"], 4)
+        self.assertEqual(back.report()["calibration_evidence"], "fresh-harvest")
+
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class RegressionResolveTest(unittest.TestCase):

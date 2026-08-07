@@ -163,6 +163,26 @@ class SolveTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             served.improve()  # loaded artifacts serve + harvest; improving needs the original data
 
+    def test_save_load_round_trips_the_honesty_ledgers(self):
+        # STAT-RR13-1/2: an artifact whose threshold was recalibrated on reused rows reloaded as
+        # "solve-split" (falsely certified), and selection_uses reset to 0, flipping
+        # selection_evidence_is_single_use from False back to True -- a spent receipt reloaded
+        # as fresh evidence.
+        import tempfile
+
+        from mixle.task import Solution, solve
+
+        sol = solve(_route, _tickets(300), alpha=0.15, seed=0, epochs=200)
+        sol.selection_uses = 4
+        sol.calibration_evidence = "reused-after-adaptive-harvest"
+        self.assertFalse(sol.selection_evidence_is_single_use)
+        with tempfile.TemporaryDirectory() as d:
+            back = Solution.load(sol.save(d + "/router"), _route)
+        self.assertEqual(back.calibration_evidence, "reused-after-adaptive-harvest")
+        self.assertEqual(back.selection_uses, 4)
+        self.assertFalse(back.selection_evidence_is_single_use)
+        self.assertEqual(back.report()["calibration_evidence"], "reused-after-adaptive-harvest")
+
     def test_save_load_preserves_rejected_promotion(self):
         import tempfile
 

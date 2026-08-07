@@ -87,7 +87,9 @@ jobs:
           CANDIDATE_SHA: ${{ github.sha }}
         run: |
           SITE=$("$RUNNER_TEMP/artifact-env/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
-          "$RUNNER_TEMP/audit-tool/bin/pip-audit" --path "$SITE" --format cyclonedx-json -o raw-sbom.json
+          # same-waiver SBOM pass as the all-features job (symmetric latent bug: this line
+          # would fail the day a base-profile waiver exists)
+          "$RUNNER_TEMP/audit-tool/bin/pip-audit" --path "$SITE" "${WAIVERS[@]}" --format cyclonedx-json -o raw-sbom.json
           python scripts/bind_sbom.py \
             --cyclonedx raw-sbom.json \
             --wheel-metadata wheel-metadata.json \
@@ -138,7 +140,11 @@ jobs:
             --args-out waiver-args-all.txt --receipt accepted-waivers-all.json
           mapfile -t WAIVERS < waiver-args-all.txt
           "$RUNNER_TEMP/audit-tool/bin/pip-audit" --path "$SITE" "${WAIVERS[@]}"
-          "$RUNNER_TEMP/audit-tool/bin/pip-audit" --path "$SITE" --format cyclonedx-json -o raw-sbom-all.json
+          # the SBOM pass runs under the SAME accepted waivers: pip-audit exits nonzero on any
+          # finding regardless of output format, so an unwaived SBOM pass failed the job even
+          # though the gating audit above had already accepted the waiver; the bound SBOM
+          # embeds the full waiver record, so the audit trail is preserved there
+          "$RUNNER_TEMP/audit-tool/bin/pip-audit" --path "$SITE" "${WAIVERS[@]}" --format cyclonedx-json -o raw-sbom-all.json
       - name: Bind complete-runtime SBOM to candidate and wheel
         env:
           CANDIDATE_SHA: ${{ github.sha }}

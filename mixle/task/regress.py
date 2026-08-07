@@ -378,6 +378,9 @@ class RegressionSolution:
                     "lr": self.lr,
                     "seed": self.seed,
                     "calibration_evidence": self.calibration_evidence,
+                    # the selection-reuse receipt survives the round trip (STAT-RR13-2): resetting
+                    # it to zero on load presented spent selection evidence as fresh
+                    "selection_uses": int(self.selection_uses),
                 }
             },
         )
@@ -404,6 +407,7 @@ class RegressionSolution:
             lr=float(m["lr"]),
             seed=int(m["seed"]),
             calibration_evidence=str(m.get("calibration_evidence", "solve-split")),
+            selection_uses=int(m.get("selection_uses", 0)),
         )
 
     def improve(self, evidence_inputs: Sequence[Any] | None = None) -> bool:
