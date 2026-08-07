@@ -47,6 +47,20 @@ from mixle.stats.latent.effective_sample import (
     validated_positive_integer,
     validated_statistic_tuple,
 )
+
+# The segmental accumulator shares the chain HMM's exact statistic geometry (initial/state/
+# transition counts, one emission-accumulator list, a length child, and the init/trans/state
+# key trio), so its mutators delegate to the family-shared transactional implementation --
+# the latent-family mutator audit measured every pre-repair defect class alive in the local
+# copies, which is precisely the sibling-bug hazard the shared home exists to end.
+from mixle.stats.latent.hidden_markov import (
+    _keyed_statistics_merge,
+    _keyed_statistics_replace,
+    _transactional_combine,
+    _transactional_restore,
+    _transactional_scale,
+    _validate_state_mass,
+)
 from mixle.stats.latent.markov_stopping import (
     DEFAULT_TERMINAL_STEP_CAP,
     require_terminal_reached,
@@ -699,22 +713,30 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             (num_states, num_states),
             "segmental-HMM transition counts",
         )
-        if not np.isclose(
-            float(state_counts.sum()),
-            float(init_counts.sum() + trans_counts.sum()),
-            rtol=1.0e-9,
-            atol=1.0e-9,
-        ):
-            raise ValueError("segmental-HMM state counts must equal initial plus transition mass")
+        # combine receives one accumulator's own statistics -- pooling happens later, at
+        # key_merge -- so the unconditional equality applies, with the family's sqrt-mass
+        # tolerance instead of the previous flat 1e-9 (which was tighter than float32 roundoff).
+        _validate_state_mass(
+            init_counts,
+            state_counts,
+            trans_counts,
+            init_key=None,
+            trans_key=None,
+            label="segmental-HMM",
+        )
         if not isinstance(acc_values, (tuple, list)) or len(acc_values) != num_states:
             raise ValueError("segmental-HMM emission statistics must match the state count")
-        self.init_counts += init_counts
-        self.state_counts += state_counts
-        self.trans_counts += trans_counts
-        for k, value in enumerate(acc_values):
-            self.accumulators[k].combine(value)
-        if len_value is not None:
-            self.len_accumulator.combine(len_value)
+        # The ENTIRE combine is transactional in the family-shared core (STAT-RR8-1/RR9-1
+        # classes, measured on this accumulator by the latent-family mutator audit).
+        _transactional_combine(
+            self,
+            init_counts,
+            state_counts,
+            trans_counts,
+            acc_values,
+            len_value,
+            family_label="segmental-HMM",
+        )
         return self
 
     def value(self) -> tuple[int, np.ndarray, np.ndarray, np.ndarray, tuple[Any, ...], Any | None]:
@@ -740,70 +762,55 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         num_states = validated_positive_integer(num_states, "segmental-HMM statistic state count")
         if num_states != self.num_states:
             raise ValueError("segmental-HMM statistic state count must match the accumulator")
-        self.init_counts = validated_count_array(init_counts, (num_states,), "segmental-HMM initial counts")
-        self.state_counts = validated_count_array(state_counts, (num_states,), "segmental-HMM state counts")
-        self.trans_counts = validated_count_array(
+        # Validate EVERYTHING before mutating ANYTHING (the previous order assigned each count
+        # array as it validated), enforce the mode-appropriate mass relation -- a KEYED
+        # accumulator's own value() carries pooled initial/transition parts, and the previous
+        # unconditional equality rejected its own round-trip (measured) -- then assign and
+        # restore children as one transaction in the family-shared core.
+        candidate_init = validated_count_array(init_counts, (num_states,), "segmental-HMM initial counts")
+        candidate_state = validated_count_array(state_counts, (num_states,), "segmental-HMM state counts")
+        candidate_trans = validated_count_array(
             trans_counts,
             (num_states, num_states),
             "segmental-HMM transition counts",
         )
-        if not np.isclose(
-            float(self.state_counts.sum()),
-            float(self.init_counts.sum() + self.trans_counts.sum()),
-            rtol=1.0e-9,
-            atol=1.0e-9,
-        ):
-            raise ValueError("segmental-HMM state counts must equal initial plus transition mass")
+        _validate_state_mass(
+            candidate_init,
+            candidate_state,
+            candidate_trans,
+            init_key=self.init_key,
+            trans_key=self.trans_key,
+            label="segmental-HMM",
+        )
         if not isinstance(acc_values, (tuple, list)) or len(acc_values) != num_states:
             raise ValueError("segmental-HMM emission statistics must match the state count")
-        for k, value in enumerate(acc_values):
-            self.accumulators[k].from_value(value)
-        if len_value is not None:
-            self.len_accumulator.from_value(len_value)
+        _transactional_restore(self, candidate_init, candidate_state, candidate_trans, acc_values, len_value)
         return self
 
     def scale(self, c: float) -> "SegmentalHiddenMarkovAccumulator":
         """Scale all weight-linear sufficient statistics by ``c``."""
         c = validated_observation_weight(c, "segmental-HMM statistic scale")
-        self.init_counts *= c
-        self.state_counts *= c
-        self.trans_counts *= c
-        for acc in self.accumulators:
-            acc.scale(c)
-        self.len_accumulator.scale(c)
+        # Parent counts, children, and the length child scale as ONE transaction with the
+        # scaled result validated as a postcondition, in the family-shared core (measured;
+        # STAT-RR8-1/RR10-1 classes).
+        _transactional_scale(self, c, family_label="segmental-HMM")
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
         """Merge keyed initial, transition, emission, and length statistics."""
-        if self.init_key is not None:
-            stats_dict[self.init_key] = stats_dict.get(self.init_key, 0.0) + self.init_counts
-        if self.trans_key is not None:
-            stats_dict[self.trans_key] = stats_dict.get(self.trans_key, 0.0) + self.trans_counts
-        if self.state_key is not None:
-            if self.state_key in stats_dict:
-                for k, acc in enumerate(stats_dict[self.state_key]):
-                    acc.combine(self.accumulators[k].value())
-            else:
-                stats_dict[self.state_key] = self.accumulators
-        for acc in self.accumulators:
-            acc.key_merge(stats_dict)
-        self.len_accumulator.key_merge(stats_dict)
+        # One shared implementation for the whole HMM family: transactional with in-place-
+        # healing rollback, pooled-result finiteness checks, and copy-on-adoption aliasing
+        # discipline -- the local copy left earlier pools merged when a later pool failed
+        # (measured; STAT-RR8-1/RR9-1/RR10-1 classes).
+        _keyed_statistics_merge(self, stats_dict, family_label="segmental-HMM")
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace keyed initial, transition, emission, and length statistics."""
-        # Copy on replace: key_merge's `stats_dict.get(key, 0.0) + self.<field>` always
-        # allocates a fresh array, but without copying here too, every tied accumulator would
-        # end up pointing at that SAME fresh array object -- any one of them later
-        # accumulating new local data would silently corrupt every other tied accumulator.
-        if self.init_key is not None and self.init_key in stats_dict:
-            self.init_counts = np.asarray(stats_dict[self.init_key]).copy()
-        if self.trans_key is not None and self.trans_key in stats_dict:
-            self.trans_counts = np.asarray(stats_dict[self.trans_key]).copy()
-        if self.state_key is not None and self.state_key in stats_dict:
-            self.accumulators = stats_dict[self.state_key]
-        for acc in self.accumulators:
-            acc.key_replace(stats_dict)
-        self.len_accumulator.key_replace(stats_dict)
+        # One shared implementation for the whole HMM family: both candidates validated before
+        # either is assigned, copy-on-replace aliasing discipline, and full accumulator-plus-
+        # mapping rollback -- the local copy accepted [inf, 0] outright and adopted a poisoned
+        # pooled child list before anything validated it (measured; STAT-RR8-1/RR9-1/RR10-1).
+        _keyed_statistics_replace(self, stats_dict, family_label="segmental-HMM")
 
     def acc_to_encoder(self) -> "SegmentalHiddenMarkovDataEncoder":
         """Return an encoder compatible with the emission and length accumulators."""
@@ -912,19 +919,28 @@ class SegmentalHiddenMarkovEstimator(ParameterEstimator):
             "segmental HMM emission sufficient statistics",
             size=num_states,
         )
-        if not np.isclose(
-            float(state_counts.sum()),
-            float(init_counts.sum() + trans_counts.sum()),
-            rtol=1.0e-9,
-            atol=1.0e-9,
-        ):
-            raise ValueError("segmental-HMM state counts must equal initial plus transition mass")
-        validate_effective_sample_mass(
-            nobs,
-            float(init_counts.sum()),
-            label="segmental-HMM effective sample",
-            allow_unassigned=True,
+        _est_keys = self.keys if isinstance(self.keys, (tuple, list)) and len(self.keys) == 3 else (None, None, None)
+        # the M-step receives post-key_merge statistics, so this is where pooling actually
+        # lands: equality when initial/transition are unkeyed, the pooled upper bound otherwise
+        # (the previous unconditional equality rejected every keyed fit's M-step -- measured)
+        _validate_state_mass(
+            init_counts,
+            state_counts,
+            trans_counts,
+            init_key=_est_keys[0],
+            trans_key=_est_keys[1],
+            label="segmental-HMM",
         )
+        if _est_keys[0] is None:
+            # a POOLED initial-count vector carries the mass of every site sharing the key, so
+            # comparing it against THIS site's observation count stops being a corruption
+            # check; an unkeyed one is still bounded by the observations that produced it
+            validate_effective_sample_mass(
+                nobs,
+                float(init_counts.sum()),
+                label="segmental-HMM effective sample",
+                allow_unassigned=True,
+            )
         emissions = [self.estimators[k].estimate(state_counts[k], emission_ss[k]) for k in range(num_states)]
         len_dist = self.len_estimator.estimate(nobs, len_ss)
 

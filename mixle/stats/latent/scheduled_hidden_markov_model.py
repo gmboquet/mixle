@@ -44,6 +44,9 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.latent.effective_sample import (
+    require_finite_count_totals,
+    restore_accumulator_statistics,
+    snapshot_accumulator_statistics,
     validate_effective_sample_mass,
     validated_count_array,
     validated_observation_weight,
@@ -556,14 +559,43 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
             self.n_states,
             "ScheduledHMMAccumulator emission statistics",
         )
+        # Transactional with a finiteness postcondition: a child rejecting its part mid-grid
+        # used to leave the counts and earlier cells merged, and individually valid count
+        # arrays can sum to an infinite aggregate (measured in the latent-family mutator
+        # audit; STAT-RR8-1/RR9-1 classes). The per-phase emission grid is snapshotted and
+        # restored cell-by-cell.
+        _snapshot = snapshot_accumulator_statistics(
+            self,
+            count_attrs=("init_counts", "trans_counts", "emission_counts"),
+            single_child_attrs=("len_acc",),
+        )
+        _grid_values = [[cell.value() for cell in row] for row in self.emission_acc]
         self.init_counts += ic
         self.trans_counts += tc
         self.emission_counts += ec
-        for p in range(self.n_phases):
-            for j in range(self.n_states):
-                self.emission_acc[p][j].combine(em[p][j])
-        if self.len_acc is not None and lv is not None:
-            self.len_acc.combine(lv)
+        try:
+            require_finite_count_totals(
+                (
+                    ("initial counts", self.init_counts),
+                    ("transition counts", self.trans_counts),
+                    ("emission counts", self.emission_counts),
+                ),
+                label="combined scheduled-HMM",
+            )
+            for p in range(self.n_phases):
+                for j in range(self.n_states):
+                    self.emission_acc[p][j].combine(em[p][j])
+            if self.len_acc is not None and lv is not None:
+                self.len_acc.combine(lv)
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            for row, row_values in zip(self.emission_acc, _grid_values):
+                for cell, cell_value in zip(row, row_values):
+                    try:
+                        cell.from_value(cell_value)
+                    except Exception:  # noqa: BLE001, S110 - rollback must not mask the rejection
+                        pass
+            raise
         return self
 
     def value(self) -> tuple:
@@ -580,12 +612,15 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
     def from_value(self, value: tuple) -> ScheduledHMMAccumulator:
         """Restore accumulator state from serialized sufficient statistics."""
         ic, tc, ec, em, lv = validated_statistic_tuple(value, 5, "scheduled-HMM sufficient statistics")
-        self.init_counts = validated_count_array(ic, self.init_counts.shape, "scheduled-HMM initial counts")
-        self.trans_counts = validated_count_array(tc, self.trans_counts.shape, "scheduled-HMM transition counts")
-        self.emission_counts = validated_count_array(ec, self.emission_counts.shape, "scheduled-HMM emission counts")
+        # Validate EVERYTHING before mutating ANYTHING (the previous order assigned each count
+        # array as it validated, so a later rejection left the accumulator half-replaced --
+        # measured), then assign and restore the emission grid as one transaction.
+        candidate_init = validated_count_array(ic, self.init_counts.shape, "scheduled-HMM initial counts")
+        candidate_trans = validated_count_array(tc, self.trans_counts.shape, "scheduled-HMM transition counts")
+        candidate_emission = validated_count_array(ec, self.emission_counts.shape, "scheduled-HMM emission counts")
         if not np.isclose(
-            float(self.emission_counts.sum()),
-            float(self.init_counts.sum() + self.trans_counts.sum()),
+            float(candidate_emission.sum()),
+            float(candidate_init.sum() + candidate_trans.sum()),
             rtol=1.0e-9,
             atol=1.0e-9,
         ):
@@ -596,11 +631,32 @@ class ScheduledHMMAccumulator(SequenceEncodableStatisticAccumulator):
             self.n_states,
             "ScheduledHMMAccumulator emission statistics",
         )
-        for p in range(self.n_phases):
-            for j in range(self.n_states):
-                self.emission_acc[p][j].from_value(em[p][j])
-        if self.len_acc is not None and lv is not None:
-            self.len_acc.from_value(lv)
+        _snapshot = snapshot_accumulator_statistics(
+            self,
+            count_attrs=("init_counts", "trans_counts", "emission_counts"),
+            single_child_attrs=("len_acc",),
+        )
+        _grid_values = [[cell.value() for cell in row] for row in self.emission_acc]
+        self.init_counts, self.trans_counts, self.emission_counts = (
+            candidate_init,
+            candidate_trans,
+            candidate_emission,
+        )
+        try:
+            for p in range(self.n_phases):
+                for j in range(self.n_states):
+                    self.emission_acc[p][j].from_value(em[p][j])
+            if self.len_acc is not None and lv is not None:
+                self.len_acc.from_value(lv)
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            for row, row_values in zip(self.emission_acc, _grid_values):
+                for cell, cell_value in zip(row, row_values):
+                    try:
+                        cell.from_value(cell_value)
+                    except Exception:  # noqa: BLE001, S110 - rollback must not mask the rejection
+                        pass
+            raise
         return self
 
     def acc_to_encoder(self) -> ScheduledHMMDataEncoder:

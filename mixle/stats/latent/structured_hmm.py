@@ -34,6 +34,10 @@ from mixle.stats.compute.mixture_evidence import (
     validated_row_probability_matrix,
 )
 from mixle.stats.latent.effective_sample import (
+    heal_pooled_statistics,
+    require_finite_count_totals,
+    restore_accumulator_statistics,
+    snapshot_accumulator_statistics,
     validate_effective_sample_mass,
     validated_count_array,
     validated_observation_weight,
@@ -1582,6 +1586,15 @@ def _copy_nested(value):
     return deepcopy(value)
 
 
+def _require_finite_nested(value, *, name, label):
+    """Finiteness postcondition over every ndarray leaf of a nested transition statistic."""
+    if isinstance(value, np.ndarray):
+        require_finite_count_totals(((name, value),), label=label)
+    else:
+        for part in value:
+            _require_finite_nested(part, name=name, label=label)
+
+
 def _validated_structured_hmm_statistics(values, states, *, label, transition_count=None):
     """Validate common structured/IO HMM statistic geometry."""
     pi_acc, trans_acc, emit_vals, nk = validated_statistic_tuple(values, 4, label)
@@ -1719,11 +1732,27 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
             self.K,
             label="structured-HMM sufficient statistics",
         )
+        # The ENTIRE combine is transactional with a finiteness postcondition: a child
+        # rejecting its part mid-loop used to leave the counts and earlier children merged,
+        # and individually valid statistics can sum to an infinite aggregate (measured in the
+        # latent-family mutator audit; STAT-RR8-1/RR9-1 classes).
+        _snapshot = snapshot_accumulator_statistics(self, count_attrs=("pi_acc", "nk"), child_attrs=("emit",))
+        _previous_trans = _copy_nested(self.trans_acc)
         self.pi_acc += pi_acc
         self.trans_acc = _add_nested(self.trans_acc, trans_acc)
         self.nk += nk
-        for k in range(self.K):
-            self.emit[k].combine(emit_vals[k])
+        try:
+            require_finite_count_totals(
+                (("initial counts", self.pi_acc), ("emission counts", self.nk)),
+                label="combined structured-HMM",
+            )
+            _require_finite_nested(self.trans_acc, name="transition counts", label="combined structured-HMM")
+            for k in range(self.K):
+                self.emit[k].combine(emit_vals[k])
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            self.trans_acc = _previous_trans
+            raise
         return self
 
     def value(self):
@@ -1737,25 +1766,49 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x):
         """Restore accumulator state from serialized sufficient statistics."""
-        self.pi_acc, self.trans_acc, emit_vals, self.nk = _validated_structured_hmm_statistics(
+        # Candidates validated before ANY assignment; children restore transactionally
+        # (measured; STAT-RR9-1 class).
+        candidate_pi, candidate_trans, emit_vals, candidate_nk = _validated_structured_hmm_statistics(
             x,
             self.K,
             label="structured-HMM sufficient statistics",
         )
-        for k in range(self.K):
-            self.emit[k].from_value(emit_vals[k])
+        _snapshot = snapshot_accumulator_statistics(self, count_attrs=("pi_acc", "nk"), child_attrs=("emit",))
+        _previous_trans = _copy_nested(self.trans_acc)
+        self.pi_acc, self.trans_acc, self.nk = candidate_pi, candidate_trans, candidate_nk
+        try:
+            for k in range(self.K):
+                self.emit[k].from_value(emit_vals[k])
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            self.trans_acc = _previous_trans
+            raise
         return self
 
     def scale(self, factor):
         """Multiply the running statistics by ``factor`` -- the decay primitive online/streaming
         Baum-Welch (StreamingEstimator) uses to fold a new batch into a forgetting running estimate."""
         f = validated_observation_weight(factor, "structured-HMM scale factor")
+        # Parent statistics and children scale as ONE transaction with the scaled result
+        # validated as a postcondition (measured; STAT-RR8-1/RR10-1 classes).
+        _snapshot = snapshot_accumulator_statistics(self, count_attrs=("pi_acc", "nk"), child_attrs=("emit",))
+        _previous_trans = _copy_nested(self.trans_acc)
         self.pi_acc *= f
         self.trans_acc = _scale_nested(self.trans_acc, f)
         self.nk *= f
-        for e in self.emit:
-            if hasattr(e, "scale"):
-                e.scale(f)
+        try:
+            require_finite_count_totals(
+                (("initial counts", self.pi_acc), ("emission counts", self.nk)),
+                label="scaled structured-HMM",
+            )
+            _require_finite_nested(self.trans_acc, name="transition counts", label="scaled structured-HMM")
+            for e in self.emit:
+                if hasattr(e, "scale"):
+                    e.scale(f)
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            self.trans_acc = _previous_trans
+            raise
         return self
 
     def acc_to_encoder(self):
@@ -1765,40 +1818,83 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
     # parameter tying: pool initial / transition counts across accumulators sharing a key
     def key_merge(self, store):
         """Merge tied initial or transition sufficient statistics into ``store``."""
-        if self.init_key is not None:
-            if self.init_key in store:
-                store[self.init_key] = self.pi_acc + store[self.init_key]
-            else:
-                # Copy on adoption: store must never alias this accumulator's own live pi_acc
-                # array. The "already present" branch above is safe (`+` always allocates a
-                # new array), but pi_acc IS mutated in place elsewhere (seq_update's `+=`,
-                # combine's `+=`, scale's `*=`), so without this copy a second tied
-                # accumulator's key_replace would still leave both accumulators pointing at
-                # this accumulator's own original, in-place-mutable array.
-                store[self.init_key] = self.pi_acc.copy()
-        if self.trans_key is not None:
-            store[self.trans_key] = (
-                _add_nested(store[self.trans_key], self.trans_acc)
-                if self.trans_key in store
-                else _copy_nested(self.trans_acc)
-            )
-        for e in self.emit:
-            if hasattr(e, "key_merge"):
-                e.key_merge(store)
+        # Transactional against the mapping, healed in place on failure: a later pool failing
+        # used to leave the initial pool already merged (measured; STAT-RR9-1/RR10-1 classes),
+        # and pooling reaches overflow by addition exactly as combine() does.
+        _snapshot = deepcopy(store)
+        try:
+            if self.init_key is not None:
+                if self.init_key in store:
+                    pooled_pi = self.pi_acc + store[self.init_key]
+                    require_finite_count_totals(
+                        (("pooled initial counts", pooled_pi),), label="structured-HMM key merge"
+                    )
+                    store[self.init_key] = pooled_pi
+                else:
+                    # Copy on adoption: store must never alias this accumulator's own live pi_acc
+                    # array. The "already present" branch above is safe (`+` always allocates a
+                    # new array), but pi_acc IS mutated in place elsewhere (seq_update's `+=`,
+                    # combine's `+=`, scale's `*=`), so without this copy a second tied
+                    # accumulator's key_replace would still leave both accumulators pointing at
+                    # this accumulator's own original, in-place-mutable array.
+                    store[self.init_key] = self.pi_acc.copy()
+            if self.trans_key is not None:
+                if self.trans_key in store:
+                    pooled_trans = _add_nested(store[self.trans_key], self.trans_acc)
+                    _require_finite_nested(
+                        pooled_trans, name="pooled transition counts", label="structured-HMM key merge"
+                    )
+                    store[self.trans_key] = pooled_trans
+                else:
+                    store[self.trans_key] = _copy_nested(self.trans_acc)
+            for e in self.emit:
+                if hasattr(e, "key_merge"):
+                    e.key_merge(store)
+        except Exception:
+            heal_pooled_statistics(store, _snapshot)
+            raise
 
     def key_replace(self, store):
         """Replace tied initial or transition statistics from ``store``."""
+        # Candidates validated BEFORE assignment (a replacement used to land with no shape or
+        # finiteness checks at all -- [inf, 0] went straight into pi_acc), and the whole
+        # replace rolls back on any later failure (measured; STAT-RR8-1/RR9-1 classes).
+        candidate_pi = None
         if self.init_key is not None and self.init_key in store:
+            candidate_pi = validated_count_array(
+                store[self.init_key],
+                np.shape(self.pi_acc),
+                "structured-HMM replacement initial counts",
+            )
+            require_finite_count_totals((("initial counts", candidate_pi),), label="structured-HMM key replace")
+        candidate_trans = None
+        if self.trans_key is not None and self.trans_key in store:
+            candidate_trans = _copy_nested(store[self.trans_key])
+            _require_finite_nested(
+                candidate_trans, name="replacement transition counts", label="structured-HMM key replace"
+            )
+
+        _snapshot = snapshot_accumulator_statistics(self, count_attrs=("pi_acc",), child_attrs=("emit",))
+        # the keyed-pooling protocol tests build accumulators via __new__ with only the fields
+        # under test, so an absent trans_acc is skipped exactly as the snapshot helper skips it
+        _previous_trans = _copy_nested(self.trans_acc) if hasattr(self, "trans_acc") else None
+        if candidate_pi is not None:
             # Copy on replace too: without it, every tied accumulator ends up pointing at the
             # SAME array object, so any one of them later accumulating new local data (pi_acc
             # is mutated in place via += in seq_update/combine and *= in scale) would silently
             # corrupt every other tied accumulator's counts.
-            self.pi_acc = np.asarray(store[self.init_key]).copy()
-        if self.trans_key is not None and self.trans_key in store:
-            self.trans_acc = _copy_nested(store[self.trans_key])
-        for e in self.emit:
-            if hasattr(e, "key_replace"):
-                e.key_replace(store)
+            self.pi_acc = candidate_pi.copy()
+        if candidate_trans is not None:
+            self.trans_acc = candidate_trans
+        try:
+            for e in self.emit:
+                if hasattr(e, "key_replace"):
+                    e.key_replace(store)
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            if _previous_trans is not None:
+                self.trans_acc = _previous_trans
+            raise
 
 
 class StructuredHMMAccumulatorFactory(StatisticAccumulatorFactory):
@@ -2366,11 +2462,25 @@ class IOHMMAccumulator(SequenceEncodableStatisticAccumulator):
             label="IOHMM sufficient statistics",
             transition_count=self.M,
         )
+        # Transactional with a finiteness postcondition (measured on the family; STAT-RR8-1/
+        # RR9-1 classes).
+        _snapshot = snapshot_accumulator_statistics(self, count_attrs=("pi_acc", "nk"), child_attrs=("emit",))
+        _previous_trans = _copy_nested(self.trans_accs)
         self.pi_acc += pi_acc
         self.trans_accs = [_add_nested(a, b) for a, b in zip(self.trans_accs, trans_accs)]
         self.nk += nk
-        for k in range(self.K):
-            self.emit[k].combine(emit_vals[k])
+        try:
+            require_finite_count_totals(
+                (("initial counts", self.pi_acc), ("emission counts", self.nk)),
+                label="combined IOHMM",
+            )
+            _require_finite_nested(self.trans_accs, name="transition counts", label="combined IOHMM")
+            for k in range(self.K):
+                self.emit[k].combine(emit_vals[k])
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            self.trans_accs = _previous_trans
+            raise
         return self
 
     def value(self):
@@ -2384,24 +2494,48 @@ class IOHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x):
         """Restore accumulator state from serialized IOHMM statistics."""
-        self.pi_acc, self.trans_accs, emit_vals, self.nk = _validated_structured_hmm_statistics(
+        # Candidates validated before ANY assignment; children restore transactionally
+        # (measured on the family; STAT-RR9-1 class).
+        candidate_pi, candidate_trans, emit_vals, candidate_nk = _validated_structured_hmm_statistics(
             x,
             self.K,
             label="IOHMM sufficient statistics",
             transition_count=self.M,
         )
-        for k in range(self.K):
-            self.emit[k].from_value(emit_vals[k])
+        _snapshot = snapshot_accumulator_statistics(self, count_attrs=("pi_acc", "nk"), child_attrs=("emit",))
+        _previous_trans = _copy_nested(self.trans_accs)
+        self.pi_acc, self.trans_accs, self.nk = candidate_pi, candidate_trans, candidate_nk
+        try:
+            for k in range(self.K):
+                self.emit[k].from_value(emit_vals[k])
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            self.trans_accs = _previous_trans
+            raise
         return self
 
     def scale(self, factor):
         """Scale IOHMM transition, emission, and initial-state statistics."""
         factor = validated_observation_weight(factor, "IOHMM scale factor")
+        # One transaction with a scaled-result postcondition (measured on the family;
+        # STAT-RR8-1/RR10-1 classes).
+        _snapshot = snapshot_accumulator_statistics(self, count_attrs=("pi_acc", "nk"), child_attrs=("emit",))
+        _previous_trans = _copy_nested(self.trans_accs)
         self.pi_acc *= factor
         self.trans_accs = _scale_nested(self.trans_accs, factor)
         self.nk *= factor
-        for accumulator in self.emit:
-            accumulator.scale(factor)
+        try:
+            require_finite_count_totals(
+                (("initial counts", self.pi_acc), ("emission counts", self.nk)),
+                label="scaled IOHMM",
+            )
+            _require_finite_nested(self.trans_accs, name="transition counts", label="scaled IOHMM")
+            for accumulator in self.emit:
+                accumulator.scale(factor)
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            self.trans_accs = _previous_trans
+            raise
         return self
 
     def acc_to_encoder(self):
@@ -2980,12 +3114,29 @@ class EDHMMAccumulator(SequenceEncodableStatisticAccumulator):
             self.D,
             label="explicit-duration HMM sufficient statistics",
         )
+        # Transactional with a finiteness postcondition (measured; STAT-RR8-1/RR9-1 classes).
+        _snapshot = snapshot_accumulator_statistics(
+            self, count_attrs=("pi_acc", "trans_acc", "dur_acc", "nk"), child_attrs=("emit",)
+        )
         self.pi_acc += pi_acc
         self.trans_acc += trans_acc
         self.dur_acc += dur_acc
         self.nk += nk
-        for k in range(self.K):
-            self.emit[k].combine(emit_vals[k])
+        try:
+            require_finite_count_totals(
+                (
+                    ("initial counts", self.pi_acc),
+                    ("transition counts", self.trans_acc),
+                    ("duration counts", self.dur_acc),
+                    ("emission counts", self.nk),
+                ),
+                label="combined explicit-duration HMM",
+            )
+            for k in range(self.K):
+                self.emit[k].combine(emit_vals[k])
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
         return self
 
     def value(self):
@@ -3000,25 +3151,57 @@ class EDHMMAccumulator(SequenceEncodableStatisticAccumulator):
 
     def from_value(self, x):
         """Restore accumulator state from serialized EDHMM statistics."""
-        self.pi_acc, self.trans_acc, self.dur_acc, emit_vals, self.nk = _validated_edhmm_statistics(
+        # Candidates validated before ANY assignment; children restore transactionally
+        # (measured; STAT-RR9-1 class).
+        candidate_pi, candidate_trans, candidate_dur, emit_vals, candidate_nk = _validated_edhmm_statistics(
             x,
             self.K,
             self.D,
             label="explicit-duration HMM sufficient statistics",
         )
-        for k in range(self.K):
-            self.emit[k].from_value(emit_vals[k])
+        _snapshot = snapshot_accumulator_statistics(
+            self, count_attrs=("pi_acc", "trans_acc", "dur_acc", "nk"), child_attrs=("emit",)
+        )
+        self.pi_acc, self.trans_acc, self.dur_acc, self.nk = (
+            candidate_pi,
+            candidate_trans,
+            candidate_dur,
+            candidate_nk,
+        )
+        try:
+            for k in range(self.K):
+                self.emit[k].from_value(emit_vals[k])
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
         return self
 
     def scale(self, factor):
         """Scale explicit-duration HMM statistics."""
         factor = validated_observation_weight(factor, "explicit-duration HMM scale factor")
+        # One transaction with a scaled-result postcondition (measured; STAT-RR8-1/RR10-1).
+        _snapshot = snapshot_accumulator_statistics(
+            self, count_attrs=("pi_acc", "trans_acc", "dur_acc", "nk"), child_attrs=("emit",)
+        )
         self.pi_acc *= factor
         self.trans_acc *= factor
         self.dur_acc *= factor
         self.nk *= factor
-        for accumulator in self.emit:
-            accumulator.scale(factor)
+        try:
+            require_finite_count_totals(
+                (
+                    ("initial counts", self.pi_acc),
+                    ("transition counts", self.trans_acc),
+                    ("duration counts", self.dur_acc),
+                    ("emission counts", self.nk),
+                ),
+                label="scaled explicit-duration HMM",
+            )
+            for accumulator in self.emit:
+                accumulator.scale(factor)
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
         return self
 
     def acc_to_encoder(self):

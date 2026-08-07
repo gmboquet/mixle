@@ -163,6 +163,132 @@ def validated_weighted_responsibilities(
     return assigned
 
 
+def require_finite_count_totals(named_arrays: Any, *, label: str) -> None:
+    """Every element AND every aggregate must be finite.
+
+    Validating only what ARRIVES is not enough: two individually valid statistics whose elements
+    are each 4.6e307 combine to finite elements with an infinite total, a valid statistic scaled by
+    a valid factor of 3.0 overflows outright, and keyed pooling reaches the same state through
+    addition (STAT-RR8-1). Finiteness has to be a postcondition of every public mutator, not a
+    precondition of ingestion, so this runs on the RESULT and each mutator rolls back if it fails.
+    This is the canonical home; the chain/tree HMM implementation aliases it, and the latent-family
+    mutator audit applies it family-wide.
+    """
+    for name, array in named_arrays:
+        values = np.asarray(array, dtype=np.float64)
+        if not np.all(np.isfinite(values)):
+            raise ValueError(f"{label} {name} must contain only finite values")
+        if not np.isfinite(float(values.sum())):
+            raise ValueError(f"{label} {name} must aggregate to a finite total")
+
+
+def snapshot_accumulator_statistics(
+    acc: Any,
+    *,
+    count_attrs: Any = (),
+    child_attrs: Any = (),
+    single_child_attrs: Any = (),
+) -> dict[str, Any]:
+    """Snapshot the named count arrays, child-accumulator lists, and single children of ``acc``.
+
+    Taken by a mutator BEFORE it changes anything, so a failure at any later point can hand the
+    snapshot to :func:`restore_accumulator_statistics` and put the accumulator back exactly as it
+    was -- counts, children, and the identity of the child containers included. Child lists are
+    captured as (container reference, child references, serialized values): the container
+    reference matters because keyed replacement can REBIND the attribute to an adopted list, and
+    rollback must restore the original object, not a copy.
+
+    Attributes the object does not carry are skipped: the keyed-pooling protocol tests build
+    accumulators via ``__new__`` with only the fields under test, and an attribute an object
+    lacks cannot need restoring either.
+    """
+    counts = {name: np.asarray(getattr(acc, name)).copy() for name in count_attrs if hasattr(acc, name)}
+    children = {}
+    for name in child_attrs:
+        if not hasattr(acc, name):
+            continue
+        container = getattr(acc, name)
+        members = list(container)
+        children[name] = (container, members, [child.value() for child in members])
+    singles = {}
+    for name in single_child_attrs:
+        if not hasattr(acc, name):
+            continue
+        child = getattr(acc, name)
+        singles[name] = (child, None if child is None else child.value())
+    return {"counts": counts, "children": children, "singles": singles}
+
+
+def restore_accumulator_statistics(acc: Any, snapshot: dict[str, Any]) -> None:
+    """Best-effort rollback of a failed mutator from a prior snapshot.
+
+    Count attributes are rebound to the snapshotted copies; child containers are rebound to
+    their ORIGINAL objects and every child restored through ``from_value``; single children
+    (length accumulators and kin) likewise. Restoration errors are deliberately suppressed:
+    the original rejection is the signal, and a failure while rolling back must not mask it.
+    """
+    for name, values in snapshot["counts"].items():
+        setattr(acc, name, values)
+    for name, (container, members, values) in snapshot["children"].items():
+        setattr(acc, name, container)
+        for child, value in zip(members, values):
+            try:
+                child.from_value(value)
+            except Exception:  # noqa: BLE001, S110 - see docstring
+                pass
+    for name, (child, value) in snapshot["singles"].items():
+        setattr(acc, name, child)
+        if child is not None and value is not None:
+            try:
+                child.from_value(value)
+            except Exception:  # noqa: BLE001, S110 - see docstring
+                pass
+
+
+def _healed_in_place(current: Any, snap_value: Any) -> Any:
+    """Write ``snap_value`` back INTO ``current`` where possible, else return the snapshot.
+
+    Arrays are restored element-wise, lists element-by-element, and accumulator objects through
+    ``from_value`` of the snapshot's ``value()`` -- each preserves the identity of the object a
+    caller may already hold a reference to. Healing errors fall back to returning the snapshot
+    object itself (mapping-level restoration), and are suppressed so a rollback failure cannot
+    mask the original rejection.
+    """
+    try:
+        if isinstance(current, np.ndarray) and isinstance(snap_value, np.ndarray) and current.shape == snap_value.shape:
+            current[...] = snap_value
+            return current
+        if isinstance(current, list) and isinstance(snap_value, list) and len(current) == len(snap_value):
+            for i in range(len(current)):
+                current[i] = _healed_in_place(current[i], snap_value[i])
+            return current
+        if isinstance(current, tuple) and isinstance(snap_value, tuple) and len(current) == len(snap_value):
+            return tuple(_healed_in_place(c, s) for c, s in zip(current, snap_value))
+        if hasattr(current, "from_value") and hasattr(snap_value, "value"):
+            current.from_value(snap_value.value())
+            return current
+    except Exception:  # noqa: BLE001, S110 - see docstring
+        pass
+    return snap_value
+
+
+def heal_pooled_statistics(stats_dict: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    """Restore a keyed-statistics mapping after a failed mutator, healing in-place damage.
+
+    Swapping restored COPIES into the mapping is not enough: merges mutate pooled arrays with
+    ``+=`` and pooled emission accumulators with ``combine``, so state reachable through a
+    pre-existing reference -- a caller's alias to a pooled array, the shared child list a tied
+    site adopted -- stayed corrupted while the mapping itself looked restored (STAT-RR10-1).
+    Entries the failed mutator added are removed; surviving entries are healed in place via
+    :func:`_healed_in_place` so external aliases observe the rollback too. Take the snapshot
+    with ``copy.deepcopy(stats_dict)`` before the first mutation.
+    """
+    for key in [k for k in stats_dict if k not in snapshot]:
+        del stats_dict[key]
+    for key, snap_value in snapshot.items():
+        stats_dict[key] = _healed_in_place(stats_dict.get(key), snap_value)
+
+
 __all__ = [
     "EffectiveSampleReceipt",
     "validated_positive_integer",
@@ -172,4 +298,8 @@ __all__ = [
     "validated_statistic_tuple",
     "validate_effective_sample_mass",
     "validated_weighted_responsibilities",
+    "require_finite_count_totals",
+    "snapshot_accumulator_statistics",
+    "restore_accumulator_statistics",
+    "heal_pooled_statistics",
 ]

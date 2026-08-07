@@ -38,6 +38,10 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.latent.effective_sample import (
+    heal_pooled_statistics,
+    require_finite_count_totals,
+    restore_accumulator_statistics,
+    snapshot_accumulator_statistics,
     validate_effective_sample_mass,
     validated_count_array,
     validated_observation_weight,
@@ -723,9 +727,21 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
         counts = validated_count_array(counts, (self.num_components,), "component counts")
         if len(component_stats) != self.num_components:
             raise ValueError("component statistics must have one item per component")
+        # Transactional with a finiteness postcondition: a child rejecting its part mid-loop
+        # used to leave the counts and earlier children merged, and two individually valid
+        # count vectors can sum to an infinite aggregate (measured in the latent-family
+        # mutator audit; STAT-RR8-1/RR9-1 classes).
+        _snapshot = snapshot_accumulator_statistics(self, count_attrs=("comp_counts",), child_attrs=("accumulators",))
         self.comp_counts += counts
-        for i in range(self.num_components):
-            self.accumulators[i].combine(copy.deepcopy(component_stats[i]))
+        try:
+            require_finite_count_totals(
+                (("component counts", self.comp_counts),), label="combined semi-supervised mixture"
+            )
+            for i in range(self.num_components):
+                self.accumulators[i].combine(copy.deepcopy(component_stats[i]))
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
 
         return self
 
@@ -745,11 +761,19 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
 
         """
         counts, component_stats = validated_statistic_tuple(x, 2, "semi-supervised mixture sufficient statistics")
-        self.comp_counts = validated_count_array(counts, (self.num_components,), "component counts")
+        candidate = validated_count_array(counts, (self.num_components,), "component counts")
         if len(component_stats) != self.num_components:
             raise ValueError("component statistics must have one item per component")
-        for i in range(self.num_components):
-            self.accumulators[i].from_value(copy.deepcopy(component_stats[i]))
+        # Validate before assigning, restore transactionally on any child failure (measured;
+        # STAT-RR9-1 class).
+        _snapshot = snapshot_accumulator_statistics(self, count_attrs=("comp_counts",), child_attrs=("accumulators",))
+        self.comp_counts = candidate
+        try:
+            for i in range(self.num_components):
+                self.accumulators[i].from_value(copy.deepcopy(component_stats[i]))
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -763,25 +787,37 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
 
         """
 
-        if self.weight_key is not None:
-            if self.weight_key in stats_dict:
-                stats_dict[self.weight_key] += self.comp_counts
-            else:
-                # Copy on adoption: stats_dict must never alias this accumulator's own live
-                # array, or a later tied accumulator's in-place += above would silently mutate
-                # this accumulator's private comp_counts as a side effect of merging.
-                stats_dict[self.weight_key] = self.comp_counts.copy()
+        # Transactional against the mapping, healed in place on failure: a later pool failing
+        # used to leave the weight pool merged, visible through any caller-held alias
+        # (measured; STAT-RR9-1/RR10-1 classes).
+        _snapshot = copy.deepcopy(stats_dict)
+        try:
+            if self.weight_key is not None:
+                if self.weight_key in stats_dict:
+                    stats_dict[self.weight_key] += self.comp_counts
+                    require_finite_count_totals(
+                        (("pooled component counts", stats_dict[self.weight_key]),),
+                        label="semi-supervised mixture key merge",
+                    )
+                else:
+                    # Copy on adoption: stats_dict must never alias this accumulator's own live
+                    # array, or a later tied accumulator's in-place += above would silently mutate
+                    # this accumulator's private comp_counts as a side effect of merging.
+                    stats_dict[self.weight_key] = self.comp_counts.copy()
 
-        if self.comp_key is not None:
-            if self.comp_key in stats_dict:
-                acc = stats_dict[self.comp_key]
-                for i in range(len(acc)):
-                    acc[i].combine(copy.deepcopy(self.accumulators[i].value()))
-            else:
-                stats_dict[self.comp_key] = copy.deepcopy(self.accumulators)
+            if self.comp_key is not None:
+                if self.comp_key in stats_dict:
+                    acc = stats_dict[self.comp_key]
+                    for i in range(len(acc)):
+                        acc[i].combine(copy.deepcopy(self.accumulators[i].value()))
+                else:
+                    stats_dict[self.comp_key] = copy.deepcopy(self.accumulators)
 
-        for u in self.accumulators:
-            u.key_merge(stats_dict)
+            for u in self.accumulators:
+                u.key_merge(stats_dict)
+        except Exception:
+            heal_pooled_statistics(stats_dict, _snapshot)
+            raise
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace the weight and component sufficient statistics with keyed values.
@@ -794,23 +830,38 @@ class SemiSupervisedMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumu
 
         """
 
-        if self.weight_key is not None:
-            if self.weight_key in stats_dict:
-                # Copy on replace too: without it, every tied accumulator ends up pointing at
-                # the SAME array object, so any one of them later accumulating new local data
-                # would silently corrupt every other tied accumulator's counts.
-                self.comp_counts = np.asarray(stats_dict[self.weight_key]).copy()
+        # Candidate validated BEFORE assignment (a replacement used to land with no shape or
+        # finiteness checks at all), and the whole replace rolls back on any later failure
+        # (measured; STAT-RR8-1/RR9-1 classes).
+        candidate = None
+        if self.weight_key is not None and self.weight_key in stats_dict:
+            candidate = validated_count_array(
+                stats_dict[self.weight_key],
+                np.shape(self.comp_counts),
+                "semi-supervised mixture replacement component counts",
+            )
+            require_finite_count_totals((("component counts", candidate),), label="semi-supervised mixture key replace")
 
-        if self.comp_key is not None:
-            if self.comp_key in stats_dict:
-                acc = stats_dict[self.comp_key]
-                if len(acc) != self.num_components:
-                    raise ValueError("keyed semi-supervised mixture component statistics have incompatible arity.")
-                for local, pooled in zip(self.accumulators, acc):
-                    local.from_value(copy.deepcopy(pooled.value()))
+        _snapshot = snapshot_accumulator_statistics(self, count_attrs=("comp_counts",), child_attrs=("accumulators",))
+        if candidate is not None:
+            # Copy on replace too: without it, every tied accumulator ends up pointing at
+            # the SAME array object, so any one of them later accumulating new local data
+            # would silently corrupt every other tied accumulator's counts.
+            self.comp_counts = candidate.copy()
+        try:
+            if self.comp_key is not None:
+                if self.comp_key in stats_dict:
+                    acc = stats_dict[self.comp_key]
+                    if len(acc) != self.num_components:
+                        raise ValueError("keyed semi-supervised mixture component statistics have incompatible arity.")
+                    for local, pooled in zip(self.accumulators, acc):
+                        local.from_value(copy.deepcopy(pooled.value()))
 
-        for u in self.accumulators:
-            u.key_replace(stats_dict)
+            for u in self.accumulators:
+                u.key_replace(stats_dict)
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
 
     def acc_to_encoder(self) -> "SemiSupervisedMixtureDataEncoder":
         """Creates a SemiSupervisedMixtureDataEncoder for encoding sequences of (value, prior)
@@ -945,12 +996,17 @@ class SemiSupervisedMixtureEstimator(ParameterEstimator):
         counts = validated_count_array(counts, (num_components,), "component counts")
         if len(comp_suff_stats) != num_components:
             raise ValueError("component statistics must have one item per component")
-        validate_effective_sample_mass(
-            nobs,
-            counts.sum(),
-            label="semi-supervised mixture effective sample",
-            allow_unassigned=True,
-        )
+        _keys = self.keys if isinstance(self.keys, (tuple, list)) and len(self.keys) == 2 else (None, None)
+        if _keys[0] is None:
+            # a POOLED component-count vector carries every tied site's mass, so the
+            # observation-count comparison only applies unkeyed (measured: the unconditional
+            # version rejected every weight-keyed fit's M-step)
+            validate_effective_sample_mass(
+                nobs,
+                counts.sum(),
+                label="semi-supervised mixture effective sample",
+                allow_unassigned=True,
+            )
 
         components = [self.estimators[i].estimate(counts[i], comp_suff_stats[i]) for i in range(num_components)]
 

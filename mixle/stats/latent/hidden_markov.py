@@ -67,6 +67,12 @@ from mixle.stats.latent._hidden_markov_numba_kernels import (
     numba_seq_log_density,
 )
 from mixle.stats.latent.effective_sample import (
+    heal_pooled_statistics as _restore_pool_dict,
+)
+from mixle.stats.latent.effective_sample import (
+    require_finite_count_totals as _require_finite_statistics,
+)
+from mixle.stats.latent.effective_sample import (
     validate_effective_sample_mass,
     validated_count_array,
     validated_observation_weight,
@@ -188,64 +194,6 @@ def _restore_children(accumulators, len_accumulator, snapshot) -> None:
             len_accumulator.from_value(length_value)
         except Exception:  # noqa: BLE001, S110 - see docstring
             pass
-
-
-def _healed_in_place(current, snap_value):
-    """Write ``snap_value`` back INTO ``current`` where possible, else return the snapshot.
-
-    Arrays are restored element-wise, lists element-by-element, and accumulator objects through
-    ``from_value`` of the snapshot's ``value()`` -- each preserves the identity of the object a
-    caller may already hold a reference to. Healing errors fall back to returning the snapshot
-    object itself (mapping-level restoration), and are suppressed so a rollback failure cannot
-    mask the original rejection.
-    """
-    try:
-        if isinstance(current, np.ndarray) and isinstance(snap_value, np.ndarray) and current.shape == snap_value.shape:
-            current[...] = snap_value
-            return current
-        if isinstance(current, list) and isinstance(snap_value, list) and len(current) == len(snap_value):
-            for i in range(len(current)):
-                current[i] = _healed_in_place(current[i], snap_value[i])
-            return current
-        if hasattr(current, "from_value") and hasattr(snap_value, "value"):
-            current.from_value(snap_value.value())
-            return current
-    except Exception:  # noqa: BLE001, S110 - see docstring
-        pass
-    return snap_value
-
-
-def _restore_pool_dict(stats_dict: dict[str, Any], snapshot: dict[str, Any]) -> None:
-    """Restore a keyed-statistics mapping after a failed mutator, healing in-place damage.
-
-    Swapping restored COPIES into the mapping is not enough: merges mutate pooled arrays with
-    ``+=`` and pooled emission accumulators with ``combine``, so state reachable through a
-    pre-existing reference -- a caller's alias to a pooled array, the shared child list a tied
-    site adopted -- stayed corrupted while the mapping itself looked restored (STAT-RR10-1).
-    Entries the failed mutator added are removed; surviving entries are healed in place via
-    :func:`_healed_in_place` so external aliases observe the rollback too.
-    """
-    for key in [k for k in stats_dict if k not in snapshot]:
-        del stats_dict[key]
-    for key, snap_value in snapshot.items():
-        stats_dict[key] = _healed_in_place(stats_dict.get(key), snap_value)
-
-
-def _require_finite_statistics(named_arrays, *, label: str) -> None:
-    """Every element AND every aggregate must be finite.
-
-    Validating only what ARRIVES is not enough: two individually valid statistics whose elements
-    are each 4.6e307 combine to finite elements with an infinite total, a valid statistic scaled by
-    a valid factor of 3.0 overflows outright, and keyed pooling reaches the same state through
-    addition (STAT-RR8-1). Finiteness has to be a postcondition of every public mutator, not a
-    precondition of ingestion, so this runs on the RESULT and each mutator rolls back if it fails.
-    """
-    for name, array in named_arrays:
-        values = np.asarray(array, dtype=np.float64)
-        if not np.all(np.isfinite(values)):
-            raise ValueError(f"{label} {name} must contain only finite values")
-        if not np.isfinite(float(values.sum())):
-            raise ValueError(f"{label} {name} must aggregate to a finite total")
 
 
 def _validate_state_mass(init_counts, state_counts, trans_counts, *, init_key, trans_key, label) -> None:

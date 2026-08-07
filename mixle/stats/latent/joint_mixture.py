@@ -45,6 +45,10 @@ from mixle.stats.compute.pdist import (
     child_enumerator,
 )
 from mixle.stats.latent.effective_sample import (
+    heal_pooled_statistics,
+    require_finite_count_totals,
+    restore_accumulator_statistics,
+    snapshot_accumulator_statistics,
     validate_effective_sample_mass,
     validated_count_array,
     validated_observation_weight,
@@ -788,13 +792,34 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             raise ValueError("joint-mixture X1 child statistics must match the component count")
         if not isinstance(s2, (tuple, list)) or len(s2) != self.num_components2:
             raise ValueError("joint-mixture X2 child statistics must match the component count")
+        # Transactional with a finiteness postcondition: a child rejecting its part mid-loop
+        # used to leave the counts and every earlier child merged, and individually valid count
+        # arrays can sum to an infinite aggregate (measured in the latent-family mutator audit;
+        # STAT-RR8-1/RR9-1 classes).
+        _snapshot = snapshot_accumulator_statistics(
+            self,
+            count_attrs=("comp_counts1", "comp_counts2", "joint_counts"),
+            child_attrs=("accumulators1", "accumulators2"),
+        )
         self.joint_counts += jc
         self.comp_counts1 += cc1
-        for i in range(self.num_components1):
-            self.accumulators1[i].combine(copy.deepcopy(s1[i]))
         self.comp_counts2 += cc2
-        for i in range(self.num_components2):
-            self.accumulators2[i].combine(copy.deepcopy(s2[i]))
+        try:
+            require_finite_count_totals(
+                (
+                    ("X1 counts", self.comp_counts1),
+                    ("X2 counts", self.comp_counts2),
+                    ("pair counts", self.joint_counts),
+                ),
+                label="combined joint-mixture",
+            )
+            for i in range(self.num_components1):
+                self.accumulators1[i].combine(copy.deepcopy(s1[i]))
+            for i in range(self.num_components2):
+                self.accumulators2[i].combine(copy.deepcopy(s2[i]))
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
 
         return self
 
@@ -825,9 +850,9 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
             5,
             "joint-mixture sufficient statistics",
         )
-        self.comp_counts1 = validated_count_array(cc1, (self.num_components1,), "joint-mixture X1 counts")
-        self.comp_counts2 = validated_count_array(cc2, (self.num_components2,), "joint-mixture X2 counts")
-        self.joint_counts = validated_count_array(
+        candidate_cc1 = validated_count_array(cc1, (self.num_components1,), "joint-mixture X1 counts")
+        candidate_cc2 = validated_count_array(cc2, (self.num_components2,), "joint-mixture X2 counts")
+        candidate_jc = validated_count_array(
             jc,
             (self.num_components1, self.num_components2),
             "joint-mixture pair counts",
@@ -837,10 +862,22 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         if not isinstance(s2, (tuple, list)) or len(s2) != self.num_components2:
             raise ValueError("joint-mixture X2 child statistics must match the component count")
 
-        for i in range(self.num_components1):
-            self.accumulators1[i].from_value(copy.deepcopy(s1[i]))
-        for i in range(self.num_components2):
-            self.accumulators2[i].from_value(copy.deepcopy(s2[i]))
+        # Every candidate validated before ANY assignment; children restore transactionally
+        # (measured; STAT-RR9-1 class).
+        _snapshot = snapshot_accumulator_statistics(
+            self,
+            count_attrs=("comp_counts1", "comp_counts2", "joint_counts"),
+            child_attrs=("accumulators1", "accumulators2"),
+        )
+        self.comp_counts1, self.comp_counts2, self.joint_counts = candidate_cc1, candidate_cc2, candidate_jc
+        try:
+            for i in range(self.num_components1):
+                self.accumulators1[i].from_value(copy.deepcopy(s1[i]))
+            for i in range(self.num_components2):
+                self.accumulators2[i].from_value(copy.deepcopy(s2[i]))
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
 
         return self
 
@@ -856,33 +893,54 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         """
         weight_key, acc1_key, acc2_key = self.keys
 
-        if weight_key is not None:
-            if weight_key in stats_dict:
-                x1, x2, x3 = stats_dict[weight_key]
-                stats_dict[weight_key] = (x1 + self.comp_counts1, x2 + self.comp_counts2, x3 + self.joint_counts)
-            else:
-                # Copy on adoption: stats_dict must never alias this accumulator's own live
-                # arrays. The "already present" branch above is safe (`+` always allocates a
-                # new array), but without this copy a second tied accumulator's key_replace
-                # would still leave both accumulators pointing at this accumulator's own
-                # original arrays.
-                stats_dict[weight_key] = (self.comp_counts1.copy(), self.comp_counts2.copy(), self.joint_counts.copy())
+        # Transactional against the mapping, healed in place on failure: a later pool failing
+        # used to leave the earlier pools already merged (measured; STAT-RR9-1/RR10-1 classes),
+        # and pooling reaches overflow by addition exactly as combine() does.
+        _snapshot = copy.deepcopy(stats_dict)
+        try:
+            if weight_key is not None:
+                if weight_key in stats_dict:
+                    x1, x2, x3 = stats_dict[weight_key]
+                    pooled = (x1 + self.comp_counts1, x2 + self.comp_counts2, x3 + self.joint_counts)
+                    require_finite_count_totals(
+                        (
+                            ("pooled X1 counts", pooled[0]),
+                            ("pooled X2 counts", pooled[1]),
+                            ("pooled pair counts", pooled[2]),
+                        ),
+                        label="joint-mixture key merge",
+                    )
+                    stats_dict[weight_key] = pooled
+                else:
+                    # Copy on adoption: stats_dict must never alias this accumulator's own live
+                    # arrays. The "already present" branch above is safe (`+` always allocates a
+                    # new array), but without this copy a second tied accumulator's key_replace
+                    # would still leave both accumulators pointing at this accumulator's own
+                    # original arrays.
+                    stats_dict[weight_key] = (
+                        self.comp_counts1.copy(),
+                        self.comp_counts2.copy(),
+                        self.joint_counts.copy(),
+                    )
 
-        if acc1_key is not None:
-            if acc1_key in stats_dict:
-                acc = stats_dict[acc1_key]
-                for i in range(len(acc)):
-                    acc[i].combine(copy.deepcopy(self.accumulators1[i].value()))
-            else:
-                stats_dict[acc1_key] = copy.deepcopy(self.accumulators1)
+            if acc1_key is not None:
+                if acc1_key in stats_dict:
+                    acc = stats_dict[acc1_key]
+                    for i in range(len(acc)):
+                        acc[i].combine(copy.deepcopy(self.accumulators1[i].value()))
+                else:
+                    stats_dict[acc1_key] = copy.deepcopy(self.accumulators1)
 
-        if acc2_key is not None:
-            if acc2_key in stats_dict:
-                acc = stats_dict[acc2_key]
-                for i in range(len(acc)):
-                    acc[i].combine(copy.deepcopy(self.accumulators2[i].value()))
-            else:
-                stats_dict[acc2_key] = copy.deepcopy(self.accumulators2)
+            if acc2_key is not None:
+                if acc2_key in stats_dict:
+                    acc = stats_dict[acc2_key]
+                    for i in range(len(acc)):
+                        acc[i].combine(copy.deepcopy(self.accumulators2[i].value()))
+                else:
+                    stats_dict[acc2_key] = copy.deepcopy(self.accumulators2)
+        except Exception:
+            heal_pooled_statistics(stats_dict, _snapshot)
+            raise
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace this accumulator's sufficient statistics from matching keys.
@@ -893,31 +951,57 @@ class JointMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
         """
         weight_key, acc1_key, acc2_key = self.keys
 
-        if weight_key is not None:
-            if weight_key in stats_dict:
-                # Copy on replace too: without it, every tied accumulator ends up pointing at
-                # the SAME array objects, so any one of them later accumulating new local data
-                # would silently corrupt every other tied accumulator's counts.
-                x1, x2, x3 = stats_dict[weight_key]
-                self.comp_counts1 = np.asarray(x1).copy()
-                self.comp_counts2 = np.asarray(x2).copy()
-                self.joint_counts = np.asarray(x3).copy()
+        # Every candidate validated BEFORE any assignment (replacements used to land with no
+        # shape or finiteness checks), and the whole replace rolls back on any later failure
+        # (measured; STAT-RR8-1/RR9-1 classes).
+        candidates = None
+        if weight_key is not None and weight_key in stats_dict:
+            x1, x2, x3 = stats_dict[weight_key]
+            candidates = (
+                validated_count_array(x1, np.shape(self.comp_counts1), "joint-mixture replacement X1 counts"),
+                validated_count_array(x2, np.shape(self.comp_counts2), "joint-mixture replacement X2 counts"),
+                validated_count_array(x3, np.shape(self.joint_counts), "joint-mixture replacement pair counts"),
+            )
+            require_finite_count_totals(
+                (
+                    ("X1 counts", candidates[0]),
+                    ("X2 counts", candidates[1]),
+                    ("pair counts", candidates[2]),
+                ),
+                label="joint-mixture key replace",
+            )
 
-        if acc1_key is not None:
-            if acc1_key in stats_dict:
-                pooled = stats_dict[acc1_key]
-                if len(pooled) != self.num_components1:
-                    raise ValueError("keyed joint-mixture X1 component statistics have incompatible arity.")
-                for local, shared in zip(self.accumulators1, pooled):
-                    local.from_value(copy.deepcopy(shared.value()))
+        _snapshot = snapshot_accumulator_statistics(
+            self,
+            count_attrs=("comp_counts1", "comp_counts2", "joint_counts"),
+            child_attrs=("accumulators1", "accumulators2"),
+        )
+        if candidates is not None:
+            # Copy on replace too: without it, every tied accumulator ends up pointing at
+            # the SAME array objects, so any one of them later accumulating new local data
+            # would silently corrupt every other tied accumulator's counts.
+            self.comp_counts1 = candidates[0].copy()
+            self.comp_counts2 = candidates[1].copy()
+            self.joint_counts = candidates[2].copy()
+        try:
+            if acc1_key is not None:
+                if acc1_key in stats_dict:
+                    pooled = stats_dict[acc1_key]
+                    if len(pooled) != self.num_components1:
+                        raise ValueError("keyed joint-mixture X1 component statistics have incompatible arity.")
+                    for local, shared in zip(self.accumulators1, pooled):
+                        local.from_value(copy.deepcopy(shared.value()))
 
-        if acc2_key is not None:
-            if acc2_key in stats_dict:
-                pooled = stats_dict[acc2_key]
-                if len(pooled) != self.num_components2:
-                    raise ValueError("keyed joint-mixture X2 component statistics have incompatible arity.")
-                for local, shared in zip(self.accumulators2, pooled):
-                    local.from_value(copy.deepcopy(shared.value()))
+            if acc2_key is not None:
+                if acc2_key in stats_dict:
+                    pooled = stats_dict[acc2_key]
+                    if len(pooled) != self.num_components2:
+                        raise ValueError("keyed joint-mixture X2 component statistics have incompatible arity.")
+                    for local, shared in zip(self.accumulators2, pooled):
+                        local.from_value(copy.deepcopy(shared.value()))
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
 
     def acc_to_encoder(self) -> DataSequenceEncoder:
         """Return an encoder compatible with paired joint-mixture observations."""
@@ -1052,12 +1136,17 @@ class JointMixtureEstimator(ParameterEstimator):
             raise ValueError("joint-mixture X1 counts must equal pair responsibility mass")
         if not np.isclose(float(counts2.sum()), mass, rtol=1.0e-9, atol=1.0e-9):
             raise ValueError("joint-mixture X2 counts must equal pair responsibility mass")
-        validate_effective_sample_mass(
-            nobs,
-            mass,
-            label="joint-mixture effective sample",
-            allow_unassigned=True,
-        )
+        _keys = self.keys if isinstance(self.keys, (tuple, list)) and len(self.keys) == 3 else (None, None, None)
+        if _keys[0] is None:
+            # POOLED joint counts carry every tied site's mass, so the observation-count
+            # comparison only applies unkeyed (measured: the unconditional version rejected
+            # every weight-keyed fit's M-step)
+            validate_effective_sample_mass(
+                nobs,
+                mass,
+                label="joint-mixture effective sample",
+                allow_unassigned=True,
+            )
 
         components1 = [self.estimators1[i].estimate(counts1[i], comp_suff_stats1[i]) for i in range(num_components1)]
         components2 = [self.estimators2[i].estimate(counts2[i], comp_suff_stats2[i]) for i in range(num_components2)]

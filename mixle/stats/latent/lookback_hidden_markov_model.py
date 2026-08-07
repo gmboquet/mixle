@@ -29,6 +29,7 @@ LookbackHiddenMarkovModelDataEncoder constructor signatures also differ (here: e
 ``encoder`` attribute; sibling: lag first with a ``topic_encoder`` attribute).
 """
 
+import copy
 from collections.abc import Sequence
 from numbers import Real
 from typing import Any, TypeVar
@@ -63,7 +64,12 @@ from mixle.stats.latent._hidden_markov_numba_kernels import (
     numba_seq_log_density,
 )
 from mixle.stats.latent.effective_sample import (
+    heal_pooled_statistics,
+    require_finite_count_totals,
+    restore_accumulator_statistics,
+    snapshot_accumulator_statistics,
     validate_effective_sample_mass,
+    validated_count_array,
     validated_observation_weight,
     validated_observation_weights,
 )
@@ -215,6 +221,8 @@ def _validated_lookback_sufficient_statistics(
     lag: int,
     num_states: int,
     context: str,
+    init_key: str | None = None,
+    trans_key: str | None = None,
 ) -> tuple[int, int, np.ndarray, np.ndarray, np.ndarray, list[Any], list[Any], Any]:
     """Validate the complete sufficient-statistic schema before mutation or estimation."""
     try:
@@ -234,9 +242,19 @@ def _validated_lookback_sufficient_statistics(
     init_counts = _validated_lookback_count_array(values[2], f"{context} initial-state counts", (num_states,))
     state_counts = _validated_lookback_count_array(values[3], f"{context} state counts", (num_states,))
     trans_counts = _validated_lookback_count_array(values[4], f"{context} transition counts", (num_states, num_states))
-    validate_effective_sample_mass(
-        state_counts.sum(),
-        init_counts.sum() + trans_counts.sum(),
+    # Mode-appropriate mass relation, shared with the chain HMM: equality when the initial and
+    # transition parts are unkeyed, the pooled upper bound otherwise -- a KEYED accumulator's
+    # own value() carries pooled parts, and the previous unconditional equality rejected its
+    # own round-trip and every keyed fit's M-step (measured by the latent-family mutator
+    # audit; the chain twin learned this in STAT-RR5-2).
+    from mixle.stats.latent.hidden_markov import _validate_state_mass
+
+    _validate_state_mass(
+        init_counts,
+        state_counts,
+        trans_counts,
+        init_key=init_key,
+        trans_key=trans_key,
         label=f"{context} hidden-state mass",
     )
     topic_ss = _owned_sequence(values[5], f"{context} topic sufficient statistics", size=num_states)
@@ -1286,16 +1304,37 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
             context="LookbackHiddenMarkovModelEstimatorAccumulator.combine",
         )
 
+        # The ENTIRE combine is transactional with a finiteness postcondition: a child
+        # rejecting its part mid-loop used to leave the counts and earlier children merged,
+        # and individually valid count arrays can sum to an infinite aggregate (measured in
+        # the latent-family mutator audit; STAT-RR8-1/RR9-1 classes).
+        _snapshot = snapshot_accumulator_statistics(
+            self,
+            count_attrs=("init_counts", "state_counts", "trans_counts"),
+            child_attrs=("seq_accumulators", "init_accumulators"),
+            single_child_attrs=("len_accumulator",),
+        )
         self.init_counts += init_counts
         self.state_counts += state_counts
         self.trans_counts += trans_counts
+        try:
+            require_finite_count_totals(
+                (
+                    ("initial counts", self.init_counts),
+                    ("state counts", self.state_counts),
+                    ("transition counts", self.trans_counts),
+                ),
+                label="combined lookback-HMM",
+            )
+            for i in range(self.num_states):
+                self.init_accumulators[i].combine(init_accumulators[i])
+                self.seq_accumulators[i].combine(seq_accumulators[i])
 
-        for i in range(self.num_states):
-            self.init_accumulators[i].combine(init_accumulators[i])
-            self.seq_accumulators[i].combine(seq_accumulators[i])
-
-        if self.len_accumulator is not None and len_acc is not None:
-            self.len_accumulator.combine(len_acc)
+            if self.len_accumulator is not None and len_acc is not None:
+                self.len_accumulator.combine(len_acc)
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
 
         return self
 
@@ -1333,12 +1372,16 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
             LookbackHiddenMarkovModelEstimatorAccumulator: This accumulator after assignment.
 
         """
+        # Candidates validated BEFORE any assignment, with the mode-appropriate mass relation
+        # (a keyed accumulator's own value() carries pooled parts; the previous unconditional
+        # equality rejected its own round-trip -- measured), and assignment plus child
+        # restoration run as one transaction (STAT-RR9-1 class).
         (
             _,
             _,
-            self.init_counts,
-            self.state_counts,
-            self.trans_counts,
+            candidate_init,
+            candidate_state,
+            candidate_trans,
             seq_accumulators,
             init_accumulators,
             len_acc,
@@ -1347,30 +1390,66 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
             lag=self.lag,
             num_states=self.num_states,
             context="LookbackHiddenMarkovModelEstimatorAccumulator.from_value",
+            init_key=self.init_key,
+            trans_key=self.trans_key,
         )
 
-        for i, v in enumerate(init_accumulators):
-            self.init_accumulators[i].from_value(v)
+        _snapshot = snapshot_accumulator_statistics(
+            self,
+            count_attrs=("init_counts", "state_counts", "trans_counts"),
+            child_attrs=("seq_accumulators", "init_accumulators"),
+            single_child_attrs=("len_accumulator",),
+        )
+        self.init_counts, self.state_counts, self.trans_counts = candidate_init, candidate_state, candidate_trans
+        try:
+            for i, v in enumerate(init_accumulators):
+                self.init_accumulators[i].from_value(v)
 
-        for i, v in enumerate(seq_accumulators):
-            self.seq_accumulators[i].from_value(v)
+            for i, v in enumerate(seq_accumulators):
+                self.seq_accumulators[i].from_value(v)
 
-        if self.len_accumulator is not None:
-            self.len_accumulator.from_value(len_acc)
+            if self.len_accumulator is not None:
+                self.len_accumulator.from_value(len_acc)
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
 
         return self
 
     def scale(self, c: float) -> "LookbackHiddenMarkovModelEstimatorAccumulator":
         """Scale all accumulated lookback-HMM sufficient statistics in place."""
+        # The factor is validated like every sibling family's (an infinite or negative factor
+        # used to be applied silently), and parent counts plus every child scale as ONE
+        # transaction with the scaled result validated as a postcondition (measured;
+        # STAT-RR8-1/RR10-1 classes).
+        c = validated_observation_weight(c, "lookback-HMM statistic scale")
+        _snapshot = snapshot_accumulator_statistics(
+            self,
+            count_attrs=("init_counts", "state_counts", "trans_counts"),
+            child_attrs=("seq_accumulators", "init_accumulators"),
+            single_child_attrs=("len_accumulator",),
+        )
         self.init_counts *= c
         self.state_counts *= c
         self.trans_counts *= c
-        for acc in self.init_accumulators:
-            acc.scale(c)
-        for acc in self.seq_accumulators:
-            acc.scale(c)
-        if self.len_accumulator is not None:
-            self.len_accumulator.scale(c)
+        try:
+            require_finite_count_totals(
+                (
+                    ("initial counts", self.init_counts),
+                    ("state counts", self.state_counts),
+                    ("transition counts", self.trans_counts),
+                ),
+                label="scaled lookback-HMM",
+            )
+            for acc in self.init_accumulators:
+                acc.scale(c)
+            for acc in self.seq_accumulators:
+                acc.scale(c)
+            if self.len_accumulator is not None:
+                self.len_accumulator.scale(c)
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
         return self
 
     def key_merge(self, stats_dict):
@@ -1380,38 +1459,56 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
             stats_dict (Dict[str, Any]): Dictionary mapping keys to merged sufficient statistics.
 
         """
-        if self.init_key is not None:
-            if self.init_key in stats_dict:
-                stats_dict[self.init_key] += self.init_counts
-            else:
-                # Copy on adoption: stats_dict must never alias this accumulator's own live
-                # array, or a later tied accumulator's in-place += above would silently mutate
-                # this accumulator's private init_counts as a side effect of merging.
-                stats_dict[self.init_key] = self.init_counts.copy()
+        # The WHOLE merge is transactional against the mapping, healed in place on failure: a
+        # later pool failing used to leave the initial pool merged, visible through any caller-
+        # held alias, and pooling reaches overflow by addition exactly as combine() does
+        # (measured; STAT-RR8-1/RR9-1/RR10-1 classes). The snapshot deep-copies the dict on
+        # entry because the child recursions below touch keys this level cannot enumerate.
+        _snapshot = copy.deepcopy(stats_dict)
+        try:
+            if self.init_key is not None:
+                if self.init_key in stats_dict:
+                    stats_dict[self.init_key] += self.init_counts
+                    require_finite_count_totals(
+                        (("pooled initial counts", stats_dict[self.init_key]),),
+                        label="lookback-HMM key merge",
+                    )
+                else:
+                    # Copy on adoption: stats_dict must never alias this accumulator's own live
+                    # array, or a later tied accumulator's in-place += above would silently mutate
+                    # this accumulator's private init_counts as a side effect of merging.
+                    stats_dict[self.init_key] = self.init_counts.copy()
 
-        if self.trans_key is not None:
-            if self.trans_key in stats_dict:
-                stats_dict[self.trans_key] += self.trans_counts
-            else:
-                # Same aliasing hazard as init_key above, for the transition-count matrix.
-                stats_dict[self.trans_key] = self.trans_counts.copy()
+            if self.trans_key is not None:
+                if self.trans_key in stats_dict:
+                    stats_dict[self.trans_key] += self.trans_counts
+                    require_finite_count_totals(
+                        (("pooled transition counts", stats_dict[self.trans_key]),),
+                        label="lookback-HMM key merge",
+                    )
+                else:
+                    # Same aliasing hazard as init_key above, for the transition-count matrix.
+                    stats_dict[self.trans_key] = self.trans_counts.copy()
 
-        if self.state_key is not None:
-            if self.state_key in stats_dict:
-                acc = stats_dict[self.state_key]
-                for i in range(len(acc)):
-                    acc[i] = acc[i].combine(self.seq_accumulators[i].value())
-            else:
-                stats_dict[self.state_key] = self.seq_accumulators
+            if self.state_key is not None:
+                if self.state_key in stats_dict:
+                    acc = stats_dict[self.state_key]
+                    for i in range(len(acc)):
+                        acc[i] = acc[i].combine(self.seq_accumulators[i].value())
+                else:
+                    stats_dict[self.state_key] = self.seq_accumulators
 
-        for u in self.init_accumulators:
-            u.key_merge(stats_dict)
+            for u in self.init_accumulators:
+                u.key_merge(stats_dict)
 
-        for u in self.seq_accumulators:
-            u.key_merge(stats_dict)
+            for u in self.seq_accumulators:
+                u.key_merge(stats_dict)
 
-        if self.len_accumulator is not None:
-            self.len_accumulator.key_merge(stats_dict)
+            if self.len_accumulator is not None:
+                self.len_accumulator.key_merge(stats_dict)
+        except Exception:
+            heal_pooled_statistics(stats_dict, _snapshot)
+            raise
 
     def key_replace(self, stats_dict):
         """Replace keyed sufficient statistics of this accumulator with values from stats_dict.
@@ -1420,29 +1517,56 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
             stats_dict (Dict[str, Any]): Dictionary mapping keys to merged sufficient statistics.
 
         """
-        if self.init_key is not None:
-            if self.init_key in stats_dict:
-                # Copy on replace too: without it, every tied accumulator ends up pointing at
-                # the SAME array object, so any one of them later accumulating new local data
-                # would silently corrupt every other tied accumulator's counts.
-                self.init_counts = np.asarray(stats_dict[self.init_key]).copy()
+        # BOTH count candidates are validated before EITHER is assigned (replacements used to
+        # land with no shape or finiteness checks at all), and the whole replace -- including
+        # the mapping's own objects, which the recursion below mutates through ADOPTED children
+        # -- rolls back on any later failure (measured; STAT-RR8-1/RR9-1/RR10-1 classes).
+        candidate_init = None
+        if self.init_key is not None and self.init_key in stats_dict:
+            candidate_init = validated_count_array(
+                stats_dict[self.init_key],
+                np.shape(self.init_counts),
+                "lookback-HMM replacement initial counts",
+            )
+            require_finite_count_totals((("initial counts", candidate_init),), label="lookback-HMM key replace")
+        candidate_trans = None
+        if self.trans_key is not None and self.trans_key in stats_dict:
+            candidate_trans = validated_count_array(
+                stats_dict[self.trans_key],
+                np.shape(self.trans_counts),
+                "lookback-HMM replacement transition counts",
+            )
+            require_finite_count_totals((("transition counts", candidate_trans),), label="lookback-HMM key replace")
 
-        if self.trans_key is not None:
-            if self.trans_key in stats_dict:
-                self.trans_counts = np.asarray(stats_dict[self.trans_key]).copy()
+        _snapshot = snapshot_accumulator_statistics(
+            self,
+            count_attrs=("init_counts", "state_counts", "trans_counts"),
+            child_attrs=("seq_accumulators", "init_accumulators"),
+            single_child_attrs=("len_accumulator",),
+        )
+        _dict_snapshot = copy.deepcopy(stats_dict)
+        if candidate_init is not None:
+            # Copy on replace too: without it, every tied accumulator ends up pointing at
+            # the SAME array object, so any one of them later accumulating new local data
+            # would silently corrupt every other tied accumulator's counts.
+            self.init_counts = candidate_init.copy()
+        if candidate_trans is not None:
+            self.trans_counts = candidate_trans.copy()
+        if self.state_key is not None and self.state_key in stats_dict:
+            self.seq_accumulators = stats_dict[self.state_key]
+        try:
+            for u in self.init_accumulators:
+                u.key_replace(stats_dict)
 
-        if self.state_key is not None:
-            if self.state_key in stats_dict:
-                self.seq_accumulators = stats_dict[self.state_key]
+            for u in self.seq_accumulators:
+                u.key_replace(stats_dict)
 
-        for u in self.init_accumulators:
-            u.key_replace(stats_dict)
-
-        for u in self.seq_accumulators:
-            u.key_replace(stats_dict)
-
-        if self.len_accumulator is not None:
-            self.len_accumulator.key_replace(stats_dict)
+            if self.len_accumulator is not None:
+                self.len_accumulator.key_replace(stats_dict)
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            heal_pooled_statistics(stats_dict, _dict_snapshot)
+            raise
 
 
 class LookbackHiddenMarkovModelEstimatorAccumulatorFactory(StatisticAccumulatorFactory):
@@ -1701,6 +1825,10 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
             LookbackHiddenMarkovModelDistribution: M-step estimate of the distribution.
 
         """
+        _est_keys = self.keys if isinstance(self.keys, (tuple, list)) and len(self.keys) == 3 else (None, None, None)
+        # the M-step receives post-key_merge statistics, so this is where pooling actually
+        # lands: equality when initial/transition are unkeyed, the pooled upper bound otherwise
+        # (the previous unconditional equality rejected every keyed fit's M-step -- measured)
         (
             lag,
             num_states,
@@ -1715,13 +1843,19 @@ class LookbackHiddenMarkovModelEstimator(ParameterEstimator):
             lag=self.lag,
             num_states=self.num_states,
             context="LookbackHiddenMarkovModelEstimator.estimate",
+            init_key=_est_keys[0],
+            trans_key=_est_keys[1],
         )
-        validate_effective_sample_mass(
-            nobs,
-            init_counts.sum(),
-            label="lookback HMM effective sample",
-            allow_unassigned=True,
-        )
+        if _est_keys[0] is None:
+            # a POOLED initial-count vector carries the mass of every site sharing the key, so
+            # comparing it against THIS site's observation count stops being a corruption
+            # check; an unkeyed one is still bounded by the observations that produced it
+            validate_effective_sample_mass(
+                nobs,
+                init_counts.sum(),
+                label="lookback HMM effective sample",
+                allow_unassigned=True,
+            )
 
         len_dist = self.len_estimator.estimate(nobs, len_ss)
 

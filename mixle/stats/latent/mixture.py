@@ -55,6 +55,10 @@ from mixle.stats.compute.pdist import (
 )
 from mixle.stats.compute.posterior import CategoricalLatentPosterior, ImpossiblePosteriorError
 from mixle.stats.latent.effective_sample import (
+    heal_pooled_statistics,
+    require_finite_count_totals,
+    restore_accumulator_statistics,
+    snapshot_accumulator_statistics,
     validate_effective_sample_mass,
     validated_count_array,
     validated_observation_weight,
@@ -1369,9 +1373,20 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         )
         if not isinstance(suff_stat[1], (tuple, list)) or len(suff_stat[1]) != self.num_components:
             raise ValueError("mixture child sufficient statistics must match the component count")
+        # The ENTIRE combine is transactional: a child rejecting its part mid-loop used to leave
+        # the counts and every earlier child already merged, and two individually valid count
+        # vectors can sum to an infinite aggregate that per-element ingestion checks cannot see
+        # (measured in the latent-family mutator audit; the chain-HMM findings STAT-RR8-1 and
+        # STAT-RR9-1 established the defect classes).
+        _snapshot = snapshot_accumulator_statistics(self, count_attrs=("comp_counts",), child_attrs=("accumulators",))
         self.comp_counts += counts
-        for i in range(self.num_components):
-            self.accumulators[i].combine(copy.deepcopy(suff_stat[1][i]))
+        try:
+            require_finite_count_totals((("component counts", self.comp_counts),), label="combined mixture")
+            for i in range(self.num_components):
+                self.accumulators[i].combine(copy.deepcopy(suff_stat[1][i]))
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
 
         return self
 
@@ -1394,23 +1409,42 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             ``self`` after restoring child accumulator state.
         """
         x = validated_statistic_tuple(x, 2, "mixture sufficient statistics")
-        self.comp_counts = validated_count_array(
+        candidate = validated_count_array(
             x[0],
             (self.num_components,),
             "mixture component counts",
         )
         if not isinstance(x[1], (tuple, list)) or len(x[1]) != self.num_components:
             raise ValueError("mixture child sufficient statistics must match the component count")
-        for i in range(self.num_components):
-            self.accumulators[i].from_value(copy.deepcopy(x[1][i]))
+        # Validate before assigning, and restore transactionally: a child rejecting its part
+        # mid-loop used to leave the counts already replaced and earlier children restored
+        # (measured in the latent-family mutator audit; STAT-RR9-1 class).
+        _snapshot = snapshot_accumulator_statistics(self, count_attrs=("comp_counts",), child_attrs=("accumulators",))
+        self.comp_counts = candidate
+        try:
+            for i in range(self.num_components):
+                self.accumulators[i].from_value(copy.deepcopy(x[1][i]))
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
         return self
 
     def scale(self, c: float) -> MixtureAccumulator:
         """Scale component counts and delegate child sufficient statistics."""
         c = validated_observation_weight(c, "mixture statistic scale")
+        # Parent counts and children scale as ONE transaction, with the scaled result validated
+        # as a postcondition: a valid factor times a valid statistic can overflow silently, and
+        # a child raising mid-loop used to leave the parent and earlier children scaled
+        # (measured; STAT-RR8-1 and STAT-RR10-1 classes).
+        _snapshot = snapshot_accumulator_statistics(self, count_attrs=("comp_counts",), child_attrs=("accumulators",))
         self.comp_counts *= c
-        for acc in self.accumulators:
-            acc.scale(c)
+        try:
+            require_finite_count_totals((("component counts", self.comp_counts),), label="scaled mixture")
+            for acc in self.accumulators:
+                acc.scale(c)
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -1420,25 +1454,41 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             stats_dict: Mutable shared sufficient-statistics mapping keyed by
                 estimator key names.
         """
-        if self.weight_key is not None:
-            if self.weight_key in stats_dict:
-                stats_dict[self.weight_key] += self.comp_counts
-            else:
-                # Copy on adoption: stats_dict must never alias this accumulator's own live
-                # array, or a later tied accumulator's in-place += above would silently mutate
-                # this accumulator's private comp_counts as a side effect of merging.
-                stats_dict[self.weight_key] = self.comp_counts.copy()
+        # The WHOLE merge is transactional: a failure in the component pool (or a child's own
+        # keyed merge) used to leave the weight pool already merged, and restoring the mapping's
+        # values alone leaves a caller's alias to a pooled array holding the partial merge --
+        # the failed mapping is healed IN PLACE instead (measured; STAT-RR9-1 and STAT-RR10-1
+        # classes). The snapshot must cover keys this level cannot enumerate, so it deep-copies
+        # the dict on entry.
+        _snapshot = copy.deepcopy(stats_dict)
+        try:
+            if self.weight_key is not None:
+                if self.weight_key in stats_dict:
+                    stats_dict[self.weight_key] += self.comp_counts
+                    # Pooling reaches overflow by addition exactly as combine() does.
+                    require_finite_count_totals(
+                        (("pooled component counts", stats_dict[self.weight_key]),),
+                        label="mixture key merge",
+                    )
+                else:
+                    # Copy on adoption: stats_dict must never alias this accumulator's own live
+                    # array, or a later tied accumulator's in-place += above would silently mutate
+                    # this accumulator's private comp_counts as a side effect of merging.
+                    stats_dict[self.weight_key] = self.comp_counts.copy()
 
-        if self.comp_key is not None:
-            if self.comp_key in stats_dict:
-                acc = stats_dict[self.comp_key]
-                for i in range(len(acc)):
-                    acc[i] = acc[i].combine(copy.deepcopy(self.accumulators[i].value()))
-            else:
-                stats_dict[self.comp_key] = copy.deepcopy(self.accumulators)
+            if self.comp_key is not None:
+                if self.comp_key in stats_dict:
+                    acc = stats_dict[self.comp_key]
+                    for i in range(len(acc)):
+                        acc[i] = acc[i].combine(copy.deepcopy(self.accumulators[i].value()))
+                else:
+                    stats_dict[self.comp_key] = copy.deepcopy(self.accumulators)
 
-        for u in self.accumulators:
-            u.key_merge(stats_dict)
+            for u in self.accumulators:
+                u.key_merge(stats_dict)
+        except Exception:
+            heal_pooled_statistics(stats_dict, _snapshot)
+            raise
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace local keyed statistics from a shared statistics dictionary.
@@ -1447,23 +1497,41 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             stats_dict: Shared sufficient-statistics mapping keyed by estimator
                 key names.
         """
-        if self.weight_key is not None:
-            if self.weight_key in stats_dict:
-                # Copy on replace too: without it, every tied accumulator ends up pointing at
-                # the SAME array object, so any one of them later accumulating new local data
-                # would silently corrupt every other tied accumulator's counts.
-                self.comp_counts = np.asarray(stats_dict[self.weight_key]).copy()
+        # A replacement arrives from outside and used to be copied in with no shape, element, or
+        # aggregate validation at all -- [inf, 0] landed directly in the accumulator -- so the
+        # candidate now goes through the same count-array contract as ingestion BEFORE anything
+        # is assigned, and a failure at any later point (a poisoned pooled child, a child's own
+        # keyed replace) rolls the whole accumulator back (measured; STAT-RR8-1 and STAT-RR9-1
+        # classes). Shape comes from what this accumulator already holds.
+        candidate = None
+        if self.weight_key is not None and self.weight_key in stats_dict:
+            candidate = validated_count_array(
+                stats_dict[self.weight_key],
+                np.shape(self.comp_counts),
+                "mixture replacement component counts",
+            )
+            require_finite_count_totals((("component counts", candidate),), label="mixture key replace")
 
-        if self.comp_key is not None:
-            if self.comp_key in stats_dict:
-                acc = stats_dict[self.comp_key]
-                if len(acc) != self.num_components:
-                    raise ValueError("keyed mixture component statistics have incompatible arity.")
-                for local, pooled in zip(self.accumulators, acc):
-                    local.from_value(copy.deepcopy(pooled.value()))
+        _snapshot = snapshot_accumulator_statistics(self, count_attrs=("comp_counts",), child_attrs=("accumulators",))
+        if candidate is not None:
+            # Copy on replace too: without it, every tied accumulator ends up pointing at
+            # the SAME array object, so any one of them later accumulating new local data
+            # would silently corrupt every other tied accumulator's counts.
+            self.comp_counts = candidate.copy()
+        try:
+            if self.comp_key is not None:
+                if self.comp_key in stats_dict:
+                    acc = stats_dict[self.comp_key]
+                    if len(acc) != self.num_components:
+                        raise ValueError("keyed mixture component statistics have incompatible arity.")
+                    for local, pooled in zip(self.accumulators, acc):
+                        local.from_value(copy.deepcopy(pooled.value()))
 
-        for u in self.accumulators:
-            u.key_replace(stats_dict)
+            for u in self.accumulators:
+                u.key_replace(stats_dict)
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
 
     def acc_to_encoder(self) -> MixtureDataEncoder:
         """Return an encoder assembled from the component accumulators."""
@@ -1673,12 +1741,19 @@ class MixtureEstimator(ParameterEstimator):
                 "component estimators -- a mismatched MixtureAccumulator/MixtureEstimator component "
                 "count is the usual cause." % (num_components, num_components),
             )
-        validate_effective_sample_mass(
-            nobs,
-            float(counts.sum()),
-            label="mixture effective sample",
-            allow_unassigned=True,
-        )
+        _keys = self.keys if isinstance(self.keys, (tuple, list)) and len(self.keys) == 2 else (None, None)
+        if _keys[0] is None:
+            # a POOLED component-count vector carries the mass of every site sharing the
+            # weight key, so comparing it against THIS site's observation count stops being a
+            # corruption check -- the unconditional version rejected every weight-keyed fit's
+            # M-step (measured end-to-end in the latent-family mutator audit); an unkeyed one
+            # is still bounded by the observations that produced it
+            validate_effective_sample_mass(
+                nobs,
+                float(counts.sum()),
+                label="mixture effective sample",
+                allow_unassigned=True,
+            )
 
         components = []
         for i in range(num_components):

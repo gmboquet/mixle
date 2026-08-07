@@ -50,6 +50,10 @@ from mixle.stats.compute.pdist import (
     child_enumerator,
 )
 from mixle.stats.latent.effective_sample import (
+    heal_pooled_statistics,
+    require_finite_count_totals,
+    restore_accumulator_statistics,
+    snapshot_accumulator_statistics,
     validate_effective_sample_mass,
     validated_count_array,
     validated_observation_weight,
@@ -931,12 +935,30 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
         )
         if not isinstance(suff_stat[2], (tuple, list)) or len(suff_stat[2]) != self.num_topics:
             raise ValueError("hierarchical-mixture child statistics must match the topic count")
+        # Transactional with a finiteness postcondition: a child rejecting its part mid-loop
+        # used to leave the counts and earlier children merged, and individually valid count
+        # arrays can sum to an infinite aggregate (measured in the latent-family mutator audit;
+        # STAT-RR8-1/RR9-1 classes).
+        _snapshot = snapshot_accumulator_statistics(
+            self,
+            count_attrs=("comp_counts", "w_counts"),
+            child_attrs=("accumulators",),
+            single_child_attrs=("len_accumulator",),
+        )
         self.comp_counts += counts
         self.w_counts += w_counts
-        for i in range(self.num_topics):
-            self.accumulators[i].combine(copy.deepcopy(suff_stat[2][i]))
+        try:
+            require_finite_count_totals(
+                (("topic counts", self.comp_counts), ("outer counts", self.w_counts)),
+                label="combined hierarchical-mixture",
+            )
+            for i in range(self.num_topics):
+                self.accumulators[i].combine(copy.deepcopy(suff_stat[2][i]))
 
-        self.len_accumulator.combine(copy.deepcopy(suff_stat[3]))
+            self.len_accumulator.combine(copy.deepcopy(suff_stat[3]))
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
 
         return self
 
@@ -968,33 +990,62 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
 
         """
         x = validated_statistic_tuple(x, 4, "hierarchical-mixture sufficient statistics")
-        self.comp_counts = validated_count_array(
+        candidate_counts = validated_count_array(
             x[0],
             (self.num_mixtures, self.num_topics),
             "hierarchical-mixture topic counts",
         )
-        self.w_counts = validated_count_array(
+        candidate_w = validated_count_array(
             x[1],
             (self.num_mixtures,),
             "hierarchical-mixture outer counts",
         )
         if not isinstance(x[2], (tuple, list)) or len(x[2]) != self.num_topics:
             raise ValueError("hierarchical-mixture child statistics must match the topic count")
-        for i in range(self.num_topics):
-            self.accumulators[i].from_value(copy.deepcopy(x[2][i]))
+        # Candidates validated before ANY assignment; children restore transactionally
+        # (measured; STAT-RR9-1 class).
+        _snapshot = snapshot_accumulator_statistics(
+            self,
+            count_attrs=("comp_counts", "w_counts"),
+            child_attrs=("accumulators",),
+            single_child_attrs=("len_accumulator",),
+        )
+        self.comp_counts, self.w_counts = candidate_counts, candidate_w
+        try:
+            for i in range(self.num_topics):
+                self.accumulators[i].from_value(copy.deepcopy(x[2][i]))
 
-        self.len_accumulator.from_value(copy.deepcopy(x[3]))
+            self.len_accumulator.from_value(copy.deepcopy(x[3]))
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
 
         return self
 
     def scale(self, c: float) -> "HierarchicalMixtureEstimatorAccumulator":
         """Scale linear counts and delegate child/length sufficient statistics."""
         c = validated_observation_weight(c, "hierarchical-mixture statistic scale")
+        # Parent counts, children, and the length child scale as ONE transaction with the
+        # scaled result validated as a postcondition (measured; STAT-RR8-1/RR10-1 classes).
+        _snapshot = snapshot_accumulator_statistics(
+            self,
+            count_attrs=("comp_counts", "w_counts"),
+            child_attrs=("accumulators",),
+            single_child_attrs=("len_accumulator",),
+        )
         self.comp_counts *= c
         self.w_counts *= c
-        for acc in self.accumulators:
-            acc.scale(c)
-        self.len_accumulator.scale(c)
+        try:
+            require_finite_count_totals(
+                (("topic counts", self.comp_counts), ("outer counts", self.w_counts)),
+                label="scaled hierarchical-mixture",
+            )
+            for acc in self.accumulators:
+                acc.scale(c)
+            self.len_accumulator.scale(c)
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -1012,29 +1063,45 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
             None.
 
         """
-        if self.weight_key is not None:
-            if self.weight_key in stats_dict:
-                keyed_comp_counts, keyed_w_counts = stats_dict[self.weight_key]
-                keyed_comp_counts += self.comp_counts
-                keyed_w_counts += self.w_counts
-            else:
-                # Copy on adoption: stats_dict must never alias this accumulator's own live
-                # arrays, or a later tied accumulator's in-place += above would silently mutate
-                # this accumulator's private comp_counts/w_counts as a side effect of merging.
-                stats_dict[self.weight_key] = (self.comp_counts.copy(), self.w_counts.copy())
+        # Transactional against the mapping, healed in place on failure: a later pool failing
+        # used to leave the weight pool merged, visible through any caller-held alias to the
+        # pooled arrays (measured; STAT-RR9-1/RR10-1 classes). Pooling reaches overflow by
+        # addition exactly as combine() does, so the merged pools are validated too.
+        _snapshot = copy.deepcopy(stats_dict)
+        try:
+            if self.weight_key is not None:
+                if self.weight_key in stats_dict:
+                    keyed_comp_counts, keyed_w_counts = stats_dict[self.weight_key]
+                    keyed_comp_counts += self.comp_counts
+                    keyed_w_counts += self.w_counts
+                    require_finite_count_totals(
+                        (
+                            ("pooled topic counts", keyed_comp_counts),
+                            ("pooled outer counts", keyed_w_counts),
+                        ),
+                        label="hierarchical-mixture key merge",
+                    )
+                else:
+                    # Copy on adoption: stats_dict must never alias this accumulator's own live
+                    # arrays, or a later tied accumulator's in-place += above would silently mutate
+                    # this accumulator's private comp_counts/w_counts as a side effect of merging.
+                    stats_dict[self.weight_key] = (self.comp_counts.copy(), self.w_counts.copy())
 
-        if self.comp_key is not None:
-            if self.comp_key in stats_dict:
-                acc = stats_dict[self.comp_key]
-                for i in range(len(acc)):
-                    acc[i].combine(copy.deepcopy(self.accumulators[i].value()))
-            else:
-                stats_dict[self.comp_key] = copy.deepcopy(self.accumulators)
+            if self.comp_key is not None:
+                if self.comp_key in stats_dict:
+                    acc = stats_dict[self.comp_key]
+                    for i in range(len(acc)):
+                        acc[i].combine(copy.deepcopy(self.accumulators[i].value()))
+                else:
+                    stats_dict[self.comp_key] = copy.deepcopy(self.accumulators)
 
-        for u in self.accumulators:
-            u.key_merge(stats_dict)
+            for u in self.accumulators:
+                u.key_merge(stats_dict)
 
-        self.len_accumulator.key_merge(stats_dict)
+            self.len_accumulator.key_merge(stats_dict)
+        except Exception:
+            heal_pooled_statistics(stats_dict, _snapshot)
+            raise
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
         """Replace this accumulator's statistics from matching keyed values.
@@ -1051,27 +1118,57 @@ class HierarchicalMixtureEstimatorAccumulator(SequenceEncodableStatisticAccumula
             None.
 
         """
-        if self.weight_key is not None:
-            if self.weight_key in stats_dict:
-                # Copy on replace too: without it, every tied accumulator ends up pointing at
-                # the SAME array objects, so any one of them later accumulating new local data
-                # would silently corrupt every other tied accumulator's counts.
-                keyed_comp_counts, keyed_w_counts = stats_dict[self.weight_key]
-                self.comp_counts = np.asarray(keyed_comp_counts).copy()
-                self.w_counts = np.asarray(keyed_w_counts).copy()
+        # BOTH candidates validated before EITHER is assigned (replacements used to land with
+        # no shape or finiteness checks at all), and the whole replace rolls back on any later
+        # failure (measured; STAT-RR8-1/RR9-1 classes).
+        candidates = None
+        if self.weight_key is not None and self.weight_key in stats_dict:
+            keyed_comp_counts, keyed_w_counts = stats_dict[self.weight_key]
+            candidates = (
+                validated_count_array(
+                    keyed_comp_counts,
+                    np.shape(self.comp_counts),
+                    "hierarchical-mixture replacement topic counts",
+                ),
+                validated_count_array(
+                    keyed_w_counts,
+                    np.shape(self.w_counts),
+                    "hierarchical-mixture replacement outer counts",
+                ),
+            )
+            require_finite_count_totals(
+                (("topic counts", candidates[0]), ("outer counts", candidates[1])),
+                label="hierarchical-mixture key replace",
+            )
 
-        if self.comp_key is not None:
-            if self.comp_key in stats_dict:
-                acc = stats_dict[self.comp_key]
-                if len(acc) != self.num_topics:
-                    raise ValueError("keyed hierarchical-mixture topic statistics have incompatible arity.")
-                for local, pooled in zip(self.accumulators, acc):
-                    local.from_value(copy.deepcopy(pooled.value()))
+        _snapshot = snapshot_accumulator_statistics(
+            self,
+            count_attrs=("comp_counts", "w_counts"),
+            child_attrs=("accumulators",),
+            single_child_attrs=("len_accumulator",),
+        )
+        if candidates is not None:
+            # Copy on replace too: without it, every tied accumulator ends up pointing at
+            # the SAME array objects, so any one of them later accumulating new local data
+            # would silently corrupt every other tied accumulator's counts.
+            self.comp_counts = candidates[0].copy()
+            self.w_counts = candidates[1].copy()
+        try:
+            if self.comp_key is not None:
+                if self.comp_key in stats_dict:
+                    acc = stats_dict[self.comp_key]
+                    if len(acc) != self.num_topics:
+                        raise ValueError("keyed hierarchical-mixture topic statistics have incompatible arity.")
+                    for local, pooled in zip(self.accumulators, acc):
+                        local.from_value(copy.deepcopy(pooled.value()))
 
-        for u in self.accumulators:
-            u.key_replace(stats_dict)
+            for u in self.accumulators:
+                u.key_replace(stats_dict)
 
-        self.len_accumulator.key_replace(stats_dict)
+            self.len_accumulator.key_replace(stats_dict)
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
 
     def acc_to_encoder(self) -> "HierarchicalMixtureDataEncoder":
         """Return a data encoder assembled from topic and length accumulators."""
@@ -1221,12 +1318,17 @@ class HierarchicalMixtureEstimator(ParameterEstimator):
         if not isinstance(comp_suff_stats, (tuple, list)) or len(comp_suff_stats) != num_components:
             raise ValueError("hierarchical-mixture child statistics must match the topic count")
         outer_mass = float(w_counts.sum())
-        validate_effective_sample_mass(
-            nobs,
-            outer_mass,
-            label="hierarchical-mixture effective sample",
-            allow_unassigned=True,
-        )
+        _keys = self.keys if isinstance(self.keys, (tuple, list)) and len(self.keys) == 2 else (None, None)
+        if _keys[0] is None:
+            # POOLED outer counts carry every tied site's mass, so the observation-count
+            # comparison only applies unkeyed (measured: the unconditional version rejected
+            # every weight-keyed fit's M-step)
+            validate_effective_sample_mass(
+                nobs,
+                outer_mass,
+                label="hierarchical-mixture effective sample",
+                allow_unassigned=True,
+            )
         len_dist = (
             self.len_estimator.estimate(outer_mass, len_suff_stats) if len_suff_stats is not None else self.len_dist
         )

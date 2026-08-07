@@ -20,6 +20,7 @@ SemiSupervisedHiddenMarkovEstimatorAccumulator, SemiSupervisedHiddenMarkovEstima
 SemiSupervisedHiddenMarkovEstimator, and SemiSupervisedHiddenMarkovDataEncoder.
 """
 
+import copy
 from typing import Any
 
 import numpy as np
@@ -36,6 +37,10 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.latent.effective_sample import (
+    heal_pooled_statistics,
+    require_finite_count_totals,
+    restore_accumulator_statistics,
+    snapshot_accumulator_statistics,
     validate_effective_sample_mass,
     validated_count_array,
     validated_observation_weight,
@@ -509,11 +514,29 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
             label="semi-supervised HMM transition mass",
             allow_unassigned=True,
         )
+        # Transactional with a finiteness postcondition: a child rejecting its part mid-loop
+        # used to leave the counts and earlier children merged, and individually valid count
+        # arrays can sum to an infinite aggregate (measured in the latent-family mutator audit;
+        # STAT-RR8-1/RR9-1 classes).
+        _snapshot = snapshot_accumulator_statistics(
+            self,
+            count_attrs=("trans_counts", "state_counts"),
+            child_attrs=("accumulators",),
+            single_child_attrs=("len_accumulator",),
+        )
         self.trans_counts += trans
         self.state_counts += state_counts
-        for s in range(self.num_states):
-            self.accumulators[s].combine(emissions[s])
-        self.len_accumulator.combine(length)
+        try:
+            require_finite_count_totals(
+                (("transition counts", self.trans_counts), ("state counts", self.state_counts)),
+                label="combined semi-supervised HMM",
+            )
+            for s in range(self.num_states):
+                self.accumulators[s].combine(emissions[s])
+            self.len_accumulator.combine(length)
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
         return self
 
     def value(self):
@@ -530,60 +553,126 @@ class SemiSupervisedHiddenMarkovEstimatorAccumulator(SequenceEncodableStatisticA
         trans, state_counts, emissions, length = validated_statistic_tuple(
             x, 4, "semi-supervised HMM sufficient statistics"
         )
-        self.trans_counts = validated_count_array(trans, (self.num_states, self.num_states), "transition counts")
-        self.state_counts = validated_count_array(state_counts, (self.num_states,), "state counts")
+        # Validate EVERYTHING before mutating ANYTHING, then restore transactionally: the
+        # previous order assigned the count arrays first, so a rejected restoration or a child
+        # failing mid-loop left the accumulator half-replaced (measured; STAT-RR9-1 class).
+        candidate_trans = validated_count_array(trans, (self.num_states, self.num_states), "transition counts")
+        candidate_state = validated_count_array(state_counts, (self.num_states,), "state counts")
         if len(emissions) != self.num_states:
             raise ValueError("emission statistics must have one item per hidden state")
         validate_effective_sample_mass(
-            self.state_counts.sum(),
-            self.trans_counts.sum(),
+            candidate_state.sum(),
+            candidate_trans.sum(),
             label="semi-supervised HMM transition mass",
             allow_unassigned=True,
         )
-        for s in range(self.num_states):
-            self.accumulators[s].from_value(emissions[s])
-        self.len_accumulator.from_value(length)
+        _snapshot = snapshot_accumulator_statistics(
+            self,
+            count_attrs=("trans_counts", "state_counts"),
+            child_attrs=("accumulators",),
+            single_child_attrs=("len_accumulator",),
+        )
+        self.trans_counts, self.state_counts = candidate_trans, candidate_state
+        try:
+            for s in range(self.num_states):
+                self.accumulators[s].from_value(emissions[s])
+            self.len_accumulator.from_value(length)
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
         return self
 
     def key_merge(self, stats_dict):
         """Merge transition, state, and child statistics into ``stats_dict``."""
-        if self.trans_key is not None:
-            if self.trans_key in stats_dict:
-                stats_dict[self.trans_key] = stats_dict[self.trans_key] + self.trans_counts
-            else:
-                # Copy on adoption: stats_dict must never alias this accumulator's own live
-                # array. The "already present" branch above is safe (`+` always allocates a
-                # new array), but without this copy a second tied accumulator's key_replace
-                # would still leave both accumulators pointing at this accumulator's own
-                # original array.
-                stats_dict[self.trans_key] = self.trans_counts.copy()
-        if self.state_key is not None:
-            if self.state_key in stats_dict:
-                counts, acc = stats_dict[self.state_key]
-                stats_dict[self.state_key] = (counts + self.state_counts, acc)
-                for i in range(self.num_states):
-                    acc[i] = acc[i].combine(self.accumulators[i].value())
-            else:
-                stats_dict[self.state_key] = (self.state_counts.copy(), self.accumulators)
-        for acc in self.accumulators:
-            acc.key_merge(stats_dict)
-        self.len_accumulator.key_merge(stats_dict)
+        # Transactional against the mapping, healed in place on failure: a later pool failing
+        # used to leave the transition pool merged, and a failed state-pool merge left the
+        # dict-held (shared) emission accumulators combined (measured; STAT-RR9-1/RR10-1
+        # classes). Pooling reaches overflow by addition, so merged pools are validated too.
+        _snapshot = copy.deepcopy(stats_dict)
+        try:
+            if self.trans_key is not None:
+                if self.trans_key in stats_dict:
+                    pooled_trans = stats_dict[self.trans_key] + self.trans_counts
+                    require_finite_count_totals(
+                        (("pooled transition counts", pooled_trans),),
+                        label="semi-supervised HMM key merge",
+                    )
+                    stats_dict[self.trans_key] = pooled_trans
+                else:
+                    # Copy on adoption: stats_dict must never alias this accumulator's own live
+                    # array. The "already present" branch above is safe (`+` always allocates a
+                    # new array), but without this copy a second tied accumulator's key_replace
+                    # would still leave both accumulators pointing at this accumulator's own
+                    # original array.
+                    stats_dict[self.trans_key] = self.trans_counts.copy()
+            if self.state_key is not None:
+                if self.state_key in stats_dict:
+                    counts, acc = stats_dict[self.state_key]
+                    pooled_state = counts + self.state_counts
+                    require_finite_count_totals(
+                        (("pooled state counts", pooled_state),),
+                        label="semi-supervised HMM key merge",
+                    )
+                    stats_dict[self.state_key] = (pooled_state, acc)
+                    for i in range(self.num_states):
+                        acc[i] = acc[i].combine(self.accumulators[i].value())
+                else:
+                    stats_dict[self.state_key] = (self.state_counts.copy(), self.accumulators)
+            for acc in self.accumulators:
+                acc.key_merge(stats_dict)
+            self.len_accumulator.key_merge(stats_dict)
+        except Exception:
+            heal_pooled_statistics(stats_dict, _snapshot)
+            raise
 
     def key_replace(self, stats_dict):
         """Replace transition, state, and child statistics from keyed entries when present."""
+        # BOTH candidates validated before EITHER is assigned (replacements used to land with
+        # no shape or finiteness checks at all), and the whole replace rolls back on any later
+        # failure (measured; STAT-RR8-1/RR9-1 classes).
+        candidate_trans = None
         if self.trans_key is not None and self.trans_key in stats_dict:
+            candidate_trans = validated_count_array(
+                stats_dict[self.trans_key],
+                np.shape(self.trans_counts),
+                "semi-supervised HMM replacement transition counts",
+            )
+            require_finite_count_totals(
+                (("transition counts", candidate_trans),), label="semi-supervised HMM key replace"
+            )
+        candidate_state = None
+        if self.state_key is not None and self.state_key in stats_dict:
+            counts, _pooled_accumulators = stats_dict[self.state_key]
+            candidate_state = validated_count_array(
+                counts,
+                np.shape(self.state_counts),
+                "semi-supervised HMM replacement state counts",
+            )
+            require_finite_count_totals((("state counts", candidate_state),), label="semi-supervised HMM key replace")
+
+        _snapshot = snapshot_accumulator_statistics(
+            self,
+            count_attrs=("trans_counts", "state_counts"),
+            child_attrs=("accumulators",),
+            single_child_attrs=("len_accumulator",),
+        )
+        if candidate_trans is not None:
             # Copy on replace too: without it, every tied accumulator ends up pointing at the
             # SAME array object, so any one of them later accumulating new local data would
             # silently corrupt every other tied accumulator's counts.
-            self.trans_counts = np.asarray(stats_dict[self.trans_key]).copy()
-        if self.state_key is not None and self.state_key in stats_dict:
-            counts, accumulators = stats_dict[self.state_key]
-            self.state_counts = np.asarray(counts).copy()
-            for index, accumulator in enumerate(self.accumulators):
-                accumulator.from_value(accumulators[index].value())
-        for acc in self.accumulators:
-            acc.key_replace(stats_dict)
-        self.len_accumulator.key_replace(stats_dict)
+            self.trans_counts = candidate_trans.copy()
+        try:
+            if candidate_state is not None:
+                _counts, accumulators = stats_dict[self.state_key]
+                self.state_counts = candidate_state.copy()
+                for index, accumulator in enumerate(self.accumulators):
+                    accumulator.from_value(accumulators[index].value())
+            for acc in self.accumulators:
+                acc.key_replace(stats_dict)
+            self.len_accumulator.key_replace(stats_dict)
+        except Exception:
+            restore_accumulator_statistics(self, _snapshot)
+            raise
 
     def acc_to_encoder(self):
         """Return the encoder compatible with this accumulator."""
