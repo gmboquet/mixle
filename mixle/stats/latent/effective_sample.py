@@ -201,8 +201,20 @@ def snapshot_accumulator_statistics(
     Attributes the object does not carry are skipped: the keyed-pooling protocol tests build
     accumulators via ``__new__`` with only the fields under test, and an attribute an object
     lacks cannot need restoring either.
+
+    Count arrays are captured as (original object, value copy) pairs, not value copies alone:
+    mutators change counts IN PLACE (``+=``, ``*=``), so a rollback that merely rebinds the
+    attribute to a pristine copy abandons the mutated original -- an external alias to the
+    count array then keeps the doubled values while the attribute looks restored, and the
+    attribute's identity changes (STAT-RR11-3). Restoration writes the values back INTO the
+    original object and rebinds that original.
     """
-    counts = {name: np.asarray(getattr(acc, name)).copy() for name in count_attrs if hasattr(acc, name)}
+    counts = {}
+    for name in count_attrs:
+        if not hasattr(acc, name):
+            continue
+        original = getattr(acc, name)
+        counts[name] = (original, np.asarray(original).copy())
     children = {}
     for name in child_attrs:
         if not hasattr(acc, name):
@@ -222,13 +234,25 @@ def snapshot_accumulator_statistics(
 def restore_accumulator_statistics(acc: Any, snapshot: dict[str, Any]) -> None:
     """Best-effort rollback of a failed mutator from a prior snapshot.
 
-    Count attributes are rebound to the snapshotted copies; child containers are rebound to
-    their ORIGINAL objects and every child restored through ``from_value``; single children
-    (length accumulators and kin) likewise. Restoration errors are deliberately suppressed:
-    the original rejection is the signal, and a failure while rolling back must not mask it.
+    Count attributes are healed by writing the snapshotted values back INTO the original array
+    object and rebinding that original -- both an external alias and the attribute itself then
+    observe the rollback, with identity preserved (STAT-RR11-3: rebinding a copy left a
+    caller-held alias doubled after a rejected in-place ``*=``/``+=``). Child containers are
+    rebound to their ORIGINAL objects and every child restored through ``from_value``; single
+    children (length accumulators and kin) likewise. Restoration errors are deliberately
+    suppressed: the original rejection is the signal, and a failure while rolling back must
+    not mask it.
     """
-    for name, values in snapshot["counts"].items():
-        setattr(acc, name, values)
+    for name, (original, values) in snapshot["counts"].items():
+        restored = original
+        try:
+            if isinstance(original, np.ndarray) and original.shape == values.shape:
+                original[...] = values
+            else:
+                restored = values
+        except Exception:  # noqa: BLE001, S110 - see docstring
+            restored = values
+        setattr(acc, name, restored)
     for name, (container, members, values) in snapshot["children"].items():
         setattr(acc, name, container)
         for child, value in zip(members, values):

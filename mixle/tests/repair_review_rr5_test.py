@@ -648,11 +648,34 @@ class WholeMutatorAliasTransactionTest(unittest.TestCase):
                 failing = _StubChild([5.0, 6.0, 7.0, 8.0], fail_on=("scale",))
                 accumulator.accumulators = [healthy, failing]
                 counts_before = accumulator.init_counts.copy()
+                # STAT-RR11-3: the rollback must heal the count arrays IN PLACE -- a caller
+                # holding an alias to init_counts observed the doubled values while the
+                # attribute was rebound to a pristine copy, and object identity changed
+                alias = accumulator.init_counts
                 with self.assertRaisesRegex(RuntimeError, "late child scale failure"):
                     accumulator.scale(2.0)
                 np.testing.assert_array_equal(accumulator.init_counts, counts_before)
+                np.testing.assert_array_equal(alias, counts_before)
+                self.assertIs(accumulator.init_counts, alias)
                 np.testing.assert_array_equal(healthy.data, [1.0, 2.0, 3.0, 4.0])
                 np.testing.assert_array_equal(failing.data, [5.0, 6.0, 7.0, 8.0])
+
+    def test_combine_child_failure_heals_count_aliases_in_place(self):
+        # the reviewer's exact shape on the += path: [0.25, 0.75] must not stay merged
+        # through a caller-held alias after the rejected combine (STAT-RR11-3)
+        for estimator_cls, family in self._FAMILIES:
+            with self.subTest(family=family):
+                accumulator = self._accumulator(estimator_cls)
+                accumulator.combine(self._consistent(accumulator))
+                counts_before = accumulator.init_counts.copy()
+                aliases = (accumulator.init_counts, accumulator.state_counts, accumulator.trans_counts)
+                poisoned = self._consistent(accumulator, children=(accumulator.accumulators[0].value(), None))
+                with self.assertRaises((TypeError, ValueError)):
+                    accumulator.combine(poisoned)
+                np.testing.assert_array_equal(aliases[0], counts_before)
+                self.assertIs(accumulator.init_counts, aliases[0])
+                self.assertIs(accumulator.state_counts, aliases[1])
+                self.assertIs(accumulator.trans_counts, aliases[2])
 
     def test_key_replace_failure_heals_the_dict_held_replacement_children(self):
         for estimator_cls, family in self._FAMILIES:

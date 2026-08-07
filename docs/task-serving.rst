@@ -57,12 +57,29 @@ The teacher labels the examples exactly as in ``solve``. The student is a
 small local regressor. Calibration is split conformal: on held-out calibration
 examples, Mixle computes an absolute-residual quantile ``qhat`` so
 ``[yhat - qhat, yhat + qhat]`` covers the teacher's answer with probability at
-least ``1 - alpha`` under the usual exchangeability assumption.
+least ``1 - alpha`` under the usual exchangeability assumption. That statement
+is marginal over the calibration draw and the query jointly.
 
 Runtime behavior is intentionally conservative. The local regressor answers
 only when ``qhat <= tol``. If the calibrated interval is wider than the
 precision your application can tolerate, every request escalates to the teacher
 until enough harvested examples support a tighter promoted model.
+
+Be precise about what the deployment gate does to the guarantee: the gate event
+``qhat <= tol`` is a function of the calibration draw, so conditioning on
+deployment is selection, and coverage conditional on the route being open is
+NOT guaranteed to be ``1 - alpha`` (exact construction from the external
+review: 19 iid Uniform(0,1) residuals at ``alpha = 0.1`` and ``tol = 0.8`` open
+the route with probability 0.083 and cover 0.751 conditionally, not 0.90). The
+effect shrinks with more calibration data; it is not certified. What the
+deployed artifact carries instead is a measurement: ``report()`` includes
+``selection_coverage``, the empirical coverage of the current interval on
+selection rows the calibration quantile never touches, alongside
+``selection_uses``, which records when those rows have also decided
+``improve()`` promotions and the number has become a selection score.
+Promotions themselves read only the selection rows; the deployed ``qhat`` is
+then recomputed on the untouched calibration rows, so an improved model is
+never chosen with the same data that certifies its interval.
 
 Use this when the original code returns a scalar and the operational contract
 can be expressed as "local answers are acceptable within this tolerance." Keep

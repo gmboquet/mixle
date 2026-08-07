@@ -1737,7 +1737,10 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
         # and individually valid statistics can sum to an infinite aggregate (measured in the
         # latent-family mutator audit; STAT-RR8-1/RR9-1 classes).
         _snapshot = snapshot_accumulator_statistics(self, count_attrs=("pi_acc", "nk"), child_attrs=("emit",))
-        _previous_trans = _copy_nested(self.trans_acc)
+        # _add_nested/_scale_nested rebind (they allocate); the original nested statistic is
+        # never mutated in place, so restoring the original REFERENCE preserves both values
+        # and the identity an external alias observes (STAT-RR11-3)
+        _previous_trans = self.trans_acc
         self.pi_acc += pi_acc
         self.trans_acc = _add_nested(self.trans_acc, trans_acc)
         self.nk += nk
@@ -1774,7 +1777,10 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
             label="structured-HMM sufficient statistics",
         )
         _snapshot = snapshot_accumulator_statistics(self, count_attrs=("pi_acc", "nk"), child_attrs=("emit",))
-        _previous_trans = _copy_nested(self.trans_acc)
+        # _add_nested/_scale_nested rebind (they allocate); the original nested statistic is
+        # never mutated in place, so restoring the original REFERENCE preserves both values
+        # and the identity an external alias observes (STAT-RR11-3)
+        _previous_trans = self.trans_acc
         self.pi_acc, self.trans_acc, self.nk = candidate_pi, candidate_trans, candidate_nk
         try:
             for k in range(self.K):
@@ -1792,7 +1798,10 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
         # Parent statistics and children scale as ONE transaction with the scaled result
         # validated as a postcondition (measured; STAT-RR8-1/RR10-1 classes).
         _snapshot = snapshot_accumulator_statistics(self, count_attrs=("pi_acc", "nk"), child_attrs=("emit",))
-        _previous_trans = _copy_nested(self.trans_acc)
+        # _add_nested/_scale_nested rebind (they allocate); the original nested statistic is
+        # never mutated in place, so restoring the original REFERENCE preserves both values
+        # and the identity an external alias observes (STAT-RR11-3)
+        _previous_trans = self.trans_acc
         self.pi_acc *= f
         self.trans_acc = _scale_nested(self.trans_acc, f)
         self.nk *= f
@@ -1877,7 +1886,7 @@ class StructuredHMMAccumulator(SequenceEncodableStatisticAccumulator):
         _snapshot = snapshot_accumulator_statistics(self, count_attrs=("pi_acc",), child_attrs=("emit",))
         # the keyed-pooling protocol tests build accumulators via __new__ with only the fields
         # under test, so an absent trans_acc is skipped exactly as the snapshot helper skips it
-        _previous_trans = _copy_nested(self.trans_acc) if hasattr(self, "trans_acc") else None
+        _previous_trans = self.trans_acc if hasattr(self, "trans_acc") else None
         if candidate_pi is not None:
             # Copy on replace too: without it, every tied accumulator ends up pointing at the
             # SAME array object, so any one of them later accumulating new local data (pi_acc
@@ -2465,7 +2474,9 @@ class IOHMMAccumulator(SequenceEncodableStatisticAccumulator):
         # Transactional with a finiteness postcondition (measured on the family; STAT-RR8-1/
         # RR9-1 classes).
         _snapshot = snapshot_accumulator_statistics(self, count_attrs=("pi_acc", "nk"), child_attrs=("emit",))
-        _previous_trans = _copy_nested(self.trans_accs)
+        # _add_nested/_scale_nested rebind (they allocate); restoring the original REFERENCE
+        # preserves both values and alias-observed identity (STAT-RR11-3)
+        _previous_trans = self.trans_accs
         self.pi_acc += pi_acc
         self.trans_accs = [_add_nested(a, b) for a, b in zip(self.trans_accs, trans_accs)]
         self.nk += nk
@@ -2503,7 +2514,9 @@ class IOHMMAccumulator(SequenceEncodableStatisticAccumulator):
             transition_count=self.M,
         )
         _snapshot = snapshot_accumulator_statistics(self, count_attrs=("pi_acc", "nk"), child_attrs=("emit",))
-        _previous_trans = _copy_nested(self.trans_accs)
+        # _add_nested/_scale_nested rebind (they allocate); restoring the original REFERENCE
+        # preserves both values and alias-observed identity (STAT-RR11-3)
+        _previous_trans = self.trans_accs
         self.pi_acc, self.trans_accs, self.nk = candidate_pi, candidate_trans, candidate_nk
         try:
             for k in range(self.K):
@@ -2520,7 +2533,9 @@ class IOHMMAccumulator(SequenceEncodableStatisticAccumulator):
         # One transaction with a scaled-result postcondition (measured on the family;
         # STAT-RR8-1/RR10-1 classes).
         _snapshot = snapshot_accumulator_statistics(self, count_attrs=("pi_acc", "nk"), child_attrs=("emit",))
-        _previous_trans = _copy_nested(self.trans_accs)
+        # _add_nested/_scale_nested rebind (they allocate); restoring the original REFERENCE
+        # preserves both values and alias-observed identity (STAT-RR11-3)
+        _previous_trans = self.trans_accs
         self.pi_acc *= factor
         self.trans_accs = _scale_nested(self.trans_accs, factor)
         self.nk *= factor

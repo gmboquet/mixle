@@ -73,6 +73,8 @@ from mixle.stats.latent.effective_sample import (
     require_finite_count_totals as _require_finite_statistics,
 )
 from mixle.stats.latent.effective_sample import (
+    restore_accumulator_statistics,
+    snapshot_accumulator_statistics,
     validate_effective_sample_mass,
     validated_count_array,
     validated_observation_weight,
@@ -417,7 +419,11 @@ def _transactional_combine(
     child can reject its own part mid-loop (STAT-RR9-1); either way the accumulator must come
     back exactly as it was.
     """
-    _previous = (acc.init_counts.copy(), acc.state_counts.copy(), acc.trans_counts.copy())
+    # Counts are snapshotted as (original object, values) and healed IN PLACE on rollback:
+    # the += below mutates the arrays themselves, so rebinding pristine copies abandoned the
+    # mutated originals -- an external alias to a count array kept the merged values while the
+    # attribute looked restored (STAT-RR11-3).
+    _state = snapshot_accumulator_statistics(acc, count_attrs=("init_counts", "state_counts", "trans_counts"))
     _children = _snapshot_children(acc.accumulators, acc.len_accumulator)
     acc.init_counts += init_counts
     acc.state_counts += state_counts
@@ -436,7 +442,7 @@ def _transactional_combine(
         if len_acc_value is not None:
             acc.len_accumulator.combine(len_acc_value)
     except Exception:
-        acc.init_counts, acc.state_counts, acc.trans_counts = _previous
+        restore_accumulator_statistics(acc, _state)
         _restore_children(acc.accumulators, acc.len_accumulator, _children)
         raise
 
@@ -455,7 +461,7 @@ def _transactional_restore(
     left the accumulator half-replaced). Child restoration can still fail mid-loop, so any
     failure rolls the whole accumulator back before re-raising (STAT-RR9-1).
     """
-    previous_counts = (acc.init_counts, acc.state_counts, acc.trans_counts)
+    _state = snapshot_accumulator_statistics(acc, count_attrs=("init_counts", "state_counts", "trans_counts"))
     children_snapshot = _snapshot_children(acc.accumulators, acc.len_accumulator)
     acc.init_counts, acc.state_counts, acc.trans_counts = candidate_init, candidate_state, candidate_trans
     try:
@@ -464,7 +470,7 @@ def _transactional_restore(
         if acc.len_accumulator is not None:
             acc.len_accumulator.from_value(len_acc)
     except Exception:
-        acc.init_counts, acc.state_counts, acc.trans_counts = previous_counts
+        restore_accumulator_statistics(acc, _state)
         _restore_children(acc.accumulators, acc.len_accumulator, children_snapshot)
         raise
 
@@ -475,9 +481,12 @@ def _transactional_scale(acc, c: float, *, family_label: str) -> None:
     A valid factor times a valid statistic can overflow ([8e307, 0] * 3.0), so the scaled
     result is validated (STAT-RR8-1) -- and the transaction must cover the child scaling too:
     snapshotting only the parent arrays around the parent check left the parent and every
-    already-scaled child doubled when a later child raised (STAT-RR10-1).
+    already-scaled child doubled when a later child raised (STAT-RR10-1). The rollback heals
+    the count arrays IN PLACE, identity preserved: the *= below mutates the arrays themselves,
+    and rebinding pristine copies left a caller-held alias doubled while the attribute looked
+    restored (STAT-RR11-3).
     """
-    previous = (acc.init_counts.copy(), acc.state_counts.copy(), acc.trans_counts.copy())
+    _state = snapshot_accumulator_statistics(acc, count_attrs=("init_counts", "state_counts", "trans_counts"))
     children_snapshot = _snapshot_children(acc.accumulators, acc.len_accumulator)
     acc.init_counts *= c
     acc.state_counts *= c
@@ -496,7 +505,7 @@ def _transactional_scale(acc, c: float, *, family_label: str) -> None:
         if acc.len_accumulator is not None:
             acc.len_accumulator.scale(c)
     except Exception:
-        acc.init_counts, acc.state_counts, acc.trans_counts = previous
+        restore_accumulator_statistics(acc, _state)
         _restore_children(acc.accumulators, acc.len_accumulator, children_snapshot)
         raise
 

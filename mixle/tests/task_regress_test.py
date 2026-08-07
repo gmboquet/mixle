@@ -68,15 +68,37 @@ class SolveRegressionTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires at least"):
             solve_regression(_price, data, tol=1.0, alpha=0.01, holdout=0.25)
 
-    def test_improve_promotes_only_tighter_calibration(self):
+    def test_improve_promotes_on_selection_rows_and_recalibrates_on_untouched_rows(self):
         from mixle.task import solve_regression
 
         sol = solve_regression(_price, _items(150), tol=0.01, alpha=0.1, seed=0, epochs=150)
-        q0 = sol.qhat
+        mae0 = sol.holdout_mae
+        cal_before = [repr(c) for c in sol.cal_inputs]
         for it in _items(300, seed=3):  # harvest real labels while escalating
             sol(it)
-        sol.improve()
-        self.assertLessEqual(sol.qhat, q0 + 1e-12)  # anti-regression on the calibrated width
+        promoted = sol.improve()
+        # every promotion decision reads the selection rows (STAT-RR11-1: promoting on the
+        # calibrated width took a running minimum of qhat over one fixed slice)
+        self.assertEqual(sol.selection_uses, 1)
+        if promoted:
+            # the promotion metric is held-out selection error, not the calibrated width
+            self.assertLessEqual(sol.holdout_mae, mae0 + 1e-12)
+        # the calibration rows are untouched by the decision and still set a finite qhat
+        self.assertEqual([repr(c) for c in sol.cal_inputs], cal_before)
+        self.assertTrue(np.isfinite(sol.qhat))
+        # the two roles never overlap
+        overlap = {repr(c) for c in sol.cal_inputs} & {repr(c) for c in sol.sel_inputs}
+        self.assertEqual(overlap, set())
+
+    def test_selection_coverage_is_measured_on_rows_the_quantile_never_touches(self):
+        from mixle.task import solve_regression
+
+        sol = solve_regression(_price, _items(200), tol=20.0, alpha=0.1, seed=0, epochs=200)
+        rep = sol.report()
+        # a fresh (single-use) measurement of the deployed interval, honestly labeled
+        self.assertEqual(rep["selection_uses"], 0)
+        self.assertIsNotNone(rep["selection_coverage"])
+        self.assertGreaterEqual(rep["selection_coverage"], 0.75)  # near 1 - alpha, minus slack
 
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
@@ -125,21 +147,23 @@ class RegressionResolveTest(unittest.TestCase):
         sol = solve_regression(counting_teacher, base_items, tol=1e6, alpha=0.1, prelabeled=pre, seed=0, epochs=150)
         # the teacher labeled ONLY the base inputs; prelabeled pairs came in free
         self.assertEqual(calls["n"], len(base_items))
-        # prelabeled landed in training, never calibration
-        self.assertEqual(len(sol.train_inputs), len(base_items) - len(sol.cal_inputs) + len(harvested))
-        self.assertLessEqual(len(sol.cal_inputs), len(base_items))
+        # prelabeled landed in training, never calibration or selection
+        held_out = len(sol.cal_inputs) + len(sol.sel_inputs)
+        self.assertEqual(len(sol.train_inputs), len(base_items) - held_out + len(harvested))
+        self.assertLessEqual(held_out, len(base_items))
         for it in harvested:
             self.assertNotIn(repr(it), [repr(c) for c in sol.cal_inputs])
+            self.assertNotIn(repr(it), [repr(c) for c in sol.sel_inputs])
 
     def test_prelabeled_data_does_not_degrade_the_fit(self):
         from mixle.task import solve_regression
 
-        small = _items(60, seed=0)
+        small = _items(80, seed=0)  # holdout 20 -> 10 calibration + 10 selection at alpha=0.1
         extra = _items(400, seed=5)
         pre = (extra, [_price(it) for it in extra])
         lone = solve_regression(_price, small, tol=1e6, alpha=0.1, seed=0, epochs=200)
         fed = solve_regression(_price, small, tol=1e6, alpha=0.1, prelabeled=pre, seed=0, epochs=200)
-        # the 15-point cal split makes MAE noisy; pin non-degradation, not strict tightening
+        # the 10-point selection split makes MAE noisy; pin non-degradation, not strict tightening
         self.assertLess(fed.holdout_mae, lone.holdout_mae * 1.5)
         self.assertTrue(np.isfinite(fed.qhat))
 

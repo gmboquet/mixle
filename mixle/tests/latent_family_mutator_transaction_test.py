@@ -247,6 +247,42 @@ class FamilyMutatorTransactionTest(unittest.TestCase):
                     fresh.scale(3.0)
                 self.assertEqual(_describe(fresh.value()), before)
 
+    def test_failed_scale_heals_externally_held_count_aliases_in_place(self):
+        # STAT-RR11-3: a rollback that rebinds pristine copies abandons the in-place-mutated
+        # originals -- a caller's alias to a count array kept the scaled values while the
+        # attribute looked restored, and object identity changed. Every family's rollback now
+        # writes the snapshot back INTO the original array.
+        count_attr = {
+            "mixture": "comp_counts",
+            "semi_supervised_mixture": "comp_counts",
+            "joint_mixture": "joint_counts",
+            "hierarchical_mixture": "comp_counts",
+            "lookback_hmm": "init_counts",
+            "segmental_hmm": "init_counts",
+            "semi_supervised_hmm": "trans_counts",
+            "structured_hmm": "pi_acc",
+            "iohmm": "pi_acc",
+            "edhmm": "pi_acc",
+            "scheduled_hmm": "init_counts",
+        }
+        for name, fx in self.families.items():
+            with self.subTest(family=name):
+                a = fx["seed"]()
+                arrays = [v for v in a.value() if isinstance(v, np.ndarray)]
+                max_el = max(float(np.abs(v).max()) for v in arrays)
+                vbig = _rescaled_preserving_ints(a.value(), 9.0e307 / max_el)
+                fresh = fx["make"]()
+                try:
+                    fresh.from_value(vbig)
+                except Exception:  # noqa: BLE001 - any family-specific contract rejection
+                    continue
+                alias = getattr(fresh, count_attr[name])
+                values_before = np.asarray(alias).copy()
+                with self.assertRaises(ValueError):
+                    fresh.scale(3.0)
+                np.testing.assert_array_equal(np.asarray(alias), values_before)
+                self.assertIs(getattr(fresh, count_attr[name]), alias)
+
     def test_legitimate_combine_and_scale_still_apply(self):
         for name, fx in self.families.items():
             with self.subTest(family=name):
