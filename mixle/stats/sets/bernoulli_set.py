@@ -408,24 +408,30 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
         return rv
 
     def __getstate__(self) -> dict:
-        """Pickle the read-only parameter view as a plain dict.
+        """Pickle every read-only parameter view as a plain dict, recording which were views.
 
-        ``pmap`` is a ``MappingProxyType`` so callers cannot mutate a fitted distribution's
-        probabilities in place. ``mappingproxy`` is unpicklable at EVERY protocol, though, which
-        made the whole distribution unserializable -- and serialization is not a corner: shipping a
-        model to Spark or Dask workers, a multiprocessing fit, and checkpoint round-trips all go
-        through pickle. The view is rebuilt on load, so immutability survives the trip.
+        ``pmap`` -- and, on a conjugate-fitted model, ``posteriors`` -- are ``MappingProxyType`` so
+        callers cannot mutate a fitted distribution in place. ``mappingproxy`` is unpicklable at
+        EVERY protocol, which made the whole distribution unserializable -- and serialization is
+        not a corner: shipping a model to Spark or Dask workers, a multiprocessing fit, and
+        checkpoint round-trips all go through pickle. The first repair converted ``pmap`` by name
+        and the adversarial re-review immediately found the conjugate path still broken
+        (STAT-RR5-1), so the conversion now walks the instance: every proxy is flattened, the
+        affected attribute names ride along in the state, and ``__setstate__`` rewraps exactly
+        those -- a future proxied attribute cannot reopen the hole.
         """
+        proxied = [key for key, value in self.__dict__.items() if isinstance(value, MappingProxyType)]
         state = dict(self.__dict__)
-        state["pmap"] = dict(state["pmap"])
+        for key in proxied:
+            state[key] = dict(state[key])
+        state["_proxied_attributes"] = proxied
         return state
 
     def __setstate__(self, state: dict) -> None:
-        """Restore the read-only parameter view discarded by :meth:`__getstate__`."""
-        from types import MappingProxyType
-
+        """Restore the read-only views recorded by :meth:`__getstate__`."""
         state = dict(state)
-        state["pmap"] = MappingProxyType(dict(state["pmap"]))
+        for key in state.pop("_proxied_attributes", ()):
+            state[key] = MappingProxyType(dict(state[key]))
         self.__dict__.update(state)
 
     def __str__(self) -> str:

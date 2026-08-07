@@ -672,41 +672,43 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
             differentiable=all(child.differentiable for child in children),
         )
 
+    # retained for pickles written before the recorded-keys scheme below
     _PROXIED_MAPS = ("init_prob_map", "transition_map", "loginit_prob_map", "log_transition_map")
 
     def __getstate__(self) -> dict:
-        """Pickle the read-only parameter views as plain dicts.
+        """Pickle every read-only parameter view as a plain dict, recording which were views.
 
-        The four probability maps are ``MappingProxyType`` so a fitted chain cannot be mutated in
-        place. ``mappingproxy`` is unpicklable at EVERY protocol, though, which made the whole
-        distribution unserializable -- and serialization is not a corner: shipping a model to Spark
-        or Dask workers, a multiprocessing fit, and checkpoint round-trips all go through pickle.
-        The views are rebuilt on load, so immutability survives the trip. Nested row maps are copied
-        one level down, which is where the transition proxies live.
+        The probability maps are ``MappingProxyType`` so a fitted chain cannot be mutated in
+        place; ``mappingproxy`` is unpicklable at every protocol, which made the whole
+        distribution unserializable. Converting a fixed name list proved fragile on the Bernoulli
+        set (a conjugate-fitted model carried a proxy the list missed, STAT-RR5-1), so the
+        conversion walks the instance instead: every top-level proxy is flattened (transition rows
+        one level down), the affected names ride along in the state, and ``__setstate__`` rewraps
+        exactly those.
         """
+        proxied = [key for key, value in self.__dict__.items() if isinstance(value, MappingProxyType)]
         state = dict(self.__dict__)
-        for attribute in self._PROXIED_MAPS:
-            mapping = state.get(attribute)
-            if mapping is not None:
-                state[attribute] = {
-                    key: dict(value) if hasattr(value, "keys") else value for key, value in mapping.items()
-                }
+        for key in proxied:
+            state[key] = {
+                inner_key: dict(inner) if isinstance(inner, MappingProxyType) else inner
+                for inner_key, inner in state[key].items()
+            }
+        state["_proxied_attributes"] = proxied
         return state
 
     def __setstate__(self, state: dict) -> None:
-        """Restore the read-only parameter views discarded by :meth:`__getstate__`."""
-        from types import MappingProxyType
-
+        """Restore the read-only views recorded by :meth:`__getstate__` (or the legacy name list)."""
         state = dict(state)
-        for attribute in self._PROXIED_MAPS:
-            mapping = state.get(attribute)
-            if mapping is not None:
-                state[attribute] = MappingProxyType(
-                    {
-                        key: MappingProxyType(dict(value)) if hasattr(value, "keys") else value
-                        for key, value in mapping.items()
-                    }
-                )
+        proxied = state.pop("_proxied_attributes", None)
+        if proxied is None:  # a pickle from the fixed-name revision
+            proxied = [name for name in self._PROXIED_MAPS if isinstance(state.get(name), dict)]
+        for key in proxied:
+            state[key] = MappingProxyType(
+                {
+                    inner_key: MappingProxyType(dict(inner)) if isinstance(inner, dict) else inner
+                    for inner_key, inner in state[key].items()
+                }
+            )
         self.__dict__.update(state)
 
     def __str__(self):

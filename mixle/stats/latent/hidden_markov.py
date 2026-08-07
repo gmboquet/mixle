@@ -144,34 +144,49 @@ def _length_term(estimate, len_enc, rows: int):
     """
     if estimate.len_dist is None or len_enc is None:
         return None
-    values = estimate.len_dist.seq_log_density(len_enc)
-    if values is None:
+    from mixle.stats.combinator.null_dist import NullDistribution
+
+    # The null case is identified by the MODEL, never by the shape of its output. The first repair
+    # treated an empty score array as "nothing to add", which turned a length model that wrongly
+    # returned no scores into a silent skip; the re-review also fed a column matrix (accepted, and
+    # broadcasting (n,1)+(n,) would have scored garbage) and a scalar (leaked an IndexError from
+    # the shape probe). Geometry is now fail-closed: exactly one score per sequence (STAT-RR5-3).
+    if isinstance(estimate.len_dist, NullDistribution):
         return None
-    values = np.asarray(values)
-    if values.size == 0:
-        return None if rows else values
-    if values.shape[0] != rows:
-        raise ValueError(f"hidden-Markov length model scored {values.shape[0]} sequences but the batch holds {rows}.")
+    values = np.asarray(estimate.len_dist.seq_log_density(len_enc), dtype=np.float64)
+    if values.ndim != 1 or values.shape[0] != rows:
+        raise ValueError(
+            "hidden-Markov length model must score one log-density per sequence: expected shape "
+            f"({rows},), got {values.shape}."
+        )
     return values
 
 
-def _responsibility_identity_applies(init_key, trans_key, state_key) -> bool:
-    """Whether the cross-part mass identities are still invariants for this accumulator.
+def _validate_state_mass(init_counts, state_counts, trans_counts, *, init_key, trans_key, label) -> None:
+    """Enforce the strongest state-mass relation the keying mode preserves (measured, not assumed).
 
-    They are per-accumulator bookkeeping facts -- "state mass == initial mass + transition mass",
-    and "initial mass <= the observation count this site saw" -- and both assume every part was
-    summed from the same observations. Any tying key breaks that assumption: a keyed part is pooled
-    across every site sharing the key, so it carries the mass of N sites while the unkeyed parts,
-    and this site's own observation count, carry the mass of one. Tying just the chain dynamics
-    (``keys=('init', 'trans', None)`` -- mixture components sharing one initial distribution and
-    transition matrix while each keeps its own emissions) is exactly what the keying feature is
-    for, and enforcing the identities there rejected it outright.
+    Unkeyed initial and transition parts come from exactly this accumulator's observations, so
+    state mass equals initial+transition mass to summation roundoff -- the full corruption check.
+    That holds whatever ``state_key`` is: state-emission tying routes the per-state EMISSION
+    merge, not this count vector (measured: state-only keying keeps the ratio at exactly 1.0).
 
-    Measured rather than assumed: pooling all three parts does not restore the identity either, so
-    the condition is "no key anywhere", not "keyed uniformly". An unkeyed accumulator is fully
-    validated as before, which is what the negative-control test pins.
+    A keyed initial or transition part is pooled across every site sharing the key, so it carries
+    other sites' mass and equality legitimately fails (measured on two tied chains: local state
+    mass over the pooled total is 0.601/0.399, summing to one). What survives is the direction --
+    pooling only ADDS mass, so local state mass cannot exceed the pooled initial+transition mass.
+    The first repair skipped validation entirely whenever any key was set, and the adversarial
+    re-review promptly fed a keyed accumulator init=2, transition=0, state=198 (STAT-RR5-2); that
+    probe violates the inequality by two orders of magnitude and is rejected in every mode now.
     """
-    return init_key is None and trans_key is None and state_key is None
+    lhs = float(np.asarray(state_counts).sum())
+    rhs = float(np.asarray(init_counts).sum() + np.asarray(trans_counts).sum())
+    rtol = _responsibility_mass_tolerance(max(abs(lhs), abs(rhs)))
+    atol = max(1.0e-9, rtol * max(1.0, abs(rhs)))
+    if init_key is None and trans_key is None:
+        if not np.isclose(lhs, rhs, rtol=rtol, atol=atol):
+            raise ValueError(f"{label} state counts must equal initial plus transition responsibility mass")
+    elif lhs > rhs * (1.0 + rtol) + atol:
+        raise ValueError(f"{label} state counts exceed the pooled initial plus transition responsibility mass")
 
 
 def _responsibility_mass_tolerance(mass):
@@ -3485,16 +3500,17 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             (num_states, num_states),
             "hidden-Markov transition counts",
         )
-        if _responsibility_identity_applies(self.init_key, self.trans_key, self.state_key):
-            _mass = float(init_counts.sum() + trans_counts.sum())
-            _rtol = _responsibility_mass_tolerance(_mass)
-            if not np.isclose(
-                float(state_counts.sum()),
-                _mass,
-                rtol=_rtol,
-                atol=max(1.0e-9, _rtol * max(1.0, abs(_mass))),
-            ):
-                raise ValueError("hidden-Markov state counts must equal initial plus transition responsibility mass")
+        # combine receives one accumulator's own statistics -- pooling happens later, at key_merge
+        # -- so the full equality holds here even under tying (measured residual 0.0 across a real
+        # keyed fit), and the check is unconditional.
+        _validate_state_mass(
+            init_counts,
+            state_counts,
+            trans_counts,
+            init_key=None,
+            trans_key=None,
+            label="hidden-Markov",
+        )
         if not isinstance(acc_values, (tuple, list)) or len(acc_values) != num_states:
             raise ValueError("hidden-Markov emission statistics must match the state count")
 
@@ -3577,16 +3593,17 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             (num_states, num_states),
             "hidden-Markov transition counts",
         )
-        if _responsibility_identity_applies(self.init_key, self.trans_key, self.state_key):
-            _mass = float(self.init_counts.sum() + self.trans_counts.sum())
-            _rtol = _responsibility_mass_tolerance(_mass)
-            if not np.isclose(
-                float(self.state_counts.sum()),
-                _mass,
-                rtol=_rtol,
-                atol=max(1.0e-9, _rtol * max(1.0, abs(_mass))),
-            ):
-                raise ValueError("hidden-Markov state counts must equal initial plus transition responsibility mass")
+        # a serialized value() may already carry pooled parts when the accumulator is keyed, so
+        # this site enforces the mode-appropriate relation: equality unkeyed, the pooled upper
+        # bound otherwise (see _validate_state_mass)
+        _validate_state_mass(
+            self.init_counts,
+            self.state_counts,
+            self.trans_counts,
+            init_key=self.init_key,
+            trans_key=self.trans_key,
+            label="hidden-Markov",
+        )
         if not isinstance(accumulators, (tuple, list)) or len(accumulators) != num_states:
             raise ValueError("hidden-Markov emission statistics must match the state count")
 
@@ -3903,20 +3920,20 @@ class HiddenMarkovEstimator(ParameterEstimator):
         if not isinstance(topic_ss, (tuple, list)) or len(topic_ss) != num_states:
             raise ValueError("hidden-Markov emission statistics must match the state count")
         _est_keys = self.keys if isinstance(self.keys, (tuple, list)) and len(self.keys) == 3 else (None, None, None)
-        if _responsibility_identity_applies(*_est_keys):
-            _mass = float(init_counts.sum() + trans_counts.sum())
-            _rtol = _responsibility_mass_tolerance(_mass)
-            if not np.isclose(
-                float(state_counts.sum()),
-                _mass,
-                rtol=_rtol,
-                atol=max(1.0e-9, _rtol * max(1.0, abs(_mass))),
-            ):
-                raise ValueError("hidden-Markov state counts must equal initial plus transition responsibility mass")
-        if _responsibility_identity_applies(*_est_keys):
-            # Same reason as the identity above: a pooled initial-count vector carries the mass of
-            # every site sharing the key, so comparing it against THIS site's observation count is
-            # not a corruption check any more.
+        # the M-step receives post-key_merge statistics, so this is where pooling actually lands:
+        # equality when initial/transition are unkeyed, the pooled upper bound otherwise
+        _validate_state_mass(
+            init_counts,
+            state_counts,
+            trans_counts,
+            init_key=_est_keys[0],
+            trans_key=_est_keys[1],
+            label="hidden-Markov",
+        )
+        if _est_keys[0] is None:
+            # a POOLED initial-count vector carries the mass of every site sharing the key, so
+            # comparing it against THIS site's observation count stops being a corruption check;
+            # an unkeyed one is still bounded by the observations that produced it
             validate_effective_sample_mass(
                 nobs,
                 float(init_counts.sum()),

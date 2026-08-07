@@ -80,12 +80,47 @@ def _prior_family_id(prior: Any) -> str:
     return _CONJUGATE_FAMILY_ALIASES.get(type_id, type_id)
 
 
+def _prior_dimension(prior: Any) -> Any:
+    """The prior's parameter dimension, or None when the family carries none.
+
+    Folding the symmetric spelling into the general Dirichlet family made the fingerprint compare
+    NAMES only, and the re-review immediately paired a 2-category component with a declared
+    3-simplex reference prior: structurally "equal", and the ELBO cross-entropy then evaluated a
+    finite number over mismatched simplices (STAT-RR5-4). Family equivalence must not erase the
+    dimension, so the leaf fingerprint carries it whenever the prior declares one.
+    """
+    dim = getattr(prior, "dim", None)
+    if isinstance(dim, (int, np.integer)) and not isinstance(dim, bool):
+        return int(dim)
+    return None
+
+
 def _prior_structure(prior: Any) -> tuple[Any, ...]:
     if prior is None:
         return ("none",)
     if isinstance(prior, (tuple, list)):
         return ("sequence", len(prior), *(_prior_structure(child) for child in prior))
-    return ("leaf", _prior_family_id(prior))
+    return ("leaf", _prior_family_id(prior), _prior_dimension(prior))
+
+
+def _prior_structures_match(left: tuple[Any, ...], right: tuple[Any, ...]) -> bool:
+    """Structural equality with one deliberate loosening: an UNDECLARED dimension matches any.
+
+    Declared dimensions must agree -- a 2-category component against a declared 3-simplex
+    reference is exactly the mismatch whose "finite but invalid" ELBO the re-review demonstrated
+    (STAT-RR5-4). The automatic path, though, supplies dimension-agnostic template priors (their
+    ``dim`` is unset so one template serves categoricals of any arity), and those must keep
+    matching the concrete posterior dimension the fit produces. Wildcards only ever come from an
+    absent declaration, never from a disagreeing one.
+    """
+    if left[:2] != right[:2]:
+        return False
+    if left[0] == "leaf":
+        left_dim, right_dim = left[2], right[2]
+        return left_dim is None or right_dim is None or left_dim == right_dim
+    if left[0] == "sequence":
+        return len(left) == len(right) and all(_prior_structures_match(a, b) for a, b in zip(left[2:], right[2:]))
+    return left == right
 
 
 def _validated_hyperprior(prior: Any) -> GammaDistribution | None:
@@ -186,7 +221,7 @@ def _validated_component_priors(components: Sequence[Any], priors: Any) -> list[
     if len(result) != len(components):
         raise ValueError("Dirichlet-process component_priors must contain exactly one entry per component.")
     for index, (component, prior) in enumerate(zip(components, result)):
-        if _prior_structure(component.get_prior()) != _prior_structure(prior):
+        if not _prior_structures_match(_prior_structure(component.get_prior()), _prior_structure(prior)):
             raise ValueError("Dirichlet-process component prior structure differs at component %d." % index)
     return result
 

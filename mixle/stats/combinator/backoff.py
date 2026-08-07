@@ -217,19 +217,35 @@ class BackoffDistribution(SequenceEncodableProbabilityDistribution):
         """
         from mixle.stats.compute.declarations import DistributionDeclaration, StatisticSpec, declaration_for
 
-        children = tuple(declaration_for(child) for child in (self.base, self.fallback))
-        declared = {child.support for child in children if child is not None}
-        support = declared.pop() if len(declared) == 1 and len(children) == 2 else None
-        known = tuple(child for child in children if child is not None)
+        base_declaration = declaration_for(self.base)
+        fallback_declaration = declaration_for(self.fallback)
+        # BOTH children must declare, and agree, before the mixture claims a support: the first
+        # revision collapsed the declared supports into a set, so one declaring child was enough
+        # to stamp its support on the whole backoff while the other child had proved nothing --
+        # and a positional role slice labeled a surviving fallback declaration "base"
+        # (STAT-RR5-5). Roles now travel WITH their declarations, and an undeclared child leaves
+        # the support unstated, which is the honest answer rather than an inherited one.
+        support = None
+        if (
+            base_declaration is not None
+            and fallback_declaration is not None
+            and base_declaration.support == fallback_declaration.support
+        ):
+            support = base_declaration.support
+        paired = tuple(
+            (role, declaration)
+            for role, declaration in (("base", base_declaration), ("fallback", fallback_declaration))
+            if declaration is not None
+        )
         return DistributionDeclaration(
             name="backoff",
             distribution_type=type(self),
             parameters=(),
             statistics=(StatisticSpec("base"), StatisticSpec("fallback")),
             support=support,
-            children=known,
-            child_roles=tuple(("base", "fallback")[: len(known)]),
-            differentiable=all(child.differentiable for child in known) if known else False,
+            children=tuple(declaration for _, declaration in paired),
+            child_roles=tuple(role for role, _ in paired),
+            differentiable=bool(paired) and all(declaration.differentiable for _, declaration in paired),
         )
 
     def __str__(self) -> str:
