@@ -34,6 +34,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.task._ledger import CLASSIFICATION_LEDGER, read_ledger, write_ledger
 from mixle.task._teacher import TeacherCaller, as_batch_view
 from mixle.task.calibrate import CalibratedTaskModel
 from mixle.task.cascade import Cascade
@@ -542,8 +543,10 @@ class Solution:
                     # decisions the reported agreement's own rows have made. selection_uses > 1 means
                     # read holdout_agreement as a selection score, not a generalization estimate.
                     "n_selection": len(self.sel_inputs),
-                    "selection_uses": self.selection_uses,
-                    "calibration_evidence": self.calibration_evidence,
+                    # the honesty ledger is registry-driven: save and load iterate the SAME
+                    # declaration, so a claim field cannot be written without being restored
+                    # (STAT-R1/RR13-1/RR13-2 were all hand-maintained-pair drift)
+                    **write_ledger(self, CLASSIFICATION_LEDGER),
                     "selection_evidence_is_single_use": self.selection_evidence_is_single_use,
                     "synthesized_inputs": self.synthesized,
                     "verified_at": time.time(),
@@ -586,8 +589,7 @@ class Solution:
         holdout_agreement = float("nan")
         escalation_rate = float("nan")
         verification_digest = None
-        selection_uses = 0
-        calibration_evidence = "solve-split"
+        ledger = read_ledger({}, CLASSIFICATION_LEDGER)
         if verification is not None:
             if not isinstance(verification, dict):
                 raise ValueError("artifact verification metadata must be a dictionary")
@@ -607,18 +609,11 @@ class Solution:
                 and 0.0 <= escalation_rate <= 1.0
             )
             promoted = bool(saved_promoted and valid_evidence)
-            # The honesty ledgers survive the round trip (STAT-RR13-1/2): an artifact whose
+            # The honesty ledger survives the round trip (STAT-RR13-1/2): an artifact whose
             # threshold was recalibrated on reused rows must not reload as certified, and the
-            # selection-reuse count must not reset -- selection_evidence_is_single_use flipped
-            # from False back to True on load, presenting a spent receipt as fresh.
-            saved_uses = verification.get("selection_uses", 0)
-            if isinstance(saved_uses, bool) or not isinstance(saved_uses, int) or saved_uses < 0:
-                raise ValueError("artifact selection_uses must be a non-negative integer")
-            selection_uses = saved_uses
-            saved_evidence = verification.get("calibration_evidence", "solve-split")
-            if saved_evidence not in ("solve-split", "fresh-evidence", "reused-after-adaptive-harvest"):
-                raise ValueError(f"artifact calibration_evidence regime is unrecognized: {saved_evidence!r}")
-            calibration_evidence = saved_evidence
+            # selection-reuse count must not reset. The registry validates on the way in;
+            # unrecognized regimes and negative counts are refused, never defaulted.
+            ledger = read_ledger(verification, CLASSIFICATION_LEDGER)
         return cls(
             cascade=Cascade(cal, _batch_view(teacher), cost=cost),
             teacher=teacher,
@@ -636,8 +631,7 @@ class Solution:
             target_agreement=meta.get("target_agreement"),
             ood=meta.get("ood"),
             verification_digest=verification_digest,
-            selection_uses=selection_uses,
-            calibration_evidence=calibration_evidence,
+            **ledger,
         )
 
 

@@ -55,6 +55,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.task._ledger import REGRESSION_LEDGER, read_ledger, write_ledger
 from mixle.task._teacher import TeacherCaller, as_batch_view
 from mixle.task.model import HashedNGram, HashedRecord
 from mixle.task.solve import _input_kind, _split_holdout_roles
@@ -377,10 +378,10 @@ class RegressionSolution:
                     "epochs": self.epochs,
                     "lr": self.lr,
                     "seed": self.seed,
-                    "calibration_evidence": self.calibration_evidence,
-                    # the selection-reuse receipt survives the round trip (STAT-RR13-2): resetting
-                    # it to zero on load presented spent selection evidence as fresh
-                    "selection_uses": int(self.selection_uses),
+                    # the honesty ledger is registry-driven: save and load iterate the SAME
+                    # declaration, so a claim field cannot be written without being restored
+                    # (STAT-R1/RR13-1/RR13-2 were all hand-maintained-pair drift)
+                    **write_ledger(self, REGRESSION_LEDGER),
                 }
             },
         )
@@ -406,8 +407,7 @@ class RegressionSolution:
             epochs=int(m["epochs"]),
             lr=float(m["lr"]),
             seed=int(m["seed"]),
-            calibration_evidence=str(m.get("calibration_evidence", "solve-split")),
-            selection_uses=int(m.get("selection_uses", 0)),
+            **read_ledger(m, REGRESSION_LEDGER),
         )
 
     def improve(self, evidence_inputs: Sequence[Any] | None = None) -> bool:

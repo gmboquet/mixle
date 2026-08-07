@@ -476,6 +476,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "task_router_test.py": ("torch", "integration", "slow"),
     "task_structured_out_test.py": ("torch", "integration", "slow"),
     "task_toolcall_test.py": ("torch", "integration", "slow"),
+    "task_ledger_lifecycle_test.py": ("torch", "integration", "slow"),
     "router_harvest_test.py": ("torch", "integration", "slow"),
     "routing_density_economics_receipts_test.py": ("torch", "integration", "slow"),
     "calibrated_report_demo_smoke_test.py": ("torch", "integration", "slow"),
