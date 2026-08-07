@@ -61,14 +61,30 @@ The core package currently ships 64 Python example scripts:
 Release Execution Status
 ------------------------
 
-The 23 base-install examples were re-run on 2026-08-04 from the source tree on Python 3.12.12,
-four at a time, with no per-script budget imposed. 22 completed successfully. The slowest was
-``hidden_association_example.py`` at 46s; every other passing script finished in under 41s.
+**All 57 examples were executed on 2026-08-07** against ``release/0.8.0``, from the source tree on
+Python 3.12.12, one at a time in its own process session under a resident-memory watchdog. All 57
+completed successfully: 439s in total, peak 2.3 GB, and the slowest single script
+``project_neural_to_structured.py`` at 24.3s.
 
-* **22 passed.**
-* **1 blocked, as inventoried**: ``skeptic_challenge_example.py`` needs ``scikit-learn``, which is
-  not a mixle dependency. It fails with ``ModuleNotFoundError: No module named 'sklearn'``, which
-  is the documented and expected behaviour for this script outside the ``examples`` extra.
+* **57 passed, 0 failed.**
+* **Environment: every optional extra provisioned** -- scikit-learn, torch, transformers, datasets,
+  pyspark, mpi4py and dask were all importable. That is what the number means and what it does not:
+  it says the examples are correct against this candidate, not that they run on a base install. The
+  per-example ``blocked`` classifications in the Inventory below are a separate axis and remain
+  accurate for a minimal environment -- ``skeptic_challenge_example.py`` passes here only because
+  scikit-learn is present, and still fails without it.
+
+This supersedes the 2026-08-04 pass, which measured only the 23 base-install scripts and predates
+the library repairs below. Two of its statements no longer hold: the remaining 34 examples were
+recorded as "not executed in this pass" and all of them execute when their prerequisites exist, and
+the slowest script was recorded at 46s against 24.3s now.
+
+This run also stands as regression evidence for eight library defects fixed on 2026-08-05/06 --
+parameter tying (``keys=``) unusable for the LDA/pLSI/PCFG families, ``BernoulliSetDistribution``
+and ``MarkovChainDistribution`` unpicklable at every protocol, and the automatic type-detection
+path building models the library then refused, among others. Those fixes touch the key validator
+that every estimator walks, sequence length handling, Dirichlet-process component priors, and
+pickling; 57 examples and the 131-notebook corpus both execute clean on top of them.
 
 This supersedes the 2026-07-17 pass, which is no longer accurate in three respects.
 
