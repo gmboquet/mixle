@@ -180,5 +180,103 @@ class SubjectBindingTest(unittest.TestCase):
         self.assertIn("run_repro_entry.py", receipt["scope"]["reproduction_bundle_entries"])
 
 
+class RecordTamperTest(unittest.TestCase):
+    """SYS-RR8-2: stripping a file's RECORD hash excluded it from every integrity comparison.
+
+    The reviewer altered ``mixle/reproduction.py`` inside a copy of the exact wheel and changed its
+    RECORD row to ``mixle/reproduction.py,,``. The wheel installed, the altered code imported, and
+    the receipt still said passed with 819 compared entries. Only RECORD may lack a hash now;
+    anything else unhashed, duplicated, or malformed is refused.
+    """
+
+    @staticmethod
+    def _wheel(directory, record_body):
+        wheel = Path(directory) / "mixle-0.8.0-py3-none-any.whl"
+        with zipfile.ZipFile(wheel, "w") as archive:
+            archive.writestr("mixle-0.8.0.dist-info/RECORD", record_body)
+        return wheel
+
+    def setUp(self):
+        import base64
+
+        from mixle import reproduction
+
+        self.reproduction = reproduction
+        self.hash = base64.urlsafe_b64encode(bytes.fromhex("a" * 64)).decode("ascii").rstrip("=")
+
+    def test_an_unhashed_code_row_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            wheel = self._wheel(
+                directory,
+                "mixle/a.py,sha256=%s,5\nmixle/reproduction.py,,\nmixle-0.8.0.dist-info/RECORD,,\n" % self.hash,
+            )
+            with self.assertRaisesRegex(ValueError, "omits hashes"):
+                self.reproduction._wheel_record_hashes(wheel)
+
+    def test_duplicate_malformed_and_missing_self_row_are_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            duplicate = "mixle/a.py,sha256={h},5\nmixle/a.py,sha256={h},5\nmixle-0.8.0.dist-info/RECORD,,\n"
+            wheel = self._wheel(directory, duplicate.format(h=self.hash))
+            with self.assertRaisesRegex(ValueError, "more than once"):
+                self.reproduction._wheel_record_hashes(wheel)
+
+            wheel = self._wheel(directory, "mixle/a.py,sha256=!!!notbase64!!!,5\nmixle-0.8.0.dist-info/RECORD,,\n")
+            with self.assertRaises(ValueError):
+                self.reproduction._wheel_record_hashes(wheel)
+
+            wheel = self._wheel(directory, "mixle/a.py,sha256=%s,5\n" % self.hash)
+            with self.assertRaisesRegex(ValueError, "exactly one self-referencing"):
+                self.reproduction._wheel_record_hashes(wheel)
+
+    def test_a_well_formed_record_still_parses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            wheel = self._wheel(directory, "mixle/a.py,sha256=%s,5\nmixle-0.8.0.dist-info/RECORD,,\n" % self.hash)
+            self.assertEqual(self.reproduction._wheel_record_hashes(wheel), {"mixle/a.py": "a" * 64})
+
+
+class ShadowInstallationTest(unittest.TestCase):
+    """SYS-RR8-3: the receipt never proved the imported code was the distribution's own.
+
+    A PYTHONPATH shadow supplied its own modules while extending ``__path__`` to the real
+    installation, and produced a receipt byte-identical to the legitimate one. The binding now
+    requires exactly one package root, equal to the distribution's, with the executing module
+    inside it.
+    """
+
+    def test_extra_package_roots_and_outside_execution_are_reported(self):
+        from mixle import reproduction
+
+        real_root = Path(reproduction.__file__).resolve().parent
+        shadow = Path("/nonexistent-shadow/mixle")
+
+        class _ShadowReproduction:  # the attack supplied its own wrapper module too
+            __file__ = str(shadow / "reproduction.py")
+
+        class _Shadow:
+            __file__ = str(shadow / "__init__.py")
+            __path__ = [str(shadow), str(real_root)]
+            reproduction = _ShadowReproduction
+
+        with patch.dict("sys.modules", {"mixle": _Shadow, "mixle.reproduction": _ShadowReproduction}):
+            with tempfile.TemporaryDirectory() as directory:
+                wheel = Path(directory) / "mixle-0.8.0-py3-none-any.whl"
+                wheel.write_bytes(b"not a wheel")
+                result = reproduction.subject_binding(wheel, {})
+        self.assertFalse(result["verified"])
+        joined = " ".join(result["mismatches"])
+        self.assertIn("package root", joined)
+
+    def test_the_legitimate_installation_records_its_paths(self):
+        from mixle import reproduction
+
+        with tempfile.TemporaryDirectory() as directory:
+            wheel = Path(directory) / "mixle-0.8.0-py3-none-any.whl"
+            wheel.write_bytes(b"not a wheel")
+            result = reproduction.subject_binding(wheel, {})
+        # the wheel is unreadable, so this fails -- but the import-path half must still be recorded
+        self.assertFalse(result["verified"])
+        self.assertTrue(result["mismatches"])
+
+
 if __name__ == "__main__":
     unittest.main()

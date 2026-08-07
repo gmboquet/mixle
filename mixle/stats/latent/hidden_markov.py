@@ -162,6 +162,23 @@ def _length_term(estimate, len_enc, rows: int):
     return values
 
 
+def _require_finite_statistics(named_arrays, *, label: str) -> None:
+    """Every element AND every aggregate must be finite.
+
+    Validating only what ARRIVES is not enough: two individually valid statistics whose elements
+    are each 4.6e307 combine to finite elements with an infinite total, a valid statistic scaled by
+    a valid factor of 3.0 overflows outright, and keyed pooling reaches the same state through
+    addition (STAT-RR8-1). Finiteness has to be a postcondition of every public mutator, not a
+    precondition of ingestion, so this runs on the RESULT and each mutator rolls back if it fails.
+    """
+    for name, array in named_arrays:
+        values = np.asarray(array, dtype=np.float64)
+        if not np.all(np.isfinite(values)):
+            raise ValueError(f"{label} {name} must contain only finite values")
+        if not np.isfinite(float(values.sum())):
+            raise ValueError(f"{label} {name} must aggregate to a finite total")
+
+
 def _validate_state_mass(init_counts, state_counts, trans_counts, *, init_key, trans_key, label) -> None:
     """Enforce the strongest state-mass relation the keying mode preserves (measured, not assumed).
 
@@ -3532,9 +3549,25 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         if not isinstance(acc_values, (tuple, list)) or len(acc_values) != num_states:
             raise ValueError("hidden-Markov emission statistics must match the state count")
 
+        # Both operands are individually valid and the SUM can still overflow (4.6e307 + 4.6e307
+        # keeps finite elements but an infinite total), so the result is validated and rolled back
+        # on failure rather than retained (STAT-RR8-1).
+        _previous = (self.init_counts.copy(), self.state_counts.copy(), self.trans_counts.copy())
         self.init_counts += init_counts
         self.state_counts += state_counts
         self.trans_counts += trans_counts
+        try:
+            _require_finite_statistics(
+                (
+                    ("initial counts", self.init_counts),
+                    ("state counts", self.state_counts),
+                    ("transition counts", self.trans_counts),
+                ),
+                label="combined hidden-Markov",
+            )
+        except ValueError:
+            self.init_counts, self.state_counts, self.trans_counts = _previous
+            raise
 
         for i in range(self.num_states):
             self.accumulators[i].combine(acc_values[i])
@@ -3660,9 +3693,24 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
     def scale(self, c: float) -> HiddenMarkovAccumulator:
         """Scale linear HMM sufficient statistics while preserving metadata."""
         c = validated_observation_weight(c, "hidden-Markov statistic scale")
+        # A valid factor times a valid statistic can overflow ([8e307, 0] * 3.0), so the scaled
+        # result is validated and rolled back on failure (STAT-RR8-1).
+        previous = (self.init_counts.copy(), self.state_counts.copy(), self.trans_counts.copy())
         self.init_counts *= c
         self.state_counts *= c
         self.trans_counts *= c
+        try:
+            _require_finite_statistics(
+                (
+                    ("initial counts", self.init_counts),
+                    ("state counts", self.state_counts),
+                    ("transition counts", self.trans_counts),
+                ),
+                label="scaled hidden-Markov",
+            )
+        except ValueError:
+            self.init_counts, self.state_counts, self.trans_counts = previous
+            raise
         for acc in self.accumulators:
             acc.scale(c)
         if self.len_accumulator is not None:
@@ -3679,9 +3727,20 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        # Pooling reaches overflow by addition exactly as combine() does, so each merged result is
+        # validated and the pool restored on failure (STAT-RR8-1).
         if self.init_key is not None:
             if self.init_key in stats_dict:
+                previous = np.asarray(stats_dict[self.init_key]).copy()
                 stats_dict[self.init_key] += self.init_counts
+                try:
+                    _require_finite_statistics(
+                        (("pooled initial counts", stats_dict[self.init_key]),),
+                        label="hidden-Markov key merge",
+                    )
+                except ValueError:
+                    stats_dict[self.init_key] = previous
+                    raise
             else:
                 # Copy on adoption: stats_dict must never alias this accumulator's own live
                 # array, or a later tied accumulator's in-place += above would silently mutate
@@ -3690,7 +3749,16 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
         if self.trans_key is not None:
             if self.trans_key in stats_dict:
+                previous = np.asarray(stats_dict[self.trans_key]).copy()
                 stats_dict[self.trans_key] += self.trans_counts
+                try:
+                    _require_finite_statistics(
+                        (("pooled transition counts", stats_dict[self.trans_key]),),
+                        label="hidden-Markov key merge",
+                    )
+                except ValueError:
+                    stats_dict[self.trans_key] = previous
+                    raise
             else:
                 # Same aliasing hazard as init_key above, for the transition-count matrix.
                 stats_dict[self.trans_key] = self.trans_counts.copy()
@@ -3719,16 +3787,34 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 initial-state, transition, emission, or length statistics.
 
         """
+        # A replacement arrives from outside and was copied in with no shape, dtype, element or
+        # mass validation at all -- [inf, 0] landed directly in the accumulator (STAT-RR8-1). Every
+        # replacement now goes through the same count-array contract as ingestion.
         if self.init_key is not None:
             if self.init_key in stats_dict:
                 # Copy on replace too: without it, every tied accumulator ends up pointing at
                 # the SAME array object, so any one of them later accumulating new local data
                 # would silently corrupt every other tied accumulator's counts.
-                self.init_counts = np.asarray(stats_dict[self.init_key]).copy()
+                # shape is taken from what this accumulator already holds, not from num_states:
+                # the keyed-pooling protocol tests build accumulators via __new__ and set only the
+                # fields under test, and the replacement must match the geometry in place anyway
+                replacement = validated_count_array(
+                    stats_dict[self.init_key],
+                    np.shape(self.init_counts),
+                    "hidden-Markov replacement initial counts",
+                )
+                _require_finite_statistics((("initial counts", replacement),), label="hidden-Markov key replace")
+                self.init_counts = replacement.copy()
 
         if self.trans_key is not None:
             if self.trans_key in stats_dict:
-                self.trans_counts = np.asarray(stats_dict[self.trans_key]).copy()
+                replacement = validated_count_array(
+                    stats_dict[self.trans_key],
+                    np.shape(self.trans_counts),
+                    "hidden-Markov replacement transition counts",
+                )
+                _require_finite_statistics((("transition counts", replacement),), label="hidden-Markov key replace")
+                self.trans_counts = replacement.copy()
 
         if self.state_key is not None:
             if self.state_key in stats_dict:

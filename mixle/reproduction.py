@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import hashlib
 import json
 import platform
@@ -73,6 +74,14 @@ def installed_content_provenance() -> dict[str, Any]:
     failures: list[str] = []
     for item in sorted(dist.files or (), key=str):
         if item.hash is None:
+            # Skipping unhashed installed entries is the same tamper vector as the wheel side
+            # (SYS-RR8-2): only RECORD may legitimately lack a hash. Installer-written metadata
+            # (INSTALLER, REQUESTED, direct_url.json) is not distributed code and is exempt.
+            name = str(item)
+            if not name.endswith(".dist-info/RECORD") and not name.startswith(("mixle-", "mixle.")):
+                failures.append(f"{item}: installed entry carries no RECORD hash")
+            elif name.endswith((".py", ".so", ".pyd", ".json")) and ".dist-info/" not in name:
+                failures.append(f"{item}: installed code entry carries no RECORD hash")
             continue
         path = Path(dist.locate_file(item))
         if not path.is_file():
@@ -154,15 +163,36 @@ def _wheel_record_hashes(path: Path) -> dict[str, str]:
             raise ValueError("wheel must contain exactly one RECORD")
         text = archive.read(record_names[0]).decode("utf-8")
     hashes: dict[str, str] = {}
+    unhashed: list[str] = []
     for line in text.splitlines():
+        if not line.strip():
+            continue
         parts = line.rsplit(",", 2)
-        if len(parts) != 3 or not parts[1]:
-            continue  # RECORD lists itself without a hash; nothing else legitimately lacks one
+        if len(parts) != 3:
+            raise ValueError(f"wheel RECORD line is malformed: {line!r}")
         name, hash_field, _size = parts
+        if not hash_field:
+            # RECORD cannot hash itself; ANY other unhashed row is the tamper vector -- strip a
+            # file's hash and the comparison silently skipped it, so altered code installed and
+            # received a passing receipt (SYS-RR8-2). Collected, then rejected below.
+            unhashed.append(name)
+            continue
         algorithm, _, value = hash_field.partition("=")
         if algorithm != "sha256" or not value:
             raise ValueError(f"wheel RECORD entry {name!r} uses unsupported hash {algorithm!r}")
-        hashes[name] = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)).hex()
+        if name in hashes:
+            raise ValueError(f"wheel RECORD lists {name!r} more than once")
+        try:
+            hashes[name] = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)).hex()
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError(f"wheel RECORD entry {name!r} has a malformed hash") from exc
+        if len(hashes[name]) != 64:
+            raise ValueError(f"wheel RECORD entry {name!r} has a malformed sha256 digest")
+    unexpected = [name for name in unhashed if not name.endswith(".dist-info/RECORD")]
+    if unexpected:
+        raise ValueError(f"wheel RECORD omits hashes for {len(unexpected)} entrie(s): {sorted(unexpected)[:5]}")
+    if len(unhashed) != 1:
+        raise ValueError("wheel RECORD must contain exactly one self-referencing unhashed row")
     if not hashes:
         raise ValueError("wheel RECORD carries no hashed entries")
     return hashes
@@ -181,16 +211,43 @@ def subject_binding(path: Path, build: dict[str, Any]) -> dict[str, Any]:
     the wheel's own entries are the code, and those are what must match.
     """
     mismatches: list[str] = []
-    try:
-        import mixle as _installed
+    # Establish WHICH CODE RAN before trusting anything found beside it. A PYTHONPATH shadow
+    # package supplied its own __init__/reproduction modules while extending __path__ to the real
+    # installation, and produced a receipt byte-identical to the legitimate one (SYS-RR8-3):
+    # provenance was read next to the shadow while distribution() independently located the real
+    # metadata. Reading provenance first would let a copied-in provenance file decide the outcome,
+    # so the import-path identity is settled up front.
+    import mixle as _installed
+    from mixle import reproduction as _running
 
-        provenance_path = Path(_installed.__file__).resolve().parent / "_build_provenance.json"
+    package_roots = [Path(p).resolve() for p in getattr(_installed, "__path__", [])]
+    try:
+        distribution_root = Path(distribution("mixle").locate_file("mixle")).resolve()
+    except PackageNotFoundError:
+        return {
+            "artifact": "mixle.subject_binding/v1",
+            "verified": False,
+            "mismatches": ["mixle distribution metadata is not installed"],
+        }
+    if len(package_roots) != 1:
+        mismatches.append(
+            f"imported mixle has {len(package_roots)} package roots; a release replay requires exactly one"
+        )
+    for root in package_roots:
+        if root != distribution_root:
+            mismatches.append(f"imported package root {root} is not the installed distribution at {distribution_root}")
+    running_file = Path(_running.__file__).resolve()
+    if not running_file.is_relative_to(distribution_root):
+        mismatches.append(f"executing module {running_file} is outside the installed distribution")
+
+    provenance_path = Path(_installed.__file__).resolve().parent / "_build_provenance.json"
+    try:
         installed_provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         return {
             "artifact": "mixle.subject_binding/v1",
             "verified": False,
-            "mismatches": [f"installed build provenance unreadable: {exc}"],
+            "mismatches": [*mismatches, f"installed build provenance unreadable: {exc}"],
         }
     for field in ("source_commit", "source_tree", "source_content_sha256"):
         if installed_provenance.get(field) != build.get(field):
@@ -200,7 +257,13 @@ def subject_binding(path: Path, build: dict[str, Any]) -> dict[str, Any]:
     try:
         wheel_hashes = _wheel_record_hashes(path)
     except (ValueError, OSError, zipfile.BadZipFile) as exc:
-        return {"artifact": "mixle.subject_binding/v1", "verified": False, "mismatches": [str(exc)]}
+        # append rather than replace: the import-path mismatches found above are the more
+        # diagnostic half of a shadowed-install failure and must not be discarded here
+        return {
+            "artifact": "mixle.subject_binding/v1",
+            "verified": False,
+            "mismatches": [*mismatches, str(exc)],
+        }
     installed_hashes: dict[str, str] = {}
     try:
         dist = distribution("mixle")
@@ -221,6 +284,10 @@ def subject_binding(path: Path, build: dict[str, Any]) -> dict[str, Any]:
         "artifact": "mixle.subject_binding/v1",
         "verified": not mismatches,
         "compared_entries": len(wheel_hashes),
+        # recorded so two receipts can be compared on WHERE the code ran, not only on its digests
+        "executing_module": str(running_file),
+        "package_roots": [str(root) for root in package_roots],
+        "distribution_root": str(distribution_root),
         "mismatches": mismatches,
     }
 

@@ -30,7 +30,7 @@ Current Inventory
 
 The core package currently ships 57 Python example scripts (the count was 64 before the
 2026-08-04 removal of the direct-dataset flagships, and this line had not caught up -- the
-execution status above and the tree both say 57):
+execution status in "Release Execution Status" below and the tree both say 57):
 
 .. list-table::
    :header-rows: 1

@@ -411,5 +411,83 @@ class RejectedRestorationRollbackTest(unittest.TestCase):
             )
 
 
+class MutatorFinitenessInvariantTest(unittest.TestCase):
+    """STAT-RR8-1: finiteness must be an INVARIANT, not an ingestion check.
+
+    Validating what arrives leaves every reduction path free to create the same invalid state:
+    two statistics with 4.6e307 elements have finite aggregates individually and an infinite one
+    combined; a valid [8e307, 0] scaled by a valid 3.0 overflows outright; keyed pooling overflows
+    by the same addition; and key_replace copied [inf, 0] straight in with no validation at all.
+    Each mutator now validates its RESULT and rolls back on failure.
+    """
+
+    _HALF = np.array([4.6e307, 4.6e307])  # finite alone (9.2e307), infinite when doubled
+
+    @staticmethod
+    def _accumulator(keys=(None, None, None)):
+        return HiddenMarkovEstimator([GaussianEstimator() for _ in range(2)], keys=keys).accumulator_factory().make()
+
+    @staticmethod
+    def _statistic(accumulator, init, state, trans=None):
+        return (
+            2,
+            init,
+            state,
+            np.zeros((2, 2)) if trans is None else trans,
+            tuple(child.value() for child in accumulator.accumulators),
+            None,
+        )
+
+    def test_combine_refuses_an_overflowing_sum_of_valid_inputs_and_rolls_back(self):
+        accumulator = self._accumulator()
+        accumulator.combine(self._statistic(accumulator, self._HALF, self._HALF))
+        before = accumulator.init_counts.copy()
+        with self.assertRaisesRegex(ValueError, "finite"):
+            accumulator.combine(self._statistic(accumulator, self._HALF, self._HALF))
+        np.testing.assert_array_equal(accumulator.init_counts, before)
+
+    def test_scale_refuses_an_overflowing_product_and_rolls_back(self):
+        accumulator = self._accumulator()
+        big = np.array([8.0e307, 0.0])
+        accumulator.combine(self._statistic(accumulator, big, big))
+        before = accumulator.init_counts.copy()
+        with self.assertRaisesRegex(ValueError, "finite"):
+            accumulator.scale(3.0)
+        np.testing.assert_array_equal(accumulator.init_counts, before)
+
+    def test_key_merge_refuses_an_overflowing_pool_and_restores_it(self):
+        first = self._accumulator(("ik", "tk", None))
+        second = self._accumulator(("ik", "tk", None))
+        first.combine(self._statistic(first, self._HALF, self._HALF))
+        second.combine(self._statistic(second, self._HALF, self._HALF))
+        pool = {}
+        first.key_merge(pool)
+        before = np.asarray(pool["ik"]).copy()
+        with self.assertRaisesRegex(ValueError, "finite"):
+            second.key_merge(pool)
+        np.testing.assert_array_equal(np.asarray(pool["ik"]), before)
+
+    def test_key_replace_validates_the_incoming_replacement(self):
+        accumulator = self._accumulator(("ik", "tk", None))
+        for bad in (np.array([np.inf, 0.0]), np.array([np.nan, 1.0]), np.array([1.0, 2.0, 3.0])):
+            with self.subTest(replacement=str(bad)):
+                with self.assertRaises(ValueError):
+                    accumulator.key_replace({"ik": bad, "tk": np.zeros((2, 2))})
+
+    def test_legitimate_reductions_are_unaffected(self):
+        accumulator = self._accumulator()
+        accumulator.combine(
+            self._statistic(accumulator, np.array([1.0, 1.0]), np.array([1.5, 1.5]), np.full((2, 2), 0.25))
+        )
+        accumulator.scale(2.0)
+        np.testing.assert_allclose(accumulator.init_counts, [2.0, 2.0])
+        keyed = self._accumulator(("ik", "tk", None))
+        keyed.combine(self._statistic(keyed, np.array([1.0, 1.0]), np.array([1.5, 1.5]), np.full((2, 2), 0.25)))
+        pool = {}
+        keyed.key_merge(pool)
+        keyed.key_replace(pool)
+        np.testing.assert_allclose(keyed.init_counts, [1.0, 1.0])
+
+
 if __name__ == "__main__":
     unittest.main()
