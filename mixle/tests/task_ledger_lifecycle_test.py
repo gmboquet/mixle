@@ -263,6 +263,46 @@ class RegressionLedgerRefusalTest(unittest.TestCase):
 
 @pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class StructuredCompositionLedgerTest(unittest.TestCase):
+    """The composition shape inherits the ledger contract through its sub-loaders.
+
+    solve_structured persists one sub-artifact per field through the SAME save/load pairs the
+    scalar shapes use, so the required-ledger refusal must hold transitively: a structured
+    artifact whose sub-field manifest lost its ledger refuses to load, and an intact round trip
+    preserves every sub-solution's ledger fields.
+    """
+
+    def test_sub_solution_ledgers_round_trip_and_missing_ones_refuse(self):
+        import json
+        from pathlib import Path
+
+        from mixle.task import StructuredSolution, solve_structured
+        from mixle.task.artifact import _manifest_integrity
+
+        def _enrich(t):
+            return {"queue": "finance" if t["amount"] > 500 else "ops", "reserve": t["amount"] * 0.1}
+
+        solution = solve_structured(_enrich, _tickets(150, seed=3), tol={"reserve": 1e6}, alpha=0.15, epochs=60, seed=0)
+        cat_key = next(iter(solution.fields_cat))
+        solution.fields_cat[cat_key].selection_uses = 4
+        solution.fields_cat[cat_key].calibration_evidence = "reused-after-adaptive-harvest"
+        with tempfile.TemporaryDirectory() as d:
+            path = solution.save(d + "/enricher")
+            back = StructuredSolution.load(path, _enrich)
+            self.assertEqual(back.fields_cat[cat_key].selection_uses, 4)
+            self.assertEqual(back.fields_cat[cat_key].calibration_evidence, "reused-after-adaptive-harvest")
+            # strip one sub-field's ledger under a valid signature: the WHOLE structured load refuses
+            sub_manifest = Path(path) / "cat" / cat_key / "manifest.json"
+            doc = json.loads(sub_manifest.read_text())
+            del doc["meta"]["solve"]["verification"]["calibration_evidence"]
+            doc["integrity_sha256"] = _manifest_integrity(doc)
+            sub_manifest.write_text(json.dumps(doc))
+            with self.assertRaisesRegex(ValueError, "missing the claim-bearing ledger field"):
+                StructuredSolution.load(path, _enrich)
+
+
+@pytest.mark.torch
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class ReportReceiptCompletenessTest(unittest.TestCase):
     """Every reported measurement travels with its receipt (STAT-RR12-2's rule, held everywhere).
 
