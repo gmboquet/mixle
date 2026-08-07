@@ -319,11 +319,11 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "anchor_harness_test.py": ("torch", "stochastic", "slow"),  # neural conditional-transport + calibration
     "edge_distill_test.py": ("torch", "integration", "slow"),
     "structured_hmm_test.py": ("hmm", "integration", "slow"),
-    "task_realteacher_smoke_test.py": ("integration", "slow"),
-    "task_model_test.py": ("integration", "slow"),  # fresh-process save/load round trip
+    "task_realteacher_smoke_test.py": ("torch", "integration", "slow"),
+    "task_model_test.py": ("torch", "integration", "slow"),  # fresh-process save/load round trip
     "symbolic_export_test.py": ("integration", "slow"),
-    "task_tune_test.py": ("doe", "stochastic", "slow"),  # BO over student recipes via mixle.doe
-    "task_plan_test.py": ("integration", "slow"),
+    "task_tune_test.py": ("torch", "doe", "stochastic", "slow"),  # BO over student recipes via mixle.doe
+    "task_plan_test.py": ("torch", "integration", "slow"),
     "task_distill_structured_test.py": ("integration", "slow"),
     # E1 chunked-recurrent spine (mixle/experimental/context_spine.py): several small TBPTT training
     # loops plus a repeated-timing receipt -- ~4s total, tagged slow so it leaves the fast gate while
@@ -454,7 +454,31 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "self_distillation_test.py": ("torch", "integration", "slow"),
     "sparsity_2_4_test.py": ("torch", "integration", "slow"),
     "structure_edit_schedule_test.py": ("integration", "slow"),
-    "task_solve_test.py": ("integration", "slow"),
+    "task_solve_test.py": ("torch", "integration", "slow"),
+    # Calibrated-serving surface: every test class in these files is torch-gated, so in the
+    # torch-less full shards they collected and silently SKIPPED -- the calibrated-serving
+    # suite executed in no CI job at all (a broken accounting identity shipped unnoticed for
+    # two review passes). The torch marker routes them to the optional shards, which install
+    # torch; the workflow additionally runs the four core serving files as a required
+    # zero-skip receipt so this surface can never go silently dark again.
+    "task_active_test.py": ("torch", "integration", "slow"),
+    "task_artifact_test.py": ("torch", "integration", "slow"),
+    "task_calibrate_test.py": ("torch", "integration", "slow"),
+    "task_cascade_test.py": ("torch", "integration", "slow"),
+    "task_density_test.py": ("torch", "integration", "slow"),
+    "task_distill_routing_test.py": ("torch", "integration", "slow"),
+    "task_distill_test.py": ("torch", "integration", "slow"),
+    "task_durability_edgecases_test.py": ("torch", "integration", "slow"),
+    "task_harness_test.py": ("torch", "integration", "slow"),
+    "task_multilabel_test.py": ("torch", "integration", "slow"),
+    "task_record_test.py": ("torch", "integration", "slow"),
+    "task_regress_test.py": ("torch", "integration", "slow"),
+    "task_router_test.py": ("torch", "integration", "slow"),
+    "task_structured_out_test.py": ("torch", "integration", "slow"),
+    "task_toolcall_test.py": ("torch", "integration", "slow"),
+    "router_harvest_test.py": ("torch", "integration", "slow"),
+    "routing_density_economics_receipts_test.py": ("torch", "integration", "slow"),
+    "calibrated_report_demo_smoke_test.py": ("torch", "integration", "slow"),
     "torch_parity_test.py": ("torch", "integration", "slow"),
     # Second retriage pass (same 2026-07-11 profiling, after the first pass cut the gate 36m38s ->
     # 5m34s): the remaining >=5s-per-call files, plus the heavy files that had been self-marked
@@ -479,7 +503,7 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     "ranking_lazy_enumerator_test.py": ("enumeration", "slow"),
     "reproduce_receipt_test.py": ("integration", "slow"),
     "sorted_profile_quantizer_test.py": ("integration", "slow"),
-    "task_quantize_test.py": ("integration", "slow"),
+    "task_quantize_test.py": ("torch", "integration", "slow"),
     # 2026-07-17 bloat-audit retriage: the domain-vertical worklist acceptance suite (H = mine-planning
     # ops, J = economics/finance, K = health/safety, L = climate, N = biodiversity, plus the IC/E/T infra
     # items that share the same convention) uses pytest's OTHER collected filename convention

@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 import numpy as np
+import pytest
 
 try:
     import torch  # noqa: F401
@@ -72,6 +73,7 @@ class DesignSelectionRolesTest(unittest.TestCase):
         self.assertEqual(len(recommend_rows[0]), len(train))
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class SolveHoldoutRolesTest(unittest.TestCase):
     """Reproduced: ``solve()``'s reserved holdout was ONE set. ``improve()`` chose the student with the
@@ -446,6 +448,7 @@ class GeneratorCertificateBindingTest(unittest.TestCase):
 # --------------------------------------------------------------------------------------- MXR-080-1896
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class PlannerGlobalRngTest(unittest.TestCase):
     """Reproduced: ``sft_planner`` called ``torch.manual_seed(seed)``, reseeding the CALLER's global

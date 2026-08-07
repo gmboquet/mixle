@@ -3,6 +3,7 @@
 import unittest
 
 import numpy as np
+import pytest
 
 try:
     import torch  # noqa: F401
@@ -82,6 +83,7 @@ class ScorecardAccountingTest(unittest.TestCase):
             scorecard(_FixedStudent("local"), lambda _x: "teacher", [1, 2], task_truth=["only-one"])
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class ScorecardTest(unittest.TestCase):
     def test_receipts_are_measured_and_honest(self):
@@ -133,6 +135,7 @@ def _enrich(t):
     return {"team": "billing" if t["kind"] in ("refund", "billing") else "support", "price": _price(t)}
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class ScorecardShapesTest(unittest.TestCase):
     """Receipts for the other solve shapes — agreement means each shape's own promise."""

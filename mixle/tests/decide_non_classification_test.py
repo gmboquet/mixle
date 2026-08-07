@@ -6,6 +6,7 @@ CalibratedTaskModel-shaped decide(x) -> value | ESCALATE contract Router require
 import unittest
 
 import numpy as np
+import pytest
 
 try:
     import torch  # noqa: F401
@@ -31,6 +32,7 @@ def _items(n, seed=0):
     return [{"kind": kinds[rng.randint(0, 3)], "size": float(rng.uniform(0, 100))} for _ in range(n)]
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class RegressionSolutionDecideTest(unittest.TestCase):
     def test_decide_matches_answers_locally_and_never_calls_the_teacher_itself(self):

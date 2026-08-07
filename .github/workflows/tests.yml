@@ -403,6 +403,22 @@ jobs:
             --receipt optional-py3.12-shard${{ matrix.shard }}.json \
             -- -n auto --num-shards 2 --shard-id ${{ matrix.shard }} \
             --ignore=mixle/tests/scientist_test.py
+      - name: Require calibrated-serving execution
+        if: matrix.shard == 1
+        # The calibrated-serving suites are torch-gated and route to this torch-installed lane.
+        # Before they carried the torch marker they collected in the torch-less full shards and
+        # silently SKIPPED there -- the whole surface executed in no CI job, and a broken
+        # accounting identity shipped unnoticed for two review passes. This receipt makes the
+        # surface's execution REQUIRED: the runner fails on zero collected tests, any skip, or
+        # any failure, so it cannot go silently dark again through a marker, install, or
+        # selection drift.
+        run: |
+          python scripts/run_required_pytest.py \
+            --candidate-sha "$GITHUB_SHA" \
+            --receipt serving-required-receipt.json \
+            -- mixle/tests/task_solve_test.py mixle/tests/task_regress_test.py \
+               mixle/tests/task_structured_out_test.py mixle/tests/task_multilabel_test.py \
+               -q -n 0 -m ""
       - name: Require assembled scientist execution on pinned assets
         if: matrix.shard == 0
         # Model-weight assets only (CLIP, local LLM, sentence encoder). The dataset-driven scientist
@@ -445,7 +461,8 @@ jobs:
           path: |
             optional-py3.12-shard${{ matrix.shard }}.json
             scientist-required-receipt.json
-          if-no-files-found: ${{ matrix.shard == 0 && 'error' || 'warn' }}
+            serving-required-receipt.json
+          if-no-files-found: error
           retention-days: 90
 
   numerical:

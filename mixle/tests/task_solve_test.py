@@ -84,8 +84,9 @@ class SolveTest(unittest.TestCase):
         sol = solve(_route, _tickets(300), alpha=0.15, seed=0, epochs=200)
         for t in _tickets(150, seed=2):
             sol(t)
-        if not sol.cascade.stats.escalated_labels:
-            self.skipTest("nothing escalated on this seed; no harvest to fold")
+        # deterministic given the seeds: this fixture escalates (the sibling test relies on the
+        # same behavior), and the required zero-skip CI receipt forbids runtime skips here
+        self.assertTrue(sol.cascade.stats.escalated_labels)
         promoted = sol.improve(evidence_inputs=_tickets(60, seed=9))
         if promoted:
             self.assertEqual(sol.calibration_evidence, "fresh-evidence")
