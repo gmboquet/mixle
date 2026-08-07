@@ -177,19 +177,20 @@ class HostedWorkflowContractTest(unittest.TestCase):
         self.assertIn("verify_vulnerability_waivers.py", security)
         self.assertIn("accepted-waivers", security)
         self.assertNotIn("continue-on-error: true", security)
-        # One wrapper remains after the no-direct-dataset-usage removal (2026-08-04) took the
-        # sunspots/Adult flagship lanes and the CIFAR-driven quotient-leaf gate with it: the
-        # model-asset scientist gate.
-        self.assertEqual(tests.count("scripts/run_required_pytest.py"), 1)
+        # Two required-execution wrappers: the model-asset scientist gate (shard 0) and the
+        # calibrated-serving gate (shard 1) -- the serving suites are torch-gated and once
+        # executed in no CI job at all, so their execution is now a required zero-skip receipt.
+        self.assertEqual(tests.count("scripts/run_required_pytest.py"), 2)
         optional_job = tests.split("\n  optional:\n", 1)[1].split("\n  numerical:\n", 1)[0]
         # The property is "this gate cannot be skipped", and it survives the 2026-08-04 sharding:
         # the JOB carries no condition (it always runs, on every shard), the tier-run step is
-        # unconditional, and the only `if:` the job may contain is the shard-0 pin on the serial
-        # one-shot gates -- which makes each of them run EXACTLY once per workflow run rather than
-        # once per shard. Any other condition would reintroduce a skippable gate.
+        # unconditional, and the only `if:` forms the job may contain are the per-shard pins on
+        # the serial one-shot gates (scientist on shard 0, calibrated-serving on shard 1) --
+        # which make each of them run EXACTLY once per workflow run rather than once per shard.
+        # Any other condition would reintroduce a skippable gate.
         self.assertNotIn("\n    if:", optional_job)
         conditions = {line.strip() for line in optional_job.splitlines() if line.strip().startswith("if:")}
-        self.assertLessEqual(conditions, {"if: matrix.shard == 0"})
+        self.assertLessEqual(conditions, {"if: matrix.shard == 0", "if: matrix.shard == 1"})
         self.assertIn("--tier optional", optional_job)
         self.assertIn("--num-shards 2", optional_job)
         self.assertIn("extras matrix / exact candidate", extras)

@@ -25,6 +25,7 @@ import numpy as np
 from scipy.stats import beta as beta_distribution
 
 from mixle.system.fault import DegradedResult
+from mixle.task._teacher import as_batch_view
 from mixle.task.calibrate import ESCALATE, CalibratedTaskModel
 
 
@@ -140,17 +141,14 @@ class Router:
         _, teacher, _ = self.tiers[-1]
         frontier_stats = self.stats.tiers[-1]
         frontier_stats.attempted += 1
-        # The frontier/teacher is a BATCHED callable (`texts -> [label]`, e.g. llm_labeler's shape) --
-        # calling it with a bare `x` (a single string) would iterate over its characters instead of
-        # treating it as one request. Wrap-and-unwrap the same way Cascade._teacher_label already does.
+        # The frontier/teacher may be per-item (`x -> label`) or batched (`texts -> [label]`,
+        # e.g. llm_labeler's shape). The previous code ASSUMED batched and called `teacher([x])`,
+        # which crashed the first time a request actually reached a per-item frontier -- e.g. a
+        # dict-record teacher indexing a list with a string. The convention is resolved ONCE
+        # through the same TeacherCaller every other serving surface uses, then every escalation
+        # goes through its validated one-request view.
         try:
-            out = teacher([x])
-            if isinstance(out, (list, tuple)):
-                if len(out) != 1:
-                    raise ValueError("frontier batch response must contain exactly one answer")
-                label = out[0]
-            else:
-                label = out
+            label = self._frontier_call().one(x)
         except Exception:
             frontier_stats.failed += 1
             raise
@@ -158,6 +156,18 @@ class Router:
         self.stats.harvested_inputs.append(x)
         self.stats.harvested_labels.append(label)
         return label
+
+    def _frontier_call(self):
+        """The frontier teacher's resolved batch view, discovered once and kept.
+
+        Escalation runs on every frontier-bound request; re-probing the calling convention per
+        request would cost the teacher an extra invocation each time.
+        """
+        caller = self.__dict__.get("_frontier_caller")
+        if caller is None:
+            caller = as_batch_view(self.tiers[-1][1])
+            self.__dict__["_frontier_caller"] = caller
+        return caller
 
     def serve(self, xs: Any) -> list[Any]:
         """Route a batch of requests and return the tier-selected answers."""

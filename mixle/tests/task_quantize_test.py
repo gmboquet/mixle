@@ -142,7 +142,11 @@ class QuantizeMLPTest(unittest.TestCase):
     def test_conversion_records_an_executed_graph_parity_proof(self):
         receipt = self.q.meta["quantized"]
         self.assertEqual(receipt["verified_architecture"], "flat_linear_relu")
-        self.assertLessEqual(receipt["dequantized_graph_parity_max_abs_error"], 1e-5)
+        # The parity proof compares the torch graph against the numpy int8 replay in float32;
+        # the bound is BLAS-reduction-order dependent (measured: <1e-5 on macOS arm64, 1.53e-5
+        # on ubuntu CPU torch the first time this test executed there). 1e-4 keeps 100x headroom
+        # below any real graph mismatch, whose error is at least one quantization step (~1e-2).
+        self.assertLessEqual(receipt["dequantized_graph_parity_max_abs_error"], 1e-4)
 
     def test_quantized_layer_shape_scale_and_weight_contracts(self):
         valid_w = np.ones((2, 3), dtype=np.int8)

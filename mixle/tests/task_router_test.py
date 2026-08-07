@@ -35,6 +35,23 @@ def _tickets(n, seed=0):
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class RouterTest(unittest.TestCase):
+    def test_per_item_frontier_teacher_serves_escalations(self):
+        # the frontier used to be called as `teacher([x])` unconditionally, so the FIRST request
+        # that actually reached a per-item teacher crashed (a dict-record teacher indexed a list
+        # with a string); the calling convention is now resolved through the shared TeacherCaller
+        from mixle.task import ESCALATE, Router
+
+        class _AlwaysEscalate:
+            def decide(self, x):
+                return ESCALATE
+
+        router = Router([("tiny", _AlwaysEscalate(), 0.001), ("frontier", _route, 0.03)])
+        ticket = {"kind": "refund", "amount": 93.2, "region": "eu"}
+        self.assertEqual(router(ticket), _route(ticket))
+        inputs, labels = router.harvested()
+        self.assertEqual(labels, [_route(ticket)])
+        self.assertEqual(inputs, [ticket])
+
     def test_routes_cheap_first_with_receipts_and_harvest(self):
         from mixle.task import Router, solve
 
