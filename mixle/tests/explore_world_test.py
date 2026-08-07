@@ -1,7 +1,8 @@
 """ExplorationWorld: the sequential-exploration world with synthetic ground truth (EXPLORE-a's
 functional substance, built in mixle core -- see the module docstring for why). Per the card's own
 acceptance: determinism given seed, exact budget accounting, and the greedy baseline beats random on
-average over 20 seeds (the sanity check that the world has learnable signal at all)."""
+average over 20 seeds -- a replicated mean comparison used as a learnable-signal sanity check, with
+no interval attached (not an uncertainty-quantified margin)."""
 
 import unittest
 

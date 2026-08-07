@@ -361,7 +361,10 @@ class CrossModalModel:
         residual as the conformal radius. Using the *max* over dimensions makes the guarantee
         **simultaneous**: :meth:`predict_interval` returns a box whose *joint* coverage over the whole
         target vector is ``>= 1 - alpha`` -- distribution-free, regardless of model specification
-        (unlike the Gaussian posterior interval).
+        (unlike the Gaussian posterior interval). Scope: that coverage is marginal over the
+        calibration draw and the query jointly, under exchangeability of the calibration pairs and
+        served traffic; it is not a per-query certainty, and distribution shift voids the statement
+        silently -- re-measure on drifted traffic.
 
         MXR-080-0279: every split-conformal precondition is validated and the method fails closed
         -- raises without storing anything -- before a single score is computed. Previously,

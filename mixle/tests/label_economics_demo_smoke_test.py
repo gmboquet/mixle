@@ -3,8 +3,9 @@
 Reuses the example's own ``run_demo`` rather than re-deriving the budgeted labeling loop, so this pins
 the actual example against regressions instead of a parallel hand-rolled copy. Runs at a small/fast
 scale (small pool, few random seeds, a narrow target well within budget) so it is fast enough for a
-test suite -- no full-scale run needed, only the qualitative receipt: EIG-ranked selection reaches the
-target held-out likelihood using strictly fewer labels than random selection.
+test suite -- no full-scale run needed, only the qualitative receipt: on this small fixed setup and
+its few seeds, EIG-ranked selection reaches the target held-out likelihood with fewer labels than
+random selection (a labels-to-target acceptance smoke, not an uncertainty-quantified margin).
 """
 
 import sys

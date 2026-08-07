@@ -67,7 +67,11 @@ model.
 Conformal Prediction
 --------------------
 
-Conformal helpers provide finite-sample coverage wrappers:
+Conformal helpers provide finite-sample coverage wrappers. Every statement
+they make is marginal over the calibration draw and the query jointly, under
+exchangeability (weighted/mondrian variants relax it exactly as their
+literature states, never beyond); none is a conditional per-query guarantee,
+and distribution shift voids the statement silently:
 
 * ``split_conformal``;
 * ``weighted_conformal``;

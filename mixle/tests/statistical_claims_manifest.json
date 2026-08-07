@@ -1,0 +1,71 @@
+{
+  "_comment": "Reviewed inventory of user-facing statistical-claim sites. A new entry means a new claim surface: audit its scope, then regenerate with python scripts/scan_statistical_claims.py --write. The contract test refuses un-inventoried claim sites and inventoried sites whose scope tokens disappear.",
+  "sites": {
+    "docs/inference-toolkit.rst": [
+      "coverage"
+    ],
+    "docs/reasoning-systems.rst": [
+      "coverage"
+    ],
+    "docs/task-serving.rst": [
+      "coverage"
+    ],
+    "examples/task_cascade_economics_example.py": [
+      "comparative"
+    ],
+    "examples/task_llm_active_example.py": [
+      "comparative"
+    ],
+    "mixle/reason/model.py": [
+      "coverage"
+    ],
+    "mixle/task/_ledger.py": [
+      "coverage"
+    ],
+    "mixle/task/calibrate.py": [
+      "coverage"
+    ],
+    "mixle/task/distill.py": [
+      "coverage"
+    ],
+    "mixle/task/model.py": [
+      "coverage"
+    ],
+    "mixle/task/multilabel.py": [
+      "coverage"
+    ],
+    "mixle/task/regress.py": [
+      "coverage"
+    ],
+    "mixle/task/solve.py": [
+      "coverage"
+    ],
+    "mixle/task/structured_out.py": [
+      "coverage"
+    ],
+    "mixle/tests/autoregressive_enumeration_test.py": [
+      "comparative"
+    ],
+    "mixle/tests/doe_oracle_test.py": [
+      "comparative"
+    ],
+    "mixle/tests/environment_test.py": [
+      "comparative"
+    ],
+    "mixle/tests/explore_world_test.py": [
+      "comparative"
+    ],
+    "mixle/tests/label_economics_demo_smoke_test.py": [
+      "comparative"
+    ],
+    "mixle/tests/model_enumeration_test.py": [
+      "comparative"
+    ],
+    "mixle/tests/task_acquire_test.py": [
+      "comparative"
+    ],
+    "mixle/tests/task_active_test.py": [
+      "comparative"
+    ]
+  }
+}

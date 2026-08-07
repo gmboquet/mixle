@@ -167,7 +167,8 @@ class DesignLoopTest(unittest.TestCase):
         self.assertIn("target_dist2", rep["best_receipt"])
 
     def test_beats_random_search_at_matched_oracle_call_budget(self):
-        """The I acceptance: on a known closed-form oracle, the loop beats random search at matched budget."""
+        """The I acceptance: on a known closed-form oracle and fixed seed, the loop beats random
+        search at matched budget -- a deterministic acceptance check, not an uncertainty-quantified margin."""
         target = np.array([0.5, -1.0])
         bounds = [(-3.0, 3.0), (-3.0, 3.0)]
         oracle = _quadratic_bowl_oracle(target)

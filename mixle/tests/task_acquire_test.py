@@ -1,10 +1,11 @@
 """mixle.task.acquire: generalized active-acquisition ranking for any scoreable model.
 
-The money claim (mirrors mixle.tests.task_active_test's claim for the hardwired text-classifier
-case, but through the model-agnostic ``acquire()`` entry point): at a fixed labeling budget,
-EIG-ranked selection reaches a target held-out likelihood using measurably fewer labels than random
-selection -- the label-count-ratio receipt. Plus a strategy plug-in test and basic sanity checks for
-the ``"disagreement"`` and ``"entropy"`` strategies.
+The claim these tests establish, exactly: on this fixed synthetic setup and seed, EIG-ranked
+selection reaches a prespecified target held-out likelihood using fewer labels than random
+selection -- a labels-to-target design (the valid shape for a fewer-labels claim, unlike an
+equal-budget margin), demonstrated as a single-replicate acceptance receipt without an
+uncertainty-quantified label-count margin. Plus a strategy plug-in test and basic sanity checks
+for the ``"disagreement"`` and ``"entropy"`` strategies.
 """
 
 from __future__ import annotations
@@ -130,8 +131,9 @@ def _smallest_reaching(curve: dict[int, float], budgets: list[int], target: floa
 
 
 class ThresholdTaskTest(unittest.TestCase):
-    """The label-count-ratio receipt: EIG-ranked labeling reaches target held-out likelihood using
-    real, measurably fewer labels than random -- the A5 acceptance criterion."""
+    """The label-count-ratio receipt (A5 acceptance): EIG-ranked labeling reaches the prespecified
+    target held-out likelihood with fewer labels than random ON THIS SEED -- a labels-to-target
+    acceptance check, not an uncertainty-quantified margin."""
 
     @classmethod
     def setUpClass(cls) -> None:

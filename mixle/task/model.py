@@ -344,7 +344,8 @@ class _ClassifierIO:
         """Row-stochastic class scores ``(m, K)`` (softmax of the logits) -- the conformal nonconformity input.
 
         These sum to 1 but are *not* a describable random process; conformal calibration is what turns them
-        into a coverage guarantee (see :mod:`mixle.task.calibrate`).
+        into a coverage guarantee -- marginal under exchangeability, voided by distribution shift; full
+        scope at the claim site in :mod:`mixle.task.calibrate`.
         """
         # Evaluate the normalization in float64 even when the model emits float32.
         # Downstream conformal validation deliberately checks row-stochastic input

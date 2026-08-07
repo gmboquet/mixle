@@ -625,7 +625,9 @@ def _split_for_calibration(
     """Split ``(items, teacher_labels)`` into disjoint ``(train_items, train_labels, cal_items, cal_labels)``.
 
     The calibration slice must be unseen by the student's training fit -- that disjointness is exactly what
-    makes the conformal coverage guarantee (:mod:`mixle.task.calibrate`) real rather than optimistic. The split
+    makes the conformal coverage guarantee (:mod:`mixle.task.calibrate`) real rather than optimistic; the
+    statement it enables is marginal under exchangeability and voided by distribution shift (full scope at
+    the claim site in :mod:`mixle.task.calibrate`). The split
     is a fixed permutation of ``seed``, so it is reproducible and shared across the text/record variants.
     """
     if not 0.0 < calibration_frac < 1.0:

@@ -46,7 +46,8 @@ def _random_policy_fn(env, belief, menu):
 
 class EigVsOracleVsRandomTest(unittest.TestCase):
     """Card acceptance: the EIG agent reaches >= 80% of a computable oracle's information gain
-    at matched budget, and beats random probing. The oracle here is exact and cheap: a
+    at matched budget, and beats random probing on this fixed seed -- a deterministic acceptance
+    check against a closed-form oracle, not an uncertainty-quantified margin. The oracle here is exact and cheap: a
     drill-only policy that already knows the true targets can identify at most
     min(n_targets, budget // DRILL_COST) of them (each identification costs one drill; no
     survey is needed once targets are known) -- that IS the achievable ceiling under the

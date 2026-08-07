@@ -204,7 +204,10 @@ any subset of modalities.
    predicted_sensor = model.predict({"text": text_features[0]}, "sensor")
 
 Use ``calibrate`` and ``predict_interval`` when cross-modal prediction needs
-finite-sample coverage for a target modality.
+finite-sample coverage for a target modality. That coverage is marginal over the
+calibration draw and the query jointly, under exchangeability of the calibration
+pairs and served traffic; it is not a per-query certainty, and distribution
+shift voids the statement silently -- re-measure on drifted traffic.
 
 Cross-modal predictions should be evaluated per modality and per missing-view
 pattern. A model that works with all modalities present can fail when only text
