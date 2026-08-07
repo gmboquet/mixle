@@ -52,6 +52,19 @@ from mixle.stats.latent.effective_sample import (
     validated_positive_integer,
     validated_statistic_tuple,
 )
+
+# The chain HMM and this tree share one accumulator-mutator discipline. The keyed merge/replace
+# bodies used to be byte-identical copies here; the duplicate-body ratchet (Y4.5) caught the
+# chain copy being repaired for STAT-RR8-1/RR9-1/RR10-1 while this twin kept every pre-repair
+# defect, so the shared logic now lives once in hidden_markov and both families delegate.
+from mixle.stats.latent.hidden_markov import (
+    _keyed_statistics_merge,
+    _keyed_statistics_replace,
+    _transactional_combine,
+    _transactional_restore,
+    _transactional_scale,
+    _validate_state_mass,
+)
 from mixle.utils.aliasing import MISSING, broadcast_pseudo_count, coalesce_alias, require
 from mixle.utils.optional_deps import HAS_NUMBA, numba
 
@@ -184,8 +197,20 @@ def _validated_tree_sufficient_statistics(
     *,
     num_states: int,
     label: str,
+    init_key: str | None = None,
+    trans_key: str | None = None,
 ) -> tuple[int, np.ndarray, np.ndarray, np.ndarray, tuple[Any, ...], Any]:
-    """Validate the public tree-HMM statistic schema and its mass law."""
+    """Validate the public tree-HMM statistic schema and its mass law.
+
+    Every node is either a root (initial mass) or has exactly one parent edge (transition
+    mass), so state mass equals initial-plus-transition mass to summation roundoff -- measured
+    relative residual 5e-16 on a real weighted fit. That equality is exactly the chain HMM's
+    relation, so the mode-aware check is shared: KEYED initial or transition parts are pooled
+    across every site sharing the key and carry other sites' mass, so a pooled ``value()``
+    legitimately breaks equality and only the upper bound survives (the previous unconditional
+    equality here rejected a keyed accumulator's own round-trip). See ``_validate_state_mass``
+    for the tolerance model.
+    """
     observed_states, init_counts, state_counts, trans_counts, topic_stats, len_stats = validated_statistic_tuple(
         values, 6, label
     )
@@ -201,10 +226,13 @@ def _validated_tree_sufficient_statistics(
     )
     if not isinstance(topic_stats, (tuple, list)) or len(topic_stats) != num_states:
         raise ValueError(f"{label} topic statistics must have one item per hidden state")
-    validate_effective_sample_mass(
-        state_counts.sum(),
-        init_counts.sum() + trans_counts.sum(),
-        label=f"{label} hidden-state mass",
+    _validate_state_mass(
+        init_counts,
+        state_counts,
+        trans_counts,
+        init_key=init_key,
+        trans_key=trans_key,
+        label="tree-HMM",
     )
     return observed_states, init_counts, state_counts, trans_counts, tuple(topic_stats), len_stats
 
@@ -1688,21 +1716,27 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             Self, with aggregated sufficient statistics.
 
         """
+        # combine receives one accumulator's own statistics -- pooling happens later, at
+        # key_merge -- so the validator's default unconditional equality applies even under
+        # tying, exactly as in the chain HMM.
         _, init_counts, state_counts, trans_counts, acc_values, len_acc_value = _validated_tree_sufficient_statistics(
             suff_stat,
             num_states=self.num_states,
             label="tree-HMM sufficient statistics",
         )
 
-        self.init_counts += init_counts
-        self.state_counts += state_counts
-        self.trans_counts += trans_counts
-
-        for i in range(self.num_states):
-            self.accumulators[i].combine(acc_values[i])
-
-        if len_acc_value is not None:
-            self.len_accumulator.combine(len_acc_value)
+        # The ENTIRE combine is transactional in the family-shared core (STAT-RR8-1,
+        # STAT-RR9-1): the previous version mutated the counts before the children could
+        # reject, and silently kept finite elements whose aggregate had overflowed.
+        _transactional_combine(
+            self,
+            init_counts,
+            state_counts,
+            trans_counts,
+            acc_values,
+            len_acc_value,
+            family_label="tree-HMM",
+        )
 
         return self
 
@@ -1733,32 +1767,35 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             Self, with sufficient statistics set to x.
 
         """
-        _, self.init_counts, self.state_counts, self.trans_counts, accumulators, len_acc = (
+        # A serialized value() may already carry pooled initial/transition parts when the
+        # accumulator is keyed, so validation enforces the mode-appropriate mass relation --
+        # the previous unconditional equality rejected a keyed accumulator's own round-trip.
+        _, candidate_init, candidate_state, candidate_trans, accumulators, len_acc = (
             _validated_tree_sufficient_statistics(
                 x,
                 num_states=self.num_states,
                 label="tree-HMM sufficient statistics",
+                init_key=self.init_key,
+                trans_key=self.trans_key,
             )
         )
 
-        for i, v in enumerate(accumulators):
-            self.accumulators[i].from_value(v)
-
-        if self.len_accumulator is not None:
-            self.len_accumulator.from_value(len_acc)
+        # Candidates are validated before ANY assignment, and assignment plus child
+        # restoration run as one transaction in the family-shared core (SYS-RR7-2,
+        # STAT-RR9-1): the previous version reassigned the counts and then let a child
+        # reject mid-loop, leaving the accumulator half-restored.
+        _transactional_restore(self, candidate_init, candidate_state, candidate_trans, accumulators, len_acc)
 
         return self
 
     def scale(self, c: float) -> "TreeHiddenMarkovAccumulator":
         """Scale all accumulated tree-HMM sufficient statistics in place."""
         c = validated_observation_weight(c, "tree-HMM scale factor")
-        self.init_counts *= c
-        self.state_counts *= c
-        self.trans_counts *= c
-        for acc in self.accumulators:
-            acc.scale(c)
-        if self.len_accumulator is not None:
-            self.len_accumulator.scale(c)
+        # Parent counts, children, and the length child scale as ONE transaction in the
+        # family-shared core, with the scaled result validated as a postcondition: the
+        # previous version silently kept an overflowed (infinite) result and had no
+        # rollback at all (STAT-RR8-1, STAT-RR10-1).
+        _transactional_scale(self, c, family_label="tree-HMM")
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -1768,36 +1805,10 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             stats_dict (Dict[str, Any]): Dictionary mapping keys to shared sufficient statistics.
 
         """
-        if self.init_key is not None:
-            if self.init_key in stats_dict:
-                stats_dict[self.init_key] += self.init_counts
-            else:
-                # Copy on adoption: stats_dict must never alias this accumulator's own live
-                # array, or a later tied accumulator's in-place += above would silently mutate
-                # this accumulator's private init_counts as a side effect of merging.
-                stats_dict[self.init_key] = self.init_counts.copy()
-
-        if self.trans_key is not None:
-            if self.trans_key in stats_dict:
-                stats_dict[self.trans_key] += self.trans_counts
-            else:
-                # Same aliasing hazard as init_key above, for the transition-count matrix.
-                stats_dict[self.trans_key] = self.trans_counts.copy()
-
-        if self.state_key is not None:
-            if self.state_key in stats_dict:
-                acc = stats_dict[self.state_key]
-                for i in range(len(acc)):
-                    acc[i] = acc[i].combine(self.accumulators[i].value())
-            else:
-                stats_dict[self.state_key] = self.accumulators
-
-        for u in self.accumulators:
-            u.key_merge(stats_dict)
-
-        if self.len_accumulator is not None:
-            self.len_accumulator.key_merge(stats_dict)
-
+        # One shared implementation for the whole HMM family (see the import-site comment):
+        # transactional with in-place-healing rollback, pooled-result finiteness checks, and
+        # copy-on-adoption aliasing discipline (STAT-RR8-1, STAT-RR9-1, STAT-RR10-1).
+        _keyed_statistics_merge(self, stats_dict, family_label="tree-HMM")
         return None
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
@@ -1807,27 +1818,12 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             stats_dict (Dict[str, Any]): Dictionary mapping keys to shared sufficient statistics.
 
         """
-        if self.init_key is not None:
-            if self.init_key in stats_dict:
-                # Copy on replace too: without it, every tied accumulator ends up pointing at
-                # the SAME array object, so any one of them later accumulating new local data
-                # would silently corrupt every other tied accumulator's counts.
-                self.init_counts = np.asarray(stats_dict[self.init_key]).copy()
-
-        if self.trans_key is not None:
-            if self.trans_key in stats_dict:
-                self.trans_counts = np.asarray(stats_dict[self.trans_key]).copy()
-
-        if self.state_key is not None:
-            if self.state_key in stats_dict:
-                self.accumulators = stats_dict[self.state_key]
-
-        for u in self.accumulators:
-            u.key_replace(stats_dict)
-
-        if self.len_accumulator is not None:
-            self.len_accumulator.key_replace(stats_dict)
-
+        # One shared implementation for the whole HMM family (see the import-site comment):
+        # both candidates validated before either is assigned, copy-on-replace aliasing
+        # discipline, and full accumulator-plus-mapping rollback -- the previous copy here
+        # accepted [inf, 0] outright and left this level half-replaced when the child
+        # recursion failed (STAT-RR8-1, STAT-RR9-1, STAT-RR10-1).
+        _keyed_statistics_replace(self, stats_dict, family_label="tree-HMM")
         return None
 
     def acc_to_encoder(self) -> "TreeHiddenMarkovDataEncoder":
@@ -1948,16 +1944,25 @@ class TreeHiddenMarkovEstimator(ParameterEstimator):
             TreeHiddenMarkovModelDistribution: Estimated distribution.
 
         """
+        _est_keys = self.keys if isinstance(self.keys, (tuple, list)) and len(self.keys) == 3 else (None, None, None)
+        # the M-step receives post-key_merge statistics, so this is where pooling actually
+        # lands: equality when initial/transition are unkeyed, the pooled upper bound otherwise
         num_states, init_counts, state_counts, trans_counts, topic_ss, len_ss = _validated_tree_sufficient_statistics(
             suff_stat,
             num_states=self.num_states,
             label="tree-HMM sufficient statistics",
+            init_key=_est_keys[0],
+            trans_key=_est_keys[1],
         )
-        validate_effective_sample_mass(
-            nobs,
-            init_counts.sum(),
-            label="tree-HMM effective sample",
-        )
+        if _est_keys[0] is None:
+            # a POOLED root-count vector carries the mass of every site sharing the key, so
+            # comparing it against THIS site's observation count stops being a corruption
+            # check; an unkeyed one must still match the observations that produced it
+            validate_effective_sample_mass(
+                nobs,
+                init_counts.sum(),
+                label="tree-HMM effective sample",
+            )
 
         len_dist = self.len_estimator.estimate(state_counts.sum(), len_ss)
         topics = [self.estimators[i].estimate(state_counts[i], topic_ss[i]) for i in range(num_states)]

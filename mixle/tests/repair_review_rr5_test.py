@@ -1,4 +1,4 @@
-"""Regressions for the 2026-08-07 adversarial repair reviews (STAT-RR5-1..5 and STAT-RR6-1..2).
+"""Regressions for the 2026-08-07 adversarial repair reviews (STAT-RR5 through STAT-RR10).
 
 Each finding was a hole in a same-week repair, found by probing the repair's edges from the
 installed wheel. Every test here reproduces the reviewer's probe, and where the first repair
@@ -18,6 +18,7 @@ from mixle.stats import (
     GaussianEstimator,
     HiddenMarkovEstimator,
     PoissonDistribution,
+    TreeHiddenMarkovEstimator,
 )
 
 
@@ -563,6 +564,294 @@ class TransactionalMutatorTest(unittest.TestCase):
         accumulator.key_merge(pool)
         accumulator.key_replace(pool)
         np.testing.assert_allclose(accumulator.init_counts, [1.0, 1.0])
+
+
+class _StubChild:
+    """Minimal accumulator protocol for transaction probes: records data, can be told to fail."""
+
+    def __init__(self, data, key=None, fail_on=()):
+        self.data = np.asarray(data, dtype=np.float64)
+        self.key = key
+        self.fail_on = fail_on
+
+    def value(self):
+        return self.data.copy()
+
+    def from_value(self, x):
+        self.data = np.asarray(x, dtype=np.float64)
+        return self
+
+    def combine(self, x):
+        self.data = self.data + np.asarray(x, dtype=np.float64)
+        return self
+
+    def scale(self, c):
+        if "scale" in self.fail_on:
+            raise RuntimeError("reviewer-induced late child scale failure")
+        self.data = self.data * c
+        return self
+
+    def key_merge(self, stats_dict):
+        return None
+
+    def key_replace(self, stats_dict):
+        if "key_replace" in self.fail_on:
+            raise RuntimeError("reviewer-induced child key_replace failure")
+        if self.key is not None and self.key in stats_dict:
+            self.data = np.asarray(stats_dict[self.key], dtype=np.float64)
+        return None
+
+
+class WholeMutatorAliasTransactionTest(unittest.TestCase):
+    """STAT-RR10-1: rollback must restore every object the mutator touched, through every alias.
+
+    Pass nine's transactions covered the accumulator's own attributes and the mapping's VALUES.
+    The re-review probed the boundaries of "everything": a child raising late in ``scale()`` left
+    the parent and earlier children doubled (the child loop ran outside the transaction); a failed
+    ``key_replace()`` restored the parent but not the dict-held replacement children its recursion
+    had already mutated; and a failed ``key_merge()`` swapped restored COPIES into the mapping
+    while a caller's pre-existing alias to the pooled array kept the partial merge. Rollback now
+    heals surviving objects IN PLACE, preserving their identity. Both HMM-family accumulators run
+    every probe: the duplicate-body ratchet caught pass nine repairing the chain twin while the
+    byte-identical tree twin kept every defect, so the mutators now share one implementation and
+    one perimeter test.
+    """
+
+    _FAMILIES = ((HiddenMarkovEstimator, "chain"), (TreeHiddenMarkovEstimator, "tree"))
+
+    @staticmethod
+    def _accumulator(estimator_cls, keys=(None, None, None)):
+        return estimator_cls([GaussianEstimator() for _ in range(2)], keys=keys).accumulator_factory().make()
+
+    @staticmethod
+    def _consistent(accumulator, scale=1.0, children=None):
+        # state mass == initial mass + transition mass, at any scale (chain: positions are
+        # starts plus steps; tree: nodes are roots plus parent edges)
+        init = np.array([1.0, 1.0]) * scale
+        trans = np.full((2, 2), 0.25) * scale
+        state = np.array([1.5, 1.5]) * scale
+        return (
+            2,
+            init,
+            state,
+            trans,
+            children if children is not None else tuple(c.value() for c in accumulator.accumulators),
+            None,
+        )
+
+    def test_scale_child_failure_rolls_back_parent_and_every_child(self):
+        for estimator_cls, family in self._FAMILIES:
+            with self.subTest(family=family):
+                accumulator = self._accumulator(estimator_cls)
+                accumulator.combine(self._consistent(accumulator))
+                healthy = _StubChild([1.0, 2.0, 3.0, 4.0])
+                failing = _StubChild([5.0, 6.0, 7.0, 8.0], fail_on=("scale",))
+                accumulator.accumulators = [healthy, failing]
+                counts_before = accumulator.init_counts.copy()
+                with self.assertRaisesRegex(RuntimeError, "late child scale failure"):
+                    accumulator.scale(2.0)
+                np.testing.assert_array_equal(accumulator.init_counts, counts_before)
+                np.testing.assert_array_equal(healthy.data, [1.0, 2.0, 3.0, 4.0])
+                np.testing.assert_array_equal(failing.data, [5.0, 6.0, 7.0, 8.0])
+
+    def test_key_replace_failure_heals_the_dict_held_replacement_children(self):
+        for estimator_cls, family in self._FAMILIES:
+            with self.subTest(family=family):
+                accumulator = self._accumulator(estimator_cls, keys=(None, None, "s"))
+                accumulator.combine(self._consistent(accumulator))
+                original_children = accumulator.accumulators
+                consumed = _StubChild([10.0, 10.0, 10.0, 10.0], key="g")
+                failing = _StubChild([20.0, 20.0, 20.0, 20.0], fail_on=("key_replace",))
+                pool = {"s": [consumed, failing], "g": np.array([100.0, 200.0, 300.0, 400.0])}
+                with self.assertRaisesRegex(RuntimeError, "child key_replace failure"):
+                    accumulator.key_replace(pool)
+                self.assertIs(accumulator.accumulators, original_children)
+                self.assertIs(pool["s"][0], consumed)  # healed in place, not swapped for a copy
+                np.testing.assert_array_equal(consumed.data, [10.0, 10.0, 10.0, 10.0])
+
+    def test_key_merge_failure_heals_an_external_alias_to_a_pooled_array(self):
+        big = 4.4e307  # statistic aggregate stays finite; the pooled double overflows
+        for estimator_cls, family in self._FAMILIES:
+            with self.subTest(family=family):
+                merger = self._accumulator(estimator_cls, keys=("ik", "tk", None))
+                statistic = (
+                    2,
+                    np.array([1.0, 1.0]),
+                    np.array([1.0 + 2.0 * big, 1.0 + 2.0 * big]),  # keeps state == init + trans
+                    np.full((2, 2), big),
+                    tuple(c.value() for c in merger.accumulators),
+                    None,
+                )
+                merger.combine(statistic)
+                pool = {"ik": np.array([5.0, 5.0]), "tk": np.full((2, 2), big)}
+                external_alias = pool["ik"]
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    merger.key_merge(pool)
+                np.testing.assert_array_equal(external_alias, [5.0, 5.0])
+                self.assertIs(pool["ik"], external_alias)  # identity preserved through the rollback
+
+    def test_legitimate_operations_still_apply_through_the_shared_implementation(self):
+        for estimator_cls, family in self._FAMILIES:
+            with self.subTest(family=family):
+                accumulator = self._accumulator(estimator_cls, keys=("ik", "tk", None))
+                accumulator.combine(self._consistent(accumulator))
+                accumulator.scale(2.0)
+                np.testing.assert_allclose(accumulator.init_counts, [2.0, 2.0])
+                pool = {}
+                accumulator.key_merge(pool)
+                partner = self._accumulator(estimator_cls, keys=("ik", "tk", None))
+                partner.combine(self._consistent(partner))
+                partner.key_merge(pool)
+                np.testing.assert_allclose(pool["ik"], [3.0, 3.0])
+                accumulator.key_replace(pool)
+                partner.key_replace(pool)
+                np.testing.assert_allclose(partner.init_counts, [3.0, 3.0])
+                self.assertIsNot(accumulator.init_counts, partner.init_counts)
+
+
+class TreeSiblingGapTest(unittest.TestCase):
+    """The tree twin of every chain-HMM mutator repair, caught by the duplicate-body ratchet.
+
+    ``TreeHiddenMarkovAccumulator.key_merge``/``key_replace`` were byte-identical copies of the
+    chain implementations, listed in the Y4.5 duplicate-body manifest. Passes five through nine
+    repaired the chain copies only; CI's manifest-staleness gate was what surfaced the divergence.
+    Measured before the fix, the tree twin still: accepted ``[inf, 0]`` replacements outright;
+    silently combined finite elements into an infinite aggregate; silently scaled counts to
+    infinity; left partial mutations behind when a child failed in ``combine``/``from_value``/
+    ``key_merge``/``key_replace``; and -- the overreach direction -- rejected a KEYED
+    accumulator's own ``value()`` round-trip, because its validator demanded unconditional mass
+    equality that pooled initial/transition parts legitimately break (the chain twin learned that
+    in STAT-RR5-2). The mutators now share one implementation; these tests pin the tree-visible
+    behavior.
+    """
+
+    @staticmethod
+    def _accumulator(keys=(None, None, None)):
+        return (
+            TreeHiddenMarkovEstimator([GaussianEstimator() for _ in range(2)], keys=keys).accumulator_factory().make()
+        )
+
+    @staticmethod
+    def _consistent(accumulator, scale=1.0, children=None):
+        init = np.array([1.0, 1.0]) * scale
+        trans = np.full((2, 2), 0.25) * scale
+        state = np.array([1.5, 1.5]) * scale
+        return (
+            2,
+            init,
+            state,
+            trans,
+            children if children is not None else tuple(c.value() for c in accumulator.accumulators),
+            None,
+        )
+
+    def test_combine_refuses_an_overflowing_sum_and_rolls_back(self):
+        # each element stays finite after doubling (9.2e307), but the two-element AGGREGATE
+        # crosses the float64 maximum (1.84e308) -- per-element checks alone cannot see it
+        half_max = 4.6e307
+        accumulator = self._accumulator()
+        statistic = (
+            2,
+            np.array([half_max, half_max]),
+            np.array([half_max, half_max]),
+            np.zeros((2, 2)),
+            tuple(c.value() for c in accumulator.accumulators),
+            None,
+        )
+        accumulator.combine(statistic)
+        with self.assertRaisesRegex(ValueError, "aggregate to a finite total"):
+            accumulator.combine(statistic)
+        np.testing.assert_array_equal(accumulator.init_counts, [half_max, half_max])
+
+    def test_combine_child_failure_rolls_back_counts_and_children(self):
+        accumulator = self._accumulator()
+        accumulator.combine(self._consistent(accumulator))
+        counts_before = accumulator.init_counts.copy()
+        children_before = [repr(c.value()) for c in accumulator.accumulators]
+        poisoned = self._consistent(accumulator, children=(accumulator.accumulators[0].value(), None))
+        with self.assertRaises((TypeError, ValueError)):
+            accumulator.combine(poisoned)
+        np.testing.assert_array_equal(accumulator.init_counts, counts_before)
+        self.assertEqual([repr(c.value()) for c in accumulator.accumulators], children_before)
+
+    def test_from_value_child_failure_rolls_back_counts_and_children(self):
+        accumulator = self._accumulator()
+        accumulator.combine(self._consistent(accumulator))
+        counts_before = accumulator.init_counts.copy()
+        children_before = [repr(c.value()) for c in accumulator.accumulators]
+        candidate = self._consistent(accumulator, scale=5.0, children=(accumulator.accumulators[0].value(), None))
+        with self.assertRaises((TypeError, ValueError)):
+            accumulator.from_value(candidate)
+        np.testing.assert_array_equal(accumulator.init_counts, counts_before)
+        self.assertEqual([repr(c.value()) for c in accumulator.accumulators], children_before)
+
+    def test_scale_refuses_an_overflowing_product_and_rolls_back(self):
+        accumulator = self._accumulator()
+        big = 9.0e307
+        accumulator.combine(
+            (
+                2,
+                np.array([big, 0.0]),
+                np.array([big, 0.0]),
+                np.zeros((2, 2)),
+                tuple(c.value() for c in accumulator.accumulators),
+                None,
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "finite"):
+            accumulator.scale(3.0)
+        np.testing.assert_array_equal(accumulator.init_counts, [big, 0.0])
+
+    def test_key_replace_validates_the_incoming_replacement(self):
+        accumulator = self._accumulator(("ik", None, None))
+        accumulator.combine(self._consistent(accumulator))
+        init_before = accumulator.init_counts.copy()
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            accumulator.key_replace({"ik": np.array([np.inf, 0.0])})
+        np.testing.assert_array_equal(accumulator.init_counts, init_before)
+
+    def test_a_keyed_accumulators_own_round_trip_is_accepted(self):
+        # two tied sites pool their initial/transition mass; each site's value() then carries
+        # POOLED init/trans next to LOCAL state, so unconditional equality must not apply
+        first = self._accumulator(("ik", "tk", None))
+        second = self._accumulator(("ik", "tk", None))
+        first.combine(self._consistent(first))
+        second.combine(self._consistent(second, scale=2.0))
+        pool = {}
+        first.key_merge(pool)
+        second.key_merge(pool)
+        first.key_replace(pool)
+        replay = self._accumulator(("ik", "tk", None))
+        replay.from_value(first.value())  # rejected outright before the sibling repair
+        np.testing.assert_allclose(replay.init_counts, first.init_counts)
+
+    def test_a_keyed_round_trip_with_corrupt_state_mass_is_still_rejected(self):
+        accumulator = self._accumulator(("ik", "tk", None))
+        with self.assertRaisesRegex(ValueError, "exceed the pooled"):
+            accumulator.from_value(
+                (
+                    2,
+                    np.array([1.0, 1.0]),
+                    np.array([99.0, 99.0]),  # far above any pooled initial+transition mass
+                    np.zeros((2, 2)),
+                    tuple(c.value() for c in accumulator.accumulators),
+                    None,
+                )
+            )
+
+    def test_unkeyed_ingestion_still_requires_mass_equality(self):
+        accumulator = self._accumulator()
+        with self.assertRaisesRegex(ValueError, "equal initial plus transition"):
+            accumulator.combine(
+                (
+                    2,
+                    np.array([1.0, 1.0]),
+                    np.array([50.0, 50.0]),
+                    np.zeros((2, 2)),
+                    tuple(c.value() for c in accumulator.accumulators),
+                    None,
+                )
+            )
 
 
 if __name__ == "__main__":

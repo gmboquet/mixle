@@ -190,6 +190,47 @@ def _restore_children(accumulators, len_accumulator, snapshot) -> None:
             pass
 
 
+def _healed_in_place(current, snap_value):
+    """Write ``snap_value`` back INTO ``current`` where possible, else return the snapshot.
+
+    Arrays are restored element-wise, lists element-by-element, and accumulator objects through
+    ``from_value`` of the snapshot's ``value()`` -- each preserves the identity of the object a
+    caller may already hold a reference to. Healing errors fall back to returning the snapshot
+    object itself (mapping-level restoration), and are suppressed so a rollback failure cannot
+    mask the original rejection.
+    """
+    try:
+        if isinstance(current, np.ndarray) and isinstance(snap_value, np.ndarray) and current.shape == snap_value.shape:
+            current[...] = snap_value
+            return current
+        if isinstance(current, list) and isinstance(snap_value, list) and len(current) == len(snap_value):
+            for i in range(len(current)):
+                current[i] = _healed_in_place(current[i], snap_value[i])
+            return current
+        if hasattr(current, "from_value") and hasattr(snap_value, "value"):
+            current.from_value(snap_value.value())
+            return current
+    except Exception:  # noqa: BLE001, S110 - see docstring
+        pass
+    return snap_value
+
+
+def _restore_pool_dict(stats_dict: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    """Restore a keyed-statistics mapping after a failed mutator, healing in-place damage.
+
+    Swapping restored COPIES into the mapping is not enough: merges mutate pooled arrays with
+    ``+=`` and pooled emission accumulators with ``combine``, so state reachable through a
+    pre-existing reference -- a caller's alias to a pooled array, the shared child list a tied
+    site adopted -- stayed corrupted while the mapping itself looked restored (STAT-RR10-1).
+    Entries the failed mutator added are removed; surviving entries are healed in place via
+    :func:`_healed_in_place` so external aliases observe the rollback too.
+    """
+    for key in [k for k in stats_dict if k not in snapshot]:
+        del stats_dict[key]
+    for key, snap_value in snapshot.items():
+        stats_dict[key] = _healed_in_place(stats_dict.get(key), snap_value)
+
+
 def _require_finite_statistics(named_arrays, *, label: str) -> None:
     """Every element AND every aggregate must be finite.
 
@@ -279,6 +320,237 @@ def _responsibility_mass_tolerance(mass):
     scaled = 4.0 * _REDUCED_PRECISION_EPS * math.sqrt(max(float(abs(mass)), 1.0))
     ceiling = 4.0 * _REDUCED_PRECISION_EPS * math.sqrt(2.0**24)
     return max(1.0e-9, min(scaled, ceiling))
+
+
+def _keyed_statistics_merge(acc, stats_dict: dict[str, Any], *, family_label: str) -> None:
+    """Shared keyed merge for the HMM family (chain and tree accumulators delegate here).
+
+    ``acc`` needs ``init_key``/``trans_key``/``state_key``, ``init_counts``/``trans_counts``,
+    ``accumulators``, and ``len_accumulator``. This used to live as two byte-identical method
+    bodies; the duplicate-body ratchet (Y4.5) caught the chain copy being repaired while the
+    tree copy kept every pre-repair defect, which is exactly the sibling-bug factory the
+    scanner exists for -- so the logic now has one home.
+
+    The WHOLE merge is transactional (STAT-RR9-1: restoring only the entry being modified
+    left the init pool already merged when the transition pool failed one step later). The
+    snapshot must cover keys this level cannot enumerate -- the recursive child merges below
+    touch their own keys -- so it deep-copies the dict on entry, and a failure restores it
+    through :func:`_restore_pool_dict`, which heals the surviving objects IN PLACE: merely
+    swapping restored copies into the mapping left a caller's pre-existing alias to a pooled
+    array holding the partial merge (STAT-RR10-1). On adoption the dict deliberately holds
+    LIVE references (see the aliasing comments below).
+    """
+    _snapshot = copy.deepcopy(stats_dict)
+    try:
+        # Pooling reaches overflow by addition exactly as combine() does (STAT-RR8-1), so each
+        # merged pool is validated before the merge is allowed to stand.
+        if acc.init_key is not None:
+            if acc.init_key in stats_dict:
+                stats_dict[acc.init_key] += acc.init_counts
+                _require_finite_statistics(
+                    (("pooled initial counts", stats_dict[acc.init_key]),),
+                    label=f"{family_label} key merge",
+                )
+            else:
+                # Copy on adoption: stats_dict must never alias this accumulator's own live
+                # array, or a later tied accumulator's in-place += above would silently mutate
+                # this accumulator's private init_counts as a side effect of merging.
+                stats_dict[acc.init_key] = acc.init_counts.copy()
+
+        if acc.trans_key is not None:
+            if acc.trans_key in stats_dict:
+                stats_dict[acc.trans_key] += acc.trans_counts
+                _require_finite_statistics(
+                    (("pooled transition counts", stats_dict[acc.trans_key]),),
+                    label=f"{family_label} key merge",
+                )
+            else:
+                # Same aliasing hazard as init_key above, for the transition-count matrix.
+                stats_dict[acc.trans_key] = acc.trans_counts.copy()
+
+        if acc.state_key is not None:
+            if acc.state_key in stats_dict:
+                pooled = stats_dict[acc.state_key]
+                for i in range(len(pooled)):
+                    pooled[i] = pooled[i].combine(acc.accumulators[i].value())
+            else:
+                stats_dict[acc.state_key] = acc.accumulators
+
+        for u in acc.accumulators:
+            u.key_merge(stats_dict)
+
+        if acc.len_accumulator is not None:
+            acc.len_accumulator.key_merge(stats_dict)
+    except Exception:
+        _restore_pool_dict(stats_dict, _snapshot)
+        raise
+
+
+def _keyed_statistics_replace(acc, stats_dict: dict[str, Any], *, family_label: str) -> None:
+    """Shared keyed replace for the HMM family (chain and tree accumulators delegate here).
+
+    Same duck-typed contract and single-home rationale as :func:`_keyed_statistics_merge`.
+
+    A replacement arrives from outside and was copied in with no shape, dtype, element or
+    mass validation at all -- [inf, 0] landed directly in the accumulator (STAT-RR8-1). Every
+    replacement now goes through the same count-array contract as ingestion, and BOTH
+    candidates are validated before EITHER is assigned (STAT-RR9-1: validating the transition
+    replacement after assigning the initial one left a rejected replace half-applied). Shape
+    is taken from what this accumulator already holds, not from num_states: the keyed-pooling
+    protocol tests build accumulators via __new__ and set only the fields under test, and the
+    replacement must match the geometry in place anyway.
+
+    The rollback covers the MAPPING's objects too: the recursion below runs over children this
+    site may have ADOPTED from ``stats_dict``, so a mid-recursion failure mutated dict-held
+    replacement children that the parent-level restore never touched (STAT-RR10-1). The dict is
+    snapshotted before any mutation and healed in place on failure, exactly as in
+    :func:`_keyed_statistics_merge`.
+    """
+    candidate_init = None
+    if acc.init_key is not None and acc.init_key in stats_dict:
+        candidate_init = validated_count_array(
+            stats_dict[acc.init_key],
+            np.shape(acc.init_counts),
+            f"{family_label} replacement initial counts",
+        )
+        _require_finite_statistics((("initial counts", candidate_init),), label=f"{family_label} key replace")
+    candidate_trans = None
+    if acc.trans_key is not None and acc.trans_key in stats_dict:
+        candidate_trans = validated_count_array(
+            stats_dict[acc.trans_key],
+            np.shape(acc.trans_counts),
+            f"{family_label} replacement transition counts",
+        )
+        _require_finite_statistics((("transition counts", candidate_trans),), label=f"{family_label} key replace")
+
+    previous_counts = (acc.init_counts, acc.trans_counts)
+    previous_accumulators = acc.accumulators
+    children_snapshot = _snapshot_children(acc.accumulators, acc.len_accumulator)
+    _dict_snapshot = copy.deepcopy(stats_dict)
+    if candidate_init is not None:
+        # Copy on replace: without it, every tied accumulator ends up pointing at the SAME
+        # array object, so any one of them later accumulating new local data would silently
+        # corrupt every other tied accumulator's counts.
+        acc.init_counts = candidate_init.copy()
+    if candidate_trans is not None:
+        acc.trans_counts = candidate_trans.copy()
+    if acc.state_key is not None and acc.state_key in stats_dict:
+        acc.accumulators = stats_dict[acc.state_key]
+    try:
+        for u in acc.accumulators:
+            u.key_replace(stats_dict)
+        if acc.len_accumulator is not None:
+            acc.len_accumulator.key_replace(stats_dict)
+    except Exception:
+        # a child failure mid-recursion must not leave this level half-replaced -- nor the
+        # mapping's own objects: the recursion above ran over ADOPTED dict-held children
+        acc.init_counts, acc.trans_counts = previous_counts
+        acc.accumulators = previous_accumulators
+        _restore_children(acc.accumulators, acc.len_accumulator, children_snapshot)
+        _restore_pool_dict(stats_dict, _dict_snapshot)
+        raise
+
+
+def _transactional_combine(
+    acc,
+    init_counts: np.ndarray,
+    state_counts: np.ndarray,
+    trans_counts: np.ndarray,
+    acc_values,
+    len_acc_value,
+    *,
+    family_label: str,
+) -> None:
+    """Add pre-validated statistics into ``acc`` as one parent/child/length transaction.
+
+    Shared by the chain and tree accumulators (the duplicate-body ratchet caught the repaired
+    logic living in one twin only). Both operands are individually valid and the sum can still
+    overflow (4.6e307 + 4.6e307 keeps finite elements but an infinite total, STAT-RR8-1), and a
+    child can reject its own part mid-loop (STAT-RR9-1); either way the accumulator must come
+    back exactly as it was.
+    """
+    _previous = (acc.init_counts.copy(), acc.state_counts.copy(), acc.trans_counts.copy())
+    _children = _snapshot_children(acc.accumulators, acc.len_accumulator)
+    acc.init_counts += init_counts
+    acc.state_counts += state_counts
+    acc.trans_counts += trans_counts
+    try:
+        _require_finite_statistics(
+            (
+                ("initial counts", acc.init_counts),
+                ("state counts", acc.state_counts),
+                ("transition counts", acc.trans_counts),
+            ),
+            label=f"combined {family_label}",
+        )
+        for i in range(acc.num_states):
+            acc.accumulators[i].combine(acc_values[i])
+        if len_acc_value is not None:
+            acc.len_accumulator.combine(len_acc_value)
+    except Exception:
+        acc.init_counts, acc.state_counts, acc.trans_counts = _previous
+        _restore_children(acc.accumulators, acc.len_accumulator, _children)
+        raise
+
+
+def _transactional_restore(
+    acc,
+    candidate_init: np.ndarray,
+    candidate_state: np.ndarray,
+    candidate_trans: np.ndarray,
+    accumulators,
+    len_acc,
+) -> None:
+    """Assign pre-validated candidates and restore children as one transaction.
+
+    Candidates must be validated BEFORE this runs (SYS-RR7-2: assigning and then validating
+    left the accumulator half-replaced). Child restoration can still fail mid-loop, so any
+    failure rolls the whole accumulator back before re-raising (STAT-RR9-1).
+    """
+    previous_counts = (acc.init_counts, acc.state_counts, acc.trans_counts)
+    children_snapshot = _snapshot_children(acc.accumulators, acc.len_accumulator)
+    acc.init_counts, acc.state_counts, acc.trans_counts = candidate_init, candidate_state, candidate_trans
+    try:
+        for i, v in enumerate(accumulators):
+            acc.accumulators[i].from_value(v)
+        if acc.len_accumulator is not None:
+            acc.len_accumulator.from_value(len_acc)
+    except Exception:
+        acc.init_counts, acc.state_counts, acc.trans_counts = previous_counts
+        _restore_children(acc.accumulators, acc.len_accumulator, children_snapshot)
+        raise
+
+
+def _transactional_scale(acc, c: float, *, family_label: str) -> None:
+    """Scale parent counts, children, and the length child as ONE transaction.
+
+    A valid factor times a valid statistic can overflow ([8e307, 0] * 3.0), so the scaled
+    result is validated (STAT-RR8-1) -- and the transaction must cover the child scaling too:
+    snapshotting only the parent arrays around the parent check left the parent and every
+    already-scaled child doubled when a later child raised (STAT-RR10-1).
+    """
+    previous = (acc.init_counts.copy(), acc.state_counts.copy(), acc.trans_counts.copy())
+    children_snapshot = _snapshot_children(acc.accumulators, acc.len_accumulator)
+    acc.init_counts *= c
+    acc.state_counts *= c
+    acc.trans_counts *= c
+    try:
+        _require_finite_statistics(
+            (
+                ("initial counts", acc.init_counts),
+                ("state counts", acc.state_counts),
+                ("transition counts", acc.trans_counts),
+            ),
+            label=f"scaled {family_label}",
+        )
+        for child in acc.accumulators:
+            child.scale(c)
+        if acc.len_accumulator is not None:
+            acc.len_accumulator.scale(c)
+    except Exception:
+        acc.init_counts, acc.state_counts, acc.trans_counts = previous
+        _restore_children(acc.accumulators, acc.len_accumulator, children_snapshot)
+        raise
 
 
 def _validated_hmm_transition_matrix(values: Any, n_states: int) -> tuple[np.ndarray, tuple[int, ...]]:
@@ -3577,33 +3849,18 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         if not isinstance(acc_values, (tuple, list)) or len(acc_values) != num_states:
             raise ValueError("hidden-Markov emission statistics must match the state count")
 
-        # The ENTIRE combine is transactional (STAT-RR9-1: rolling back only the count arrays left
-        # a child failure mid-loop with the counts and earlier children already combined). Both
-        # operands are individually valid and the sum can still overflow (4.6e307 + 4.6e307 keeps
-        # finite elements but an infinite total, STAT-RR8-1), and a child can reject its own part;
-        # either way the accumulator must come back exactly as it was.
-        _previous = (self.init_counts.copy(), self.state_counts.copy(), self.trans_counts.copy())
-        _children = _snapshot_children(self.accumulators, self.len_accumulator)
-        self.init_counts += init_counts
-        self.state_counts += state_counts
-        self.trans_counts += trans_counts
-        try:
-            _require_finite_statistics(
-                (
-                    ("initial counts", self.init_counts),
-                    ("state counts", self.state_counts),
-                    ("transition counts", self.trans_counts),
-                ),
-                label="combined hidden-Markov",
-            )
-            for i in range(self.num_states):
-                self.accumulators[i].combine(acc_values[i])
-            if len_acc_value is not None:
-                self.len_accumulator.combine(len_acc_value)
-        except Exception:
-            self.init_counts, self.state_counts, self.trans_counts = _previous
-            _restore_children(self.accumulators, self.len_accumulator, _children)
-            raise
+        # The ENTIRE combine is transactional (STAT-RR9-1, STAT-RR8-1); the shared core is the
+        # single home for the chain and tree twins (the duplicate-body ratchet caught the
+        # repaired logic living in one twin only).
+        _transactional_combine(
+            self,
+            init_counts,
+            state_counts,
+            trans_counts,
+            acc_values,
+            len_acc_value,
+            family_label="hidden-Markov",
+        )
 
         return self
 
@@ -3691,60 +3948,20 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         if not isinstance(accumulators, (tuple, list)) or len(accumulators) != num_states:
             raise ValueError("hidden-Markov emission statistics must match the state count")
 
-        # Child restoration can still fail mid-loop, so it runs transactionally: children are
-        # snapshotted via value() first, and any failure rolls the whole accumulator back before
-        # re-raising. Rollback errors are deliberately suppressed -- the original rejection is the
-        # signal, and a rollback failure would mask it.
-        previous_counts = (self.init_counts, self.state_counts, self.trans_counts)
-        child_snapshots = [child.value() for child in self.accumulators]
-        length_snapshot = self.len_accumulator.value() if self.len_accumulator is not None else None
-        self.init_counts, self.state_counts, self.trans_counts = candidate_init, candidate_state, candidate_trans
-        try:
-            for i, v in enumerate(accumulators):
-                self.accumulators[i].from_value(v)
-            if self.len_accumulator is not None:
-                self.len_accumulator.from_value(len_acc)
-        except Exception:
-            self.init_counts, self.state_counts, self.trans_counts = previous_counts
-            for child, snapshot in zip(self.accumulators, child_snapshots):
-                try:
-                    child.from_value(snapshot)
-                except Exception:  # noqa: BLE001, S110 - see comment above
-                    pass
-            if self.len_accumulator is not None and length_snapshot is not None:
-                try:
-                    self.len_accumulator.from_value(length_snapshot)
-                except Exception:  # noqa: BLE001, S110 - see comment above
-                    pass
-            raise
+        # Child restoration can still fail mid-loop, so assignment and child restoration run as
+        # one transaction in the family-shared core (STAT-RR9-1).
+        _transactional_restore(self, candidate_init, candidate_state, candidate_trans, accumulators, len_acc)
 
         return self
 
     def scale(self, c: float) -> HiddenMarkovAccumulator:
         """Scale linear HMM sufficient statistics while preserving metadata."""
         c = validated_observation_weight(c, "hidden-Markov statistic scale")
-        # A valid factor times a valid statistic can overflow ([8e307, 0] * 3.0), so the scaled
-        # result is validated and rolled back on failure (STAT-RR8-1).
-        previous = (self.init_counts.copy(), self.state_counts.copy(), self.trans_counts.copy())
-        self.init_counts *= c
-        self.state_counts *= c
-        self.trans_counts *= c
-        try:
-            _require_finite_statistics(
-                (
-                    ("initial counts", self.init_counts),
-                    ("state counts", self.state_counts),
-                    ("transition counts", self.trans_counts),
-                ),
-                label="scaled hidden-Markov",
-            )
-        except ValueError:
-            self.init_counts, self.state_counts, self.trans_counts = previous
-            raise
-        for acc in self.accumulators:
-            acc.scale(c)
-        if self.len_accumulator is not None:
-            self.len_accumulator.scale(c)
+        # Parent counts, children, and the length child scale as ONE transaction in the
+        # family-shared core: the previous version rolled back only the parent finiteness
+        # check, so a child raising mid-loop left the parent and earlier children doubled
+        # (STAT-RR8-1, STAT-RR10-1).
+        _transactional_scale(self, c, family_label="hidden-Markov")
         return self
 
     def key_merge(self, stats_dict: dict[str, Any]) -> None:
@@ -3757,59 +3974,10 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        # The WHOLE merge is transactional (STAT-RR9-1: restoring only the entry being modified
-        # left the init pool already merged when the transition pool failed one step later). The
-        # snapshot must cover keys this level cannot enumerate -- the recursive child merges below
-        # touch their own keys -- so it deep-copies the dict on entry and restores it wholesale on
-        # any failure. On adoption the dict deliberately holds LIVE references (see the aliasing
-        # comments below); a post-failure restore replaces those with copies, which is sound
-        # because a failed merge's dict must be discarded or retried, never committed.
-        _snapshot = copy.deepcopy(stats_dict)
-        try:
-            # Pooling reaches overflow by addition exactly as combine() does (STAT-RR8-1), so each
-            # merged pool is validated before the merge is allowed to stand.
-            if self.init_key is not None:
-                if self.init_key in stats_dict:
-                    stats_dict[self.init_key] += self.init_counts
-                    _require_finite_statistics(
-                        (("pooled initial counts", stats_dict[self.init_key]),),
-                        label="hidden-Markov key merge",
-                    )
-                else:
-                    # Copy on adoption: stats_dict must never alias this accumulator's own live
-                    # array, or a later tied accumulator's in-place += above would silently mutate
-                    # this accumulator's private init_counts as a side effect of merging.
-                    stats_dict[self.init_key] = self.init_counts.copy()
-
-            if self.trans_key is not None:
-                if self.trans_key in stats_dict:
-                    stats_dict[self.trans_key] += self.trans_counts
-                    _require_finite_statistics(
-                        (("pooled transition counts", stats_dict[self.trans_key]),),
-                        label="hidden-Markov key merge",
-                    )
-                else:
-                    # Same aliasing hazard as init_key above, for the transition-count matrix.
-                    stats_dict[self.trans_key] = self.trans_counts.copy()
-
-            if self.state_key is not None:
-                if self.state_key in stats_dict:
-                    acc = stats_dict[self.state_key]
-                    for i in range(len(acc)):
-                        acc[i] = acc[i].combine(self.accumulators[i].value())
-                else:
-                    stats_dict[self.state_key] = self.accumulators
-
-            for u in self.accumulators:
-                u.key_merge(stats_dict)
-
-            if self.len_accumulator is not None:
-                self.len_accumulator.key_merge(stats_dict)
-        except Exception:
-            stats_dict.clear()
-            stats_dict.update(_snapshot)
-            raise
-
+        # One shared implementation for the whole HMM family: the duplicate-body ratchet caught
+        # this body being repaired (STAT-RR8-1, STAT-RR9-1) while its byte-identical tree twin
+        # kept every pre-repair defect, so the logic lives once in _keyed_statistics_merge.
+        _keyed_statistics_merge(self, stats_dict, family_label="hidden-Markov")
         return None
 
     def key_replace(self, stats_dict: dict[str, Any]) -> None:
@@ -3820,55 +3988,11 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
                 initial-state, transition, emission, or length statistics.
 
         """
-        # A replacement arrives from outside and was copied in with no shape, dtype, element or
-        # mass validation at all -- [inf, 0] landed directly in the accumulator (STAT-RR8-1). Every
-        # replacement now goes through the same count-array contract as ingestion, and BOTH
-        # candidates are validated before EITHER is assigned (STAT-RR9-1: validating the transition
-        # replacement after assigning the initial one left a rejected replace half-applied). Shape
-        # is taken from what this accumulator already holds, not from num_states: the keyed-pooling
-        # protocol tests build accumulators via __new__ and set only the fields under test, and the
-        # replacement must match the geometry in place anyway.
-        candidate_init = None
-        if self.init_key is not None and self.init_key in stats_dict:
-            candidate_init = validated_count_array(
-                stats_dict[self.init_key],
-                np.shape(self.init_counts),
-                "hidden-Markov replacement initial counts",
-            )
-            _require_finite_statistics((("initial counts", candidate_init),), label="hidden-Markov key replace")
-        candidate_trans = None
-        if self.trans_key is not None and self.trans_key in stats_dict:
-            candidate_trans = validated_count_array(
-                stats_dict[self.trans_key],
-                np.shape(self.trans_counts),
-                "hidden-Markov replacement transition counts",
-            )
-            _require_finite_statistics((("transition counts", candidate_trans),), label="hidden-Markov key replace")
-
-        previous_counts = (self.init_counts, self.trans_counts)
-        previous_accumulators = self.accumulators
-        children_snapshot = _snapshot_children(self.accumulators, self.len_accumulator)
-        if candidate_init is not None:
-            # Copy on replace: without it, every tied accumulator ends up pointing at the SAME
-            # array object, so any one of them later accumulating new local data would silently
-            # corrupt every other tied accumulator's counts.
-            self.init_counts = candidate_init.copy()
-        if candidate_trans is not None:
-            self.trans_counts = candidate_trans.copy()
-        if self.state_key is not None and self.state_key in stats_dict:
-            self.accumulators = stats_dict[self.state_key]
-        try:
-            for u in self.accumulators:
-                u.key_replace(stats_dict)
-            if self.len_accumulator is not None:
-                self.len_accumulator.key_replace(stats_dict)
-        except Exception:
-            # a child failure mid-recursion must not leave this level half-replaced
-            self.init_counts, self.trans_counts = previous_counts
-            self.accumulators = previous_accumulators
-            _restore_children(self.accumulators, self.len_accumulator, children_snapshot)
-            raise
-
+        # One shared implementation for the whole HMM family: the duplicate-body ratchet caught
+        # this body being repaired (STAT-RR8-1, STAT-RR9-1, STAT-RR10-1) while its byte-identical
+        # tree twin kept every pre-repair defect, so the logic lives once in
+        # _keyed_statistics_replace.
+        _keyed_statistics_replace(self, stats_dict, family_label="hidden-Markov")
         return None
 
     def acc_to_encoder(self) -> HiddenMarkovDataEncoder:
