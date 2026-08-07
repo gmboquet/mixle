@@ -58,7 +58,9 @@ small local regressor. Calibration is split conformal: on held-out calibration
 examples, Mixle computes an absolute-residual quantile ``qhat`` so
 ``[yhat - qhat, yhat + qhat]`` covers the teacher's answer with probability at
 least ``1 - alpha`` under the usual exchangeability assumption. That statement
-is marginal over the calibration draw and the query jointly.
+is marginal over the calibration draw and the query jointly, and distribution
+shift -- any break of exchangeability between calibration rows and live
+traffic -- voids it silently; re-measure on drifted traffic.
 
 Runtime behavior is intentionally conservative. The local regressor answers
 only when ``qhat <= tol``. If the calibrated interval is wider than the

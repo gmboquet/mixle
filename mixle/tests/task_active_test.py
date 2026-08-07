@@ -1,7 +1,12 @@
-"""Active labeling (mixle.task.active): spend labels where they matter, beating random for the same budget.
+"""Active labeling (mixle.task.active): budget accounting and same-budget non-inferiority.
 
-The money claim: at a fixed labeling budget, uncertainty-driven selection reaches at least as good a student as
-random labeling -- usually better -- so the same quality costs fewer teacher calls.
+What these tests establish, exactly: the budget ledger is honest (every teacher query is counted,
+validation labels included), and at ONE fixed equal budget on ONE synthetic seed, uncertainty-driven
+selection produces held-out teacher agreement within a small tolerance of random selection. That is a
+same-budget smoke check, not a labels-to-target result: no claim that the same quality costs fewer
+calls follows from it (STAT-RR15-1), and none is made. A labels-to-target learning curve over
+independent seeds with uncertainty on the label-count difference is the experiment that would
+support a fewer-calls claim.
 """
 
 import unittest
@@ -75,8 +80,9 @@ class ActiveLabelingTest(unittest.TestCase):
         p = pool(4)
         val = pool(999)[:200]
         truth = teacher(val)
-        # The 200 validation labels are real teacher purchases too. A total
-        # budget of 270 leaves the same 70-label training budget for each policy.
+        # The 200 validation labels are real teacher purchases too. A total budget of 270
+        # leaves the same 70-label training budget for each policy: an EQUAL-BUDGET
+        # comparison, with the query count verified below -- not a fewer-calls result.
         budget = 270
 
         active = active_distill(
@@ -106,8 +112,10 @@ class ActiveLabelingTest(unittest.TestCase):
             pred = model.batch(val)
             return float(np.mean([a == b for a, b in zip(pred, truth)]))
 
-        # same labeling budget; uncertainty sampling should not do worse than random (usually better)
+        # equal-budget non-inferiority on one seed, with tolerance for training noise: active
+        # held-out teacher agreement must not be materially worse than random at the same spend
         self.assertGreaterEqual(acc(active.model), acc(rand.model) - 0.06)
+        self.assertEqual(active.teacher_queries, rand.teacher_queries)  # the budgets really were equal
         self.assertEqual(active.labels_used, rand.labels_used)
         self.assertEqual(active.labels_used, budget)
         self.assertEqual(active.training_labels_used, 70)

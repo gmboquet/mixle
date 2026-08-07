@@ -6,6 +6,16 @@ calibration uses one joint nonconformity score: the largest binary-label error a
 vector. Its split-conformal quantile covers the complete teacher set with probability at least
 ``1 - alpha`` under exchangeability. A request is answered locally only when that joint prediction set
 contains exactly one label vector; multiple or zero admissible vectors escalate to the teacher.
+
+**Scope of that statement.** The ``1 - alpha`` joint-set coverage is finite-sample and MARGINAL over
+the calibration draw and the query jointly, under exchangeability of the calibration rows and
+incoming traffic. It is NOT an accuracy guarantee conditional on answering locally: serving conditions
+on the joint set being a singleton, and coverage conditional on that event is not controlled (the
+classification side measured 9% marginal versus 47% answered-slice error from the same selection
+effect). Answered-slice quality is a measurement -- ``holdout_set_agreement`` in ``report()`` -- not a
+guarantee. Distribution shift or any other break of exchangeability voids the statement silently;
+re-measure on drifted traffic. ``report()`` carries this scope machine-readably in
+``coverage_contract_scope``.
 """
 
 from __future__ import annotations
@@ -17,6 +27,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.task._ledger import conformal_scope
 from mixle.task.model import HashedNGram
 from mixle.task.regress import (
     RecordRegressionFeaturizer,
@@ -208,6 +219,9 @@ class MultiLabelSolution:
             "holdout_set_agreement": round(self.holdout_set_agreement, 4),
             "alpha": self.alpha,
             "coverage_contract": "joint_exact_set",
+            "coverage_contract_scope": conformal_scope(
+                "finite-sample marginal joint-set coverage of the complete teacher label vector"
+            ),
             "joint_qhat": self.joint_qhat,
             "requests": self.n_requests,
             "escalated": self.n_escalated,

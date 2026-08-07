@@ -13,6 +13,15 @@ all fields. The input is answered locally only when every categorical prediction
 every numeric interval meets its tolerance. Thus the complete record, rather than each field
 marginally, has the advertised ``1 - alpha`` split-conformal coverage contract.
 
+**Scope of that statement.** The joint ``1 - alpha`` coverage is finite-sample and MARGINAL over the
+calibration draw and the query jointly, under exchangeability of the calibration rows and incoming
+traffic. It is NOT an accuracy guarantee conditional on answering locally: serving conditions on every
+field simultaneously clearing its singleton/tolerance gate, and coverage conditional on that event is
+not controlled -- answered-slice quality is a measurement (the per-field ``holdout_agreement`` values
+in ``report()``), never a guarantee. Distribution shift or any other break of exchangeability voids
+the statement silently; re-measure on drifted traffic. ``report()`` carries this scope
+machine-readably in ``coverage_contract_scope``.
+
 ``improve()`` pushes each harvested ``(input, dict)`` down into every field's own harvest buffer and
 runs each sub-solution's anti-regression improve. No structured-level OOD gate yet (the classifier
 fields' own gates are off here to avoid redundant vetoes) -- noted, not hidden.
@@ -27,6 +36,7 @@ from typing import Any
 
 import numpy as np
 
+from mixle.task._ledger import conformal_scope
 from mixle.task.regress import RegressionSolution, solve_regression
 from mixle.task.solve import Solution, _label_with, solve
 
@@ -107,6 +117,9 @@ class StructuredSolution:
         return {
             "fields": per_field,
             "coverage_contract": "joint_structured",
+            "coverage_contract_scope": conformal_scope(
+                "finite-sample marginal joint coverage of the complete output record"
+            ),
             "joint_qhat": self.joint_qhat,
             "alpha": self.alpha,
             "requests": self.n_requests,

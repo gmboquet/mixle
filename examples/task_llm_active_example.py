@@ -4,8 +4,12 @@ The two differentiators in one run:
 
   * the teacher is an **LLM** (here a local ``CallableLLM``; swap in ``OpenAICompatLLM(base_url, model)``
     to use Ollama / vLLM / a hosted endpoint unchanged);
-  * **active labeling** (DoE applied to the labeling decision) queries that LLM only for the most informative
-    examples, reaching the same student quality as random labeling for far fewer paid calls.
+  * **active labeling** (DoE applied to the labeling decision) queries that LLM only for the most
+    informative examples. The comparison below is a SAME-BUDGET one -- both policies spend exactly the
+    same number of paid calls, and the measured quantity is held-out agreement with this synthetic
+    deterministic teacher, compared as a paired difference with its uncertainty. (A labels-to-target
+    curve -- how many calls each policy needs to REACH a fixed quality -- is a different experiment;
+    the EIG/BALD curve in ``label_economics_demo.py`` is the acquisition-level version of it.)
 
 Then the distilled student is wrapped in a calibrated cascade and the realized savings are reported.
 
@@ -61,16 +65,30 @@ def main() -> None:
     p, val = pool(1), pool(seed=900)[:300]
     truth = teacher(val)
 
-    def acc(model):
-        pred = model.batch(val)
-        return float(np.mean([a == b for a, b in zip(pred, truth)]))
-
     budget = 60
-    print(f"label budget: {budget} LLM calls (out of {len(p)} unlabeled)")
+    print(f"label budget: {budget} LLM calls per policy (out of {len(p)} unlabeled)")
     active = active_distill(teacher, p, budget=budget, seed_size=20, rounds=4, acquisition="margin", recipe=recipe)
     rand = active_distill(teacher, p, budget=budget, seed_size=20, rounds=4, acquisition="random", recipe=recipe)
-    print(f"   active labeling : {acc(active.model):.3f} accuracy with {active.labels_used} labels")
-    print(f"   random labeling : {acc(rand.model):.3f} accuracy with {rand.labels_used} labels")
+    # The ESTIMAND, stated before the numbers: each realized student's agreement with the
+    # deterministic teacher over the synthetic pool() population, compared at the SAME paid-call
+    # budget. Both students predict the SAME 300 fresh validation rows (drawn independently of
+    # both fits), so conditional on the two fits the per-row paired differences are i.i.d. and
+    # give a valid 95% interval for the agreement difference. "Agreement", not "accuracy": the
+    # teacher is the reference, and the data are synthetic.
+    active_hits = np.asarray([a == b for a, b in zip(active.model.batch(val), truth)], dtype=np.float64)
+    random_hits = np.asarray([a == b for a, b in zip(rand.model.batch(val), truth)], dtype=np.float64)
+    paired = active_hits - random_hits
+    difference = float(paired.mean())
+    standard_error = float(paired.std(ddof=1) / np.sqrt(len(paired))) if len(paired) > 1 else float("inf")
+    low, high = difference - 1.96 * standard_error, difference + 1.96 * standard_error
+    print(f"   active labeling : {active_hits.mean():.3f} held-out teacher agreement ({active.labels_used} labels)")
+    print(f"   random labeling : {random_hits.mean():.3f} held-out teacher agreement ({rand.labels_used} labels)")
+    print(f"   paired difference {difference:+.3f}, 95% CI [{low:+.3f}, {high:+.3f}] at the same budget")
+    if low > 0.0:
+        print("   -> active labeling measurably beats random AT THE SAME BUDGET on this population")
+    else:
+        print("   -> no measurable difference at this budget and sample size; active did not pay for")
+        print("      itself here, and no fewer-calls claim is made")
 
     print("\nwrap the active student in a calibrated cascade and serve")
     cal = pool(seed=2)

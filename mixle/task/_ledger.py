@@ -104,10 +104,31 @@ def read_ledger(meta: dict[str, Any], fields: tuple[LedgerField, ...]) -> dict[s
     return out
 
 
+def conformal_scope(statement: str) -> dict[str, Any]:
+    """Machine-readable scope block for any report that carries a conformal coverage label.
+
+    Every report surface that names a coverage contract attaches this block so the claim's
+    scope travels WITH the claim (STAT-RR15-2: bare contract labels like "joint_exact_set"
+    advertised coverage without stating that split conformal is marginal under exchangeability,
+    is NOT an accuracy guarantee conditional on answering locally, and is voided by
+    distribution shift). One shared constructor, not per-report prose, so the scope statement
+    cannot drift between shapes.
+    """
+    return {
+        "statement": statement,
+        "marginal": True,
+        "assumptions": ["exchangeability of calibration rows and incoming queries"],
+        "conditional_on_answering_locally": False,
+        "conditional_accuracy_guarantee": False,
+        "voided_by": "distribution shift / non-exchangeability",
+    }
+
+
 __all__ = [
     "LedgerField",
     "CLASSIFICATION_LEDGER",
     "REGRESSION_LEDGER",
     "write_ledger",
     "read_ledger",
+    "conformal_scope",
 ]
