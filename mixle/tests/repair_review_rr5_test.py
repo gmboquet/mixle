@@ -315,5 +315,101 @@ class BackoffDifferentiabilityHonestyTest(unittest.TestCase):
         self.assertEqual(both.differentiable, poisson.differentiable and poisson.differentiable)
 
 
+class InfiniteAggregateMassTest(unittest.TestCase):
+    """STAT-RR7-1: per-element finiteness is not aggregate finiteness.
+
+    Arrays of finite 8e307 values sum to infinity, and every mass comparison then passes
+    vacuously -- np.isclose(inf, inf) is True and inf exceeds no bound -- so the corruption was
+    accepted AND retained. An infinite total is refused outright now, at every site and in every
+    keying mode; it is not a tolerance question at any scale.
+    """
+
+    _BIG = np.array([1.0e308, 1.0e308])  # each element finite; the pair sums past float64 max
+
+    def _statistic(self, accumulator, init, state):
+        return (2, init, state, np.zeros((2, 2)), tuple(a.value() for a in accumulator.accumulators), None)
+
+    def test_infinite_totals_are_rejected_at_every_site_and_mode(self):
+        for keys in ((None, None, None), ("ik", "tk", None)):
+            estimator = HiddenMarkovEstimator([GaussianEstimator() for _ in range(2)], keys=keys)
+            for site in ("combine", "from_value", "estimate"):
+                for init, state in ((self._BIG, self._BIG), (np.array([1.0, 1.0]), self._BIG)):
+                    with self.subTest(keys=keys, site=site, overflow="both" if init is self._BIG else "state"):
+                        accumulator = estimator.accumulator_factory().make()
+                        statistic = self._statistic(accumulator, init, state)
+                        with self.assertRaisesRegex(ValueError, "finite totals"):
+                            if site == "combine":
+                                accumulator.combine(statistic)
+                            elif site == "from_value":
+                                accumulator.from_value(statistic)
+                            else:
+                                estimator.estimate(4.0, statistic)
+
+
+class RejectedRestorationRollbackTest(unittest.TestCase):
+    """SYS-RR7-2: a rejected from_value() must leave the accumulator exactly as it was.
+
+    The previous order assigned the count arrays and then validated, so a refused restoration had
+    already replaced the state -- an exception whose side effect is the corruption it refused.
+    Validation now precedes every assignment, and child restoration is transactional.
+    """
+
+    @staticmethod
+    def _valid_statistic(accumulator):
+        # state mass 3.0 == initial 2.0 + transition 1.0
+        return (
+            2,
+            np.array([1.0, 1.0]),
+            np.array([1.5, 1.5]),
+            np.full((2, 2), 0.25),
+            tuple(a.value() for a in accumulator.accumulators),
+            None,
+        )
+
+    def test_a_mass_rejected_restore_preserves_all_counts(self):
+        accumulator = HiddenMarkovEstimator([GaussianEstimator() for _ in range(2)]).accumulator_factory().make()
+        accumulator.from_value(self._valid_statistic(accumulator))
+        before = (
+            accumulator.init_counts.copy(),
+            accumulator.state_counts.copy(),
+            accumulator.trans_counts.copy(),
+        )
+        corrupt = (
+            2,
+            np.array([1.0, 1.0]),
+            np.array([99.0, 99.0]),
+            np.zeros((2, 2)),
+            tuple(a.value() for a in accumulator.accumulators),
+            None,
+        )
+        with self.assertRaisesRegex(ValueError, "initial plus transition"):
+            accumulator.from_value(corrupt)
+        np.testing.assert_array_equal(accumulator.init_counts, before[0])
+        np.testing.assert_array_equal(accumulator.state_counts, before[1])
+        np.testing.assert_array_equal(accumulator.trans_counts, before[2])
+
+    def test_a_child_failure_mid_restore_rolls_the_counts_and_children_back(self):
+        accumulator = HiddenMarkovEstimator([GaussianEstimator() for _ in range(2)]).accumulator_factory().make()
+        accumulator.from_value(self._valid_statistic(accumulator))
+        counts_before = accumulator.init_counts.copy()
+        children_before = [child.value() for child in accumulator.accumulators]
+        good_children = tuple(child.value() for child in accumulator.accumulators)
+        poisoned = (
+            2,
+            np.array([2.0, 2.0]),
+            np.array([3.0, 3.0]),
+            np.full((2, 2), 0.5),
+            (good_children[0], None),  # None reliably fails the child's own unpacking
+            None,
+        )
+        with self.assertRaises((ValueError, TypeError)):
+            accumulator.from_value(poisoned)
+        np.testing.assert_array_equal(accumulator.init_counts, counts_before)
+        for child, snapshot in zip(accumulator.accumulators, children_before):
+            np.testing.assert_array_equal(
+                np.asarray(child.value(), dtype=object).shape, np.asarray(snapshot, dtype=object).shape
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

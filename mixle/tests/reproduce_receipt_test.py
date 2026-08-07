@@ -102,5 +102,83 @@ class ReproduceReceiptTest(unittest.TestCase):
                 self.mod.wheel_provenance(wheel)
 
 
+class SubjectBindingTest(unittest.TestCase):
+    """SYS-RR7-3/4: the receipt's subject must be the wheel whose code executes, and the receipt
+    must say what it covers.
+
+    Version equality is not identity -- the adversarial review presented an older 0.8.0 wheel as
+    the subject while a newer 0.8.0 build executed, and the receipt said passed. The binding
+    compares the installed package's embedded build provenance and every hashed RECORD entry
+    against the subject wheel, and a foreign wheel fails closed.
+    """
+
+    @staticmethod
+    def _foreign_wheel(directory):
+        import base64
+
+        from mixle import reproduction
+
+        wheel = Path(directory) / "mixle-0.8.0-py3-none-any.whl"
+        provenance = {
+            "artifact": "mixle.build_provenance/v1",
+            "source_commit": "a" * 40,
+            "source_tree": "b" * 40,
+            "source_dirty": False,
+            "source_content_sha256": "c" * 64,
+        }
+        fake_hash = base64.urlsafe_b64encode(bytes.fromhex("d" * 64)).decode("ascii").rstrip("=")
+        record = "mixle/__init__.py,sha256=%s,10\nmixle-0.8.0.dist-info/RECORD,,\n" % fake_hash
+        with zipfile.ZipFile(wheel, "w") as archive:
+            archive.writestr("mixle-0.8.0.dist-info/METADATA", "Name: mixle\nVersion: 0.8.0\n")
+            archive.writestr("mixle-0.8.0.dist-info/RECORD", record)
+            archive.writestr("mixle/_build_provenance.json", json.dumps(provenance))
+        return wheel, reproduction
+
+    def test_a_foreign_same_version_wheel_fails_the_binding_and_the_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            wheel, reproduction = self._foreign_wheel(directory)
+            artifact = reproduction.wheel_provenance(wheel)
+            binding = reproduction.subject_binding(wheel, artifact["build"])
+            self.assertFalse(binding["verified"])
+            self.assertTrue(binding["mismatches"])
+            receipt, passed = reproduction.build_receipt(wheel=wheel, allow_source_tree=False)
+            self.assertFalse(passed)
+            self.assertFalse(receipt["subject"]["verified"])
+            self.assertFalse(receipt["subject"]["installed_binding"]["verified"])
+
+    def test_wheel_record_parsing_is_exact_and_fail_closed(self):
+        import base64
+
+        from mixle import reproduction
+
+        with tempfile.TemporaryDirectory() as directory:
+            wheel = Path(directory) / "mixle-0.8.0-py3-none-any.whl"
+            digest = "e" * 64
+            encoded = base64.urlsafe_b64encode(bytes.fromhex(digest)).decode("ascii").rstrip("=")
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr(
+                    "mixle-0.8.0.dist-info/RECORD",
+                    "mixle/a.py,sha256=%s,5\nmixle-0.8.0.dist-info/RECORD,,\n" % encoded,
+                )
+            self.assertEqual(reproduction._wheel_record_hashes(wheel), {"mixle/a.py": digest})
+
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr("mixle-0.8.0.dist-info/RECORD", "mixle/a.py,md5=abc,5\n")
+            with self.assertRaisesRegex(ValueError, "unsupported hash"):
+                reproduction._wheel_record_hashes(wheel)
+
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr("mixle-0.8.0.dist-info/RECORD", "mixle-0.8.0.dist-info/RECORD,,\n")
+            with self.assertRaisesRegex(ValueError, "no hashed entries"):
+                reproduction._wheel_record_hashes(wheel)
+
+    def test_the_receipt_declares_its_scope(self):
+        from mixle import reproduction
+
+        receipt, _ = reproduction.build_receipt(wheel=None, allow_source_tree=True)
+        self.assertEqual(receipt["scope"]["claim_checks"], sorted(reproduction._EXPECTATIONS))
+        self.assertIn("run_repro_entry.py", receipt["scope"]["reproduction_bundle_entries"])
+
+
 if __name__ == "__main__":
     unittest.main()

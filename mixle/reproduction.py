@@ -146,6 +146,85 @@ def wheel_provenance(path: Path) -> dict[str, Any]:
     }
 
 
+def _wheel_record_hashes(path: Path) -> dict[str, str]:
+    """Parse the wheel's RECORD into ``{path: sha256-hex}`` for every hashed entry."""
+    with zipfile.ZipFile(path) as archive:
+        record_names = [name for name in archive.namelist() if name.endswith(".dist-info/RECORD")]
+        if len(record_names) != 1:
+            raise ValueError("wheel must contain exactly one RECORD")
+        text = archive.read(record_names[0]).decode("utf-8")
+    hashes: dict[str, str] = {}
+    for line in text.splitlines():
+        parts = line.rsplit(",", 2)
+        if len(parts) != 3 or not parts[1]:
+            continue  # RECORD lists itself without a hash; nothing else legitimately lacks one
+        name, hash_field, _size = parts
+        algorithm, _, value = hash_field.partition("=")
+        if algorithm != "sha256" or not value:
+            raise ValueError(f"wheel RECORD entry {name!r} uses unsupported hash {algorithm!r}")
+        hashes[name] = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)).hex()
+    if not hashes:
+        raise ValueError("wheel RECORD carries no hashed entries")
+    return hashes
+
+
+def subject_binding(path: Path, build: dict[str, Any]) -> dict[str, Any]:
+    """Bind the receipt's SUBJECT wheel to the distribution that is actually executing.
+
+    Name/version equality is not identity: any clean ``mixle==X`` wheel matches the installed
+    version string, so the adversarial review presented an older 0.8.0 wheel as the subject while
+    a newer 0.8.0 build executed, and the receipt reported ``passed`` for bytes that never ran
+    (SYS-RR7-3). Two comparisons close that: the installed package's embedded build provenance
+    must equal the subject wheel's (source commit, tree, and content digest), and every hashed
+    entry in the subject wheel's RECORD must appear in the installed RECORD with the same digest.
+    The installed RECORD may carry extra installer-written files (INSTALLER, direct_url.json);
+    the wheel's own entries are the code, and those are what must match.
+    """
+    mismatches: list[str] = []
+    try:
+        import mixle as _installed
+
+        provenance_path = Path(_installed.__file__).resolve().parent / "_build_provenance.json"
+        installed_provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "artifact": "mixle.subject_binding/v1",
+            "verified": False,
+            "mismatches": [f"installed build provenance unreadable: {exc}"],
+        }
+    for field in ("source_commit", "source_tree", "source_content_sha256"):
+        if installed_provenance.get(field) != build.get(field):
+            mismatches.append(
+                f"build provenance {field}: wheel={build.get(field)!r} installed={installed_provenance.get(field)!r}"
+            )
+    try:
+        wheel_hashes = _wheel_record_hashes(path)
+    except (ValueError, OSError, zipfile.BadZipFile) as exc:
+        return {"artifact": "mixle.subject_binding/v1", "verified": False, "mismatches": [str(exc)]}
+    installed_hashes: dict[str, str] = {}
+    try:
+        dist = distribution("mixle")
+    except PackageNotFoundError:
+        mismatches.append("mixle distribution metadata is not installed")
+    else:
+        for item in dist.files or ():
+            if item.hash is not None and item.hash.mode == "sha256":
+                value = item.hash.value
+                installed_hashes[str(item)] = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)).hex()
+    for name, digest in sorted(wheel_hashes.items()):
+        if installed_hashes.get(name) != digest:
+            mismatches.append(f"RECORD content differs at {name}")
+            if len(mismatches) >= 10:
+                mismatches.append("further RECORD mismatches suppressed")
+                break
+    return {
+        "artifact": "mixle.subject_binding/v1",
+        "verified": not mismatches,
+        "compared_entries": len(wheel_hashes),
+        "mismatches": mismatches,
+    }
+
+
 def source_tree_provenance() -> dict[str, Any]:
     """Identify an explicitly requested development checkout by its own repository root."""
     repository = Path(__file__).resolve().parents[1]
@@ -231,6 +310,10 @@ def build_receipt(*, wheel: Path | None, allow_source_tree: bool) -> tuple[dict[
         raise ValueError("--wheel and --source-tree are mutually exclusive")
     if wheel is not None:
         artifact = wheel_provenance(wheel)
+        # the receipt's subject must be the wheel whose code EXECUTES, not merely one sharing its
+        # version string (SYS-RR7-3)
+        artifact["installed_binding"] = subject_binding(wheel, artifact["build"])
+        artifact["verified"] = bool(artifact["verified"]) and bool(artifact["installed_binding"]["verified"])
     elif allow_source_tree:
         artifact = source_tree_provenance()
     else:
@@ -250,6 +333,17 @@ def build_receipt(*, wheel: Path | None, allow_source_tree: bool) -> tuple[dict[
         {
             "artifact": "mixle.reproduction_receipt/v2",
             "passed": passed,
+            # The receipt names its own coverage so it cannot be presented as more than it is
+            # (SYS-RR7-4): the installed command runs the self-contained claim checks against the
+            # bound artifact; the reproduction-bundle entries are SOURCE-CHECKOUT receipts,
+            # produced separately, because the wheel ships neither the bundle nor its inputs.
+            "scope": {
+                "claim_checks": sorted(_EXPECTATIONS),
+                "reproduction_bundle_entries": (
+                    "not included; replay each entry from the source checkout with "
+                    "`python scripts/run_repro_entry.py --entry <id>` and attach those receipts"
+                ),
+            },
             "subject": artifact,
             "environment": installed,
             "checks": checks,

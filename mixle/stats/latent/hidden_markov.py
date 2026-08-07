@@ -180,6 +180,12 @@ def _validate_state_mass(init_counts, state_counts, trans_counts, *, init_key, t
     """
     lhs = float(np.asarray(state_counts).sum())
     rhs = float(np.asarray(init_counts).sum() + np.asarray(trans_counts).sum())
+    # Per-element finiteness is not aggregate finiteness: arrays of finite 8e307s sum to inf, and
+    # both comparisons below then pass vacuously (np.isclose(inf, inf) is True, and inf exceeds no
+    # bound) -- the re-review fed exactly that and the accumulator retained it (STAT-RR7-1). An
+    # infinite mass total is not a tolerance question at any scale.
+    if not (np.isfinite(lhs) and np.isfinite(rhs)):
+        raise ValueError(f"{label} responsibility masses must aggregate to finite totals")
     rtol = _responsibility_mass_tolerance(max(abs(lhs), abs(rhs)))
     atol = max(1.0e-9, rtol * max(1.0, abs(rhs)))
     if init_key is None and trans_key is None:
@@ -3598,9 +3604,12 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         num_states = validated_positive_integer(num_states, "hidden-Markov statistic state count")
         if num_states != self.num_states:
             raise ValueError("hidden-Markov statistic state count must match the accumulator")
-        self.init_counts = validated_count_array(init_counts, (num_states,), "hidden-Markov initial counts")
-        self.state_counts = validated_count_array(state_counts, (num_states,), "hidden-Markov state counts")
-        self.trans_counts = validated_count_array(
+        # Validate EVERYTHING before mutating ANYTHING (SYS-RR7-2): the previous order assigned the
+        # count arrays and then ran the mass check, so a rejected restoration left the accumulator
+        # half-replaced -- an exception whose side effect is the very corruption it refused.
+        candidate_init = validated_count_array(init_counts, (num_states,), "hidden-Markov initial counts")
+        candidate_state = validated_count_array(state_counts, (num_states,), "hidden-Markov state counts")
+        candidate_trans = validated_count_array(
             trans_counts,
             (num_states, num_states),
             "hidden-Markov transition counts",
@@ -3609,9 +3618,9 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         # this site enforces the mode-appropriate relation: equality unkeyed, the pooled upper
         # bound otherwise (see _validate_state_mass)
         _validate_state_mass(
-            self.init_counts,
-            self.state_counts,
-            self.trans_counts,
+            candidate_init,
+            candidate_state,
+            candidate_trans,
             init_key=self.init_key,
             trans_key=self.trans_key,
             label="hidden-Markov",
@@ -3619,11 +3628,32 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         if not isinstance(accumulators, (tuple, list)) or len(accumulators) != num_states:
             raise ValueError("hidden-Markov emission statistics must match the state count")
 
-        for i, v in enumerate(accumulators):
-            self.accumulators[i].from_value(v)
-
-        if self.len_accumulator is not None:
-            self.len_accumulator.from_value(len_acc)
+        # Child restoration can still fail mid-loop, so it runs transactionally: children are
+        # snapshotted via value() first, and any failure rolls the whole accumulator back before
+        # re-raising. Rollback errors are deliberately suppressed -- the original rejection is the
+        # signal, and a rollback failure would mask it.
+        previous_counts = (self.init_counts, self.state_counts, self.trans_counts)
+        child_snapshots = [child.value() for child in self.accumulators]
+        length_snapshot = self.len_accumulator.value() if self.len_accumulator is not None else None
+        self.init_counts, self.state_counts, self.trans_counts = candidate_init, candidate_state, candidate_trans
+        try:
+            for i, v in enumerate(accumulators):
+                self.accumulators[i].from_value(v)
+            if self.len_accumulator is not None:
+                self.len_accumulator.from_value(len_acc)
+        except Exception:
+            self.init_counts, self.state_counts, self.trans_counts = previous_counts
+            for child, snapshot in zip(self.accumulators, child_snapshots):
+                try:
+                    child.from_value(snapshot)
+                except Exception:  # noqa: BLE001, S110 - see comment above
+                    pass
+            if self.len_accumulator is not None and length_snapshot is not None:
+                try:
+                    self.len_accumulator.from_value(length_snapshot)
+                except Exception:  # noqa: BLE001, S110 - see comment above
+                    pass
+            raise
 
         return self
 
