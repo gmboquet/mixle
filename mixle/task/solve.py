@@ -282,6 +282,13 @@ class Solution:
     sel_inputs: list = field(default_factory=list)
     sel_labels: list = field(default_factory=list)
     selection_uses: int = 0
+    # Which regime certified the CURRENT conformal threshold: "solve-split" (the initial holdout
+    # calibration role), "fresh-evidence" (an ``evidence_inputs`` batch), or
+    # "reused-after-adaptive-harvest" -- a no-argument promotion recalibrated on the solve-time
+    # rows even though the candidate trained on escalations that the OLD threshold selected
+    # per-query, which is STAT-RR12-1's leak in per-query form: the finite-sample statement for
+    # such a threshold is not restored by the role split, and this field says so in report().
+    calibration_evidence: str = "solve-split"
     selection_receipt: list[dict] = field(default_factory=list)
 
     @property
@@ -324,6 +331,9 @@ class Solution:
             # it as a selection score, not a generalization estimate.
             "selection_uses": self.selection_uses,
             "selection_evidence_is_single_use": self.selection_evidence_is_single_use,
+            # which rows certified the CURRENT threshold; "reused-after-adaptive-harvest" means
+            # the finite-sample coverage statement is voided for this artifact (STAT-RR12-1)
+            "calibration_evidence": self.calibration_evidence,
         }
         if self.edge is not None:
             out["device"] = {
@@ -348,6 +358,18 @@ class Solution:
         rows decide again and ``selection_uses`` records that the number is now a selection score. The
         reuse is recorded rather than refused because the no-argument loop is the documented serving
         workflow and a caller with no fresh traffic still needs the anti-regression gate.
+
+        **What reuse does to the threshold's guarantee (STAT-RR12-1).** The role split does NOT
+        restore the finite-sample coverage statement for a no-argument promotion: the harvested
+        escalations that train the candidate were selected per-query by the OLD threshold, itself a
+        function of the calibration rows -- so those rows helped construct the candidate and cannot
+        also certify it (the regression loop's all-or-none version of this leak measured 0.8857
+        against a claimed 0.90; the per-query selection here is the stronger channel, and unlike
+        regression the escalated slice is threshold-selected, so it cannot serve as fresh calibration
+        either). After such a promotion ``report()['calibration_evidence']`` says
+        ``"reused-after-adaptive-harvest"`` and the deployed threshold's nominal statement should be
+        treated as empirical; a promotion fed by ``evidence_inputs`` records ``"fresh-evidence"`` and
+        keeps the exact statement.
 
         When the original ``solve()`` ran under a device budget (``self.edge`` is set), the harvested
         labels are re-searched under that SAME ``DeviceSpec``/``EdgeSpace`` -- warm-started from the
@@ -429,6 +451,7 @@ class Solution:
         self.cal_inputs, self.cal_labels = cal_in, cal_lab
         self.sel_inputs, self.sel_labels = sel_in, sel_lab
         self.selection_uses = uses
+        self.calibration_evidence = "fresh-evidence" if fresh else "reused-after-adaptive-harvest"
         self.verification_digest = _evidence_digest([*cal_in, *sel_in], [*cal_lab, *sel_lab])
         self.holdout_agreement, self.escalation_rate = agree, esc
         self.promoted = self.promoted or self._passes_target(agree)
@@ -520,6 +543,7 @@ class Solution:
                     # read holdout_agreement as a selection score, not a generalization estimate.
                     "n_selection": len(self.sel_inputs),
                     "selection_uses": self.selection_uses,
+                    "calibration_evidence": self.calibration_evidence,
                     "selection_evidence_is_single_use": self.selection_evidence_is_single_use,
                     "synthesized_inputs": self.synthesized,
                     "verified_at": time.time(),
@@ -636,7 +660,11 @@ def solve(
             target separately with
             :meth:`mixle.task.calibrate.CalibratedTaskModel.calibrate_selective`. Both statements
             fail silently under distribution shift; the ``ood`` gate below mitigates, and drifted
-            traffic calls for re-measurement.
+            traffic calls for re-measurement. The statement covers the INITIAL solve and any
+            ``improve(evidence_inputs=...)`` promotion; a no-argument promotion recalibrates on
+            rows that already shaped the candidate through the harvest, voiding the finite-sample
+            statement for that artifact -- ``report()['calibration_evidence']`` says which regime
+            applies (see :meth:`Solution.improve`).
         target_agreement: Optional gate. If the student's held-out agreement with the teacher misses it,
             the returned Solution routes *everything* to the teacher (``promoted=False``).
         holdout: Fraction reserved for calibration + verification (never trained on). Those are two

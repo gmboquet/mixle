@@ -77,9 +77,20 @@ deployed artifact carries instead is a measurement: ``report()`` includes
 selection rows the calibration quantile never touches, alongside
 ``selection_uses``, which records when those rows have also decided
 ``improve()`` promotions and the number has become a selection score.
-Promotions themselves read only the selection rows; the deployed ``qhat`` is
-then recomputed on the untouched calibration rows, so an improved model is
-never chosen with the same data that certifies its interval.
+Promotions themselves read only the selection rows, and the promoted model's
+``qhat`` is recomputed on FRESH rows that postdate the round's harvest --
+reserved from the harvest itself (sound here because the regression gate is
+all-or-none, so a closed route harvests the raw serving stream), or a
+caller-supplied ``evidence_inputs`` batch. The solve-time calibration rows are
+never reused after harvesting: they decide, through the gate, whether a harvest
+exists at all, so they help construct the candidate and cannot also certify it
+(exact effect when reused: 0.8857 coverage against the claimed 0.90).
+``report()`` names the certifying regime in ``calibration_evidence`` and states
+its coverage measurement with a denominator and an exact 95%
+Clopper-Pearson interval (``selection_coverage_n``,
+``selection_coverage_ci95``). Re-solving with ``prelabeled=`` needs a fresh
+base sample for the same reason: the split is deterministic in the inputs and
+seed, so reusing both repeats the exact calibration rows that gated the harvest.
 
 Use this when the original code returns a scalar and the operational contract
 can be expressed as "local answers are acceptable within this tolerance." Keep

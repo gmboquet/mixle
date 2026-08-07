@@ -22,22 +22,27 @@ empirical coverage of the current interval on the SELECTION rows, a slice the ca
 never touches. Both the guarantee and the measurement assume exchangeability and fail silently under
 distribution shift -- re-measure on drifted traffic.
 
-**Two immutable holdout roles.** The held-out rows are split, deterministically at solve time, into
-CALIBRATION rows (they set ``qhat`` and are never read by a promotion decision) and SELECTION rows
-(they decide every ``improve()`` promotion and produce the reported error/coverage measurements).
-Without the split, ``improve()`` chose the student with the same rows that then set its interval, and
-repeated promotion took a running minimum over ``qhat`` draws -- expected coverage in the reviewer's
-exact construction fell from 0.90 to 0.75 after twenty candidate selections. ``selection_uses`` counts
-how many promotion decisions the selection rows have made: after the first, the selection-side numbers
-are selection scores, not fresh held-out estimates (the same honesty rule as classification ``solve``).
+**Two immutable holdout roles, and fresh calibration after every harvest.** The held-out rows are
+split, deterministically at solve time, into CALIBRATION rows (they set the initial ``qhat`` and are
+never read by a promotion decision) and SELECTION rows (they decide every ``improve()`` promotion and
+produce the reported error/coverage measurements). Without the split, ``improve()`` chose the student
+with the same rows that then set its interval -- expected coverage fell from 0.90 to 0.75 after twenty
+candidate selections in the reviewer's exact construction (STAT-RR11-1). The split alone is NOT enough:
+the solve-time calibration rows also decide, through the deployment gate, whether requests are
+harvested at all, so the candidate's training data is a function of that draw and the same rows cannot
+certify the candidate they helped construct -- reusing them gave exactly 0.8857 coverage against the
+claimed 0.90 (STAT-RR12-1). Every promotion therefore recalibrates on FRESH rows that postdate the
+harvest (reserved from the harvest itself, or a caller-supplied ``evidence_inputs`` batch);
+``calibration_evidence`` in ``report()`` names the regime that certified the current ``qhat``.
+``selection_uses`` counts how many promotion decisions the selection rows have made: after the first,
+the selection-side numbers are selection scores, not fresh held-out estimates (the same honesty rule
+as classification ``solve``).
 
     def price(item): ...                                   # the rigid pricing routine
     sol = solve_regression(price, items, tol=5.0)          # dataset <- price(i); train; calibrate
     sol(item)                                              # a float: local (width <= tol) or teacher
-    sol.interval(item)                                     # (yhat, lo, hi); marginal 1 - alpha coverage,
-                                                           #   unconditional on the deployment gate
-    sol.improve(); sol.report()                            # promote on selection rows; recalibrate on
-                                                           #   untouched calibration rows
+    sol.interval(item)                                     # (yhat, lo, hi); marginal 1 - alpha coverage
+    sol.improve(); sol.report()                            # promote on selection; calibrate on fresh rows
 
 ``qhat`` is one global width, as in standard split conformal regression.
 """
@@ -234,6 +239,12 @@ class RegressionSolution:
     sel_inputs: list = field(default_factory=list)
     sel_ys: list = field(default_factory=list)
     selection_uses: int = 0
+    # Which regime certified the CURRENT qhat: "solve-split" (the initial holdout calibration
+    # role), "fresh-harvest" (rows reserved from the round's harvest, never seen by candidate
+    # construction), or "fresh-evidence" (a caller-supplied teacher-labeled batch). Every
+    # promotion recalibrates on rows that did not exist before its harvest began -- reusing the
+    # solve-time calibration rows after adaptive harvesting is exactly STAT-RR12-1's leak.
+    calibration_evidence: str = "solve-split"
     hidden: tuple = (64,)
     epochs: int = 300
     lr: float = 1e-2
@@ -293,24 +304,32 @@ class RegressionSolution:
         self.harvested_ys.append(y)
         return y
 
-    def selection_coverage(self) -> float | None:
-        """Measured coverage of the CURRENT interval on the selection rows, or None when absent.
+    def selection_coverage(self) -> tuple[float, int] | None:
+        """Measured coverage of the CURRENT interval on the selection rows, with its denominator.
 
         The selection rows never touch the calibration quantile, so for a freshly solved model this
         is an unbiased per-artifact measurement of the deployed interval's coverage -- the honest
         substitute for the deployment-conditional guarantee split conformal does not provide (see
         the module docstring). After ``improve()`` promotions the same rows have also chosen the
-        model; ``selection_uses`` records that the number is then a selection score.
+        model; ``selection_uses`` records that the number is then a selection score. Returns
+        ``(covered_fraction, n_rows)`` or ``None`` when there are no selection rows.
         """
         if not self.sel_inputs or not np.isfinite(self.qhat):
             return None
         predictions = self._predict(list(self.sel_inputs))
         residuals = np.abs(np.asarray(self.sel_ys, dtype=np.float64) - predictions)
-        return float(np.mean(residuals <= self.qhat))
+        return float(np.mean(residuals <= self.qhat)), int(residuals.size)
 
     def report(self) -> dict[str, Any]:
         """Return calibration, precision, measurement, request, and harvest metrics."""
-        coverage = self.selection_coverage()
+        measured = self.selection_coverage()
+        if measured is None:
+            coverage, n_sel, interval = None, 0, None
+        else:
+            coverage, n_sel = measured
+            # a bare proportion cannot communicate its sampling precision (STAT-RR12-2):
+            # the exact Clopper-Pearson 95% interval names the uncertainty of the measurement
+            interval = _clopper_pearson_interval(int(round(coverage * n_sel)), n_sel, 0.95)
         return {
             "answers_locally": self.answers_locally,
             "qhat": round(float(self.qhat), 6),
@@ -320,7 +339,10 @@ class RegressionSolution:
             # measured on the selection rows, not guaranteed: deployment conditions on the
             # calibration draw, which split conformal's marginal statement does not cover
             "selection_coverage": None if coverage is None else round(coverage, 6),
+            "selection_coverage_n": n_sel,
+            "selection_coverage_ci95": None if interval is None else [round(interval[0], 6), round(interval[1], 6)],
             "selection_uses": self.selection_uses,
+            "calibration_evidence": self.calibration_evidence,
             "requests": self.n_requests,
             "escalated": self.n_escalated,
             "harvested": len(self.harvested_ys),
@@ -355,6 +377,7 @@ class RegressionSolution:
                     "epochs": self.epochs,
                     "lr": self.lr,
                     "seed": self.seed,
+                    "calibration_evidence": self.calibration_evidence,
                 }
             },
         )
@@ -380,30 +403,69 @@ class RegressionSolution:
             epochs=int(m["epochs"]),
             lr=float(m["lr"]),
             seed=int(m["seed"]),
+            calibration_evidence=str(m.get("calibration_evidence", "solve-split")),
         )
 
-    def improve(self) -> bool:
-        """Re-fit with harvested pairs; promote on SELECTION evidence, recalibrate on untouched rows.
+    def improve(self, evidence_inputs: Sequence[Any] | None = None) -> bool:
+        """Re-fit with harvested pairs; promote on SELECTION evidence, calibrate on FRESH evidence.
 
-        The promote/reject decision reads only the selection rows, and the deployed ``qhat`` is
-        then computed on the calibration rows, which no promotion decision ever reads -- so the
-        promoted model is not chosen with the same data that certifies its interval. The previous
-        rule promoted whenever the CALIBRATED width shrank, which took a running minimum of
-        ``qhat`` over candidates on one fixed slice; in the reviewer's exact exchangeable
-        construction that selection drove expected coverage from 0.90 to 0.75 after twenty
-        candidates (STAT-RR11-1). A consequence of honest recalibration: the deployed ``qhat``
-        may occasionally grow across a promotion, because it is no longer the selection metric.
-        ``selection_uses`` records each decision the selection rows make.
+        The promote/reject decision reads only the selection rows (STAT-RR11-1's repair), and the
+        deployed ``qhat`` is computed on rows that DID NOT EXIST before this round's harvest began
+        -- never on the solve-time calibration rows. Reusing those rows leaks even without any
+        direct comparison: the incumbent's calibration-derived gate decides whether requests
+        escalate at all, so whether a harvest exists -- and therefore the candidate's training
+        data and whether this method can run -- is a function of the old calibration draw, and a
+        slice that shaped the candidate cannot also certify it. In the reviewer's exact
+        exchangeable construction, reusing the gate-contaminated slice gives 0.8857 coverage
+        against the claimed 0.90, and fresh calibration restores 0.90 (STAT-RR12-1).
+
+        Fresh evidence comes from one of two places. Passing ``evidence_inputs`` teacher-labels a
+        fresh batch and uses it as the calibration slice. Without it, the LAST
+        ``max(ceil(1/alpha) - 1, len(harvest) // 4)`` harvested pairs are RESERVED as the
+        calibration slice and excluded from candidate training; this is sound for the regression
+        loop specifically because its gate is all-or-none -- when the route escalates, EVERY
+        request is harvested, so conditional on the deployed artifact the harvest is the raw
+        serving stream, not a threshold-selected slice (contrast the classification loop, whose
+        per-query-selected escalations cannot serve as calibration evidence). When the harvest
+        cannot yet fund the reserved slice plus at least one training row, this returns False and
+        keeps harvesting. On promotion the reserved slice BECOMES the artifact's calibration data
+        (``calibration_evidence`` records the regime), so the next round reserves from the next
+        harvest and no round ever reuses rows that predate its own harvest. A consequence of
+        honest recalibration: the deployed ``qhat`` may grow across a promotion, because it is
+        not the selection metric. ``selection_uses`` records each decision the selection rows
+        make.
         """
         if not self.harvested_inputs:
             return False
-        if not self.cal_inputs or not self.sel_inputs:
+        if not self.sel_inputs:
             raise RuntimeError(
                 "this RegressionSolution was loaded from an artifact and has no calibration/selection "
                 "data; collect the harvested pairs and re-solve_regression() to improve."
             )
-        inputs = self.train_inputs + list(self.harvested_inputs)
-        ys = self.train_ys + [float(v) for v in self.harvested_ys]
+        min_cal = int(np.ceil(1.0 / self.alpha)) - 1
+        harvest_inputs = list(self.harvested_inputs)
+        harvest_ys = [float(v) for v in self.harvested_ys]
+        if evidence_inputs is not None:
+            fresh_inputs = list(evidence_inputs)
+            if len(fresh_inputs) < min_cal:
+                raise ValueError(
+                    f"evidence_inputs supplies {len(fresh_inputs)} rows, but alpha={self.alpha} "
+                    f"requires at least {min_cal} fresh calibration examples"
+                )
+            fresh_ys = _validated_finite_values(self._teacher_call()(fresh_inputs), name="evidence targets")
+            train_harvest_inputs, train_harvest_ys = harvest_inputs, harvest_ys
+            evidence_regime = "fresh-evidence"
+        else:
+            n_fresh = max(min_cal, len(harvest_inputs) // 4)
+            if len(harvest_inputs) < n_fresh + 1:
+                return False  # keep harvesting until a fresh calibration slice can be funded
+            fresh_inputs = harvest_inputs[-n_fresh:]
+            fresh_ys = harvest_ys[-n_fresh:]
+            train_harvest_inputs = harvest_inputs[:-n_fresh]
+            train_harvest_ys = harvest_ys[:-n_fresh]
+            evidence_regime = "fresh-harvest"
+        inputs = self.train_inputs + train_harvest_inputs
+        ys = self.train_ys + train_harvest_ys
         cand = _fit_scaled(inputs, ys, self.featurizer, self.hidden, self.epochs, self.lr, self.seed)
         incumbent_error = _selection_error(
             (self.net, (self.y_mean, self.y_scale)), self.featurizer, self.sel_inputs, self.sel_ys
@@ -412,12 +474,14 @@ class RegressionSolution:
         self.selection_uses += 1
         if not np.isfinite(candidate_error) or candidate_error > incumbent_error + 1e-12:
             return False
-        qhat, _ = _calibrate(cand, self.featurizer, self.cal_inputs, self.cal_ys, self.alpha)
+        qhat, _ = _calibrate(cand, self.featurizer, fresh_inputs, fresh_ys, self.alpha)
         if not np.isfinite(qhat):
             return False
         self.net, (self.y_mean, self.y_scale) = cand[0], cand[1]
         self.qhat, self.holdout_mae = float(qhat), float(candidate_error)
         self.train_inputs, self.train_ys = inputs, ys
+        self.cal_inputs, self.cal_ys = list(fresh_inputs), list(fresh_ys)
+        self.calibration_evidence = evidence_regime
         self.harvested_inputs.clear()
         self.harvested_ys.clear()
         return True
@@ -431,6 +495,18 @@ def _fit_scaled(inputs: list, ys: list, featurizer: Any, hidden, epochs, lr, see
     feats = _validated_features(featurizer, inputs)
     net = _fit_reg_mlp(feats, ((y - mean) / scale).astype(np.float32), hidden, epochs, lr, seed)
     return net, (mean, scale)
+
+
+def _clopper_pearson_interval(successes: int, n: int, level: float) -> tuple[float, float]:
+    """Exact Clopper-Pearson two-sided interval for a binomial proportion."""
+    from scipy.stats import beta as _beta
+
+    if n <= 0:
+        raise ValueError("interval needs a positive denominator")
+    tail = (1.0 - level) / 2.0
+    lower = 0.0 if successes == 0 else float(_beta.ppf(tail, successes, n - successes + 1))
+    upper = 1.0 if successes == n else float(_beta.ppf(1.0 - tail, successes + 1, n - successes))
+    return lower, upper
 
 
 def _selection_error(cand, featurizer, sel_inputs, sel_ys) -> float:
@@ -499,9 +575,13 @@ def solve_regression(
             CALIBRATION rows (the larger half; set ``qhat``, never read by promotions) and SELECTION
             rows (decide ``improve()`` promotions, produce the reported measurements).
         prelabeled: already-teacher-labeled ``(inputs, values)`` — typically harvested escalations from
-            a serving deployment — folded into the TRAINING split only, never calibration (which stays
-            a fresh split of ``inputs``, so ``qhat`` keeps its finite-sample guarantee). The re-solve
-            half of the serving loop.
+            a serving deployment — folded into the TRAINING split only, never calibration. The
+            finite-sample guarantee of the resulting ``qhat`` requires the BASE ``inputs`` to be a
+            genuinely fresh sample: re-solving with the same ``inputs`` and ``seed`` reproduces the
+            exact same calibration rows (the split is deterministic, and ``prelabeled`` does not
+            perturb it), and those rows gated the very serving run that harvested ``prelabeled`` --
+            the STAT-RR12-1 leak in re-solve form. Supply fresh base inputs, or treat the re-solved
+            interval as empirical rather than guaranteed.
     """
     if not callable(teacher):
         raise TypeError("teacher must be callable")

@@ -177,10 +177,11 @@ class StructuredResolveTest(unittest.TestCase):
         num = sol.fields_num["priority"]
         cat = sol.fields_cat["queue"]
         joint_count = sol.calibration_receipt["calibration_count"]
-        self.assertEqual(len(num.train_inputs), len(base) - joint_count - len(num.cal_inputs) + len(harvested))
-        # the categorical field is a solve() Solution, whose reserved holdout now carries TWO roles --
-        # conformal calibration (cal_*) and selection/verification (sel_*) -- so the rows withheld from
-        # training are cal + sel, not cal alone (MXR-080-1891).
+        # BOTH sub-solution shapes reserve TWO holdout roles -- conformal calibration (cal_*) and
+        # selection (sel_*) -- so the rows withheld from training are cal + sel, not cal alone
+        # (MXR-080-1891 for solve(); STAT-RR11-1 gave solve_regression the same split).
+        num_reserved = len(num.cal_inputs) + len(num.sel_inputs)
+        self.assertEqual(len(num.train_inputs), len(base) - joint_count - num_reserved + len(harvested))
         cat_reserved = len(cat.cal_inputs) + len(cat.sel_inputs)
         self.assertEqual(len(cat.train_inputs), len(base) - joint_count - cat_reserved + len(harvested))
         for t in harvested:

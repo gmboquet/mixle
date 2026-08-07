@@ -68,27 +68,59 @@ class SolveRegressionTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires at least"):
             solve_regression(_price, data, tol=1.0, alpha=0.01, holdout=0.25)
 
-    def test_improve_promotes_on_selection_rows_and_recalibrates_on_untouched_rows(self):
+    def test_improve_promotes_on_selection_rows_and_calibrates_on_fresh_harvest(self):
         from mixle.task import solve_regression
 
         sol = solve_regression(_price, _items(150), tol=0.01, alpha=0.1, seed=0, epochs=150)
         mae0 = sol.holdout_mae
-        cal_before = [repr(c) for c in sol.cal_inputs]
-        for it in _items(300, seed=3):  # harvest real labels while escalating
+        solve_cal = [repr(c) for c in sol.cal_inputs]
+        harvest = _items(300, seed=3)
+        for it in harvest:  # harvest real labels while escalating
             sol(it)
+        reserved = [repr(c) for c in sol.harvested_inputs[-max(9, len(sol.harvested_inputs) // 4) :]]
         promoted = sol.improve()
         # every promotion decision reads the selection rows (STAT-RR11-1: promoting on the
         # calibrated width took a running minimum of qhat over one fixed slice)
         self.assertEqual(sol.selection_uses, 1)
+        self.assertTrue(np.isfinite(sol.qhat))
         if promoted:
             # the promotion metric is held-out selection error, not the calibrated width
             self.assertLessEqual(sol.holdout_mae, mae0 + 1e-12)
-        # the calibration rows are untouched by the decision and still set a finite qhat
-        self.assertEqual([repr(c) for c in sol.cal_inputs], cal_before)
-        self.assertTrue(np.isfinite(sol.qhat))
+            # STAT-RR12-1: the certifying rows POSTDATE the harvest -- they are the reserved
+            # harvest tail, never the solve-time calibration rows (which gated the harvest and
+            # therefore helped construct the candidate), and never candidate training rows
+            self.assertEqual([repr(c) for c in sol.cal_inputs], reserved)
+            self.assertEqual(sol.calibration_evidence, "fresh-harvest")
+            train_reprs = {repr(c) for c in sol.train_inputs}
+            self.assertEqual({repr(c) for c in sol.cal_inputs} & train_reprs, set())
+        else:
+            self.assertEqual([repr(c) for c in sol.cal_inputs], solve_cal)
+            self.assertEqual(sol.calibration_evidence, "solve-split")
         # the two roles never overlap
         overlap = {repr(c) for c in sol.cal_inputs} & {repr(c) for c in sol.sel_inputs}
         self.assertEqual(overlap, set())
+
+    def test_improve_waits_until_the_harvest_funds_a_fresh_calibration_slice(self):
+        from mixle.task import solve_regression
+
+        sol = solve_regression(_price, _items(150), tol=0.01, alpha=0.1, seed=0, epochs=150)
+        for it in _items(9, seed=13):  # nine harvested pairs cannot fund 9 calibration + 1 training
+            sol(it)
+        self.assertFalse(sol.improve())
+        self.assertEqual(sol.calibration_evidence, "solve-split")
+        self.assertEqual(len(sol.harvested_inputs), 9)  # the harvest keeps accumulating
+
+    def test_improve_accepts_fresh_evidence_inputs_for_calibration(self):
+        from mixle.task import solve_regression
+
+        sol = solve_regression(_price, _items(150), tol=0.01, alpha=0.1, seed=0, epochs=150)
+        for it in _items(120, seed=3):
+            sol(it)
+        evidence = _items(30, seed=21)
+        promoted = sol.improve(evidence_inputs=evidence)
+        if promoted:
+            self.assertEqual(sol.calibration_evidence, "fresh-evidence")
+            self.assertEqual([repr(c) for c in sol.cal_inputs], [repr(c) for c in evidence])
 
     def test_selection_coverage_is_measured_on_rows_the_quantile_never_touches(self):
         from mixle.task import solve_regression
@@ -97,8 +129,16 @@ class SolveRegressionTest(unittest.TestCase):
         rep = sol.report()
         # a fresh (single-use) measurement of the deployed interval, honestly labeled
         self.assertEqual(rep["selection_uses"], 0)
+        self.assertEqual(rep["calibration_evidence"], "solve-split")
         self.assertIsNotNone(rep["selection_coverage"])
         self.assertGreaterEqual(rep["selection_coverage"], 0.75)  # near 1 - alpha, minus slack
+        # STAT-RR12-2: the proportion travels with its denominator and an exact interval
+        self.assertEqual(rep["selection_coverage_n"], len(sol.sel_inputs))
+        low, high = rep["selection_coverage_ci95"]
+        self.assertLessEqual(0.0, low)
+        self.assertLessEqual(low, rep["selection_coverage"])
+        self.assertLessEqual(rep["selection_coverage"], high)
+        self.assertLessEqual(high, 1.0)
 
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")

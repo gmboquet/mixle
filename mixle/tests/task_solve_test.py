@@ -64,12 +64,32 @@ class SolveTest(unittest.TestCase):
 
         sol = solve(_route, _tickets(300), alpha=0.15, seed=0, epochs=200)
         base_agree = sol.holdout_agreement
+        self.assertEqual(sol.calibration_evidence, "solve-split")
         for t in _tickets(150, seed=2):
             sol(t)
+        promoted = False
         if sol.cascade.stats.escalated_labels:  # improve() only acts when something was harvested
-            sol.improve()
+            promoted = sol.improve()
         # anti-regression invariant: agreement never got worse, whatever improve() decided
         self.assertGreaterEqual(sol.holdout_agreement + 1e-12, base_agree)
+        # STAT-RR12-1: a no-argument promotion recalibrated on rows that gated the harvest the
+        # candidate trained on; the artifact must SAY its threshold is in the reused regime
+        expected = "reused-after-adaptive-harvest" if promoted else "solve-split"
+        self.assertEqual(sol.calibration_evidence, expected)
+        self.assertEqual(sol.report()["calibration_evidence"], expected)
+
+    def test_improve_with_fresh_evidence_keeps_the_certified_regime(self):
+        from mixle.task import solve
+
+        sol = solve(_route, _tickets(300), alpha=0.15, seed=0, epochs=200)
+        for t in _tickets(150, seed=2):
+            sol(t)
+        if not sol.cascade.stats.escalated_labels:
+            self.skipTest("nothing escalated on this seed; no harvest to fold")
+        promoted = sol.improve(evidence_inputs=_tickets(60, seed=9))
+        if promoted:
+            self.assertEqual(sol.calibration_evidence, "fresh-evidence")
+            self.assertEqual(sol.report()["calibration_evidence"], "fresh-evidence")
 
     def test_target_agreement_gate_falls_back_to_teacher(self):
         from mixle.task import solve
