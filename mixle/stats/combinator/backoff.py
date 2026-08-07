@@ -237,6 +237,16 @@ class BackoffDistribution(SequenceEncodableProbabilityDistribution):
             for role, declaration in (("base", base_declaration), ("fallback", fallback_declaration))
             if declaration is not None
         )
+        # Differentiability follows the same both-or-nothing rule as support: the mixture's score
+        # differentiates only if BOTH children do, and an undeclared child has proved nothing --
+        # deriving the flag from the declared subset let one declared differentiable fallback
+        # vouch for an undeclared, non-differentiable base (STAT-RR6-2).
+        differentiable = (
+            base_declaration is not None
+            and fallback_declaration is not None
+            and base_declaration.differentiable
+            and fallback_declaration.differentiable
+        )
         return DistributionDeclaration(
             name="backoff",
             distribution_type=type(self),
@@ -245,7 +255,7 @@ class BackoffDistribution(SequenceEncodableProbabilityDistribution):
             support=support,
             children=tuple(declaration for _, declaration in paired),
             child_roles=tuple(role for role, _ in paired),
-            differentiable=bool(paired) and all(declaration.differentiable for _, declaration in paired),
+            differentiable=differentiable,
         )
 
     def __str__(self) -> str:

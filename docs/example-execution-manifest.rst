@@ -68,8 +68,11 @@ completed successfully: 439s in total, peak 2.3 GB, and the slowest single scrip
 
 * **57 passed, 0 failed.**
 * **Environment: every optional extra provisioned** -- scikit-learn, torch, transformers, datasets,
-  pyspark, mpi4py and dask were all importable. That is what the number means and what it does not:
-  it says the examples are correct against this candidate, not that they run on a base install. The
+  pyspark, mpi4py and dask were all importable. That is what the number means and what it does not.
+  It says every script EXECUTES TO COMPLETION with exit code 0 against this candidate: no import
+  breaks, no API drift, no crash. It is not proof the printed numbers are scientifically correct
+  -- an example can run clean and still demonstrate the wrong thing, which only the per-example
+  assertions and the review gates can speak to -- and it says nothing about a base install. The
   per-example ``blocked`` classifications in the Inventory below are a separate axis and remain
   accurate for a minimal environment -- ``skeptic_challenge_example.py`` passes here only because
   scikit-learn is present, and still fails without it.
@@ -113,10 +116,6 @@ Real-data flagship demonstrations (Banking77, UCI Adult, sunspots) were removed
 from this repository on 2026-08-04: the repository carries no direct dataset
 usage, and real-data demonstrations live in notebooks outside it. Their
 historical execution evidence remains in this page's git history.
-
-The remaining examples (task/DOE/reasoning workflows) were not executed in
-this pass -- they need optional extras, model weights, or services per their
-Inventory entries below, none of which are provisioned in this environment.
 
 **``hierarchical_mixture_example.py`` follow-up (2026-07-17).** A later
 re-verification pass flagged this example as exceeding its 90s budget against

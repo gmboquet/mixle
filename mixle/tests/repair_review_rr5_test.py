@@ -1,4 +1,4 @@
-"""Regressions for the five findings of the 2026-08-07 adversarial repair review (STAT-RR5-1..5).
+"""Regressions for the 2026-08-07 adversarial repair reviews (STAT-RR5-1..5 and STAT-RR6-1..2).
 
 Each finding was a hole in a same-week repair, found by probing the repair's edges from the
 installed wheel. Every test here reproduces the reviewer's probe, and where the first repair
@@ -211,6 +211,108 @@ class BackoffDeclarationHonestyTest(unittest.TestCase):
         declaration = declaration_for(BackoffDistribution(PoissonDistribution(2.0), PoissonDistribution(6.0)))
         self.assertEqual(declaration.support, "non_negative_integer")
         self.assertEqual(declaration.child_roles, ("base", "fallback"))
+
+
+class MassToleranceScaleSweepTest(unittest.TestCase):
+    """STAT-RR6-1: the sqrt-mass tolerance grew without bound and eventually accepted anything.
+
+    The sqrt scaling models sequential float32 accumulation drift, but unbounded it computed rtol
+    0.584 at mass 1.5e12 and passed a 50 percent mass mismatch. The tolerance now saturates at the
+    mass where float32 accumulation itself stops functioning (2**24 -- adding 1.0 to a float32
+    running sum is a no-op past it), about 1.95e-3: beyond that, mass either came from float64
+    accumulation (drift far below the ceiling) or is itself broken. The sweep is the reviewer's
+    acceptance criterion: supported-precision residuals pass and fixed-fraction corruption fails
+    at EVERY scale, at every validation site, keyed and unkeyed.
+    """
+
+    _SCALES = (1.0e3, 1.0e6, 1.0e9, 1.0e12)
+
+    @staticmethod
+    def _statistic(total_mass, state_factor, accumulator):
+        half = total_mass / 2.0
+        return (
+            2,
+            np.array([half / 2.0, half / 2.0]),
+            np.array([total_mass * state_factor / 2.0] * 2),
+            np.full((2, 2), half / 4.0),
+            tuple(a.value() for a in accumulator.accumulators),
+            None,
+        )
+
+    def _accumulator(self, keys):
+        return HiddenMarkovEstimator([GaussianEstimator() for _ in range(2)], keys=keys).accumulator_factory().make()
+
+    def test_supported_precision_residuals_pass_at_every_scale(self):
+        from mixle.stats.latent.hidden_markov import _responsibility_mass_tolerance
+
+        for mass in self._SCALES:
+            residual = 1.19e-7 * (min(mass, 2.0**24) ** 0.5)  # sequential float32 drift model
+            factor = 1.0 + residual
+            for keys in ((None, None, None), ("ik", "tk", None)):
+                with self.subTest(mass=mass, keys=keys):
+                    accumulator = self._accumulator(keys)
+                    accumulator.combine(self._statistic(mass, factor, accumulator))
+            self.assertLess(residual, _responsibility_mass_tolerance(mass))
+
+    def test_fixed_fraction_corruption_fails_at_every_scale_and_site(self):
+        for mass in self._SCALES:
+            for keys in ((None, None, None), ("ik", "tk", None), ("ik", "tk", "sk")):
+                with self.subTest(mass=mass, keys=keys, site="combine"):
+                    accumulator = self._accumulator(keys)
+                    with self.assertRaisesRegex(ValueError, "initial plus transition"):
+                        accumulator.combine(self._statistic(mass, 1.5, accumulator))
+                with self.subTest(mass=mass, keys=keys, site="from_value"):
+                    accumulator = self._accumulator(keys)
+                    with self.assertRaisesRegex(ValueError, "initial plus transition"):
+                        accumulator.from_value(self._statistic(mass, 1.5, accumulator))
+                with self.subTest(mass=mass, keys=keys, site="estimate"):
+                    estimator = HiddenMarkovEstimator([GaussianEstimator() for _ in range(2)], keys=keys)
+                    accumulator = estimator.accumulator_factory().make()
+                    with self.assertRaisesRegex(ValueError, "initial plus transition"):
+                        estimator.estimate(mass, self._statistic(mass, 1.5, accumulator))
+
+    def test_the_reviewers_exact_probe_is_rejected(self):
+        for keys in ((None, None, None), ("ik", "tk", None)):
+            with self.subTest(keys=keys):
+                accumulator = self._accumulator(keys)
+                statistic = (
+                    2,
+                    np.array([2.5e11, 2.5e11]),
+                    np.array([7.5e11, 7.5e11]),  # state mass 1.5e12 against initial+transition 1.0e12
+                    np.full((2, 2), 1.25e11),
+                    tuple(a.value() for a in accumulator.accumulators),
+                    None,
+                )
+                with self.assertRaisesRegex(ValueError, "initial plus transition"):
+                    accumulator.combine(statistic)
+
+
+class BackoffDifferentiabilityHonestyTest(unittest.TestCase):
+    """STAT-RR6-2: a declared differentiable fallback vouched for an undeclared base.
+
+    Differentiability follows the same both-or-nothing rule as support: the mixture's score
+    differentiates only if BOTH children are declared and both differentiable.
+    """
+
+    class _Undeclared(PoissonDistribution):
+        @classmethod
+        def compute_declaration(cls):
+            return None
+
+    def test_an_undeclared_child_blocks_the_differentiable_claim(self):
+        from mixle.stats.combinator.backoff import BackoffDistribution
+        from mixle.stats.compute.declarations import declaration_for
+
+        partial = declaration_for(BackoffDistribution(self._Undeclared(3.0), PoissonDistribution(4.0)))
+        self.assertFalse(partial.differentiable)
+
+    def test_two_declared_children_keep_their_joint_verdict(self):
+        from mixle.stats.combinator.backoff import BackoffDistribution
+        from mixle.stats.compute.declarations import declaration_for
+
+        both = declaration_for(BackoffDistribution(PoissonDistribution(2.0), PoissonDistribution(6.0)))
+        poisson = declaration_for(PoissonDistribution(2.0))
+        self.assertEqual(both.differentiable, poisson.differentiable and poisson.differentiable)
 
 
 if __name__ == "__main__":

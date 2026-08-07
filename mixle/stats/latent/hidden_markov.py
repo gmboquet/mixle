@@ -214,8 +214,20 @@ def _responsibility_mass_tolerance(mass):
     accumulator -- a dropped state, a double-counted transition -- misses this identity by a fraction
     of the total, not by parts per million. The check still catches that; what it no longer does is
     refuse a supported engine for arithmetic that engine documents.
+
+    The growth is CAPPED at the mass where float32 accumulation itself stops functioning. The
+    sqrt scaling models sequential float32 summation drift, but unbounded it eventually swallows
+    the very corruption the check exists for: the adversarial review computed rtol 0.584 at mass
+    1.5e12 and passed a 50% mass mismatch (STAT-RR6-1). No legitimate float32 path reaches such
+    masses -- adding 1.0 to a float32 running sum is a NO-OP past 2**24, so a mass beyond that
+    either came from float64 accumulation (whose drift is orders of magnitude below this ceiling)
+    or is itself broken. The ceiling is therefore the formula evaluated at 2**24, about 1.95e-3:
+    every fixed-fraction corruption of 0.5% or more is rejected at EVERY scale, while the measured
+    legitimate residual (4.8e-6 relative at mass 8000) keeps its 4x headroom.
     """
-    return max(1.0e-9, 4.0 * _REDUCED_PRECISION_EPS * math.sqrt(max(float(abs(mass)), 1.0)))
+    scaled = 4.0 * _REDUCED_PRECISION_EPS * math.sqrt(max(float(abs(mass)), 1.0))
+    ceiling = 4.0 * _REDUCED_PRECISION_EPS * math.sqrt(2.0**24)
+    return max(1.0e-9, min(scaled, ceiling))
 
 
 def _validated_hmm_transition_matrix(values: Any, n_states: int) -> tuple[np.ndarray, tuple[int, ...]]:
