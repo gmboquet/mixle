@@ -21,10 +21,15 @@ from typing import Any
 
 @dataclass(frozen=True)
 class LedgerField:
-    """One claim-bearing field: its name, its missing-artifact default, and its validator."""
+    """One claim-bearing field: its name and its validator.
+
+    There is deliberately NO missing-artifact default: a live object's initialization default
+    ("solve-split", zero uses) describes a freshly solved model, and reusing it as the meaning
+    of an ABSENT field would present an artifact whose calibration history is unknown as clean,
+    certified evidence (STAT-RR14-1). An artifact that does not carry its ledger is refused.
+    """
 
     name: str
-    default: Any
     validate: Callable[[Any], Any]
 
 
@@ -47,10 +52,9 @@ def _regime(*allowed: str) -> Callable[[Any], str]:
 # selection-reuse count. "fresh-harvest" is NOT a classification regime -- its escalations are
 # per-query threshold-selected and can never serve as calibration evidence (D-0155).
 CLASSIFICATION_LEDGER: tuple[LedgerField, ...] = (
-    LedgerField("selection_uses", 0, _non_negative_int),
+    LedgerField("selection_uses", _non_negative_int),
     LedgerField(
         "calibration_evidence",
-        "solve-split",
         _regime("solve-split", "fresh-evidence", "reused-after-adaptive-harvest"),
     ),
 )
@@ -60,10 +64,9 @@ CLASSIFICATION_LEDGER: tuple[LedgerField, ...] = (
 # raw serving stream (D-0155), and there is no reused regime -- regression improve() refuses to
 # certify on reused rows outright.
 REGRESSION_LEDGER: tuple[LedgerField, ...] = (
-    LedgerField("selection_uses", 0, _non_negative_int),
+    LedgerField("selection_uses", _non_negative_int),
     LedgerField(
         "calibration_evidence",
-        "solve-split",
         _regime("solve-split", "fresh-harvest", "fresh-evidence"),
     ),
 )
@@ -81,16 +84,23 @@ def write_ledger(obj: Any, fields: tuple[LedgerField, ...]) -> dict[str, Any]:
 def read_ledger(meta: dict[str, Any], fields: tuple[LedgerField, ...]) -> dict[str, Any]:
     """Reconstruct ledger keyword arguments from artifact metadata, validating each on the way IN.
 
-    Missing fields take the declared default (artifacts predating a field's introduction);
-    present-but-invalid values are refused rather than coerced -- silent defaulting is exactly
-    how an uncertified threshold reloaded as certified (STAT-RR13-1).
+    Present-but-invalid values are refused rather than coerced (silent coercion is how an
+    uncertified threshold reloaded as certified, STAT-RR13-1) -- and MISSING fields are refused
+    outright: an artifact without its ledger has an unknown calibration history, and loading it
+    under a fresh-solve default presented exactly such an artifact -- a threshold produced after
+    adaptive reuse, selection evidence spent four times -- as clean, single-use, certified
+    evidence (STAT-RR14-1). The 0.8.0 artifact format REQUIRES the ledger; there are no
+    published pre-ledger artifacts, and an unpublished one is re-solved, not reinterpreted.
     """
     out: dict[str, Any] = {}
     for field in fields:
-        if field.name in meta:
-            out[field.name] = field.validate(meta[field.name])
-        else:
-            out[field.name] = field.default
+        if field.name not in meta:
+            raise ValueError(
+                f"artifact is missing the claim-bearing ledger field {field.name!r}: its "
+                "calibration history is unknown and cannot present as certified evidence -- "
+                "re-solve to produce a current artifact"
+            )
+        out[field.name] = field.validate(meta[field.name])
     return out
 
 

@@ -6,6 +6,11 @@ uncertified threshold reloading as certified, STAT-RR13-2's selection-reuse coun
 These tests are registry-driven: they iterate the SAME ledger declarations that ``save`` and
 ``load`` iterate, so a newly declared claim field is automatically round-trip-tested, corrupt
 values are automatically refusal-tested, and the tests cannot go stale against the registry.
+
+The ledger is a REQUIRED member of the artifact format (STAT-RR14-1): an artifact missing a
+claim field has an unknown calibration history, and loading it under fresh-solve defaults
+presented a reused-and-spent threshold as clean, single-use, certified evidence. Missing
+fields refuse -- live-object initialization defaults are never missing-artifact semantics.
 """
 
 import tempfile
@@ -73,15 +78,22 @@ class LedgerRegistryContractTest(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         field.validate(_sentinel(field.name, shape, "illegal"))
 
-    def test_read_ledger_defaults_missing_fields_and_refuses_corrupt_ones(self):
+    def test_read_ledger_refuses_missing_and_corrupt_fields(self):
+        # missing is refused, not defaulted: fresh-solve initialization values are what a NEW
+        # object means, never what an artifact with an unrecorded history means (STAT-RR14-1)
         for shape, ledger in (("classification", CLASSIFICATION_LEDGER), ("regression", REGRESSION_LEDGER)):
             with self.subTest(shape=shape):
-                defaults = read_ledger({}, ledger)
-                self.assertEqual(set(defaults), {f.name for f in ledger})
+                with self.assertRaisesRegex(ValueError, "missing the claim-bearing ledger field"):
+                    read_ledger({}, ledger)
+                complete = {f.name: _sentinel(f.name, shape, "legal") for f in ledger}
+                self.assertEqual(set(read_ledger(complete, ledger)), {f.name for f in ledger})
                 for field in ledger:
-                    self.assertEqual(defaults[field.name], field.default)
+                    partial = dict(complete)
+                    del partial[field.name]
+                    with self.assertRaisesRegex(ValueError, field.name):
+                        read_ledger(partial, ledger)
                     with self.assertRaises(ValueError):
-                        read_ledger({field.name: _sentinel(field.name, shape, "illegal")}, ledger)
+                        read_ledger({**complete, field.name: _sentinel(field.name, shape, "illegal")}, ledger)
 
     def test_write_ledger_refuses_a_corrupt_live_object(self):
         class Holder:
@@ -161,6 +173,41 @@ class ClassificationLedgerLifecycleTest(unittest.TestCase):
                     finally:
                         manifest_path.write_text(original)
 
+    def test_load_refuses_a_validly_signed_artifact_missing_ledger_fields(self):
+        # STAT-RR14-1's exact construction: a legacy-shaped artifact (well-formed, validly
+        # signed, ledger fields ABSENT) reloaded as clean solve-split evidence with zero uses
+        import json
+        from pathlib import Path
+
+        from mixle.task import Solution
+        from mixle.task.artifact import _manifest_integrity
+
+        with tempfile.TemporaryDirectory() as d:
+            path = self.solution.save(d + "/router")
+            manifest_path = Path(path) / "manifest.json"
+            original = manifest_path.read_text()
+            for field in CLASSIFICATION_LEDGER:
+                with self.subTest(field=field.name):
+                    doc = json.loads(original)
+                    del doc["meta"]["solve"]["verification"][field.name]
+                    doc["integrity_sha256"] = _manifest_integrity(doc)
+                    manifest_path.write_text(json.dumps(doc))
+                    try:
+                        with self.assertRaisesRegex(ValueError, "missing the claim-bearing ledger field"):
+                            Solution.load(path, _route)
+                    finally:
+                        manifest_path.write_text(original)
+            # and an artifact with NO verification block at all refuses for the same reason
+            doc = json.loads(original)
+            del doc["meta"]["solve"]["verification"]
+            doc["integrity_sha256"] = _manifest_integrity(doc)
+            manifest_path.write_text(json.dumps(doc))
+            try:
+                with self.assertRaisesRegex(ValueError, "ledger is missing"):
+                    Solution.load(path, _route)
+            finally:
+                manifest_path.write_text(original)
+
 
 @pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
@@ -182,6 +229,36 @@ class RegressionLedgerLifecycleTest(unittest.TestCase):
                 self.assertEqual(getattr(back, field.name), expected)
                 if field.name in report:
                     self.assertEqual(report[field.name], expected)
+
+
+@pytest.mark.torch
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class RegressionLedgerRefusalTest(unittest.TestCase):
+    """The regression artifact refuses missing ledger fields under a valid signature too."""
+
+    def test_load_refuses_a_validly_signed_artifact_missing_ledger_fields(self):
+        import json
+        from pathlib import Path
+
+        from mixle.task import RegressionSolution, solve_regression
+        from mixle.task.artifact import _manifest_integrity
+
+        solution = solve_regression(_price, _tickets(150, seed=2), tol=50.0, alpha=0.1, seed=0, epochs=80)
+        with tempfile.TemporaryDirectory() as d:
+            path = solution.save(d + "/pricer")
+            manifest_path = Path(path) / "manifest.json"
+            original = manifest_path.read_text()
+            for field in REGRESSION_LEDGER:
+                with self.subTest(field=field.name):
+                    doc = json.loads(original)
+                    del doc["meta"]["regress"][field.name]
+                    doc["integrity_sha256"] = _manifest_integrity(doc)
+                    manifest_path.write_text(json.dumps(doc))
+                    try:
+                        with self.assertRaisesRegex(ValueError, "missing the claim-bearing ledger field"):
+                            RegressionSolution.load(path, _price)
+                    finally:
+                        manifest_path.write_text(original)
 
 
 @pytest.mark.torch

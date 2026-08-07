@@ -585,35 +585,35 @@ class Solution:
         if not isinstance(meta, dict):
             raise ValueError("artifact solve metadata must be a dictionary")
         verification = meta.get("verification")
-        promoted = False
-        holdout_agreement = float("nan")
-        escalation_rate = float("nan")
-        verification_digest = None
-        ledger = read_ledger({}, CLASSIFICATION_LEDGER)
-        if verification is not None:
-            if not isinstance(verification, dict):
-                raise ValueError("artifact verification metadata must be a dictionary")
-            saved_promoted = verification.get("promoted")
-            if not isinstance(saved_promoted, bool):
-                raise ValueError("artifact verification promoted state must be boolean")
-            holdout_agreement = float(verification.get("holdout_agreement", float("nan")))
-            escalation_rate = float(verification.get("holdout_escalation_rate", float("nan")))
-            verification_digest = verification.get("evidence_sha256")
-            valid_evidence = (
-                isinstance(verification_digest, str)
-                and len(verification_digest) == 64
-                and verification.get("artifact_binding") == "manifest-integrity-v1"
-                and np.isfinite(holdout_agreement)
-                and 0.0 <= holdout_agreement <= 1.0
-                and np.isfinite(escalation_rate)
-                and 0.0 <= escalation_rate <= 1.0
+        # An artifact without a verification block carries no honesty ledger at all: its
+        # calibration history is unknown, and unknown history must refuse rather than reload
+        # under fresh-solve defaults (STAT-RR14-1). Every 0.8.0 writer produces the block.
+        if not isinstance(verification, dict):
+            raise ValueError(
+                "artifact has no verification metadata, so its claim-bearing ledger is missing: "
+                "its calibration history is unknown and cannot present as certified evidence -- "
+                "re-solve to produce a current artifact"
             )
-            promoted = bool(saved_promoted and valid_evidence)
-            # The honesty ledger survives the round trip (STAT-RR13-1/2): an artifact whose
-            # threshold was recalibrated on reused rows must not reload as certified, and the
-            # selection-reuse count must not reset. The registry validates on the way in;
-            # unrecognized regimes and negative counts are refused, never defaulted.
-            ledger = read_ledger(verification, CLASSIFICATION_LEDGER)
+        saved_promoted = verification.get("promoted")
+        if not isinstance(saved_promoted, bool):
+            raise ValueError("artifact verification promoted state must be boolean")
+        holdout_agreement = float(verification.get("holdout_agreement", float("nan")))
+        escalation_rate = float(verification.get("holdout_escalation_rate", float("nan")))
+        verification_digest = verification.get("evidence_sha256")
+        valid_evidence = (
+            isinstance(verification_digest, str)
+            and len(verification_digest) == 64
+            and verification.get("artifact_binding") == "manifest-integrity-v1"
+            and np.isfinite(holdout_agreement)
+            and 0.0 <= holdout_agreement <= 1.0
+            and np.isfinite(escalation_rate)
+            and 0.0 <= escalation_rate <= 1.0
+        )
+        promoted = bool(saved_promoted and valid_evidence)
+        # The honesty ledger survives the round trip (STAT-RR13-1/2) and is REQUIRED
+        # (STAT-RR14-1): the registry refuses missing fields, unrecognized regimes, and
+        # negative counts -- never defaults them.
+        ledger = read_ledger(verification, CLASSIFICATION_LEDGER)
         return cls(
             cascade=Cascade(cal, _batch_view(teacher), cost=cost),
             teacher=teacher,
