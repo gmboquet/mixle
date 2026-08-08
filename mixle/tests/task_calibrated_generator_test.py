@@ -205,3 +205,75 @@ class DeterminismTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CertificateCoversServedPolicyTest(unittest.TestCase):
+    """STAT-RR17-07: the certificate must cover the policy that serves.
+
+    Calibration used to seed candidate draws by (row_index, prompt) while serving seeds by
+    prompt alone: on a repeated-prompt population, per-row randomness measured 1/150 errors and
+    certified an 0.0366 upper bound while the served (prompt-only, deterministic-per-prompt)
+    policy answered 1000/1000 wrong. With one schedule, certification can only record what
+    serving would do, so that split is structurally impossible.
+    """
+
+    @staticmethod
+    def _seed_flipped_generator():
+        # candidate correctness depends ONLY on the rng the policy supplies: a per-row schedule
+        # makes calibration rows disagree with serving on the same prompt; prompt-only cannot
+        import numpy as np
+
+        def generate(prompt, k, rng=None):
+            if rng is None:
+                rng = np.random.default_rng()
+            flip = float(rng.random())
+            return [(prompt, "right" if flip < 0.5 else "wrong", i) for i in range(k)]
+
+        def score(candidate):
+            return 1.0
+
+        return generate, score
+
+    def test_served_answers_replay_certification_on_repeated_prompts(self):
+        from mixle.task.calibrated_generator import ABSTAIN, CalibratedGenerator
+
+        generate, score = self._seed_flipped_generator()
+        gate = CalibratedGenerator(generate, score, alpha=0.1, k=3, seed=7)
+        prompts = ["the same prompt"] * 150
+        calibration_verdicts: list[bool] = []
+
+        def is_correct(prompt, candidate):
+            ok = candidate[1] == "right"
+            calibration_verdicts.append(ok)
+            return ok
+
+        gate.calibrate(prompts, is_correct)
+        served = gate.serve("the same prompt")
+        if gate.risk_receipt["error_upper"] is not None and served is not ABSTAIN:
+            # certified AND answering: the served answer must be the exact decision
+            # certification measured -- certify-low-then-serve-high is impossible
+            self.assertTrue(all(calibration_verdicts))
+            self.assertEqual(served[1], "right")
+        else:
+            # not certified (or abstaining): serving must abstain rather than answer uncovered
+            self.assertIs(served, ABSTAIN)
+        # the receipt discloses the schedule and the duplicate-collapsed sample size
+        self.assertEqual(gate.risk_receipt["seed_schedule"], "prompt-only (identical to serving)")
+        self.assertEqual(gate.risk_receipt["unique_prompt_count"], 1)
+
+    def test_mismatched_calibrate_seed_is_refused(self):
+        from mixle.task.calibrated_generator import CalibratedGenerator
+
+        generate, score = self._seed_flipped_generator()
+        gate = CalibratedGenerator(generate, score, alpha=0.1, k=3, seed=7)
+        with self.assertRaisesRegex(ValueError, "served policy"):
+            gate.calibrate(["a", "b", "c", "d"], lambda p, c: True, seed=8)
+
+    def test_serve_seed_override_is_refused_once_certified(self):
+        from mixle.task.calibrated_generator import CalibratedGenerator
+
+        generate, score = self._seed_flipped_generator()
+        gate = CalibratedGenerator(generate, score, alpha=0.5, k=3, seed=7)
+        gate.calibrate([f"p{i}" for i in range(40)], lambda p, c: c[1] == "right")
+        with self.assertRaisesRegex(ValueError, "certificate covers only the prompt-derived schedule"):
+            gate.serve("p0", seed=123)

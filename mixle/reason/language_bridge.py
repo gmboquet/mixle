@@ -407,7 +407,15 @@ class PosteriorDescriber:
             calls["n"] += 1
             return claim.contains(true_value)
 
-        self._gen.calibrate(posteriors, is_correct, seed=seed)
+        if seed is not None and int(seed) != self._gen.seed:
+            # STAT-RR17-07: the certificate covers only the generator's own prompt-derived seed
+            # schedule -- the policy describe() serves. Honoring a calibrate-time seed therefore
+            # means REBUILDING the generator under that seed, so certification and serving remain
+            # one stochastic policy, rather than certifying a schedule that never serves.
+            self._gen = CalibratedGenerator(
+                self._generate, self._score, alpha=self._gen.alpha, k=self._gen.k, seed=int(seed)
+            )
+        self._gen.calibrate(posteriors, is_correct)
         return self
 
     def describe(self, posterior: Any, *, seed: int | None = None) -> Claim | None:

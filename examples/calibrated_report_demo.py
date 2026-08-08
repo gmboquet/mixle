@@ -211,13 +211,16 @@ def build_claim_report(
     record: tuple[float, ...],
     shape_gate: CalibratedGenerator,
     structured: Any,
-    *,
-    seed: int | None = None,
 ) -> VolumeClaimReport:
-    """Run every claim through its own gate and bind the outcomes into one inspectable report."""
+    """Run every claim through its own gate and bind the outcomes into one inspectable report.
+
+    Serving takes NO per-call seed: the risk certificate covers only the gate's own
+    prompt-derived seed schedule, and a certified generator now refuses overrides
+    (STAT-RR17-07 -- a per-call seed served a policy the certificate never measured).
+    """
     verdicts: dict[str, ClaimVerdict] = {}
 
-    served = shape_gate.serve(record, seed=seed)
+    served = shape_gate.serve(record)
     if served is ABSTAIN:
         verdicts["shape"] = ClaimVerdict(
             "shape", None, "abstained", detail="no shape candidate cleared the selective-risk threshold"

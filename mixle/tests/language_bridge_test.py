@@ -301,7 +301,9 @@ class PosteriorDescriberTest(unittest.TestCase):
 
     def test_sharp_unseen_posterior_is_accepted_only_if_the_gate_certifies_it(self):
         posterior = GaussianDistribution(mu=7.0, sigma2=0.01)
-        claim = self.describer.describe(posterior, seed=2)
+        # no per-call seed: the certificate covers only the prompt-derived schedule
+        # (STAT-RR17-07), and serving under it is deterministic per posterior anyway
+        claim = self.describer.describe(posterior)
         if claim is not ABSTAIN:
             self.assertIsInstance(claim, Claim)
             self.assertTrue(claim.contains(7.0))
@@ -310,7 +312,7 @@ class PosteriorDescriberTest(unittest.TestCase):
         # spread ~200x tol: no candidate width (up to 10*tol) can meaningfully cover this posterior's
         # mass without also covering the rest of the plausible range -- the honest answer is abstain.
         posterior = GaussianDistribution(mu=7.0, sigma2=10000.0)
-        claim = self.describer.describe(posterior, seed=3)
+        claim = self.describer.describe(posterior)
         self.assertIs(claim, ABSTAIN)
 
     def test_invalid_tol_rejected(self):
@@ -445,6 +447,12 @@ class CalibrationTruthLookupTest(unittest.TestCase):
 
         receipt_shared = _risk_receipt_for(calibration_set_shared_object, tol=tol)
         receipt_distinct = _risk_receipt_for(calibration_set_distinct_objects, tol=tol)
+        # the receipts differ ONLY in the served-policy uniqueness disclosure: one shared object
+        # derives one prompt seed, 100 distinct objects derive their own (STAT-RR17-07 makes the
+        # certificate report the schedule it actually covers); the truth-lookup behavior under
+        # test must be identical either way
+        self.assertEqual(receipt_shared.pop("unique_prompt_count"), 1)
+        self.assertGreater(receipt_distinct.pop("unique_prompt_count"), 1)
 
         # every row's per-candidate draws/scores are identical either way (the mock posterior's
         # sampling ignores its seed and object identity) -- so a correct truth lookup must produce
@@ -460,10 +468,12 @@ class CalibrationTruthLookupTest(unittest.TestCase):
         calibration_set_shared_object = [(reused, v) for v in true_values]
         calibration_set_distinct_objects = [(_ConstantPosterior(5.0), v) for v in true_values]
 
-        self.assertEqual(
-            _risk_receipt_for(calibration_set_shared_object, tol=tol),
-            _risk_receipt_for(calibration_set_distinct_objects, tol=tol),
-        )
+        receipt_shared = _risk_receipt_for(calibration_set_shared_object, tol=tol)
+        receipt_distinct = _risk_receipt_for(calibration_set_distinct_objects, tol=tol)
+        # equality modulo the served-policy uniqueness disclosure, as above
+        receipt_shared.pop("unique_prompt_count")
+        receipt_distinct.pop("unique_prompt_count")
+        self.assertEqual(receipt_shared, receipt_distinct)
 
 
 class CalibrationSelectiveOutcomeTest(unittest.TestCase):

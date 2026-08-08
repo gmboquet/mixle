@@ -352,10 +352,14 @@ class CalibratedGenerator:
         bound (MXR-080-1849). If no nonempty accepted subset certifies risk
         ``<= alpha``, the threshold is ``+inf`` and serving abstains everywhere.
 
-        Scope of the certificate: assuming the calibration prompts and future queries are
-        i.i.d. draws from the same distribution, with probability at least ``confidence``
-        over the calibration draw, the TRUE accepted-slice error at the deployed threshold
-        is ``<= alpha`` (the per-threshold binomial bounds are Bonferroni-corrected across
+        Scope of the certificate: it covers exactly the SERVED stochastic policy -- candidate
+        draws seeded from the generator's own ``seed`` and the prompt alone, the same
+        derivation ``candidate_set()``/``serve()`` use (STAT-RR17-07: certifying under a
+        per-row schedule measured 1/150 errors and bounded risk at 0.0366 while the served
+        policy produced 1000/1000 errors). Assuming the calibration prompts and future
+        queries are i.i.d. draws from the same distribution, with probability at least
+        ``confidence`` over the calibration draw, the TRUE accepted-slice error at the
+        deployed threshold is ``<= alpha`` (the per-threshold binomial bounds are Bonferroni-corrected across
         the proposal family, so the selection of the loosest passing threshold stays
         covered). Distribution shift voids the statement silently; re-certify on drifted
         traffic.
@@ -367,7 +371,17 @@ class CalibratedGenerator:
             raise ValueError("calibrate(...) needs at least two held-out prompts for proposal/certification splitting")
         if seed is not None and (isinstance(seed, (bool, np.bool_)) or not isinstance(seed, (int, np.integer))):
             raise ValueError("seed must be an exact integer or None")
-        rng_seed = self.seed if seed is None else int(seed)
+        if seed is not None and int(seed) != self.seed:
+            # STAT-RR17-07: the certificate must cover the policy that SERVES. Serving derives its
+            # candidate seed from self.seed and the prompt alone, so calibrating under any other
+            # base seed certifies a policy that never runs. Construct the generator with the seed
+            # you want and calibrate that.
+            raise ValueError(
+                "calibrate(seed=...) must equal the generator's own seed: the certificate covers the "
+                f"served policy (seed={self.seed}), and certifying under a different seed schedule is "
+                "how a 3.7% certificate served 100% errors"
+            )
+        rng_seed = self.seed
         # ORACLE CONTRACT: is_correct is called exactly once per CERTIFICATION row, in order, starting
         # at the first prompt. The oracle receives only (prompt, candidate) -- no row index -- so an
         # oracle that must recover per-row ground truth has no way to do it except by counting its own
@@ -385,7 +399,15 @@ class CalibratedGenerator:
         statistics: list[float] = []
         errors: list[bool] = []
         for i, prompt in enumerate(prompts):
-            candidate, statistic = self._selection(prompt, seed=_derive_seed(rng_seed, (i, prompt)))
+            # STAT-RR17-07: select with the SERVED seed schedule -- self.seed and the prompt,
+            # exactly what candidate_set() derives -- never a per-row schedule. Certifying under
+            # (row, prompt) seeds measured 1/150 errors and certified an 0.0366 upper bound while
+            # the served (prompt-only) policy produced 1000/1000 errors on a repeated-prompt
+            # population: the certified policy never served. With this schedule a repeated prompt
+            # contributes the identical served decision to certification, so the certificate can
+            # only report what serving would do; duplicated prompts reduce the certificate's
+            # effective independent-sample count (see unique_prompt_count in the receipt).
+            candidate, statistic = self._selection(prompt, seed=_derive_seed(self.seed, prompt))
             statistics.append(statistic)
             if i >= n_certify:
                 continue  # a proposal row contributes a threshold, never a verdict
@@ -441,6 +463,8 @@ class CalibratedGenerator:
             "statistic": "top_score",
             "candidate_count": self.k,
             "seed": rng_seed,
+            "seed_schedule": "prompt-only (identical to serving)",
+            "unique_prompt_count": len({repr(prompt) for prompt in prompts}),
             "accepted": 0 if chosen is None else chosen["accepted"],
             "errors": 0 if chosen is None else chosen["errors"],
             "error_upper": None if chosen is None else chosen["error_upper"],
@@ -450,6 +474,9 @@ class CalibratedGenerator:
             "policy": self._describe_policy(),
             "assumptions": [
                 "calibration certification and serving cases are exchangeable",
+                "certification prompts are distinct enough that their accept/error events are "
+                "independent -- duplicated prompts repeat the identical served decision, so the "
+                "binomial bound's effective sample is unique_prompt_count, not certification_count",
                 "the certified generate/score callables behave identically at serving time "
                 "(their identity is enforced; their internal state is not observable here)",
             ],
@@ -462,6 +489,14 @@ class CalibratedGenerator:
         if self.qhat is None:
             raise RuntimeError("call calibrate(...) (or set qhat) before candidate_set(...)")
         self._require_certified_policy()
+        if seed is not None and self.risk_receipt is not None:
+            # STAT-RR17-07: an explicit per-call seed is a different stochastic policy from the one
+            # the certificate covers -- the exact mechanism behind certify-3.7%-serve-100%.
+            raise ValueError(
+                "candidate_set/serve seed overrides are refused on a certified generator: the "
+                "certificate covers only the prompt-derived schedule; build a generator with the "
+                "desired seed and calibrate it"
+            )
         call_seed = _derive_seed(self.seed, prompt) if seed is None else int(seed)
         candidate, statistic = self._selection(prompt, seed=call_seed)
         return [candidate] if statistic >= self.qhat else []
