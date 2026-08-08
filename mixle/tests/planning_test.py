@@ -3,6 +3,7 @@
 import unittest
 
 import numpy as np
+import pytest
 
 import mixle.stats as st
 from mixle.inference import Guarantee, VerificationReceipt, certify, optimize, plan_estimation, receipt_subject
@@ -183,6 +184,7 @@ class LatentCertificateTest(unittest.TestCase):
         self.assertEqual(certify(model, receipts=[receipt]).blocks[0].guarantee, Guarantee.UNVERIFIED)
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class GradientAuditTest(unittest.TestCase):
     def test_neural_block_is_isolated_and_pool_eligible(self):

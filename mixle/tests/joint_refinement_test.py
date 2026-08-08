@@ -9,6 +9,7 @@ which piece a GPU pool would take and which stays local.
 import unittest
 
 import numpy as np
+import pytest
 
 try:
     import torch
@@ -42,6 +43,7 @@ def _ll(model, data):
     return float(np.sum(model.seq_log_density(model.dist_to_encoder().seq_encode(data))))
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "requires torch")
 class JointRefinementTest(unittest.TestCase):
     def setUp(self):

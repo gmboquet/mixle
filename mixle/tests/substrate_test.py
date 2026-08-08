@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+import pytest
+
 from mixle.substrate import (
     MODALITIES,
     Substrate,
@@ -307,6 +309,7 @@ class IndexDirtyTrackingTest(unittest.TestCase):
         self.assertTrue(s._dirty)
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "represent embedder needs torch")
 class SemanticRetrievalTest(unittest.TestCase):
     def _corpus(self):
@@ -356,6 +359,7 @@ class SemanticRetrievalTest(unittest.TestCase):
         self.assertEqual(s.get(target_id).text, "")  # the item itself really is empty now
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "represent embedder needs torch")
 class CrossScopeIndexIsolationTest(unittest.TestCase):
     """MXR-080-0237 (Critical, security): a scope's query results, and the embedding transform used to

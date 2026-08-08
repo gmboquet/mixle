@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 import numpy as np
+import pytest
 
 try:
     import torch  # noqa: F401
@@ -167,6 +168,7 @@ class LifecycleTest(unittest.TestCase):
             back = mixle.Model.load(path)
             self.assertAlmostEqual(back.fitted.log_density("a"), m.fitted.log_density("a"), places=10)
 
+    @pytest.mark.torch
     @unittest.skipUnless(_HAS_TORCH, "torch not installed")
     def test_neural_json_artifact_requires_trust_code(self):
         # A "json"-format artifact whose model embeds a NeuralLeaf carries a pickle-backed torch module
@@ -315,6 +317,7 @@ class LifecycleTest(unittest.TestCase):
             self.assertEqual(back.notes, ["legacy"])
             self.assertAlmostEqual(back.fitted.log_density("a"), fitted.log_density("a"), places=10)
 
+    @pytest.mark.torch
     @unittest.skipUnless(_HAS_TORCH, "torch not installed")
     def test_distill_self_teacher_labels_own_clusters(self):
         import mixle
@@ -334,6 +337,7 @@ class LifecycleTest(unittest.TestCase):
         self.assertIn(sol(data[0]), ("0", "1"))
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class AnalysisVerbsTest(unittest.TestCase):
     def test_explain_prediction_forecast_and_do_delegate(self):

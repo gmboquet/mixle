@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pytest
+
 try:
     import torch  # noqa: F401
 
@@ -141,6 +143,7 @@ class TraceHarvestTest(unittest.TestCase):
         self.assertEqual(len(traces.rejections), 1)
         self.assertIn("input must be an object", traces.rejections[0].reason)
 
+    @pytest.mark.torch
     @unittest.skipUnless(_HAS_TORCH, "torch not installed")
     def test_harvested_traces_feed_the_distillers(self):
         import numpy as np
@@ -182,6 +185,7 @@ class TraceHarvestTest(unittest.TestCase):
         )
         self.assertGreater(tc.selection_agreement, 0.8)  # the agent's own history taught the tiny model
 
+    @pytest.mark.torch
     @unittest.skipUnless(_HAS_TORCH, "torch not installed")
     def test_harvested_traces_feed_the_plan_writer(self):
         """workstream C: harvest_agent_traces -> sft_planner, exactly the module docstring's own example."""

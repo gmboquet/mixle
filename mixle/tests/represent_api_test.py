@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 import numpy as np
+import pytest
 
 try:
     import torch  # noqa: F401
@@ -30,6 +31,7 @@ def _records(n, seed=0):
     return out
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class EmbedderTest(unittest.TestCase):
     def test_records_embed_and_retrieve_their_near_duplicates(self):
@@ -98,6 +100,7 @@ class EmbedderKindSchemaTest(unittest.TestCase):
         self.assertEqual({_kind_of(x) for x in ({"a": 1}, (1, 2), [3, 4])}, {"record"})
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class EmbedderRetrieveKValidationTest(unittest.TestCase):
     """retrieve(k=...) must reject a k that can't mean "top k": negative or fractional."""
@@ -132,6 +135,7 @@ class EmbedderRetrieveKValidationTest(unittest.TestCase):
         self.assertEqual(len(hits), 3)
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class EmbedderRecordVsBatchContractTest(unittest.TestCase):
     """MXR-080-1783: a list-valued record must not be mistaken for a batch at serving time.
@@ -176,6 +180,7 @@ class EmbedderRecordVsBatchContractTest(unittest.TestCase):
         self.assertTrue(all(np.isfinite(s) for _, s in hits))
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class EmbedderCorpusOwnershipTest(unittest.TestCase):
     """MXR-080-1785: retrieval evidence must not be mutable into arbitrary results.
@@ -234,6 +239,7 @@ class EmbedderCorpusOwnershipTest(unittest.TestCase):
         np.testing.assert_allclose(norms, np.ones_like(norms), atol=1e-5)
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class EmbedderArtifactManifestTest(unittest.TestCase):
     """MXR-080-1786: the manifest must describe AND protect the artifact it ships with.
@@ -332,6 +338,7 @@ class EmbedderArtifactManifestTest(unittest.TestCase):
             self.assertEqual([p.name for p in path.iterdir()], ["embedder.mixle"])
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class EmbedderLoadTrustGateTest(unittest.TestCase):
     """Embedder.load unpickles a live torch module -- it must refuse without explicit trust."""

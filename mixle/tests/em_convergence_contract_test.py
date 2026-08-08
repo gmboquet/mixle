@@ -24,6 +24,7 @@ import unittest
 from contextlib import redirect_stdout
 
 import numpy as np
+import pytest
 
 from mixle.inference.estimation import optimize
 from mixle.stats import (
@@ -117,6 +118,7 @@ class ClosedFormMonotonicityTest(unittest.TestCase):
         self.assertLess(trace[-1] - trace[-2], 1e-6)
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class MutableModeContractTest(unittest.TestCase):
     """Neural trees: best-visited selection, disclosed failures, and the SAEM schedule."""

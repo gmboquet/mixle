@@ -4,6 +4,7 @@ points), composing into the same NeuralGaussian-style estimator/accumulator cont
 import unittest
 
 import numpy as np
+import pytest
 
 try:
     import torch
@@ -57,6 +58,7 @@ def _ode_residual(module, coll):
     return du - torch.cos(coll)
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class PINNRegressionTest(unittest.TestCase):
     def test_fits_the_analytic_solution_from_one_boundary_point_plus_the_residual(self):
@@ -261,6 +263,7 @@ def _module_level_residual(module, coll):
     return _ode_residual(module, coll)
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class PINNRegressionSerializationTest(unittest.TestCase):
     def test_to_dict_from_dict_roundtrip_preserves_predictions(self):

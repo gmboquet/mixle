@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import unittest
 
+import pytest
+
 try:
     import torch
 
@@ -14,6 +16,7 @@ except ImportError:
     _HAS_TORCH = False
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class TransformerContractTest(unittest.TestCase):
     def test_architecture_is_validated_before_allocation(self):

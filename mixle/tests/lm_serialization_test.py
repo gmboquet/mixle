@@ -11,6 +11,7 @@ import pickle
 import unittest
 
 import numpy as np
+import pytest
 
 try:
     import torch
@@ -20,6 +21,7 @@ except ImportError:
     _HAS_TORCH = False
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class LMSerializationTest(unittest.TestCase):
     def _lm(self):
@@ -82,6 +84,7 @@ class LMSerializationTest(unittest.TestCase):
         self.assertIs(lm.fit_pairs([], epochs=3), lm)
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class LeafSerializationTest(unittest.TestCase):
     def test_streaming_transformer_pickle_preserves_seq_log_density(self):

@@ -4,6 +4,7 @@ composition with the existing NeuralGaussian regression wrapper."""
 import unittest
 
 import numpy as np
+import pytest
 
 try:
     import torch
@@ -13,6 +14,7 @@ except ImportError:
     _HAS_TORCH = False
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class MakeMonotonicMlpTest(unittest.TestCase):
     def test_increasing_by_construction_at_random_init(self):

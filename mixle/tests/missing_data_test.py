@@ -11,6 +11,7 @@ import pickle
 import unittest
 
 import numpy as np
+import pytest
 
 _HAS_TORCH = importlib.util.find_spec("torch") is not None
 
@@ -168,6 +169,7 @@ class PplMissingTest(unittest.TestCase):
         with self.assertRaises(Exception):  # noqa: B017 -- the support check rejects NaN with a bare Exception
             Normal(free, free).fit(self._data())
 
+    @pytest.mark.torch
     @unittest.skipUnless(_HAS_TORCH, "full-Bayesian marginalization needs the torch autograd target")
     def test_full_bayesian_posterior_with_missing(self):
         # MAP/VI (and the samplers) marginalize NaNs through the autograd target -> posterior over the

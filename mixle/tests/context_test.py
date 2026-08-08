@@ -3,6 +3,8 @@
 import unittest
 from pathlib import Path
 
+import pytest
+
 from mixle.substrate import (
     ContextBudget,
     ContextPacket,
@@ -121,6 +123,7 @@ class BudgetTest(unittest.TestCase):
         self.assertEqual(pkt.used_chars, len(pkt.render()))
         self.assertLessEqual(pkt.used_chars, 80)
 
+    @pytest.mark.torch
     @unittest.skipUnless(_HAS_TORCH, "10 items crosses into semantic retrieval, which needs the represent embedder")
     def test_item_cap_is_honored(self):
         s = Substrate()
@@ -262,6 +265,7 @@ class CompressionTest(unittest.TestCase):
         self.assertLessEqual(len(out), 3)
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "semantic retrieval needs the represent embedder")
 class SemanticAssemblyTest(unittest.TestCase):
     def test_top_item_is_on_topic_and_budget_monotone(self):

@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 import numpy as np
+import pytest
 
 try:
     import torch  # noqa: F401
@@ -136,6 +137,7 @@ class OracleTimeoutAbandonmentTest(unittest.TestCase):
         self.assertIn("score_fn blew up", str(ctx.exception))
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "the BO proposal model needs torch")
 class DesignLoopTest(unittest.TestCase):
     def test_finds_the_target_and_returns_a_receipted_run(self):
@@ -529,6 +531,7 @@ class OracleBudgetAndCircuitBreakerTest(unittest.TestCase):
         self.assertEqual(run.history[-1].result.receipt["status"], "oracle_quarantined")
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "requires the real BayesianOptimizer (torch) proposal model")
 class AllAbstentionRunStillReportsTest(unittest.TestCase):
     """MXR-080-1488: an all-abstention run must still produce its audit report.

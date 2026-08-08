@@ -2,6 +2,8 @@
 
 import unittest
 
+import pytest
+
 from mixle.substrate import ContextBudget, Substrate, SubstrateItem, multihop
 from mixle.telemetry import Telemetry
 
@@ -95,6 +97,7 @@ class ChainTest(unittest.TestCase):
 
 
 class BudgetTest(unittest.TestCase):
+    @pytest.mark.torch
     @unittest.skipUnless(_HAS_TORCH, "30 items crosses into semantic retrieval, which needs the represent embedder")
     def test_max_items_caps_the_chain(self):
         s = Substrate()

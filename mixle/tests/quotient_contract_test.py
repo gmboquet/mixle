@@ -6,6 +6,7 @@ import pickle
 import unittest
 
 import numpy as np
+import pytest
 
 try:
     import torch
@@ -23,6 +24,7 @@ except ImportError:
     _HAS_TORCH = False
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class QuotientContractTest(unittest.TestCase):
     def test_module_is_importably_pickleable(self):

@@ -4,6 +4,7 @@ energy by construction (the symplectic gradient of a learned scalar H), not by p
 import unittest
 
 import numpy as np
+import pytest
 
 try:
     import torch
@@ -13,6 +14,7 @@ except ImportError:
     _HAS_TORCH = False
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class HamiltonianNetTest(unittest.TestCase):
     def test_conserves_energy_at_random_untrained_init(self):

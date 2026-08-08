@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import unittest
 
+import pytest
+
 try:
     import torch  # noqa: F401
 
@@ -63,6 +65,7 @@ class ReproducesKnownExponentsTest(unittest.TestCase):
         self.assertTrue(beta_lo - 0.02 <= CHINCHILLA_BETA <= beta_hi + 0.02)
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "allocate_compute fits a GaussianProcessRegressor (torch)")
 class AllocatorBeatsHeuristicTest(unittest.TestCase):
     def test_doe_allocator_beats_fixed_20to1_heuristic_at_matched_compute(self):
@@ -120,6 +123,7 @@ class UncertaintyReceiptsTest(unittest.TestCase):
         self.assertGreaterEqual(hits_beta, 6)
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "allocate_compute_learned fits a GaussianProcessRegressor (torch)")
 class LearnedAllocationControllerTest(unittest.TestCase):
     """Smoke test for the optional D5-pattern (mixle.inference.conditional_jit_controller)

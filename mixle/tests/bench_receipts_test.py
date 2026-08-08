@@ -88,6 +88,7 @@ class GradLeafVolumeScaleBenchmarkTest(unittest.TestCase):
         self.assertLess(elapsed, 65.0, "GradLeaf fit on 1e6x4 rows took %.3f s, floor is 65 s" % elapsed)
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH_ENGINE, "torch engine unavailable")
 class MixtureEStepEngineBenchmarkTest(unittest.TestCase):
     """Acceptance test A7-2: mixture E-step engine=torch vs engine=numpy, GPU only.

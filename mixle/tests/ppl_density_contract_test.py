@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 try:
     import torch  # noqa: F401
@@ -13,6 +14,7 @@ except ImportError:
     _HAS_TORCH = False
 
 
+@pytest.mark.torch
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class DensityContractTest(unittest.TestCase):
     def test_constructor_dimensions_and_training_controls_are_strict(self):

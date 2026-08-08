@@ -7,6 +7,7 @@ import unittest
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from mixle.data import model_hash
 from mixle.inference import optimize
@@ -122,6 +123,7 @@ class CheckpointChainTest(unittest.TestCase):
                 json.dump(payload, f)
             self.assertFalse(reg.verify_chain("run"))
 
+    @pytest.mark.torch
     @unittest.skipUnless(_HAS_TORCH, "torch not installed")
     def test_verify_chain_with_trust_code_true_verifies_a_neural_checkpoint(self):
         # A checkpoint whose model is a NeuralLeaf-family distribution embeds a pickle-backed torch
@@ -140,6 +142,7 @@ class CheckpointChainTest(unittest.TestCase):
 
             self.assertTrue(reg.verify_chain("chain", trust_code=True))
 
+    @pytest.mark.torch
     @unittest.skipUnless(_HAS_TORCH, "torch not installed")
     def test_verify_chain_without_trust_code_refuses_a_neural_checkpoint(self):
         # Same chain as above, but without the opt-in: verify_chain must not silently report True/False
