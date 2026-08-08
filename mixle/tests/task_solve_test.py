@@ -444,6 +444,10 @@ class AnsweredSliceMeasurementTest(unittest.TestCase):
         self.assertEqual(sol.sel_rows, len(sol.sel_inputs))
         self.assertLessEqual(sol.answered_sel_correct, sol.answered_sel_n)
         self.assertLessEqual(sol.answered_sel_n, sol.sel_rows)
+        # the two reported numbers derive from ONE gate over ONE row set: the stored escalation
+        # rate and the answered count must satisfy the exact identity (health()'s two-sample
+        # baseline reconstructs its counts from it, so drift there would corrupt the alarm)
+        self.assertAlmostEqual(sol.escalation_rate, (sol.sel_rows - sol.answered_sel_n) / sol.sel_rows, places=12)
 
         decisions = sol.cascade.model.batch_decide(list(sol.sel_inputs))
         answered = [(d, y) for d, y in zip(decisions, sol.sel_labels) if d is not ESCALATE]
