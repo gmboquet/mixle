@@ -169,7 +169,13 @@ class Cascade:
         return out
 
     def plan(self, *, volume: int, n_label: int, max_escalation: float | None = None) -> RoutePlan:
-        """Project the lowest-cost route at ``volume`` using the realized escalation rate."""
+        """Project the lowest-cost route at ``volume`` using the realized escalation rate.
+
+        This is a POINT projection, not a forecast with uncertainty: it prices every route at the
+        escalation rate realized on the traffic served so far and assumes that rate persists at
+        ``volume``. Distribution shift re-prices it silently -- re-measure on drifted traffic
+        before acting on a large-volume recommendation.
+        """
         if self.cost is None:
             raise RuntimeError("Cascade needs a CostModel to plan a route")
         return recommend_route(
