@@ -27,14 +27,14 @@ RULES OF THIS LEDGER (the repo's standing worklist discipline):
 | UQ-2 | `inference/uq.py` module docstring | "finite-sample coverage" claimed from a surface the claims gate never scanned; scope triad added and `mixle/inference` added to `COVERAGE_SURFACES` (negated-mention suppression added for `select.py`'s disclaimers, pinned by controls; manifest at 34 sites). |
 | GATE-5 | `calibration_gate.py` `CalibrationVerdict.score` | Docstring said "1 == at/below the calibrated-null level"; the formula gives 0.5 at the threshold. Docstring now states the actual mapping and warns against fixed-cutoff gating. |
 | FC-1 | `forecast.py` → `price_forecast.paths` → `analysis/valuation.py` NPV | `paths` had no true cross-step dependence (per-step marginal multinomial) plus a state-sorted ordering artifact (0.691 measured, −0.03 shuffled; the honest joint value at that start is ~0.70 — the artifact sat near it by coincidence, diverging elsewhere). Now forward-simulates genuine chain trajectories; per-step marginals unchanged in distribution; adverse test pins the empirical lag-1 correlation to the EXACT analytic joint value and rejects monotone (state-sorted) rows. |
+| NP-1 | `nonparametric.py` Wilcoxon | Exact enumeration null at n <= 25 with no zeros/ties (the SciPy/R regime switch): the extreme n=5 outcome now reports exactly 0.0625 and no attainable p sits below it, so the structural 6.25%-at-nominal-5% level violation is gone; continuity correction scoped to the normal branch; adverse test enumerates all 32 sign patterns. |
+| NP-3 | `nonparametric.py` ks_2samp | P-value delegated to scipy's two-sample method='auto' (exact small-sample, asymptotic large): separation at n=3 now reports the exact 0.1 instead of 0.0; large-sample values match scipy to 1e-9; module conventions sentence corrected (runs/Page carry no continuity correction). |
 | CAL-9 | `calibration.py` `pit_calibration_error` | Summary line said "mean absolute deviation"; the statistic is the SUM (2× total variation, range [0, 2(1−1/bins)]). Docstring corrected; interacts with `calibration_gate`'s `low_power_threshold=1.0`. |
 
 ## Confirmed, fix pending (reproduced in the main session)
 
 | ID | Site | Class | Finding |
 |----|------|-------|---------|
-| NP-1 | `nonparametric.py:414-417` Wilcoxon | a,d | Normal approximation with no exact branch: at n=5 the extreme outcome reports p=0.0431 (<0.05) while the exact p is 0.0625 → guaranteed 6.25% type-I at nominal 5% (same at n=6). Module claims "matching the conventions of SciPy / R"; both use exact nulls here. |
-| NP-3 | `nonparametric.py:209-211` ks_2samp | a | One-sample `kstwo` law evaluated at rounded n₁n₂/(n₁+n₂): complete separation at n=3 returns p=0.0 where the exact permutation p is 0.1. Comment calls it "finite-n". |
 | RS-1 | `resampling.py:231-245` m-out-of-n | a,e | Percentile orientation applied to Politis–Romano-rescaled replicates is the REFLECTION of the correct (basic) interval: sample-max example has ci_high == sample max < θ, coverage exactly 0. √n rate also hardwired (comment admits it; docstring does not). |
 | RS-9 | `resampling.py:209-231` m == n | a | `m == n` permutes the full sample without replacement: every replicate equals the estimate; returns a zero-width "95% CI" (measured width 5.6e-17) silently. |
 
