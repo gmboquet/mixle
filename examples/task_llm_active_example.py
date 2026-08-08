@@ -5,9 +5,10 @@ The two differentiators in one run:
   * the teacher is an **LLM** (here a local ``CallableLLM``; swap in ``OpenAICompatLLM(base_url, model)``
     to use Ollama / vLLM / a hosted endpoint unchanged);
   * **active labeling** (DoE applied to the labeling decision) queries that LLM only for the most
-    informative examples. The comparison below is a SAME-BUDGET one -- both policies spend exactly the
-    same number of paid calls, and the measured quantity is held-out agreement with this synthetic
-    deterministic teacher, compared as a paired difference with its uncertainty. (A labels-to-target
+    informative examples. The comparison below is a SAME-TRAINING-BUDGET one -- both policies spend
+    exactly the same number of paid training calls (the shared evaluation labels are paid too, and
+    counted) -- and the measured quantity is held-out agreement with this synthetic deterministic
+    teacher, decided by the EXACT paired test on the discordant pairs. (A labels-to-target
     curve -- how many calls each policy needs to REACH a fixed quality -- is a different experiment;
     the EIG/BALD curve in ``label_economics_demo.py`` is the acquisition-level version of it.)
 
@@ -51,6 +52,24 @@ def pool(seed, n_per_class=300):
     return out
 
 
+def exact_paired_pvalue(first_only: int, second_only: int) -> float:
+    """Exact two-sided paired (McNemar) p-value from the two discordant-pair counts.
+
+    Under the null of equal policies, each discordant pair favors either side with probability
+    one half, so the p-value is the two-sided binomial tail at 0.5 over the discordances. This
+    is the example's CONCLUSION RULE: it stays valid at any discordance count, including the
+    tiny ones where a Wald interval on the paired mean is unreliable.
+    """
+    n = first_only + second_only
+    if n == 0:
+        return 1.0
+    k = max(first_only, second_only)
+    from math import comb
+
+    tail = sum(comb(n, i) for i in range(k, n + 1)) / 2.0**n
+    return float(min(1.0, 2.0 * tail))
+
+
 def local_llm(prompt, system=None):
     """Deterministic local teacher with the same callable shape as an LLM endpoint."""
     text = prompt.split("Text:", 1)[-1].lower()
@@ -63,32 +82,39 @@ def main() -> None:
     recipe = {"n": 4, "dim": 512, "hidden": [64], "epochs": 200, "lr": 1e-2}
 
     p, val = pool(1), pool(seed=900)[:300]
-    truth = teacher(val)
+    truth = teacher(val)  # 300 evaluation labels: PAID teacher calls, shared by both policies
 
     budget = 60
-    print(f"label budget: {budget} LLM calls per policy (out of {len(p)} unlabeled)")
+    print(f"training-label budget: {budget} LLM calls per policy (out of {len(p)} unlabeled)")
+    print(f"shared evaluation labels: {len(val)} LLM calls (paid; score both students, train neither)")
+    print(f"total teacher calls before serving: {2 * budget + len(val)}")
     active = active_distill(teacher, p, budget=budget, seed_size=20, rounds=4, acquisition="margin", recipe=recipe)
     rand = active_distill(teacher, p, budget=budget, seed_size=20, rounds=4, acquisition="random", recipe=recipe)
     # The ESTIMAND, stated before the numbers: each realized student's agreement with the
-    # deterministic teacher over the synthetic pool() population, compared at the SAME paid-call
-    # budget. Both students predict the SAME 300 fresh validation rows (drawn independently of
-    # both fits), so conditional on the two fits the per-row paired differences are i.i.d. and
-    # give a valid 95% interval for the agreement difference. "Agreement", not "accuracy": the
-    # teacher is the reference, and the data are synthetic.
+    # deterministic teacher over the synthetic pool() population, compared at the SAME
+    # training-label budget, conditional on the two fitted students. Both students predict the
+    # SAME 300 fresh validation rows. The decision rule is the EXACT paired (McNemar) test on
+    # the discordant pairs -- a normal-approximation interval is unreliable exactly where this
+    # comparison lives (an external review measured a Wald gate declaring superiority at four
+    # discordant pairs, where the exact two-sided p-value is 0.125). "Agreement", not
+    # "accuracy": the teacher is the reference, and the data are synthetic.
     active_hits = np.asarray([a == b for a, b in zip(active.model.batch(val), truth)], dtype=np.float64)
     random_hits = np.asarray([a == b for a, b in zip(rand.model.batch(val), truth)], dtype=np.float64)
-    paired = active_hits - random_hits
-    difference = float(paired.mean())
-    standard_error = float(paired.std(ddof=1) / np.sqrt(len(paired))) if len(paired) > 1 else float("inf")
-    low, high = difference - 1.96 * standard_error, difference + 1.96 * standard_error
+    active_only = int(np.sum((active_hits == 1.0) & (random_hits == 0.0)))
+    random_only = int(np.sum((random_hits == 1.0) & (active_hits == 0.0)))
+    p_exact = exact_paired_pvalue(active_only, random_only)
     print(f"   active labeling : {active_hits.mean():.3f} held-out teacher agreement ({active.labels_used} labels)")
     print(f"   random labeling : {random_hits.mean():.3f} held-out teacher agreement ({rand.labels_used} labels)")
-    print(f"   paired difference {difference:+.3f}, 95% CI [{low:+.3f}, {high:+.3f}] at the same budget")
-    if low > 0.0:
-        print("   -> active labeling measurably beats random AT THE SAME BUDGET on this population")
+    print(
+        f"   discordant pairs: {active_only} active-only vs {random_only} random-only; "
+        f"exact paired two-sided p = {p_exact:.3f}"
+    )
+    if p_exact < 0.05:
+        print("   -> active labeling beats random AT THE SAME TRAINING BUDGET on this population")
+        print("      (exact paired evidence at the 5% level)")
     else:
-        print("   -> no measurable difference at this budget and sample size; active did not pay for")
-        print("      itself here, and no fewer-calls claim is made")
+        print("   -> the exact paired evidence is INCONCLUSIVE at the 5% level on this run: too few")
+        print("      disagreements to distinguish the policies; no superiority claim is made")
 
     print("\nwrap the active student in a calibrated cascade and serve")
     cal = pool(seed=2)

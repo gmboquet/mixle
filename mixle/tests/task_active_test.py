@@ -46,6 +46,39 @@ def teacher(texts):
 RECIPE = {"n": 4, "dim": 512, "hidden": [64], "epochs": 200, "lr": 1e-2}
 
 
+class ExactPairedConclusionRuleTest(unittest.TestCase):
+    """The examples' conclusion rule itself, exercised where Wald gates fail (STAT-RR16-1).
+
+    Four discordant pairs all favoring one side is exactly the boundary the review measured: the
+    Wald interval's lower endpoint goes positive while the exact two-sided paired p-value is
+    0.125 -- no rejection at 5%. The rule must stay exact at any discordance count.
+    """
+
+    @staticmethod
+    def _rule():
+        import importlib.util
+        from pathlib import Path
+
+        examples = Path(__file__).resolve().parents[2] / "examples"
+        spec = importlib.util.spec_from_file_location("_active_example", examples / "task_llm_active_example.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.exact_paired_pvalue
+
+    def test_small_discordance_does_not_reject(self):
+        rule = self._rule()
+        self.assertAlmostEqual(rule(4, 0), 0.125, places=12)  # the review's exact case
+        self.assertGreaterEqual(rule(4, 0), 0.05)  # no superiority claim at four discordances
+        self.assertEqual(rule(0, 0), 1.0)
+        self.assertAlmostEqual(rule(3, 1), 0.625, places=12)
+
+    def test_large_onesided_discordance_rejects_and_is_symmetric(self):
+        rule = self._rule()
+        self.assertLess(rule(15, 1), 0.05)
+        self.assertEqual(rule(4, 0), rule(0, 4))
+        self.assertLessEqual(rule(30, 13), 1.0)
+
+
 class AcquisitionTest(unittest.TestCase):
     def test_scores_rank_uncertain_higher(self):
         train = pool(1)

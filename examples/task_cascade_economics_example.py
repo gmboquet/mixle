@@ -10,7 +10,9 @@ for?" This runs the full mixle.task spine end to end:
   4. report realized dollars saved vs paying the frontier for every request;
   5. harvest the escalated items (free targeted labels), re-distill, and test "the cascade got
      cheaper with use" as a PAIRED comparison: both fixed cascades decide the same fresh
-     requests, and the conclusion is gated on a 95% interval for the paired difference.
+     requests, and the conclusion is gated on the EXACT paired (McNemar) test over the
+     discordant requests -- valid at any discordance count, with the Wald width shown only
+     as a descriptive companion.
      (Comparing round 1's serving rate against round 2's would be invalid: round 2 is trained
      on escalations harvested FROM round 1's traffic, so those two rate estimates are coupled
      through the training data, and a two-independent-proportions interval does not apply.)
@@ -38,6 +40,18 @@ from mixle.task import (
 SPAM = ["free", "winner", "prize", "buy", "cheap", "offer", "click"]
 HAM = ["meeting", "lunch", "project", "report", "schedule", "team", "review"]
 FILLER = ["the", "a", "today", "tomorrow", "please", "thanks", "we", "you"]
+
+
+def exact_paired_pvalue(first_only: int, second_only: int) -> float:
+    """Exact two-sided paired (McNemar) p-value from the two discordant counts."""
+    n = first_only + second_only
+    if n == 0:
+        return 1.0
+    k = max(first_only, second_only)
+    from math import comb
+
+    tail = sum(comb(n, i) for i in range(k, n + 1)) / 2.0**n
+    return float(min(1.0, 2.0 * tail))
 
 
 def corpus(seed: int, n_per_class: int = 150) -> list[str]:
@@ -95,26 +109,38 @@ def main() -> None:
     # so round 1's serving rate and round 2's rate are coupled through that shared sample and a
     # two-independent-proportions interval would rest on a false premise. Instead, both FIXED
     # cascades decide the same evaluation requests -- traffic no fitting step ever saw -- and,
-    # conditional on the two fits, the per-request paired differences are i.i.d., giving a valid
-    # normal-approximation 95% interval for the mean difference.
+    # conditional on the two fits, the per-request paired differences are i.i.d.; the DECISION
+    # below uses the exact paired test on the discordant requests.
     evaluation = corpus(seed=901)
     escalated_1 = np.asarray([d is ESCALATE for d in casc.model.batch_decide(evaluation)], dtype=np.float64)
     escalated_2 = np.asarray([d is ESCALATE for d in casc2.model.batch_decide(evaluation)], dtype=np.float64)
     paired = escalated_1 - escalated_2
     difference = float(paired.mean())
+    # The conclusion rule is the EXACT paired (McNemar) test on the discordant requests: it stays
+    # valid at any discordance count, where a normal-approximation interval fails exactly in the
+    # small-discordance runs (an external review measured a Wald gate declaring a difference at
+    # four discordant pairs in a sibling example, where the exact p-value is 0.125). The Wald
+    # interval is still printed as a descriptive width alongside the exact decision.
+    only_1 = int(np.sum((escalated_1 == 1.0) & (escalated_2 == 0.0)))
+    only_2 = int(np.sum((escalated_2 == 1.0) & (escalated_1 == 0.0)))
+    p_exact = exact_paired_pvalue(only_1, only_2)
     standard_error = float(paired.std(ddof=1) / np.sqrt(len(paired)))
     low, high = difference - 1.96 * standard_error, difference + 1.96 * standard_error
     print(
         f"   on {len(evaluation)} fresh paired requests: round-1 escalates {escalated_1.mean():.1%}, "
         f"round-2 {escalated_2.mean():.1%}"
     )
-    print(f"   paired difference {difference:+.1%}, 95% CI [{low:+.1%}, {high:+.1%}]")
-    if low > 0.0:
+    print(f"   paired difference {difference:+.1%} (descriptive 95% width [{low:+.1%}, {high:+.1%}])")
+    print(
+        f"   discordant requests: {only_1} round-1-only vs {only_2} round-2-only; "
+        f"exact paired two-sided p = {p_exact:.4f}"
+    )
+    if p_exact < 0.05 and difference > 0.0:
         print("   -> the re-distilled cascade escalates less on identical traffic: it measurably")
-        print("      got cheaper with use")
+        print("      got cheaper with use (exact paired evidence at the 5% level)")
     else:
-        print("   -> consistent with no change at this sample size; serve more traffic before")
-        print("      claiming it got cheaper")
+        print("   -> the exact paired evidence is inconclusive at the 5% level; serve more traffic")
+        print("      before claiming it got cheaper")
 
     print("\nserve round 2 on the fresh traffic and project the cheapest route at 1,000,000 requests")
     casc2.serve(evaluation)
@@ -124,6 +150,8 @@ def main() -> None:
         f"   recommended: {plan.route}  per-request ${plan.per_request:.5f}  "
         f"saves ${plan.savings_vs_frontier:,.0f} vs frontier-only"
     )
+    print("   (a POINT projection at this run's realized escalation rate; it assumes the served mix")
+    print("    stays exchangeable with this traffic -- drift re-prices it, so re-measure before acting)")
 
 
 if __name__ == "__main__":
