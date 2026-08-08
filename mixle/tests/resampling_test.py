@@ -246,3 +246,27 @@ class PermutationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SubsamplingOrientationTest(unittest.TestCase):
+    """Audit RS-1/RS-9: m-out-of-n takes the pivotal orientation and refuses m == n."""
+
+    def test_m_equal_n_is_refused(self):
+        # m == n is a permutation: every replicate equals the estimate and the "interval" has
+        # width zero -- a silent 0%-coverage CI (measured width 5.6e-17 before the refusal)
+        with self.assertRaisesRegex(ValueError, "m < n"):
+            bootstrap(np.random.RandomState(0).randn(50), np.mean, m=50)
+
+    def test_subsampling_interval_is_pivotal_not_percentile(self):
+        # canonical U(0, theta) sample-max: every subsample max sits at or below the full-sample
+        # max, so the PERCENTILE upper endpoint equals the sample max < theta almost surely --
+        # coverage exactly zero. The basic (pivotal) orientation reflects through the estimate,
+        # so the upper endpoint must exceed the sample max and cover theta here.
+        x = np.random.RandomState(1).uniform(0.0, 1.0, 400)
+        res = bootstrap(x, np.max, m=60, n_boot=400, seed=7)
+        self.assertGreater(res.ci_high, float(np.max(x)))
+        self.assertLessEqual(res.ci_low, 1.0)
+        self.assertGreaterEqual(res.ci_high, 1.0)
+        # the caller cannot opt back into the reflected orientation in m-mode
+        again = bootstrap(x, np.max, m=60, n_boot=400, seed=7, method="percentile")
+        self.assertEqual((res.ci_low, res.ci_high), (again.ci_low, again.ci_high))

@@ -186,9 +186,11 @@ def bootstrap(
         groups: ``(n,)`` labels for **stratified** resampling (resample within each group).
         clusters: ``(n,)`` labels for **cluster** resampling (resample whole clusters with replacement).
         block_length: moving-**block** length for serially dependent (time-series) data.
-        m: subsample size for **m-out-of-n** subsampling (without replacement). Replicates are
-            rescaled about the point estimate by ``sqrt(m/n)`` (Politis--Romano), so the returned
-            distribution / interval / standard error are at full-sample scale.
+        m: subsample size for **m-out-of-n** subsampling (without replacement), ``m < n``.
+            Replicates are rescaled about the point estimate by ``sqrt(m/n)`` (Politis--Romano),
+            which assumes the usual ``sqrt(n)``-consistent statistic (a faster-rate statistic
+            gets a conservative interval), and the interval takes the BASIC (pivotal)
+            orientation that subsampling theory yields -- ``method`` is overridden in this mode.
 
     Returns:
         A :class:`BootstrapResult`.
@@ -206,8 +208,12 @@ def bootstrap(
             raise ValueError("block_length must be in [1, n]")
     if m is not None:
         m = _integer_control("m", m, minimum=1)
-        if m > n:
-            raise ValueError("m must be in [1, n]")
+        if m >= n:
+            # m == n draws a without-replacement PERMUTATION of the full sample, so every
+            # replicate of a permutation-invariant statistic equals the estimate exactly and the
+            # returned "interval" has width zero -- a silent 0%-coverage confidence interval
+            # (audit RS-9). Subsampling needs a genuinely smaller m.
+            raise ValueError("m-out-of-n subsampling needs m < n; at m == n every replicate equals the estimate")
     if groups is not None:
         groups = _labels("groups", groups, n)
     if clusters is not None:
@@ -228,14 +234,23 @@ def bootstrap(
     for b in range(n_boot):
         idx = _resample_indices(n, rng, groups=groups, clusters=clusters, block_length=block_length, m=m)
         reps[b] = _call(statistic, _take(data, idx))
-    if m is not None and m < n:
+    if m is not None:
         # Politis-Romano m-out-of-n rescaling: a size-m subsample statistic fluctuates at the
         # sqrt(m) rate, so shrink the replicates about the point estimate by sqrt(m/n) to put
-        # them at full-sample scale (assumes the usual sqrt(n)-consistent statistic).
+        # them at full-sample scale (assumes the usual sqrt(n)-consistent statistic; a faster
+        # rate needs a custom rescale and this interval is conservative for it).
         reps = estimate + np.sqrt(m / n) * (reps - estimate)
 
     alpha = 1.0 - ci_level
-    if method == "bca" and special:
+    if m is not None:
+        # Subsampling theory approximates the law of (theta_hat_n - theta) by the law of
+        # (theta_hat_m - theta_hat_n), which yields the BASIC (pivotal) orientation:
+        # [2*est - Q_hi, 2*est - Q_lo]. The percentile orientation is its REFLECTION and agrees
+        # only for symmetric limit laws -- subsampling exists for the asymmetric ones, and on
+        # the canonical U(0, theta) sample-max example the percentile upper endpoint equals the
+        # sample max, which sits below theta almost surely: coverage exactly zero (audit RS-1).
+        method_used = "basic"
+    elif method == "bca" and special:
         method_used = "percentile"
     else:
         method_used = method
