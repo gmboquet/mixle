@@ -8,7 +8,11 @@ quantities needed for downstream checks.
     sample fitted models and get an explicitly approximate parameter interval.
   * a torch module / any point predictor callable over arrays -> split-conformal calibration from a
     held-out ``(X, y)``; ``interval(x)`` returns a prediction interval with finite-sample coverage.
-    Give a LIST of predictors instead and it becomes a deep ensemble (epistemic spread + conformal).
+    Scope of that statement: the ``1 - alpha`` coverage is MARGINAL over the calibration draw and
+    the query jointly, under exchangeability of the calibration rows and incoming queries; it is
+    not a per-query statement, and distribution shift voids it silently -- re-calibrate on drifted
+    traffic. Give a LIST of predictors instead and it becomes a deep ensemble (epistemic spread +
+    conformal).
   * an LLM-style callable over prompts (returns a string, or samples of strings) -> semantic entropy
     over meaning classes; ``confident(prompt)`` abstains when the model disagrees with itself.
 
@@ -239,7 +243,13 @@ def _uq_point(predictor: Any, data: Any, alpha: float) -> UQResult:
             "cal_y": cal_y,
             "qhat": qhat,
             "alpha": alpha,
-            "coverage_cal": float(np.mean((cal_y >= cal_pred - qhat) & (cal_y <= cal_pred + qhat))),
+            # IN-SAMPLE by construction: this is the band's hit rate on the very rows whose
+            # residual quantile set qhat, so it is >= 1 - alpha mechanically and is NOT evidence
+            # of serving coverage (the MXR-080-1891 class); it is kept only as a sanity receipt
+            # that the band was assembled correctly. Measure real coverage on disjoint rows.
+            "coverage_cal_in_sample_mechanical": float(
+                np.mean((cal_y >= cal_pred - qhat) & (cal_y <= cal_pred + qhat))
+            ),
         },
     )
 

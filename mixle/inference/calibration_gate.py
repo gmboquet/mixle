@@ -114,8 +114,11 @@ class CalibrationVerdict:
 
     @property
     def score(self) -> float:
-        """A 0..1 calibration score (1 == at/below the calibrated-null level), for callers that rank
-        rather than gate. Normalized by the null threshold so it's comparable across sample sizes."""
+        """A 0..1 ranking score: 1 at zero PIT error, 0.5 exactly AT the calibrated-null threshold,
+        0 at twice the threshold, linear in between. Normalized by the null threshold so it is
+        comparable across sample sizes. It is NOT 1 for every passing posterior -- a genuinely
+        calibrated posterior typically lands around 0.6-0.7, so rank with it, never gate on a
+        fixed cutoff like 0.9 (use ``calibration_status`` to gate)."""
         if self.null_threshold <= 0:
             return 1.0 if self.pit_error == 0 else 0.0
         return float(max(0.0, 1.0 - self.pit_error / (2.0 * self.null_threshold)))

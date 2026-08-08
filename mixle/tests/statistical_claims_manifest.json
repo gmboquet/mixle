@@ -34,6 +34,12 @@
     "examples/task_llm_active_example.py": [
       "comparative"
     ],
+    "mixle/inference/conformal.py": [
+      "coverage"
+    ],
+    "mixle/inference/uq.py": [
+      "coverage"
+    ],
     "mixle/reason/language_bridge.py": [
       "certification"
     ],

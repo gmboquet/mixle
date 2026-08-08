@@ -46,8 +46,9 @@ ROOT = _HERE.parent
 MANIFEST = ROOT / "mixle" / "tests" / "statistical_claims_manifest.json"
 
 # Surfaces whose text is user-facing claim material. API autodoc pages render source docstrings,
-# which are audited at the source, so docs/api is excluded.
-COVERAGE_SURFACES = ("examples", "docs", "mixle/task", "mixle/reason")
+# which are audited at the source, so docs/api is excluded. mixle/inference joined after a sweep
+# found uq.py claiming finite-sample coverage from an unscanned surface.
+COVERAGE_SURFACES = ("examples", "docs", "mixle/task", "mixle/reason", "mixle/inference")
 COMPARATIVE_SURFACES = ("examples", "mixle/tests")
 
 # A claim LINE is explicit on its own: coverage coupled with guarantee/probability/contract
@@ -66,6 +67,14 @@ _SCOPE_TOKENS = (
     re.compile(r"marginal", re.IGNORECASE),
     re.compile(r"exchangeab", re.IGNORECASE),
     re.compile(r"shift", re.IGNORECASE),
+)
+# A negated mention is a DISCLAIMER, not a claim ("this is a ranking diagnostic, not a conformal
+# or bootstrap coverage guarantee") -- requiring the scope triad there would force scope prose
+# onto text whose whole point is that no guarantee exists. Suppression is line-local and pinned
+# by the contract test's controls.
+_NEGATED_COVERAGE = re.compile(
+    r"\b(no|not|never|cannot|without( a| any)?|isn'?t|is not)\b[^.\n]{0,80}coverage\s+(guarantee|contract)",
+    re.IGNORECASE,
 )
 
 _COMPARATIVE_CLAIM = re.compile(
@@ -149,7 +158,18 @@ def scan(root: Path | None = None) -> dict:
 
     for path in _files(COVERAGE_SURFACES):
         text = path.read_text(encoding="utf-8", errors="replace")
-        if not _COVERAGE_CLAIM.search(text):
+        lines = text.splitlines()
+        claim_lines = []
+        for i, line in enumerate(lines):
+            if not _COVERAGE_CLAIM.search(line):
+                continue
+            # docstring prose wraps mid-sentence, so the negation may sit at the END of the
+            # previous line ("... is a ranking diagnostic, not a\nconformal or bootstrap
+            # coverage guarantee"); judge negation over the wrapped sentence fragment
+            context = (lines[i - 1][-80:] + " " + line) if i else line
+            if not _NEGATED_COVERAGE.search(context):
+                claim_lines.append(line)
+        if not claim_lines:
             continue
         rel = path.relative_to(ROOT).as_posix()
         missing = [token.pattern for token in _SCOPE_TOKENS if not token.search(text)]

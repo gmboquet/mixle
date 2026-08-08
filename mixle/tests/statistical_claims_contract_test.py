@@ -60,6 +60,16 @@ def test_detector_negative_and_positive_controls() -> None:
         assert scanner._COVERAGE_CLAIM.search(text), text
     for text in must_not_match_coverage:
         assert not scanner._COVERAGE_CLAIM.search(text), text
+    # negated mentions are DISCLAIMERS, suppressed line-locally (with the previous line's tail in
+    # scope for wrapped sentences); a disclaimer must never be forced to carry the scope triad
+    negated_coverage = (
+        "This is a ranking diagnostic, not a conformal or bootstrap coverage guarantee.",
+        "one verifier score cannot establish a coverage guarantee",
+        "carries no coverage contract of any kind",
+    )
+    for text in negated_coverage:
+        assert scanner._NEGATED_COVERAGE.search(text), text
+    assert not scanner._NEGATED_COVERAGE.search("the set carries a finite-sample coverage guarantee")
 
     must_match_comparative = (
         "reaches the same student quality as random labeling for far fewer paid calls",

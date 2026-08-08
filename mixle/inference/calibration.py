@@ -381,10 +381,12 @@ def pit_histogram(pit: np.ndarray, *, bins: int = 10) -> dict[str, np.ndarray]:
 
 
 def pit_calibration_error(pit: np.ndarray, *, bins: int = 10) -> float:
-    """Calibration error of a PIT histogram: mean absolute deviation from uniform mass.
+    """Calibration error of a PIT histogram: TOTAL absolute deviation from uniform mass.
 
-    ``sum_b |count_b/n - 1/bins|`` -- 0 when the PIT histogram is perfectly flat (calibrated), larger
-    when it is U-shaped (under-dispersed) or humped (over-dispersed).
+    ``sum_b |count_b/n - 1/bins|`` -- the SUM over bins (twice the total-variation distance to
+    uniform, range ``[0, 2(1 - 1/bins)]``), not a per-bin mean: a threshold sized for a mean
+    would be off by a factor of ``bins``. 0 when the PIT histogram is perfectly flat
+    (calibrated), larger when it is U-shaped (under-dispersed) or humped (over-dispersed).
     """
     u = _pit_vector(pit)
     bins = _positive_int("bins", bins)
