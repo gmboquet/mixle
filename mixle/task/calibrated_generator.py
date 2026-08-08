@@ -351,6 +351,14 @@ class CalibratedGenerator:
         metered or side-effecting oracle is not spent on rows that cannot reach the
         bound (MXR-080-1849). If no nonempty accepted subset certifies risk
         ``<= alpha``, the threshold is ``+inf`` and serving abstains everywhere.
+
+        Scope of the certificate: assuming the calibration prompts and future queries are
+        i.i.d. draws from the same distribution, with probability at least ``confidence``
+        over the calibration draw, the TRUE accepted-slice error at the deployed threshold
+        is ``<= alpha`` (the per-threshold binomial bounds are Bonferroni-corrected across
+        the proposal family, so the selection of the loosest passing threshold stays
+        covered). Distribution shift voids the statement silently; re-certify on drifted
+        traffic.
         """
         if not callable(is_correct):
             raise TypeError("is_correct must be callable")

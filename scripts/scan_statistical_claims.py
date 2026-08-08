@@ -10,7 +10,7 @@ that new files entering those classes get a human audit (the manifest is the rev
 that audit). Its coverage grows by widening the phrase classes; the negative controls in the
 contract test pin what each class does and does not match.
 
-The three enforced classes:
+The four enforced classes:
 
 * COVERAGE (conformal coverage-guarantee phrasing in examples/docs/task/reason surfaces): the
   same file must state the scope triad -- MARGINAL, EXCHANGEABILITY assumed, SHIFT voids;
@@ -18,7 +18,10 @@ The three enforced classes:
   same file must carry uncertainty-or-reduced wording (paired/interval/estimand/exact-test/
   "not an uncertainty-quantified" disclosure);
 * COMPETITIVE (named-rival and gap-closing phrasing in examples): the same file must disclose
-  its measurement conditions (versions/this-run/if-installed language).
+  its measurement conditions (versions/this-run/if-installed language);
+* CERTIFICATION (selective-risk / accepted-error guarantee phrasing in task/reason/docs/example
+  surfaces): the same file must state the sampling premise (i.i.d./exchangeability), the failure
+  probability over the calibration draw, and the shift voiding.
 
 The manifest (``mixle/tests/statistical_claims_manifest.json``) is the reviewed inventory of
 files currently in these classes. The contract test fails when a NEW file enters a class
@@ -80,6 +83,26 @@ _UNCERTAINTY_TOKENS = re.compile(
     r"|exact (paired|two-sided|test|p-value)|mcnemar|\bse\b|elpd_se|d_elpd",
     re.IGNORECASE,
 )
+
+# CERTIFICATION claims advertise a finite-sample selective-risk / accepted-error guarantee; the
+# file must state the sampling premise (i.i.d./exchangeability), the failure probability over
+# the calibration draw, and the shift voiding. The verb-object shape (certify + its risk object)
+# keeps ledger-provenance narration ("reloaded an uncertified threshold as certified", "which
+# rows certified the CURRENT conformal threshold") out of scope -- those describe bookkeeping,
+# not a guarantee offered to the caller.
+_CERTIFICATION_CLAIM = re.compile(
+    r"certif(y|ies|ied|ication)\s+(a |the |an )?[^.\n]{0,30}(risk|selective|accepted-error)"
+    r"|selective[- ]risk[^.\n]{0,50}(gate|threshold|control|<=|at most)"
+    r"|\(alpha, delta\)-PAC"
+    r"|risk control\b",
+    re.IGNORECASE,
+)
+_CERTIFICATION_TOKENS = (
+    re.compile(r"i\.i\.d|\biid\b|exchangeab", re.IGNORECASE),
+    re.compile(r"\bdelta\b|probability at least|with probability", re.IGNORECASE),
+    re.compile(r"shift|drift|same distribution|deployment distribution", re.IGNORECASE),
+)
+CERTIFICATION_SURFACES = ("mixle/task", "mixle/reason", "docs", "examples")
 
 # COMPETITIVE claims name a rival library or a closed gap; the file must disclose its
 # measurement conditions (versions, this-run language, if-installed hedges).
@@ -158,6 +181,17 @@ def scan(root: Path | None = None) -> dict:
             entry["violations"].append(
                 "competitive claim without measurement-conditions disclosure (versions/this-run/if-installed)"
             )
+
+    for path in _files(CERTIFICATION_SURFACES):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if not _CERTIFICATION_CLAIM.search(text):
+            continue
+        rel = path.relative_to(ROOT).as_posix()
+        missing = [token.pattern for token in _CERTIFICATION_TOKENS if not token.search(text)]
+        entry = sites.setdefault(rel, {"classes": [], "violations": []})
+        entry["classes"].append("certification")
+        if missing:
+            entry["violations"].append(f"certification claim without scope tokens: missing {missing}")
 
     return dict(sorted(sites.items()))
 

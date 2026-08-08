@@ -381,6 +381,12 @@ class PosteriorDescriber:
         proposes a top-score threshold on one split and certifies the accepted
         interval-error rate on an independent split; it does not treat the
         prompt-specific interval candidates as a fixed conformal label space.
+
+        Scope of the certificate (it is :meth:`CalibratedGenerator.calibrate`'s):
+        assuming the calibration pairs and future posteriors are i.i.d. draws
+        from the same distribution, it holds with probability at least the
+        underlying gate's ``confidence`` over the calibration draw; distribution
+        shift voids it silently, so re-calibrate on drifted traffic.
         """
         calibration_set = list(calibration_set)
         posteriors = [p for p, _ in calibration_set]

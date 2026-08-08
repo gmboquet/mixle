@@ -1,6 +1,9 @@
 {
   "_comment": "Reviewed inventory of user-facing statistical-claim sites. A new entry means a new claim surface: audit its scope, then regenerate with python scripts/scan_statistical_claims.py --write. The contract test refuses un-inventoried claim sites and inventoried sites whose scope tokens disappear.",
   "sites": {
+    "docs/bring_your_own_model.rst": [
+      "certification"
+    ],
     "docs/inference-toolkit.rst": [
       "coverage"
     ],
@@ -9,6 +12,9 @@
     ],
     "docs/task-serving.rst": [
       "coverage"
+    ],
+    "examples/calibrated_report_demo.py": [
+      "certification"
     ],
     "examples/heterogeneous_correctness_example.py": [
       "competitive"
@@ -28,6 +34,12 @@
     "examples/task_llm_active_example.py": [
       "comparative"
     ],
+    "mixle/reason/language_bridge.py": [
+      "certification"
+    ],
+    "mixle/reason/llm.py": [
+      "certification"
+    ],
     "mixle/reason/model.py": [
       "coverage"
     ],
@@ -35,7 +47,11 @@
       "coverage"
     ],
     "mixle/task/calibrate.py": [
+      "certification",
       "coverage"
+    ],
+    "mixle/task/calibrated_generator.py": [
+      "certification"
     ],
     "mixle/task/distill.py": [
       "coverage"

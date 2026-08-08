@@ -155,7 +155,11 @@ def build_shape_gate(cal_records: list[tuple[float, ...]], *, alpha: float = 0.1
 
     The top-scored candidate is served only when its calibrated score margin
     clears the independently certified accepted-error threshold; otherwise the
-    report records :data:`ABSTAIN`.
+    report records :data:`ABSTAIN`. Scope: the certificate assumes the
+    calibration records and future volumes are i.i.d. draws from the same
+    distribution, and holds with probability at least the gate's ``confidence``
+    over the calibration draw; distribution shift voids it silently, so
+    re-certify on drifted traffic.
     """
 
     def is_correct(record: tuple[float, ...], candidate: tuple[tuple[float, ...], str]) -> bool:

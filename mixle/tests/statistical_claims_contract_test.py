@@ -91,6 +91,26 @@ def test_detector_negative_and_positive_controls() -> None:
     for text in must_not_match_competitive:
         assert not scanner._COMPETITIVE_CLAIM.search(text), text
 
+    must_match_certification = (
+        "certify a held-out accepted-error threshold",
+        "serve the best under a certified selective-risk gate",
+        "no nonempty accepted subset certifies risk <= alpha",
+        "a finite-sample (alpha, delta)-PAC guarantee",
+        "this is selective classification / risk control",
+        "the selective-risk threshold from held-out pairs",
+    )
+    # ledger-provenance narration describes bookkeeping, never a guarantee offered to a caller
+    must_not_match_certification = (
+        "reloaded an uncertified threshold as certified",
+        "which rows certified the CURRENT conformal threshold",
+        "kept serving was serving an uncertified threshold, with nothing in the object saying so",
+        "the certificate authority rotated its keys",
+    )
+    for text in must_match_certification:
+        assert scanner._CERTIFICATION_CLAIM.search(text), text
+    for text in must_not_match_certification:
+        assert not scanner._CERTIFICATION_CLAIM.search(text), text
+
 
 def test_claim_sites_match_the_reviewed_inventory() -> None:
     scanner = _load_scanner()
