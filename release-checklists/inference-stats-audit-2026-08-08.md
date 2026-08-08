@@ -29,14 +29,13 @@ RULES OF THIS LEDGER (the repo's standing worklist discipline):
 | FC-1 | `forecast.py` → `price_forecast.paths` → `analysis/valuation.py` NPV | `paths` had no true cross-step dependence (per-step marginal multinomial) plus a state-sorted ordering artifact (0.691 measured, −0.03 shuffled; the honest joint value at that start is ~0.70 — the artifact sat near it by coincidence, diverging elsewhere). Now forward-simulates genuine chain trajectories; per-step marginals unchanged in distribution; adverse test pins the empirical lag-1 correlation to the EXACT analytic joint value and rejects monotone (state-sorted) rows. |
 | NP-1 | `nonparametric.py` Wilcoxon | Exact enumeration null at n <= 25 with no zeros/ties (the SciPy/R regime switch): the extreme n=5 outcome now reports exactly 0.0625 and no attainable p sits below it, so the structural 6.25%-at-nominal-5% level violation is gone; continuity correction scoped to the normal branch; adverse test enumerates all 32 sign patterns. |
 | NP-3 | `nonparametric.py` ks_2samp | P-value delegated to scipy's two-sample method='auto' (exact small-sample, asymptotic large): separation at n=3 now reports the exact 0.1 instead of 0.0; large-sample values match scipy to 1e-9; module conventions sentence corrected (runs/Page carry no continuity correction). |
+| RS-1 | `resampling.py` m-out-of-n | Interval now takes the BASIC (pivotal) orientation subsampling theory yields (method overridden in m-mode, documented): the U(0,θ) sample-max example goes from coverage exactly 0 to covering (conservatively, per the documented sqrt-n-rate assumption); symmetric statistics unchanged. |
+| RS-9 | `resampling.py` m == n | Refused with an explanatory error: a without-replacement permutation makes every replicate equal the estimate, so the returned interval had width 0 (a silent 0%-coverage CI). |
 | CAL-9 | `calibration.py` `pit_calibration_error` | Summary line said "mean absolute deviation"; the statistic is the SUM (2× total variation, range [0, 2(1−1/bins)]). Docstring corrected; interacts with `calibration_gate`'s `low_power_threshold=1.0`. |
 
 ## Confirmed, fix pending (reproduced in the main session)
 
-| ID | Site | Class | Finding |
-|----|------|-------|---------|
-| RS-1 | `resampling.py:231-245` m-out-of-n | a,e | Percentile orientation applied to Politis–Romano-rescaled replicates is the REFLECTION of the correct (basic) interval: sample-max example has ci_high == sample max < θ, coverage exactly 0. √n rate also hardwired (comment admits it; docstring does not). |
-| RS-9 | `resampling.py:209-231` m == n | a | `m == n` permutes the full sample without replacement: every replicate equals the estimate; returns a zero-width "95% CI" (measured width 5.6e-17) silently. |
+(all confirmed findings fixed as of 2026-08-08; next reproductions come from the demonstrated list below)
 
 ## Demonstrated by the auditing passes (numbers quoted; reproduce before fixing)
 
