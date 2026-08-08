@@ -236,7 +236,9 @@ class QATBeatsPTQTest(unittest.TestCase):
         _restore(saved_ptq)
 
         print(f"\n[qat_test] held-out int4 cross-entropy -- QAT: {qat_int4_ce:.4f}  PTQ: {ptq_int4_ce:.4f}")
-        self.assertLess(qat_int4_ce, ptq_int4_ce)  # QAT is measurably better at real int4
+        self.assertLess(
+            qat_int4_ce, ptq_int4_ce
+        )  # QAT beats PTQ at real int4 on this fixed seed (an acceptance check, not an uncertainty-quantified margin)
         self.assertLess(qat_int4_ce, 0.97 * ptq_int4_ce)  # "measurably" -- at least a 3% relative margin
 
     def test_qat_full_precision_eval_is_not_wrecked(self):

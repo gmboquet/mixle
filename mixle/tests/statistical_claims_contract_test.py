@@ -1,13 +1,15 @@
-"""Statistical claims are inventoried and carry their scope (the pass-15 root-cause gate).
+"""The enforced statistical-claim phrase classes are inventoried and carry their scope.
 
-Seven review passes found the same defect in different clothes: a free-text statistical claim --
-a docstring, an example header, a report label, a test comment -- stronger than what the
-mathematics or the experiment establishes. ``scripts/scan_statistical_claims.py`` enumerates the
-user-facing claim surfaces; this test is the ratchet: a NEW claim-bearing file must be audited
-into the manifest, an inventoried file must keep its scope tokens (marginal/exchangeability/shift
-for coverage claims; uncertainty-or-reduced wording for comparative claims), and stale entries
-must be pruned. Regenerate with ``python scripts/scan_statistical_claims.py --write`` after
-auditing the change.
+What this gate is, exactly (STAT-RR16-3): a LEXICAL ratchet over the three phrase classes the
+scanner declares (coverage, comparative, competitive) -- not a proof of claim validity, and not
+an enumeration of every sentence a reader might take as a claim. Token presence cannot validate
+a statistical method: conclusion rules are validated by method-specific tests (the exact
+paired-rule tests in ``task_active_test.py`` exist because a Wald gate passed this lexical check
+while making an invalid inference at four discordant pairs). What the ratchet does guarantee:
+text matching the enforced classes never ships without scope language, new files entering a
+class get a human audit recorded in the manifest, and the negative controls below pin exactly
+what each class matches. Regenerate with ``python scripts/scan_statistical_claims.py --write``
+after auditing the change.
 """
 
 from __future__ import annotations
@@ -38,6 +40,56 @@ def test_every_claim_site_carries_its_scope() -> None:
         "shift statements; comparative claims need uncertainty language or reduced wording):\n"
         + "\n".join(f"  - {rel}: {v}" for rel, v in sorted(violations.items()))
     )
+
+
+def test_detector_negative_and_positive_controls() -> None:
+    """Pin what each phrase class does and does not match, so widenings are deliberate."""
+    scanner = _load_scanner()
+    must_match_coverage = (
+        "the set covers the true label with probability >= 1 - alpha",
+        "carries a finite-sample coverage guarantee",
+        "the model's local errors are conformally bounded",
+        "a coverage contract for every record",
+    )
+    must_not_match_coverage = (
+        "coverage_by_hop_count requires at least one hop.",
+        "a sample corroborates a claim when it covers at least one clause",
+        "code coverage stayed at 94%",
+    )
+    for text in must_match_coverage:
+        assert scanner._COVERAGE_CLAIM.search(text), text
+    for text in must_not_match_coverage:
+        assert not scanner._COVERAGE_CLAIM.search(text), text
+
+    must_match_comparative = (
+        "reaches the same student quality as random labeling for far fewer paid calls",
+        "the cascade gets cheaper with use",
+        "uncertainty sampling beats random",
+        "active labeling measurably beats random at the same budget",
+        "the winner: model A (runner-up trails by 12 elpd)",
+    )
+    must_not_match_comparative = (
+        "fewer allocations per call in the hot path",
+        "the beat frequency of the oscillator",
+    )
+    for text in must_match_comparative:
+        assert scanner._COMPARATIVE_CLAIM.search(text), text
+    for text in must_not_match_comparative:
+        assert not scanner._COMPARATIVE_CLAIM.search(text), text
+
+    must_match_competitive = (
+        "mixle fits every field; the nearest rival can't",
+        "pomegranate raises inside its own heterogeneous path",
+        "how much of the gap closes with zero gradient steps",
+    )
+    must_not_match_competitive = (
+        "torch is an optional dependency",
+        "install scikit-learn for the comparison baselines",
+    )
+    for text in must_match_competitive:
+        assert scanner._COMPETITIVE_CLAIM.search(text), text
+    for text in must_not_match_competitive:
+        assert not scanner._COMPETITIVE_CLAIM.search(text), text
 
 
 def test_claim_sites_match_the_reviewed_inventory() -> None:

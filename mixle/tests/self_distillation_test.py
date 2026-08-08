@@ -8,7 +8,8 @@ Each test below is an acceptance criterion from the roadmap item, not just a smo
        with G3's already-built `coarsen()` (PR #151) as the compressibility proxy. Train a small CausalLM
        two ways for the SAME number of steps -- plain vs. train_with_self_distillation -- then run
        `coarsen()` on BOTH at the SAME divergence budget and trust region, and confirm the J3-trained
-       checkpoint compresses measurably better (lower total KL for the same accepted depth cut).
+       checkpoint compresses better by the asserted margin -- lower total KL for the same accepted
+       depth cut (fixed-seed acceptance, not an uncertainty-quantified margin).
 """
 
 import unittest

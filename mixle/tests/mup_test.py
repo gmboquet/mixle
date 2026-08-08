@@ -5,7 +5,8 @@ then use :func:`mixle.models.mup.transfer_lr` to *predict* (no search) the optim
 "target width" -- and that prediction should land close to what an INDEPENDENT small hyperparameter
 search at the target width finds on its own. A contrast test shows the standard (non-muP) parametrization
 does *not* have this property: naively reusing the base width's tuned lr at a much wider target performs
-measurably worse than the muP-transferred lr.
+worse than the muP-transferred lr by the asserted margin (fixed-seed acceptance, not an
+uncertainty-quantified margin).
 
 The "tuned optimum" searches use :class:`mixle.doe.optimizer.BayesianOptimizer` (mixle's own ask/tell
 Bayesian-optimization machinery, ``mixle.doe``) over ``log10(lr)`` -- a real, if small, hyperparameter

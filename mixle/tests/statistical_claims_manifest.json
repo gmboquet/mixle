@@ -10,6 +10,18 @@
     "docs/task-serving.rst": [
       "coverage"
     ],
+    "examples/heterogeneous_correctness_example.py": [
+      "competitive"
+    ],
+    "examples/mixture_reduction_benchmark.py": [
+      "competitive"
+    ],
+    "examples/model_comparison_example.py": [
+      "comparative"
+    ],
+    "examples/skeptic_challenge_example.py": [
+      "competitive"
+    ],
     "examples/task_cascade_economics_example.py": [
       "comparative"
     ],
@@ -59,6 +71,9 @@
       "comparative"
     ],
     "mixle/tests/model_enumeration_test.py": [
+      "comparative"
+    ],
+    "mixle/tests/moment_propagation_test.py": [
       "comparative"
     ],
     "mixle/tests/task_acquire_test.py": [

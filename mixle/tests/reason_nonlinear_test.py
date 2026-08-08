@@ -29,7 +29,8 @@ def test_iekf_recovers_the_latent_through_a_nonlinear_forward():
     assert np.allclose(np.asarray(ans.belief.mean()).reshape(-1), truth, atol=0.05)
     assert ans.attribution()["sensor"] > 0.0  # nats removed are attributed
 
-    # a single linearization from that far prior is measurably worse than the iterated one
+    # a single linearization from that far prior is worse than the iterated one by the asserted
+    # margin on this fixed seed (not an uncertainty-quantified comparison)
     one = reason(prior, [NonlinearEvidence(_h, y, 1e-4, jacobian=_J, iterations=1)])
     err_one = np.linalg.norm(np.asarray(one.belief.mean()).reshape(-1) - truth)
     err_many = np.linalg.norm(np.asarray(ans.belief.mean()).reshape(-1) - truth)

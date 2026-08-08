@@ -6,7 +6,8 @@ Three things are tested against a real (tiny) mixle.models.transformer.CausalLM,
 2. `track_regression` flags a genuine, deliberately-injected regression beyond threshold, and does *not*
    flag a sequence with only noise-level fluctuation.
 3. The suite's task axes actually discriminate: a model trained on the harness's own synthetic task
-   families scores measurably better than a randomly-initialized model on every axis -- proof the evals
+   families scores better than a randomly-initialized model by the asserted margins on every axis
+(fixed-seed acceptance checks, not uncertainty-quantified margins) -- proof the evals
    are not vacuous / always-same-score.
 """
 
@@ -249,7 +250,8 @@ class RegressionTrackingTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Discrimination: a trained toy model must score measurably better than random init on every axis.
+# Discrimination: a trained toy model must beat random init by the asserted margin on every axis
+# (fixed-seed acceptance, not an uncertainty-quantified margin).
 # ---------------------------------------------------------------------------
 
 
@@ -343,7 +345,7 @@ class DiscriminationTest(unittest.TestCase):
         self.assertLess(
             trained_scores["held_out_perplexity"],
             random_scores["held_out_perplexity"] * 0.5,
-            "trained perplexity not measurably better than random init",
+            "trained perplexity not better than random init by the asserted margin",
         )
 
         # Accuracy axes: an absolute margin over random init, sized per axis to its own difficulty/chance
@@ -352,7 +354,9 @@ class DiscriminationTest(unittest.TestCase):
         margins = {"modular_arithmetic": 0.5, "parity_reasoning": 0.2, "in_context_induction": 0.15}
         for name, margin in margins.items():
             r, tr = random_scores[name], trained_scores[name]
-            self.assertGreater(tr, r + margin, f"{name}: trained={tr} not measurably better than random={r}")
+            self.assertGreater(
+                tr, r + margin, f"{name}: trained={tr} not better than random={r} by the asserted margin"
+            )
             # Sanity floor: the trained model must also be clearly above the task's own chance level, not
             # just above (a possibly-also-low) random init.
             self.assertGreater(tr, chance[name] + margin, f"{name}: trained={tr} not clearly above chance")

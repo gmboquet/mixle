@@ -253,7 +253,8 @@ class DepthPlateauSanityTest(unittest.TestCase):
 
 class AdaptiveVsFixedLadderTest(unittest.TestCase):
     """THE acceptance criterion: "on a small ladder, the adaptive-structure run reaches target loss
-    with measurably less compute than the best fixed structure." Compute = the real F4
+    with less compute than the best fixed structure by the asserted margin (fixed-seed
+    acceptance, not an uncertainty-quantified margin)." Compute = the real F4
     theoretical_flops_per_iter summed over every step, at the model's shape AT that step.
 
     Averaged over several seeds (compute-to-target on a tiny model/task is genuinely noisy step to

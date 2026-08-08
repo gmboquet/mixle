@@ -5,7 +5,8 @@ Acceptance criteria under test (see the ConditionalJIT track's D4 item):
 1. Held-out density preserved within tolerance -- a plateaued gradient leaf's moment-matched
    surrogate scores genuinely held-out data almost as well as the original gradient leaf did.
 2. Faster to same F -- once a leaf has plateaued, updating its (closed-form) surrogate is
-   measurably cheaper than continuing to run gradient M-steps on it.
+   cheaper than continuing to run gradient M-steps on it by the asserted margin (fixed-seed
+   acceptance, not an uncertainty-quantified margin).
 3. Swap-back on misfit -- when the surrogate's fit quality genuinely degrades (a real, computed
    misfit receipt crossing the tolerance), the operator swaps back to the retained original
    gradient leaf, both at the primitive level and end-to-end inside ``run_em_with_hotswap``.

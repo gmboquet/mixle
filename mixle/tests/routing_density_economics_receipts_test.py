@@ -155,7 +155,8 @@ class DensityGateOodEscalationReceiptsTest(unittest.TestCase):
 
 
 class CalibratedAlphaBeatsFixedDefaultReceiptsTest(unittest.TestCase):
-    """(c): alpha/threshold selection from real held-out data measurably beats a fixed hardcoded default on a
+    """(c): alpha/threshold selection from real held-out data beats a fixed hardcoded default by the
+    asserted margin on this fixed seed (an acceptance check, not an uncertainty-quantified margin) on a
     real cost model, using a real :class:`CalibratedTaskModel` (not the synthetic escalation-curve stub in
     ``economics_cost_aware_alpha_test.py``). Reports both numbers honestly, even if the gap is small."""
 
