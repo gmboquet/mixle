@@ -533,17 +533,30 @@ class Solution:
 
         The conformal answer-or-escalate rule is calibrated under an
         exchangeability assumption. When the input distribution shifts, the live
-        escalation rate may move away from the verified baseline. This method
-        compares the live rate with the baseline using an exact binomial test
-        and, when ``recent_inputs`` and an OOD gate are available, compares the
-        gate hit rate with its design quantile.
+        escalation rate may move away from the verified baseline. The baseline is
+        an ESTIMATE from the selection rows, not a known constant, so the live
+        and baseline samples are compared with a TWO-SAMPLE exact test (Fisher)
+        on the two escalation counts. Testing the live count against the plug-in
+        baseline rate as if it were exact false-alarms at rates far above
+        nominal -- measured 57-71% at ``p_threshold=0.01`` under NO drift across
+        (n_selection, n_live) of (10, 500), (50, 1000), (100, 5000), versus
+        0.4-0.8% for the two-sample test on the same draws -- and worsens as
+        live traffic grows, because any baseline estimation error eventually
+        dominates. The OOD comparison is a one-sample exact test against the
+        gate's DESIGN quantile -- a chosen budget, not an estimate -- and it is
+        one-sided (greater): the gate exists to catch novelty floods, so only
+        firing significantly ABOVE budget alarms; under-firing is reported in
+        the rates but is not drift.
 
         Returns a dictionary with ``drifted``, live and baseline rates, and
-        p-values where enough observations are available. A drift alarm means
-        traffic has changed and retraining or review may be needed; abstained
-        inputs still route to the teacher.
+        p-values where enough observations are available (the escalation
+        p-value needs the selection-slice counts, which every solved or loaded
+        0.8.0 Solution carries; an object with ``sel_rows == 0`` reports rates
+        without an escalation p-value). A drift alarm means traffic has changed
+        and retraining or review may be needed; abstained inputs still route to
+        the teacher.
         """
-        from scipy.stats import binomtest
+        from scipy.stats import binomtest, fisher_exact
 
         stats = self.cascade.stats
         out: dict[str, Any] = {
@@ -552,8 +565,18 @@ class Solution:
             "baseline_escalation_rate": self.escalation_rate,
             "drifted": False,
         }
-        if stats.n_requests >= 20 and np.isfinite(self.escalation_rate):
-            p = float(binomtest(stats.n_escalated, stats.n_requests, max(min(self.escalation_rate, 1.0), 1e-9)).pvalue)
+        if stats.n_requests >= 20 and self.sel_rows > 0:
+            # the answered-slice ledger gives the exact baseline counts: the gate either answers
+            # or escalates, so the selection slice escalated sel_rows - answered_sel_n rows
+            sel_escalated = self.sel_rows - self.answered_sel_n
+            p = float(
+                fisher_exact(
+                    [
+                        [stats.n_escalated, stats.n_requests - stats.n_escalated],
+                        [sel_escalated, self.sel_rows - sel_escalated],
+                    ]
+                )[1]
+            )
             out["escalation_p_value"] = p
             out["drifted"] = p < p_threshold
         gate = self.cascade.model.density_gate
@@ -563,7 +586,15 @@ class Solution:
                 hit = float(np.mean(gate.ood_mask(rows)))
                 out["live_ood_rate"] = hit
                 out["design_ood_rate"] = float(self.ood)
-                p_ood = float(binomtest(int(round(hit * len(rows))), len(rows), max(self.ood, 1e-9)).pvalue)
+                # one-sided GREATER: the gate exists to catch novelty floods, so only a hit rate
+                # significantly ABOVE the design budget is drift. The two-sided version alarmed on
+                # UNDER-firing too, and its point null is not even true under no-drift (the design
+                # quantile is an in-sample threshold estimate, so the realized fresh-traffic rate
+                # legitimately sits off-target) -- same-world traffic tripped it in this repo's own
+                # health test. Under-firing stays visible in live_ood_rate vs design_ood_rate.
+                p_ood = float(
+                    binomtest(int(round(hit * len(rows))), len(rows), max(self.ood, 1e-9), alternative="greater").pvalue
+                )
                 out["ood_p_value"] = p_ood
                 out["drifted"] = bool(out["drifted"] or p_ood < p_threshold)
         return out

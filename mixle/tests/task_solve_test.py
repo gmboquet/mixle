@@ -415,6 +415,11 @@ class HealthTest(unittest.TestCase):
             sol(t)
         ok = sol.health(recent_inputs=_tickets(200, seed=22))
         self.assertGreaterEqual(ok["requests"], 200)
+        # exchangeable traffic must NOT alarm: the two-sample exact test holds its nominal size
+        # where the old one-sample test against the plug-in baseline false-alarmed at a measured
+        # 57-71% under no drift (any baseline estimation error dominates as live traffic grows)
+        self.assertFalse(ok["drifted"])
+        self.assertIn("escalation_p_value", ok)
 
         shifted = [
             {"kind": "zzz-" + str(i), "amount": 1.0e8 + i, "region": "??"} for i in range(200)
