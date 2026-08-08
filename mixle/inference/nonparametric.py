@@ -3,8 +3,11 @@
 Distribution-free two-sample, k-sample, paired, repeated-measures, ordered-alternative, and
 goodness-of-fit tests, each returning a small result object with the statistic, p-value, and -- where
 standard -- an effect size. Statistics are computed here (mid-ranks for ties); tail probabilities use
-the asymptotic reference distributions (normal / chi-square / Student-t / Kolmogorov) with the usual
-tie and continuity corrections, matching the conventions of SciPy / R.
+exact small-sample nulls where SciPy / R use them (the Wilcoxon signed-rank enumeration at
+``n <= 25`` without ties or zeros; the two-sample KS at small samples) and the asymptotic reference
+distributions (normal / chi-square / Student-t / Kolmogorov) with tie corrections otherwise. Not
+every asymptotic branch carries a continuity correction (the runs test and Page test do not), and
+the remaining small-sample normal approximations are approximations -- see each test's docstring.
 
 .. parsed-literal::
 
@@ -189,7 +192,12 @@ def brunner_munzel(x: Any, y: Any, *, alternative: str = "two-sided", distributi
 
 
 def ks_2samp(x: Any, y: Any, *, alternative: str = "two-sided") -> TestResult:
-    """Two-sample Kolmogorov-Smirnov test: max gap between the two empirical CDFs (asymptotic p)."""
+    """Two-sample Kolmogorov-Smirnov test: max gap between the two empirical CDFs.
+
+    The p-value is exact at small samples and asymptotic otherwise (scipy ``method='auto'``).
+    The null distribution is distribution-free for CONTINUOUS data; with ties (discrete or
+    rounded data) the p-value is conservative.
+    """
     _alternative(alternative)
     x = np.sort(_sample("x", x))
     y = np.sort(_sample("y", y))
@@ -206,11 +214,12 @@ def ks_2samp(x: Any, y: Any, *, alternative: str = "two-sided") -> TestResult:
         d = float(-np.min(diff))
     else:
         raise ValueError("alternative must be 'two-sided', 'greater', or 'less'.")
-    en = n1 * n2 / (n1 + n2)
-    if alternative == "two-sided":
-        p = float(stats.kstwo.sf(d, int(np.round(en))))  # finite-n KS distribution (matches scipy 'asymp')
-    else:
-        p = float(np.exp(-2.0 * en * d * d))  # one-sided asymptotic (Smirnov)
+    # The p-value comes from scipy's two-sample machinery (method='auto': EXACT at small samples,
+    # asymptotic otherwise). The previous hand-rolled version evaluated the ONE-sample kstwo law at
+    # round(n1*n2/(n1+n2)) -- a heuristic substitution, not the two-sample null: at n1=n2=3 with
+    # complete separation it returned p = 0.0 where the exact permutation p-value is 2/C(6,3) = 0.1
+    # (audit NP-3). The statistic conventions match scipy's exactly, verified above.
+    p = float(stats.ks_2samp(x, y, alternative=alternative, method="auto").pvalue)
     return TestResult(d, float(min(max(p, 0.0), 1.0)), {"n1": n1, "n2": n2})
 
 
@@ -367,11 +376,15 @@ def wilcoxon_signed_rank(
 ) -> WilcoxonResult:
     """Wilcoxon signed-rank test for paired samples (or one sample vs 0).
 
-    Ranks ``|d|`` for ``d = x - y`` (mid-ranks for ties), splits into positive / negative rank sums, and
-    uses the tie-corrected normal approximation. ``zero_method='wilcox'`` drops zero differences (and
-    their ranks); ``'pratt'`` keeps them in the ranking but drops them from the sums, with the matching
-    Pratt/Cureton zero corrections applied to the null mean and variance (as scipy does). The
-    matched-pairs rank-biserial correlation is reported as the effect size.
+    Ranks ``|d|`` for ``d = x - y`` (mid-ranks for ties), splits into positive / negative rank sums,
+    and uses the EXACT enumeration null when it is available -- ``n <= 25`` with no zero differences
+    and no tied ``|d|`` -- and the tie-corrected normal approximation otherwise (the same regime
+    switch SciPy and R make; the normal approximation is level-violating at very small ``n``, where
+    its smallest attainable p sits below the exact one). ``zero_method='wilcox'`` drops zero
+    differences (and their ranks); ``'pratt'`` keeps them in the ranking but drops them from the
+    sums, with the matching Pratt/Cureton zero corrections applied to the null mean and variance
+    (as scipy does). ``correction`` applies only to the normal branch (exact tails need no
+    continuity repair). The matched-pairs rank-biserial correlation is reported as the effect size.
     """
     _alternative(alternative)
     if zero_method not in ("wilcox", "pratt"):
@@ -410,6 +423,29 @@ def wilcoxon_signed_rank(
     )
     if sigma == 0:
         raise ValueError("Wilcoxon signed-rank reference variance is zero")
+    if nn <= 25 and n_zero == 0 and _tie_term(r) == 0.0:
+        # EXACT null (audit NP-1): with no zeros and no ties the ranks are exactly {1..nn} and
+        # T+ is a subset sum, enumerated by the 0/1 convolution prod_k (1 + x^k) -- 2^25 patterns
+        # count exactly in float64. The normal approximation is not merely imprecise here, it is
+        # level-violating: at n=5 the most extreme outcome gets normal p = 0.043 (< 0.05) while
+        # the exact two-sided p is 2/32 = 0.0625, so the realized type-I rate at nominal 5% was
+        # a guaranteed 6.25% (same construction at n=6). SciPy and R both switch to the exact
+        # null in this regime, which is what the module-level conventions sentence promises.
+        # The continuity correction is an approximation repair and does not apply to exact tails.
+        counts = np.zeros(nn * (nn + 1) // 2 + 1)
+        counts[0] = 1.0
+        for k in range(1, nn + 1):
+            counts[k:] = counts[k:] + counts[:-k].copy()
+        cdf = np.cumsum(counts) / counts.sum()
+        z = (t - mu) / sigma  # reported as a descriptive companion to the exact p
+        if alternative == "two-sided":
+            p = min(1.0, 2.0 * float(cdf[int(t)]))
+        elif alternative == "greater":  # x > y -> R+ large; P(T+ >= r_plus) = P(T+ <= r_minus)
+            p = float(cdf[int(r_minus)])
+        elif alternative == "less":
+            p = float(cdf[int(r_plus)])
+        else:
+            raise ValueError("alternative must be 'two-sided', 'greater', or 'less'.")
     else:
         if alternative == "two-sided":
             cc = 0.5 if correction else 0.0

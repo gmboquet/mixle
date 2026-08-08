@@ -78,7 +78,9 @@ class AgainstScipyTest(unittest.TestCase):
 
     def test_ks(self):
         r2 = ks_2samp(self.x, self.y)
-        s2 = ss.ks_2samp(self.x, self.y, method="asymp")
+        # method='auto' is the reference since the NP-3 fix: exact at small samples (as here),
+        # asymptotic at large -- the same regime switch scipy itself makes
+        s2 = ss.ks_2samp(self.x, self.y)
         self.assertAlmostEqual(r2.statistic, s2.statistic, places=9)
         self.assertAlmostEqual(r2.pvalue, float(s2.pvalue), places=9)
         r1 = ks_1samp(self.x, ss.norm.cdf)
@@ -198,3 +200,43 @@ class JonckheereNullVarianceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExactSmallSampleNullTest(unittest.TestCase):
+    """Audit NP-1/NP-3: exact small-sample nulls where SciPy/R use them."""
+
+    def test_wilcoxon_exact_branch_restores_the_level(self):
+        from itertools import product
+
+        from mixle.inference.nonparametric import wilcoxon_signed_rank
+
+        # the most extreme n=5 outcome: exact two-sided p is 2/32, and the old normal branch
+        # reported 0.043 -- a guaranteed 6.25% type-I rate at nominal 5%
+        r = wilcoxon_signed_rank([1.0, 2.0, 3.0, 4.0, 5.0])
+        self.assertAlmostEqual(r.pvalue, 0.0625, places=12)
+        # over ALL 32 sign patterns at n=5, no attainable p may sit below the exact minimum,
+        # so a 5% test can never reject under this null (the level violation is structural)
+        magnitudes = [1.0, 2.0, 3.0, 4.0, 5.0]
+        smallest = min(
+            wilcoxon_signed_rank([m * s for m, s in zip(magnitudes, signs)]).pvalue
+            for signs in product((1.0, -1.0), repeat=5)
+        )
+        self.assertAlmostEqual(smallest, 0.0625, places=12)
+        # one-sided exact tails: all-positive differences give P(T+ >= 15) = 1/32
+        one_sided = wilcoxon_signed_rank([1.0, 2.0, 3.0, 4.0, 5.0], alternative="greater")
+        self.assertAlmostEqual(one_sided.pvalue, 1.0 / 32.0, places=12)
+
+    def test_ks_2samp_small_sample_p_is_exact(self):
+        import numpy as np
+        from scipy import stats as scipy_stats
+
+        from mixle.inference.nonparametric import ks_2samp
+
+        # complete separation at n1=n2=3: the exact permutation p is 2/C(6,3) = 0.1; the old
+        # one-sample-law substitution returned 0.0 -- certainty from the weakest possible evidence
+        r = ks_2samp([1.0, 2.0, 3.0], [4.0, 5.0, 6.0])
+        self.assertAlmostEqual(r.pvalue, 0.1, places=9)
+        # large samples agree with scipy's auto method to numerical precision
+        x = np.random.RandomState(2).randn(80)
+        y = np.random.RandomState(3).randn(90) + 0.5
+        self.assertAlmostEqual(ks_2samp(list(x), list(y)).pvalue, scipy_stats.ks_2samp(x, y).pvalue, places=9)
