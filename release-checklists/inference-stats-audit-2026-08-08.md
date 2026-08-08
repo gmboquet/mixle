@@ -108,3 +108,32 @@ RULES OF THIS LEDGER (the repo's standing worklist discipline):
   derivatives, Greenwood algebra, Aalen–Johansen construction, discrete-time GLM factorization;
   event_study's identification gate and DL algebra; resampling's permutation exactness logic and
   Mammen moments; `risk.py`'s CVaR ≥ VaR invariant (0 violations over the scanned grid).
+
+## Pass-17 external findings (2026-08-08, NO-GO; reports under /private/tmp/mixle-rereview17.5mIyWg/)
+
+External review pass 17 confirmed seven open ledger items (RR17-06=P-2, RR17-08=GATE-1/2/4,
+RR17-09=E-1 sparse-Poisson variant at rate .5 exposures 1:2 — p=1.37e-12 true null at n=1000,
+RR17-12=RS-7, RR17-14=U-4, RR17-16=NP-2, RR17-17=NP-4) and added the following NEW findings:
+
+| ID | Sev | Site | One-line finding |
+|----|-----|------|------------------|
+| RR17-07 | High | `task/calibrated_generator.py` | THE HEADLINE: calibrate() seeds selection by (row_index, prompt); default serving seeds by prompt only — the certificate covers a policy that never serves. Deterministic repro: certified upper risk 0.0366 from 1/150 calibration errors; 1000/1000 served answers wrong on a repeated-prompt population. Fix: one stochastic policy for both + repeated-prompt negative test. |
+| RR17-01 | High | `examples/task_llm_active_example.py` | Call ledger prints 420 pre-serving teacher calls; the cascade section then buys 600 more calibration labels before serving (actual 1,020). "Fewest labels/most informative" headline survives the inconclusive verdict; the 4.14x label-economics citation is one EIG seed vs five unrelated random seeds. |
+| RR17-02 | High | `examples/task_cascade_economics_example.py` | Harvested labels called free are DISCARDED (build_cascade re-queries the teacher on train+htexts); setup labels excluded from the cost estimand: measured 600 labels build 1, 1,312 after build 2; first-round all-in cost $6.563 vs the reported $0.563-vs-$3 framing. |
+| RR17-03 | High | `examples/task_cascade_economics_example.py` | corpus() fixes 150 rows per class, so rows are NOT i.i.d.; the pooled McNemar exactness claim does not hold for the overall-mean estimand under the stratified design (pooled 29-14 p=.032 vs spam 14-6 p=.115, ham 15-8 p=.210). |
+| RR17-04 | High | `examples/heterogeneous_correctness_example.py` | Acceptance oracle checks abs(abs(mu)-3)<.3 and max(prob)>.6 — wrong concentrated categories still print "recovered ... True". |
+| RR17-05 | High | `examples/structured_hmm_example.py` | Emissions initialized within Uniform(-1,1) of truth with an error<1 oracle: a no-op optimizer passes; return-prev-estimate printed "recovered". |
+| RR17-10 | High | `inference/forecast.py` | Docstring says MC only for emission quantiles, but the reported MEAN is computed from draws (seeds 1/2: 4.3911 vs 4.4256 at n=25); Forecast carries no draw count / MCSE / method flag. |
+| RR17-11 | High | MCMC public summary | One-chain fits report rhat=None/ess=None/NaN split-Rhat yet the summary emits parameter numbers without MCSE (raw sampler had MCSE [0.144, 0.033]); route test checks attribute presence only. |
+| RR17-13 | Med | `task/multilabel.py`, `task/structured_out.py` | Answered-slice fields accept impossible states on direct construction (evaluated=1, answered=1, correct=2 -> agreement 2.0, CI [NaN, NaN]); enforce 0 <= correct <= answered <= evaluated. |
+| RR17-15 | Med | `inference/nonparametric.py` Wilcoxon | Exact one-sided output internally contradictory: all-positive n=5 'greater' gives p=.03125 and rank-biserial +1 but z=-2.0226 (the descriptive z still uses t=min(R+,R-)). |
+| RR17-18 | Med | `examples/lookback_hmm_example.py` | "States distinguishable only through dependence" is false: nonstationary start makes lag-0 transient marginals differ (pairwise TV .07). |
+| RR17-19 | Med | `examples/task_cascade_economics_example.py` | Synthetic/stand-in data disclosure lives only in the teacher docstring, not the top-level narrative/output. |
+| RR17-20 | Low | `scripts/scan_statistical_claims.py` | Manifest --write records path/classes only; the promised "human audit" has no reviewer/date/attestation fields. |
+
+Minimum-closure order from the report: (1) RR17-07 seed-policy unification + negative test;
+(2) GATE cluster (valid MC p-value, dependence-aware null, measured power); (3) P-2/RR17-06
+price-forecast leakage refusal-or-disclaimer; (4) E-1/RR17-09 sparse-Poisson refusal or exact
+conditional route; (5) RR17-01/02/03 example accounting + stratified inference; (6)
+RR17-04/05 example oracles that fail on wrong categories/no-op fits; (7) RR17-10/11/14 MC/MCMC
+labeling with draws+MCSE and diagnostic refusal; (8) RS-7/RR17-12 sign-flip assumptions.
