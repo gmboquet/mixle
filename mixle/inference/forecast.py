@@ -100,7 +100,9 @@ def forecast(
         level: central-interval mass (0.9 -> the 5%..95% band).
         n: Monte-Carlo draws per step for the emission quantiles (state marginals are exact).
         seed: reproducibility.
-        keep_samples: also return the raw ``(H, n)`` predictive draws (scalar emissions only).
+        keep_samples: also return ``(H, n)`` JOINT sample paths -- column ``j`` is one simulated
+            trajectory of the chain, so cross-step dependence is the model's own and summing
+            along a column is a valid path functional (scalar emissions only).
 
     Raises:
         TypeError: if ``model`` is not a fitted HMM.
@@ -137,15 +139,32 @@ def forecast(
     his: list[Any] = []
     all_draws: list[np.ndarray] = []
     all_scalar = True
+    states: np.ndarray | None = None
     for h in range(horizon):
         p = p @ a_mat  # exact state marginal at T+h+1
         state_probs[h] = p
-        counts = rng.multinomial(n, p)
-        draws: list[Any] = []
-        for s, c in enumerate(counts):
-            if c:
-                out = samplers[s].sample(int(c))
-                draws.extend(list(np.asarray(out)) if np.ndim(out) else [out])
+        # JOINT sample paths: column j of the returned draws is ONE trajectory of the chain, so
+        # cross-step dependence is the model's own. Each step's marginal law is exactly p_T A^h
+        # either way; what the old per-step multinomial destroyed was the JOINT law -- resampling
+        # states independently every step erased the chain's serial dependence, and appending the
+        # draws in state-index order then injected a spurious ordering correlation in its place
+        # (measured 0.69 down a column on a chain whose true lag-1 persistence is 0.96, against
+        # -0.03 after a within-step shuffle). Downstream consumers sum along columns
+        # (Monte-Carlo DCF in mixle.analysis.valuation), where the joint law is the whole point.
+        if states is None:
+            step_cdf = np.cumsum(np.broadcast_to(p, (n, p.size)), axis=1)
+        else:
+            step_cdf = np.cumsum(a_mat[states], axis=1)
+        uniforms = rng.rand(n)
+        states = np.minimum((uniforms[:, None] > step_cdf).sum(axis=1), p.size - 1).astype(int)
+        draws: list[Any] = [None] * n
+        for s in range(p.size):
+            positions = np.flatnonzero(states == s)
+            if positions.size:
+                out = samplers[s].sample(int(positions.size))
+                values = list(np.asarray(out)) if np.ndim(out) else [out]
+                for position, value in zip(positions, values):
+                    draws[position] = value
         try:
             arr = np.asarray(draws, dtype=np.float64)
             step_scalar = arr.ndim == 1

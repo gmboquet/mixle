@@ -176,3 +176,39 @@ def test_valid_controls_still_produce_an_ordered_band():
     f = forecast(m, [4.5, 4.5], horizon=3, level=0.9, n=2000, seed=0)
     assert f.mean.shape == (3,)
     assert bool((f.lo <= f.hi).all())
+
+
+def test_kept_samples_are_joint_chain_paths_not_marginal_resamples():
+    # FC-1: a column of f.samples must carry the CHAIN's serial dependence. The old per-step
+    # marginal multinomial had none (shuffle control ~0), and its state-sorted append injected
+    # a spurious ~0.69 ordering correlation instead of the true 0.96 persistence.
+    import numpy as np
+
+    from mixle.inference.forecast import forecast
+    from mixle.stats import GaussianDistribution
+    from mixle.stats.latent.hidden_markov import HiddenMarkovModelDistribution
+
+    hmm = HiddenMarkovModelDistribution(
+        [GaussianDistribution(0.0, 0.25), GaussianDistribution(10.0, 0.25)],
+        w=np.array([0.5, 0.5]),
+        transitions=np.array([[0.98, 0.02], [0.02, 0.98]]),
+    )
+    f = forecast(hmm, [0.1, -0.2, 0.1, 0.0, 0.2], horizon=6, n=4000, seed=0, keep_samples=True)
+    paths = np.asarray(f.samples, dtype=float)
+    assert paths.shape == (6, 4000)
+    regime = (paths > 5.0).astype(float)
+    # the lag-1 correlation down columns must match the EXACT joint law of the chain:
+    # P(s_h=1, s_{h+1}=1) = p_h(1) * A[1,1], with the marginals taken from the analytic
+    # state_probs -- not a stationary-start rule of thumb (at this near-pure start the true
+    # value is ~0.70, which the old ordering artifact happened to sit near by coincidence).
+    p1 = float(f.state_probs[0, 1])
+    p2 = float(f.state_probs[1, 1])
+    joint_11 = p1 * 0.98
+    analytic = (joint_11 - p1 * p2) / np.sqrt(p1 * (1 - p1) * p2 * (1 - p2))
+    lag1 = float(np.corrcoef(regime[0], regime[1])[0, 1])
+    assert abs(lag1 - analytic) < 0.05, (lag1, analytic)
+    # the old implementation appended draws in state-index order, so every row was monotone in
+    # the column index; genuine per-path sampling must interleave the states within a row
+    assert np.any(np.diff(regime[1]) < 0.0)
+    # per-step marginal is unchanged: regime-1 mass tracks the exact state marginal
+    assert np.allclose(regime.mean(axis=1), f.state_probs[:, 1], atol=0.03)
