@@ -30,8 +30,15 @@ from pathlib import Path
 # coverage on 4-vCPU hosted runners) has never completed inside any budget this cycle; the only
 # genuine datum is a kill at 2400s with 72% executed, projecting ~3300s. Its budget is now ~1.6x
 # that projection. Core's 720 held: every core lane on both platforms passed inside it.
+# Core re-baseline 2026-08-08 (fourth revision): at 900 the core lane was killed at the budget on
+# two pushes this week with every executed test green (one at 99% collected, dots all passing) --
+# green-run completions across the last four green Tests runs span 300-404s (n=20 core jobs, both
+# platforms), so those kills were runners pacing >2.2x the healthy range, not test growth. 1500 is
+# ~3.7x the worst green completion: it still trips any real multiplicative regression while no
+# longer failing the lane for drawing a degraded runner (the job-level timeout-minutes backstop
+# rises with it).
 _BUDGETS = {
-    "core": 900,
+    "core": 1500,
     "full": 5400,
     "optional": 2700,
     "numerical": 1800,
