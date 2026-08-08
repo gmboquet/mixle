@@ -48,15 +48,21 @@ def _regime(*allowed: str) -> Callable[[Any], str]:
     return check
 
 
-# Classification (mixle.task.solve.Solution): the threshold's certifying regime and the
-# selection-reuse count. "fresh-harvest" is NOT a classification regime -- its escalations are
-# per-query threshold-selected and can never serve as calibration evidence (D-0155).
+# Classification (mixle.task.solve.Solution): the threshold's certifying regime, the
+# selection-reuse count, and the answered-slice measurement counts. "fresh-harvest" is NOT a
+# classification regime -- its escalations are per-query threshold-selected and can never serve
+# as calibration evidence (D-0155). The answered-slice counts are claim-bearing measurements
+# (STAT-RR16-2): dropping them on reload would present an artifact with an unknown measurement
+# as one that measured nothing, so they ride the same refuse-on-missing registry.
 CLASSIFICATION_LEDGER: tuple[LedgerField, ...] = (
     LedgerField("selection_uses", _non_negative_int),
     LedgerField(
         "calibration_evidence",
         _regime("solve-split", "fresh-evidence", "reused-after-adaptive-harvest"),
     ),
+    LedgerField("sel_rows", _non_negative_int),
+    LedgerField("answered_sel_n", _non_negative_int),
+    LedgerField("answered_sel_correct", _non_negative_int),
 )
 
 # Regression (mixle.task.regress.RegressionSolution): the same two claims; "fresh-harvest" IS a
@@ -102,6 +108,22 @@ def read_ledger(meta: dict[str, Any], fields: tuple[LedgerField, ...]) -> dict[s
             )
         out[field.name] = field.validate(meta[field.name])
     return out
+
+
+def _clopper_pearson_interval(successes: int, n: int, level: float) -> tuple[float, float]:
+    """Exact Clopper-Pearson two-sided interval for a binomial proportion.
+
+    Lives here (not in a shape module) because every shape's answered-slice measurement quotes
+    it and ``regress`` already imports from ``solve`` -- a shape-to-shape import would cycle.
+    """
+    from scipy.stats import beta as _beta
+
+    if n <= 0:
+        raise ValueError("interval needs a positive denominator")
+    tail = (1.0 - level) / 2.0
+    lower = 0.0 if successes == 0 else float(_beta.ppf(tail, successes, n - successes + 1))
+    upper = 1.0 if successes == n else float(_beta.ppf(1.0 - tail, successes + 1, n - successes))
+    return lower, upper
 
 
 def conformal_scope(statement: str) -> dict[str, Any]:

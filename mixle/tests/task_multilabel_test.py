@@ -159,5 +159,63 @@ class MultiLabelResolveTest(unittest.TestCase):
             self.assertNotIn(repr(t), [repr(c) for c in sol.cal_inputs])
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class MultiLabelAnsweredSliceTest(unittest.TestCase):
+    def test_measurement_matches_the_real_serving_gate_and_round_trips(self):
+        # STAT-RR16-2: the answered-slice numbers must be the REAL joint-qhat singleton rule run
+        # over the disjoint evaluation rows -- not the raw 0.5-threshold agreement relabeled.
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from mixle.task import MultiLabelSolution, solve_multilabel
+        from mixle.task.artifact import _manifest_integrity
+
+        sol = solve_multilabel(_tags, _txns(400), alpha=0.1, seed=0, epochs=300)
+        self.assertEqual(sol.eval_rows, len(sol.eval_inputs))
+        self.assertGreaterEqual(sol.eval_rows, 2)
+        self.assertLessEqual(sol.answered_eval_correct, sol.answered_eval_n)
+        self.assertLessEqual(sol.answered_eval_n, sol.eval_rows)
+
+        answered = correct = 0
+        for x, want in zip(sol.eval_inputs, sol.eval_sets):
+            got = sol.try_local(x)
+            if got is None:
+                continue
+            answered += 1
+            correct += int(sorted(got) == sorted(want))
+        self.assertEqual(answered, sol.answered_eval_n)
+        self.assertEqual(correct, sol.answered_eval_correct)
+
+        block = sol.report()["answered_slice"]
+        if sol.answered_eval_n == 0:
+            self.assertIsNone(block)
+        else:
+            self.assertEqual(block["n_answered"], sol.answered_eval_n)
+            self.assertEqual(block["n_evaluated"], sol.eval_rows)
+            self.assertAlmostEqual(block["agreement"], sol.answered_eval_correct / sol.answered_eval_n, places=4)
+            low, high = block["ci95"]
+            self.assertGreaterEqual(low, 0.0)
+            self.assertLessEqual(high, 1.0)
+            self.assertLessEqual(low, block["agreement"] + 1e-4)
+            self.assertGreaterEqual(high, block["agreement"] - 1e-4)
+
+        with tempfile.TemporaryDirectory() as d:
+            path = sol.save(d + "/tagger")
+            back = MultiLabelSolution.load(path, _tags)
+            self.assertEqual(back.eval_rows, sol.eval_rows)
+            self.assertEqual(back.answered_eval_n, sol.answered_eval_n)
+            self.assertEqual(back.answered_eval_correct, sol.answered_eval_correct)
+            # an artifact WITHOUT a measurement member is refused, never defaulted to
+            # "measured nothing" (the STAT-RR14-1 mechanism)
+            manifest_path = Path(path) / "manifest.json"
+            doc = json.loads(manifest_path.read_text())
+            del doc["meta"]["multilabel"]["answered_eval_n"]
+            doc["integrity_sha256"] = _manifest_integrity(doc)
+            manifest_path.write_text(json.dumps(doc))
+            with self.assertRaises(KeyError):
+                MultiLabelSolution.load(path, _tags)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,10 +17,15 @@ marginally, has the advertised ``1 - alpha`` split-conformal coverage contract.
 calibration draw and the query jointly, under exchangeability of the calibration rows and incoming
 traffic. It is NOT an accuracy guarantee conditional on answering locally: serving conditions on every
 field simultaneously clearing its singleton/tolerance gate, and coverage conditional on that event is
-not controlled -- answered-slice quality is a measurement (the per-field ``holdout_agreement`` values
-in ``report()``), never a guarantee. Distribution shift or any other break of exchangeability voids
-the statement silently; re-measure on drifted traffic. ``report()`` carries this scope
-machine-readably in ``coverage_contract_scope``.
+not controlled. Answered-slice quality is a MEASUREMENT, never a guarantee, and ``report()`` separates
+the two kinds of numbers: the per-field ``holdout_agreement`` values are RAW route-independent
+sub-model metrics (the joint serving gate never runs in them), while ``answered_slice`` applies the
+real joint gate to a disjoint record-level evaluation slice and reports how many records it answered,
+how many answered records matched the teacher's record (categoricals exactly, numerics within their
+tolerance), and an exact 95% Clopper-Pearson interval for that conditional agreement (``None`` when it
+answered none). Distribution shift or any other break of exchangeability voids the statement silently;
+re-measure on drifted traffic. ``report()`` carries this scope machine-readably in
+``coverage_contract_scope``.
 
 ``improve()`` pushes each harvested ``(input, dict)`` down into every field's own harvest buffer and
 runs each sub-solution's anti-regression improve. No structured-level OOD gate yet (the classifier
@@ -36,7 +41,7 @@ from typing import Any
 
 import numpy as np
 
-from mixle.task._ledger import conformal_scope
+from mixle.task._ledger import _clopper_pearson_interval, conformal_scope
 from mixle.task.regress import RegressionSolution, solve_regression
 from mixle.task.solve import Solution, _label_with, solve
 
@@ -55,6 +60,13 @@ class StructuredSolution:
     joint_qhat: float = float("inf")
     alpha: float = 0.1
     numeric_tolerances: dict[str, float] = field(default_factory=dict)
+    # answered-slice MEASUREMENT (STAT-RR16-2): the real joint gate (``try_local``) applied to a
+    # disjoint record-level evaluation slice -- how many records were evaluated, how many the gate
+    # answered, and how many answered records matched the teacher's record (categoricals exactly,
+    # numerics within their tolerance). Measurements, never guarantees.
+    eval_rows: int = 0
+    answered_eval_n: int = 0
+    answered_eval_correct: int = 0
     calibration_receipt: dict[str, Any] = field(default_factory=dict)
     n_requests: int = 0
     n_escalated: int = 0
@@ -110,12 +122,30 @@ class StructuredSolution:
     def report(self) -> dict[str, Any]:
         """Return per-field calibration details and aggregate serving/harvest counts."""
         per_field: dict[str, Any] = {}
+        # per-field values are RAW route-independent sub-model metrics; the joint serving gate
+        # never runs in them, so none of them is an answered-slice number
         for key, sub in self.fields_cat.items():
             per_field[key] = {"kind": "categorical", "holdout_agreement": round(sub.holdout_agreement, 4)}
         for key, sub in self.fields_num.items():
             per_field[key] = {"kind": "numeric", "qhat": round(float(sub.qhat), 6), "tol": sub.tol}
         return {
             "fields": per_field,
+            # answered-slice MEASUREMENT: the real joint gate on the disjoint record-level
+            # evaluation slice, with the answered denominator and an exact 95% Clopper-Pearson
+            # interval; None when the gate answered none of them
+            "answered_slice": (
+                None
+                if self.answered_eval_n == 0
+                else {
+                    "agreement": round(self.answered_eval_correct / self.answered_eval_n, 4),
+                    "n_answered": self.answered_eval_n,
+                    "n_evaluated": self.eval_rows,
+                    "ci95": [
+                        round(bound, 4)
+                        for bound in _clopper_pearson_interval(self.answered_eval_correct, self.answered_eval_n, 0.95)
+                    ],
+                }
+            ),
             "coverage_contract": "joint_structured",
             "coverage_contract_scope": conformal_scope(
                 "finite-sample marginal joint coverage of the complete output record"
@@ -148,6 +178,9 @@ class StructuredSolution:
                     "joint_qhat": self.joint_qhat,
                     "alpha": self.alpha,
                     "numeric_tolerances": self.numeric_tolerances,
+                    "eval_rows": int(self.eval_rows),
+                    "answered_eval_n": int(self.answered_eval_n),
+                    "answered_eval_correct": int(self.answered_eval_correct),
                     "calibration_receipt": self.calibration_receipt,
                 }
             )
@@ -178,6 +211,13 @@ class StructuredSolution:
             joint_qhat=float(manifest.get("joint_qhat", float("inf"))),
             alpha=float(manifest.get("alpha", 0.1)),
             numeric_tolerances={k: float(v) for k, v in manifest.get("numeric_tolerances", {}).items()},
+            # required, not defaulted: a live object's zero-initialization means "not yet
+            # measured", and reusing it for an ABSENT member would present an artifact with an
+            # unknown measurement as one that measured nothing (the STAT-RR14-1 mechanism); the
+            # 0.8.0 format is the first to ship this artifact, so every artifact carries these
+            eval_rows=int(manifest["eval_rows"]),
+            answered_eval_n=int(manifest["answered_eval_n"]),
+            answered_eval_correct=int(manifest["answered_eval_correct"]),
             calibration_receipt=dict(manifest.get("calibration_receipt", {})),
         )
 
@@ -324,13 +364,22 @@ def solve_structured(
 
     order = np.random.RandomState(seed).permutation(len(items))
     n_joint_cal = int(np.ceil(1.0 / alpha)) - 1
-    if n_joint_cal < 1 or len(items) - n_joint_cal < 12:
+    if n_joint_cal < 1 or len(items) - n_joint_cal < 14:
         raise ValueError(
-            f"solve_structured needs at least {n_joint_cal + 12} inputs for joint calibration and sub-model fitting"
+            f"solve_structured needs at least {n_joint_cal + 14} inputs for joint calibration, "
+            "record-level evaluation, and sub-model fitting"
         )
-    joint_idx, sub_idx = order[:n_joint_cal], order[n_joint_cal:]
+    # a record-level evaluation slice, disjoint from every training and calibration row, on which
+    # the REAL joint gate is measured after fitting (STAT-RR16-2); joint_qhat is selected on the
+    # joint calibration rows, so measuring the answered slice there would be optimistic
+    n_eval = min(max(2, len(items) // 5), len(items) - n_joint_cal - 12)
+    joint_idx = order[:n_joint_cal]
+    eval_idx = order[n_joint_cal : n_joint_cal + n_eval]
+    sub_idx = order[n_joint_cal + n_eval :]
     joint_inputs = [items[i] for i in joint_idx]
     joint_outputs = [outs[i] for i in joint_idx]
+    eval_inputs = [items[i] for i in eval_idx]
+    eval_outputs = [outs[i] for i in eval_idx]
     sub_inputs = [items[i] for i in sub_idx]
     sub_outputs = [outs[i] for i in sub_idx]
 
@@ -376,7 +425,7 @@ def solve_structured(
     if rank < 1 or rank > len(joint_scores):
         raise ValueError("joint structured calibration slice is too small for the requested alpha")
     joint_qhat = float(np.sort(joint_scores)[rank - 1])
-    return StructuredSolution(
+    solution = StructuredSolution(
         fields_cat=fields_cat,
         fields_num=fields_num,
         teacher=teacher,
@@ -388,5 +437,25 @@ def solve_structured(
             "calibration_count": len(joint_inputs),
             "calibration_indices": [int(i) for i in joint_idx],
             "calibration_sha256": sha256(repr(list(zip(joint_inputs, joint_outputs))).encode("utf-8")).hexdigest(),
+            "evaluation_count": len(eval_inputs),
+            "evaluation_indices": [int(i) for i in eval_idx],
+            "evaluation_sha256": sha256(repr(list(zip(eval_inputs, eval_outputs))).encode("utf-8")).hexdigest(),
         },
     )
+    # run the REAL serving gate over the disjoint evaluation records; try_local touches no
+    # serving counters and no harvest buffer, so the measurement leaves the solution pristine
+    answered_n = 0
+    answered_correct = 0
+    for x, truth in zip(eval_inputs, eval_outputs):
+        decided = solution.try_local(x)
+        if decided is None:
+            continue
+        answered_n += 1
+        cats_match = all(str(decided[key]) == str(truth[key]) for key in fields_cat)
+        nums_match = all(abs(float(decided[key]) - float(truth[key])) <= numeric_tolerances[key] for key in fields_num)
+        if cats_match and nums_match:
+            answered_correct += 1
+    solution.eval_rows = len(eval_inputs)
+    solution.answered_eval_n = answered_n
+    solution.answered_eval_correct = answered_correct
+    return solution

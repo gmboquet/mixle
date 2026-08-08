@@ -55,6 +55,11 @@ _SENTINELS = {
         "classification": {"legal": "reused-after-adaptive-harvest", "illegal": "certified-by-vibes"},
         "regression": {"legal": "fresh-harvest", "illegal": "certified-by-vibes"},
     },
+    # answered-slice measurement counts (STAT-RR16-2): non-negative integers; booleans and
+    # negatives are refused (a bool True would silently count as 1)
+    "sel_rows": {"legal": 25, "illegal": -1},
+    "answered_sel_n": {"legal": 19, "illegal": -1},
+    "answered_sel_correct": {"legal": 17, "illegal": True},
 }
 
 

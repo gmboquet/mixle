@@ -34,9 +34,9 @@ from typing import Any
 
 import numpy as np
 
-from mixle.task._ledger import CLASSIFICATION_LEDGER, read_ledger, write_ledger
+from mixle.task._ledger import CLASSIFICATION_LEDGER, _clopper_pearson_interval, read_ledger, write_ledger
 from mixle.task._teacher import TeacherCaller, as_batch_view
-from mixle.task.calibrate import CalibratedTaskModel
+from mixle.task.calibrate import ESCALATE, CalibratedTaskModel
 from mixle.task.cascade import Cascade
 from mixle.task.density import DensityGate
 from mixle.task.distill import agreement, distill_from_labels, distill_records_from_labels
@@ -63,6 +63,19 @@ def _batch_view(teacher: Callable[..., Any]) -> TeacherCaller:
 def _evidence_digest(inputs: Sequence[Any], labels: Sequence[Any]) -> str:
     """Bind a verification decision to the exact ordered evidence rows without persisting those rows."""
     return sha256(repr(list(zip(inputs, labels))).encode("utf-8")).hexdigest()
+
+
+def _answered_slice_counts(model: Any, sel_inputs: Sequence[Any], sel_labels: Sequence[Any]) -> tuple[int, int]:
+    """Run the REAL answer-or-escalate rule over the selection rows (STAT-RR16-2).
+
+    Returns ``(answered, answered_and_correct)``. This is the gated companion to the raw
+    route-independent ``holdout_agreement``: a decision is counted only when the calibrated
+    model actually answers (conformal singleton, OOD gate passing), and correctness is exact
+    agreement with the teacher's label on those answered rows.
+    """
+    decisions = model.batch_decide(list(sel_inputs))
+    answered = [(decided, label) for decided, label in zip(decisions, sel_labels) if decided is not ESCALATE]
+    return len(answered), sum(1 for decided, label in answered if str(decided) == str(label))
 
 
 def _split_holdout_roles(count: int) -> int:
@@ -291,6 +304,14 @@ class Solution:
     # such a threshold is not restored by the role split, and this field says so in report().
     calibration_evidence: str = "solve-split"
     selection_receipt: list[dict] = field(default_factory=list)
+    # answered-slice MEASUREMENT (STAT-RR16-2 symmetry with multilabel/structured): the REAL
+    # answer-or-escalate rule run over the selection rows -- how many rows, how many the gate
+    # answered, how many answered rows matched the teacher. ``holdout_agreement`` is the RAW
+    # route-independent number; these are the gated ones. They share the selection rows, so
+    # ``selection_uses > 1`` marks them selection-contaminated exactly like holdout_agreement.
+    sel_rows: int = 0
+    answered_sel_n: int = 0
+    answered_sel_correct: int = 0
 
     @property
     def selection_evidence_is_single_use(self) -> bool:
@@ -321,8 +342,26 @@ class Solution:
         stats = self.cascade.stats
         out = {
             "promoted": self.promoted,
+            # RAW route-independent agreement on the selection rows; the answer-or-escalate gate
+            # never runs in it, so it is NOT an answered-slice number
             "holdout_agreement": round(self.holdout_agreement, 4),
             "holdout_escalation_rate": round(self.escalation_rate, 4),
+            # answered-slice MEASUREMENT: the real answer-or-escalate rule on the selection rows,
+            # with the answered denominator and an exact 95% Clopper-Pearson interval; None when
+            # the gate answered none. selection_uses > 1 contaminates these numbers too (same rows).
+            "answered_slice": (
+                None
+                if self.answered_sel_n == 0
+                else {
+                    "agreement": round(self.answered_sel_correct / self.answered_sel_n, 4),
+                    "n_answered": self.answered_sel_n,
+                    "n_evaluated": self.sel_rows,
+                    "ci95": [
+                        round(bound, 4)
+                        for bound in _clopper_pearson_interval(self.answered_sel_correct, self.answered_sel_n, 0.95)
+                    ],
+                }
+            ),
             "requests": stats.n_requests,
             "live_escalated": stats.n_escalated,
             "harvested_labels": len(stats.escalated_labels),
@@ -413,6 +452,7 @@ class Solution:
         cal = CalibratedTaskModel(student, alpha=alpha, density_gate=gate).calibrate(cal_in, cal_lab)
         agree = agreement(student, sel_lab, sel_in)
         esc = cal.escalation_rate(sel_in)
+        answered_n, answered_correct = _answered_slice_counts(cal, sel_in, sel_lab)
         # On fresh evidence the incumbent's stored numbers came from different rows, so re-measure it on
         # the same rows the candidate is judged on; otherwise the stored numbers already are that.
         if fresh:
@@ -443,6 +483,12 @@ class Solution:
                 self.sel_inputs, self.sel_labels = sel_in, sel_lab
                 self.selection_uses = uses
                 self.holdout_agreement, self.escalation_rate = incumbent_agree, incumbent_esc
+                # the retained INCUMBENT's answered slice, re-measured on the new selection rows
+                # so the stored measurement always describes the deployed model on the stored rows
+                self.sel_rows = len(sel_in)
+                self.answered_sel_n, self.answered_sel_correct = _answered_slice_counts(
+                    self.cascade.model, sel_in, sel_lab
+                )
             else:
                 self.selection_uses = uses
             return False  # anti-regression: keep the current student
@@ -455,6 +501,8 @@ class Solution:
         self.calibration_evidence = "fresh-evidence" if fresh else "reused-after-adaptive-harvest"
         self.verification_digest = _evidence_digest([*cal_in, *sel_in], [*cal_lab, *sel_lab])
         self.holdout_agreement, self.escalation_rate = agree, esc
+        self.sel_rows = len(sel_in)
+        self.answered_sel_n, self.answered_sel_correct = answered_n, answered_correct
         self.promoted = self.promoted or self._passes_target(agree)
         self.cascade.stats.escalated_texts.clear()
         self.cascade.stats.escalated_labels.clear()
@@ -666,7 +714,9 @@ def solve(
             ``>= 1 - alpha`` MARGINALLY over queries; the student answers locally only when its set
             is a single label and escalates otherwise. Marginal set coverage is NOT a bound on the
             error of the locally-answered slice (answering conditions on the set being a singleton),
-            so answered-slice agreement is reported as a measurement -- certify an answered-slice
+            so answered-slice agreement is reported as a measurement -- ``report()['answered_slice']``
+            runs the real answer-or-escalate rule over the selection rows and carries the answered
+            denominator and an exact 95% Clopper-Pearson interval -- certify an answered-slice
             target separately with
             :meth:`mixle.task.calibrate.CalibratedTaskModel.calibrate_selective`. Both statements
             fail silently under distribution shift; the ``ood`` gate below mitigates, and drifted
@@ -786,6 +836,7 @@ def solve(
     # improve() the calibration set as its selection set (MXR-080-1891).
     agree = agreement(student, sel_labels, sel_inputs)
     esc = cal.escalation_rate(sel_inputs)
+    answered_n, answered_correct = _answered_slice_counts(cal, sel_inputs, sel_labels)
     promoted = target_agreement is None or agree >= target_agreement
     if edge_result is not None and not edge_result.feasible:
         promoted = False  # nothing fit the device: serve the teacher, never a budget-busting student
@@ -817,4 +868,7 @@ def solve(
         sel_inputs=sel_inputs,
         sel_labels=sel_labels,
         selection_uses=1,  # solve() itself is the selection role's first and, so far, only use
+        sel_rows=len(sel_inputs),
+        answered_sel_n=answered_n,
+        answered_sel_correct=answered_correct,
     )

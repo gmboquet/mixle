@@ -426,5 +426,47 @@ class HealthTest(unittest.TestCase):
         self.assertGreater(bad["live_ood_rate"], bad["design_ood_rate"])
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class AnsweredSliceMeasurementTest(unittest.TestCase):
+    def test_measurement_matches_the_real_gate_and_survives_the_round_trip(self):
+        # STAT-RR16-2 symmetry: classification's answered-slice numbers must be the REAL
+        # answer-or-escalate rule run over the selection rows -- not holdout_agreement relabeled.
+        import tempfile
+
+        from mixle.task import ESCALATE, Solution, solve
+
+        sol = solve(_route, _tickets(400), alpha=0.1, seed=0, epochs=300)
+        self.assertEqual(sol.sel_rows, len(sol.sel_inputs))
+        self.assertLessEqual(sol.answered_sel_correct, sol.answered_sel_n)
+        self.assertLessEqual(sol.answered_sel_n, sol.sel_rows)
+
+        decisions = sol.cascade.model.batch_decide(list(sol.sel_inputs))
+        answered = [(d, y) for d, y in zip(decisions, sol.sel_labels) if d is not ESCALATE]
+        self.assertEqual(len(answered), sol.answered_sel_n)
+        self.assertEqual(sum(1 for d, y in answered if str(d) == str(y)), sol.answered_sel_correct)
+
+        block = sol.report()["answered_slice"]
+        if sol.answered_sel_n == 0:
+            self.assertIsNone(block)
+        else:
+            self.assertEqual(block["n_answered"], sol.answered_sel_n)
+            self.assertEqual(block["n_evaluated"], sol.sel_rows)
+            self.assertAlmostEqual(block["agreement"], sol.answered_sel_correct / sol.answered_sel_n, places=4)
+            low, high = block["ci95"]
+            self.assertGreaterEqual(low, 0.0)
+            self.assertLessEqual(high, 1.0)
+            self.assertLessEqual(low, block["agreement"] + 1e-4)
+            self.assertGreaterEqual(high, block["agreement"] - 1e-4)
+
+        with tempfile.TemporaryDirectory() as d:
+            path = sol.save(d + "/router")
+            back = Solution.load(path, _route)
+            self.assertEqual(back.sel_rows, sol.sel_rows)
+            self.assertEqual(back.answered_sel_n, sol.answered_sel_n)
+            self.assertEqual(back.answered_sel_correct, sol.answered_sel_correct)
+            # missing-member refusal for these fields is covered registry-wide by
+            # task_ledger_lifecycle_test (they ride CLASSIFICATION_LEDGER)
+
+
 if __name__ == "__main__":
     unittest.main()

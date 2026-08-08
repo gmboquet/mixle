@@ -55,7 +55,7 @@ from typing import Any
 
 import numpy as np
 
-from mixle.task._ledger import REGRESSION_LEDGER, read_ledger, write_ledger
+from mixle.task._ledger import REGRESSION_LEDGER, _clopper_pearson_interval, read_ledger, write_ledger
 from mixle.task._teacher import TeacherCaller, as_batch_view
 from mixle.task.model import HashedNGram, HashedRecord
 from mixle.task.solve import _input_kind, _split_holdout_roles
@@ -499,18 +499,6 @@ def _fit_scaled(inputs: list, ys: list, featurizer: Any, hidden, epochs, lr, see
     feats = _validated_features(featurizer, inputs)
     net = _fit_reg_mlp(feats, ((y - mean) / scale).astype(np.float32), hidden, epochs, lr, seed)
     return net, (mean, scale)
-
-
-def _clopper_pearson_interval(successes: int, n: int, level: float) -> tuple[float, float]:
-    """Exact Clopper-Pearson two-sided interval for a binomial proportion."""
-    from scipy.stats import beta as _beta
-
-    if n <= 0:
-        raise ValueError("interval needs a positive denominator")
-    tail = (1.0 - level) / 2.0
-    lower = 0.0 if successes == 0 else float(_beta.ppf(tail, successes, n - successes + 1))
-    upper = 1.0 if successes == n else float(_beta.ppf(1.0 - tail, successes + 1, n - successes))
-    return lower, upper
 
 
 def _selection_error(cand, featurizer, sel_inputs, sel_ys) -> float:

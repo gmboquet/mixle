@@ -12,10 +12,16 @@ the calibration draw and the query jointly, under exchangeability of the calibra
 incoming traffic. It is NOT an accuracy guarantee conditional on answering locally: serving conditions
 on the joint set being a singleton, and coverage conditional on that event is not controlled (the
 classification side measured 9% marginal versus 47% answered-slice error from the same selection
-effect). Answered-slice quality is a measurement -- ``holdout_set_agreement`` in ``report()`` -- not a
-guarantee. Distribution shift or any other break of exchangeability voids the statement silently;
-re-measure on drifted traffic. ``report()`` carries this scope machine-readably in
-``coverage_contract_scope``.
+effect). Answered-slice quality is a MEASUREMENT, never a guarantee, and ``report()`` carries two
+distinct numbers that must not be conflated: ``holdout_set_agreement`` is the RAW route-independent
+0.5-threshold exact-set agreement on the evaluation rows (the serving gate never runs in it), while
+``answered_slice`` applies the real joint-qhat singleton rule to the same disjoint evaluation rows
+and reports exact-set agreement among the rows the gate actually answered, with the answered
+denominator and an exact 95% Clopper-Pearson interval (``None`` when it answered none). After an
+``improve()`` promotion those numbers describe the winner of a 2-way comparison made on the same
+rows, so they are post-selection measurements (the receipt records this). Distribution shift or any
+other break of exchangeability voids the coverage statement silently; re-measure on drifted
+traffic. ``report()`` carries the scope machine-readably in ``coverage_contract_scope``.
 """
 
 from __future__ import annotations
@@ -27,7 +33,7 @@ from typing import Any
 
 import numpy as np
 
-from mixle.task._ledger import conformal_scope
+from mixle.task._ledger import _clopper_pearson_interval, conformal_scope
 from mixle.task.model import HashedNGram
 from mixle.task.regress import (
     RecordRegressionFeaturizer,
@@ -169,6 +175,12 @@ class MultiLabelSolution:
     joint_qhat: float
     alpha: float
     holdout_set_agreement: float
+    # answered-slice MEASUREMENT (STAT-RR16-2): the real joint-qhat singleton gate applied to the
+    # disjoint evaluation rows -- how many rows were evaluated, how many the gate answered, and how
+    # many answered rows matched the teacher's set exactly. Measurements, never guarantees.
+    eval_rows: int = 0
+    answered_eval_n: int = 0
+    answered_eval_correct: int = 0
     train_inputs: list = field(default_factory=list)
     train_sets: list = field(default_factory=list)
     cal_inputs: list = field(default_factory=list)
@@ -216,7 +228,25 @@ class MultiLabelSolution:
         """Return multi-label agreement, escalation, and harvest metrics."""
         return {
             "labels": len(self.labels),
+            # RAW route-independent 0.5-threshold exact-set agreement on the evaluation rows; the
+            # serving gate never runs in it, so it is NOT an answered-slice number
             "holdout_set_agreement": round(self.holdout_set_agreement, 4),
+            # answered-slice MEASUREMENT: the real joint-qhat singleton rule on the disjoint
+            # evaluation rows, with the answered denominator and an exact 95% Clopper-Pearson
+            # interval; None when the gate answered none of them
+            "answered_slice": (
+                None
+                if self.answered_eval_n == 0
+                else {
+                    "agreement": round(self.answered_eval_correct / self.answered_eval_n, 4),
+                    "n_answered": self.answered_eval_n,
+                    "n_evaluated": self.eval_rows,
+                    "ci95": [
+                        round(bound, 4)
+                        for bound in _clopper_pearson_interval(self.answered_eval_correct, self.answered_eval_n, 0.95)
+                    ],
+                }
+            ),
             "alpha": self.alpha,
             "coverage_contract": "joint_exact_set",
             "coverage_contract_scope": conformal_scope(
@@ -254,6 +284,9 @@ class MultiLabelSolution:
                     "joint_qhat": self.joint_qhat,
                     "alpha": self.alpha,
                     "holdout_set_agreement": self.holdout_set_agreement,
+                    "eval_rows": int(self.eval_rows),
+                    "answered_eval_n": int(self.answered_eval_n),
+                    "answered_eval_correct": int(self.answered_eval_correct),
                     "hidden": [int(h) for h in self.hidden],
                     "epochs": self.epochs,
                     "lr": self.lr,
@@ -280,6 +313,13 @@ class MultiLabelSolution:
             joint_qhat=float(m["joint_qhat"]),
             alpha=float(m["alpha"]),
             holdout_set_agreement=float(m["holdout_set_agreement"]),
+            # required, not defaulted: a live object's zero-initialization means "not yet
+            # measured", and reusing it for an ABSENT member would present an artifact with an
+            # unknown measurement as one that measured nothing (the STAT-RR14-1 mechanism); the
+            # 0.8.0 format is the first to ship this artifact, so every artifact carries these
+            eval_rows=int(m["eval_rows"]),
+            answered_eval_n=int(m["answered_eval_n"]),
+            answered_eval_correct=int(m["answered_eval_correct"]),
             hidden=tuple(m["hidden"]),
             epochs=int(m["epochs"]),
             lr=float(m["lr"]),
@@ -343,6 +383,9 @@ class MultiLabelSolution:
         self.upper_absent, self.lower_present = cand["upper_absent"], cand["lower_present"]
         self.joint_qhat = float(cand["joint_qhat"])
         self.holdout_set_agreement = float(cand["agreement"])
+        self.eval_rows = int(cand["eval_rows"])
+        self.answered_eval_n = int(cand["answered_eval_n"])
+        self.answered_eval_correct = int(cand["answered_eval_correct"])
         self.train_inputs, self.train_sets = inputs, sets
         self.cal_inputs, self.cal_sets = fresh_cal_inputs, fresh_cal_sets
         self.eval_inputs, self.eval_sets = fresh_eval_inputs, fresh_eval_sets
@@ -353,6 +396,10 @@ class MultiLabelSolution:
                 "evidence_sha256": sha256(repr(list(zip(fresh_inputs, fresh_sets))).encode("utf-8")).hexdigest(),
                 "incumbent_agreement": incumbent_agreement,
                 "candidate_agreement": cand["agreement"],
+                # the promotion rule compared incumbent vs candidate on these same evaluation
+                # rows, so the promoted numbers are post-selection (a 2-way pick); they are
+                # measurements of the winner, not selection-free estimates
+                "post_selection": True,
             }
         )
         self.harvested_inputs.clear()
@@ -390,6 +437,15 @@ def _fit_and_calibrate(
             f"{len(cal_inputs)} calibration examples are insufficient for finite {1.0 - alpha:.6g} joint coverage"
         )
     agree = _raw_set_agreement(net, featurizer, eval_inputs, eval_sets, labels)
+    # The ANSWERED-SLICE measurement runs the REAL serving rule (joint_qhat singleton decision)
+    # on the disjoint evaluation rows: how many the gate answers, and how many of those match
+    # the teacher's exact set. The raw 0.5-threshold agreement above is route-independent and
+    # must never be presented as an answered-slice number (STAT-RR16-2).
+    eval_scores = _score_net(net, _validated_features(featurizer, eval_inputs), len(labels))
+    unique, predicted = _joint_decisions(eval_scores, qhat)
+    eval_truth = _indicator_matrix(eval_sets, labels)
+    answered_n = int(np.sum(unique))
+    answered_correct = int(np.sum(unique & np.all(predicted == eval_truth, axis=1)))
     # Retained for artifact/API compatibility; the serving decision uses joint_qhat.
     upper_absent = np.full(len(labels), 1.0 - qhat)
     lower_present = np.full(len(labels), qhat)
@@ -399,6 +455,9 @@ def _fit_and_calibrate(
         "lower_present": lower_present,
         "joint_qhat": qhat,
         "agreement": agree,
+        "eval_rows": len(eval_inputs),
+        "answered_eval_n": answered_n,
+        "answered_eval_correct": answered_correct,
     }
 
 
@@ -512,6 +571,9 @@ def solve_multilabel(
         joint_qhat=float(cand["joint_qhat"]),
         alpha=float(alpha),
         holdout_set_agreement=float(cand["agreement"]),
+        eval_rows=int(cand["eval_rows"]),
+        answered_eval_n=int(cand["answered_eval_n"]),
+        answered_eval_correct=int(cand["answered_eval_correct"]),
         train_inputs=train_inputs,
         train_sets=train_sets,
         cal_inputs=cal_inputs,

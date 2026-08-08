@@ -177,17 +177,85 @@ class StructuredResolveTest(unittest.TestCase):
         num = sol.fields_num["priority"]
         cat = sol.fields_cat["queue"]
         joint_count = sol.calibration_receipt["calibration_count"]
+        # the structured level ALSO reserves a disjoint record-level evaluation slice for the
+        # answered-slice measurement (STAT-RR16-2); those rows never reach any sub-model
+        eval_count = sol.calibration_receipt["evaluation_count"]
+        self.assertEqual(eval_count, sol.eval_rows)
+        self.assertGreaterEqual(eval_count, 2)
         # BOTH sub-solution shapes reserve TWO holdout roles -- conformal calibration (cal_*) and
         # selection (sel_*) -- so the rows withheld from training are cal + sel, not cal alone
         # (MXR-080-1891 for solve(); STAT-RR11-1 gave solve_regression the same split).
         num_reserved = len(num.cal_inputs) + len(num.sel_inputs)
-        self.assertEqual(len(num.train_inputs), len(base) - joint_count - num_reserved + len(harvested))
+        self.assertEqual(len(num.train_inputs), len(base) - joint_count - eval_count - num_reserved + len(harvested))
         cat_reserved = len(cat.cal_inputs) + len(cat.sel_inputs)
-        self.assertEqual(len(cat.train_inputs), len(base) - joint_count - cat_reserved + len(harvested))
+        self.assertEqual(len(cat.train_inputs), len(base) - joint_count - eval_count - cat_reserved + len(harvested))
         for t in harvested:
             self.assertNotIn(repr(t), [repr(c) for c in num.cal_inputs])
             self.assertNotIn(repr(t), [repr(c) for c in cat.cal_inputs])
             self.assertNotIn(repr(t), [repr(c) for c in cat.sel_inputs])
+
+
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class StructuredAnsweredSliceTest(unittest.TestCase):
+    def test_measurement_matches_the_real_joint_gate_and_round_trips(self):
+        # STAT-RR16-2: the answered-slice numbers must be the REAL joint gate (try_local) run
+        # over the disjoint record-level evaluation slice, with record-correct meaning
+        # categoricals exact and numerics within their tolerance.
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from mixle.task import StructuredSolution, solve_structured
+
+        base = _tickets(200)
+        sol = solve_structured(_triage, base, tol={"priority": 3.0}, alpha=0.1, seed=0, epochs=150)
+        receipt = sol.calibration_receipt
+        self.assertEqual(receipt["evaluation_count"], sol.eval_rows)
+        self.assertGreaterEqual(sol.eval_rows, 2)
+        self.assertTrue(set(receipt["evaluation_indices"]).isdisjoint(receipt["calibration_indices"]))
+        self.assertLessEqual(sol.answered_eval_correct, sol.answered_eval_n)
+        self.assertLessEqual(sol.answered_eval_n, sol.eval_rows)
+
+        answered = correct = 0
+        for i in receipt["evaluation_indices"]:
+            truth = _triage(base[i])
+            got = sol.try_local(base[i])
+            if got is None:
+                continue
+            answered += 1
+            ok_queue = str(got["queue"]) == str(truth["queue"])
+            ok_priority = abs(float(got["priority"]) - float(truth["priority"])) <= 3.0
+            correct += int(ok_queue and ok_priority)
+        self.assertEqual(answered, sol.answered_eval_n)
+        self.assertEqual(correct, sol.answered_eval_correct)
+
+        block = sol.report()["answered_slice"]
+        if sol.answered_eval_n == 0:
+            self.assertIsNone(block)
+        else:
+            self.assertEqual(block["n_answered"], sol.answered_eval_n)
+            self.assertEqual(block["n_evaluated"], sol.eval_rows)
+            self.assertAlmostEqual(block["agreement"], sol.answered_eval_correct / sol.answered_eval_n, places=4)
+            low, high = block["ci95"]
+            self.assertGreaterEqual(low, 0.0)
+            self.assertLessEqual(high, 1.0)
+            self.assertLessEqual(low, block["agreement"] + 1e-4)
+            self.assertGreaterEqual(high, block["agreement"] - 1e-4)
+
+        with tempfile.TemporaryDirectory() as d:
+            path = sol.save(d + "/triage")
+            back = StructuredSolution.load(path, _triage)
+            self.assertEqual(back.eval_rows, sol.eval_rows)
+            self.assertEqual(back.answered_eval_n, sol.answered_eval_n)
+            self.assertEqual(back.answered_eval_correct, sol.answered_eval_correct)
+            # an artifact WITHOUT a measurement member is refused, never defaulted to
+            # "measured nothing" (the STAT-RR14-1 mechanism)
+            sj = Path(path) / "structured.json"
+            doc = json.loads(sj.read_text())
+            del doc["answered_eval_n"]
+            sj.write_text(json.dumps(doc))
+            with self.assertRaises(KeyError):
+                StructuredSolution.load(path, _triage)
 
 
 if __name__ == "__main__":
