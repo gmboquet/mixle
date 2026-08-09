@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 
 from mixle.inference import (
+    calibration_null_expectation,
     coverage_curve,
     expected_calibration_error,
     interval_coverage,
@@ -127,6 +128,44 @@ class CoverageTest(unittest.TestCase):
         y = mu + rng.normal(0, 1, size=n)
         cc = coverage_curve(forecasts, y, levels=np.array([0.9]))
         self.assertLess(cc["empirical"][0], 0.9)
+
+
+class CalibrationNullFloorTest(unittest.TestCase):
+    """Audit CAL-1/2/3/7/8: finite-sample null floors and pointwise-CI honesty."""
+
+    def test_null_expectation_matches_a_perfectly_calibrated_forecaster(self):
+        rng = np.random.RandomState(0)
+        p = rng.uniform(0.05, 0.95, size=2000)
+        y = (rng.uniform(size=2000) < p).astype(float)  # calibrated by construction
+        null = calibration_null_expectation(p, bins=10, n_sim=400, seed=1)
+        self.assertGreater(null["ece"], 0.0)  # zero is NOT the null value
+        self.assertLess(expected_calibration_error(p, y, bins=10), 2.0 * null["ece_q95"])
+        self.assertLess(maximum_calibration_error(p, y, bins=10), 2.0 * null["mce_q95"])
+
+    def test_mce_null_grows_with_bins(self):
+        rng = np.random.RandomState(2)
+        p = rng.uniform(0.05, 0.95, size=2000)
+        few = calibration_null_expectation(p, bins=10, n_sim=200, seed=3)
+        many = calibration_null_expectation(p, bins=500, n_sim=200, seed=3)
+        self.assertGreater(many["mce"], 3.0 * few["mce"])  # the max is a bins artifact under the null
+
+    def test_coverage_curve_null_expectation_tracks_a_perfect_small_ensemble(self):
+        rng = np.random.RandomState(4)
+        n, m = 6000, 5
+        forecasts = rng.standard_normal((n, m))
+        y = rng.standard_normal(n)  # same law: the ensemble is perfect, m is just small
+        cc = coverage_curve(forecasts, y, levels=np.array([0.95]))
+        self.assertLess(cc["null_expectation"][0], 0.75)  # far below the diagonal at m=5
+        self.assertLess(abs(cc["empirical"][0] - cc["null_expectation"][0]), 0.05)
+
+    def test_reliability_ci_reports_effective_bootstrap_counts(self):
+        rng = np.random.RandomState(5)
+        p = rng.uniform(0.0, 1.0, size=60)
+        y = (rng.uniform(size=60) < p).astype(float)
+        out = reliability_curve(p, y, bins=10, ci=True, n_boot=100, seed=6)
+        eff = out["obs_ci_effective_boot"]
+        self.assertEqual(eff.shape, out["obs_freq"].shape)
+        self.assertTrue(np.all(eff >= 1) and np.all(eff <= 100))
 
 
 if __name__ == "__main__":

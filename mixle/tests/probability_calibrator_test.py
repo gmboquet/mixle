@@ -57,6 +57,19 @@ class PlattTest(unittest.TestCase):
         order = np.argsort(s)
         self.assertTrue(np.all(np.diff(pred[order]) >= -1e-9))
 
+    def test_platt_survives_perfectly_separable_data(self):
+        # Audit CAL-5: raw 0/1 targets sent a -> inf on separable data, so the "calibrated"
+        # outputs were exact 0/1 -- maximal overconfidence. Smoothed targets keep them interior.
+        rng = np.random.RandomState(7)
+        s = np.concatenate([rng.uniform(-3, -1, 40), rng.uniform(1, 3, 40)])
+        y = np.concatenate([np.zeros(40), np.ones(40)])
+        cal = calibrate_probabilities(s, y, method="platt")
+        pred = cal.predict(np.array([-2.0, 2.0]))
+        self.assertGreater(pred[0], 1e-6)
+        self.assertLess(pred[1], 1.0 - 1e-6)
+        self.assertLess(pred[0], 0.1)
+        self.assertGreater(pred[1], 0.9)
+
 
 def _auc(scores: np.ndarray, y: np.ndarray) -> float:
     """AUC = P(score of a correct item > score of an incorrect item) via the Mann-Whitney statistic."""

@@ -19,8 +19,14 @@ Three families, by forecast type:
   * **Intervals / quantiles** -- :func:`interval_coverage` (coverage and mean width at one level) and
     :func:`coverage_curve` (empirical-vs-nominal coverage across a grid of levels).
 
-Several functions take ``ci=True`` to attach a nonparametric bootstrap confidence band, so a
-reliability diagram or ECE comes with uncertainty bands rather than a bare point estimate.
+Several functions take ``ci=True`` to attach nonparametric bootstrap intervals. These are
+PER-BIN POINTWISE intervals, not a simultaneous band: each bin's interval covers that bin's own
+frequency at the stated level, but the chance that at least one of ``bins`` intervals excludes its
+truth is far higher (measured 30-45% familywise exclusion at a nominal 5% per bin on reliability
+diagrams) -- so one bin poking outside its interval is expected under perfect calibration, not
+evidence against it. The binned summaries also have a NULL FLOOR: with finitely many outcomes per
+bin, ECE and MCE are strictly positive even for a perfectly calibrated forecaster; compare them to
+:func:`calibration_null_expectation`, not to zero.
 """
 
 from __future__ import annotations
@@ -121,14 +127,22 @@ def reliability_curve(
         outcome: ``(n,)`` 0/1 outcomes (or correctness indicators).
         bins: number of bins.
         strategy: ``"uniform"`` (equal-width) or ``"quantile"`` (equal-count) bins.
-        ci: if True attach a percentile bootstrap band on the observed frequency in each bin.
+        ci: if True attach a percentile bootstrap interval on the observed frequency in each bin.
         n_boot: bootstrap resamples when ``ci`` is True.
-        ci_level: central probability of the bootstrap band (e.g. 0.95).
+        ci_level: central probability of each PER-BIN interval (e.g. 0.95).
         seed: RNG seed for the bootstrap.
 
     Returns:
         ``{'mean_pred', 'obs_freq', 'count', 'bin_edges'}`` (one entry per non-empty bin), plus
-        ``'obs_lo'`` / ``'obs_hi'`` when ``ci`` is True.
+        ``'obs_lo'`` / ``'obs_hi'`` / ``'obs_ci_effective_boot'`` when ``ci`` is True.
+
+    The intervals are POINTWISE, one bin at a time -- with 10 bins at 95% each, at least one bin
+    escaping its interval under perfect calibration is a ~30-45% event, so judge single-bin
+    excursions accordingly. A resample in which a bin comes up EMPTY contributes nothing to that
+    bin's interval; the quantiles are taken over the non-empty resamples only, which conditions the
+    interval on the bin being observed (a real bias for sparse bins). ``obs_ci_effective_boot``
+    reports, per bin, how many of the ``n_boot`` resamples actually informed the interval -- treat
+    an interval resting on far fewer than ``n_boot`` replicates as unstable rather than narrow.
     """
     p, y = _probability_outcomes(prob, outcome)
     if ci:
@@ -170,6 +184,9 @@ def reliability_curve(
     lo_q = (1.0 - ci_level) / 2.0
     out["obs_lo"] = np.nanquantile(boot, lo_q, axis=0)
     out["obs_hi"] = np.nanquantile(boot, 1.0 - lo_q, axis=0)
+    # NaN rows are resamples where the bin was empty: nanquantile drops them, so the interval is
+    # conditioned on the bin existing. Surface how many replicates each interval actually rests on.
+    out["obs_ci_effective_boot"] = np.sum(~np.isnan(boot), axis=0).astype(int)
     return out
 
 
@@ -188,8 +205,16 @@ def expected_calibration_error(
     """Expected Calibration Error: count-weighted average gap between confidence and accuracy.
 
     ``ECE = sum_b (n_b / n) |obs_b - pred_b|`` over bins (``norm='l2'`` uses the squared gap, square-
-    rooted). Zero is perfect calibration. For multiclass classifiers reduce with
-    :func:`top_label_confidence` first.
+    rooted). For multiclass classifiers reduce with :func:`top_label_confidence` first.
+
+    Zero is NOT the null value. The plug-in ECE takes an absolute value of binomial noise in every
+    bin, so a PERFECTLY calibrated forecaster still scores roughly ``sqrt(bins / n)`` in expectation
+    -- and a percentile bootstrap interval around the plug-in estimate inherits that upward shift,
+    so under perfect calibration it excludes the true value 0 essentially always. Judge the point
+    estimate against :func:`calibration_null_expectation` (the measured perfect-calibration
+    distribution of this same statistic at your ``prob`` profile and binning), and read the
+    bootstrap interval as sampling uncertainty around the BIASED plug-in functional, not as a test
+    of calibration.
 
     Args:
         prob: ``(n,)`` predicted probabilities / confidences.
@@ -247,7 +272,12 @@ def maximum_calibration_error(
     """Maximum Calibration Error: the worst per-bin gap ``max_b |obs_b - pred_b|``.
 
     Unlike :func:`expected_calibration_error` this is not count-weighted, so it surfaces a small but
-    badly-miscalibrated region that the average would hide.
+    badly-miscalibrated region that the average would hide -- and for exactly that reason its null
+    value GROWS with ``bins``: a max over more (and therefore sparser) bins of pure binomial noise
+    rises from ~0.05 to ~0.6 as ``bins`` goes 10 -> 500 under perfect calibration, with the argmax
+    typically landing on the sparsest bin. A large MCE from a thin bin is what noise looks like at
+    that binning; compare to :func:`calibration_null_expectation` before reading it as a defect,
+    and prefer more data per bin (fewer bins, or quantile binning) when the max matters.
     """
     p, y = _probability_outcomes(prob, outcome)
     edges = _bin_edges(p, bins, strategy)
@@ -261,8 +291,78 @@ def maximum_calibration_error(
     return worst
 
 
+def calibration_null_expectation(
+    prob: np.ndarray,
+    *,
+    bins: int = 10,
+    strategy: str = "uniform",
+    norm: str = "l1",
+    n_sim: int = 500,
+    seed: int | RandomState | None = 0,
+) -> dict[str, float]:
+    """What ECE and MCE look like for a PERFECTLY calibrated forecaster at this ``prob`` profile.
+
+    Simulates outcomes ``y*_i ~ Bernoulli(prob_i)`` -- the definition of perfect calibration at the
+    observed forecasts -- and recomputes the binned statistics each time, with the same bins the
+    real statistics would use. The plug-in ECE/MCE are strictly positive under this null (absolute
+    values of binomial noise), so THESE numbers, not zero, are the calibrated baseline: an observed
+    ECE near ``ece`` here is consistent with perfect calibration, and evidence of miscalibration
+    starts around the ``*_q95`` quantiles, which give a one-sided 5% test by construction.
+
+    Args:
+        prob: ``(n,)`` the forecaster's predicted probabilities (outcomes are not needed -- the
+            null generates them).
+        bins, strategy, norm: the same binning controls you pass to the real statistics.
+        n_sim: null simulations.
+        seed: RNG seed.
+
+    Returns:
+        ``{'ece', 'ece_q95', 'mce', 'mce_q95', 'n_sim'}`` -- null means and 95th percentiles of the
+        plug-in ECE (under ``norm``) and MCE at this forecast profile and binning.
+    """
+    p = _vector("prob", prob)
+    if np.any((p < 0.0) | (p > 1.0)):
+        raise ValueError("prob must contain probabilities in [0, 1]")
+    if norm not in ("l1", "l2"):
+        raise ValueError("norm must be 'l1' or 'l2'.")
+    n_sim = _positive_int("n_sim", n_sim)
+    rng = _as_rng(seed)
+    edges = _bin_edges(p, bins, strategy)
+    nb = len(edges) - 1
+    idx = np.clip(np.digitize(p, edges[1:-1], right=False), 0, nb - 1)
+    n = p.shape[0]
+    draws = rng.random_sample((n_sim, n)) < p  # (n_sim, n) perfectly calibrated outcomes
+    ece = np.zeros(n_sim)
+    mce = np.zeros(n_sim)
+    for b in range(nb):
+        mask = idx == b
+        c = int(mask.sum())
+        if c == 0:
+            continue
+        gap = np.abs(draws[:, mask].mean(axis=1) - float(p[mask].mean()))
+        ece += (c / n) * (gap if norm == "l1" else gap * gap)
+        mce = np.maximum(mce, gap)
+    if norm == "l2":
+        ece = np.sqrt(ece)
+    return {
+        "ece": float(ece.mean()),
+        "ece_q95": float(np.quantile(ece, 0.95)),
+        "mce": float(mce.mean()),
+        "mce_q95": float(np.quantile(mce, 0.95)),
+        "n_sim": float(n_sim),
+    }
+
+
 def top_label_confidence(prob: np.ndarray, labels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Reduce a multiclass classifier to the (confidence, correct) top-label calibration problem.
+
+    This checks calibration OF THE ARGMAX CLASS ONLY -- a deliberately narrow reduction, not THE
+    multiclass calibration check. Probabilities the model puts on classes it never predicts are
+    invisible to it: a forecaster that always assigns 0.4 to a class that never occurs (while its
+    argmax confidences are accurate) passes top-label calibration with ECE 0. Classwise or full-
+    vector calibration is a strictly stronger property and is not implemented here; when the
+    non-argmax probabilities carry decisions (thresholded alerts on a minority class, expected-cost
+    rankings), check those probabilities against their own outcomes directly.
 
     Args:
         prob: ``(n, K)`` class-probability matrix.
@@ -423,8 +523,19 @@ def coverage_curve(forecasts: np.ndarray, y: np.ndarray, *, levels: np.ndarray |
 
     For each nominal central level ``c`` the per-observation central interval
     ``[quantile((1-c)/2), quantile((1+c)/2)]`` is read off the predictive ensemble and its empirical
-    coverage is measured. A calibrated forecast traces the diagonal ``empirical == nominal``; bowing
-    below the diagonal means the intervals are too narrow (over-confident).
+    coverage is measured.
+
+    Judge ``empirical`` against ``null_expectation``, NOT the diagonal. Plug-in quantiles of a
+    finite ensemble cover BELOW nominal even when the ensemble is perfect: with m = 5 members, a
+    perfectly calibrated forecast's 95% interval covers only ~0.64 -- the interval simply cannot
+    reach past the sample extremes. ``null_expectation`` is the expected coverage of a perfectly
+    calibrated m-member ensemble at each level, computed for a uniform reference with the same
+    quantile rule. It is almost -- not exactly -- distribution-free: linear quantile interpolation
+    leaves a small dependence on the ensemble's shape at very small m (measured 0.632 / 0.644 /
+    0.636 for uniform / Gaussian / exponential at m = 5 and nominal 0.95, converging by m ~ 50),
+    which is an order of magnitude smaller than the diagonal gap it corrects. ``empirical`` below
+    the DIAGONAL at small m is expected; ``empirical`` meaningfully below ``null_expectation``
+    indicates over-confidence.
 
     Args:
         forecasts: ``(n, m)`` predictive ensemble.
@@ -432,7 +543,8 @@ def coverage_curve(forecasts: np.ndarray, y: np.ndarray, *, levels: np.ndarray |
         levels: nominal central coverage levels in ``(0, 1)``; defaults to ``0.05 .. 0.95`` by 0.05.
 
     Returns:
-        ``{'nominal', 'empirical'}`` arrays of equal length.
+        ``{'nominal', 'empirical', 'null_expectation'}`` arrays of equal length --
+        ``null_expectation`` is the finite-m perfect-calibration benchmark per level.
     """
     f = np.asarray(forecasts, dtype=float)
     y = _vector("y", y)
@@ -445,12 +557,20 @@ def coverage_curve(forecasts: np.ndarray, y: np.ndarray, *, levels: np.ndarray |
     levels = _vector("levels", levels)
     if np.any((levels <= 0.0) | (levels >= 1.0)):
         raise ValueError("levels must lie strictly between 0 and 1")
+    from mixle.inference.calibration_gate import _reference_coverage_null_expectation
+
     emp = np.empty_like(levels)
+    null_expectation = np.empty_like(levels)
+    m = int(f.shape[1])
     for i, c in enumerate(levels):
         lo = np.quantile(f, (1.0 - c) / 2.0, axis=1)
         hi = np.quantile(f, (1.0 + c) / 2.0, axis=1)
         emp[i] = float(((y >= lo) & (y <= hi)).mean())
-    return {"nominal": levels, "empirical": emp}
+        # the same uniform-reference finite-m benchmark the calibration gate compares against
+        # (GATE-3): a perfect m-member ensemble's plug-in interval covers below nominal, so the
+        # honest reference at each level is this expectation, not the diagonal
+        null_expectation[i] = _reference_coverage_null_expectation(m, float(c))
+    return {"nominal": levels, "empirical": emp, "null_expectation": null_expectation}
 
 
 def _pava(y: np.ndarray, weights: np.ndarray | None = None) -> np.ndarray:
@@ -487,8 +607,19 @@ class ProbabilityCalibrator:
 
     * ``method="isotonic"`` -- monotone, non-parametric (pool-adjacent-violators). Assumes higher
       score => not-lower probability; flexible, needs enough calibration points.
-    * ``method="platt"`` -- logistic ``sigmoid(a * score + b)``. Two parameters, robust on little data,
-      but assumes a sigmoidal relationship.
+    * ``method="platt"`` -- logistic ``sigmoid(a * score + b)``. Two parameters, usable on little
+      data, but assumes a sigmoidal relationship. Fit against Platt's smoothed targets
+      ``(N+ + 1)/(N+ + 2)`` and ``1/(N- + 2)`` rather than raw 0/1: with raw targets, perfectly
+      separable calibration data drives ``a`` to infinity and the "calibrated" outputs to exact
+      0/1 -- maximal overconfidence from the method that was supposed to remove it. The smoothing
+      keeps the map finite and the outputs strictly inside ``(0, 1)``.
+
+    The guarantee is conditional on HELD-OUT evaluation. The isotonic fit interpolates its own
+    calibration outcomes, so re-checking calibration on the SAME data it was fit on passes by
+    construction (a reliability curve of the fitted values against the fitting outcomes sits on the
+    diagonal no matter how little signal the score carried); any honest check of a fitted
+    calibrator -- isotonic especially -- uses data it never saw. Both methods assume the
+    score/outcome relationship is stable between fitting and serving.
 
     A near-flat fitted curve is itself the finding: it means the raw score carried little information
     about the outcome (its "likelihood" was unrelated to the event).
@@ -536,12 +667,19 @@ class ProbabilityCalibrator:
 
             sm, ss = s.mean(), s.std() + 1e-12
             z = (s - sm) / ss  # standardize for a well-scaled logistic fit
+            # Platt's smoothed regression targets (CAL-5): raw 0/1 targets make the MLE diverge on
+            # separable data (a -> inf, outputs snap to exact 0/1). Regressing on the smoothed
+            # values -- the posterior mean of each class's rate under a uniform prior -- bounds the
+            # optimum and keeps predictions strictly inside (0, 1).
+            n_pos = float(y.sum())
+            n_neg = float(y.size - n_pos)
+            targets = np.where(y == 1.0, (n_pos + 1.0) / (n_pos + 2.0), 1.0 / (n_neg + 2.0))
 
             def nll(theta: np.ndarray) -> float:
                 a, b = theta
                 logits = a * z + b
-                # stable BCE
-                return float(np.mean(np.logaddexp(0.0, logits) - y * logits))
+                # stable cross-entropy against the smoothed targets
+                return float(np.mean(np.logaddexp(0.0, logits) - targets * logits))
 
             res = minimize(nll, np.array([1.0, 0.0]), method="BFGS")
             if not res.success or not np.all(np.isfinite(res.x)):
@@ -573,6 +711,7 @@ __all__ = [
     "reliability_curve",
     "expected_calibration_error",
     "maximum_calibration_error",
+    "calibration_null_expectation",
     "top_label_confidence",
     "pit_values",
     "pit_ensemble",

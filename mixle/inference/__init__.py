@@ -45,6 +45,7 @@ from mixle.inference.calibrate_fit import CalibrationReport, calibration_report
 from mixle.inference.calibration import (
     ProbabilityCalibrator,
     calibrate_probabilities,
+    calibration_null_expectation,
     coverage_curve,
     expected_calibration_error,
     interval_coverage,
@@ -599,6 +600,7 @@ __all__ = [
     # recalibration: map raw scores -> calibrated probabilities (isotonic / Platt)
     "ProbabilityCalibrator",
     "calibrate_probabilities",
+    "calibration_null_expectation",
     "pit_values",
     "pit_ensemble",
     "pit_histogram",

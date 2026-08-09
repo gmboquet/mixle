@@ -301,9 +301,13 @@ def _measured_gate_power(
 def _reference_coverage_null_expectation(m: int, level: float, *, n_sims: int = 4000, seed: int = 5) -> float:
     """Finite-``m`` null expectation of the reference interval's empirical coverage.
 
-    Distribution-free by ranks: under per-row exchangeability, whether ``y`` falls inside the
-    empirical central interval of ``m`` draws depends only on ranks, so Uniform simulation gives
-    the exact expectation for any continuous family. The direction label must compare against
+    Uniform-reference simulation of the same quantile rule. NEARLY distribution-free: whether
+    ``y`` falls inside the interval would depend only on ranks if the endpoints were order
+    statistics, but linear quantile interpolation adds a small shape dependence at very small
+    ``m`` (measured expected coverage 0.632 / 0.644 / 0.636 for uniform / Gaussian / exponential
+    ensembles at m = 5, nominal 0.95; the spread vanishes by m ~ 50) -- an order of magnitude
+    below the nominal-vs-finite-m gap this reference exists to correct, and well inside the
+    direction label's tolerance. The direction label must compare against
     THIS -- at small ``m`` the plug-in interval of a PERFECTLY calibrated ensemble covers well
     below nominal, and comparing to the nominal level branded calibrated posteriors
     "overconfident" by construction (STAT-RR17-08 / audit GATE-3).
