@@ -134,3 +134,18 @@ price-forecast leakage refusal-or-disclaimer; (4) E-1/RR17-09 sparse-Poisson ref
 conditional route; (5) RR17-01/02/03 example accounting + stratified inference; (6)
 RR17-04/05 example oracles that fail on wrong categories/no-op fits; (7) RR17-10/11/14 MC/MCMC
 labeling with draws+MCSE and diagnostic refusal; (8) RS-7/RR17-12 sign-flip assumptions.
+
+## Pass-18 status (2026-08-09, NO-GO, 15 High; reports under /private/tmp/mixle-rereview18.4UVgLt/)
+
+Pass 18 CLOSED RR17-07 (seed policy) and found the pass-17 gate fix itself defective. Fixed this
+session: RR17-08 round 2 (a17f95de — ONE invariant jitter across all column relabelings, my level
+sim 0.1303 at the reviewer's exact k=10/m=4/alpha=.21 regime vs their 0.1298 control; power =
+EXECUTED decision under both regimes with adaptive budget, promotion gated on the CALLER-DECLARED
+ensemble_dependence regime, fail-safe shared-draws default; suite size-regression moved to an
+attainable alpha/m); RR18-04 (bound counts the declared (prompt, outcome) unit:
+outcomes='per-prompt' collapses duplicates/refuses disagreeing verdicts, 'per-row' is the
+caller's recorded assertion — language_bridge declares per-row). STILL OPEN from pass 18:
+RR18-01 propose() outer-holdout leak (candidate families selected on all rows before the split);
+RR18-02 explain_fit says MAP on the neural route; RR18-03 empty caveats on
+ensemble/sample/VMP routes; plus the carried RR17-01/02/03/04/05/06/09/10/11/12/14 and
+mediums RR17-13/15/16/17/18/19/20 (RR17-14 and RR17-17 severity RAISED to High).
