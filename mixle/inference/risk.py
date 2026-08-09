@@ -6,9 +6,10 @@ array of scalar outcomes works -- into the two standard tail-risk summaries plus
 
   * :func:`value_at_risk` -- the loss not exceeded with probability ``alpha`` (a quantile).
   * :func:`conditional_value_at_risk` -- the expected loss *given* that the VaR threshold is
-    breached (expected shortfall); always at least as large as VaR. When the exceedance tail is
-    sparse, refines the raw tail mean with a fitted Generalized Pareto tail
-    (:func:`mixle.analysis.extreme.peaks_over_threshold`) rather than trusting a handful of points.
+    breached (expected shortfall); always at least as large as VaR. A Generalized Pareto tail
+    extrapolation is available by OPT-IN only (``gpd_tail=True``): measured on sparse tails it
+    was strictly noisier than the raw tail mean it replaced (audit R-1), so sparse tails default
+    to the honest sample statistic.
   * :func:`stress_rank` -- named stress scenarios (low-grade, price-crash, carbon-spike, ...) ranked
     from worst to least-bad loss.
 
@@ -53,24 +54,31 @@ def value_at_risk(samples: Any, alpha: float = 0.95) -> float:
     return float(-np.quantile(x, 1.0 - alpha))
 
 
-def conditional_value_at_risk(samples: Any, alpha: float = 0.95, *, min_tail: int = 20) -> float:
+def conditional_value_at_risk(
+    samples: Any, alpha: float = 0.95, *, min_tail: int = 20, gpd_tail: bool = False
+) -> float:
     """Conditional Value-at-Risk (expected shortfall) at confidence ``alpha``.
 
-    ``CVaR_alpha = -mean(samples[samples <= -VaR_alpha])`` -- the mean loss in the tail beyond VaR.
-    Because the tail mean is at least as extreme as the threshold that bounds it, ``CVaR >= VaR``
-    always holds.
+    The empirical estimator is the mass-weighted mean over the worst ``1 - alpha`` probability
+    mass (NOT the docstring formula ``-mean(samples <= -VaR)``, which overweights observations
+    tied at VaR -- audit R-3 pinned the mismatch between the stated and computed estimator).
+    Because the tail mean is at least as extreme as the threshold bounding it, ``CVaR >= VaR``.
 
-    When the tail has fewer than ``min_tail`` observations the raw sample mean is noisy (a handful
-    of points), so the exceedances are refined with a fitted Generalized Pareto tail
-    (:func:`~mixle.analysis.extreme.peaks_over_threshold`, on the *loss* scale, thresholded at VaR)
-    and the analytic GPD tail mean ``VaR + scale / (1 - shape)`` is returned instead, falling back to
-    the raw tail mean if the fit is unavailable (too few exceedances) or the GPD tail mean is
-    undefined (``shape >= 1``).
+    ``gpd_tail=True`` opts in to a Generalized Pareto refinement of a sparse tail (fewer than
+    ``min_tail`` exceedances). It is OFF by default because it is measurably WORSE exactly where
+    it fires (audit R-1): fitting a two-parameter heavy-tail MLE to the same 5-19 points it is
+    meant to rescue, then plugging the estimates into ``VaR + scale/(1 - shape)``, multiplied
+    the estimator's spread instead of shrinking it -- measured on lognormal losses at n = 100
+    (true ES 8.54), the raw tail mean's sd was 2.36 while the GPD path's was 46.4 with a worst
+    case of 663. Use the refinement only with an exogenous reason to trust a GPD tail (e.g. a
+    threshold chosen from much more data), and treat its output as a model extrapolation, not a
+    sample statistic; its parameters are plug-in MLEs with no interval attached (audit R-2).
 
     Args:
         samples: array-like of scalar outcomes (same array passed to :func:`value_at_risk`).
         alpha: confidence level in ``(0, 1)``.
-        min_tail: tail sample count below which the GPD refinement is attempted.
+        min_tail: tail sample count below which the (opt-in) GPD refinement is attempted.
+        gpd_tail: opt in to the GPD tail extrapolation described above.
 
     Returns:
         The CVaR as a loss; always ``>= value_at_risk(samples, alpha)``.
@@ -94,7 +102,7 @@ def conditional_value_at_risk(samples: Any, alpha: float = 0.95, *, min_tail: in
         weighted_loss += fraction * float(losses[full])
     raw_cvar = weighted_loss / tail_mass
     empirical_tail_count = int(np.ceil(tail_mass))
-    if empirical_tail_count < min_tail:
+    if gpd_tail and empirical_tail_count < min_tail:
         # Import lazily: importing a submodule executes ``mixle.analysis``'s
         # package initializer, which itself reaches inference through valuation.
         # Risk is re-exported while Dirichlet may still be initializing.
