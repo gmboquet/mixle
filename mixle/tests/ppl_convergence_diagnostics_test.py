@@ -119,5 +119,49 @@ class SummaryExposesDiagnosticsTest(unittest.TestCase):
         self.assertGreater(s["_bulk_ess"]["mu"], 100)
 
 
+class EnsembleWalkerChainDiagnosticsTest(unittest.TestCase):
+    """STAT-RR21-14: sweep-major pooled walker states read as one serial chain made the
+    autocorrelation look like white noise -- median bulk ESS was the full state count, MCSE was
+    understated 3.97x, and only 33% of analytic posterior means fell inside +/-1.96 MCSE. Each
+    walker is now its own chain; replaying the reviewer's protocol measures SD/MCSE 0.88 and 96%
+    coverage."""
+
+    def test_mcse_covers_the_analytic_posterior_mean(self):
+        import warnings
+
+        import mixle.ppl as P
+        from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
+
+        sigma, prior_sd, n_obs = 2.0, 10.0, 40
+        data = GaussianDistribution(1.0, sigma**2).sampler(seed=0).sample(n_obs)
+        analytic_mean = (np.sum(data) / sigma**2) / (n_obs / sigma**2 + 1.0 / prior_sd**2)
+        means, mcses, esses = [], [], []
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for seed in range(30):
+                fit = P.Normal(P.Normal(0, prior_sd), sigma).fit(
+                    data,
+                    how="ensemble",
+                    draws=100,
+                    burn=50,
+                    walkers=8,
+                    chains=2,
+                    rng=np.random.RandomState(seed),
+                )
+                row = fit.summary()["arg0"]
+                means.append(row["mean"])
+                mcses.append(row["mcse"])
+                esses.append(row["ess_bulk"])
+        means = np.asarray(means)
+        mcses = np.asarray(mcses)
+        ratio = means.std(ddof=1) / mcses.mean()
+        self.assertLess(ratio, 2.0)  # was 3.97 flattened
+        self.assertGreater(ratio, 0.4)
+        coverage = np.mean(np.abs(means - analytic_mean) <= 1.959963984540054 * mcses)
+        self.assertGreaterEqual(coverage, 0.80)  # was 0.33
+        # walker serial correlation is REAL: the honest ESS is far below the raw state count
+        self.assertLess(np.median(esses), 800)
+
+
 if __name__ == "__main__":
     unittest.main()

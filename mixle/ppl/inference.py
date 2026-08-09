@@ -1049,8 +1049,18 @@ def _finalize(rv, slots, res, build) -> RandomVariable:
     vals = _u_to_vals(slots, u)
     mean_vals = {s.index: float(vals[:, k].mean()) for k, s in enumerate(slots)}
     post = Posterior(slots, vals, res)
-    # split-R-hat / bulk-/tail-ESS work on a single chain (split into halves) + count its divergences
-    _attach_convergence(post, slots, u[None, :, :], [res])
+    n_walkers = getattr(res, "walkers", None)
+    if n_walkers and u.shape[0] % int(n_walkers) == 0 and u.shape[0] // int(n_walkers) >= 2:
+        # STAT-RR21-14, single-ensemble form: compute ESS/MCSE over per-walker chains (the real
+        # serial structure), but DO NOT present walker agreement as independent-chain mixing
+        # evidence -- walkers interact every sweep, so split-R-hat stays a deliberate NaN and the
+        # summary keeps the single-chain-mixing-unassessable label.
+        cube = u.reshape(-1, int(n_walkers), u.shape[1]).transpose(1, 0, 2)
+        _attach_convergence(post, slots, np.ascontiguousarray(cube), [res])
+        post.split_rhat = {s_.name: float("nan") for s_ in slots}
+    else:
+        # split-R-hat / bulk-/tail-ESS work on a single chain (split into halves) + count divergences
+        _attach_convergence(post, slots, u[None, :, :], [res])
 
     def predictive(n, rng):
         idx = rng.randint(len(vals), size=n)
@@ -1190,10 +1200,25 @@ def _finalize_chains(rv, slots, results, build) -> RandomVariable:
     different component orderings, which would smear the pooled posterior and blow up R-hat. Sorting
     each chain's components by their leading parameter aligns them so the pooled summary is correct.
     """
-    us = [np.asarray(r.samples, dtype=float).reshape(len(r.samples), -1) for r in results]
+    us_raw = [np.asarray(r.samples, dtype=float).reshape(len(r.samples), -1) for r in results]
     layout = _exchangeable_layout(slots)
     if layout is not None:
-        us = [_relabel_chain(u, layout) for u in us]
+        us_raw = [_relabel_chain(u, layout) for u in us_raw]
+    # STAT-RR21-14: an ensemble result's rows are sweep-major pooled WALKER states -- consecutive
+    # rows are different walkers at the same sweep, nearly independent by construction, so
+    # treating the pool as one serial chain made the autocorrelation look like white noise
+    # (median bulk ESS = the full state count; MCSE understated 3.97x; 33% coverage of the
+    # analytic mean at +/-1.96 MCSE). Each WALKER is its own chain: its serial autocorrelation
+    # is the real one, and with >= 2 independent ensembles the chain set still carries genuine
+    # cross-ensemble independence for split-R-hat.
+    us = []
+    for result, u in zip(results, us_raw):
+        n_walkers = getattr(result, "walkers", None)
+        if n_walkers and u.shape[0] % int(n_walkers) == 0 and u.shape[0] // int(n_walkers) >= 2:
+            cube = u.reshape(-1, int(n_walkers), u.shape[1])
+            us.extend(np.ascontiguousarray(cube[:, k, :]) for k in range(int(n_walkers)))
+        else:
+            us.append(u)
     n = min(len(u) for u in us)
     rhat = _gelman_rubin(np.stack([u[:n] for u in us], axis=0))
     vals = _u_to_vals(slots, np.concatenate(us, axis=0))
@@ -1211,6 +1236,13 @@ def _finalize_chains(rv, slots, results, build) -> RandomVariable:
         post.ess = None
         post.ess_by_parameter = None
     _attach_convergence(post, slots, np.stack([u[:n] for u in us], axis=0), results)
+    if isinstance(post.bulk_ess, dict) and post.bulk_ess:
+        finite_ess = [v for v in post.bulk_ess.values() if np.isfinite(v)]
+        if finite_ess and len(finite_ess) == len(post.bulk_ess):
+            # keep the aggregate consistent with the walker-aware per-parameter values -- the
+            # legacy per-result sum flattened walkers and re-inflated it (STAT-RR21-14)
+            post.ess = float(min(finite_ess))
+            post.ess_by_parameter = {name: float(v) for name, v in post.bulk_ess.items()}
 
     def predictive(n_, rng_):
         idx = rng_.randint(len(vals), size=n_)
@@ -1846,7 +1878,14 @@ def ensemble_fit(
             for k in range(walkers):
                 if not feasible(p0[k]):
                     p0[k] = _project_init(p0[0], feasible, crng)
-        return affine_invariant_ensemble(log_target, p0, num_samples=draws, burn_in=burn, thin=thin, rng=crng)
+        result = affine_invariant_ensemble(log_target, p0, num_samples=draws, burn_in=burn, thin=thin, rng=crng)
+        # STAT-RR21-14: the samples are sweep-major pooled walker states; downstream diagnostics
+        # must be able to recover walker identity instead of reading W near-independent states
+        # per sweep as one serial chain (which inflated ESS ~4x and understated MCSE 3.97x).
+        # MCMCResult is frozen to write-lock its EVIDENCE fields; attaching provenance metadata
+        # (which walker count produced the rows) via object.__setattr__ does not touch those.
+        object.__setattr__(result, "walkers", int(walkers))
+        return result
 
     if chains == 1:
         return _finalize(rv, slots, run_one(int(rng.randint(1, 2**31))), build)
