@@ -248,3 +248,9 @@ each with measured receipts and adverse tests:
 One stale cross-file pin surfaced and was fixed in-session (06d7c2b7): a test still encoded the
 pre-RR17-02 Haldane-at-zero contract for poisson_lograte_effect. Gate before push: the full local
 suite on this final tree.
+
+Correction to c00bcbd4's message: the reworded KM sentence no longer matches the coverage-claim
+classifier at all (the claim verb went away with the scoping), so the signed manifest is
+byte-identical to ba738d77 -- survival.py did NOT join the inventory, and no re-attestation
+happened or was needed. The commit's code change is exactly as described; only its "joins the
+reviewed claims inventory" clause is wrong, and this note is the append-only correction.
