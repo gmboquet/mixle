@@ -9,7 +9,7 @@ together with the convergence diagnostics (effective sample size, R-hat) into on
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import numpy as np
@@ -103,22 +103,47 @@ def posterior_summary(fitted: RandomVariable, *, hdi_prob: float = 0.94) -> dict
             lo, hi = hdi(draws.reshape(-1), hdi_prob)
             row["hdi_low"], row["hdi_high"] = lo, hi
             # The ESS estimators take (n_chains, n_draws). A fit that exposes a flat vector of draws
-            # ran a single chain, so present it as one -- passing the 1-D array straight through made
+            # is presented to them as one chain -- passing the 1-D array straight through made
             # them raise, and every ess/ess_tail came back None with diagnostic_status "failed".
             chains = draws.reshape(1, -1) if draws.ndim == 1 else draws
-            if isinstance(bulk_by_parameter, dict) and name in bulk_by_parameter:
-                row["ess"] = float(bulk_by_parameter[name])
-            else:
-                from mixle.ppl.diagnostics import bulk_ess
+            # How many chains ran is a fact about the FIT, not about the shape posterior()
+            # returns: the public MCMC path pools chains into a flat vector, so judging by
+            # draws.ndim branded every real 4-chain fit "single-chain" while printing its finite
+            # multi-chain R-hat in the same row (pass 19: "ok" was unreachable through the public
+            # path -- the RR17-11 taxonomy inverted again). _attach_convergence writes a FINITE
+            # per-parameter split-R-hat only when >= 2 chains ran (deliberate NaN for one chain),
+            # so a finite result-supplied R-hat is multi-chain evidence even for pooled draws.
+            rhat_from_result = None
+            if isinstance(rhat, dict) and name in rhat:
+                try:
+                    rhat_from_result = float(rhat[name])
+                except (TypeError, ValueError):
+                    rhat_from_result = float("nan")
+            multi_chain = chains.shape[0] > 1 or (rhat_from_result is not None and np.isfinite(rhat_from_result))
 
-                row["ess"] = float(bulk_ess(chains))
-            if isinstance(tail_by_parameter, dict) and name in tail_by_parameter:
-                row["ess_tail"] = float(tail_by_parameter[name])
-            else:
-                from mixle.ppl.diagnostics import tail_ess
+            def _ess_value(
+                by_parameter: Any,
+                compute: Callable[[np.ndarray], float],
+                *,
+                key: str = name,
+                is_multi: bool = multi_chain,
+                chain_matrix: np.ndarray = chains,
+            ) -> float:
+                if isinstance(by_parameter, dict) and key in by_parameter:
+                    supplied = float(by_parameter[key])
+                    if np.isfinite(supplied) or is_multi:
+                        # a non-finite value for a MULTI-chain fit is a genuine diagnostic
+                        # failure and must surface as one (unusable), never be papered over
+                        return supplied
+                # either no result-supplied value, or the result's deliberate single-chain NaN
+                # marker: the single-chain ESS itself is computable and honest -- what one chain
+                # cannot assess is MIXING, and the status says that, not "numerically failed"
+                return float(compute(chain_matrix))
 
-                row["ess_tail"] = float(tail_ess(chains))
-            multi_chain = chains.shape[0] > 1
+            from mixle.ppl.diagnostics import bulk_ess, tail_ess
+
+            row["ess"] = _ess_value(bulk_by_parameter, bulk_ess)
+            row["ess_tail"] = _ess_value(tail_by_parameter, tail_ess)
             row["diagnostic_status"] = "pending"
         except (KeyError, NotImplementedError) as error:
             row["diagnostic_status"] = "unavailable"
@@ -140,12 +165,23 @@ def posterior_summary(fitted: RandomVariable, *, hdi_prob: float = 0.94) -> dict
                 row["mcse"] = float(sd) / float(np.sqrt(row["ess"]))
             finite_core = all(row[k] is not None and np.isfinite(row[k]) for k in ("ess", "ess_tail", "mcse"))
             rhat_value = row["r_hat"]
+            if rhat_value is not None and not np.isfinite(rhat_value) and not multi_chain:
+                # the result's deliberate single-chain marker: R-hat is UNDEFINED for one chain,
+                # which is the single-chain status below, not a numeric failure
+                row["r_hat"] = None
+                rhat_value = None
             if not finite_core or (rhat_value is not None and not np.isfinite(rhat_value)):
                 row["diagnostic_status"] = "unusable"
                 row["diagnostic_error"] = "a diagnostic evaluated non-finite (NaN/inf)"
             elif not multi_chain or rhat_value is None:
                 row["diagnostic_status"] = "single-chain-mixing-unassessable"
-                row["diagnostic_error"] = "one chain: R-hat undefined; run >= 2 chains before promoting"
+                # the message states which precondition actually failed instead of asserting
+                # "one chain" for a multi-chain fit that merely lacks a usable R-hat
+                row["diagnostic_error"] = (
+                    "one chain: R-hat undefined; run >= 2 chains before promoting"
+                    if not multi_chain
+                    else "mixing unassessable: the fit supplied no usable multi-chain R-hat for this parameter"
+                )
             else:
                 row["diagnostic_status"] = "ok"
         out[name] = row

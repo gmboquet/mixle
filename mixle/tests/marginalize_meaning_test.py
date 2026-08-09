@@ -110,5 +110,22 @@ class ProbabilityCalibratorTest(unittest.TestCase):
         self.assertTrue(np.all(np.diff(out) >= -1e-9))
 
 
+class SemanticEntropyReceiptInputTest(unittest.TestCase):
+    def test_iterator_samples_keep_their_count_and_correction(self):
+        """Pass 19: a generator input was consumed by the clustering pass, after which the receipt
+        counted the exhausted remainder -- n_samples=0, bias None, and the UNCORRECTED plug-in
+        silently published as entropy_miller_madow under an 'MM correction available' banner."""
+        from mixle.inference.uncertainty import semantic_entropy_receipt
+
+        items = ["a", "a", "b", "c", "a", "b", "c", "a"]
+        from_list = semantic_entropy_receipt(list(items))
+        from_iterator = semantic_entropy_receipt(iter(items))
+        self.assertEqual(from_iterator["n_samples"], 8)
+        self.assertEqual(from_iterator["k_observed"], 3)
+        self.assertAlmostEqual(from_iterator["bias_estimate_nats"], (3 - 1) / (2.0 * 8), places=12)
+        self.assertAlmostEqual(from_iterator["entropy_miller_madow"], from_list["entropy_miller_madow"], places=12)
+        self.assertGreater(from_iterator["entropy_miller_madow"], from_iterator["entropy_plugin"])
+
+
 if __name__ == "__main__":
     unittest.main()

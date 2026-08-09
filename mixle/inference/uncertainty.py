@@ -358,13 +358,13 @@ def marginalize_meaning(
     How the per-string probability enters:
 
     * ``log_probs`` -- the model's sequence log-probabilities ``log P(s)`` for each DISTINCT item;
-            classes are combined by ``logsumexp`` and renormalized over the items you passed, so the
-            result is the meaning marginal CONDITIONAL ON the observed strings, not the model's full
-            marginal (audit U-5) -- unobserved tail mass is excluded, and repeated strings would
-            each add their own ``P(s)`` (estimating ``sum P(s)^2``, a different quantity), so
-            duplicates are refused in this branch. Use this when the items
-      are *distinct* strings whose probabilities you know -- it corrects the counting form's hidden
-      "every string in a class is equiprobable" assumption.
+      classes are combined by ``logsumexp`` and renormalized over the items you passed, so the
+      result is the meaning marginal CONDITIONAL ON the observed strings, not the model's full
+      marginal (audit U-5) -- unobserved tail mass is excluded, and repeated strings would each
+      add their own ``P(s)`` (estimating ``sum P(s)^2``, a different quantity), so duplicates are
+      refused in this branch. Use this when the items are *distinct* strings whose probabilities
+      you know -- it corrects the counting form's hidden "every string in a class is equiprobable"
+      assumption.
     * ``weights`` -- explicit non-negative masses per item (summed within class).
     * neither -- uniform mass, i.e. counting: ``P(c) = count_c / N``. For i.i.d. samples from the
       model this is the unbiased Monte-Carlo estimate of the same marginal.
@@ -461,9 +461,14 @@ def semantic_entropy_receipt(
     counting estimator; with explicit ``log_probs``/``weights`` the count-based bias formula does
     not apply and the receipt says so with ``bias_estimate_nats = None``.
     """
+    # Materialize ONCE: an iterator/generator input was consumed by marginalize_meaning below,
+    # after which len(list(samples)) counted the exhausted remainder -- the receipt then read
+    # n_samples=0, bias=None, and an "MM correction available" method string with NO correction
+    # applied, silently reporting the uncorrected plug-in as the corrected value (pass 19).
+    samples = list(samples)
     clustering = marginalize_meaning(samples, equivalent, log_probs=log_probs, weights=weights)
     plugin = float(_entropy_last(clustering.probs))
-    n = len(list(samples))
+    n = len(samples)
     k = int(np.asarray(clustering.probs).size)
     counted = log_probs is None and weights is None
     bias = (k - 1) / (2.0 * n) if (counted and n > 0) else None
