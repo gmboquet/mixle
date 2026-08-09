@@ -347,6 +347,7 @@ class CalibratedGenerator:
         *,
         seed: int | None = None,
         outcomes: str = "per-prompt",
+        sampling: str = "constructed",
     ) -> CalibratedGenerator:
         """Certify a held-out accepted-error threshold using an explicit correctness oracle.
 
@@ -368,6 +369,31 @@ class CalibratedGenerator:
         the proposal family, so the selection of the loosest passing threshold stays
         covered). Distribution shift voids the statement silently; re-certify on drifted
         traffic.
+
+        WHAT the bound is a bound ON depends on how duplicated prompts got into the stream, and
+        only the caller knows that -- ``sampling`` is that declaration (the same
+        premise-declaration contract as ``outcomes``):
+
+        * ``sampling="constructed"`` (fail-safe default): the prompt list is a curated set, so
+          under ``outcomes="per-prompt"`` duplicates are redundant copies of one Bernoulli and
+          COLLAPSE to one certification row (300 copies of one always-correct prompt certify from
+          n = 1, bound 0.975 -- STAT-RR18-04). The certified estimand is then UNIFORM over the
+          DISTINCT certification prompts. It is NOT traffic-weighted: measured on 40%-heavy
+          i.i.d. traffic whose heavy prompt always errs, collapsing certified error_upper 0.080
+          while the served traffic risk was 0.37-0.41, every trial (the pass-19 blocker). If your
+          serving mix repeats prompts, this default's certificate does not cover it -- declare the
+          sampling truthfully instead.
+        * ``sampling="iid-traffic"``: the caller's recorded assertion that the calibration rows
+          are an i.i.d. draw of the serving traffic itself. Row error indicators are then i.i.d.
+          Bernoulli(traffic accepted-error rate) EVEN under per-prompt outcomes -- the randomness
+          is the prompt draw, and a duplicate's multiplicity IS its traffic weight -- so rows all
+          count and the bound covers the TRAFFIC-WEIGHTED accepted-error rate serving experiences.
+          On the measurement above, this declaration refuses to certify alpha = 0.15 (the heavy
+          errors are ~40% of rows), which is the correct answer.
+
+        Disagreeing duplicate verdicts are refused under ``outcomes="per-prompt"`` in both
+        sampling modes (a deterministic decision with a fixed per-prompt outcome cannot differ
+        between copies); the receipt records both declarations and names the certified estimand.
         """
         if not callable(is_correct):
             raise TypeError("is_correct must be callable")
@@ -376,6 +402,8 @@ class CalibratedGenerator:
             raise ValueError("calibrate(...) needs at least two held-out prompts for proposal/certification splitting")
         if outcomes not in ("per-prompt", "per-row"):
             raise ValueError("outcomes must be 'per-prompt' or 'per-row'")
+        if sampling not in ("constructed", "iid-traffic"):
+            raise ValueError("sampling must be 'constructed' or 'iid-traffic'")
         if seed is not None and (isinstance(seed, (bool, np.bool_)) or not isinstance(seed, (int, np.integer))):
             raise ValueError("seed must be an exact integer or None")
         if seed is not None and int(seed) != self.seed:
@@ -438,10 +466,9 @@ class CalibratedGenerator:
             key = _seed_key(prompts[row])
             key = key if key is not None else repr(prompts[row])
             rows_by_key.setdefault(key, []).append(row)
-        if outcomes == "per-row":
-            effective_rows = list(range(n_certify))
-        else:
-            effective_rows = []
+        if outcomes == "per-prompt":
+            # Oracle consistency is checked under BOTH sampling declarations: with a fixed
+            # per-prompt outcome and a deterministic served decision, copies cannot disagree.
             for rows in rows_by_key.values():
                 verdicts = {bool(errors[row]) for row in rows}
                 if len(verdicts) > 1:
@@ -452,8 +479,16 @@ class CalibratedGenerator:
                         "copies -- if each row is graded against its own independent outcome, "
                         "declare outcomes='per-row'"
                     )
-                effective_rows.append(rows[0])
-            effective_rows.sort()
+        if outcomes == "per-row" or sampling == "iid-traffic":
+            # Rows all count. per-row: each row's outcome is an independent draw given its prompt.
+            # iid-traffic + per-prompt: the row indicators err(prompt_i) are i.i.d. Bernoulli of
+            # the TRAFFIC accepted-error rate because the prompts themselves are the i.i.d. draw;
+            # collapsing here would silently swap the estimand to uniform-over-distinct-prompts
+            # and under-weight an error-prone heavy prompt (measured: certified 0.080 while the
+            # served traffic risk was 0.37-0.41 on 40%-heavy traffic -- the pass-19 blocker).
+            effective_rows = list(range(n_certify))
+        else:
+            effective_rows = sorted(rows[0] for rows in rows_by_key.values())
         certification_stats = np.asarray([statistics[row] for row in effective_rows], dtype=float)
         certification_errors = np.asarray([errors[row] for row in effective_rows], dtype=bool)
         proposal_stats = np.asarray(statistics[n_certify:], dtype=float)
@@ -503,9 +538,19 @@ class CalibratedGenerator:
             "seed": rng_seed,
             "seed_schedule": "prompt-only (identical to serving)",
             "unique_prompt_count": len({repr(prompt) for prompt in prompts}),
-            # the binomial bound's actual sample size: unique certification prompts (RR18-04)
+            # the binomial bound's actual sample size under the declared regime (RR18-04 / pass 19)
             "certification_effective_count": len(effective_rows),
             "outcome_declaration": outcomes,
+            "sampling_declaration": sampling,
+            "certified_estimand": (
+                "per-row accepted-error rate (each row's outcome declared an independent draw given its prompt)"
+                if outcomes == "per-row"
+                else "traffic-weighted accepted-error rate (rows declared an i.i.d. draw of serving traffic; "
+                "duplicates carry their traffic weight)"
+                if sampling == "iid-traffic"
+                else "accepted-error rate UNIFORM over the distinct certification prompts (duplicates "
+                "collapsed; NOT traffic-weighted -- repeat-heavy serving is not covered by this certificate)"
+            ),
             "accepted": 0 if chosen is None else chosen["accepted"],
             "errors": 0 if chosen is None else chosen["errors"],
             "error_upper": None if chosen is None else chosen["error_upper"],

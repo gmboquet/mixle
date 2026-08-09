@@ -303,6 +303,57 @@ class DuplicatePromptBoundTest(unittest.TestCase):
         self.assertTrue(receipt["error_upper"] is None or receipt["error_upper"] > 0.9)
         self.assertEqual(receipt["threshold"], "inf")
 
+    def test_traffic_weighted_certification_requires_the_sampling_declaration(self):
+        # Pass-19 blocker: on 40%-heavy i.i.d. traffic whose heavy prompt always errs, collapsing
+        # duplicates certified error_upper ~0.08 while the SERVED traffic risk measured 0.37-0.41
+        # (every trial) -- the collapse silently swapped the estimand to uniform-over-distinct-
+        # prompts. sampling='iid-traffic' keeps every row (a duplicate's multiplicity is its
+        # traffic weight), so this stream refuses to certify alpha=0.15; the constructed default
+        # still certifies its uniform estimand but the receipt now NAMES it as not traffic-
+        # weighted.
+        import hashlib
+
+        from mixle.task.calibrated_generator import CalibratedGenerator
+
+        def generate(prompt, k, rng=None):
+            if rng is None:
+                rng = np.random.default_rng()
+            cands = [(prompt, 2 * prompt)]
+            while len(cands) < k:
+                offset = int(rng.integers(-6, 7))
+                if offset:
+                    cands.append((prompt, 2 * prompt + offset))
+            rng.shuffle(cands)
+            return cands
+
+        def score_local(candidate):
+            n, guess = candidate
+            jitter = int.from_bytes(hashlib.sha256(repr(candidate).encode()).digest()[:8], "big") / 2**64
+            return -abs(guess - 2 * n) + 0.5 * jitter
+
+        heavy = 7
+
+        def oracle(prompt, candidate):
+            n, guess = candidate
+            return False if prompt == heavy else guess == 2 * n
+
+        rng = np.random.RandomState(0)
+        cal = [heavy if rng.rand() < 0.4 else int(rng.randint(100_000, 104_000)) for _ in range(400)]
+
+        honest = CalibratedGenerator(generate, score_local, alpha=0.15, k=5, seed=0)
+        honest.calibrate(cal, oracle, sampling="iid-traffic")
+        self.assertEqual(honest.risk_receipt["threshold"], "inf")  # 40% traffic risk: no certificate
+        self.assertEqual(honest.risk_receipt["sampling_declaration"], "iid-traffic")
+        self.assertIn("traffic-weighted", honest.risk_receipt["certified_estimand"])
+        self.assertEqual(honest.risk_receipt["certification_effective_count"], 200)
+
+        disclosed = CalibratedGenerator(generate, score_local, alpha=0.15, k=5, seed=0)
+        disclosed.calibrate(cal, oracle)
+        self.assertIn("NOT traffic-weighted", disclosed.risk_receipt["certified_estimand"])
+        self.assertEqual(disclosed.risk_receipt["sampling_declaration"], "constructed")
+        with self.assertRaisesRegex(ValueError, "sampling"):
+            disclosed.calibrate(cal, oracle, sampling="whatever")
+
     def test_disagreeing_duplicate_verdicts_are_refused(self):
         from mixle.task.calibrated_generator import CalibratedGenerator
 
