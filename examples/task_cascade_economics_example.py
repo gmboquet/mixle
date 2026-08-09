@@ -1,4 +1,7 @@
-"""The whole money loop: distill a local model, gate it honestly, serve a cascade, and MEASURE whether use made it cheaper.
+"""The whole money loop on SYNTHETIC STAND-IN DATA: distill, gate, serve, and MEASURE whether use made it cheaper.
+
+Everything here is synthetic: the "frontier teacher" is a deterministic keyword rule and the
+traffic is generated -- the point is the ACCOUNTING METHOD, not the specific dollar amounts.
 
 GPU time is not free, so the question is always "what can I serve locally, and what must I pay the frontier
 for?" This runs the full mixle.task spine end to end:
@@ -10,9 +13,10 @@ for?" This runs the full mixle.task spine end to end:
   4. report realized dollars saved vs paying the frontier for every request;
   5. harvest the escalated items (free targeted labels), re-distill, and test "the cascade got
      cheaper with use" as a PAIRED comparison: both fixed cascades decide the same fresh
-     requests, and the conclusion is gated on the EXACT paired (McNemar) test over the
-     discordant requests -- valid at any discordance count, with the Wald width shown only
-     as a descriptive companion.
+     requests, and the conclusion is gated on PER-STRATUM exact paired (McNemar) tests --
+     the corpus fixes 150 rows per class, so the strata are the exchangeable units and a
+     pooled "exact" test would overstate what the design supports (STAT-RR17-03); both
+     strata must agree at the 5% level.
      (Comparing round 1's serving rate against round 2's would be invalid: round 2 is trained
      on escalations harvested FROM round 1's traffic, so those two rate estimates are coupled
      through the training data, and a two-independent-proportions interval does not apply.)
@@ -34,7 +38,6 @@ from mixle.task import (
     CostModel,
     DensityGate,
     HashedNGram,
-    distill,
 )
 
 SPAM = ["free", "winner", "prize", "buy", "cheap", "offer", "click"]
@@ -72,75 +75,98 @@ def expensive_teacher(texts: list[str]) -> list[str]:
     return ["spam" if any(w in t.split() for w in s) else "ham" for t in texts]
 
 
-def build_cascade(train, cal, cost):
-    student = distill(expensive_teacher, train, n=4, dim=512, hidden=[64], epochs=250, seed=0, task="spam vs ham")
+class CountingTeacher:
+    """The paid teacher with an odometer: every label the pipeline buys is counted, no exceptions."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, texts):
+        self.calls += len(texts)
+        return expensive_teacher(texts)
+
+
+def build_cascade(teacher, train, train_labels, cal, cal_labels, cost):
+    """Distill/calibrate from ALREADY-PAID labels -- harvested labels are reused, never re-bought."""
+    from mixle.task import distill_from_labels
+
+    student = distill_from_labels(
+        train, train_labels, n=4, dim=512, hidden=[64], epochs=250, seed=0, task="spam vs ham"
+    )
     gate = DensityGate(HashedNGram(n=3, dim=48, seed=1)).fit(train, n_components=3, seed=0)
-    model = CalibratedTaskModel(student, alpha=0.1, density_gate=gate).calibrate(cal, expensive_teacher(cal))
-    return Cascade(model, expensive_teacher, cost=cost)
+    model = CalibratedTaskModel(student, alpha=0.1, density_gate=gate).calibrate(cal, cal_labels)
+    return Cascade(model, teacher, cost=cost)
 
 
 def main() -> None:
+    print("SYNTHETIC DEMO: keyword-rule teacher, generated traffic -- the accounting method is the point\n")
     cost = CostModel(c_frontier=0.01, c_local=0.00001, c_label=0.01, train_cost=0.0)  # $/request
+    teacher = CountingTeacher()
     train, cal, traffic = corpus(1), corpus(2), corpus(seed=900)
 
     print("round 1: distill + calibrate, then serve the cascade")
-    casc = build_cascade(train, cal, cost)
+    train_labels = teacher(train)  # 600 paid setup labels (train + cal), counted in the estimand
+    cal_labels = teacher(cal)
+    setup_calls_1 = teacher.calls
+    casc = build_cascade(teacher, train, train_labels, cal, cal_labels, cost)
     casc.serve(traffic)
     rep = casc.report()
     print(
         f"   served {rep['n_requests']} requests, escalated {rep['n_escalated']} "
         f"({rep['realized_escalation_rate']:.1%})"
     )
+    all_in_1 = rep["realized_cost"] + setup_calls_1 * cost.c_label
     print(
-        f"   spent ${rep['realized_cost']:.2f} vs ${rep['frontier_only_cost']:.2f} frontier-only "
-        f"-> saved ${rep['savings_vs_frontier']:.2f}"
+        f"   serving spent ${rep['realized_cost']:.3f}; ALL-IN round-1 cost including "
+        f"{setup_calls_1} setup labels is ${all_in_1:.3f} vs ${rep['frontier_only_cost']:.2f} frontier-only"
     )
+    if all_in_1 > rep["frontier_only_cost"]:
+        print(
+            f"   -> round 1 COSTS ${all_in_1 - rep['frontier_only_cost']:.3f} MORE than frontier-only: "
+            "setup amortizes only over later traffic"
+        )
 
-    print("\nharvest the escalated requests (free targeted labels) and re-distill")
+    print("\nharvest the escalated requests (already-paid labels) and re-distill WITHOUT re-buying them")
     htexts, hlabels = casc.harvested()
-    print(f"   harvested {len(htexts)} teacher-labeled examples from escalations")
+    print(f"   harvested {len(htexts)} teacher-labeled examples from escalations (0 new calls)")
 
-    print("\nround 2: re-distill including the harvest, then compare the two cascades HEAD-TO-HEAD")
-    casc2 = build_cascade(train + htexts, cal, cost)
+    print("\nround 2: re-distill REUSING the harvest, then compare the two cascades HEAD-TO-HEAD")
+    calls_before_build2 = teacher.calls
+    casc2 = build_cascade(teacher, train + htexts, train_labels + list(hlabels), cal, cal_labels, cost)
+    print(f"   round-2 build bought {teacher.calls - calls_before_build2} new labels (harvest reused)")
     # The ESTIMAND, stated before the comparison: the difference in escalation probability
-    # between the two REALIZED cascades (round 1's and round 2's, both fully fitted above) over
-    # the request distribution that corpus() draws from i.i.d. The comparison must be PAIRED on
-    # fresh traffic: round 2 was trained on escalations harvested from round 1's served traffic,
-    # so round 1's serving rate and round 2's rate are coupled through that shared sample and a
-    # two-independent-proportions interval would rest on a false premise. Instead, both FIXED
-    # cascades decide the same evaluation requests -- traffic no fitting step ever saw -- and,
-    # conditional on the two fits, the per-request paired differences are i.i.d.; the DECISION
-    # below uses the exact paired test on the discordant requests.
+    # between the two REALIZED cascades over the request distribution corpus() draws from.
+    # corpus() FIXES 150 rows per class (stratified, not i.i.d.), so the honest exact statement
+    # is PER STRATUM: within each class the paired discordances are exchangeable under the null,
+    # and each class gets its own exact McNemar test (STAT-RR17-03 -- the pooled test is not
+    # exact for the overall mean under a fixed-stratum design without a stronger stratumwise
+    # null). The conclusion requires BOTH strata to agree at the 5% level.
     evaluation = corpus(seed=901)
-    escalated_1 = np.asarray([d is ESCALATE for d in casc.model.batch_decide(evaluation)], dtype=np.float64)
-    escalated_2 = np.asarray([d is ESCALATE for d in casc2.model.batch_decide(evaluation)], dtype=np.float64)
-    paired = escalated_1 - escalated_2
-    difference = float(paired.mean())
-    # The conclusion rule is the EXACT paired (McNemar) test on the discordant requests: it stays
-    # valid at any discordance count, where a normal-approximation interval fails exactly in the
-    # small-discordance runs (an external review measured a Wald gate declaring a difference at
-    # four discordant pairs in a sibling example, where the exact p-value is 0.125). The Wald
-    # interval is still printed as a descriptive width alongside the exact decision.
-    only_1 = int(np.sum((escalated_1 == 1.0) & (escalated_2 == 0.0)))
-    only_2 = int(np.sum((escalated_2 == 1.0) & (escalated_1 == 0.0)))
-    p_exact = exact_paired_pvalue(only_1, only_2)
-    standard_error = float(paired.std(ddof=1) / np.sqrt(len(paired)))
-    low, high = difference - 1.96 * standard_error, difference + 1.96 * standard_error
+    truth = expensive_teacher(evaluation)
+    escalated_1 = np.asarray([d is ESCALATE for d in casc.model.batch_decide(evaluation)], dtype=bool)
+    escalated_2 = np.asarray([d is ESCALATE for d in casc2.model.batch_decide(evaluation)], dtype=bool)
     print(
-        f"   on {len(evaluation)} fresh paired requests: round-1 escalates {escalated_1.mean():.1%}, "
-        f"round-2 {escalated_2.mean():.1%}"
+        f"   on {len(evaluation)} fresh paired requests (150 per class, FIXED by design): "
+        f"round-1 escalates {escalated_1.mean():.1%}, round-2 {escalated_2.mean():.1%}"
     )
-    print(f"   paired difference {difference:+.1%} (descriptive 95% width [{low:+.1%}, {high:+.1%}])")
-    print(
-        f"   discordant requests: {only_1} round-1-only vs {only_2} round-2-only; "
-        f"exact paired two-sided p = {p_exact:.4f}"
-    )
-    if p_exact < 0.05 and difference > 0.0:
-        print("   -> the re-distilled cascade escalates less on identical traffic: it measurably")
-        print("      got cheaper with use (exact paired evidence at the 5% level)")
+    verdicts = []
+    for label in ("spam", "ham"):
+        stratum = np.asarray([t == label for t in truth])
+        only_1 = int(np.sum(escalated_1 & ~escalated_2 & stratum))
+        only_2 = int(np.sum(~escalated_1 & escalated_2 & stratum))
+        p_exact = exact_paired_pvalue(only_1, only_2)
+        verdicts.append(p_exact < 0.05 and only_1 > only_2)
+        print(
+            f"   {label}: discordant {only_1} round-1-only vs {only_2} round-2-only; "
+            f"exact paired two-sided p = {p_exact:.4f}"
+        )
+    if all(verdicts):
+        print("   -> BOTH strata improved (exact paired evidence at the 5% level in each):")
+        print("      the re-distilled cascade escalates less on identical traffic")
     else:
-        print("   -> the exact paired evidence is inconclusive at the 5% level; serve more traffic")
-        print("      before claiming it got cheaper")
+        print("   -> the per-stratum exact evidence is inconclusive at the 5% level; serve more")
+        print("      traffic before claiming it got cheaper (no pooled shortcut: the corpus is")
+        print("      stratified by design, so the strata are the honest units)")
 
     print("\nserve round 2 on the fresh traffic and project the cheapest route at 1,000,000 requests")
     casc2.serve(evaluation)
@@ -152,6 +178,7 @@ def main() -> None:
     )
     print("   (a POINT projection at this run's realized escalation rate; it assumes the served mix")
     print("    stays exchangeable with this traffic -- drift re-prices it, so re-measure before acting)")
+    print(f"\ntotal paid teacher calls this whole demo: {teacher.calls}")
 
 
 if __name__ == "__main__":
