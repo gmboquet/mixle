@@ -84,7 +84,14 @@ class BrierScoreTest(unittest.TestCase):
         p = rng.rand(5000)
         y = (rng.rand(5000) < p).astype(float)  # perfectly reliable forecaster
         d = brier_decomposition(p, y, bins=10)
-        self.assertAlmostEqual(d["reliability"] - d["resolution"] + d["uncertainty"], d["brier"], places=12)
+        # SCORING-3: 'brier' is now the ACTUAL score mean((p - y)^2); the decomposition sums to
+        # its own binned reconstruction exactly, and differs from the real score only by the
+        # within-bin variance term the binning discards
+        self.assertAlmostEqual(
+            d["reliability"] - d["resolution"] + d["uncertainty"], d["brier_binned_reconstruction"], places=12
+        )
+        self.assertAlmostEqual(d["brier"], float(np.mean((p - y) ** 2)), places=12)
+        self.assertLess(abs(d["brier"] - d["brier_binned_reconstruction"]), 0.02)
         # a calibrated forecaster has near-zero reliability
         self.assertLess(d["reliability"], 0.01)
 

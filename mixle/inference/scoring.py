@@ -172,9 +172,14 @@ def brier_decomposition(prob: np.ndarray, outcome: np.ndarray, *, bins: int = 10
         bins: number of equal-width probability bins.
 
     Returns:
-        ``{'reliability', 'resolution', 'uncertainty', 'brier'}``. The identity
-        ``reliability - resolution + uncertainty == brier`` holds up to binning of the score's
-        in-bin variance term.
+        ``{'reliability', 'resolution', 'uncertainty', 'brier', 'brier_binned_reconstruction'}``.
+        ``brier`` is the ACTUAL Brier score ``mean((prob - outcome)^2)`` (audit SCORING-3: the key
+        previously held the binned reconstruction, which differs from the real score by the
+        within-bin variance term). ``brier_binned_reconstruction = reliability - resolution +
+        uncertainty`` is the decomposition's own sum. The components are PLUG-IN estimates whose
+        finite-sample bias grows like ``bins/n`` (audit SCORING-2): with sparse bins, reliability
+        is inflated by within-bin binomial noise and resolution by base-rate noise -- read them
+        against ``n/bins``, and do not chase small differences at small samples.
 
     Raises:
         ValueError: if ``prob`` is not finite or has entries outside ``[0, 1]``, or if ``outcome``
@@ -217,7 +222,8 @@ def brier_decomposition(prob: np.ndarray, outcome: np.ndarray, *, bins: int = 10
         "reliability": reliability,
         "resolution": resolution,
         "uncertainty": uncertainty,
-        "brier": reliability - resolution + uncertainty,
+        "brier": float(np.mean((p - y) ** 2)),
+        "brier_binned_reconstruction": reliability - resolution + uncertainty,
     }
 
 
@@ -232,7 +238,7 @@ def _crps_sample(sorted_x: np.ndarray, y: float, fair: bool) -> float:
     return float(term1) - pair_sum / denom
 
 
-def crps_ensemble(forecasts: np.ndarray, y: np.ndarray, *, fair: bool = False, mean: bool = True) -> np.ndarray | float:
+def crps_ensemble(forecasts: np.ndarray, y: np.ndarray, *, fair: bool = True, mean: bool = True) -> np.ndarray | float:
     """Continuous Ranked Probability Score from a finite predictive ensemble (sample).
 
     Uses the energy form ``CRPS = E|X - y| - 1/2 E|X - X'|`` estimated from the ensemble draws. The
@@ -244,8 +250,13 @@ def crps_ensemble(forecasts: np.ndarray, y: np.ndarray, *, fair: bool = False, m
             ``(m,)`` for a single observation. Ragged ensembles are not supported -- pad or call per
             observation.
         y: ``(n,)`` realised values (or a scalar for the ``(m,)`` case).
-        fair: if True use the unbiased ``1/(m(m-1))`` spread estimator (the "fair"/almost-unbiased
-            CRPS); if False (default) the standard ``1/m^2`` estimator.
+        fair: if True (the DEFAULT -- audit SCORING-1) use the unbiased ``1/(m(m-1))`` spread
+            estimator (the "fair" CRPS), which is proper for finite ensembles: measured at
+            ``m = 5``, the expected fair score is minimized by reporting the true predictive
+            (dispersion factor 1.000), while the ``1/m^2`` estimator rewards UNDER-dispersing to
+            a factor of 0.700 -- an improper score that trains and selects forecasters toward
+            overconfidence. ``fair=False`` keeps the plain ``1/m^2`` estimator for comparability
+            with sources that use it; treat those numbers as biased-low in ensemble spread.
         mean: if True return the mean CRPS; otherwise the per-observation vector.
 
     Returns:
@@ -392,7 +403,7 @@ def pinball_loss(pred: np.ndarray, y: np.ndarray, tau: float | np.ndarray, *, me
     return _reduce(loss, mean)
 
 
-def energy_score(forecasts: np.ndarray, y: np.ndarray, *, fair: bool = False, mean: bool = True) -> np.ndarray | float:
+def energy_score(forecasts: np.ndarray, y: np.ndarray, *, fair: bool = True, mean: bool = True) -> np.ndarray | float:
     """Energy score: the multivariate generalisation of CRPS for vector-valued forecasts.
 
     ``ES = E||X - y|| - 1/2 E||X - X'||`` with Euclidean norms; for scalar ``y`` it equals
@@ -402,7 +413,9 @@ def energy_score(forecasts: np.ndarray, y: np.ndarray, *, fair: bool = False, me
         forecasts: predictive draws shaped ``(n, m, d)`` (``m`` ``d``-vectors per observation) or
             ``(m, d)`` for a single observation.
         y: ``(n, d)`` realised vectors (or ``(d,)`` for the single-observation case).
-        fair: use the unbiased ``1/(m(m-1))`` spread estimator if True.
+        fair: if True (the DEFAULT -- audit SCORING-1, same finite-ensemble impropriety as
+            :func:`crps_ensemble`) use the unbiased ``1/(m(m-1))`` spread estimator; ``False``
+            keeps the biased ``1/m^2`` form for comparability, rewarding under-dispersion.
         mean: if True return the mean; otherwise the per-observation vector.
 
     Returns:
