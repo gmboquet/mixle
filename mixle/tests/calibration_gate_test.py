@@ -24,7 +24,7 @@ def _predictive_ensemble(truth_sd: float, ensemble_sd: float, *, k: int = 400, m
 
 def test_calibrated_posterior_predictive_passes():
     ensemble, y = _predictive_ensemble(truth_sd=1.0, ensemble_sd=1.0)  # k=400: ample power
-    verdict = posterior_predictive_calibration(ensemble, y)
+    verdict = posterior_predictive_calibration(ensemble, y, ensemble_dependence="independent")
     assert verdict.passed, verdict.reasons
     assert not verdict.low_power
     assert verdict.pit_error <= verdict.null_threshold
@@ -63,7 +63,7 @@ def test_calibration_status_is_passed_for_a_well_powered_calibrated_posterior():
     """calibration_status carries the honest three-way state instead of a bool + bolted-on
     low_power flag (mirrors mixle.evolve.verify.Verdict.calibration_status)."""
     ensemble, y = _predictive_ensemble(truth_sd=1.0, ensemble_sd=1.0)  # k=400: ample power
-    verdict = posterior_predictive_calibration(ensemble, y)
+    verdict = posterior_predictive_calibration(ensemble, y, ensemble_dependence="independent")
     assert verdict.calibration_status == "passed"
     assert verdict.passed
     assert not verdict.low_power
@@ -249,7 +249,9 @@ def test_unseeded_randomized_checks_are_indeterminate_not_promotable():
 
 def test_verifier_passes_a_calibrated_payload():
     ensemble, y = _predictive_ensemble(truth_sd=1.0, ensemble_sd=1.0)
-    verdict = CalibrationVerifier().verify(claim={"payload": {"ensemble": ensemble, "held_out_y": y}})
+    verdict = CalibrationVerifier(ensemble_dependence="independent").verify(
+        claim={"payload": {"ensemble": ensemble, "held_out_y": y}}
+    )
     assert verdict["passed"] is True
     assert verdict["calibration_status"] == "passed"
     assert verdict["kind"] == "calibration"

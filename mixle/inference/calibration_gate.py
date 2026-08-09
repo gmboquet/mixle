@@ -98,6 +98,11 @@ class CalibrationVerdict:
     # old expected-count and threshold-magnitude heuristics computed no power at all
     power_estimate: float = float("nan")
     power_alternative: str = ""
+    power_estimate_independent: float = float("nan")
+    power_estimate_shared: float = float("nan")
+    # the caller's declared ensemble construction; promotion power is gated on THIS regime's
+    # executed power, and a misdeclaration is the caller asserting a false premise on record
+    declared_dependence: str = ""
     # finite-m null expectation of the reference-interval's empirical coverage under
     # exchangeability (rank Monte Carlo): the direction label compares against THIS, because at
     # small m a perfectly calibrated ensemble's plug-in interval covers well below nominal
@@ -175,34 +180,33 @@ def _uniform_mc_pvalue(t_obs: float, n: int, *, bins: int, n_null: int, seed: in
     return float((1.0 + count) / (1.0 + int(n_null)))
 
 
-def _column_swap_pvalue(y: np.ndarray, ens: np.ndarray, t_obs: float, *, bins: int, pit_seed: Any) -> float:
+def _column_swap_pvalue(y: np.ndarray, ens: np.ndarray, *, bins: int, pit_seed: Any) -> tuple[float, float]:
     """Exact randomization p-value for PIT uniformity under COLUMN exchangeability.
 
     The randomization group swaps the observation vector with one whole ensemble column: under
     calibration, ``(y, col_1, ..., col_m)`` are exchangeable AS VECTORS both when the columns
-    share posterior draws (the documented construction pushes the same ``m`` posterior draws
-    through the forward model for every point -- swapping ``y`` with column ``j`` merely relabels
-    which posterior draw played "truth") and when all entries are independent (a subgroup of the
-    full per-row swap group). Enumerating all ``m`` swaps gives ``p = (1 + #{T_j >= T_obs})/(1 + m)``,
-    exactly level-valid with p-values quantized at ``1/(m+1)`` -- so with few draws per point the
-    test simply CANNOT reject at small alpha, which the measured power reports honestly instead of
-    the old rule rejecting against an arbitrary fixed-seed quantile (STAT-RR17-08; realized levels
-    0.0033-0.0181 at nominal 0.01, and an i.i.d.-null reference failed a correctly calibrated
-    shared-parameter posterior 298/300 times). Independent PER-ROW swaps are deliberately NOT used:
-    they are invariant only for independent rows, and this module's own adverse test demonstrated
-    they false-alarm on the shared-draw construction.
+    share posterior draws (the documented construction) and when all entries are independent.
+    Exactness additionally requires ONE fixed statistic applied to every relabeling, so a single
+    jitter seed -- drawn once from ``pit_seed`` -- randomizes the PIT of the observed AND every
+    swapped configuration identically (pass 18 measured the varying-jitter version rejecting
+    83.1% of a fully i.i.d. null at a claimed 21% level; the same-jitter control measured 13.0%).
+    Returns ``(t_obs_decision, p)`` with ``p = (1 + #{T_j >= T_obs})/(1 + m)``, level-valid and
+    quantized at ``1/(m+1)`` -- with few draws per point the test CANNOT reject at small alpha,
+    which the measured power reports honestly.
     """
     k, m = ens.shape
     base = int(pit_seed) if isinstance(pit_seed, (int, np.integer)) else 0
+    jitter_seed = (base * 2654435761 + 97) % (2**31 - 1)
+    t_obs = float(pit_calibration_error(pit_ensemble(y, ens, randomize=True, seed=jitter_seed), bins=bins))
     count = 0
     for j in range(m):
         y_j = ens[:, j].copy()
         ens_j = ens.copy()
         ens_j[:, j] = y
-        pit_j = pit_ensemble(y_j, ens_j, randomize=True, seed=base + 7919 + j)
+        pit_j = pit_ensemble(y_j, ens_j, randomize=True, seed=jitter_seed)
         if pit_calibration_error(pit_j, bins=bins) >= t_obs:
             count += 1
-    return float((1.0 + count) / (1.0 + m))
+    return t_obs, float((1.0 + count) / (1.0 + m))
 
 
 def _measured_power(
@@ -215,37 +219,83 @@ def _measured_power(
     n_alternative: int = 200,
     seed: int = 20260808,
 ) -> tuple[float, str]:
-    """Measured Monte-Carlo power of the level-``alpha`` decision at this sample size.
+    """Measured power of the SBC decision (i.i.d. MC p-value) at this sample size.
 
-    Against ONE named canonical alternative -- predictive dispersion 0.8x the truth, i.e. PIT
-    values ``Phi(z / 0.8)`` for ``z ~ N(0,1)`` (continuous-PIT approximation, independent rows).
-    When ``m`` is given (the column-swap decision), p-values are quantized at ``1/(m+1)``: if
-    ``1/(m+1) > alpha`` the test can never reject and the power is exactly 0.0 -- reported as
-    such rather than papered over (the previous check compared bin counts and the threshold's
-    magnitude, computed no power at all, and said ``power_sufficient=True`` where the actual
-    rejection rate against this alternative was ~4.5%, STAT-RR17-08).
+    Against ONE named canonical alternative -- predictive dispersion 0.8x the truth, PIT values
+    ``Phi(z/0.8)``. This executes the implemented decision: reject when
+    ``(1 + #{T_null >= T_alt})/(1 + B) <= alpha``. Used by SBC only; the predictive gate's power
+    runs the column-swap decision itself under both supported dependence regimes
+    (:func:`_measured_gate_power`).
     """
     from scipy.stats import norm as _norm
 
     alternative = "predictive dispersion 0.8x truth (PIT = Phi(z/0.8))"
-    if m is not None and 1.0 / (m + 1.0) > alpha:
-        return 0.0, alternative
+    del m
     rs = RandomState(seed)
     null_stats = np.sort(
         [pit_calibration_error(rs.uniform(0.0, 1.0, size=int(n)), bins=bins) for _ in range(int(n_null))]
     )
-    if m is not None:
-        allowed = int(np.floor(alpha * (m + 1.0) - 1.0))
-        tail_fraction = max((allowed + 1.0) / (m + 1.0), 1.0 / (int(n_null) + 1.0))
-    else:
-        tail_fraction = alpha
-    critical = float(np.quantile(null_stats, 1.0 - tail_fraction))
     hits = 0
     for _ in range(int(n_alternative)):
         t_alt = pit_calibration_error(_norm.cdf(rs.standard_normal(int(n)) / 0.8), bins=bins)
-        if t_alt > critical:
+        count = int(null_stats.size - np.searchsorted(null_stats, t_alt, side="left"))
+        if (1.0 + count) / (1.0 + null_stats.size) <= alpha:
             hits += 1
     return float(hits / float(n_alternative)), alternative
+
+
+def _measured_gate_power(
+    k: int,
+    m: int,
+    *,
+    bins: int,
+    alpha: float,
+    n_alternative: int = 60,
+    budget_ops: float = 6.5e9,
+    seed: int = 20260809,
+) -> tuple[float, float, str]:
+    """Power of the ACTUAL column-swap decision, executed under BOTH supported dependence regimes.
+
+    Pass 18 measured the previous helper -- an independent-rows approximation that never executed
+    the decision -- reporting 0.95 where the shared-column regime's true rejection rate was 1.8%
+    and even the independent regime's was 0.866; a shared-column mis-calibrated posterior was then
+    PROMOTED on that fictitious power. Here each alternative replicate runs
+    :func:`_column_swap_pvalue` itself: 'independent' draws every entry independently, 'shared'
+    gives each ensemble column a shared component (the documented same-posterior-draws
+    construction). The promotion gate uses the MINIMUM of the two. Returns ``(nan, nan, ...)``
+    when execution would exceed the operation budget -- an unmeasured power never promotes
+    (claim reduction, per the pass-18 closure requirement).
+    """
+    alternative = (
+        "predictive marginal SD 0.8x truth (executed decision; min over independent and shared-column regimes)"
+    )
+    if 1.0 / (m + 1.0) > alpha:
+        return 0.0, 0.0, alternative  # p-values are quantized above alpha: the test cannot reject
+    per_replicate = 2.0 * (m + 1.0) * float(k) * float(m)  # both regimes execute the full decision
+    n_alternative = int(min(n_alternative, np.floor(float(budget_ops) / per_replicate)))
+    if n_alternative < 24:
+        # fewer than 24 executed replicates cannot resolve the 0.5 promotion floor; an
+        # unmeasured power never promotes (the caller sees indeterminate with this reason)
+        return float("nan"), float("nan"), alternative
+    rs = RandomState(seed)
+    hits_independent = 0
+    hits_shared = 0
+    for i in range(int(n_alternative)):
+        y = rs.standard_normal(k)
+        ens = 0.8 * rs.standard_normal((k, m))
+        _, p_ind = _column_swap_pvalue(y, ens, bins=bins, pit_seed=seed + 3 * i)
+        hits_independent += p_ind <= alpha
+        shared_truth = rs.standard_normal()
+        y2 = shared_truth + rs.standard_normal(k)
+        cols = rs.standard_normal(m)
+        ens2 = 0.8 * (cols[None, :] + rs.standard_normal((k, m)))
+        _, p_sh = _column_swap_pvalue(y2, ens2, bins=bins, pit_seed=seed + 3 * i + 1)
+        hits_shared += p_sh <= alpha
+    return (
+        float(hits_independent / float(n_alternative)),
+        float(hits_shared / float(n_alternative)),
+        alternative,
+    )
 
 
 def _reference_coverage_null_expectation(m: int, level: float, *, n_sims: int = 4000, seed: int = 5) -> float:
@@ -315,8 +365,20 @@ def posterior_predictive_calibration(
     low_power_threshold: float = 1.0,
     min_expected_count_per_bin: float = 5.0,
     pit_seed: int | RandomState | None = 0,
+    ensemble_dependence: Literal["shared-draws", "independent"] = "shared-draws",
 ) -> CalibrationVerdict:
     """Check a posterior-predictive ensemble against held-out observations it never saw.
+
+    ``ensemble_dependence`` declares how the ensemble was BUILT, because the test's power (not
+    its level -- the column-swap p-value is exact in both regimes) differs radically between
+    them: ``"shared-draws"`` (the default, fail-safe) means the same posterior draws generated
+    every row (the documented construction), where power is often low and promotion honestly
+    refuses; ``"independent"`` asserts every row used fresh draws, unlocking that regime's
+    (usually much higher) executed power. The declaration is the CALLER'S assertion about their
+    own sampling code -- it is recorded in the verdict and the receipt, and misdeclaring it is
+    how a low-power non-rejection would masquerade as affirmative evidence (pass 18 measured a
+    shared-column mis-calibrated posterior promoted on an independent-rows power fiction of
+    0.95 against an actual 0.018).
 
     ``ensemble`` is ``(k, m)``: for each of ``k`` held-out points, ``m`` posterior-predictive draws
     (push ``m`` draws from the posterior through the forward model to the observation of each held-out
@@ -372,6 +434,8 @@ def posterior_predictive_calibration(
     if not np.all(np.isfinite(ens)) or not np.all(np.isfinite(y)):
         raise ValueError("ensemble and held_out_y must contain only finite values")
 
+    if ensemble_dependence not in ("shared-draws", "independent"):
+        raise ValueError("ensemble_dependence must be 'shared-draws' or 'independent'")
     k = int(y.shape[0])
     pit = pit_ensemble(y, ens, randomize=True, seed=pit_seed)
     pit_err = float(pit_calibration_error(pit, bins=bins))
@@ -390,9 +454,12 @@ def posterior_predictive_calibration(
         # old compare-to-estimated-quantile rule's realized level was an arbitrary function of
         # the threshold seed: 0.0033-0.0181 measured at nominal 0.01)
         base = pit_seed if isinstance(pit_seed, (int, np.integer)) else 0
-        p_value = _column_swap_pvalue(y, ens, pit_err, bins=bins, pit_seed=pit_seed)
+        _t_decision, p_value = _column_swap_pvalue(y, ens, bins=bins, pit_seed=pit_seed)
         passed = p_value > alpha
-    power_estimate, power_alternative = _measured_power(k, bins=bins, alpha=alpha, n_null=n_null, m=int(ens.shape[1]))
+    power_independent, power_shared, power_alternative = _measured_gate_power(
+        k, int(ens.shape[1]), bins=bins, alpha=alpha
+    )
+    power_estimate = float(power_independent if ensemble_dependence == "independent" else power_shared)
     legacy_power, expected_count = _power_is_sufficient(
         k,
         bins=bins,
@@ -402,6 +469,8 @@ def posterior_predictive_calibration(
     )
     # power is MEASURED against the named canonical alternative; the legacy bin-count floor is
     # kept as a data-sufficiency screen, but it never substitutes for measured power again
+    # NaN (power unmeasurable within budget) intentionally fails this comparison: an unmeasured
+    # power never promotes (pass-18 closure: measure under every supported regime or reduce)
     power_sufficient = bool(legacy_power and power_estimate >= 0.5)
     randomness_controlled = pit_seed is not None
 
@@ -446,10 +515,19 @@ def posterior_predictive_calibration(
         )
     if not power_sufficient:
         reasons.append(
-            f"INDETERMINATE / LOW POWER: measured power {power_estimate:.2f} against the canonical "
-            f"alternative ({power_alternative}) at k={k} with {expected_count:.2f} expected points "
-            f"per bin; promotion requires measured power >= 0.50 and at least "
-            f"{min_expected_count_per_bin:.2f} per bin. Hold out more independent points."
+            "INDETERMINATE / LOW POWER: "
+            + (
+                f"power not measurable within budget at (k={k}, m={int(ens.shape[1])}) -- an unmeasured "
+                "power never promotes; reduce m, or decide with an explicit pit_tol"
+                if np.isnan(power_estimate)
+                else f"executed-decision power in the DECLARED '{ensemble_dependence}' regime is "
+                f"{power_estimate:.2f} (independent={power_independent:.2f}, "
+                f"shared-column={power_shared:.2f}) against the canonical alternative "
+                f"({power_alternative}) at k={k} with {expected_count:.2f} expected points per bin; "
+                "promotion requires declared-regime power >= 0.50 and at least "
+                f"{min_expected_count_per_bin:.2f} per bin. Hold out more independent points, or "
+                "build the ensemble with fresh per-point draws and declare it."
+            )
         )
     if not randomness_controlled:
         reasons.append(
@@ -480,6 +558,9 @@ def posterior_predictive_calibration(
         n_null=0 if pit_tol is not None else int(ens.shape[1]),
         power_estimate=power_estimate,
         power_alternative=power_alternative,
+        power_estimate_independent=power_independent,
+        power_estimate_shared=power_shared,
+        declared_dependence=ensemble_dependence,
         coverage_at_reference_null_expectation=coverage_null_expectation,
     )
 
@@ -698,11 +779,19 @@ class CalibrationVerifier:
     """
 
     def __init__(
-        self, *, reference_level: float = 0.90, null_quantile: float = 0.99, pit_tol: float | None = None
+        self,
+        *,
+        reference_level: float = 0.90,
+        null_quantile: float = 0.99,
+        pit_tol: float | None = None,
+        ensemble_dependence: Literal["shared-draws", "independent"] = "shared-draws",
     ) -> None:
         self.reference_level = reference_level
         self.null_quantile = null_quantile
         self.pit_tol = pit_tol
+        # fail-safe default: the documented construction shares posterior draws across points,
+        # and promotion power is gated on the declared regime (STAT-RR17-08, pass 18)
+        self.ensemble_dependence = ensemble_dependence
 
     def verify(self, claim: Any, context: Any = None) -> dict[str, Any]:
         payload = (claim or {}).get("payload", {}) if isinstance(claim, dict) else {}
@@ -732,6 +821,7 @@ class CalibrationVerifier:
                 reference_level=self.reference_level,
                 null_quantile=self.null_quantile,
                 pit_tol=self.pit_tol,
+                ensemble_dependence=self.ensemble_dependence,
             )
         except (TypeError, ValueError, FloatingPointError) as exc:
             return {
