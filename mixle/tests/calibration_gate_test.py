@@ -273,10 +273,14 @@ def test_verifier_refuses_to_promote_an_underpowered_non_rejection():
 
 
 def test_verifier_fails_closed_when_given_nothing_to_check():
+    # STAT-RR17-08 (GATE-7): a missing payload supports NEITHER verdict. "failed" is reserved for
+    # evidence of miscalibration by the module's own taxonomy, so an unverifiable claim is
+    # INDETERMINATE -- while still failing closed (passed=False, never promotable).
     verdict = CalibrationVerifier().verify(claim={"payload": {"some_number": 42}})
     assert verdict["passed"] is False
-    assert verdict["calibration_status"] == "failed"
-    assert any("unchecked" in r or "no ensemble" in r for r in verdict["reasons"])
+    assert verdict["calibration_status"] == "indeterminate"
+    assert verdict["indeterminate"] is True
+    assert any("no ensemble" in r for r in verdict["reasons"])
 
 
 @pytest.mark.parametrize(
@@ -305,3 +309,63 @@ def test_sbc_rejects_empty_simulations_and_draws():
         simulation_based_calibration(_prior, _simulate, _correct_fit, n_sims=0)
     with pytest.raises(ValueError, match="posterior draws"):
         simulation_based_calibration(_prior, _simulate, lambda _y, rng: np.array([]), n_sims=1)
+
+
+def test_shared_posterior_draws_do_not_fail_a_calibrated_posterior():
+    """STAT-RR17-08: the dependence-respecting null does not fail calibrated shared-draw posteriors."""
+    # the documented construction: the SAME m posterior draws pushed through the forward model
+    # for every held-out point. A correctly calibrated shared-parameter posterior failed the
+    # old i.i.d.-uniform reference 298/300 times; the swap-randomization null is exact under
+    # per-row exchangeability whatever the cross-row dependence, so failures are ~alpha rare.
+    failures = 0
+    for seed in range(6):
+        rng = np.random.RandomState(seed)
+        tau, noise, k, m = 1.5, 1.0, 300, 200
+        theta_true = rng.normal(0.0, tau)
+        y = theta_true + rng.normal(0.0, noise, size=k)
+        theta_draws = rng.normal(0.0, tau, size=m)  # a correct prior-matched posterior family
+        ensemble = theta_draws[None, :] + rng.normal(0.0, noise, size=(k, m))
+        verdict = posterior_predictive_calibration(ensemble, y, pit_seed=seed)
+        failures += verdict.calibration_status == "failed"
+    assert failures <= 1, failures
+
+
+def test_pvalue_decision_holds_its_level_on_iid_calibrated_data():
+    # (1 + count)/(1 + B) is level-valid at any B: over calibrated replicates the failure
+    # rate at alpha = 0.01 stays near alpha instead of tracking an arbitrary threshold seed
+    failures = 0
+    reps = 30
+    for seed in range(reps):
+        rng = np.random.RandomState(1000 + seed)
+        y = rng.normal(0.0, 1.0, size=60)
+        ensemble = rng.normal(0.0, 1.0, size=(60, 40))
+        verdict = posterior_predictive_calibration(ensemble, y, pit_seed=seed)
+        failures += verdict.calibration_status == "failed"
+    assert failures <= 3, failures
+
+
+def test_power_is_measured_not_asserted():
+    rng = np.random.RandomState(7)
+    y = rng.normal(0.0, 1.0, size=200)
+    ensemble = rng.normal(0.0, 1.0, size=(200, 60))
+    verdict = posterior_predictive_calibration(ensemble, y, pit_seed=3)
+    # the verdict carries a measured power number against a NAMED alternative
+    assert 0.0 <= verdict.power_estimate <= 1.0
+    assert "0.8" in verdict.power_alternative
+    # at k=200 the measured power against the 0.8-dispersion alternative is far below the
+    # old heuristic's implicit claim; power_sufficient must reflect the measurement
+    if verdict.power_estimate < 0.5:
+        assert not verdict.power_sufficient
+        assert verdict.calibration_status in ("indeterminate", "failed")
+
+
+def test_direction_label_uses_finite_m_expectation():
+    # a perfectly calibrated ensemble with FEW draws per point: the plug-in interval covers
+    # well below nominal by construction, and the verdict must carry the finite-m expectation
+    rng = np.random.RandomState(11)
+    y = rng.normal(0.0, 1.0, size=400)
+    ensemble = rng.normal(0.0, 1.0, size=(400, 8))
+    verdict = posterior_predictive_calibration(ensemble, y, pit_seed=2)
+    assert verdict.coverage_at_reference_null_expectation < 0.88  # far below the 0.90 nominal
+    # coverage sits near the finite-m expectation, not near nominal
+    assert abs(verdict.coverage_at_reference - verdict.coverage_at_reference_null_expectation) < 0.08

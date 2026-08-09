@@ -59,14 +59,18 @@ CalibrationStatus = Literal["passed", "failed", "indeterminate"]
 class CalibrationVerdict:
     """The outcome of a calibration check with an explicit three-way decision state.
 
-    ``null_threshold`` is the key to honest small-sample behaviour: ``pit_error`` is compared against
-    the value a *genuinely calibrated* posterior of this exact sample size would produce (the high
-    quantile of the finite-sample null), not a fixed constant that would false-alarm on calibrated
-    data at small ``n``. ``calibration_status`` is ``'passed'`` only when the observed error is
-    at/below that threshold *and* the check has adequate power; ``'indeterminate'`` means the data
-    cannot support either promotion or rejection; ``'failed'`` means the observed error exceeded
-    the calibrated threshold, which is real evidence of a problem even when power was otherwise
-    low. A gate may promote only the literal ``'passed'`` state.
+    The DECISION is a Monte-Carlo p-value compared to ``1 - null_quantile`` (STAT-RR17-08): the
+    predictive gate uses a swap-randomization null that is exact under per-row exchangeability
+    whatever the cross-row dependence of the ensemble, and SBC uses an i.i.d.-uniform null,
+    which its protocol genuinely satisfies; both use ``(1 + count)/(1 + B)``, level-valid at any
+    replicate count. ``null_threshold`` remains as a descriptive scale and the ``score`` anchor,
+    never the decision constant (deciding against that estimated quantile realized levels of
+    0.0033-0.0181 at nominal 0.01 depending only on its seed). ``calibration_status`` is
+    ``'passed'`` only when the p-value clears alpha AND measured power against the named
+    canonical alternative is adequate AND randomness is controlled; ``'indeterminate'`` means
+    the data cannot support either promotion or rejection; ``'failed'`` means the decision rule
+    rejected, which is real evidence of a problem even when power was otherwise low. A gate may
+    promote only the literal ``'passed'`` state.
     """
 
     calibration_status: CalibrationStatus
@@ -82,6 +86,24 @@ class CalibrationVerdict:
     randomness_controlled: bool = True
     reasons: list[str] = field(default_factory=list)
     kind: str = "calibration"
+    # STAT-RR17-08: the DECISION is a Monte-Carlo p-value that is level-valid at any replicate
+    # count -- (1 + #{T_null >= T_obs}) / (1 + B) -- never a comparison against the (noisy,
+    # fixed-seed) null-quantile estimate, which realized levels of 0.0033-0.0181 at nominal 0.01
+    # depending only on the threshold seed. null_threshold remains as the score anchor and a
+    # descriptive scale. p_value is NaN when an explicit tolerance override decided instead.
+    p_value: float = float("nan")
+    n_null: int = 0
+    # measured Monte-Carlo power of the level-(1 - null_quantile) decision against ONE named
+    # canonical alternative (0.8-dispersion mis-calibration), continuous-PIT approximation; the
+    # old expected-count and threshold-magnitude heuristics computed no power at all
+    power_estimate: float = float("nan")
+    power_alternative: str = ""
+    # finite-m null expectation of the reference-interval's empirical coverage under
+    # exchangeability (rank Monte Carlo): the direction label compares against THIS, because at
+    # small m a perfectly calibrated ensemble's plug-in interval covers well below nominal
+    # (~0.78 at m=8 for 0.90), and comparing to nominal called calibrated posteriors
+    # "overconfident" by construction
+    coverage_at_reference_null_expectation: float = float("nan")
 
     def __post_init__(self) -> None:
         # A receipt is a record. Detaching severs the caller's alias, so a mutation after
@@ -135,6 +157,113 @@ def _uniformity_null_threshold(
     rs = RandomState(seed)
     errs = [pit_calibration_error(rs.uniform(0.0, 1.0, size=int(n)), bins=bins) for _ in range(int(n_null))]
     return float(np.quantile(errs, quantile))
+
+
+def _uniform_mc_pvalue(t_obs: float, n: int, *, bins: int, n_null: int, seed: int) -> float:
+    """Monte-Carlo p-value of the PIT-uniformity statistic under an i.i.d. Uniform(0,1) null.
+
+    ``(1 + #{T_null >= T_obs}) / (1 + n_null)`` is level-valid at ANY replicate count (the +1s
+    count the observed configuration among the replicates), which is what replaces the previous
+    compare-to-estimated-quantile rule whose realized level depended on the threshold seed
+    (STAT-RR17-08). Valid when the PIT/rank values are independent across entries -- true for
+    SBC by construction (each simulation draws its own parameters and data).
+    """
+    rs = RandomState(seed)
+    count = sum(
+        1 for _ in range(int(n_null)) if pit_calibration_error(rs.uniform(0.0, 1.0, size=int(n)), bins=bins) >= t_obs
+    )
+    return float((1.0 + count) / (1.0 + int(n_null)))
+
+
+def _column_swap_pvalue(y: np.ndarray, ens: np.ndarray, t_obs: float, *, bins: int, pit_seed: Any) -> float:
+    """Exact randomization p-value for PIT uniformity under COLUMN exchangeability.
+
+    The randomization group swaps the observation vector with one whole ensemble column: under
+    calibration, ``(y, col_1, ..., col_m)`` are exchangeable AS VECTORS both when the columns
+    share posterior draws (the documented construction pushes the same ``m`` posterior draws
+    through the forward model for every point -- swapping ``y`` with column ``j`` merely relabels
+    which posterior draw played "truth") and when all entries are independent (a subgroup of the
+    full per-row swap group). Enumerating all ``m`` swaps gives ``p = (1 + #{T_j >= T_obs})/(1 + m)``,
+    exactly level-valid with p-values quantized at ``1/(m+1)`` -- so with few draws per point the
+    test simply CANNOT reject at small alpha, which the measured power reports honestly instead of
+    the old rule rejecting against an arbitrary fixed-seed quantile (STAT-RR17-08; realized levels
+    0.0033-0.0181 at nominal 0.01, and an i.i.d.-null reference failed a correctly calibrated
+    shared-parameter posterior 298/300 times). Independent PER-ROW swaps are deliberately NOT used:
+    they are invariant only for independent rows, and this module's own adverse test demonstrated
+    they false-alarm on the shared-draw construction.
+    """
+    k, m = ens.shape
+    base = int(pit_seed) if isinstance(pit_seed, (int, np.integer)) else 0
+    count = 0
+    for j in range(m):
+        y_j = ens[:, j].copy()
+        ens_j = ens.copy()
+        ens_j[:, j] = y
+        pit_j = pit_ensemble(y_j, ens_j, randomize=True, seed=base + 7919 + j)
+        if pit_calibration_error(pit_j, bins=bins) >= t_obs:
+            count += 1
+    return float((1.0 + count) / (1.0 + m))
+
+
+def _measured_power(
+    n: int,
+    *,
+    bins: int,
+    alpha: float,
+    n_null: int,
+    m: int | None = None,
+    n_alternative: int = 200,
+    seed: int = 20260808,
+) -> tuple[float, str]:
+    """Measured Monte-Carlo power of the level-``alpha`` decision at this sample size.
+
+    Against ONE named canonical alternative -- predictive dispersion 0.8x the truth, i.e. PIT
+    values ``Phi(z / 0.8)`` for ``z ~ N(0,1)`` (continuous-PIT approximation, independent rows).
+    When ``m`` is given (the column-swap decision), p-values are quantized at ``1/(m+1)``: if
+    ``1/(m+1) > alpha`` the test can never reject and the power is exactly 0.0 -- reported as
+    such rather than papered over (the previous check compared bin counts and the threshold's
+    magnitude, computed no power at all, and said ``power_sufficient=True`` where the actual
+    rejection rate against this alternative was ~4.5%, STAT-RR17-08).
+    """
+    from scipy.stats import norm as _norm
+
+    alternative = "predictive dispersion 0.8x truth (PIT = Phi(z/0.8))"
+    if m is not None and 1.0 / (m + 1.0) > alpha:
+        return 0.0, alternative
+    rs = RandomState(seed)
+    null_stats = np.sort(
+        [pit_calibration_error(rs.uniform(0.0, 1.0, size=int(n)), bins=bins) for _ in range(int(n_null))]
+    )
+    if m is not None:
+        allowed = int(np.floor(alpha * (m + 1.0) - 1.0))
+        tail_fraction = max((allowed + 1.0) / (m + 1.0), 1.0 / (int(n_null) + 1.0))
+    else:
+        tail_fraction = alpha
+    critical = float(np.quantile(null_stats, 1.0 - tail_fraction))
+    hits = 0
+    for _ in range(int(n_alternative)):
+        t_alt = pit_calibration_error(_norm.cdf(rs.standard_normal(int(n)) / 0.8), bins=bins)
+        if t_alt > critical:
+            hits += 1
+    return float(hits / float(n_alternative)), alternative
+
+
+def _reference_coverage_null_expectation(m: int, level: float, *, n_sims: int = 4000, seed: int = 5) -> float:
+    """Finite-``m`` null expectation of the reference interval's empirical coverage.
+
+    Distribution-free by ranks: under per-row exchangeability, whether ``y`` falls inside the
+    empirical central interval of ``m`` draws depends only on ranks, so Uniform simulation gives
+    the exact expectation for any continuous family. The direction label must compare against
+    THIS -- at small ``m`` the plug-in interval of a PERFECTLY calibrated ensemble covers well
+    below nominal, and comparing to the nominal level branded calibrated posteriors
+    "overconfident" by construction (STAT-RR17-08 / audit GATE-3).
+    """
+    rs = RandomState(seed)
+    draws = rs.uniform(0.0, 1.0, size=(int(n_sims), int(m)))
+    y = rs.uniform(0.0, 1.0, size=int(n_sims))
+    lo = np.quantile(draws, (1.0 - level) / 2.0, axis=1)
+    hi = np.quantile(draws, (1.0 + level) / 2.0, axis=1)
+    return float(np.mean((y >= lo) & (y <= hi)))
 
 
 def _validate_gate_parameters(
@@ -193,23 +322,32 @@ def posterior_predictive_calibration(
     (push ``m`` draws from the posterior through the forward model to the observation of each held-out
     point). ``held_out_y`` is the ``(k,)`` array of real observed values at those points.
 
-    The decision is a proper finite-sample uniformity test on the randomized PIT of the held-out data
-    (:func:`~mixle.inference.calibration.pit_ensemble`). ``pit_error``
-    (:func:`~mixle.inference.calibration.pit_calibration_error`, deviation of the rank histogram from
-    uniform) is compared against :func:`_uniformity_null_threshold` -- the ``null_quantile`` upper tail
-    of what a *genuinely calibrated* posterior of this exact sample size would produce -- NOT a fixed
-    constant (a fixed constant is below the finite-sample noise floor at small ``k`` and would
-    false-alarm on calibrated data). Pass ``pit_tol`` to override with a fixed threshold if you have a
-    reason to.
+    The decision is an exact column-swap randomization test on the randomized PIT of the
+    held-out data (STAT-RR17-08): the observation vector is swapped with each whole ensemble
+    column in turn and the identical statistic recomputed, giving ``p = (1 + count)/(1 + m)``.
+    Under calibration, ``(y, col_1..col_m)`` are exchangeable as vectors BOTH for the documented
+    construction (the same ``m`` posterior draws pushed through the forward model for every
+    point -- the i.i.d.-uniform reference this replaces wrongly failed a correctly calibrated
+    shared-parameter posterior 298/300 times there) AND for fully independent entries, so the
+    p-value is level-exact in either regime. It is quantized at ``1/(m+1)``: with few draws per
+    point the test cannot reject at small alpha, and the measured power reports that honestly.
+    The decision rejects when ``p <= 1 - null_quantile``. ``null_threshold`` is still computed
+    as a descriptive scale and the ``score`` anchor, never the decision constant. Pass
+    ``pit_tol`` to override with a fixed tolerance if you have a reason to (that branch reports
+    no p-value).
 
     Coverage numbers (:func:`~mixle.inference.calibration.coverage_curve` /
     :func:`~mixle.inference.calibration.interval_coverage`) are computed and reported as human-readable
     diagnostics and to label the *direction* of any miscalibration (over- vs under-confident), but the
     pass/fail itself is the PIT test, which subsumes them and is scale-correct.
 
-    A non-rejection is promotable only when both power checks pass: the calibrated null threshold
-    is below ``low_power_threshold`` and the expected count per PIT bin is at least
-    ``min_expected_count_per_bin``. Otherwise the result is ``indeterminate``, never a pass.
+    A non-rejection is promotable only when MEASURED power is adequate: the Monte-Carlo power of
+    this decision at this ``k`` against the named canonical alternative (predictive dispersion
+    0.8x the truth) must reach 0.50, alongside the ``min_expected_count_per_bin`` data floor.
+    The previous bin-count/threshold-magnitude heuristics computed no power at all and reported
+    ``power_sufficient=True`` where the actual rejection rate against that alternative was ~4.5%
+    (STAT-RR17-08). Power against ONE named alternative is a floor, not a universal power claim.
+    Otherwise the result is ``indeterminate``, never a pass.
     """
     ens = np.asarray(ensemble, dtype=float)
     y = np.asarray(held_out_y, dtype=float)
@@ -237,16 +375,34 @@ def posterior_predictive_calibration(
     k = int(y.shape[0])
     pit = pit_ensemble(y, ens, randomize=True, seed=pit_seed)
     pit_err = float(pit_calibration_error(pit, bins=bins))
-    threshold = (
-        float(pit_tol) if pit_tol is not None else _uniformity_null_threshold(k, bins=bins, quantile=null_quantile)
-    )
-    power_sufficient, expected_count = _power_is_sufficient(
+    alpha = 1.0 - null_quantile
+    n_null = 500
+    threshold = _uniformity_null_threshold(k, bins=bins, quantile=null_quantile)
+    if pit_tol is not None:
+        # explicit caller override: a fixed tolerance decides, and no p-value is reported for it
+        threshold = float(pit_tol)
+        p_value = float("nan")
+        passed = pit_err <= threshold
+    else:
+        # STAT-RR17-08: the decision is the exact swap-randomization Monte-Carlo p-value -- valid
+        # at any replicate count and under ANY cross-row dependence of the ensemble (the i.i.d.
+        # null failed a correctly calibrated shared-parameter posterior 298/300 times, and the
+        # old compare-to-estimated-quantile rule's realized level was an arbitrary function of
+        # the threshold seed: 0.0033-0.0181 measured at nominal 0.01)
+        base = pit_seed if isinstance(pit_seed, (int, np.integer)) else 0
+        p_value = _column_swap_pvalue(y, ens, pit_err, bins=bins, pit_seed=pit_seed)
+        passed = p_value > alpha
+    power_estimate, power_alternative = _measured_power(k, bins=bins, alpha=alpha, n_null=n_null, m=int(ens.shape[1]))
+    legacy_power, expected_count = _power_is_sufficient(
         k,
         bins=bins,
         null_threshold=threshold,
         low_power_threshold=low_power_threshold,
         min_expected_count_per_bin=min_expected_count_per_bin,
     )
+    # power is MEASURED against the named canonical alternative; the legacy bin-count floor is
+    # kept as a data-sufficiency screen, but it never substitutes for measured power again
+    power_sufficient = bool(legacy_power and power_estimate >= 0.5)
     randomness_controlled = pit_seed is not None
 
     curve = coverage_curve(ens, y)
@@ -255,30 +411,45 @@ def posterior_predictive_calibration(
     hi = np.quantile(ens, (1.0 + reference_level) / 2.0, axis=1)
     ref = interval_coverage(lo, hi, y)
     coverage_at_ref = float(ref["coverage"])
+    coverage_null_expectation = _reference_coverage_null_expectation(int(ens.shape[1]), float(reference_level))
 
-    passed = pit_err <= threshold
     reasons: list[str] = []
     if not passed:
+        # direction judged against the FINITE-m null expectation, not the nominal level: a
+        # perfectly calibrated ensemble's plug-in interval covers ~0.78 at m=8 for nominal 0.90,
+        # so the nominal comparison branded calibrated posteriors overconfident by construction
         direction = (
             "overconfident (intervals too narrow -- reports false certainty)"
-            if coverage_at_ref < reference_level
+            if coverage_at_ref < coverage_null_expectation
             else "underconfident (intervals too wide)"
         )
+        decided_by = (
+            f"PIT error {pit_err:.3f} > tolerance {threshold:.3f}"
+            if pit_tol is not None
+            else f"column-swap exact p = {p_value:.4f} <= alpha = {alpha:.4f}"
+        )
         reasons.append(
-            f"miscalibrated: PIT error {pit_err:.3f} > null threshold {threshold:.3f} for k={k}; "
-            f"{reference_level:.0%} interval covers {coverage_at_ref:.1%} of held-out points -- {direction}"
+            f"miscalibrated: {decided_by} for k={k}; {reference_level:.0%} interval covers "
+            f"{coverage_at_ref:.1%} of held-out points against a finite-m calibrated expectation "
+            f"of {coverage_null_expectation:.1%} -- {direction}"
         )
     else:
+        decided_by = (
+            f"PIT error {pit_err:.3f} <= tolerance {threshold:.3f}"
+            if pit_tol is not None
+            else f"column-swap exact p = {p_value:.4f} > alpha = {alpha:.4f}"
+        )
         reasons.append(
-            f"not detectably miscalibrated: PIT error {pit_err:.3f} <= null threshold {threshold:.3f} for k={k}; "
-            f"{reference_level:.0%} interval covers {coverage_at_ref:.1%} of held-out points"
+            f"not detectably miscalibrated: {decided_by} for k={k}; "
+            f"{reference_level:.0%} interval covers {coverage_at_ref:.1%} of held-out points "
+            f"(finite-m calibrated expectation {coverage_null_expectation:.1%})"
         )
     if not power_sufficient:
         reasons.append(
-            f"INDETERMINATE / LOW POWER: k={k} gives {expected_count:.2f} expected points per bin "
-            f"and null threshold {threshold:.2f}; promotion requires at least "
-            f"{min_expected_count_per_bin:.2f} per bin and threshold < {low_power_threshold:.2f}. "
-            "Hold out more independent points."
+            f"INDETERMINATE / LOW POWER: measured power {power_estimate:.2f} against the canonical "
+            f"alternative ({power_alternative}) at k={k} with {expected_count:.2f} expected points "
+            f"per bin; promotion requires measured power >= 0.50 and at least "
+            f"{min_expected_count_per_bin:.2f} per bin. Hold out more independent points."
         )
     if not randomness_controlled:
         reasons.append(
@@ -305,6 +476,11 @@ def posterior_predictive_calibration(
         expected_count_per_bin=expected_count,
         randomness_controlled=randomness_controlled,
         reasons=reasons,
+        p_value=p_value,
+        n_null=0 if pit_tol is not None else int(ens.shape[1]),
+        power_estimate=power_estimate,
+        power_alternative=power_alternative,
+        coverage_at_reference_null_expectation=coverage_null_expectation,
     )
 
 
@@ -354,6 +530,14 @@ def simulation_based_calibration(
     model? Draw ``theta ~ prior``, simulate ``y ~ p(y|theta)``, refit a posterior, and record the rank
     of the true ``theta`` among the posterior draws. Under a correct inference those ranks are Uniform;
     a systematically over/under-dispersed posterior makes them pile up at the middle or the edges.
+
+    PRECONDITION (STAT-RR17-08 / audit GATE-6): rank uniformity requires the posterior draws each
+    ``fit`` returns to be (near-)independent -- exchangeability of ``theta_true`` with the draws.
+    An UNTHINNED autocorrelated MCMC chain from a CORRECT inference produces systematically
+    non-uniform ranks and fails this gate without any defect in the inference; thin the chain to
+    approximate independence first (Talts et al., section 4). The decision itself is the
+    level-exact Monte-Carlo p-value against the i.i.d.-uniform null, which the SBC protocol
+    genuinely satisfies across simulations (each draws its own parameters and data).
 
     ``prior_sampler(rng) -> theta`` (a ``(d,)`` parameter vector, or scalar-as-``(1,)``);
     ``simulate(theta, rng) -> y`` (any shape the fitter accepts);
@@ -422,41 +606,57 @@ def simulation_based_calibration(
     # a uniform rank histogram means calibrated inference; reuse the same PIT-uniformity metric,
     # judged against the same sample-size-aware null threshold (n_sims here plays the role of k).
     sbc_error = float(pit_calibration_error(ranks, bins=bins))
-    threshold = (
-        float(error_tol)
-        if error_tol is not None
-        else _uniformity_null_threshold(int(n_sims), bins=bins, quantile=null_quantile)
-    )
-    power_sufficient, expected_count = _power_is_sufficient(
+    alpha = 1.0 - null_quantile
+    n_null = 500
+    threshold = _uniformity_null_threshold(int(n_sims), bins=bins, quantile=null_quantile)
+    if error_tol is not None:
+        threshold = float(error_tol)
+        p_value = float("nan")
+        within_threshold = sbc_error <= threshold
+    else:
+        # STAT-RR17-08: decide by the level-exact MC p-value, never the estimated quantile. The
+        # i.i.d.-uniform null is CORRECT here (unlike the predictive gate): each SBC simulation
+        # draws its own parameters and data, so ranks are independent across sims by protocol.
+        p_value = _uniform_mc_pvalue(
+            sbc_error, int(n_sims), bins=bins, n_null=n_null, seed=(0 if seed is None else int(seed)) + 404
+        )
+        within_threshold = p_value > alpha
+    power_estimate, power_alternative = _measured_power(int(n_sims), bins=bins, alpha=alpha, n_null=n_null)
+    legacy_power, expected_count = _power_is_sufficient(
         int(n_sims),
         bins=bins,
         null_threshold=threshold,
         low_power_threshold=low_power_threshold,
         min_expected_count_per_bin=min_expected_count_per_bin,
     )
-    within_threshold = sbc_error <= threshold
+    power_sufficient = bool(legacy_power and power_estimate >= 0.5)
     randomness_controlled = seed is not None
     calibration_status: CalibrationStatus = (
         "failed"
         if not within_threshold
         else ("passed" if power_sufficient and randomness_controlled else "indeterminate")
     )
+    decided_by = (
+        f"error {sbc_error:.3f} vs tolerance {threshold:.3f}"
+        if error_tol is not None
+        else f"MC p = {p_value:.4f} vs alpha = {alpha:.4f}"
+    )
     if calibration_status == "failed":
         reasons = [
-            f"SBC ranks NOT uniform (error {sbc_error:.3f} > null threshold {threshold:.3f}): inference is "
+            f"SBC ranks NOT uniform ({decided_by}): inference is "
             "mis-dispersed (over/under-confident) under its own generative model"
         ]
     elif calibration_status == "passed":
         reasons = [
-            f"SBC ranks consistent with uniform (error {sbc_error:.3f} <= null threshold {threshold:.3f} for "
+            f"SBC ranks consistent with uniform ({decided_by} for "
             f"{n_sims} sims): inference is self-consistent under its own generative model"
         ]
     elif not power_sufficient:
         reasons = [
-            f"SBC is INDETERMINATE / LOW POWER: error {sbc_error:.3f} is within threshold {threshold:.3f}, "
-            f"but {n_sims} simulations give only {expected_count:.2f} expected ranks per bin; promotion "
-            f"requires at least {min_expected_count_per_bin:.2f} per bin and threshold < "
-            f"{low_power_threshold:.2f}."
+            f"SBC is INDETERMINATE / LOW POWER: {decided_by}, but measured power is "
+            f"{power_estimate:.2f} against the canonical alternative ({power_alternative}) with "
+            f"{expected_count:.2f} expected ranks per bin; promotion requires measured power >= 0.50 "
+            f"and at least {min_expected_count_per_bin:.2f} per bin."
         ]
     else:
         reasons = [
@@ -477,6 +677,10 @@ def simulation_based_calibration(
         randomness_controlled=randomness_controlled,
         reasons=reasons,
         kind="calibration-sbc",
+        p_value=p_value,
+        n_null=0 if error_tol is not None else n_null,
+        power_estimate=power_estimate,
+        power_alternative=power_alternative,
     )
 
 
@@ -506,13 +710,19 @@ class CalibrationVerifier:
         ensemble = source.get("ensemble") if isinstance(source, dict) else None
         held_out_y = source.get("held_out_y") if isinstance(source, dict) else None
         if ensemble is None or held_out_y is None:
+            # STAT-RR17-08 (GATE-7): by this module's own taxonomy, "failed" means the observed
+            # error exceeded the calibrated decision rule -- evidence of miscalibration. A missing
+            # payload supports NEITHER verdict, so it is labeled indeterminate; the decision still
+            # fails closed (passed=False), it just never counts as miscalibration evidence.
             return {
                 "passed": False,
-                "calibration_status": "failed",
+                "calibration_status": "indeterminate",
+                "indeterminate": True,
                 "score": 0.0,
                 "kind": "calibration",
                 "reasons": [
-                    "no ensemble/held_out_y to calibrate against -- failing closed rather than passing an unchecked posterior"
+                    "no ensemble/held_out_y to calibrate against -- indeterminate and failing closed "
+                    "rather than passing an unchecked posterior (or counting it as miscalibrated)"
                 ],
             }
         try:
@@ -526,10 +736,11 @@ class CalibrationVerifier:
         except (TypeError, ValueError, FloatingPointError) as exc:
             return {
                 "passed": False,
-                "calibration_status": "failed",
+                "calibration_status": "indeterminate",
+                "indeterminate": True,
                 "score": 0.0,
                 "kind": "calibration",
-                "reasons": [f"calibration input rejected: {exc}"],
+                "reasons": [f"calibration input rejected (indeterminate, failing closed): {exc}"],
             }
         return {
             "passed": verdict.passed,
@@ -540,4 +751,6 @@ class CalibrationVerifier:
             "indeterminate": verdict.indeterminate,
             "low_power": verdict.low_power,
             "power_sufficient": verdict.power_sufficient,
+            "p_value": verdict.p_value,
+            "power_estimate": verdict.power_estimate,
         }
