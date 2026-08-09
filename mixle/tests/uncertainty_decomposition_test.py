@@ -101,14 +101,17 @@ class VarianceSplitTest(unittest.TestCase):
         d = decompose_variance(means, varis)
         self.assertEqual(d.kind, "variance")
         self.assertAlmostEqual(d.aleatoric, 0.5, places=12)  # mean of per-member variances
-        self.assertAlmostEqual(d.epistemic, np.var(means), places=12)  # spread of the means
+        # audit U-3: ddof=1 -- the members are draws, so the estimand is the population
+        # variance of member means and the plug-in understated it by (M-1)/M
+        self.assertAlmostEqual(d.epistemic, np.var(means, ddof=1), places=12)  # spread of the means
         self.assertAlmostEqual(d.total, d.aleatoric + d.epistemic, places=12)
 
     def test_point_predictors_have_zero_aleatoric(self):
         means = np.array([2.0, 2.0, 8.0, 8.0])
         d = decompose_variance(means)  # no variances given
+        self.assertEqual(d.kind, "variance-epistemic-only")  # audit U-9: total carries NO noise
         self.assertAlmostEqual(d.aleatoric, 0.0, places=12)
-        self.assertAlmostEqual(d.epistemic, np.var(means), places=12)
+        self.assertAlmostEqual(d.epistemic, np.var(means, ddof=1), places=12)
 
     def test_agreeing_means_zero_epistemic(self):
         means = np.array([4.0, 4.0, 4.0])
@@ -122,7 +125,7 @@ class VarianceSplitTest(unittest.TestCase):
         varis = rng.random((5, 8)) + 0.1
         d = decompose_variance(means, varis)
         self.assertEqual(np.shape(d.total), (8,))
-        np.testing.assert_allclose(d.total, means.var(axis=0) + varis.mean(axis=0), atol=1e-12)
+        np.testing.assert_allclose(d.total, means.var(axis=0, ddof=1) + varis.mean(axis=0), atol=1e-12)
 
     def test_mismatched_shapes_raise(self):
         with self.assertRaises(ValueError):
@@ -139,7 +142,7 @@ class FrontDoorAndBuildersTest(unittest.TestCase):
     def test_front_door_dispatch(self):
         p = np.array([[0.2, 0.8], [0.6, 0.4]])
         self.assertEqual(decompose_uncertainty(probs=p).kind, "entropy")
-        self.assertEqual(decompose_uncertainty(means=np.array([1.0, 2.0])).kind, "variance")
+        self.assertEqual(decompose_uncertainty(means=np.array([1.0, 2.0])).kind, "variance-epistemic-only")
         with self.assertRaises(ValueError):
             decompose_uncertainty(probs=p, means=np.array([1.0, 2.0]))
         with self.assertRaises(ValueError):

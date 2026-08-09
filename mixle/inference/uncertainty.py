@@ -25,8 +25,17 @@ Two *exact* decompositions, matched to the two answer types:
 
 "Members" are draws from ``q(theta | data)`` (parameter uncertainty, via
 :class:`~mixle.inference.posterior.ParameterPosterior`) or an explicit ensemble of fitted models
-(as in a deep ensemble / bagged fit). Both splits are exact given the members; the only
-approximation is the finite number of members used to represent the posterior.
+(as in a deep ensemble / bagged fit). The DECOMPOSITION IDENTITIES are exact given the members;
+what the numbers mean depends on where the members came from (audit U-1): only for exact
+posterior draws (the conjugate route) is the finite member count M the sole approximation. A
+VARIATIONAL ``q`` is mode-seeking and systematically understates the posterior spread (the
+epistemic term inherits that understatement at any M); MCMC members carry burn-in and
+autocorrelation, so the effective sample size, not M, governs their error. The finite-M
+estimators are themselves biased: the entropy split's plug-in mutual information is capped at
+``log M`` outright and biased low (audit U-2 -- at M = 2 a true 2.08-nat disagreement reads at
+most 0.693), and the variance split's epistemic term uses the unbiased ``ddof=1`` estimator
+precisely so its expectation is the population variance at every M (audit U-3 -- the ``ddof=0``
+plug-in understated it by exactly ``(M-1)/M``, 50% at M = 2).
 """
 
 from __future__ import annotations
@@ -146,8 +155,14 @@ def decompose_entropy(member_probs: Any) -> UncertaintyDecomposition:
 
     Returns:
         An :class:`UncertaintyDecomposition` with ``kind="entropy"`` (nats). ``epistemic`` is the
-        mutual information ``H(mean) - mean H`` and is clamped to ``>= 0`` (it is non-negative in
-        exact arithmetic; the clamp only removes small floating-point negatives).
+        PLUG-IN mutual information ``H(mean) - mean H``, clamped to ``>= 0`` (non-negative in
+        exact arithmetic; the clamp removes floating-point negatives, and ``total`` is recomputed
+        as ``aleatoric + epistemic`` afterward so the asserted identity holds exactly -- audit
+        U-8). ESTIMATOR LIMITS (audit U-2): the plug-in MI over M members is structurally capped
+        at ``log M`` whatever the true disagreement -- at the permitted minimum M = 2 a true
+        2.08-nat mutual information reads at most 0.693 -- and is biased low below the cap; read
+        it as a lower bound at small M, and prefer M large enough that ``log M`` comfortably
+        exceeds the disagreement you need to resolve.
     """
     p = np.asarray(member_probs, dtype=float)
     if p.ndim < 2:
@@ -164,6 +179,9 @@ def decompose_entropy(member_probs: Any) -> UncertaintyDecomposition:
     total = _entropy_last(mean)  # H(mean)  -> (...)
     aleatoric = _entropy_last(p).mean(axis=0)  # mean_m H(p_m) -> (...)
     epistemic = np.maximum(total - aleatoric, 0.0)
+    # recompute total AFTER the clamp so total == aleatoric + epistemic exactly (audit U-8: the
+    # class docstring asserts that identity, and the clamp could break it by a float ulp)
+    total = aleatoric + epistemic
     return UncertaintyDecomposition(total, aleatoric, epistemic, "entropy")
 
 
@@ -177,15 +195,19 @@ def decompose_variance(member_means: Any, member_vars: Any = None) -> Uncertaint
             decomposition reports only the epistemic spread of the means.
 
     Returns:
-        An :class:`UncertaintyDecomposition` with ``kind="variance"``:
-        ``aleatoric = mean_m Var_m``, ``epistemic = Var_m(mean_m)``, ``total`` their sum.
+        An :class:`UncertaintyDecomposition` with ``kind="variance"`` (or
+        ``kind="variance-epistemic-only"`` when ``member_vars`` is ``None`` -- ``total`` then
+        contains NO aleatoric noise and is not a predictive variance; audit U-9).
     """
     mu = np.asarray(member_means, dtype=float)
     if mu.ndim < 1 or not np.all(np.isfinite(mu)):
         raise ValueError("member_means must be a finite array with a member axis")
     if mu.shape[0] < 2:
         raise ValueError("need at least two members (M >= 2) to estimate epistemic uncertainty")
-    epistemic = mu.var(axis=0)  # Var_m E[y|m]
+    # ddof=1 (audit U-3): members are DRAWS representing the posterior, so the estimand is the
+    # population variance of member means; the ddof=0 plug-in has expectation ((M-1)/M) * Var --
+    # a measured 50% understatement of the epistemic term at the permitted minimum M = 2
+    epistemic = mu.var(axis=0, ddof=1)  # Var_m E[y|m]
     if member_vars is None:
         aleatoric = np.zeros_like(epistemic)
     else:
@@ -196,7 +218,8 @@ def decompose_variance(member_means: Any, member_vars: Any = None) -> Uncertaint
             raise ValueError("member_vars must be finite non-negative variances")
         aleatoric = v.mean(axis=0)  # mean_m Var[y|m]
     total = aleatoric + epistemic
-    return UncertaintyDecomposition(total, aleatoric, epistemic, "variance")
+    kind = "variance" if member_vars is not None else "variance-epistemic-only"
+    return UncertaintyDecomposition(total, aleatoric, epistemic, kind)
 
 
 def predictive_distribution(members: Iterable[Any], support: Sequence[Any]) -> np.ndarray:
@@ -205,6 +228,13 @@ def predictive_distribution(members: Iterable[Any], support: Sequence[Any]) -> n
     Each member's ``log_density`` is evaluated at every point of ``support`` and softmax-normalized
     over the support, giving one categorical row per member. Feed the result to
     :func:`decompose_entropy`.
+
+    PRECONDITION (audit U-7): the softmax treats every support point as carrying EQUAL measure.
+    That is exact for a discrete family evaluated on its full support, and a grid approximation
+    for a continuous density ONLY when the grid is uniform -- a non-uniform grid silently
+    reweights the density by the missing cell widths, and any downstream entropy inherits the
+    distortion. Restrict a discrete member's support at your own risk: the row then represents
+    the conditional given that subset.
     """
     support = list(support)
     if len(support) < 2:
@@ -291,7 +321,12 @@ def cluster_samples(samples: Sequence[Any], equivalent: Callable[[Any, Any], boo
 
     for i in range(len(values)):
         for j in range(i):
-            if bool(eq(values[i], values[j])):
+            # audit U-6: a directional ``equivalent`` (an entailment check is the documented
+            # example) made the partition depend on the input ORDER -- shuffling the same samples
+            # changed K and every downstream entropy. Merging on either direction makes the
+            # clustering order-independent; single-linkage chaining across a non-transitive
+            # relation remains, as documented.
+            if bool(eq(values[i], values[j])) or bool(eq(values[j], values[i])):
                 union(i, j)
     class_by_root: dict[int, int] = {}
     reps: list[Any] = []
@@ -322,8 +357,12 @@ def marginalize_meaning(
 
     How the per-string probability enters:
 
-    * ``log_probs`` -- the model's sequence log-probabilities ``log P(s)`` for each item; classes are
-      combined by ``logsumexp`` (exact marginalization, numerically stable). Use this when the items
+    * ``log_probs`` -- the model's sequence log-probabilities ``log P(s)`` for each DISTINCT item;
+            classes are combined by ``logsumexp`` and renormalized over the items you passed, so the
+            result is the meaning marginal CONDITIONAL ON the observed strings, not the model's full
+            marginal (audit U-5) -- unobserved tail mass is excluded, and repeated strings would
+            each add their own ``P(s)`` (estimating ``sum P(s)^2``, a different quantity), so
+            duplicates are refused in this branch. Use this when the items
       are *distinct* strings whose probabilities you know -- it corrects the counting form's hidden
       "every string in a class is equiprobable" assumption.
     * ``weights`` -- explicit non-negative masses per item (summed within class).
@@ -343,6 +382,19 @@ def marginalize_meaning(
             raise ValueError("log_probs must have one entry per item")
         if np.any(np.isnan(lp)) or np.any(np.isposinf(lp)) or not np.any(np.isfinite(lp)):
             raise ValueError("log_probs must contain at least one finite value and no NaN or +inf")
+        # audit U-5: repeated strings would each contribute their own P(s), estimating
+        # sum P(s)^2 per class instead of the marginal sum P(s) -- refuse rather than distort
+        seen: dict = {}
+        for item in items:
+            key = repr(item)
+            seen[key] = seen.get(key, 0) + 1
+        duplicated = [key for key, count in seen.items() if count > 1]
+        if duplicated:
+            raise ValueError(
+                "log_probs marginalization requires DISTINCT items (each string's probability "
+                f"enters once); got repeats of {duplicated[:3]} -- deduplicate first, or drop "
+                "log_probs to marginalize by sample counting"
+            )
         logmass = np.full(k, -np.inf)
         for i, lab in enumerate(labels):
             logmass[lab] = np.logaddexp(logmass[lab], lp[i])
