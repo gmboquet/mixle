@@ -10,9 +10,12 @@ emission family with a sampler (Gaussian, Gamma, categorical, wrapped, neural, .
     f.mean, f.lo, f.hi          # (H,) arrays (or lists for non-scalar emissions)
     f.state_probs               # (H, S): where the chain is expected to be at each step
 
-Sampling-based on purpose: exact for the state marginals (``p_T A^h``), Monte Carlo only for the
-emission quantiles, so the intervals reflect arbitrary (skewed / multimodal / discrete)
-emission families rather than pretending everything is Gaussian.
+Sampling-based on purpose: exact for the state marginals (``p_T A^h``); the per-step means AND
+the emission quantiles are Monte Carlo from ``n`` draws (STAT-RR17-10 -- the mean was previously
+described as exact while being computed from draws), so the intervals reflect arbitrary
+(skewed / multimodal / discrete) emission families rather than pretending everything is
+Gaussian. ``Forecast.mean_mcse`` carries the mean's per-step Monte Carlo standard error and
+``Forecast.n_draws`` the draw count; raise ``n`` to shrink both.
 """
 
 from __future__ import annotations
@@ -25,7 +28,14 @@ import numpy as np
 
 @dataclass
 class Forecast:
-    """Per-step predictive summaries plus the state-marginal trajectory."""
+    """Per-step predictive summaries plus the state-marginal trajectory.
+
+    ``mean``, ``lo``, and ``hi`` are MONTE CARLO estimates from ``n_draws`` predictive draws per
+    step (STAT-RR17-10); only ``state_probs`` is exact. ``mean_mcse`` is the per-step Monte
+    Carlo standard error of ``mean`` (draw std / sqrt(n_draws)) so two runs' means can be read
+    against their own noise instead of as reproducible constants -- 25-draw means varied
+    4.39-4.72 across seeds on a fixed model. ``method`` names the estimator.
+    """
 
     mean: Any
     lo: Any
@@ -33,6 +43,9 @@ class Forecast:
     level: float
     state_probs: np.ndarray  # (H, S)
     samples: Any = field(default=None, repr=False)  # (H, n) predictive draws (scalar emissions)
+    method: str = "monte-carlo (chain-path simulation)"
+    n_draws: int = 0
+    mean_mcse: Any = None  # (H,) per-step MCSE of `mean` for scalar emissions, else None
 
 
 def _exact_positive_int(value: Any, name: str) -> int:
@@ -187,12 +200,17 @@ def forecast(
         all_scalar = all_scalar and step_scalar
 
     if all_scalar:
+        draws_matrix = np.asarray(all_draws)
         return Forecast(
             mean=np.asarray(means),
             lo=np.asarray(los),
             hi=np.asarray(his),
             level=level,
             state_probs=state_probs,
-            samples=np.asarray(all_draws) if keep_samples else None,
+            samples=draws_matrix if keep_samples else None,
+            n_draws=n,
+            # per-step MCSE of the Monte-Carlo mean (STAT-RR17-10): the mean is an estimate,
+            # and two seeds' means must be read against this, not as reproducible constants
+            mean_mcse=draws_matrix.std(axis=1, ddof=1) / np.sqrt(n) if n > 1 else np.full(horizon, np.nan),
         )
-    return Forecast(mean=means, lo=los, hi=his, level=level, state_probs=state_probs)
+    return Forecast(mean=means, lo=los, hi=his, level=level, state_probs=state_probs, n_draws=n)
