@@ -190,3 +190,17 @@ def test_select_best_rejects_empty_candidates():
 def test_select_best_rejects_bad_alpha():
     with pytest.raises(ValueError):
         select_best([1, 2], score=float, conformal_alpha=1.5)
+
+
+def test_select_best_two_candidate_flag_is_declared_undefined():
+    """Audit S-1c: at N=2 the margin/spread heuristic is data-independent (margin = sqrt(2) * spread
+    identically), so the flag was decided by alpha alone -- never at 0.05, always at 0.20. It now
+    reports False with a method string naming the degeneracy, at every alpha."""
+    import numpy as np
+
+    for alpha in (0.05, 0.20):
+        r = select_best(["a", "b"], score={"a": 1.0, "b": 5.0}.get, heuristic_alpha=alpha)
+        assert r.best == "b"
+        assert r.confident is False
+        assert "undefined-for-two-candidates" in r.confidence_method
+        assert np.isnan(r.band)

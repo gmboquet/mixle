@@ -84,9 +84,24 @@ def forecast_price(
             API deliberately does not fake by silently truncating your model.
 
     Returns:
-        A :class:`PriceForecast` with the calibrated ``(lo, hi)`` band, the point forecast
+        A :class:`PriceForecast` with the calibrated ``(lo, hi)`` intervals, the point forecast
         ``mean``, the raw per-step predictive draws ``paths`` (for Monte-Carlo DCF scenario
         analysis downstream), and ``level``.
+
+    What ``(lo, hi)`` is: one MARGINAL interval PER LEAD, each calibrated to ``level`` at its own
+    horizon depth -- NOT a simultaneous band. The probability that the whole realized path stays
+    inside all ``horizon`` intervals at once is materially lower than ``level`` (with dependent
+    leads it can approach ``level`` but never exceeds it; independent misses would compound as
+    ``level**horizon``), so a plotted "tube" must not be read as containing the path with
+    ``level`` probability. For path-level statements, work from ``paths`` directly.
+
+    Read ``calibration_count`` before trusting the exact level. At the defaults the reserved
+    window yields on the order of 20 residuals per lead; split conformal's finite-sample quantile
+    moves in steps of ``1/(n_cal + 1)``, so small counts make the interval coarse and typically
+    conservative -- and consecutive rolling origins are one step apart, so their ``horizon``-step
+    windows OVERLAP and the residuals are serially dependent: the exchangeability behind the
+    conformal guarantee holds only approximately across overlapping origins. More history (or a
+    larger ``cal_frac``) buys both more residuals and less overlap distortion.
     """
     if isinstance(horizon, bool) or not isinstance(horizon, Integral):
         raise TypeError("horizon must be a positive integer")
@@ -175,12 +190,16 @@ def forecast_price(
         assumptions = (
             "in_sample_calibration_residuals_optimistic (model fitted through calibration outcomes)",
             "stable_data_generating_process",
+            "per_lead_marginal_intervals (each lead at `level` on its own; joint path coverage is lower)",
+            "overlapping_rolling_origin_residuals (adjacent origins share outcomes; exchangeability approximate)",
         )
     else:
         method = "horizon_matched_split_conformal"
         assumptions = (
             "held_out_exchangeability (model fitting stopped before the calibration window, as declared)",
             "stable_data_generating_process",
+            "per_lead_marginal_intervals (each lead at `level` on its own; joint path coverage is lower)",
+            "overlapping_rolling_origin_residuals (adjacent origins share outcomes; exchangeability approximate)",
         )
     return PriceForecast(
         mean=test_pred,

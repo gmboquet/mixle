@@ -76,6 +76,10 @@ def select_best(
             exchangeable repeated measurements.
         heuristic_alpha: optional normal score-spread threshold level in ``(0, 1)``. When given,
             ``confident`` is a heuristic ranking flag only; ``coverage_guarantee`` remains ``False``.
+            With exactly TWO candidates the heuristic is undefined -- margin and spread are the
+            same number up to sqrt(2), so the flag would be decided by ``alpha`` alone (never at
+            0.05, always at 0.20, whatever the scores) -- and ``confident`` is returned ``False``
+            with ``confidence_method`` naming the degeneracy.
 
     Returns:
         A :class:`SelectionResult`. It is also subscriptable (``result["best"]``), so callers may treat
@@ -130,6 +134,16 @@ def select_best(
     # A z-scaled score-spread heuristic. One score per selected candidate cannot establish a sampling
     # distribution, exchangeability, or held-out calibration, so this intentionally carries no coverage
     # claim and is not labeled conformal/bootstrap in the result.
+    if len(scores) == 2:
+        # With exactly two candidates the data cancel out of the comparison entirely:
+        # margin = |s1 - s2| and spread = |s1 - s2| / sqrt(2), so "margin > z * spread" reduces to
+        # the CONSTANT test sqrt(2) > z -- false for every pair of scores at alpha = 0.05, true
+        # for every distinct pair at alpha = 0.20, regardless of what was scored (audit S-1c).
+        # A flag whose value is chosen by alpha alone is not a confidence signal; say so.
+        result.band = float("nan")
+        result.confident = False
+        result.confidence_method = "undefined-for-two-candidates (margin/spread cancel; add candidates)"
+        return result
     from scipy.stats import norm
 
     spread = float(np.std(scores, ddof=1)) if len(scores) > 1 else 0.0
