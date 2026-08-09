@@ -13,6 +13,11 @@ Distribution-free uncertainty estimates by resampling the data itself:
   * :func:`permutation_test` -- an exact/Monte-Carlo test for an arbitrary statistic under a sharp
     null, with **stratified / restricted** (within-group) shuffling and a **paired** (sign-flip) mode;
     when the number of distinct rearrangements is small it enumerates them for an *exact* p-value.
+    "Exact" always means exact FOR THE STATED SHARP NULL, carried on the result as
+    ``null_hypothesis`` (STAT-RR17-12): the sign-flip null is SYMMETRY of the paired differences
+    about the null value, not mean equality (a mean-zero asymmetric alternative rejected 43% at
+    nominal 5%), and the two-sample null is full exchangeability, not equal means under unequal
+    variances.
 
 Everything is pure NumPy. ``data`` may be a single array (resampled along axis 0) or a tuple of arrays
 sharing their first axis (e.g. ``(X, y)``); the statistic is then called as ``statistic(*parts)``.
@@ -433,6 +438,14 @@ class PermutationResult:
     n_perm: int
     exact: bool
     alternative: str
+    # STAT-RR17-12: the sharp null the rearrangement group actually tests, carried WITH the
+    # p-value. "exact" means exact FOR THIS NULL -- the paired sign-flip null is symmetry of the
+    # differences about null_value, and for mean-zero ASYMMETRIC differences the enumerated
+    # "exact" test rejected 43% at nominal 5% (n=8, +9 w.p. 0.1 else -1): it is not a
+    # mean-equality test. The two-sample null is exchangeability (F = G); with unequal variances
+    # and sizes the raw mean-difference statistic does not control the equal-means level
+    # (studentize for that).
+    null_hypothesis: str = ""
 
 
 def _mean_diff(x: np.ndarray, y: np.ndarray) -> float:
@@ -564,7 +577,20 @@ def permutation_test(
                 signs = rng.choice([-1.0, 1.0], size=n)
                 null[p] = stat(d * signs, np.zeros_like(d))
         pval = _pvalue(observed, null, alternative, exact=exact, null_value=null_center)
-        return PermutationResult(observed, pval, null, null.size, exact, alternative)
+        return PermutationResult(
+            observed,
+            pval,
+            null,
+            null.size,
+            exact,
+            alternative,
+            null_hypothesis=(
+                "paired differences are SYMMETRIC about the null value (sign-flip "
+                "exchangeability); exact for THAT null only -- for mean-zero asymmetric "
+                "differences the enumerated test rejected 43% at nominal 5% (n=8), so this is "
+                "not a mean-equality test under asymmetry"
+            ),
+        )
 
     observed = float(stat(x, y))
     pooled = np.concatenate([x, y])
@@ -593,6 +619,7 @@ def permutation_test(
             n_perm,
             False,
             alternative,
+            null_hypothesis="within-stratum exchangeability of the two samples (F = G per stratum)",
         )
 
     from math import comb
@@ -613,7 +640,19 @@ def permutation_test(
             perm = rng.permutation(pooled)
             null[p] = stat(perm[:nx], perm[nx:])
     pval = _pvalue(observed, null, alternative, exact=exact, null_value=null_center)
-    return PermutationResult(observed, pval, null, null.size, exact, alternative)
+    return PermutationResult(
+        observed,
+        pval,
+        null,
+        null.size,
+        exact,
+        alternative,
+        null_hypothesis=(
+            "exchangeability of the two samples (F = G); with unequal variances and sizes the "
+            "raw mean-difference statistic does not control an equal-MEANS level -- studentize "
+            "the statistic for that estimand"
+        ),
+    )
 
 
 __all__ = [
