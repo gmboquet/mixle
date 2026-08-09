@@ -2238,8 +2238,9 @@ class RandomVariable:
         """Posterior summary of a Bayesian fit, or the fitted params for a point estimate.
 
         For ``how='mcmc'|'hmc'|'ensemble'|'vi'`` returns a per-parameter dict of
-        ``{mean, std, q2.5, q97.5}`` (the 95% credible interval) plus ``_acceptance_rate`` and, for
-        multi-chain runs, ``_rhat`` / ``_ess`` / ``_n_chains``. For ``map``/``em`` it returns ``.params``.
+        ``{mean, std, q2.5, q97.5, mcse}`` (the 95% credible interval plus each mean's own Monte
+        Carlo standard error, STAT-RR19-11) plus ``_acceptance_rate`` and, for multi-chain runs,
+        ``_rhat`` / ``_ess`` / ``_n_chains``. For ``map``/``em`` it returns ``.params``.
         """
         r = self._result
         if r is not None and supports(r, Summarizable):

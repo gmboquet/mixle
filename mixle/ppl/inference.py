@@ -241,7 +241,16 @@ class Posterior:
         return self.samples(param).mean(axis=0)
 
     def summary(self) -> dict:
-        """Return parameter summaries and any available convergence diagnostics."""
+        """Return parameter summaries and any available convergence diagnostics.
+
+        Every draw-based ``mean`` ships with ``mcse`` -- its own Monte Carlo standard error,
+        ``std / sqrt(ESS)`` (STAT-RR19-11: the primary summary is the claim-bearing surface, and
+        publishing a posterior mean without its noise floor invited reading MC noise as signal;
+        a one-chain fit's mean 0.338 carried a 0.017 MCSE that appeared nowhere). The ESS is the
+        fit's own bulk ESS when finite; otherwise it is computed from the pooled draws as one
+        chain -- the result's deliberate single-chain NaN markers are about MIXING being
+        unassessable, not about the ESS being incomputable.
+        """
         out = {}
         for k, s in enumerate(self._slots):
             col = self._samples[:, k]
@@ -262,6 +271,19 @@ class Posterior:
                 row["ess_bulk"] = float(self.bulk_ess[s.name])
             if isinstance(self.tail_ess, dict) and s.name in self.tail_ess:
                 row["ess_tail"] = float(self.tail_ess[s.name])
+            ess_for_mcse = row.get("ess_bulk")
+            if ess_for_mcse is None or not np.isfinite(ess_for_mcse):
+                try:
+                    from mixle.ppl.diagnostics import bulk_ess as _bulk_ess
+
+                    ess_for_mcse = float(_bulk_ess(col.reshape(1, -1)))
+                except (TypeError, ValueError):
+                    ess_for_mcse = float("nan")
+            row["mcse"] = (
+                float(row["std"] / np.sqrt(ess_for_mcse))
+                if np.isfinite(ess_for_mcse) and ess_for_mcse > 0
+                else float("nan")
+            )
             out[s.name] = row
         out["_acceptance_rate"] = self.acceptance_rate
         if self.rhat is not None:

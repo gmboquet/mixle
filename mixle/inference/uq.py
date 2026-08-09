@@ -121,7 +121,13 @@ class UQResult:
         at the 8-draw default on a uniform ten-class generator -- which makes a hallucinating
         model look confident, the exact failure this gate exists to catch (STAT-RR17-14). The
         decision therefore uses the Miller-Madow-corrected estimate: still an estimate, but its
-        residual error is far smaller and the correction errs toward ABSTAINING. Use
+        residual error is far smaller and the correction errs toward ABSTAINING. The calibrated
+        threshold is a quantile of the SAME corrected statistic at the SAME draw count
+        (STAT-RR19-12: a plug-in-scale threshold against a corrected-scale gate moved acceptance
+        from 98.2% to 41.0% on a fixed generator), so serving a calibrated threshold at a
+        different ``n`` is refused -- the correction is ``(K-1)/(2n)``, and changing ``n``
+        changes the statistic the threshold was calibrated for. An explicit ``max_entropy``
+        override carries no calibration claim and may use any ``n``. Use
         :meth:`semantic_entropy_receipt` to see the plug-in value, the correction, n, and K.
         """
         thr = self.payload["max_entropy"] if max_entropy is None else float(max_entropy)
@@ -129,6 +135,13 @@ class UQResult:
             raise ValueError("confident() requires calibrated prompts or an explicit max_entropy")
         if not np.isfinite(thr) or thr < 0.0:
             raise ValueError("max_entropy must be a finite non-negative value")
+        calibration_n = self.payload.get("calibration_n")
+        if max_entropy is None and calibration_n is not None and int(n) != int(calibration_n):
+            raise ValueError(
+                f"confident(n={n}) does not match the calibrated draw count n={calibration_n}: "
+                "the Miller-Madow statistic depends on n, so the calibrated threshold covers "
+                "only that n -- serve at the calibrated n, or pass an explicit max_entropy"
+            )
         return float(self.semantic_entropy_receipt(prompt, n=n)["entropy_miller_madow"]) <= thr
 
     def semantic_entropy_receipt(self, prompt: Any, *, n: int = 8) -> dict[str, Any]:
@@ -279,13 +292,24 @@ def _uq_point(predictor: Any, data: Any, alpha: float) -> UQResult:
 def _uq_llm(
     generate: Callable[[Any], Any], data: Any, alpha: float, equivalent: Callable[[Any, Any], bool] | None
 ) -> UQResult:
-    from mixle.inference.uncertainty import semantic_entropy
+    from mixle.inference.uncertainty import semantic_entropy_receipt
 
-    # calibrate an abstention threshold from example prompts, if given: the (1-alpha) quantile of
-    # semantic entropy over the calibration prompts becomes the "too uncertain" cutoff.
+    # Calibrate an abstention threshold from example prompts, if given: the (1-alpha) quantile of
+    # semantic entropy over the calibration prompts becomes the "too uncertain" cutoff -- computed
+    # with the SAME estimator serving gates on. STAT-RR19-12: calibrating the quantile of PLUG-IN
+    # entropies while confident() compares the Miller-Madow-corrected estimate put the threshold
+    # and the gate on different scales -- exact finite enumeration on a uniform ten-class
+    # generator at n=8 gave acceptance 0.982 on the calibration scale vs 0.410 on the serving
+    # scale. The number of draws is part of the statistic too (the correction is (K-1)/(2n)), so
+    # the calibration n is recorded and confident() refuses to serve a calibrated threshold at a
+    # different n.
+    calibration_n = 8
     max_entropy = None
     if data is not None:
-        ents = [semantic_entropy([generate(p) for _ in range(8)], equivalent) for p in data]
+        ents = [
+            semantic_entropy_receipt([generate(p) for _ in range(calibration_n)], equivalent)["entropy_miller_madow"]
+            for p in data
+        ]
         if not ents:
             raise ValueError("LLM uncertainty calibration requires at least one prompt")
         if not np.all(np.isfinite(ents)):
@@ -293,8 +317,14 @@ def _uq_llm(
         max_entropy = float(np.quantile(ents, 1.0 - alpha))
     return UQResult(
         kind="llm_semantic",
-        method="semantic entropy over meaning classes",
-        payload={"generate": generate, "equivalent": equivalent, "max_entropy": max_entropy, "alpha": alpha},
+        method="semantic entropy over meaning classes (Miller-Madow scale, calibration and serving alike)",
+        payload={
+            "generate": generate,
+            "equivalent": equivalent,
+            "max_entropy": max_entropy,
+            "alpha": alpha,
+            "calibration_n": calibration_n if max_entropy is not None else None,
+        },
     )
 
 

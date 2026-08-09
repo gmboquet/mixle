@@ -472,12 +472,24 @@ def semantic_entropy_receipt(
     k = int(np.asarray(clustering.probs).size)
     counted = log_probs is None and weights is None
     bias = (k - 1) / (2.0 * n) if (counted and n > 0) else None
+    # Delta-method standard error of the plug-in entropy (STAT-RR19-12's residual: the corrected
+    # estimator's spread was measured at 0.253 across replays with nothing on the receipt saying
+    # so): sqrt((sum p (log p)^2 - H^2) / n). It approximates the sampling SD of the plug-in AND
+    # of the Miller-Madow value (the correction is deterministic given K, so it shifts, not
+    # spreads, to first order); like the correction itself it applies to the counting estimator.
+    entropy_se = None
+    if counted and n > 0:
+        probs = np.asarray(clustering.probs, dtype=float)
+        positive = probs[probs > 0]
+        second_moment = float(np.sum(positive * np.log(positive) ** 2))
+        entropy_se = float(np.sqrt(max(second_moment - plugin**2, 0.0) / n))
     return {
         "entropy_plugin": plugin,
         "entropy_miller_madow": plugin + bias if bias is not None else plugin,
         "n_samples": n,
         "k_observed": k,
         "bias_estimate_nats": bias,
+        "entropy_se_estimate": entropy_se,
         "method": "plug-in over sampled meaning classes"
         + (" (Miller-Madow correction available)" if counted else " (probability-weighted; MM correction n/a)"),
     }

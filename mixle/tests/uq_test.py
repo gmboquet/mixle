@@ -97,7 +97,10 @@ class LLMUQTest(unittest.TestCase):
         r = uq(gen, data=[0, 1, 2], alpha=0.2)  # calibrate on determinate prompts
         self.assertTrue(np.isfinite(r.payload["max_entropy"]))
         self.assertTrue(r.confident(0, n=8))  # a determinate prompt is confident
-        self.assertFalse(r.confident(3, n=16))  # the two-meaning prompt is not
+        self.assertFalse(r.confident(3, n=8))  # the two-meaning prompt is not
+        # STAT-RR19-12: the calibrated threshold covers only the calibrated draw count
+        with self.assertRaisesRegex(ValueError, "calibrated draw count"):
+            r.confident(3, n=16)
 
 
 class DispatchTest(unittest.TestCase):
@@ -108,3 +111,63 @@ class DispatchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SemanticEntropyScaleAlignmentTest(unittest.TestCase):
+    """STAT-RR19-12: calibration quantiled PLUG-IN entropies while serving gated on the
+    Miller-Madow estimate -- the reviewer's [a,a,b,c,d,e,f,g] pattern calibrated a threshold of
+    1.9062 and was then rejected at its own serving value 2.2812; acceptance on a uniform
+    ten-class generator moved 98.2% -> 41.0% purely from the scale mismatch. Both sides now use
+    the corrected statistic at a recorded draw count."""
+
+    @staticmethod
+    def _generator():
+        import zlib
+
+        classes = [f"c{i}" for i in range(10)]
+
+        def gen(prompt):
+            # zlib.crc32 is process-stable, unlike salted hash(): the calibrated quantile must
+            # be reproducible for the scale-identity assertions below
+            rs = np.random.RandomState(zlib.crc32(f"g|{prompt}|{gen.calls}".encode()) % (2**31))
+            gen.calls += 1
+            return rs.choice(classes)
+
+        gen.calls = 0
+        return gen
+
+    def test_calibration_and_serving_share_the_corrected_scale(self):
+        from mixle.inference.uncertainty import semantic_entropy_receipt
+        from mixle.inference.uq import uq
+
+        result = uq(self._generator(), data=[f"p{i}" for i in range(120)], alpha=0.2)
+        self.assertEqual(result.payload["calibration_n"], 8)
+        pattern = semantic_entropy_receipt(["a", "a", "b", "c", "d", "e", "f", "g"])
+        self.assertAlmostEqual(pattern["entropy_miller_madow"], 2.2811547465, places=9)
+        # the calibrated threshold is the (1 - alpha)-quantile OF THE SERVED STATISTIC: recompute
+        # the same Miller-Madow receipts over the calibration prompts and the quantile must be
+        # identical -- with the old plug-in-scale calibration it sat a full (K-1)/(2n) below
+        replay = self._generator()
+        entropies = [
+            semantic_entropy_receipt([replay(p) for _ in range(8)])["entropy_miller_madow"]
+            for p in [f"p{i}" for i in range(120)]
+        ]
+        self.assertAlmostEqual(result.payload["max_entropy"], float(np.quantile(entropies, 0.8)), places=9)
+        accepted = np.mean([result.confident(f"q{i}") for i in range(200)])
+        self.assertGreaterEqual(accepted, 0.78)  # calibration promises >= 1 - alpha up to MC noise
+
+    def test_calibrated_threshold_refuses_a_different_draw_count(self):
+        from mixle.inference.uq import uq
+
+        result = uq(self._generator(), data=[f"p{i}" for i in range(30)], alpha=0.2)
+        with self.assertRaisesRegex(ValueError, "calibrated draw count"):
+            result.confident("x", n=16)
+        # an explicit override carries no calibration claim and may pick its own n
+        self.assertIn(result.confident("x", n=16, max_entropy=50.0), (True, False))
+
+    def test_receipt_carries_a_standard_error(self):
+        from mixle.inference.uncertainty import semantic_entropy_receipt
+
+        receipt = semantic_entropy_receipt(["a", "a", "b", "c", "d", "e", "f", "g"])
+        self.assertIsNotNone(receipt["entropy_se_estimate"])
+        self.assertGreater(receipt["entropy_se_estimate"], 0.0)
