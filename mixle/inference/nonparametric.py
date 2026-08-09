@@ -362,13 +362,22 @@ def dunn_test(*samples: Any, p_adjust: str = "holm") -> DunnResult:
 # --- paired / one sample ----------------------------------------------------
 @dataclass
 class WilcoxonResult:
-    """Result of a paired or one-sample Wilcoxon signed-rank test."""
+    """Result of a paired or one-sample Wilcoxon signed-rank test.
+
+    ``method`` names the null actually used (STAT-RR17-15): ``"exact"`` (full enumeration, the
+    n <= 25 no-ties/no-zeros regime) or ``"normal"`` (tie/zero-corrected approximation).
+    ``zscore`` is signed FOR THE STATED ALTERNATIVE -- positive means the data lean toward it --
+    so an all-positive sample under ``alternative='greater'`` reports a positive z next to its
+    small exact p, where the old min(W+, W-)-based z reported -2.02 beside p = 0.03125 and a
+    rank-biserial of +1.
+    """
 
     statistic: float  # the smaller of W+ / W- (test statistic)
     zscore: float
     pvalue: float
     rank_biserial: float
     alternative: str
+    method: str = "normal"
 
 
 def wilcoxon_signed_rank(
@@ -437,7 +446,13 @@ def wilcoxon_signed_rank(
         for k in range(1, nn + 1):
             counts[k:] = counts[k:] + counts[:-k].copy()
         cdf = np.cumsum(counts) / counts.sum()
-        z = (t - mu) / sigma  # reported as a descriptive companion to the exact p
+        method = "exact"
+        # descriptive z, SIGNED FOR THE ALTERNATIVE (STAT-RR17-15): r_plus above its null mean
+        # leans toward 'greater'; two-sided keeps the magnitude of the departure with the sign
+        # of (r_plus - mu) so direction and effect size read consistently
+        z = ((r_plus - mu) / sigma) if alternative != "less" else ((mu - r_plus) / sigma)
+        if alternative == "two-sided":
+            z = (r_plus - mu) / sigma
         if alternative == "two-sided":
             p = min(1.0, 2.0 * float(cdf[int(t)]))
         elif alternative == "greater":  # x > y -> R+ large; P(T+ >= r_plus) = P(T+ <= r_minus)
@@ -447,6 +462,7 @@ def wilcoxon_signed_rank(
         else:
             raise ValueError("alternative must be 'two-sided', 'greater', or 'less'.")
     else:
+        method = "normal"
         if alternative == "two-sided":
             cc = 0.5 if correction else 0.0
             z = (t - mu + cc) / sigma
@@ -463,7 +479,7 @@ def wilcoxon_signed_rank(
             raise ValueError("alternative must be 'two-sided', 'greater', or 'less'.")
     total = r_plus + r_minus
     rbc = (r_plus - r_minus) / total if total > 0 else 0.0
-    return WilcoxonResult(float(t), float(z), float(min(p, 1.0)), float(rbc), alternative)
+    return WilcoxonResult(float(t), float(z), float(min(p, 1.0)), float(rbc), alternative, method)
 
 
 def sign_test(x: Any, y: Any = None, *, alternative: str = "two-sided") -> TestResult:
