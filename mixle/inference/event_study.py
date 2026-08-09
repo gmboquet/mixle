@@ -151,6 +151,28 @@ def _haldane_logit_moments(n: int, p: float) -> tuple[float, float]:
     return m1, m2 - m1 * m1
 
 
+def _batch_counts(name: str, raw: Any) -> np.ndarray:
+    """Batch count vector with the SAME Boolean refusal as the scalar route (STAT-RR21-04).
+
+    ``np.asarray([...], dtype=float)`` coerces ``True`` to 1.0 silently -- exactly the mis-wired
+    ``any(events)``-indicator shape the scalar route refuses by contract; a batch of them is the
+    same mistake at scale, and mixed lists (``[True, 3]``) coerce through int64 with no bool dtype
+    left to detect, so the ORIGINAL items are checked.
+    """
+    items = list(raw)
+    if any(isinstance(value, (bool, np.bool_)) for value in items):
+        raise TypeError(f"{name} must contain numbers, not Booleans")
+    arr = np.asarray(items, dtype=float)
+    return arr
+
+
+def _positive_exposure(name: str, value: Any) -> float:
+    """Exposure scalar with the scalar route's Boolean refusal (STAT-RR21-04)."""
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be a number, not a Boolean; got {value!r}")
+    return float(value)
+
+
 def poisson_lograte_effects(k_pre: Any, t_pre: float, k_post: Any, t_post: float) -> tuple[np.ndarray, np.ndarray]:
     """Per-subject log rate-ratio effects for Gaussian pooling, via the CONDITIONAL (binomial) route.
 
@@ -184,8 +206,10 @@ def poisson_lograte_effects(k_pre: Any, t_pre: float, k_post: Any, t_post: float
     normal-approximation gate; below it use poisson_pooled_rate_ratio, exact at any sparsity for
     the common-ratio estimand.
     """
-    k_pre_arr = np.asarray(list(k_pre), dtype=float)
-    k_post_arr = np.asarray(list(k_post), dtype=float)
+    k_pre_arr = _batch_counts("k_pre", k_pre)
+    k_post_arr = _batch_counts("k_post", k_post)
+    t_pre = _positive_exposure("t_pre", t_pre)
+    t_post = _positive_exposure("t_post", t_post)
     if k_pre_arr.shape != k_post_arr.shape or k_pre_arr.ndim != 1 or k_pre_arr.size == 0:
         raise ValueError("k_pre and k_post must be equal-length non-empty count vectors")
     mean_pre, mean_post = float(k_pre_arr.mean()), float(k_post_arr.mean())
@@ -243,8 +267,10 @@ def poisson_pooled_rate_ratio(
     from scipy.stats import beta as _beta
     from scipy.stats import binomtest as _binomtest
 
-    k_pre_arr = np.asarray(list(k_pre), dtype=float)
-    k_post_arr = np.asarray(list(k_post), dtype=float)
+    k_pre_arr = _batch_counts("k_pre", k_pre)
+    k_post_arr = _batch_counts("k_post", k_post)
+    t_pre = _positive_exposure("t_pre", t_pre)
+    t_post = _positive_exposure("t_post", t_post)
     if k_pre_arr.shape != k_post_arr.shape or k_pre_arr.ndim != 1 or k_pre_arr.size == 0:
         raise ValueError("k_pre and k_post must be equal-length non-empty count vectors")
     for name, arr in (("k_pre", k_pre_arr), ("k_post", k_post_arr)):
@@ -360,6 +386,17 @@ def hierarchical_event_study(
     ``*_effects`` / ``*_vars`` are per-subject changes and sampling variances. A control group makes the
     numeric contrast ``treated_mean - control_mean``. It is labeled an ATT only when a complete
     ``identification`` receipt is attached; otherwise it remains a treated/control change association.
+
+    THE WEIGHTING FOLLOWS THE ESTIMAND (STAT-RR21-01). The ATT is the treated-population
+    ARITHMETIC mean of unit effects, so the identified path uses equal-subject-weight group means
+    with their empirical standard errors (``sd/sqrt(n)`` per group -- per-subject sampling noise
+    is inside the observed spread, so this SE covers noise and heterogeneity together).
+    DerSimonian-Laird precision weighting estimates a DIFFERENT quantity whenever effect size and
+    sampling variance are dependent -- with treated unit effects evenly split between +1 and -1
+    (true ATT exactly 0), precision weights track the totals that track the effects, and the DL
+    contrast reported +0.197 with 92-100% rejection at nominal 5%. DL pooling remains what the
+    ASSOCIATION paths report (a precision-weighted summary, named as such), and its tau^2 /
+    shrunk-effect diagnostics are attached in both modes.
     """
     if not isinstance(alpha, (int, float, np.integer, np.floating)) or not np.isfinite(alpha):
         raise ValueError("alpha must be a finite number strictly between 0 and 1")
@@ -397,12 +434,28 @@ def hierarchical_event_study(
         )
     if identified:
         estimand = "difference-in-differences average treatment effect on the treated"
-        interpretation = "causal contrast under the attached identification assumptions"
+        interpretation = (
+            "causal contrast under the attached identification assumptions; equal-subject-weight "
+            "(arithmetic) group means with empirical SEs -- precision weighting estimates a "
+            "different, weight-dependent quantity under effect-variance dependence (STAT-RR21-01)"
+        )
+        # The ATT is an ARITHMETIC mean over treated units: estimate it with equal weights and the
+        # groups' own empirical spread. The DL numbers computed above stay as RE diagnostics.
+        if len(y_t) < 2 or len(y_c) < 2:
+            raise ValueError(
+                "the identified ATT path needs at least 2 treated and 2 control subjects: the "
+                "arithmetic-mean contrast takes its SE from each group's empirical spread"
+            )
+        t_mean = float(y_t.mean())
+        c_mean = float(y_c.mean())
+        t_var = float(y_t.var(ddof=1) / len(y_t))
+        c_var = float(y_c.var(ddof=1) / len(y_c))
+        effect, var = t_mean - c_mean, t_var + c_var
     elif has_control:
-        estimand = "treated-minus-control change association"
+        estimand = "treated-minus-control change association (precision-weighted)"
         interpretation = "association only; parallel trends and causal assumptions were not established"
     else:
-        estimand = "before-after association"
+        estimand = "before-after association (precision-weighted)"
         interpretation = "association only; no control group or causal identification was supplied"
 
     se = float(np.sqrt(var))

@@ -183,6 +183,52 @@ class SparsePoissonRegimeTest(unittest.TestCase):
         for total in np.unique(totals):
             self.assertEqual(np.unique(variances[totals == total]).size, 1)
 
+    def test_identified_att_is_the_arithmetic_mean_not_the_precision_weighted_one(self):
+        # STAT-RR21-01: treated unit effects split between true log-ratios +1 and -1 (arithmetic
+        # ATT exactly 0); DL precision weights track the totals that track the effects, and the
+        # weighted contrast reported +0.197 with 92-100% rejection. The identified path now uses
+        # equal-subject-weight means with empirical SEs.
+        from mixle.inference.event_study import EventStudyIdentification, hierarchical_event_study
+
+        ident = EventStudyIdentification(
+            design_evidence=("probe design",),
+            parallel_trends_evidence=("constructed null",),
+            exchangeability=True,
+            positivity=True,
+            consistency=True,
+            no_interference=True,
+            no_anticipation=True,
+        )
+        rejections = 0
+        estimates = []
+        reps = 80
+        for rep in range(reps):
+            rs = np.random.RandomState(rep)
+            lam = np.full(200, 6.0)
+            theta = np.where(np.arange(200) % 2 == 0, np.e, 1.0 / np.e)
+            y_t, v_t = poisson_lograte_effects(rs.poisson(lam), 1.0, rs.poisson(lam * theta), 1.0)
+            y_c, v_c = poisson_lograte_effects(rs.poisson(lam), 1.0, rs.poisson(lam), 1.0)
+            res = hierarchical_event_study(y_t, v_t, y_c, v_c, identification=ident)
+            estimates.append(res.effect)
+            rejections += res.p_value < 0.05
+        self.assertLess(abs(float(np.mean(estimates))), 0.05)
+        self.assertLess(rejections / reps, 0.12)
+        self.assertIn("arithmetic", res.interpretation)
+
+    def test_batch_routes_refuse_boolean_counts_and_exposures(self):
+        # STAT-RR21-04: float coercion before validation let batch/pooled routes read Booleans
+        # as counts/exposures that the scalar contract refuses by name.
+        from mixle.inference.event_study import poisson_pooled_rate_ratio
+
+        with self.assertRaisesRegex(TypeError, "Boolean"):
+            poisson_lograte_effects([True] * 300, 1.0, [5] * 300, 1.0)
+        with self.assertRaisesRegex(TypeError, "Boolean"):
+            poisson_lograte_effects([5] * 300, True, [5] * 300, 1.0)
+        with self.assertRaisesRegex(TypeError, "Boolean"):
+            poisson_pooled_rate_ratio([True, 2], 1.0, [3, 4], 2.0)
+        with self.assertRaisesRegex(TypeError, "Boolean"):
+            poisson_pooled_rate_ratio([1, 2], 1.0, [3, 4], True)
+
     def test_batch_null_is_level_correct_under_heterogeneous_baselines(self):
         # STAT-RR19-03: the arm-mean debias assumed one shared baseline rate; with half the
         # subjects at rate 0.1 and half at 9.1 (exposures 1:3) and every true ratio exactly 1 it
