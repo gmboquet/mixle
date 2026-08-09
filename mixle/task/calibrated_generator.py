@@ -341,7 +341,12 @@ class CalibratedGenerator:
         return cands[best], statistic
 
     def calibrate(
-        self, prompts: Sequence[Any], is_correct: Callable[[Any, Any], bool], *, seed: int | None = None
+        self,
+        prompts: Sequence[Any],
+        is_correct: Callable[[Any, Any], bool],
+        *,
+        seed: int | None = None,
+        outcomes: str = "per-prompt",
     ) -> CalibratedGenerator:
         """Certify a held-out accepted-error threshold using an explicit correctness oracle.
 
@@ -369,6 +374,8 @@ class CalibratedGenerator:
         prompts = list(prompts)
         if len(prompts) < 2:
             raise ValueError("calibrate(...) needs at least two held-out prompts for proposal/certification splitting")
+        if outcomes not in ("per-prompt", "per-row"):
+            raise ValueError("outcomes must be 'per-prompt' or 'per-row'")
         if seed is not None and (isinstance(seed, (bool, np.bool_)) or not isinstance(seed, (int, np.integer))):
             raise ValueError("seed must be an exact integer or None")
         if seed is not None and int(seed) != self.seed:
@@ -416,8 +423,39 @@ class CalibratedGenerator:
                 raise TypeError("is_correct must return a boolean")
             errors.append(not bool(verdict))
 
-        certification_stats = np.asarray(statistics[:n_certify], dtype=float)
-        certification_errors = np.asarray(errors, dtype=bool)
+        # STAT-RR18-04: the bound's exchangeability unit is the (prompt, outcome) PAIR, and the
+        # code cannot see outcomes -- so the CALLER declares how they attach. outcomes="per-prompt"
+        # (the fail-safe default) means a prompt's outcome is a fixed property of the prompt:
+        # duplicates repeat one Bernoulli, so they collapse to one certification row (300 copies
+        # of one always-correct prompt certify from n=1, bound 0.975 -- the row count certified
+        # 0.024 from one trial's worth of evidence), and duplicates whose verdicts DISAGREE are
+        # refused as an oracle inconsistency. outcomes="per-row" is the caller's recorded
+        # assertion that each row's outcome is an independent draw given the prompt (e.g. graded
+        # against a per-row ground truth); rows then all count, and the receipt records that the
+        # effective sample size rests on that declaration.
+        rows_by_key: dict[Any, list[int]] = {}
+        for row in range(n_certify):
+            key = _seed_key(prompts[row])
+            key = key if key is not None else repr(prompts[row])
+            rows_by_key.setdefault(key, []).append(row)
+        if outcomes == "per-row":
+            effective_rows = list(range(n_certify))
+        else:
+            effective_rows = []
+            for rows in rows_by_key.values():
+                verdicts = {bool(errors[row]) for row in rows}
+                if len(verdicts) > 1:
+                    raise ValueError(
+                        "duplicate certification prompts returned different verdicts under "
+                        "outcomes='per-prompt': a prompt's served decision is deterministic, so "
+                        "with a fixed per-prompt outcome its correctness cannot differ between "
+                        "copies -- if each row is graded against its own independent outcome, "
+                        "declare outcomes='per-row'"
+                    )
+                effective_rows.append(rows[0])
+            effective_rows.sort()
+        certification_stats = np.asarray([statistics[row] for row in effective_rows], dtype=float)
+        certification_errors = np.asarray([errors[row] for row in effective_rows], dtype=bool)
         proposal_stats = np.asarray(statistics[n_certify:], dtype=float)
         thresholds = np.unique(np.concatenate((np.asarray([-np.inf]), proposal_stats)))
         per_threshold_tail = (1.0 - self.confidence) / len(thresholds)
@@ -465,6 +503,9 @@ class CalibratedGenerator:
             "seed": rng_seed,
             "seed_schedule": "prompt-only (identical to serving)",
             "unique_prompt_count": len({repr(prompt) for prompt in prompts}),
+            # the binomial bound's actual sample size: unique certification prompts (RR18-04)
+            "certification_effective_count": len(effective_rows),
+            "outcome_declaration": outcomes,
             "accepted": 0 if chosen is None else chosen["accepted"],
             "errors": 0 if chosen is None else chosen["errors"],
             "error_upper": None if chosen is None else chosen["error_upper"],

@@ -277,3 +277,47 @@ class CertificateCoversServedPolicyTest(unittest.TestCase):
         gate.calibrate([f"p{i}" for i in range(40)], lambda p, c: c[1] == "right")
         with self.assertRaisesRegex(ValueError, "certificate covers only the prompt-derived schedule"):
             gate.serve("p0", seed=123)
+
+
+class DuplicatePromptBoundTest(unittest.TestCase):
+    """STAT-RR18-04: the risk bound must agree with the receipt's effective sample size."""
+
+    def test_bound_uses_unique_certification_prompts(self):
+        from mixle.task.calibrated_generator import CalibratedGenerator
+
+        def generate(prompt, k, rng=None):
+            return [(prompt, "right", i) for i in range(k)]
+
+        def score(candidate):
+            return 1.0
+
+        gate = CalibratedGenerator(generate, score, alpha=0.1, k=3, seed=5)
+        gate.calibrate(["the one prompt"] * 300, lambda p, c: True)
+        receipt = gate.risk_receipt
+        # 150 certification rows collapse to ONE unique prompt: the exact binomial bound at
+        # 0/1 is 0.975 (the receipt's own stated effective sample), so nothing certifies at
+        # alpha=0.1 -- the reviewer's construction certified 0.024 by counting 150 copies
+        self.assertEqual(receipt["certification_effective_count"], 1)
+        self.assertEqual(receipt["outcome_declaration"], "per-prompt")
+        self.assertEqual(receipt["unique_prompt_count"], 1)
+        self.assertTrue(receipt["error_upper"] is None or receipt["error_upper"] > 0.9)
+        self.assertEqual(receipt["threshold"], "inf")
+
+    def test_disagreeing_duplicate_verdicts_are_refused(self):
+        from mixle.task.calibrated_generator import CalibratedGenerator
+
+        def generate(prompt, k, rng=None):
+            return [(prompt, "right", i) for i in range(k)]
+
+        def score(candidate):
+            return 1.0
+
+        gate = CalibratedGenerator(generate, score, alpha=0.5, k=3, seed=5)
+        flip = {"n": 0}
+
+        def inconsistent(prompt, candidate):
+            flip["n"] += 1
+            return flip["n"] % 2 == 0
+
+        with self.assertRaisesRegex(ValueError, "duplicate certification"):
+            gate.calibrate(["p"] * 40, inconsistent)

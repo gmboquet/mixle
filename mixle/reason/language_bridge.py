@@ -415,7 +415,10 @@ class PosteriorDescriber:
             self._gen = CalibratedGenerator(
                 self._generate, self._score, alpha=self._gen.alpha, k=self._gen.k, seed=int(seed)
             )
-        self._gen.calibrate(posteriors, is_correct)
+        # outcomes='per-row' is this protocol's defining property (STAT-RR18-04): every row is
+        # graded against its OWN true value via the monotone counter above, so duplicate
+        # posterior objects carry independent outcome draws and each row counts toward the bound.
+        self._gen.calibrate(posteriors, is_correct, outcomes="per-row")
         return self
 
     def describe(self, posterior: Any, *, seed: int | None = None) -> Claim | None:
