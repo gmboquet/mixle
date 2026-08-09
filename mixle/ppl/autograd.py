@@ -375,8 +375,12 @@ class GradTarget:
         ``alpha=1`` is the usual KL-ELBO; ``alpha=0`` is the importance-weighted (IWAE) bound — both
         mass-covering directions that widen the often-too-narrow KL fit (the importance weights
         ``w=p/q`` are *tilted* by ``1-alpha``). ``batch_size`` subsamples the data per step (SGVB).
-        Returns ``(value_samples, mean_u, scale_u, objective)`` where ``objective`` is the final
-        variational objective value (ELBO for ``alpha=1``, otherwise the tilted Renyi bound)."""
+        Returns ``(value_samples, mean_u, scale_u, objective, cholesky)`` where ``objective`` is
+        the final variational objective ESTIMATE from ``max(mc, 256)`` fresh draws: the ELBO for
+        ``|alpha - 1| <= 1e-6``, otherwise the K-sample tilted Renyi bound whose expectation
+        depends on that K (compare fits only at equal ``mc``); for ``alpha > 1`` the finite-K
+        estimate is not a lower bound on the evidence. A fixed number of Adam steps is run -- no
+        convergence criterion is checked, only finiteness of the result."""
         n_data = int(self._x.shape[0])
         use_mb = batch_size is not None and 0 < int(batch_size) < n_data
 
@@ -392,7 +396,7 @@ class GradTarget:
                 )
             return self._logtarget_batch(u)
 
-        mean_np, scale_np, U, objective, chol = _advi_optimize(
+        mean_np, scale_np, U, objective, _n_eval, chol = _advi_optimize(
             self._torch,
             log_p_fn,
             u0,

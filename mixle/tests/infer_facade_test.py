@@ -281,5 +281,31 @@ class AdviTargetRankTest(unittest.TestCase):
         self.assertEqual(res.samples.shape, (8, 2))
 
 
+class AdviObjectiveHonestyTest(unittest.TestCase):
+    """Audit A-1/A-2/A-3: alpha-near-1 band, K disclosure, finiteness-not-convergence wording."""
+
+    @staticmethod
+    def _fit(alpha, seed=0):
+        def target_batch(u):
+            return -0.5 * ((u - 2.0) ** 2).sum(dim=1)
+
+        return infer.advi(
+            target_batch, u0=np.zeros(1), s0=np.ones(1), samples=64, mc=32, steps=400, lr=0.05, alpha=alpha, rng=seed
+        )
+
+    def test_alpha_just_below_one_routes_to_the_elbo_branch(self):
+        # An exact float test sent alpha = 1 - 1e-9 down the Renyi branch, where the objective
+        # divides logsumexp round-off by (1 - alpha); inside the band both runs must be identical.
+        edge, exact = self._fit(1.0 - 1e-9), self._fit(1.0)
+        self.assertEqual(edge.objective, exact.objective)
+        np.testing.assert_allclose(edge.mean, exact.mean)
+        self.assertLess(abs(edge.mean[0] - 2.0), 0.25)
+
+    def test_objective_reports_its_evaluation_draw_count(self):
+        res = self._fit(0.5)
+        self.assertEqual(res.objective_n_eval, 256)  # max(mc=32, 256): the K the bound is at
+        self.assertTrue(np.isfinite(res.objective))
+
+
 if __name__ == "__main__":
     unittest.main()

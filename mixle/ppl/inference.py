@@ -2431,7 +2431,9 @@ def vi_fit(
             family=family,
             alpha=alpha,
         )
-        objective_kind = "kl_elbo" if alpha == 1.0 else "renyi_tilted"
+        # Same tolerance band as the optimizer (mixle.inference._advi._ELBO_ALPHA_TOL): alpha
+        # within 1e-6 of 1 runs the ELBO branch there, so the recorded kind must agree.
+        objective_kind = "kl_elbo" if abs(alpha - 1.0) <= 1e-6 else "renyi_tilted"
         algorithm = f"advi_{family}"
         executed_iterations = vi_steps
         termination_reason = "fixed_steps_completed"

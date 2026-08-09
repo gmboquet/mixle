@@ -12,6 +12,15 @@ import math
 
 import numpy as np
 
+# Below this distance from alpha = 1 the tilted-Renyi estimator is numerically WORSE than the
+# ELBO it converges to: the objective divides logsumexp((1-alpha) log_w) by (1-alpha), so float64
+# round-off in the logsumexp is amplified by 1/(1-alpha) -- measured absolute error on a fixed
+# log_w vector: 5e-8 at 1-alpha=1e-8, 4e-7 at 1e-10, 3.9e-4 at 1e-12, 2.3e-3 at 1e-13 and growing.
+# Meanwhile the MATHEMATICAL gap |L_alpha - ELBO| ~ (1-alpha) Var(log w)/2 is ~2e-6 at 1e-6.
+# Inside the band the exact-entropy ELBO branch is therefore both the better estimator and within
+# noise of what was asked for. An exact `alpha == 1.0` test left the cliff reachable from below.
+_ELBO_ALPHA_TOL = 1e-6
+
 
 def _exact_positive(name: str, value) -> int:
     """``value`` as an exact positive integer count.
@@ -95,25 +104,34 @@ def _advi_optimize(
     ``log_p_fn(U: Tensor(mc, d)) -> Tensor(mc,)`` is the (unconstrained) batched joint log-target;
     it owns any data minibatching/rescaling. This is the family/objective machinery shared by
     :meth:`GradTarget.advi` and the public :func:`mixle.inference.advi` facade, with no dependency on
-    ``GradTarget``'s slots or data. Returns ``(mean_u, scale_u, U_draws, objective, cholesky)`` with
-    the unconstrained mean/scale, the draws ``(samples, d)``, the final variational objective value
-    (the ELBO for ``alpha=1``, otherwise the tilted Renyi bound), and -- for ``family='fullrank'``
-    only -- the fitted lower-triangular Cholesky factor of the covariance (``None`` for meanfield).
-    Returning the factor is what makes a full-rank fit usable: the correlations it exists to learn
-    live in the off-diagonals, and reporting marginal scales alone hands back a posterior
-    indistinguishable from the meanfield one the caller opted out of.
+    ``GradTarget``'s slots or data. Returns ``(mean_u, scale_u, U_draws, objective, n_eval,
+    cholesky)`` with the unconstrained mean/scale, the draws ``(samples, d)``, the final variational
+    objective value, the number of Monte Carlo draws that value was estimated with, and -- for
+    ``family='fullrank'`` only -- the fitted lower-triangular Cholesky factor of the covariance
+    (``None`` for meanfield). Returning the factor is what makes a full-rank fit usable: the
+    correlations it exists to learn live in the off-diagonals, and reporting marginal scales alone
+    hands back a posterior indistinguishable from the meanfield one the caller opted out of.
 
-    Every control is validated before any optimization happens, and the fitted parameters and final
-    objective must be finite before a result is handed back: an ``AdviResult`` is a claim that a
-    posterior was fitted, and an unvalidated run could satisfy that claim having performed no valid
-    optimization at all.
+    What ``objective`` is -- and is not. For ``|alpha - 1| <= 1e-6`` it is the K-draw MC estimate of
+    the ELBO (unbiased in the mean term, exact entropy). Otherwise it is the K-SAMPLE tilted Renyi
+    bound at ``K = n_eval = max(mc, 256)``: its expectation DEPENDS ON K (for ``alpha < 1`` it rises
+    toward the true bound as K grows, IWAE-style), so two fits' objectives are comparable only at
+    the same ``n_eval``, and a bigger objective from a bigger ``mc`` is partly just K. For
+    ``alpha > 1`` the finite-K estimate is upward-biased (Jensen flips with the negative
+    ``1 - alpha``) and is NOT a lower bound on the evidence -- it can exceed ``log Z``.
+
+    Optimization runs a FIXED number of Adam steps: no convergence criterion is evaluated, and
+    nothing here claims stationarity. The postcondition enforced before returning is FINITENESS --
+    fitted parameters and objective that are actually numbers -- which rules out a fitted-looking
+    artifact from a numerically failed run but says nothing about optimization quality; judge that
+    by whether the objective has stopped improving across ``steps``/``lr`` choices.
 
     Raises:
         TypeError: if ``samples``, ``mc``, or ``steps`` is not an exact integer.
         ValueError: for a non-positive count, a non-finite or non-positive learning rate, an
             unsupported ``alpha`` or ``family``, a misaligned/non-finite/non-positive-scale
-            initialization, a target that violates its ``(mc,)`` output contract, or a fit that did
-            not converge to finite variational parameters and objective.
+            initialization, a target that violates its ``(mc,)`` output contract, or a run that
+            ended in non-finite variational parameters or objective.
     """
     samples = _exact_positive("samples", samples)
     mc = _exact_positive("mc", mc)
@@ -128,6 +146,9 @@ def _advi_optimize(
         raise ValueError(f"alpha must be finite and >= 0 (1.0 = KL-ELBO, 0.0 = IWAE), got {alpha!r}")
     if family not in ("meanfield", "fullrank"):
         raise ValueError(f"unknown variational family {family!r}; use 'meanfield' or 'fullrank'.")
+    # Tolerance band, not an exact float test (see _ELBO_ALPHA_TOL): alpha just below 1 reaches the
+    # Renyi branch whose 1/(1-alpha) division amplifies logsumexp round-off past the ELBO gap.
+    use_elbo = abs(alpha - 1.0) <= _ELBO_ALPHA_TOL
     u0_arr, s0_arr = _validate_init(u0, s0)
 
     d = int(u0_arr.size)
@@ -162,7 +183,7 @@ def _advi_optimize(
         eps = torch.randn((mc, d), dtype=torch.float64, generator=gen)
         u, log_q, entropy = variational(eps)
         log_p = _checked_log_p(log_p_fn, u, mc, require_grad=True)
-        if alpha == 1.0:  # standard ELBO with the exact (low-variance) entropy term
+        if use_elbo:  # standard ELBO with the exact (low-variance) entropy term
             obj = log_p.mean() + entropy
         else:  # tilted Renyi-alpha bound: tilt the importance weights w=p/q by (1-alpha)
             log_w = log_p - log_q
@@ -176,7 +197,7 @@ def _advi_optimize(
         eps = torch.randn((n_eval, d), dtype=torch.float64, generator=gen)
         u, log_q, entropy = variational(eps)
         log_p = _checked_log_p(log_p_fn, u, n_eval, require_grad=False)
-        if alpha == 1.0:
+        if use_elbo:
             final_obj = float((log_p.mean() + entropy).item())
         else:
             log_w = log_p - log_q
@@ -195,14 +216,15 @@ def _advi_optimize(
         scale_np = torch.exp(log_std).detach().numpy()
         U = mean_np + scale_np * z
 
-    # Convergence is an explicit postcondition, not an assumption: returning non-finite variational
-    # parameters or a non-finite objective would hand back a fitted-looking artifact from a run that
-    # produced no usable posterior.
+    # FINITENESS postcondition -- deliberately not called "convergence": the loop above ran a fixed
+    # number of Adam steps and checked no stationarity criterion, so finite output only certifies
+    # that the run produced numbers, not that they are an optimum. Non-finite output would hand back
+    # a fitted-looking artifact from a numerically failed run.
     if not math.isfinite(final_obj):
         raise ValueError(
-            f"ADVI did not converge to a finite objective (got {final_obj}); the fit produced no "
-            "usable variational posterior"
+            f"ADVI ended with a non-finite objective (got {final_obj}); the run produced no usable "
+            "variational posterior"
         )
     if not (np.isfinite(mean_np).all() and np.isfinite(scale_np).all() and np.all(scale_np > 0.0)):
-        raise ValueError("ADVI did not converge to finite variational parameters with positive scales")
-    return mean_np, scale_np, U, final_obj, chol
+        raise ValueError("ADVI ended with non-finite variational parameters (or non-positive scales)")
+    return mean_np, scale_np, U, final_obj, n_eval, chol

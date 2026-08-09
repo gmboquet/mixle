@@ -93,6 +93,15 @@ class AdviResult:
     mean: np.ndarray
     scale: np.ndarray
     objective: float | None = None
+    """Final variational objective, a Monte Carlo ESTIMATE from ``objective_n_eval`` draws.
+
+    For ``|alpha - 1| <= 1e-6`` this is the ELBO. Otherwise it is the K-sample tilted Renyi bound
+    at ``K = objective_n_eval``, whose expectation depends on K -- compare two fits' objectives
+    only at equal ``objective_n_eval`` -- and for ``alpha > 1`` the finite-K estimate is NOT a
+    lower bound on the evidence (it is upward-biased and can exceed ``log Z``). The value comes
+    from a FIXED number of Adam steps with no convergence criterion; finiteness, not stationarity,
+    is what was checked."""
+    objective_n_eval: int | None = None
     cholesky: np.ndarray | None = None
     """Lower-triangular Cholesky factor of the fitted covariance, for ``family='fullrank'`` only.
 
@@ -518,7 +527,7 @@ def advi(
     import torch  # noqa: F401
 
     rng = _as_rng(rng)
-    mean_np, scale_np, U, objective, chol = _advi_optimize(
+    mean_np, scale_np, U, objective, n_eval, chol = _advi_optimize(
         torch,
         target_batch,
         u0,
@@ -531,7 +540,14 @@ def advi(
         family=family,
         alpha=alpha,
     )
-    return AdviResult(samples=U, mean=mean_np, scale=scale_np, objective=objective, cholesky=chol)
+    return AdviResult(
+        samples=U,
+        mean=mean_np,
+        scale=scale_np,
+        objective=objective,
+        objective_n_eval=n_eval,
+        cholesky=chol,
+    )
 
 
 def _as_rng(rng: np.random.RandomState | int | None) -> np.random.RandomState:
