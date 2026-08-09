@@ -160,9 +160,20 @@ def brunner_munzel(x: Any, y: Any, *, alternative: str = "two-sided", distributi
 
     Tests the stochastic-equality null ``P(x < y) + 0.5 P(x = y) = 1/2``. ``alternative`` is
     ``'two-sided'``, ``'greater'`` (x > y), or ``'less'`` -- the same direction convention as
-    :func:`mann_whitney_u` (and scipy). ``distribution='t'`` uses a Satterthwaite t reference
-    (recommended for small samples); ``'normal'`` the normal approximation. Reports the estimated
+    :func:`mann_whitney_u` (and scipy). ``distribution='t'`` uses a Satterthwaite t reference,
+    ``'normal'`` the normal approximation. The t reference is the better of the two but is still
+    LIBERAL in small samples -- below roughly 10 observations per group its true level runs above
+    nominal (this is documented behavior of the approximation, not an implementation defect), so
+    treat sub-10-per-group p-values near the threshold as optimistic; the studentized-permutation
+    version of the test is the small-sample fix and is not implemented here. Reports the estimated
     relative effect ``p_hat = P(x < y) + 0.5 P(x = y)`` in ``extra``.
+
+    Completely separated samples (all of one group beyond all of the other) make the variance
+    estimate 0 and the statistic undefined; instead of refusing, the result then reports the exact
+    permutation bound for that configuration -- one-sided ``p = 1 / C(n1+n2, n1)`` (doubled, capped
+    at 1, for two-sided), ``statistic`` of ``+/-inf``, and ``extra['method'] =
+    'separation-exact-bound'`` -- which is the strongest claim total separation supports at these
+    sample sizes.
     """
     _alternative(alternative)
     if distribution not in ("t", "normal"):
@@ -176,7 +187,29 @@ def brunner_munzel(x: Any, y: Any, *, alternative: str = "two-sided", distributi
     s1 = np.sum((rank_all[:n1] - rx - r1m + (n1 + 1) / 2.0) ** 2) / (n1 - 1)
     s2 = np.sum((rank_all[n1:] - ry - r2m + (n2 + 1) / 2.0) ** 2) / (n2 - 1)
     denom = n1 * s1 + n2 * s2
+    p_hat_early = (r2m - (n2 + 1) / 2.0) / n1
     if denom <= 0:
+        if p_hat_early in (0.0, 1.0):
+            # Complete separation: the variance estimate is legitimately 0 and the studentized
+            # statistic undefined. The exact permutation bound for this configuration -- only the
+            # observed label split (out of C(n, n1)) is this extreme -- is the honest report; the
+            # old refusal ("requires non-zero rank variation") misdescribed data with plenty of
+            # between-group rank variation and threw away a decisive answer.
+            from math import comb
+
+            one_sided = 1.0 / comb(n1 + n2, n1)
+            direction = 1.0 if p_hat_early == 1.0 else -1.0  # p_hat=1: x below y (w > 0 side)
+            if alternative == "two-sided":
+                p = min(1.0, 2.0 * one_sided)
+            elif alternative == "greater":  # x > y: supported only by the p_hat=0 separation
+                p = one_sided if p_hat_early == 0.0 else 1.0
+            else:  # 'less'
+                p = one_sided if p_hat_early == 1.0 else 1.0
+            return TestResult(
+                float(direction * np.inf),
+                float(p),
+                {"p_hat": float(p_hat_early), "method": "separation-exact-bound"},
+            )
         raise ValueError("Brunner-Munzel test requires non-zero rank variation")
     w = n1 * n2 * (r2m - r1m) / ((n1 + n2) * np.sqrt(denom))
     p_hat = (r2m - (n2 + 1) / 2.0) / n1  # P(x < y) + 0.5 P(x = y)
@@ -289,10 +322,21 @@ def kruskal_wallis(*samples: Any) -> TestResult:
 
 
 def mood_median_test(*samples: Any, ties: str = "below") -> TestResult:
-    """Mood's median test: chi-square test that k samples share a common median.
+    """Mood's median test: contingency test that k samples sit alike around the POOLED median.
 
-    Cross-tabulates each observation as above / (at-or-below) the pooled grand median and runs a
-    chi-square test of independence on the resulting 2xk table. ``extra`` carries the ``grand_median``.
+    Cross-tabulates each observation as above / (at-or-below) the pooled grand median and tests
+    independence of the resulting 2xk table. ``extra`` carries the ``grand_median``, the reference
+    used (``method``), and ``min_expected_count``.
+
+    What rejection means -- precisely: the groups differ in their probability of exceeding the
+    pooled median. That is implied by unequal medians under a shift model, but it is NOT "the
+    medians differ" unconditionally: groups with identical medians and different shapes near that
+    median can reject, and the test has famously low power besides. Reference: the median split
+    fixes BOTH margins of the table, so for k = 2 the conditional exact (Fisher) p-value is the
+    calibrated one and is used automatically whenever any expected cell count is below 5 (the
+    uncorrected chi-square over-rejects there); for k > 2 the chi-square approximation is all that
+    is implemented -- check ``min_expected_count`` and treat p-values from tables with expected
+    counts below ~5 as approximate.
     """
     if ties not in ("below", "above"):
         raise ValueError("ties must be 'below' or 'above'")
@@ -308,8 +352,27 @@ def mood_median_test(*samples: Any, ties: str = "below") -> TestResult:
     table = np.array([above, below], dtype=float)
     if np.any(table.sum(axis=1) == 0) or np.any(table.sum(axis=0) == 0):
         raise ValueError("Mood median test requires observations on both sides of the pooled median")
-    chi2, p, dof, _ = stats.chi2_contingency(table, correction=False)
-    return TestResult(float(chi2), float(p), {"df": int(dof), "grand_median": gm})
+    chi2, p, dof, expected = stats.chi2_contingency(table, correction=False)
+    min_expected = float(expected.min())
+    if len(groups) == 2 and min_expected < 5.0:
+        # Both margins are fixed by the median split, so the conditional exact reference is the
+        # right one -- and at these counts the uncorrected chi-square is anti-conservative.
+        _, p_exact = stats.fisher_exact(table.astype(int))
+        return TestResult(
+            float(chi2),
+            float(p_exact),
+            {
+                "df": int(dof),
+                "grand_median": gm,
+                "method": "fisher-exact",
+                "min_expected_count": min_expected,
+            },
+        )
+    return TestResult(
+        float(chi2),
+        float(p),
+        {"df": int(dof), "grand_median": gm, "method": "chi-square", "min_expected_count": min_expected},
+    )
 
 
 @dataclass
@@ -327,6 +390,16 @@ def dunn_test(*samples: Any, p_adjust: str = "holm") -> DunnResult:
 
     Uses the pooled-rank z statistic with the shared tie-corrected variance, and adjusts the pairwise
     p-values by ``'holm'``, ``'bonferroni'``, or ``'none'``.
+
+    Each pairwise z is calibrated under the GLOBAL null (all k groups exchangeable), because both
+    the pooled ranks and the shared variance come from the full pooled sample. That is exactly the
+    null a post-hoc test runs under after rejecting it, so read the p-values as screening under
+    partial nulls, not as k(k-1)/2 self-contained two-sample tests: when one group genuinely
+    differs, its observations shift the pooled ranks and the shared variance for every OTHER pair
+    too -- with two identical groups plus one concentrated third, the identical pair's nominal-5%
+    rejection rate is ~24%. For a confirmatory conclusion about a specific pair, test that pair
+    directly (:func:`brunner_munzel` uses only the two groups involved) with your own multiplicity
+    adjustment; use Dunn to rank candidates, not to certify them.
     """
     if p_adjust not in ("holm", "bonferroni", "none"):
         raise ValueError("p_adjust must be 'holm', 'bonferroni', or 'none'.")
@@ -546,6 +619,12 @@ def jonckheere_terpstra(*samples: Any, alternative: str = "increasing") -> TestR
     order. ``alternative='increasing'`` / ``'decreasing'`` / ``'two-sided'``. Uses the tie-corrected
     normal approximation of the J statistic (sum of pairwise Mann-Whitney counts over ordered pairs).
 
+    The group ORDER is part of the hypothesis and must be chosen BEFORE looking at the data (the
+    same pre-specification the sibling :func:`page_trend_test` states): the level calculation
+    assumes one fixed ordering, and picking the ordering that best matches the observed group means
+    -- k!/2 candidate orderings -- turns a nominal 5% test into a data-dredged one. If the ordering
+    came from the data, this test's p-value does not mean what it says.
+
     The null variance is the published Jonckheere-Terpstra one (Lehmann 1975), whose leading term is
     ``[n(n-1)(2n+5) - sum n_i(n_i-1)(2n_i+5)] / 72`` -- algebraically the same as the equivalent
     ``[n^2(2n+3) - sum n_i^2(2n_i+3)] / 72`` form. This implementation previously used
@@ -555,6 +634,12 @@ def jonckheere_terpstra(*samples: Any, alternative: str = "increasing") -> TestR
     21.5278 against the required ``n1*n2*(n+1)/12 = 22.9167``, reporting ``z=2.69408, p=0.003529``
     where the rank-sum test gives ``z=2.61116, p=0.004512``. The tied branch inherited the same altered
     base terms, including in its ``sum t_j(t_j-1)(2t_j+5)`` tie correction.
+
+    Reproducing that cross-check: the quoted rank-sum numbers use the normal approximation WITHOUT
+    a continuity correction, because this J statistic's normal reference carries none -- call
+    :func:`mann_whitney_u` with ``use_continuity=False`` to match (its DEFAULT is ``True``, which
+    reports a different, corrected p on the same data). The difference between the defaults is the
+    correction convention, not a defect in either test.
     """
     _alternative(alternative, ("increasing", "decreasing", "two-sided"))
     groups = _groups(samples)
@@ -607,6 +692,13 @@ def page_trend_test(*measurements: Any, decreasing: bool = False) -> TestResult:
     Like Friedman but for a pre-specified ordering of the k treatments (the columns, in order). Tests
     ``L = sum_j j * R_j`` against the normal approximation. Set ``decreasing=True`` to predict the
     reverse ordering. ``extra`` carries the z-score.
+
+    Ties are handled exactly, not ignored: within-block midranks enter ``L``, and the null variance
+    is the exact permutation variance of the observed (possibly tied) midranks -- per block,
+    ``Var = sum_j (w_j - w-bar)^2 * sum_i (r_i - r-bar)^2 / (k - 1)`` under uniform within-block
+    permutation, summed over blocks. With no ties this reduces algebraically to the textbook
+    ``n k^2 (k+1)(k^2-1) / 144``; with ties the textbook constant overstates the variance (tied
+    midranks vary less), which made the test conservative and its z biased toward 0.
     """
     data = _related(measurements)
     nblocks, k = data.shape
@@ -616,8 +708,14 @@ def page_trend_test(*measurements: Any, decreasing: bool = False) -> TestResult:
     rsum = ranks.sum(axis=0)
     weights = np.arange(k, 0, -1) if decreasing else np.arange(1, k + 1)
     L = float(np.sum(weights * rsum))
+    # E[L] is tie-invariant (midranks always sum to k(k+1)/2 per block); the variance is not.
+    # Under H0 each block's midrank vector is a uniformly random permutation of its observed
+    # values, independent across blocks, so Var(L) = S_w * sum_b S_r(b) / (k - 1) exactly.
     mu = nblocks * k * (k + 1) ** 2 / 4.0
-    var = nblocks * k**2 * (k + 1) * (k**2 - 1) / 144.0
+    s_w = float(np.sum((weights - weights.mean()) ** 2))
+    r_bar = (k + 1) / 2.0
+    s_r = float(np.sum((ranks - r_bar) ** 2))
+    var = s_w * s_r / (k - 1)
     z = (L - mu) / np.sqrt(var) if var > 0 else 0.0
     p = float(stats.norm.sf(z))
     return TestResult(L, float(min(p, 1.0)), {"zscore": float(z)})

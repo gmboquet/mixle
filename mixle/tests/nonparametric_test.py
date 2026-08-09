@@ -198,6 +198,63 @@ class JonckheereNullVarianceTest(unittest.TestCase):
         self.assertGreater(jonckheere_terpstra(*flat).pvalue, 0.05)
 
 
+class OrderedAndSmallSampleHonestyTest(unittest.TestCase):
+    """Audit NP-6/7/8/11: Page tie variance, BM separation bound, Mood exact route, JT cross-check."""
+
+    def test_page_tie_variance_reduces_to_textbook_without_ties(self):
+        rng = np.random.RandomState(0)
+        cols = [rng.standard_normal(12) for _ in range(4)]
+        res = page_trend_test(*cols)
+        n, k = 12, 4
+        mu = n * k * (k + 1) ** 2 / 4.0
+        var_textbook = n * k**2 * (k + 1) * (k**2 - 1) / 144.0
+        implied = ((res.statistic - mu) / res.extra["zscore"]) ** 2
+        self.assertAlmostEqual(implied, var_textbook, places=6)
+
+    def test_page_is_level_correct_under_heavy_ties(self):
+        # The hardcoded no-tie variance overstated Var(L) for tied midranks (conservative, z
+        # biased toward 0); the exact per-block permutation variance restores the level.
+        rej, used = 0, 0
+        for r in range(1500):
+            rs = np.random.RandomState(50_000 + r)
+            data = rs.randint(0, 3, size=(8, 4)).astype(float)
+            try:
+                pv = page_trend_test(*[data[:, j] for j in range(4)]).pvalue
+            except ValueError:
+                continue
+            used += 1
+            rej += pv < 0.05
+        self.assertGreater(used, 1400)
+        self.assertGreater(rej / used, 0.03)
+        self.assertLess(rej / used, 0.075)
+
+    def test_brunner_munzel_reports_the_exact_bound_under_separation(self):
+        from math import comb
+
+        r = brunner_munzel([1, 2, 3, 4, 5], [10, 11, 12, 13, 14])
+        self.assertTrue(np.isinf(r.statistic))
+        self.assertEqual(r.extra["method"], "separation-exact-bound")
+        self.assertAlmostEqual(r.pvalue, 2.0 / comb(10, 5), places=12)
+        supported = brunner_munzel([1, 2, 3], [5, 6, 7], alternative="less")
+        opposed = brunner_munzel([1, 2, 3], [5, 6, 7], alternative="greater")
+        self.assertAlmostEqual(supported.pvalue, 1.0 / comb(6, 3), places=12)
+        self.assertEqual(opposed.pvalue, 1.0)
+
+    def test_mood_routes_small_two_group_tables_to_fisher(self):
+        m = mood_median_test([1.0, 2.0, 3.0, 10.0], [8.0, 9.0, 11.0, 12.0])
+        self.assertEqual(m.extra["method"], "fisher-exact")
+        self.assertLess(m.extra["min_expected_count"], 5.0)
+        big = np.random.RandomState(1).standard_normal(60)
+        m2 = mood_median_test(list(big), list(big + 0.1))
+        self.assertEqual(m2.extra["method"], "chi-square")
+
+    def test_jt_matches_mwu_exactly_with_continuity_off(self):
+        jt = jonckheere_terpstra([1, 2, 3, 4, 5], [10, 11, 12, 13, 14], alternative="increasing")
+        mw = mann_whitney_u([1, 2, 3, 4, 5], [10, 11, 12, 13, 14], alternative="less", use_continuity=False)
+        self.assertAlmostEqual(abs(jt.extra["zscore"]), abs(mw.zscore), places=9)
+        self.assertAlmostEqual(jt.pvalue, mw.pvalue, places=9)
+
+
 if __name__ == "__main__":
     unittest.main()
 
