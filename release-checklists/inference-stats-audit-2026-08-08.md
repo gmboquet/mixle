@@ -187,3 +187,64 @@ RR17-18 (uniform first symbol makes the dependence-only claim exactly true, TV 0
 RR17-20 (manifest --write requires --reviewed-by; attestation block recorded). Plus wave-2 and
 the round-2 gate fix. ALL 24 pass-17/18 findings now carry fixes; gate = full suite on the
 final tree, then push.
+
+### Own-ledger closure wave (2026-08-09, this session): every remaining open item fixed
+
+The full "Demonstrated by the auditing passes" backlog is closed, one commit per module cluster,
+each with measured receipts and adverse tests:
+
+- SCORING-1/2/3 (bda80a3c): crps_ensemble/energy_score fair=True default -- the 1/m^2 form's
+  dispersion minimizer measured 0.700 of truth vs 1.000 fair at m=5; brier_decomposition returns
+  the real Brier score plus a separately-named binned reconstruction; O(bins/n) bias disclosed.
+- U-1/2/3/5/6/7/8/9 (d4c653fc): ddof=1 epistemic variance (pinned 0.5034 at the reviewer's
+  fixture); kind="variance-epistemic-only"; total entropy recomputed post-clamp; plug-in BALD MI
+  capped at log(M) (0.678 vs cap 0.693 measured); duplicate refusal in the log_probs branch;
+  symmetric equivalence evaluation; predictive grid precondition.
+- R-1/2/3 (65512342): GPD tail extrapolation now opt-in (gpd_tail=True) -- at n=100 the fitted-
+  tail q99.9 measured sd 46.4 vs 2.36 empirical with worst draw 663 vs truth 8.54; docstring
+  formula matches the mass-weighted computation.
+- G-1..G-7 (ddadeaf2): t_{residual_df} reference whenever dispersion was estimated (level 9% ->
+  5.2% at n=8, 4000 reps); ll at the MLE dispersion with AIC k = rank + dispersion; rank-deficient
+  designs REFUSE per-coefficient Wald (the pinv min-norm split halved a duplicated column's
+  coefficient and SE invisibly); NB theta 1.87x SE warning; HC0/elastic-net/module-promise docs.
+- S-1..S-6 (f1a4fe5a): frailty_cox se_method="jackknife" (se/SD 0.84 -> 0.98 measured, 60 reps,
+  G=20, theta=1); aalen_additive truncates at rank loss with truncated_at instead of accumulating
+  min-norm noise (max |B| 1.4 -> 19 before); to_person_period refuses time=0; KM intervals
+  renamed POINTWISE with measured 0.60/0.51/0.43 simultaneous coverage; cox_ph independence/PH
+  statement with the 0.68 clustered se/SD number; theta->0 claim replaced by the boundary truth.
+- A-1/2/3 (b54b5f82): |alpha-1| <= 1e-6 ELBO band (round-off error measured 4e-7 at 1e-10 rising
+  to 2.3e-3 at 1e-13; alpha=1-1e-9 now reproduces alpha=1 exactly); objective_n_eval on
+  AdviResult with the K-dependence and alpha>1 not-a-bound documented; finiteness postcondition
+  wording (no convergence claim from fixed-step Adam).
+- CAL-1..8 (3334c4de): calibration_null_expectation() -- measured perfect-calibration ECE/MCE at
+  the caller's profile (MCE null 0.057 -> 0.85 as bins 10 -> 500); coverage_curve null_expectation
+  column via the gate's finite-m benchmark (0.64 at m=5/level .95), with the "distribution-free by
+  ranks" overclaim corrected in BOTH files (measured 0.632/0.644/0.636 family spread at m=5);
+  Platt smoothed targets keep separable data interior; isotonic guarantee scoped held-out;
+  pointwise-not-band wording with obs_ci_effective_boot exposure of empty-bin conditioning.
+- NP-5..8, NP-10/11 (2c9f9a00): Page exact per-block tie variance (reduces to textbook with no
+  ties, tied-null level 5.0% measured at nominal 5%); BM separation reports the exact 1/C(n,n1)
+  bound instead of refusing, small-sample liberality stated; Mood routes small 2x2 to Fisher with
+  min_expected_count on every result; Dunn global-null scope (the ~24% partial-null number) with
+  the brunner_munzel confirmatory route; JT pre-specified-ordering + continuity-off cross-check
+  (z 2.61116 reproduced both sides).
+- RS-2..6 (22ef49b5): BCa degenerate-jackknife fallback labelled "percentile
+  (bca-degenerate-jackknife)"; mid-p z0 (atoms at the estimate no longer read as bias); CIRCULAR
+  moving blocks (centring gap 0.008 sd after; O(l/n) endpoint bias before) with n^(1/3) block-
+  length guidance; cluster G-asymptotics stated; wild_bootstrap leverage= Davidson-Flachaire
+  e/(1-h) (slope CI 0.36 -> 0.50 on a high-leverage design) with the response-scale residual
+  contract pinned.
+- D-1 (06d7c2b7): bayes_action ships expected_loss_mc_se (verified 1/sqrt(n)) and the winner's
+  curse is reproduced at -2.52 MC SEs (K=100; audit -2.5); report="fresh-draws" re-estimates the
+  winner selection-independently (+0.08 SEs residual) without touching the default path's exact
+  loss-invocation counts (MXR-080-1611 preserved by test).
+- S-1c + P-3/4 (f9ca5ef0): select_best N=2 flag declared undefined (was alpha-decided: never at
+  .05, always at .20); forecast_price receipts state per-lead-marginal (no simultaneous band) and
+  overlapping-origin/quantized-level caveats as coverage_assumptions entries.
+- E-1: closed by the RR17-09 design fix (b84de41b) -- the measured floor + exact conditional
+  pooled route is precisely the repair E-1's entry demanded; recorded here so the "Confirmed, fix
+  pending" section reads as resolved.
+
+One stale cross-file pin surfaced and was fixed in-session (06d7c2b7): a test still encoded the
+pre-RR17-02 Haldane-at-zero contract for poisson_lograte_effect. Gate before push: the full local
+suite on this final tree.
