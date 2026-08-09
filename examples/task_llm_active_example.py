@@ -1,11 +1,11 @@
-"""LLM teacher + active labeling: pay a frontier model for the fewest labels, then serve locally for ~free.
+"""LLM teacher + active labeling: spend a FIXED label budget on the least-certain examples, then serve locally.
 
 The two differentiators in one run:
 
   * the teacher is an **LLM** (here a local ``CallableLLM``; swap in ``OpenAICompatLLM(base_url, model)``
     to use Ollama / vLLM / a hosted endpoint unchanged);
-  * **active labeling** (DoE applied to the labeling decision) queries that LLM only for the most
-    informative examples. The comparison below is a SAME-TRAINING-BUDGET one -- both policies spend
+  * **active labeling** (DoE applied to the labeling decision) queries that LLM for the examples
+    the current student is least sure about (margin acquisition). The comparison below is a SAME-TRAINING-BUDGET one -- both policies spend
     exactly the same number of paid training calls (the shared evaluation labels are paid too, and
     counted) -- and the measured quantity is held-out agreement with this synthetic deterministic
     teacher, decided by the EXACT paired test on the discordant pairs. (A labels-to-target
@@ -16,8 +16,9 @@ Then the distilled student is wrapped in a calibrated cascade and the realized s
 
 Scope: the LABELING-BUDGET side of the mixle.task loop. ``task_distill_example.py`` is the plain
 distill/save/reload entry point and ``task_cascade_economics_example.py`` prices the serving side;
-``label_economics_demo.py`` makes the same "active beats random" point through the EIG/BALD
-``acquire()`` API instead of a task-level teacher.
+``label_economics_demo.py`` explores the acquisition-level EIG/BALD side (note its headline
+ratio compares one EIG run against unrelated random-seed runs -- a demonstration, not a paired
+replicated estimand like the comparison here).
 
 Run: ``python examples/task_llm_active_example.py``  (needs ``pip install "mixle[torch]"``).
 """
@@ -87,7 +88,7 @@ def main() -> None:
     budget = 60
     print(f"training-label budget: {budget} LLM calls per policy (out of {len(p)} unlabeled)")
     print(f"shared evaluation labels: {len(val)} LLM calls (paid; score both students, train neither)")
-    print(f"total teacher calls before serving: {2 * budget + len(val)}")
+    print(f"teacher calls for this comparison: {2 * budget + len(val)} (2 x {budget} training + {len(val)} evaluation)")
     active = active_distill(teacher, p, budget=budget, seed_size=20, rounds=4, acquisition="margin", recipe=recipe)
     rand = active_distill(teacher, p, budget=budget, seed_size=20, rounds=4, acquisition="random", recipe=recipe)
     # The ESTIMAND, stated before the numbers: each realized student's agreement with the
@@ -118,12 +119,23 @@ def main() -> None:
 
     print("\nwrap the active student in a calibrated cascade and serve")
     cal = pool(seed=2)
-    model = CalibratedTaskModel(active.model, alpha=0.1).calibrate(cal, teacher(cal))
+    cal_labels = teacher(cal)  # calibration labels are PAID teacher calls too, and counted below
+    model = CalibratedTaskModel(active.model, alpha=0.1).calibrate(cal, cal_labels)
+    total_pre_serving = 2 * 60 + 300 + len(cal)
+    print(f"   calibration bought {len(cal)} more teacher labels")
+    print(
+        f"   ALL-IN teacher calls before serving: {total_pre_serving} "
+        f"(120 training + 300 evaluation + {len(cal)} calibration)"
+    )
     casc = Cascade(model, teacher, cost=CostModel(c_frontier=0.01, c_local=0.00001))
     casc.serve(pool(seed=901))
     rep = casc.report()
+    setup_cost = total_pre_serving * 0.01
     print(f"   served {rep['n_requests']} requests, escalated {rep['realized_escalation_rate']:.1%} to the LLM")
-    print(f"   saved ${rep['savings_vs_frontier']:.2f} vs paying the LLM for every request")
+    print(
+        f"   serving saved ${rep['savings_vs_frontier']:.2f} vs paying the LLM per request -- against "
+        f"${setup_cost:.2f} of setup labels ({total_pre_serving} calls); setup amortizes only past that volume"
+    )
 
 
 if __name__ == "__main__":
