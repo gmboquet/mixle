@@ -260,3 +260,20 @@ class StructuredAnsweredSliceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ImpossibleAnsweredSliceCountsTest(unittest.TestCase):
+    def test_impossible_answered_slice_counts_are_refused(self):
+        # STAT-RR17-13: evaluated=1, answered=1, correct=2 used to return agreement 2.0 and a
+        # [NaN, NaN] interval through report(); the arithmetic is an invariant, so it refuses.
+        from mixle.task import StructuredSolution
+
+        with self.assertRaisesRegex(ValueError, "correct <= answered <= evaluated"):
+            StructuredSolution(
+                fields_cat={},
+                fields_num={},
+                teacher=lambda x: {},
+                eval_rows=1,
+                answered_eval_n=1,
+                answered_eval_correct=2,
+            )

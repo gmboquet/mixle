@@ -73,6 +73,20 @@ class StructuredSolution:
     harvested_inputs: list = field(default_factory=list)
     harvested_outputs: list = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        # STAT-RR17-13: the answered-slice counts are one measurement, so their arithmetic is an
+        # invariant, not a convention -- a hand-built object with correct > answered returned
+        # agreement 2.0 and a [NaN, NaN] interval through report(). Impossible states refuse.
+        counts = (self.eval_rows, self.answered_eval_n, self.answered_eval_correct)
+        if any(isinstance(c, bool) or not isinstance(c, int) or c < 0 for c in counts):
+            raise ValueError("answered-slice counts must be non-negative integers")
+        if not self.answered_eval_correct <= self.answered_eval_n <= self.eval_rows:
+            raise ValueError(
+                "answered-slice counts must satisfy 0 <= correct <= answered <= evaluated; got "
+                f"correct={self.answered_eval_correct}, answered={self.answered_eval_n}, "
+                f"evaluated={self.eval_rows}"
+            )
+
     @property
     def schema(self) -> dict[str, str]:
         """Return each output field's inferred kind: ``categorical`` or ``numeric``."""

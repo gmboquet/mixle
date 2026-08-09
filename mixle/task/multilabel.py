@@ -197,6 +197,20 @@ class MultiLabelSolution:
     harvested_sets: list = field(default_factory=list)
     calibration_receipt: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        # STAT-RR17-13: the answered-slice counts are one measurement, so their arithmetic is an
+        # invariant, not a convention -- a hand-built object with correct > answered returned
+        # agreement 2.0 and a [NaN, NaN] interval through report(). Impossible states refuse.
+        counts = (self.eval_rows, self.answered_eval_n, self.answered_eval_correct)
+        if any(isinstance(c, bool) or not isinstance(c, int) or c < 0 for c in counts):
+            raise ValueError("answered-slice counts must be non-negative integers")
+        if not self.answered_eval_correct <= self.answered_eval_n <= self.eval_rows:
+            raise ValueError(
+                "answered-slice counts must satisfy 0 <= correct <= answered <= evaluated; got "
+                f"correct={self.answered_eval_correct}, answered={self.answered_eval_n}, "
+                f"evaluated={self.eval_rows}"
+            )
+
     def _scores(self, xs: list) -> np.ndarray:
         return _score_net(self.net, _validated_features(self.featurizer, xs), len(self.labels))
 

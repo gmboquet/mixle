@@ -219,3 +219,26 @@ class MultiLabelAnsweredSliceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ImpossibleAnsweredSliceCountsTest(unittest.TestCase):
+    def test_impossible_answered_slice_counts_are_refused(self):
+        # STAT-RR17-13: evaluated=1, answered=1, correct=2 used to return agreement 2.0 and a
+        # [NaN, NaN] interval through report(); the arithmetic is an invariant, so it refuses.
+        from mixle.task import MultiLabelSolution
+
+        with self.assertRaisesRegex(ValueError, "correct <= answered <= evaluated"):
+            MultiLabelSolution(
+                net=None,
+                featurizer=None,
+                labels=["a"],
+                teacher=lambda xs: [["a"] for _ in xs],
+                upper_absent=np.zeros(1),
+                lower_present=np.zeros(1),
+                joint_qhat=0.5,
+                alpha=0.1,
+                holdout_set_agreement=1.0,
+                eval_rows=1,
+                answered_eval_n=1,
+                answered_eval_correct=2,
+            )
