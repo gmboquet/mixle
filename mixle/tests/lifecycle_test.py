@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+import unittest.mock
 
 import numpy as np
 import pytest
@@ -595,3 +596,38 @@ class EvidenceRecordTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProposeHoldoutIsolationTest(unittest.TestCase):
+    """STAT-RR18-01: candidate model families are generated from training rows only."""
+
+    def test_holdout_is_invisible_to_candidate_generation(self):
+        # the reviewer's construction: rows whose value range splits so the holdout half would
+        # steer the family choice if any proposer saw it. Capture what recommend_model receives.
+        import mixle.lifecycle as lifecycle
+
+        seen: list[list] = []
+        original = None
+
+        def spy(rows, **kw):
+            seen.append(list(rows))
+            return original(rows, **kw)
+
+        from mixle.task import recommend as recommend_module
+
+        original = recommend_module.recommend_model
+        rng = np.random.RandomState(0)
+        rows = [float(v) for v in np.concatenate([rng.uniform(0.01, 3.5, 75), -rng.uniform(0.1, 3.6, 25)])]
+        import mixle.task
+
+        with unittest.mock.patch.object(mixle.task, "recommend_model", side_effect=spy) as _:
+            try:
+                lifecycle.propose(rows, holdout=0.25, seed=0, max_candidates=1, max_its=3)
+            except Exception:  # noqa: BLE001 - only the spy's observation matters here
+                pass  # candidate fitting may fail on this adversarial data; the spy already saw the rows
+        self.assertTrue(seen, "recommend_model was never consulted")
+        # the exact train split propose() uses: permutation(seed=0), first 25 rows held out
+        order = np.random.RandomState(0).permutation(len(rows))
+        train_expected = [rows[i] for i in order[25:]]
+        self.assertEqual(sorted(seen[0]), sorted(train_expected))
+        self.assertEqual(len(seen[0]), 75)

@@ -594,7 +594,9 @@ def propose(
     :doc:`/automatic-modeling-contract`'s "Dependence between fields"), the plain independence baseline
     (:func:`mixle.utils.automatic.get_estimator`), and, when an ``llm`` handle is given, an LLM-designed
     structure (:func:`mixle.task.design.design_model`, allowlisted-spec, fit-validated). Each candidate is
-    **fitted on a train split and scored on held-out data**, so the ranking is out-of-sample, not a guess.
+    **generated from the training split only, fitted on it, and scored on held-out data** -- the
+    outer holdout is invisible to every proposer until final ranking (STAT-RR18-01), so the
+    ranking is out-of-sample, not a guess.
     The winner becomes the returned :class:`Model`; the full ranking lands in ``Model.frontier`` and the
     per-field confidence / dependency / candidate notes in ``Model.notes`` (shown by ``explain()``). Pass
     ``fit=True`` to also fit the winner to all of ``data`` before returning.
@@ -640,7 +642,20 @@ def propose(
     rows = list(data)
     if len(rows) < 3:
         raise ValueError("propose requires at least three records for a non-empty train/holdout split")
-    rec = recommend_model(rows, **recommend_kw)
+    # STAT-RR18-01: the outer split happens BEFORE any candidate generation, and every proposer
+    # sees TRAINING rows only. Letting recommend_model/get_estimator/design_model inspect all
+    # rows meant holdout-informed model-FAMILY selection before candidates were ranked on that
+    # same holdout (measured: with 25 adverse holdout rows visible, full-data recommendation
+    # chose Laplace where train-only chose HalfNormal) -- fitting on train afterward does not
+    # undo a family choice the holdout already steered.
+    rng = np.random.RandomState(seed)
+    order = rng.permutation(len(rows))
+    n_val = max(2, int(round(len(rows) * holdout)))
+    val = [rows[i] for i in order[:n_val]]
+    train = [rows[i] for i in order[n_val:]]
+    if not train:
+        raise ValueError("holdout leaves no training rows; lower holdout or provide more records")
+    rec = recommend_model(train, **recommend_kw)
     candidates: list[tuple[str, Any]] = [("recommended", rec.estimator)]
     # optimize()'s own no-estimator auto-structure-search (structure="auto", the default, reached by
     # passing estimator=None) is the only route to a copula or learned-Bayesian-network dependence
@@ -657,7 +672,7 @@ def propose(
     try:  # the independence baseline the frontier has to beat (skip when identical to the recommendation)
         from mixle.utils.automatic import get_estimator
 
-        indep = get_estimator(rows)
+        indep = get_estimator(train)
         # ParameterEstimator has no value-based __repr__ (it falls back to the default object repr,
         # keyed on identity/memory address), so a repr() comparison here never matches even when the
         # two estimators are structurally identical -- the "skip when identical" intent silently
@@ -669,15 +684,9 @@ def propose(
     if llm is not None:
         from mixle.task import design_model
 
-        designed = design_model(rows, llm)
+        designed = design_model(train, llm)
         if designed.source == "llm":
             candidates.append(("llm-designed", designed.estimator))
-
-    rng = np.random.RandomState(seed)
-    order = rng.permutation(len(rows))
-    n_val = max(2, int(round(len(rows) * holdout)))
-    val = [rows[i] for i in order[:n_val]]
-    train = [rows[i] for i in order[n_val:]]
 
     frontier: list[dict[str, Any]] = []
     evaluated = 0
