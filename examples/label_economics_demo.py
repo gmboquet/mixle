@@ -15,10 +15,10 @@ as a curve rather than a single ratio number.
 **Takeaway.** Which points you pay to label is a modeling decision. The evidence printed below is
 PAIRED: each master seed runs BOTH strategies on the same pool, and the receipt is the per-seed
 win/tie/loss record with an exact sign test -- "often no worse and sometimes better" is what this
-synthetic task supports. No pooled multiple is reported: an earlier revision printed "4.14x" by
-comparing one EIG seed against the average of five different random seeds, and the paired replay
-(18 jointly-reaching seeds: 11 wins, 7 ties, 0 losses; seed 1 itself tied 7 vs 7) does not support
-a several-times label-requirement estimate (STAT-RR19-01).
+synthetic task supports. No pooled multiple is reported: an earlier revision printed a pooled
+label-requirement multiple by comparing one EIG seed against the average of five different random
+seeds, and the paired replay (18 jointly-reaching seeds: 11 wins, 7 ties, 0 losses; seed 1 itself
+tied 7 vs 7) does not support a several-times label-requirement estimate (STAT-RR19-01).
 
 **Dataset.** Deliberately synthetic, mirroring ``task_acquire_test.py``'s own setup: a noisy-threshold
 classification task (``y = 1{x > theta_true}``, label noise ``EPS_TRUE``) with a small bootstrap
@@ -189,7 +189,7 @@ def run_demo(
     receipt is the win/tie/loss record over the seeds where both strategies reach the target,
     with the exact one-sided sign test over the discordant seeds. An earlier revision compared
     ONE EIG seed against the pointwise AVERAGE of five different random seeds and printed the
-    result as a "4.14x" label-requirement multiple; the paired design is the honest estimand and
+    result as a pooled label-requirement multiple; the paired design is the honest estimand and
     it supports a qualitative claim only (STAT-RR19-01). Factored out of ``main()`` so tests can
     run the loop at whatever scale they need.
     """
@@ -288,7 +288,7 @@ def print_report(result: dict) -> None:
     else:
         print("=> the paired evidence is inconclusive at the 5% level on this run; add seeds")
     print("   (no pooled multiple is printed: one seed against a seed-average is not a paired")
-    print("    estimand, and the old '4.14x' did not survive the paired replay -- STAT-RR19-01)")
+    print("    estimand, and the old pooled multiple did not survive the paired replay -- STAT-RR19-01)")
 
 
 def main() -> None:
