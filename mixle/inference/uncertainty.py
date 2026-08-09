@@ -370,18 +370,60 @@ def semantic_entropy(
     log_probs: Any = None,
     weights: Any = None,
 ) -> float:
-    """Entropy (nats) over the *meaning* classes of ``samples`` -- the model's predictive uncertainty.
+    """PLUG-IN entropy (nats) over the *meaning* classes of ``samples``.
 
     Sample a stochastic generator (an LLM at temperature) ``n`` times, marginalize the string
     distribution over meaning classes (:func:`marginalize_meaning`), and take the entropy of that
     marginal. High semantic entropy means the model disagrees with itself about *what* the answer is
     (a hallucination signal), as opposed to merely phrasing one answer many ways (which collapses to
-    low entropy). Pass ``log_probs`` (the sequence log-likelihoods) to marginalize with the actual
-    string probabilities rather than by sample counting. Feed the clusters' per-member distributions
-    to :func:`decompose_entropy` for an epistemic/aleatoric split.
+    low entropy).
+
+    APPROXIMATION, NOT A MEASUREMENT OF THE GENERATOR (STAT-RR17-14): with ``n`` counted samples
+    this is the plug-in estimator, biased LOW by about ``(K - 1) / (2n)`` nats (Miller-Madow,
+    ``K`` = observed meaning classes) -- at the eight-draw default an abstention loop actually
+    uses, a uniform ten-class generator's true 2.303 nats measured 1.646 on average (bias
+    -0.656): the bias direction makes a HALLUCINATING model look confident, the exact failure
+    the signal exists to catch. Use :func:`semantic_entropy_receipt` for the estimate WITH its
+    sample size, observed class count, bias estimate, and the bias-corrected value; abstention
+    thresholds should use the corrected value (it errs toward abstaining). Pass ``log_probs``
+    (the sequence log-likelihoods) to marginalize with the actual string probabilities rather
+    than by sample counting. Feed the clusters' per-member distributions to
+    :func:`decompose_entropy` for an epistemic/aleatoric split.
     """
     probs = marginalize_meaning(samples, equivalent, log_probs=log_probs, weights=weights).probs
     return float(_entropy_last(probs))
+
+
+def semantic_entropy_receipt(
+    samples: Sequence[Any],
+    equivalent: Callable[[Any, Any], bool] | None = None,
+    *,
+    log_probs: Any = None,
+    weights: Any = None,
+) -> dict[str, Any]:
+    """:func:`semantic_entropy` with its approximation receipt (STAT-RR17-14).
+
+    Returns ``entropy_plugin`` (the biased-low plug-in), ``entropy_miller_madow`` (bias-corrected
+    by ``(K - 1)/(2n)``; still an estimate), ``n_samples``, ``k_observed``,
+    ``bias_estimate_nats`` (the correction added), and ``method``. The correction applies to the
+    counting estimator; with explicit ``log_probs``/``weights`` the count-based bias formula does
+    not apply and the receipt says so with ``bias_estimate_nats = None``.
+    """
+    clustering = marginalize_meaning(samples, equivalent, log_probs=log_probs, weights=weights)
+    plugin = float(_entropy_last(clustering.probs))
+    n = len(list(samples))
+    k = int(np.asarray(clustering.probs).size)
+    counted = log_probs is None and weights is None
+    bias = (k - 1) / (2.0 * n) if (counted and n > 0) else None
+    return {
+        "entropy_plugin": plugin,
+        "entropy_miller_madow": plugin + bias if bias is not None else plugin,
+        "n_samples": n,
+        "k_observed": k,
+        "bias_estimate_nats": bias,
+        "method": "plug-in over sampled meaning classes"
+        + (" (Miller-Madow correction available)" if counted else " (probability-weighted; MM correction n/a)"),
+    }
 
 
 def decompose_uncertainty(

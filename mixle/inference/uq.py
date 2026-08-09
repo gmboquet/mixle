@@ -115,13 +115,35 @@ class UQResult:
         return entropy
 
     def confident(self, prompt: Any, *, n: int = 8, max_entropy: float | None = None) -> bool:
-        """True when semantic entropy is below the threshold -- else the model disagrees with itself."""
+        """True when BIAS-CORRECTED semantic entropy is below the threshold.
+
+        The plug-in entropy at small ``n`` is biased LOW by ~(K-1)/(2n) nats -- measured -0.656
+        at the 8-draw default on a uniform ten-class generator -- which makes a hallucinating
+        model look confident, the exact failure this gate exists to catch (STAT-RR17-14). The
+        decision therefore uses the Miller-Madow-corrected estimate: still an estimate, but its
+        residual error is far smaller and the correction errs toward ABSTAINING. Use
+        :meth:`semantic_entropy_receipt` to see the plug-in value, the correction, n, and K.
+        """
         thr = self.payload["max_entropy"] if max_entropy is None else float(max_entropy)
         if thr is None:
             raise ValueError("confident() requires calibrated prompts or an explicit max_entropy")
         if not np.isfinite(thr) or thr < 0.0:
             raise ValueError("max_entropy must be a finite non-negative value")
-        return self.semantic_entropy(prompt, n=n) <= thr
+        return float(self.semantic_entropy_receipt(prompt, n=n)["entropy_miller_madow"]) <= thr
+
+    def semantic_entropy_receipt(self, prompt: Any, *, n: int = 8) -> dict[str, Any]:
+        """The entropy estimate WITH its approximation receipt (n, K, bias, corrected value)."""
+        from mixle.inference.uncertainty import semantic_entropy_receipt as _receipt
+
+        gen = self.payload["generate"]
+        equivalent = self.payload.get("equivalent")
+        if isinstance(n, (bool, np.bool_)) or not isinstance(n, (int, np.integer)) or n < 1:
+            raise ValueError("n must be a positive integer")
+        samples = [gen(prompt) for _ in range(int(n))]
+        receipt = _receipt(samples, equivalent)
+        if not np.isfinite(receipt["entropy_plugin"]):
+            raise ValueError("semantic entropy calculation returned a non-finite value")
+        return receipt
 
     def report(self) -> dict[str, Any]:
         """Return uncertainty-quantification metadata and scalar payload fields."""
