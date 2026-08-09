@@ -58,15 +58,29 @@ class GLMContractsTest(unittest.TestCase):
     def test_inverse_gaussian_uses_its_actual_density(self):
         y = np.array([0.7, 1.2, 1.8, 2.5, 3.7, 5.1, 6.9, 9.0])
         result = glm(self.x, y, family="inverse_gaussian")
-        expected = np.sum(
-            -0.5
-            * (
-                np.log(2.0 * np.pi * result.dispersion)
-                + 3.0 * np.log(y)
-                + (y - result.fitted) ** 2 / (result.dispersion * y * result.fitted**2)
+
+        def ig_ll(phi: float) -> float:
+            return float(
+                np.sum(
+                    -0.5
+                    * (
+                        np.log(2.0 * np.pi * phi)
+                        + 3.0 * np.log(y)
+                        + (y - result.fitted) ** 2 / (phi * y * result.fitted**2)
+                    )
+                )
             )
-        )
-        self.assertAlmostEqual(result.log_likelihood, expected)
+
+        # The reported value is the IG density at the dispersion MLE -- the mean unit deviance
+        # sum (y-mu)^2/(y mu^2) / n -- which maximises the likelihood; `dispersion` itself stays
+        # the df-corrected Pearson estimate the SEs use, and evaluating the density there gives
+        # a strictly smaller value (audit G-2: the first fix used the Pearson-form MLE, 0.1 nats
+        # short of the maximum on this very fit).
+        phi_mle = float(np.mean((y - result.fitted) ** 2 / (y * result.fitted**2)))
+        self.assertAlmostEqual(result.log_likelihood, ig_ll(phi_mle))
+        self.assertGreater(result.log_likelihood, ig_ll(result.dispersion))
+        for perturbed in (phi_mle * 0.8, phi_mle * 1.25):
+            self.assertGreater(result.log_likelihood, ig_ll(perturbed))
         self.assertTrue(np.isfinite(result.aic))
 
     def test_information_criteria_require_an_actual_likelihood(self):

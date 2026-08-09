@@ -103,12 +103,13 @@ class SenseSimulateInvertReportTest(unittest.TestCase):
         # indistinguishable from a correct one by that statistic, which is precisely why the risk
         # certificate, not the score, is what decides here.
         tight = describer_at(0.2)
-        self.assertIsNone(tight.describe(inv_model.posterior(y_obs), seed=0))
+        # no per-call seed: certified describers refuse schedule overrides (STAT-RR17-07)
+        self.assertIsNone(tight.describe(inv_model.posterior(y_obs)))
         self.assertFalse(tight._gen.risk_receipt["target_attainable"] is False)  # size is not the blocker now
 
         # Serve at a precision it can. tol=0.5 misses on 0.006 of rows and certifies at 0.077 <= 0.1.
         loose = describer_at(0.5)
-        claim = loose.describe(inv_model.posterior(y_obs), seed=0)
+        claim = loose.describe(inv_model.posterior(y_obs))
         self.assertIsNotNone(claim, msg=str(loose._gen.risk_receipt))
         self.assertTrue(claim.contains(TRUE_DEPTH))
         self.assertLessEqual(loose._gen.risk_receipt["error_upper"], ALPHA)  # the served claim is receipted

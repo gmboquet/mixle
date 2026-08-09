@@ -109,7 +109,8 @@ class CrossModalModelTest(unittest.TestCase):
         # an ensemble of beliefs across records -> epistemic variance decomposition
         means = np.array([m.belief({"A": xA[i]}).mean() for i in range(20)])
         dec = decompose_variance(means)
-        self.assertEqual(dec.kind, "variance")
+        # audit U-5: the split carries only between-mean variance, and the kind label says so
+        self.assertEqual(dec.kind, "variance-epistemic-only")
 
     def test_conformal_prediction_intervals_have_coverage(self):
         # The honest-UQ claim, verified: conformal intervals cover the truth at ~1-alpha on held-out

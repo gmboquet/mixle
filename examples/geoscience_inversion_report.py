@@ -176,7 +176,11 @@ def main() -> None:
         "depth_km", tol=0.1, k=3, alpha=0.2, width_multiples=(1.0, 3.0, 10.0), n_probe=300, seed=0
     )
     describer.calibrate(calibration_set, seed=0)
-    claim = describer.describe(target_post, seed=0)
+    # No per-call seed here: the certificate covers the generator's own prompt-derived serving
+    # schedule, and a certified describer refuses explicit seed overrides (STAT-RR17-07 -- the
+    # certify-low-serve-high mechanism). The call is deterministic anyway: the schedule is a
+    # function of the describer's constructor seed and the prompt.
+    claim = describer.describe(target_post)
 
     print(f"\n[report]    M5 PosteriorDescriber calibrated on {len(calibration_set)} held-out sites through A1")
     if claim is None:

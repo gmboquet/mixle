@@ -447,7 +447,14 @@ def test_low_power_calibration_verdict_does_not_resolve_the_knowledge_gap():
 
 def test_well_powered_calibration_verdict_still_resolves_the_knowledge_gap():
     """Companion to the low-power regression above: the fix must not over-correct into blocking a
-    genuine, well-powered calibration pass from resolving its gap."""
+    genuine, well-powered calibration pass from resolving its gap.
+
+    The fixture's ensemble draws every row independently, and the verifier must be TOLD so
+    (STAT-RR17-08, pass 18): promotion power is measured under the DECLARED dependence regime,
+    and under the fail-safe shared-draws default even k=400 held-out points carry so little
+    exchangeable-column information that the honest verdict is low-power indeterminate. The
+    declaration is the fixture author's statement about construction -- exactly the contract the
+    pass-18 gate fix introduced."""
     catalog = [
         CatalogEntry(
             id="calibration_probe",
@@ -455,7 +462,7 @@ def test_well_powered_calibration_verdict_still_resolves_the_knowledge_gap():
             owner="physics",
             cost=0.1,
             reliability=0.9,
-            verifier=CalibrationVerifier(),
+            verifier=CalibrationVerifier(ensemble_dependence="independent"),
         )
     ]
     proposer = init_decomposition_proposer([["physics"]] * 20)

@@ -241,9 +241,13 @@ class GLMResult:
         se: ``(p,)`` standard errors (model-based, or robust if requested).
         fitted: ``(n,)`` fitted means ``mu``.
         deviance: residual deviance.
-        dispersion: estimated/assumed dispersion ``phi``.
+        dispersion: estimated/assumed dispersion ``phi`` -- the residual-df-corrected (Pearson)
+            estimate the standard errors use, NOT the value the log-likelihood is evaluated at.
         log_likelihood: maximised log-likelihood, or ``None`` when the supplied
-            family/response does not define one.
+            family/response does not define one. For dispersion-estimating families this is
+            evaluated at the family's own dispersion MLE (see ``_dispersion_mle``), which
+            differs from ``dispersion`` by design: the covariance wants the df-corrected
+            estimate, the likelihood wants its maximiser.
         n_iter: IRLS iterations to convergence.
         converged: whether the IRLS convergence criterion was met. Public fits
             currently raise instead of returning this as false.
@@ -339,6 +343,41 @@ class GLMResult:
         if self.dispersion_estimated and self.residual_df is not None and self.residual_df > 0:
             return 2.0 * stats.t.sf(z, self.residual_df)
         return 2.0 * stats.norm.sf(z)
+
+
+def _dispersion_mle(family: Family, y: np.ndarray, mu: np.ndarray, weights: np.ndarray, phi_fallback: float) -> float:
+    """The maximiser of this family's OWN log-likelihood over the dispersion, at fixed ``mu``.
+
+    Each estimate solves d/d(phi) of the weighted log-density sum ``_loglik`` evaluates -- so the
+    reported "maximised log-likelihood" really is evaluated at its maximum:
+
+    * gaussian: ``sum w (y - mu)^2 / sum w`` (the RSS form).
+    * inverse_gaussian: ``sum w (y - mu)^2 / (y mu^2) / sum w`` -- the mean unit deviance. The
+      Pearson form divides by ``V(mu) = mu^3`` instead of ``y mu^2`` and does NOT maximise the IG
+      density (measured 0.1 nats short on an 8-point fit).
+    * gamma: no closed form -- the shape ``nu = 1/phi`` solves ``log(nu) - digamma(nu) = c`` with
+      ``c`` the weighted mean of ``y/mu - log(y/mu) - 1`` (half the mean unit deviance);
+      ``log(nu) - digamma(nu)`` is strictly decreasing from +inf to 0, so the root is unique and
+      bracketed in log-space. A numerically perfect fit (``c ~ 0``) sends ``phi -> 0`` and the
+      likelihood to +inf; the covariance-phi fallback is returned there rather than a fake maximum.
+    """
+    total_weight = float(np.sum(weights))
+    if family.name == "gaussian":
+        return float(np.sum(weights * (y - mu) ** 2) / total_weight)
+    if family.name == "inverse_gaussian":
+        return float(np.sum(weights * (y - mu) ** 2 / (y * mu**2)) / total_weight)
+    if family.name == "gamma":
+        c = float(np.sum(weights * (y / mu - np.log(y / mu) - 1.0)) / total_weight)
+        if not np.isfinite(c) or c <= 1e-12:
+            return phi_fallback
+        from scipy.optimize import brentq
+
+        def gap(log_nu: float) -> float:
+            return log_nu - float(special.digamma(np.exp(log_nu))) - c
+
+        log_nu_hat = brentq(gap, -30.0, 30.0, xtol=1e-12)
+        return float(np.exp(-log_nu_hat))
+    return phi_fallback
 
 
 def _loglik(family: Family, y: np.ndarray, mu: np.ndarray, phi: float, weights: np.ndarray) -> float | None:
@@ -510,12 +549,13 @@ def glm(
         raise RuntimeError("fit produced a non-finite covariance matrix")
     se = np.sqrt(np.clip(np.diag(cov), 0.0, None))
     if fam.estimate_dispersion:
-        # audit G-2: "maximised log-likelihood" must be evaluated at the MLE of the dispersion
-        # (RSS-form / n_active), not the residual-df-corrected phi used for the covariance --
-        # the mixed convention understated ll and, with the uncounted dispersion parameter,
-        # distorted AIC/BIC model selection toward larger mean models
-        n_active = int(np.count_nonzero(active))
-        phi_mle = float(np.sum(w * (y - mu) ** 2 / var) / n_active)
+        # audit G-2: "maximised log-likelihood" must be evaluated at the MLE of the dispersion,
+        # not the residual-df-corrected phi used for the covariance -- the mixed convention
+        # understated ll and, with the uncounted dispersion parameter, distorted AIC/BIC model
+        # selection toward larger mean models. The MLE is FAMILY-SPECIFIC (the Pearson-form
+        # sum (y-mu)^2/V(mu) / n maximises only the Gaussian likelihood; the first cut of this
+        # fix used it for every family and the IG contract test caught the 0.1-nat gap).
+        phi_mle = _dispersion_mle(fam, y, mu, w, phi)
         ll = _loglik(fam, y, mu, phi_mle, w)
     else:
         ll = _loglik(fam, y, mu, phi, w)
