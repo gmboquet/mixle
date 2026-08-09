@@ -12,8 +12,10 @@ the PPL DSL in :mod:`mixle.ppl.regression`):
     robust scale.
   * :func:`quantile_regression` -- the conditional ``tau``-quantile by IRLS on the check loss.
 
-Each fit returns a small result object exposing the coefficients, standard errors, fitted values, a
-``predict`` method, and the relevant goodness-of-fit summary.
+``glm`` returns a result with coefficients, standard errors, and Wald inference; the penalized,
+robust, and quantile fits return coefficients and fits WITHOUT standard errors (their correct
+inferential machinery -- debiased lasso, M-estimator sandwiches, quantile sparsity estimates --
+is deliberately not faked here; audit G-6).
 """
 
 from __future__ import annotations
@@ -262,6 +264,11 @@ class GLMResult:
     cov: np.ndarray
     converged: bool = True
     rank: int | None = None
+    # audit G-1/G-3: inference metadata -- the t reference needs the residual degrees of freedom
+    # when the dispersion was estimated, and per-coefficient Wald inference is only defined when
+    # the design has full rank (the pinv min-norm split otherwise fabricates smaller SEs)
+    residual_df: int | None = None
+    dispersion_estimated: bool = False
     _link: Link = field(repr=False, default=None)
 
     def predict(self, x: np.ndarray, *, offset: np.ndarray | None = None) -> np.ndarray:
@@ -281,26 +288,57 @@ class GLMResult:
         return prediction
 
     @property
+    def _n_parameters(self) -> int:
+        # audit G-2: count what was actually ESTIMATED -- the design rank (not the raw column
+        # count, which penalizes rank-deficient fits for parameters they never estimated) plus
+        # the dispersion when it was estimated (the Gaussian/Gamma/IG families' extra parameter,
+        # previously uncounted, which biased model selection toward larger mean models)
+        rank = self.rank if self.rank is not None else self.coef.size
+        return int(rank + (1 if self.dispersion_estimated else 0))
+
+    @property
     def aic(self) -> float:
-        """Akaike information criterion for the fitted GLM."""
+        """Akaike information criterion: ``-2 ll + 2 k`` with ``k = rank + estimated dispersion``."""
         if self.log_likelihood is None:
             raise ValueError("AIC is unavailable because this fit has no defined likelihood")
-        return float(-2.0 * self.log_likelihood + 2.0 * self.coef.size)
+        return float(-2.0 * self.log_likelihood + 2.0 * self._n_parameters)
 
     @property
     def bic(self) -> float:
-        """Bayesian information criterion for the fitted GLM."""
+        """Bayesian information criterion over the positive-weight observations actually fit."""
         if self.log_likelihood is None:
             raise ValueError("BIC is unavailable because this fit has no defined likelihood")
-        return float(-2.0 * self.log_likelihood + np.log(self.fitted.size) * self.coef.size)
+        n_effective = self.fitted.size if self.residual_df is None else self.residual_df + (self.rank or 0)
+        return float(-2.0 * self.log_likelihood + np.log(n_effective) * self._n_parameters)
+
+    def _require_identifiable(self) -> None:
+        # audit G-3: with rank < p the individual coefficients are NOT identified -- pinv returns
+        # the minimum-norm representative, which splits a shared effect across collinear columns
+        # and shrinks each SE to match (a duplicated column halved both the coefficient and its
+        # SE, leaving z unchanged and the collinearity invisible). Only estimable functions have
+        # sampling distributions there, so per-coefficient Wald inference refuses.
+        if self.rank is not None and self.rank < self.coef.size:
+            raise ValueError(
+                f"per-coefficient Wald inference is undefined: design rank {self.rank} < "
+                f"{self.coef.size} columns, so individual coefficients are not identified (the "
+                "reported minimum-norm split is arbitrary). Drop or combine collinear columns, "
+                "or test an estimable linear combination instead."
+            )
 
     def z_values(self) -> np.ndarray:
-        """Return Wald z statistics for fitted coefficients."""
+        """Return Wald statistics for fitted coefficients (full-rank designs only)."""
+        self._require_identifiable()
         return self.coef / self.se
 
     def p_values(self) -> np.ndarray:
-        """Return two-sided normal-approximation p-values for coefficients."""
-        return 2.0 * stats.norm.sf(np.abs(self.z_values()))
+        """Two-sided Wald p-values: Student-t on the residual df when the dispersion was
+        ESTIMATED (Gaussian/Gamma/inverse-Gaussian -- the plug-in-dispersion normal reference
+        rejected 9% at nominal 5% at n=8; audit G-1), normal otherwise (fixed-dispersion
+        families), both asymptotic in the non-Gaussian mean model."""
+        z = np.abs(self.z_values())
+        if self.dispersion_estimated and self.residual_df is not None and self.residual_df > 0:
+            return 2.0 * stats.t.sf(z, self.residual_df)
+        return 2.0 * stats.norm.sf(z)
 
 
 def _loglik(family: Family, y: np.ndarray, mu: np.ndarray, phi: float, weights: np.ndarray) -> float | None:
@@ -353,11 +391,19 @@ def glm(
         offset: ``(n,)`` known additive term on the linear-predictor scale (e.g. ``log`` exposure).
         weights: ``(n,)`` prior weights.
         max_iter, tol: IRLS controls (convergence on the relative deviance change).
-        robust: if True report Huber--White sandwich standard errors instead of model-based ones.
+        robust: if True report Huber--White (HC0) sandwich standard errors instead of
+            model-based ones. HC0 carries no finite-sample leverage correction, assumes
+            INDEPENDENT observations (it is not cluster-robust), and still requires the mean/link
+            to be correct; small-sample intervals lean narrow (audit G-7).
         theta: the negative-binomial dispersion parameter (``family="negativebinomial"`` only;
             ignored otherwise). Not estimated from data -- pass the value appropriate to your data
             (e.g. from a prior fit or a method-of-moments estimate); the default ``1.0`` is a plain
-            placeholder, not a fitted value.
+            placeholder, not a fitted value. WARNING (audit
+            G-4): the MODEL-BASED standard errors assume ``theta`` is correct -- with the
+            placeholder against true theta = 10, measured SEs were 1.87x the true sampling
+            spread (nominal 95% Wald intervals covering ~100%, tests losing essentially all
+            power). Pass ``robust=True`` unless ``theta`` is trusted, and if ``theta`` came from
+            the same data, remember AIC/BIC do not count it.
 
     Returns:
         A :class:`GLMResult`.
@@ -463,7 +509,16 @@ def glm(
     if not np.all(np.isfinite(cov)):
         raise RuntimeError("fit produced a non-finite covariance matrix")
     se = np.sqrt(np.clip(np.diag(cov), 0.0, None))
-    ll = _loglik(fam, y, mu, phi, w)
+    if fam.estimate_dispersion:
+        # audit G-2: "maximised log-likelihood" must be evaluated at the MLE of the dispersion
+        # (RSS-form / n_active), not the residual-df-corrected phi used for the covariance --
+        # the mixed convention understated ll and, with the uncounted dispersion parameter,
+        # distorted AIC/BIC model selection toward larger mean models
+        n_active = int(np.count_nonzero(active))
+        phi_mle = float(np.sum(w * (y - mu) ** 2 / var) / n_active)
+        ll = _loglik(fam, y, mu, phi_mle, w)
+    else:
+        ll = _loglik(fam, y, mu, phi, w)
     if ll is not None and not np.isfinite(ll):
         raise RuntimeError("fit produced a non-finite log likelihood")
     return GLMResult(
@@ -479,6 +534,8 @@ def glm(
         cov,
         converged=True,
         rank=rank,
+        residual_df=int(np.count_nonzero(active)) - rank,
+        dispersion_estimated=bool(fam.estimate_dispersion),
         _link=lk,
     )
 
@@ -545,7 +602,9 @@ def elastic_net(
     """Elastic-net linear regression by cyclic coordinate descent.
 
     Minimises ``(1/2n) ||y - X b||^2 + alpha ( l1_ratio ||b||_1 + (1 - l1_ratio)/2 ||b||^2 )``.
-    ``l1_ratio = 1`` is the lasso (sparse), ``l1_ratio = 0`` is ridge.
+    ``l1_ratio = 1`` is the lasso (sparse); ``l1_ratio = 0`` is ridge-shaped, but note the
+    ``1/(2n)`` data term means ``elastic_net(X, y, a, 0.0)`` equals ``ridge_regression(X, y, n*a)``
+    -- the penalties differ by a factor of ``n`` when cross-walking alpha (audit G-5).
     """
     if not np.isfinite(alpha) or alpha < 0:
         raise ValueError("alpha must be finite and >= 0")

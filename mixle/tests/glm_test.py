@@ -3,6 +3,7 @@
 import unittest
 
 import numpy as np
+from scipy import stats
 
 from mixle.inference import (
     elastic_net,
@@ -187,3 +188,43 @@ class RobustQuantileTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GlmInferenceHonestyTest(unittest.TestCase):
+    """Audit G-1/G-2/G-3: t reference under estimated dispersion; refusal under rank deficiency."""
+
+    def test_estimated_dispersion_uses_the_t_reference(self):
+        rng = np.random.RandomState(0)
+        x = rng.standard_normal((12, 2))
+        y = 0.6 * x[:, 0] + rng.standard_normal(12)
+        fit = glm(x, y, family="gaussian")
+        self.assertTrue(fit.dispersion_estimated)
+        self.assertEqual(fit.residual_df, 12 - fit.rank)
+        expected = 2.0 * stats.t.sf(np.abs(fit.coef / fit.se), fit.residual_df)
+        np.testing.assert_allclose(fit.p_values(), expected, atol=1e-12)
+
+    def test_h0_level_is_controlled_at_small_n(self):
+        # the plug-in-dispersion normal reference rejected ~9% at nominal 5% at n=8
+        rejections = 0
+        for i in range(1500):
+            rng = np.random.RandomState(100 + i)
+            fit = glm(rng.standard_normal((8, 2)), rng.standard_normal(8), family="gaussian")
+            rejections += fit.p_values()[0] < 0.05
+        self.assertLess(rejections / 1500.0, 0.075)
+
+    def test_rank_deficient_wald_inference_refuses(self):
+        rng = np.random.RandomState(1)
+        base = rng.standard_normal(30)
+        x = np.column_stack([base, base])  # duplicated column: rank < columns
+        y = 3.0 * base + rng.standard_normal(30)
+        fit = glm(x, y, family="gaussian")
+        with self.assertRaisesRegex(ValueError, "not identified"):
+            fit.p_values()
+
+    def test_aic_counts_the_estimated_dispersion(self):
+        rng = np.random.RandomState(2)
+        x = rng.standard_normal((40, 2))
+        y = x[:, 0] + rng.standard_normal(40)
+        fit = glm(x, y, family="gaussian")
+        # k = rank + 1 (dispersion); ll at the MLE dispersion
+        self.assertAlmostEqual(fit.aic, -2.0 * fit.log_likelihood + 2.0 * (fit.rank + 1), places=10)
