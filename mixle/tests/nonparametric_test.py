@@ -228,17 +228,24 @@ class OrderedAndSmallSampleHonestyTest(unittest.TestCase):
         self.assertGreater(rej / used, 0.03)
         self.assertLess(rej / used, 0.075)
 
-    def test_brunner_munzel_reports_the_exact_bound_under_separation(self):
+    def test_brunner_munzel_separation_reports_no_p_under_its_own_null(self):
+        # STAT-RR19-04: the permutation tail 1/C(n, n1) is exact only under FULL exchangeability;
+        # X = +/-1 equiprobable vs Y = 0 satisfies stochastic equality yet separates with
+        # probability 2^(-n1), so the old report rejected 12.5% of that null at nominal 5%.
+        # The p-value is now honestly NaN; the stronger-null bound ships under its true name.
         from math import comb
 
         r = brunner_munzel([1, 2, 3, 4, 5], [10, 11, 12, 13, 14])
         self.assertTrue(np.isinf(r.statistic))
-        self.assertEqual(r.extra["method"], "separation-exact-bound")
-        self.assertAlmostEqual(r.pvalue, 2.0 / comb(10, 5), places=12)
+        self.assertEqual(r.extra["method"], "separation-no-valid-p-under-stochastic-equality")
+        self.assertTrue(np.isnan(r.pvalue))
+        self.assertAlmostEqual(r.extra["p_exchangeability"], 2.0 / comb(10, 5), places=12)
         supported = brunner_munzel([1, 2, 3], [5, 6, 7], alternative="less")
         opposed = brunner_munzel([1, 2, 3], [5, 6, 7], alternative="greater")
-        self.assertAlmostEqual(supported.pvalue, 1.0 / comb(6, 3), places=12)
-        self.assertEqual(opposed.pvalue, 1.0)
+        self.assertTrue(np.isnan(supported.pvalue) and np.isnan(opposed.pvalue))
+        self.assertAlmostEqual(supported.extra["p_exchangeability"], 1.0 / comb(6, 3), places=12)
+        self.assertEqual(opposed.extra["p_exchangeability"], 1.0)
+        self.assertIn("exchangeability", r.extra["note"])
 
     def test_mood_routes_small_two_group_tables_to_fisher(self):
         m = mood_median_test([1.0, 2.0, 3.0, 10.0], [8.0, 9.0, 11.0, 12.0])
@@ -297,3 +304,31 @@ class ExactSmallSampleNullTest(unittest.TestCase):
         x = np.random.RandomState(2).randn(80)
         y = np.random.RandomState(3).randn(90) + 0.5
         self.assertAlmostEqual(ks_2samp(list(x), list(y)).pvalue, scipy_stats.ks_2samp(x, y).pvalue, places=9)
+
+
+class ExactCeilingTest(unittest.TestCase):
+    """STAT-RR19-13/-14: the exact-null ceilings were historical, not computational."""
+
+    def test_wilcoxon_n26_far_tail_is_exact(self):
+        # All-positive untied n=26 got normal p = 8.3e-6 where the exact tail is 2.98e-8 -- a
+        # 278x evidence overstatement. The subset-sum DP is O(n^3); the ceiling is now 300.
+        import scipy.stats as ss
+
+        d = np.arange(1.0, 27.0)
+        r = wilcoxon_signed_rank(d)
+        self.assertEqual(r.method, "exact")
+        self.assertAlmostEqual(r.pvalue, ss.wilcoxon(d, method="exact").pvalue, places=15)
+        rng = np.random.RandomState(0)
+        d2 = rng.standard_normal(60) + 0.3
+        self.assertEqual(wilcoxon_signed_rank(d2).method, "exact")
+        self.assertAlmostEqual(wilcoxon_signed_rank(d2).pvalue, ss.wilcoxon(d2, method="exact").pvalue, places=12)
+
+    def test_runs_test_stays_exact_past_sixty(self):
+        # Exhaustive enumeration of every C(61, 3) sequence measured 9.83% size at nominal 5% on
+        # the normal branch; the closed-form pmf is exact big-integer arithmetic at any n.
+        seq = np.zeros(61)
+        seq[[5, 30, 55]] = 1.0
+        res = runs_test(seq, cutoff=0.5)
+        self.assertEqual(res.extra["method"], "exact")
+        big = np.tile([0.0, 1.0], 150)  # n=300: still exact
+        self.assertEqual(runs_test(big, cutoff=0.5).extra["method"], "exact")

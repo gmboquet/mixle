@@ -3,12 +3,12 @@
 Distribution-free two-sample, k-sample, paired, repeated-measures, ordered-alternative, and
 goodness-of-fit tests, each returning a small result object with the statistic, p-value, and -- where
 standard -- an effect size. Statistics are computed here (mid-ranks for ties); tail probabilities use
-exact small-sample nulls where SciPy / R use them (the Wilcoxon signed-rank enumeration at
-``n <= 25`` without ties or zeros; the two-sample KS at small samples) and the asymptotic reference
-distributions (normal / chi-square / Student-t / Kolmogorov) with tie corrections otherwise. Not
-every asymptotic branch carries a continuity correction (the Page test does not; the runs test is
-EXACT at n <= 60), and the remaining small-sample normal approximations are approximations -- see
-each test's docstring.
+exact nulls wherever they are computable at reasonable cost (the Wilcoxon signed-rank subset-sum
+DP at ``n <= 300`` without ties or zeros; the runs test's closed-form pmf at ``n <= 5000``; the
+two-sample KS at small samples) and the asymptotic reference distributions (normal / chi-square /
+Student-t / Kolmogorov) with tie corrections otherwise. Not every asymptotic branch carries a
+continuity correction (the Page test does not), and the remaining small-sample normal
+approximations are approximations -- see each test's docstring.
 
 .. parsed-literal::
 
@@ -169,11 +169,17 @@ def brunner_munzel(x: Any, y: Any, *, alternative: str = "two-sided", distributi
     relative effect ``p_hat = P(x < y) + 0.5 P(x = y)`` in ``extra``.
 
     Completely separated samples (all of one group beyond all of the other) make the variance
-    estimate 0 and the statistic undefined; instead of refusing, the result then reports the exact
-    permutation bound for that configuration -- one-sided ``p = 1 / C(n1+n2, n1)`` (doubled, capped
-    at 1, for two-sided), ``statistic`` of ``+/-inf``, and ``extra['method'] =
-    'separation-exact-bound'`` -- which is the strongest claim total separation supports at these
-    sample sizes.
+    estimate 0 and the studentized statistic undefined -- and NO valid p-value exists under this
+    test's own null. The permutation tail ``1/C(n1+n2, n1)`` an earlier revision reported is
+    exact only under FULL exchangeability (F = G), a strictly stronger hypothesis than
+    Brunner-Munzel's stochastic equality: with ``X = +/-1`` equiprobable and ``Y = 0``,
+    ``P(X < Y) = 0.5`` holds exactly, yet all-X-below-Y has probability ``2^(-n1)`` -- at
+    ``n1 = 4`` the old report rejected 12.5% of that null at nominal 5% while quoting
+    ``p = 0.0002`` (STAT-RR19-04). The result therefore reports ``pvalue = nan``,
+    ``statistic = +/-inf``, ``extra['method'] = 'separation-no-valid-p-under-stochastic-equality'``,
+    the observed ``p_hat``, and -- for callers prepared to ASSERT the stronger F = G null --
+    ``extra['p_exchangeability']``, the exact permutation bound labeled as exactly that. Use
+    :func:`mann_whitney_u` or a permutation test when exchangeability is the hypothesis you mean.
     """
     _alternative(alternative)
     if distribution not in ("t", "normal"):
@@ -191,24 +197,36 @@ def brunner_munzel(x: Any, y: Any, *, alternative: str = "two-sided", distributi
     if denom <= 0:
         if p_hat_early in (0.0, 1.0):
             # Complete separation: the variance estimate is legitimately 0 and the studentized
-            # statistic undefined. The exact permutation bound for this configuration -- only the
-            # observed label split (out of C(n, n1)) is this extreme -- is the honest report; the
-            # old refusal ("requires non-zero rank variation") misdescribed data with plenty of
-            # between-group rank variation and threw away a decisive answer.
+            # statistic undefined -- and under the test's OWN null (stochastic equality) no
+            # finite-sample p-value exists (STAT-RR19-04: the permutation tail 1/C(n, n1) is
+            # exact only under full exchangeability, and a two-point X against a degenerate Y
+            # satisfies stochastic equality while separating with probability 2^(-n1) -- the
+            # bound rejected 12.5% of that null at nominal 5%). Report the facts and the
+            # STRONGER-null bound under its true name; the p-value itself is honestly NaN.
             from math import comb
 
             one_sided = 1.0 / comb(n1 + n2, n1)
-            direction = 1.0 if p_hat_early == 1.0 else -1.0  # p_hat=1: x below y (w > 0 side)
             if alternative == "two-sided":
-                p = min(1.0, 2.0 * one_sided)
+                p_exch = min(1.0, 2.0 * one_sided)
             elif alternative == "greater":  # x > y: supported only by the p_hat=0 separation
-                p = one_sided if p_hat_early == 0.0 else 1.0
+                p_exch = one_sided if p_hat_early == 0.0 else 1.0
             else:  # 'less'
-                p = one_sided if p_hat_early == 1.0 else 1.0
+                p_exch = one_sided if p_hat_early == 1.0 else 1.0
+            direction = 1.0 if p_hat_early == 1.0 else -1.0  # p_hat=1: x below y (w > 0 side)
             return TestResult(
                 float(direction * np.inf),
-                float(p),
-                {"p_hat": float(p_hat_early), "method": "separation-exact-bound"},
+                float("nan"),
+                {
+                    "p_hat": float(p_hat_early),
+                    "method": "separation-no-valid-p-under-stochastic-equality",
+                    "p_exchangeability": float(p_exch),
+                    "note": (
+                        "complete separation; p_exchangeability is exact ONLY under the stronger "
+                        "full-exchangeability null (F = G), not under Brunner-Munzel's stochastic "
+                        "equality -- assert F = G explicitly (e.g. mann_whitney_u / permutation "
+                        "test) before using it"
+                    ),
+                },
             )
         raise ValueError("Brunner-Munzel test requires non-zero rank variation")
     w = n1 * n2 * (r2m - r1m) / ((n1 + n2) * np.sqrt(denom))
@@ -447,7 +465,7 @@ class WilcoxonResult:
     """Result of a paired or one-sample Wilcoxon signed-rank test.
 
     ``method`` names the null actually used (STAT-RR17-15): ``"exact"`` (full enumeration, the
-    n <= 25 no-ties/no-zeros regime) or ``"normal"`` (tie/zero-corrected approximation).
+    n <= 300 no-ties/no-zeros regime) or ``"normal"`` (tie/zero-corrected approximation).
     ``zscore`` is signed FOR THE STATED ALTERNATIVE -- positive means the data lean toward it --
     so an all-positive sample under ``alternative='greater'`` reports a positive z next to its
     small exact p, where the old min(W+, W-)-based z reported -2.02 beside p = 0.03125 and a
@@ -468,7 +486,7 @@ def wilcoxon_signed_rank(
     """Wilcoxon signed-rank test for paired samples (or one sample vs 0).
 
     Ranks ``|d|`` for ``d = x - y`` (mid-ranks for ties), splits into positive / negative rank sums,
-    and uses the EXACT enumeration null when it is available -- ``n <= 25`` with no zero differences
+    and uses the EXACT subset-sum null when it is available -- ``n <= 300`` with no zero differences
     and no tied ``|d|`` -- and the tie-corrected normal approximation otherwise (the same regime
     switch SciPy and R make; the normal approximation is level-violating at very small ``n``, where
     its smallest attainable p sits below the exact one). ``zero_method='wilcox'`` drops zero
@@ -514,15 +532,19 @@ def wilcoxon_signed_rank(
     )
     if sigma == 0:
         raise ValueError("Wilcoxon signed-rank reference variance is zero")
-    if nn <= 25 and n_zero == 0 and _tie_term(r) == 0.0:
-        # EXACT null (audit NP-1): with no zeros and no ties the ranks are exactly {1..nn} and
-        # T+ is a subset sum, enumerated by the 0/1 convolution prod_k (1 + x^k) -- 2^25 patterns
-        # count exactly in float64. The normal approximation is not merely imprecise here, it is
-        # level-violating: at n=5 the most extreme outcome gets normal p = 0.043 (< 0.05) while
-        # the exact two-sided p is 2/32 = 0.0625, so the realized type-I rate at nominal 5% was
-        # a guaranteed 6.25% (same construction at n=6). SciPy and R both switch to the exact
-        # null in this regime, which is what the module-level conventions sentence promises.
-        # The continuity correction is an approximation repair and does not apply to exact tails.
+    if nn <= 300 and n_zero == 0 and _tie_term(r) == 0.0:
+        # EXACT null (audit NP-1; ceiling raised for STAT-RR19-13): with no zeros and no ties the
+        # ranks are exactly {1..nn} and T+ is a subset sum, computed by the 0/1 convolution
+        # prod_k (1 + x^k) -- an O(n^3) dynamic program, NOT an enumeration, so the historical
+        # n <= 25 ceiling (inherited from SciPy/R's default switch) starved the far tail for no
+        # computational reason: an all-positive untied n = 26 sample got normal p = 8.3e-6 where
+        # the exact tail is 2.98e-8, a 278x overstatement of evidence. Counts are exactly
+        # representable in float64 through n = 53; beyond that the DP carries ~1e-13 relative
+        # rounding, still "exact" to every displayed digit and incomparably tighter than the
+        # normal tail it replaces. The normal approximation is not merely imprecise at small n,
+        # it is level-violating: at n=5 the most extreme outcome gets normal p = 0.043 (< 0.05)
+        # while the exact two-sided p is 2/32 = 0.0625 -- a guaranteed 6.25% type-I rate at
+        # nominal 5%. The continuity correction does not apply to exact tails.
         counts = np.zeros(nn * (nn + 1) // 2 + 1)
         counts[0] = 1.0
         for k in range(1, nn + 1):
@@ -755,10 +777,14 @@ def runs_test(x: Any, *, cutoff: str | float = "median") -> TestResult:
     if var <= 0:
         raise ValueError("runs test requires enough observations for a positive reference variance")
     z = (runs - mu) / np.sqrt(var)
-    if n <= 60:
-        # exact conditional null given (n1, n2): the closed-form run-count pmf (STAT-RR17-16).
+    if n <= 5000:
+        # Exact conditional null given (n1, n2): the closed-form run-count pmf (STAT-RR17-16).
         # P(R = 2k) = 2 C(n1-1, k-1) C(n2-1, k-1) / C(n, n1);
         # P(R = 2k+1) = [C(n1-1, k) C(n2-1, k-1) + C(n1-1, k-1) C(n2-1, k)] / C(n, n1).
+        # The ceiling is a big-integer COST bound, not a validity bound (STAT-RR19-14): the pmf
+        # is exact arbitrary-precision arithmetic at any n, and the old n <= 60 cutoff dropped
+        # sparse just-over-the-edge samples onto the normal branch, where exhaustive enumeration
+        # of every C(61, 3) sequence measured 9.83% size at nominal 5%.
         from math import comb
 
         total = comb(n, n1)
