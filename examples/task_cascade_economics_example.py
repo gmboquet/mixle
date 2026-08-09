@@ -142,7 +142,13 @@ def main() -> None:
     # exact for the overall mean under a fixed-stratum design without a stronger stratumwise
     # null). The conclusion requires BOTH strata to agree at the 5% level.
     evaluation = corpus(seed=901)
-    truth = expensive_teacher(evaluation)
+    # Ground truth for the head-to-head is BOUGHT from the paid teacher and counted on the
+    # odometer like every other label (STAT-RR19-02: an earlier revision called expensive_teacher
+    # directly here, so 300 paid calls bypassed the counter and the demo printed 690 total calls
+    # while 990 occurred). It is a MEASUREMENT cost of this comparison, not a serving cost, and
+    # the print says which.
+    truth = teacher(evaluation)
+    print(f"   bought {len(evaluation)} evaluation labels for the head-to-head (measurement cost, counted)")
     escalated_1 = np.asarray([d is ESCALATE for d in casc.model.batch_decide(evaluation)], dtype=bool)
     escalated_2 = np.asarray([d is ESCALATE for d in casc2.model.batch_decide(evaluation)], dtype=bool)
     print(
@@ -171,7 +177,9 @@ def main() -> None:
     print("\nserve round 2 on the fresh traffic and project the cheapest route at 1,000,000 requests")
     casc2.serve(evaluation)
 
-    plan = casc2.plan(volume=1_000_000, n_label=len(train))
+    # setup labels actually paid: train (300) AND calibration (300) -- projecting with only the
+    # training count understated the amortized setup by $3 at c_label = $0.01 (STAT-RR19-02)
+    plan = casc2.plan(volume=1_000_000, n_label=len(train) + len(cal))
     print(
         f"   recommended: {plan.route}  per-request ${plan.per_request:.5f}  "
         f"saves ${plan.savings_vs_frontier:,.0f} vs frontier-only"

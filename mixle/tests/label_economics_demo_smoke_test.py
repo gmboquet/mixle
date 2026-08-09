@@ -1,11 +1,10 @@
-"""Smoke test for ``examples/label_economics_demo.py``: the label-count-ratio receipt still holds.
+"""Smoke test for ``examples/label_economics_demo.py``: the PAIRED receipt still holds.
 
-Reuses the example's own ``run_demo`` rather than re-deriving the budgeted labeling loop, so this pins
-the actual example against regressions instead of a parallel hand-rolled copy. Runs at a small/fast
-scale (small pool, few random seeds, a narrow target well within budget) so it is fast enough for a
-test suite -- no full-scale run needed, only the qualitative receipt: on this small fixed setup and
-its few seeds, EIG-ranked selection reaches the target held-out likelihood with fewer labels than
-random selection (a labels-to-target acceptance smoke, not an uncertainty-quantified margin).
+Reuses the example's own ``run_demo`` rather than re-deriving the budgeted labeling loop, so this
+pins the actual example against regressions. Small/fast scale; the pinned claim is the example's
+own paired one (STAT-RR19-01): over paired seeds EIG is never worse more often than better, and
+the receipt carries the win/tie/loss record with an exact sign test -- no pooled ratio exists to
+pin anymore, by design.
 """
 
 import sys
@@ -17,21 +16,23 @@ from label_economics_demo import run_demo  # noqa: E402
 
 
 class LabelEconomicsDemoSmokeTest(unittest.TestCase):
-    def test_eig_reaches_target_with_fewer_labels_than_random(self) -> None:
+    def test_paired_receipt_reports_wins_ties_losses_and_sign_test(self) -> None:
         result = run_demo(
             pool_size=150,
             ho_size=300,
             seed_size=6,
             budgets=list(range(6, 31, 2)),
             target=-0.35,
-            n_random_seeds=3,
+            n_seeds=4,
             n_members=12,
         )
 
-        self.assertIsNotNone(result["n_eig"], "EIG-ranked selection never reached the target within budget")
-        self.assertIsNotNone(result["n_random"], "random selection never reached the target within budget")
-        self.assertLess(result["n_eig"], result["n_random"])
-        self.assertGreater(result["ratio"], 1.0)
+        self.assertEqual(result["n_seeds"], 4)
+        self.assertGreaterEqual(result["n_joint"], 1, "no seed reached the target under both strategies")
+        self.assertEqual(result["wins"] + result["ties"] + result["losses"], result["n_joint"])
+        self.assertGreaterEqual(result["wins"], result["losses"])  # qualitative: EIG not worse here
+        self.assertTrue(0.0 <= result["p_sign"] <= 1.0)
+        self.assertNotIn("ratio", result)  # the pooled multiple is gone by design
 
 
 if __name__ == "__main__":

@@ -12,9 +12,13 @@ buy" can run and read directly: a budgeted labeling loop that ends with an expli
 -- plus a small table of held-out likelihood vs. label count for both strategies, so the comparison reads
 as a curve rather than a single ratio number.
 
-**Takeaway.** Which points you pay to label is a modeling decision, and it is worth more than a bigger
-budget. The curve below is the argument: EIG-chosen labels reach a held-out likelihood that random
-labeling needs several times as many labels to match, on the same pool with the same model family.
+**Takeaway.** Which points you pay to label is a modeling decision. The evidence printed below is
+PAIRED: each master seed runs BOTH strategies on the same pool, and the receipt is the per-seed
+win/tie/loss record with an exact sign test -- "often no worse and sometimes better" is what this
+synthetic task supports. No pooled multiple is reported: an earlier revision printed "4.14x" by
+comparing one EIG seed against the average of five different random seeds, and the paired replay
+(18 jointly-reaching seeds: 11 wins, 7 ties, 0 losses; seed 1 itself tied 7 vs 7) does not support
+a several-times label-requirement estimate (STAT-RR19-01).
 
 **Dataset.** Deliberately synthetic, mirroring ``task_acquire_test.py``'s own setup: a noisy-threshold
 classification task (``y = 1{x > theta_true}``, label noise ``EPS_TRUE``) with a small bootstrap
@@ -175,73 +179,116 @@ def run_demo(
     seed_size: int = 6,
     budgets: list[int] | None = None,
     target: float = -0.25,
-    n_random_seeds: int = 5,
+    n_seeds: int = 12,
     n_members: int = 20,
 ) -> dict:
-    """Run the budgeted labeling loop for both strategies and return the receipt.
+    """Run the budgeted labeling loop PAIRED -- both strategies under each master seed.
 
-    Returns a dict with the eig curve, the seed-averaged random curve, ``n_eig``/``n_random`` (smallest
-    budget in ``budgets`` at which each strategy's held-out log-likelihood reaches ``target``, or
-    ``None`` if never reached), and ``ratio`` (``n_random / n_eig``, or ``None`` if either is ``None``).
-    Factored out of ``main()`` so tests (and other callers) can run the core loop directly at whatever
-    scale they need, without going through ``__main__`` script execution.
+    The estimand is per-seed: on the same pool with the same initial labels and RNG stream, does
+    EIG reach the target held-out likelihood with fewer bought labels than random selection? The
+    receipt is the win/tie/loss record over the seeds where both strategies reach the target,
+    with the exact one-sided sign test over the discordant seeds. An earlier revision compared
+    ONE EIG seed against the pointwise AVERAGE of five different random seeds and printed the
+    result as a "4.14x" label-requirement multiple; the paired design is the honest estimand and
+    it supports a qualitative claim only (STAT-RR19-01). Factored out of ``main()`` so tests can
+    run the loop at whatever scale they need.
     """
     if budgets is None:
         budgets = list(range(seed_size, seed_size + 25))
     pool_x, pool_y, ho_x, ho_y = make_task(pool_size=pool_size, ho_size=ho_size)
 
-    eig_curve = budget_curve(
-        pool_x, pool_y, ho_x, ho_y, seed_size, "eig", master_seed=1, budgets=budgets, n_members=n_members
-    )
-
-    random_curves = [
-        budget_curve(
-            pool_x, pool_y, ho_x, ho_y, seed_size, "random", master_seed=100 + s, budgets=budgets, n_members=n_members
+    per_seed = []
+    first_pair: tuple[dict, dict] | None = None
+    for master_seed in range(1, n_seeds + 1):
+        eig_curve = budget_curve(
+            pool_x, pool_y, ho_x, ho_y, seed_size, "eig", master_seed=master_seed, budgets=budgets, n_members=n_members
         )
-        for s in range(n_random_seeds)
-    ]
-    random_avg = {
-        b: float(np.mean([c[b] for c in random_curves if b in c]))
-        for b in budgets
-        if any(b in c for c in random_curves)
-    }
+        random_curve = budget_curve(
+            pool_x,
+            pool_y,
+            ho_x,
+            ho_y,
+            seed_size,
+            "random",
+            master_seed=master_seed,
+            budgets=budgets,
+            n_members=n_members,
+        )
+        if first_pair is None:
+            first_pair = (eig_curve, random_curve)
+        per_seed.append(
+            {
+                "seed": master_seed,
+                "n_eig": _smallest_reaching(eig_curve, budgets, target),
+                "n_random": _smallest_reaching(random_curve, budgets, target),
+            }
+        )
 
-    n_eig = _smallest_reaching(eig_curve, budgets, target)
-    n_random = _smallest_reaching(random_avg, budgets, target)
-    ratio = (n_random / n_eig) if (n_eig and n_random) else None
+    joint = [row for row in per_seed if row["n_eig"] is not None and row["n_random"] is not None]
+    wins = sum(row["n_eig"] < row["n_random"] for row in joint)
+    losses = sum(row["n_eig"] > row["n_random"] for row in joint)
+    ties = len(joint) - wins - losses
+    # exact one-sided sign test over the discordant seeds: the pre-registered alternative is
+    # "EIG needs fewer labels", so the tail is P(wins >= observed | fair coin on discordants)
+    from math import comb
 
+    discordant = wins + losses
+    p_sign = sum(comb(discordant, j) for j in range(wins, discordant + 1)) / 2.0**discordant if discordant else 1.0
+
+    eig_reached = [row["n_eig"] for row in joint]
+    random_reached = [row["n_random"] for row in joint]
     return {
         "budgets": budgets,
         "target": target,
-        "eig_curve": eig_curve,
-        "random_curve": random_avg,
-        "n_eig": n_eig,
-        "n_random": n_random,
-        "ratio": ratio,
+        "eig_curve": first_pair[0] if first_pair else {},
+        "random_curve": first_pair[1] if first_pair else {},
+        "per_seed": per_seed,
+        "n_joint": len(joint),
+        "n_seeds": n_seeds,
+        "wins": wins,
+        "ties": ties,
+        "losses": losses,
+        "p_sign": float(p_sign),
+        "median_n_eig": float(np.median(eig_reached)) if eig_reached else None,
+        "median_n_random": float(np.median(random_reached)) if random_reached else None,
     }
 
 
 def print_report(result: dict) -> None:
     budgets, target = result["budgets"], result["target"]
     eig_curve, random_curve = result["eig_curve"], result["random_curve"]
-    n_eig, n_random, ratio = result["n_eig"], result["n_random"], result["ratio"]
 
     print(f"target held-out log-likelihood: {target}")
-    print(f"{'labels':>8}  {'eig ll':>10}  {'random ll':>10}")
+    print(f"{'labels':>8}  {'eig ll':>10}  {'random ll':>10}   (seed 1's paired curves, for shape)")
     checkpoints = sorted(set(eig_curve) | set(random_curve))
     step = max(1, len(checkpoints) // 8)  # a handful of rows, not every single budget
-    shown = sorted(set(checkpoints[::step]) | {b for b in (n_eig, n_random) if b is not None})
-    for b in shown:
+    for b in checkpoints[::step]:
         eig_v = f"{eig_curve[b]:.4f}" if b in eig_curve else "--"
         rnd_v = f"{random_curve[b]:.4f}" if b in random_curve else "--"
         print(f"{b:>8}  {eig_v:>10}  {rnd_v:>10}")
 
     print()
-    if n_eig is None or n_random is None:
-        print("receipt: target not reached by one or both strategies within budget -- widen `budgets`.")
-        return
-    print(f"receipt: {n_eig} EIG-chosen labels matched {ratio:.2f}x{n_eig} (={n_random}) random labels")
-    print(f"         N_eig={n_eig}  N_random={n_random}  N_random/N_eig={ratio:.2f}x")
+    wins, ties, losses = result["wins"], result["ties"], result["losses"]
+    print(
+        f"PAIRED receipt over {result['n_seeds']} seeds ({result['n_joint']} reached the target "
+        f"under both strategies): EIG needed fewer labels on {wins}, tied on {ties}, "
+        f"more on {losses}; exact one-sided sign test p = {result['p_sign']:.4f}"
+    )
+    if result["median_n_eig"] is not None:
+        print(
+            f"median labels to target: EIG {result['median_n_eig']:.0f} vs random "
+            f"{result['median_n_random']:.0f} (descriptive medians over the jointly-reaching seeds)"
+        )
+    if result["n_joint"] == 0:
+        print("receipt: target not reached under both strategies on any seed -- widen `budgets`.")
+    elif result["p_sign"] < 0.05 and losses == 0:
+        print("=> on this synthetic task EIG was never worse and often better (paired evidence at 5%)")
+    elif result["p_sign"] < 0.05:
+        print("=> EIG needed fewer labels more often than not (paired evidence at 5%)")
+    else:
+        print("=> the paired evidence is inconclusive at the 5% level on this run; add seeds")
+    print("   (no pooled multiple is printed: one seed against a seed-average is not a paired")
+    print("    estimand, and the old '4.14x' did not survive the paired replay -- STAT-RR19-01)")
 
 
 def main() -> None:
