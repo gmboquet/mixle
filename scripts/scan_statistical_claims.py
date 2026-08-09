@@ -223,6 +223,11 @@ def load_manifest() -> dict:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--write", action="store_true", help="regenerate the reviewed manifest")
+    parser.add_argument(
+        "--reviewed-by",
+        default="",
+        help="attestation name recorded in the manifest (required with --write; STAT-RR17-20)",
+    )
     args = parser.parse_args(argv)
 
     sites = scan()
@@ -234,13 +239,28 @@ def main(argv: list[str] | None = None) -> int:
             print(f"        {violation}")
 
     if args.write:
+        import datetime
+
+        reviewer = args.reviewed_by
+        if not reviewer:
+            # STAT-RR17-20: the docstring promised a human audit for new sites, but --write
+            # recorded only paths and classes -- no reviewer, date, or attestation. The
+            # regeneration now refuses to mint a "reviewed inventory" nobody signed.
+            print("--write requires --reviewed-by '<name>': the manifest is a REVIEWED inventory")
+            return 1
         record = {
             "_comment": (
                 "Reviewed inventory of user-facing statistical-claim sites. A new entry means a new "
                 "claim surface: audit its scope, then regenerate with "
-                "python scripts/scan_statistical_claims.py --write. The contract test refuses "
-                "un-inventoried claim sites and inventoried sites whose scope tokens disappear."
+                "python scripts/scan_statistical_claims.py --write --reviewed-by '<name>'. The "
+                "contract test refuses un-inventoried claim sites and inventoried sites whose "
+                "scope tokens disappear."
             ),
+            "attestation": {
+                "reviewed_by": reviewer,
+                "reviewed_on": datetime.date.today().isoformat(),
+                "statement": "each inventoried site's scope language was read against its claim class",
+            },
             "sites": {rel: sorted(set(entry["classes"])) for rel, entry in sites.items()},
         }
         if violations:

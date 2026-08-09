@@ -1,5 +1,10 @@
 {
-  "_comment": "Reviewed inventory of user-facing statistical-claim sites. A new entry means a new claim surface: audit its scope, then regenerate with python scripts/scan_statistical_claims.py --write. The contract test refuses un-inventoried claim sites and inventoried sites whose scope tokens disappear.",
+  "_comment": "Reviewed inventory of user-facing statistical-claim sites. A new entry means a new claim surface: audit its scope, then regenerate with python scripts/scan_statistical_claims.py --write --reviewed-by '<name>'. The contract test refuses un-inventoried claim sites and inventoried sites whose scope tokens disappear.",
+  "attestation": {
+    "reviewed_by": "Grant Boquet (release owner)",
+    "reviewed_on": "2026-08-09",
+    "statement": "each inventoried site's scope language was read against its claim class"
+  },
   "sites": {
     "docs/bring_your_own_model.rst": [
       "certification"
