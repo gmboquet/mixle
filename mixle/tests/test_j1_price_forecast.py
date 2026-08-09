@@ -48,7 +48,7 @@ def test_out_of_sample_coverage_matches_nominal_level():
     total = 0
     for t in range(window, len(full_path)):
         history = full_path[t - window : t]
-        pf = forecast_price(model, history, horizon=1, level=level, cal_frac=0.3, seed=t)
+        pf = forecast_price(model, history, horizon=1, level=level, cal_frac=0.3, seed=t, model_fit_length=0)
         truth = full_path[t]
         hits += int(pf.lo[0] <= truth <= pf.hi[0])
         total += 1
@@ -60,7 +60,7 @@ def test_out_of_sample_coverage_matches_nominal_level():
 def test_paths_are_scenario_draws_for_downstream_monte_carlo_dcf():
     model = _price_hmm(stay=0.9)
     history = _simulate_path(model, n_steps=60, seed=1)
-    pf = forecast_price(model, history, horizon=6, level=0.9, seed=0)
+    pf = forecast_price(model, history, horizon=6, level=0.9, seed=0, model_fit_length=0)
 
     assert isinstance(pf, PriceForecast)
     assert pf.mean.shape == (6,)
@@ -76,8 +76,23 @@ def test_rejects_too_short_horizon_and_bad_cal_frac():
     model = _price_hmm()
     history = _simulate_path(model, n_steps=30, seed=2)
     with pytest.raises(ValueError):
-        forecast_price(model, history, horizon=0)
+        forecast_price(model, history, horizon=0, model_fit_length=0)
     with pytest.raises(ValueError):
-        forecast_price(model, history, horizon=3, cal_frac=0.0)
+        forecast_price(model, history, horizon=3, cal_frac=0.0, model_fit_length=0)
     with pytest.raises(ValueError):
-        forecast_price(model, history, horizon=3, cal_frac=1.0)
+        forecast_price(model, history, horizon=3, cal_frac=1.0, model_fit_length=0)
+
+
+def test_fit_boundary_declaration_is_required_and_disclosed():
+    # STAT-RR17-06: the calibration window cannot be certified held-out without knowing where
+    # fitting stopped; fitting through it flips the receipt to the disclosed in-sample mode.
+    model = _price_hmm(stay=0.95)
+    history = _simulate_path(model, n_steps=80, seed=3)
+    with pytest.raises(ValueError, match="model_fit_length is required"):
+        forecast_price(model, history, horizon=3)
+    clean = forecast_price(model, history, horizon=3, model_fit_length=0)
+    assert any("held_out_exchangeability" in a for a in clean.coverage_assumptions)
+    leaky = forecast_price(model, history, horizon=3, model_fit_length=len(history))
+    assert "IN-SAMPLE CALIBRATION" in leaky.interval_method
+    assert any("optimistic" in a for a in leaky.coverage_assumptions)
+    assert leaky.model_fit_length == len(history)

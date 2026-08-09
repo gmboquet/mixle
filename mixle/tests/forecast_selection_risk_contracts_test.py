@@ -28,7 +28,7 @@ class PriceForecastCalibrationContractTest(unittest.TestCase):
             patch("mixle.inference.price_forecast.forecast", side_effect=fake_forecast),
             patch("mixle.inference.price_forecast.split_conformal", side_effect=fake_split),
         ):
-            result = forecast_price(object(), history, horizon=2, cal_frac=0.5)
+            result = forecast_price(object(), history, horizon=2, cal_frac=0.5, model_fit_length=0)
 
         self.assertEqual(len(captured), 2)
         origins = np.arange(10, 18)
@@ -36,13 +36,13 @@ class PriceForecastCalibrationContractTest(unittest.TestCase):
         np.testing.assert_array_equal(captured[1][1], history[origins + 1])
         self.assertEqual(result.calibration_count, 8)
         self.assertEqual(result.interval_method, "horizon_matched_split_conformal")
-        self.assertIn("held_out_exchangeability", result.coverage_assumptions)
+        self.assertTrue(any("held_out_exchangeability" in a for a in result.coverage_assumptions))
 
     def test_forecast_controls_and_history_shape_are_exact(self):
         with self.assertRaises(TypeError):
-            forecast_price(object(), [1.0, 2.0], horizon=1.5)
+            forecast_price(object(), [1.0, 2.0], horizon=1.5, model_fit_length=0)
         with self.assertRaises(ValueError):
-            forecast_price(object(), [[1.0], [2.0]], horizon=1)
+            forecast_price(object(), [[1.0], [2.0]], horizon=1, model_fit_length=0)
 
 
 class SelectionGuaranteeContractTest(unittest.TestCase):

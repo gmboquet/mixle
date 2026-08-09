@@ -44,6 +44,10 @@ class PriceForecast(NamedTuple):
     calibration_count: int = 0
     interval_method: str = "horizon_matched_split_conformal"
     coverage_assumptions: tuple[str, ...] = ("held_out_exchangeability", "stable_data_generating_process")
+    # STAT-RR17-06: how many leading history observations the fitted model consumed, as DECLARED
+    # by the caller. When the model was fitted through any calibration-window outcome, the
+    # residuals are partly in-sample and the band is optimistic -- the receipt then says so.
+    model_fit_length: int = 0
 
 
 def forecast_price(
@@ -54,6 +58,7 @@ def forecast_price(
     level: float = 0.9,
     cal_frac: float = 0.3,
     seed: int = 0,
+    model_fit_length: int | None = None,
 ) -> PriceForecast:
     """Forecast ``horizon`` steps of a price/cost series with a conformally-calibrated band.
 
@@ -67,6 +72,16 @@ def forecast_price(
             reserved window, a rolling-origin backtest of the same ``horizon``-step-ahead forecast
             is scored against the real outcomes to build the calibration residuals.
         seed: reproducibility for the calibration and requested-horizon Monte Carlo draws.
+        model_fit_length: REQUIRED DECLARATION (STAT-RR17-06) -- how many leading observations of
+            ``history`` the fitted ``model`` consumed (``0`` when it was built from prior
+            knowledge or other data; ``len(history)`` when it was fitted on everything). The
+            rolling-origin calibration reuses the model at every pseudo-origin without refitting,
+            so when the model was fitted through ANY calibration-window outcome the residuals are
+            partly in-sample and the band is optimistic: the receipt's ``interval_method`` and
+            ``coverage_assumptions`` then disclose exactly that instead of claiming a held-out
+            guarantee (a spy measured a first origin at 13 with a model fitted through 19 -- six
+            future outcomes exposed). The clean alternative is refitting per origin, which this
+            API deliberately does not fake by silently truncating your model.
 
     Returns:
         A :class:`PriceForecast` with the calibrated ``(lo, hi)`` band, the point forecast
@@ -94,6 +109,16 @@ def forecast_price(
     if seed < 0:
         raise ValueError("seed must be a non-negative integer")
 
+    if model_fit_length is None:
+        raise ValueError(
+            "model_fit_length is required (STAT-RR17-06): declare how many leading history "
+            "observations the fitted model consumed -- 0 for a model built from prior knowledge "
+            "or other data, len(history) for a model fitted on all of it. The calibration window "
+            "cannot be certified held-out without knowing where fitting stopped."
+        )
+    if isinstance(model_fit_length, bool) or not isinstance(model_fit_length, Integral) or int(model_fit_length) < 0:
+        raise ValueError("model_fit_length must be a non-negative integer")
+    model_fit_length = int(model_fit_length)
     hist = np.asarray(list(history), dtype=np.float64)
     if hist.ndim != 1 or hist.size == 0 or not np.all(np.isfinite(hist)):
         raise ValueError("history must be a non-empty finite one-dimensional series")
@@ -102,6 +127,9 @@ def forecast_price(
     if n_cal_window >= n_hist:
         raise ValueError("history is too short to hold out a calibration window at this horizon")
     cal_start = n_hist - n_cal_window
+    if model_fit_length > n_hist:
+        raise ValueError(f"model_fit_length {model_fit_length} exceeds the history length {n_hist}")
+    fitted_into_calibration = model_fit_length > cal_start
 
     # Recalibration set: a rolling-origin backtest, within the reserved window, of the SAME
     # horizon-step-ahead point forecast the caller is about to receive -- so the residuals are at
@@ -138,6 +166,22 @@ def forecast_price(
     hi = np.asarray([bound[1][0] for bound in bounds], dtype=np.float64)
 
     paths = f.samples if f.samples is not None else np.asarray([])
+    if fitted_into_calibration:
+        method = (
+            "horizon_matched_split_conformal (IN-SAMPLE CALIBRATION: the model was fitted through "
+            f"observation {model_fit_length} > calibration start {cal_start}, so calibration "
+            "residuals are partly in-sample and the band is optimistic)"
+        )
+        assumptions = (
+            "in_sample_calibration_residuals_optimistic (model fitted through calibration outcomes)",
+            "stable_data_generating_process",
+        )
+    else:
+        method = "horizon_matched_split_conformal"
+        assumptions = (
+            "held_out_exchangeability (model fitting stopped before the calibration window, as declared)",
+            "stable_data_generating_process",
+        )
     return PriceForecast(
         mean=test_pred,
         lo=lo,
@@ -145,6 +189,9 @@ def forecast_price(
         paths=paths,
         level=level,
         calibration_count=int(cal_pred.shape[0]),
+        interval_method=method,
+        coverage_assumptions=assumptions,
+        model_fit_length=model_fit_length,
     )
 
 
