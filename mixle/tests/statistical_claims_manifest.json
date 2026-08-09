@@ -24,6 +24,9 @@
     "examples/heterogeneous_correctness_example.py": [
       "competitive"
     ],
+    "examples/label_economics_demo.py": [
+      "comparative"
+    ],
     "examples/mixture_reduction_benchmark.py": [
       "competitive"
     ],
@@ -92,9 +95,6 @@
       "comparative"
     ],
     "mixle/tests/explore_world_test.py": [
-      "comparative"
-    ],
-    "mixle/tests/label_economics_demo_smoke_test.py": [
       "comparative"
     ],
     "mixle/tests/model_enumeration_test.py": [
