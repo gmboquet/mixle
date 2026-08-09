@@ -167,16 +167,38 @@ class SparsePoissonRegimeTest(unittest.TestCase):
         z = effects.mean() / np.sqrt(variances.mean() / 300.0)
         self.assertLess(abs(z), 3.0)
 
-    def test_batch_variances_cannot_correlate_with_the_effects(self):
-        # Pass-19 blocker: per-subject variances built from the SAME counts as the effects let
-        # inverse-variance pooling weight low-y subjects up (corr(1/v, y) = -0.72 measured),
-        # dragging a TRUE-NULL weighted mean to -0.15 and z to -7.8 at n=1000. Arm-level
-        # variances are constant across subjects, so weighting is inert by construction.
+    def test_batch_variances_depend_only_on_subject_totals(self):
+        # Pass-19 blocker: per-subject variances built from the realized counts let inverse-
+        # variance pooling weight low-y subjects up (corr(1/v, y) = -0.72 measured), dragging a
+        # TRUE-NULL weighted mean to -0.15 and z to -7.8 at n=1000. The conditional route's
+        # variance is the exact Binomial(n_i, p_bar) logit variance -- a deterministic function
+        # of the subject's TOTAL alone -- so equal totals get identical weights and the noise
+        # channel is closed by construction.
         rng = np.random.RandomState(11)
-        effects, variances = poisson_lograte_effects(rng.poisson(4.6, 800), 1.0, rng.poisson(13.8, 800), 3.0)
-        self.assertEqual(np.unique(variances).size, 1)
-        weighted = float(np.average(effects, weights=1.0 / variances))
-        self.assertAlmostEqual(weighted, float(effects.mean()), places=12)
+        k_pre = rng.poisson(4.6, 800)
+        k_post = rng.poisson(13.8, 800)
+        effects, variances = poisson_lograte_effects(k_pre, 1.0, k_post, 3.0)
+        totals = (k_pre + k_post)[(k_pre + k_post) > 0]
+        self.assertEqual(effects.shape, totals.shape)
+        for total in np.unique(totals):
+            self.assertEqual(np.unique(variances[totals == total]).size, 1)
+
+    def test_batch_null_is_level_correct_under_heterogeneous_baselines(self):
+        # STAT-RR19-03: the arm-mean debias assumed one shared baseline rate; with half the
+        # subjects at rate 0.1 and half at 9.1 (exposures 1:3) and every true ratio exactly 1 it
+        # rejected 400/400 with mean z -20.75. Conditioning on each subject's total makes the
+        # baseline rate cancel exactly; measured 0.055 at n=1000 (400 reps) after the fix.
+        from mixle.inference.event_study import _random_effects
+
+        rejections = 0
+        reps = 80
+        for rep in range(reps):
+            rs = np.random.RandomState(70_000 + rep)
+            lam = np.where(rs.rand(1000) < 0.5, 0.1, 9.1)
+            y, v = poisson_lograte_effects(rs.poisson(lam), 1.0, rs.poisson(lam * 3.0), 3.0)
+            mean, var, _, _ = _random_effects(y, v)
+            rejections += abs(mean / np.sqrt(var)) > 1.959963984540054
+        self.assertLess(rejections / reps, 0.15)
 
     def test_batch_null_is_level_correct_after_debiasing(self):
         # The Haldane offset is removed by exact pmf-summation debiasing; through the real

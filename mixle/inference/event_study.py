@@ -95,8 +95,14 @@ def gaussian_effect(pre: np.ndarray, post: np.ndarray) -> tuple[float, float]:
 def poisson_lograte_effect(k_pre: float, t_pre: float, k_post: float, t_post: float) -> tuple[float, float]:
     """Per-subject log activity-rate shift ``log(rate_post) - log(rate_pre)`` for event counts over windows.
 
-    ``k_*`` are event counts, ``t_*`` the window durations (or exposures). Uses a Haldane 0.5 correction so
-    zero-count windows are finite; variance is the delta-method log-rate variance ``1/k_post + 1/k_pre``.
+    ``k_*`` are event counts, ``t_*`` the window durations (or exposures). The estimate is the
+    Haldane form ``log((k_post + 0.5)/t_post) - log((k_pre + 0.5)/t_pre)`` with the matching
+    plug-in variance ``1/(k_post + 0.5) + 1/(k_pre + 0.5)`` -- STRICTLY POSITIVE counts only:
+    a zero-count window is REFUSED with a pointer to :func:`poisson_pooled_rate_ratio`
+    (STAT-RR17-09: at zero the Haldane offset is pure correction, not rate information, and
+    pooling it drove a true null to p = 1.37e-12). An earlier version of this docstring claimed
+    zero counts were made finite and quoted a ``1/k`` variance; neither matched the executable
+    contract (STAT-P20-03).
     """
     # A Boolean is not an event count (MXR-080-1899). `float(True)` is 1.0 and `(1.0).is_integer()`
     # is True, so `poisson_lograte_effect(True, t, False, t)` used to be read as "one event in the
@@ -133,44 +139,50 @@ def poisson_lograte_effect(k_pre: float, t_pre: float, k_post: float, t_post: fl
     return effect, var
 
 
-def _haldane_log_moments(mu: float) -> tuple[float, float]:
-    """Exact plug-in mean and variance of ``log(K + 0.5)`` for ``K ~ Poisson(mu)`` by pmf summation."""
-    from scipy.stats import poisson as _poisson
+def _haldane_logit_moments(n: int, p: float) -> tuple[float, float]:
+    """Exact mean and variance of ``log((K+0.5)/(n-K+0.5))`` for ``K ~ Binomial(n, p)`` by pmf summation."""
+    from scipy.stats import binom as _binom
 
-    k_max = int(mu + 15.0 * np.sqrt(mu) + 30.0)
-    k = np.arange(k_max + 1)
-    pmf = _poisson.pmf(k, mu)
-    log_k = np.log(k + 0.5)
-    m1 = float(np.sum(pmf * log_k))
-    m2 = float(np.sum(pmf * log_k * log_k))
+    k = np.arange(n + 1)
+    pmf = _binom.pmf(k, n, p)
+    logit_k = np.log((k + 0.5) / (n - k + 0.5))
+    m1 = float(np.sum(pmf * logit_k))
+    m2 = float(np.sum(pmf * logit_k * logit_k))
     return m1, m2 - m1 * m1
 
 
 def poisson_lograte_effects(k_pre: Any, t_pre: float, k_post: Any, t_post: float) -> tuple[np.ndarray, np.ndarray]:
-    """Per-subject log rate-ratio effects prepared for Gaussian pooling: DEBIASED, with ARM-LEVEL variances.
+    """Per-subject log rate-ratio effects for Gaussian pooling, via the CONDITIONAL (binomial) route.
 
-    Two structural defects of the naive ``log((k + 0.5)/t)`` route are repaired here, both
-    measured on true-null simulations:
+    Conditioning is what makes the heterogeneous estimand reachable. Given a subject's total
+    ``n_i = k_pre,i + k_post,i`` and the common exposure ratio ``r = t_post/t_pre``,
+    ``k_post,i | n_i ~ Binomial(n_i, p_i)`` with ``logit(p_i) = log(theta_i) + log(r)`` -- the
+    subject's BASELINE RATE lambda_i cancels exactly, so nothing here assumes rate homogeneity.
+    Two earlier constructions failed measurably on that point (pass 19 and its pass-20 replay):
 
-    1. Count-estimated weights. Handing each subject the variance ``1/(k_post+0.5) + 1/(k_pre+0.5)``
-       lets inverse-variance pooling weight subjects by the SAME counts that made their effects --
-       measured corr(1/v, y) = -0.72 at arm means (4.6, 13.8), which dragged the weighted mean to
-       -0.150 under a TRUE NULL while the unweighted mean sat at -0.008: z = -7.8 at n = 1000,
-       100% false rejection, flat in n (the pass-19 blocker). The variances returned here are the
-       exact plug-in variance of ``log(K + 0.5)`` at the ARM means -- one value per arm, CONSTANT
-       across subjects -- so inverse-variance weights cannot correlate with the effects, and the
-       DL heterogeneity step still sees genuine between-subject dispersion through Q.
-    2. Haldane mean bias. ``E[log(K + 0.5)] != log(mu)``; the arm-level offset survives pooling and
-       grows in z as sqrt(n) (the pass-17 p = 1.37e-12 mechanism). Each effect is debiased by the
-       EXACT plug-in offset ``(E[log(K+0.5); mu_post] - log(mu_post)) - (same at mu_pre)`` computed
-       by pmf summation -- no series truncation -- leaving only the O(1/(n mu^2)) plug-in residual,
-       which SHRINKS with n.
+    1. Count-estimated per-subject variances (``1/(k+0.5)`` forms) let inverse-variance weights
+       correlate with the effects (measured corr(1/v, y) = -0.72; weighted true-null mean -0.150;
+       z = -7.8 at n = 1000, 100% false rejection, flat in n).
+    2. Debiasing at the pooled ARM means fixed the homogeneous fixture but assumed every subject
+       shares one baseline rate: with half the subjects at rate 0.1 and half at 9.1 (exposures
+       1:3) and every true ratio exactly 1, it rejected 400/400 with mean z -20.75/-65.62 at
+       n = 1e3/1e4 (STAT-RR19-03) -- the nonlinear Haldane bias must be removed at each subject's
+       own law, which is unknowable at the rate scale and EXACT at the conditional scale.
 
-    Measured after both repairs (400 reps each): two-sided rejection at nominal 5% is 0.058-0.062
-    at arm means (4, 4) and (4.6, 13.8) for n = 1000..10000 and 0.040 at n = 100000; z is
-    mean +/-0.08, sd ~1.0 throughout. The 4.0 arm-mean floor remains as the Gaussian-approximation
-    gate; below it, use poisson_pooled_rate_ratio -- exact at any sparsity for the common-ratio
-    estimand.
+    Here each effect is the Haldane conditional logit ``log((k_post+0.5)/(k_pre+0.5)) - log(r)``,
+    debiased by the exact pmf-summation bias of that statistic under ``Binomial(n_i, p_bar)``
+    (``p_bar`` = pooled working proportion; under the null every subject's ``p_i`` equals it
+    exactly, whatever the baseline rates), with the exact conditional variance at ``(n_i, p_bar)``
+    as the pooling variance -- a function of ``n_i`` alone given ``p_bar``, so weights cannot
+    correlate with the per-subject noise. Zero-total subjects (``n_i = 0``) carry no information
+    about a rate ratio and are excluded from the returned arrays.
+
+    Measured on the pass-20 fixtures through the real DL pool: heterogeneous 0.1/9.1 (r = 3) true
+    null rejects 0.055 at n = 1000 (400 reps) and 0.0417 at n = 10000 (1200 reps); the milder 2/8
+    (r = 2) mixture 0.018; the homogeneous 4.6 (r = 3) fixture 0.048; power at a true common
+    ratio of 1.3 on the 2/8 mixture is 1.000. The 4.0 arm-mean floor remains as the pooled-z
+    normal-approximation gate; below it use poisson_pooled_rate_ratio, exact at any sparsity for
+    the common-ratio estimand.
     """
     k_pre_arr = np.asarray(list(k_pre), dtype=float)
     k_post_arr = np.asarray(list(k_post), dtype=float)
@@ -189,11 +201,29 @@ def poisson_lograte_effects(k_pre: Any, t_pre: float, k_post: Any, t_post: float
     for name, arr in (("k_pre", k_pre_arr), ("k_post", k_post_arr)):
         if np.any(arr < 0) or np.any(arr != np.floor(arr)) or not np.all(np.isfinite(arr)):
             raise ValueError(f"{name} must contain non-negative integer counts")
-    elog_pre, vlog_pre = _haldane_log_moments(mean_pre)
-    elog_post, vlog_post = _haldane_log_moments(mean_post)
-    bias = (elog_post - np.log(mean_post)) - (elog_pre - np.log(mean_pre))
-    effects = np.log((k_post_arr + 0.5) / float(t_post)) - np.log((k_pre_arr + 0.5) / float(t_pre)) - bias
-    variances = np.full(k_pre_arr.size, vlog_post + vlog_pre)
+    r = float(t_post) / float(t_pre)
+    totals = (k_pre_arr + k_post_arr).astype(int)
+    keep = totals > 0
+    if not np.any(keep):
+        raise ValueError("every subject has zero events in both windows: no rate-ratio information")
+    k_post_kept = k_post_arr[keep]
+    k_pre_kept = k_pre_arr[keep]
+    totals_kept = totals[keep]
+    p_bar = float(k_post_kept.sum() / totals_kept.sum())
+    p_bar = min(max(p_bar, 1e-12), 1.0 - 1e-12)
+    null_logit = float(np.log(p_bar / (1.0 - p_bar)))
+    bias_by_total: dict[int, float] = {}
+    var_by_total: dict[int, float] = {}
+    for total in np.unique(totals_kept):
+        m1, v = _haldane_logit_moments(int(total), p_bar)
+        bias_by_total[int(total)] = m1 - null_logit
+        var_by_total[int(total)] = v
+    effects = (
+        np.log((k_post_kept + 0.5) / (k_pre_kept + 0.5))
+        - np.log(r)
+        - np.asarray([bias_by_total[int(total)] for total in totals_kept])
+    )
+    variances = np.asarray([var_by_total[int(total)] for total in totals_kept])
     return effects, variances
 
 
