@@ -99,7 +99,7 @@ class WeightedTest(unittest.TestCase):
         cal_y = cal_pred + rng.normal(0, 1, 300)
         test_pred = rng.normal(0, 1, 50)
         s_lo, s_hi = split_conformal(cal_pred, cal_y, test_pred, alpha=0.1)
-        w_lo, w_hi = weighted_conformal(cal_pred, cal_y, test_pred, np.ones(300), alpha=0.1)
+        w_lo, w_hi = weighted_conformal(cal_pred, cal_y, test_pred, np.ones(300), alpha=0.1, test_weight=1.0)
         # within one calibration score of each other (quantile-index convention differs by <=1)
         self.assertLess(abs((w_hi - w_lo)[0] - (s_hi - s_lo)[0]), 0.5)
 
@@ -115,7 +115,7 @@ class WeightedTest(unittest.TestCase):
         test_y = x_test + rng.normal(0, 1, 4000) * (1 + 0.5 * np.abs(x_test))
         # likelihood ratio N(1.5,1)/N(0,1) at the calibration points
         w = np.exp(-((x_cal - 1.5) ** 2) / 2 + (x_cal**2) / 2)
-        lo, hi = weighted_conformal(cal_pred, cal_y, test_pred, w, alpha=0.1)
+        lo, hi = weighted_conformal(cal_pred, cal_y, test_pred, w, alpha=0.1, test_weight=1.0)
         cov = np.mean((test_y >= lo) & (test_y <= hi))
         # weighted conformal keeps coverage close to nominal under the shift
         self.assertGreater(cov, 0.85)
@@ -127,7 +127,7 @@ class WeightedTest(unittest.TestCase):
         cal_pred = np.zeros(3)
         cal_y = np.array([1.0, -1.0, 2.0])
         with self.assertRaises(ValueError):
-            weighted_conformal(cal_pred, cal_y, np.zeros(1), np.array([1.0, 1.0, -5.0]), alpha=0.3)
+            weighted_conformal(cal_pred, cal_y, np.zeros(1), np.array([1.0, 1.0, -5.0]), alpha=0.3, test_weight=1.0)
 
     def test_negative_test_weight_raises(self):
         cal_pred = np.zeros(3)
@@ -140,7 +140,7 @@ class WeightedTest(unittest.TestCase):
         # _conformal_quantile, so it needs -- and previously lacked -- its own n==0 guard: it
         # crashed with a raw IndexError from cdf[-1] instead of a clear ValueError.
         with self.assertRaises(ValueError):
-            weighted_conformal(np.array([]), np.array([]), np.zeros(1), np.array([]), alpha=0.1)
+            weighted_conformal(np.array([]), np.array([]), np.zeros(1), np.array([]), alpha=0.1, test_weight=1.0)
 
     def test_nan_weight_raises_instead_of_silently_returning_the_trivial_interval(self):
         # `np.any(w < 0.0)` does not catch NaN (a NaN comparison is always False), so a NaN weight
@@ -199,9 +199,9 @@ class WeightedTest(unittest.TestCase):
         cal_pred = np.zeros(3)
         cal_y = np.array([1.0, -1.0, 2.0])
         w = np.ones(3)
-        lo0, hi0 = weighted_conformal(cal_pred, cal_y, np.zeros(1), w, alpha=0.0)
+        lo0, hi0 = weighted_conformal(cal_pred, cal_y, np.zeros(1), w, alpha=0.0, test_weight=1.0)
         self.assertTrue(np.isneginf(lo0[0]) and np.isposinf(hi0[0]))
-        lo1, hi1 = weighted_conformal(cal_pred, cal_y, np.zeros(1), w, alpha=1.0)
+        lo1, hi1 = weighted_conformal(cal_pred, cal_y, np.zeros(1), w, alpha=1.0, test_weight=1.0)
         self.assertTrue(np.isfinite(lo1[0]) and np.isfinite(hi1[0]))
 
     def test_zero_total_weight_raises_instead_of_dividing_by_zero(self):
@@ -215,13 +215,40 @@ class WeightedTest(unittest.TestCase):
             weighted_conformal(cal_pred, cal_y, np.zeros(1), np.zeros(3), alpha=0.1, test_weight=0.0)
 
     def test_all_zero_calibration_weights_with_positive_test_weight_still_valid(self):
-        # distinct from the zero-*total*-weight case above: the default test_weight=1.0 keeps the
-        # total positive even when every calibration weight is zero, which is a legitimate (if
+        # distinct from the zero-*total*-weight case above: an explicit positive test_weight keeps
+        # the total positive even when every calibration weight is zero, which is a legitimate (if
         # maximally conservative) "none of my calibration data resembles the test point" answer.
+        # (test_weight is REQUIRED since STAT-RR21-07 -- the old shared default covered 0.589 at
+        # nominal 0.90 on a two-point covariate-shift fixture.)
         cal_pred = np.zeros(3)
         cal_y = np.array([1.0, -1.0, 2.0])
-        lo, hi = weighted_conformal(cal_pred, cal_y, np.zeros(1), np.zeros(3), alpha=0.1)
+        lo, hi = weighted_conformal(cal_pred, cal_y, np.zeros(1), np.zeros(3), alpha=0.1, test_weight=1.0)
         self.assertTrue(np.isneginf(lo[0]) and np.isposinf(hi[0]))
+        with self.assertRaisesRegex(ValueError, "test_weight is required"):
+            weighted_conformal(cal_pred, cal_y, np.zeros(1), np.zeros(3), alpha=0.1)
+
+    def test_per_query_weights_restore_shifted_coverage(self):
+        # STAT-RR21-07 acceptance: the reviewer's two-point covariate-shift fixture -- cal
+        # P(X=1)=.01, deploy Q(X=1)=.50, Y=X, zero predictor, exact ratios -- covered 0.589 with
+        # the retired shared default and 1.000 with each query's own ratio.
+        rng = np.random.RandomState(0)
+        w0, w1 = 0.5 / 0.99, 0.5 / 0.01
+        hits = 0
+        trials = 2000
+        for _ in range(trials):
+            x_cal = (rng.rand(20) < 0.01).astype(float)
+            w_cal = np.where(x_cal == 1.0, w1, w0)
+            x_test = float(rng.rand() < 0.5)
+            lo, hi = weighted_conformal(
+                np.zeros(20),
+                x_cal,
+                np.zeros(1),
+                w_cal,
+                alpha=0.1,
+                test_weight=np.array([w1 if x_test == 1.0 else w0]),
+            )
+            hits += bool(lo[0] <= x_test <= hi[0])
+        self.assertGreaterEqual(hits / trials, 0.90)
 
 
 class ConformalQuantileBoundaryTest(unittest.TestCase):

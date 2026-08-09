@@ -372,5 +372,40 @@ class CrossModalModelTest(unittest.TestCase):
         self.assertTrue(np.isfinite(q))
 
 
+class ConformalSplitScaleTest(unittest.TestCase):
+    """STAT-RR21-06: scales fitted on the ranked residuals broke exchangeability -- joint coverage
+    0.179 at d=50 against the claimed 0.90 floor. The internal split (scale half / rank half)
+    restores it; measured 0.899-0.905 with 100% finite boxes at n_cal=40."""
+
+    @staticmethod
+    def _mocked(dim):
+        from mixle.reason import CrossModalModel
+
+        m = CrossModalModel(latent_dim=2, seed=0)
+        m.add_modality("A", 3).add_modality("Y", dim)
+        m.predict = lambda obs, target: np.zeros(dim)
+        return m
+
+    def test_high_dimensional_joint_coverage_holds(self):
+        rng = np.random.RandomState(0)
+        for dim in (10, 50):
+            model = self._mocked(dim)
+            hits = 0
+            trials = 600
+            for _ in range(trials):
+                cal = {"A": rng.standard_normal((40, 3)), "Y": rng.standard_normal((40, dim))}
+                model.calibrate(cal, "Y", alpha=0.1)
+                lo, hi = model.predict_interval({"A": np.zeros(3)}, "Y")
+                y_new = rng.standard_normal(dim)
+                hits += bool(np.all((y_new >= lo) & (y_new <= hi)))
+            self.assertGreaterEqual(hits / trials, 0.86)  # >= 0.90 - 3 MC sd at 600 trials
+
+    def test_small_holdouts_are_refused_not_self_normalized(self):
+        model = self._mocked(4)
+        rng = np.random.RandomState(1)
+        with self.assertRaisesRegex(ValueError, "at least 4 holdout rows"):
+            model.calibrate({"A": rng.standard_normal((3, 3)), "Y": rng.standard_normal((3, 4))}, "Y")
+
+
 if __name__ == "__main__":
     unittest.main()

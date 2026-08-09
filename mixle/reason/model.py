@@ -356,15 +356,25 @@ class CrossModalModel:
     def calibrate(self, cal_data: dict[str, Any], target: str, *, alpha: float = 0.1) -> CrossModalModel:
         """Calibrate cross-modal prediction of ``target`` for finite-sample coverage (split conformal).
 
-        On a held-out calibration set, predict ``target`` from the *other* modalities, normalize the
-        per-dimension residuals, and take the ``ceil((n+1)(1-alpha))``-th largest max-normalized
-        residual as the conformal radius. Using the *max* over dimensions makes the guarantee
-        **simultaneous**: :meth:`predict_interval` returns a box whose *joint* coverage over the whole
-        target vector is ``>= 1 - alpha`` -- distribution-free, regardless of model specification
-        (unlike the Gaussian posterior interval). Scope: that coverage is marginal over the
-        calibration draw and the query jointly, under exchangeability of the calibration pairs and
-        served traffic; it is not a per-query certainty, and distribution shift voids the statement
-        silently -- re-measure on drifted traffic.
+        The holdout is SPLIT internally: the first half estimates the per-dimension residual
+        scales, and only the second half is scored and ranked against those FIXED scales -- the
+        same fixed scales a fresh query is scored with, which is what makes the query's score
+        exchangeable with the ranked ones. Estimating the scales on the same residuals that get
+        ranked broke that exchangeability, and the break was not cosmetic: with i.i.d. residuals
+        and every stated assumption holding, measured joint coverage at nominal 0.90 was 0.854 in
+        two dimensions, 0.584 in ten, and 0.179 in fifty (STAT-RR21-06) -- each calibration
+        residual helped set its own yardstick, so query scores ran systematically larger than the
+        ranked ones. The radius is the standard conformal ``ceil((n_rank+1)(1-alpha))``-th
+        SMALLEST ranked score (ascending order statistic; an earlier docstring said "largest",
+        contradicting the implementation). Using the *max* over dimensions makes the guarantee
+        **simultaneous**: :meth:`predict_interval` returns a box whose *joint* coverage over the
+        whole target vector is ``>= 1 - alpha`` -- distribution-free, regardless of model
+        specification (unlike the Gaussian posterior interval). Scope: that coverage is marginal
+        over the calibration draw and the query jointly, under exchangeability of the calibration
+        pairs and served traffic; it is not a per-query certainty, and distribution shift voids
+        the statement silently -- re-measure on drifted traffic. The split halves the effective
+        ranking sample, so small holdouts reach ``+inf`` radii (an unbounded box) sooner -- that
+        is the honest price of a guarantee that actually holds.
 
         MXR-080-0279: every split-conformal precondition is validated and the method fails closed
         -- raises without storing anything -- before a single score is computed. Previously,
@@ -421,16 +431,26 @@ class CrossModalModel:
             if not np.all(np.isfinite(X)):
                 raise ValueError(f"modality {name!r} holdout data contains non-finite values (NaN/Inf)")
 
+        if n < 4:
+            raise ValueError(
+                "cross-modal conformal calibration needs at least 4 holdout rows: the holdout is "
+                "split into a scale half and a ranking half (STAT-RR21-06 -- ranking the same "
+                "residuals that set the scales broke score exchangeability and joint coverage)"
+            )
         preds = np.array([self.predict({o: cal_data[o][i] for o in others}, target) for i in range(n)])
         resid = np.abs(y - preds)  # (n, dim)
-        scale = resid.std(axis=0) + 1e-8  # per-dim normalization so no dimension dominates the box
-        scores = (resid / scale).max(axis=1)  # (n,) max-normalized nonconformity -> simultaneous cover
-        k = int(np.ceil((n + 1) * (1.0 - alpha)))
-        # finite-sample split conformal: when ceil((n+1)(1-alpha)) exceeds n, no calibration score
-        # certifies the level -- the radius is +inf (the box is unbounded), not the max score. Mirrors
-        # mixle.scientist.study()'s identical k > n handling for the same split-conformal edge case.
-        # (alpha is now guaranteed in (0, 1) and n >= 1 above, so k >= 1 always -- never <= 0.)
-        q = float(np.sort(scores)[k - 1]) if k <= n else float("inf")
+        # SPLIT (STAT-RR21-06): scales from the first half only; scores ranked on the second half
+        # against those fixed scales, exactly as a fresh query will be scored. Self-normalized
+        # ranking measured joint coverage 0.179 at d=50 against the claimed 0.90 floor.
+        n_scale = n // 2
+        scale = resid[:n_scale].std(axis=0) + 1e-8  # per-dim normalization so no dimension dominates
+        rank_scores = (resid[n_scale:] / scale).max(axis=1)  # max-normalized -> simultaneous cover
+        n_rank = int(rank_scores.shape[0])
+        k = int(np.ceil((n_rank + 1) * (1.0 - alpha)))
+        # finite-sample split conformal: when ceil((n_rank+1)(1-alpha)) exceeds n_rank, no ranked
+        # score certifies the level -- the radius is +inf (the box is unbounded), not the max
+        # score. Mirrors mixle.scientist.study()'s identical k > n handling.
+        q = float(np.sort(rank_scores)[k - 1]) if k <= n_rank else float("inf")
         self._conformal[target] = (float(alpha), scale, q)
         return self
 

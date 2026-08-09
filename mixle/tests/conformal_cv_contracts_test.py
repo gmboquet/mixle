@@ -53,7 +53,9 @@ def test_every_returned_temporal_fold_is_nonempty_and_disjoint():
     [
         lambda: split_conformal(np.array([0.0]), np.array([0.0, 1.0]), np.array([0.0])),
         lambda: split_conformal(np.array([0.0]), np.array([0.0]), np.array([np.nan])),
-        lambda: weighted_conformal(np.array([0.0]), np.array([0.0]), np.array([np.inf]), np.array([1.0])),
+        lambda: weighted_conformal(
+            np.array([0.0]), np.array([0.0]), np.array([np.inf]), np.array([1.0]), test_weight=1.0
+        ),
         lambda: mondrian_conformal(
             np.array([0.0]), np.array([0.0]), np.array([np.nan]), np.array([0.0]), np.array([0])
         ),

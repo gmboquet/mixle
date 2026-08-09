@@ -308,14 +308,20 @@ def weighted_conformal(
     weights: np.ndarray,
     *,
     alpha: float = 0.1,
-    test_weight: float = 1.0,
+    test_weight: float | np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Covariate-shift-weighted split conformal (Tibshirani et al. 2019).
 
     Under covariate shift the calibration and test inputs follow different distributions; reweighting
-    the calibration scores by the likelihood ratio ``w(x) = p_test(x)/p_train(x)`` restores coverage.
-    Uses the weighted empirical quantile of the calibration scores (each test point shares the same
-    ``test_weight`` for its own potential score).
+    the calibration scores by the likelihood ratio ``w(x) = p_test(x)/p_train(x)`` restores coverage
+    -- PER QUERY. The theorem places EACH test point's own ``w(x_test)`` alongside the calibration
+    weights, so ``test_weight`` is REQUIRED and per-query: pass an ``(m,)`` array of each query's
+    likelihood ratio, or a scalar as your explicit assertion that ``w(x_test)`` is the same for
+    every query (true only when the shift does not move the test points' own ratios). An earlier
+    signature defaulted to a single shared scalar and suggested "the mean test/train ratio"; on a
+    two-point-covariate fixture with exact ratios w(0)=0.505 / w(1)=50 that default covered 0.589
+    of 20,000 trials at nominal 0.90 while the query-specific weights covered 1.000
+    (STAT-RR21-07) -- a shared scalar cannot apply the heavy query's required mass.
 
     Args:
         cal_pred, cal_y: calibration predictions and responses.
@@ -323,11 +329,12 @@ def weighted_conformal(
         weights: ``(n,)`` likelihood-ratio weights for the calibration points (need not be normalised).
         alpha: miscoverage level, in ``[0.0, 1.0]`` (``0.0`` and ``1.0`` are valid boundaries, as for
             :func:`_conformal_quantile`).
-        test_weight: the weight assigned to a test point (usually the mean test/train ratio; ``1.0``
-            when weights are self-normalised around the test density).
+        test_weight: ``(m,)`` per-query likelihood ratios ``w(x_test_i)`` (or a scalar, asserting a
+            constant ratio across these queries). Required.
 
     Returns:
-        ``(lower, upper)`` arrays of length ``m`` (a symmetric interval per test point).
+        ``(lower, upper)`` arrays of length ``m`` (a symmetric interval per test point, each at its
+        own weighted quantile).
     """
     alpha = _alpha(alpha)
     cal_pred = _finite_vector("cal_pred", cal_pred)
@@ -341,30 +348,46 @@ def weighted_conformal(
         raise ValueError(
             f"weights, cal_pred, and cal_y must have matching shape, got {w.shape}, {cal_pred.shape}, {cal_y.shape}."
         )
-    if (
-        isinstance(test_weight, (bool, np.bool_))
-        or not isinstance(test_weight, (int, float, np.integer, np.floating))
-        or not np.isfinite(test_weight)
-    ):
+    if test_weight is None:
+        raise ValueError(
+            "test_weight is required: weighted conformal places each query's OWN likelihood ratio "
+            "w(x_test) alongside the calibration weights (STAT-RR21-07 -- a shared default scalar "
+            "covered 0.589 at nominal 0.90). Pass an (m,) array of per-query ratios, or a scalar "
+            "as an explicit assertion that the ratio is constant across these queries."
+        )
+    if isinstance(test_weight, (bool, np.bool_)):
+        raise ValueError("weights and test_weight must be finite numbers, not Booleans.")
+    test_w = np.asarray(test_weight, dtype=float)
+    if test_w.ndim == 0:
+        test_w = np.full(test_pred.shape, float(test_w))
+    if test_w.shape != test_pred.shape:
+        raise ValueError(
+            f"test_weight must be a scalar or match test_pred's shape {test_pred.shape}, got {test_w.shape}."
+        )
+    if not np.all(np.isfinite(test_w)):
         # checked before the sign check below: a NaN comparison is always False, so `NaN < 0.0` would
         # otherwise silently pass as "non-negative" and corrupt every downstream sum/cdf entry.
         raise ValueError("weights and test_weight must be finite.")
-    if np.any(w < 0.0) or test_weight < 0.0:
+    if np.any(w < 0.0) or np.any(test_w < 0.0):
         raise ValueError("weights and test_weight must be non-negative likelihood ratios.")
-    total_weight = float(w.sum() + test_weight)
-    if not np.isfinite(total_weight) or total_weight <= 0.0:
-        # w and test_weight are already known finite and non-negative, so the only way to land here
-        # is every weight (calibration and test) being exactly zero -- a degenerate reweighting that
-        # divides the CDF by zero below (0/0 = NaN) and, since a NaN comparison is always False, was
-        # silently falling through to the "insufficient mass" branch (q = inf) instead of raising.
-        raise ValueError(f"weighted_conformal requires a positive, finite total weight, got {total_weight!r}.")
+    total_weights = w.sum() + test_w  # (m,) -- each query brings its own mass to the denominator
+    if not np.all(np.isfinite(total_weights)) or np.any(total_weights <= 0.0):
+        # w and test_w are already known finite and non-negative, so the only way to land here is
+        # every weight (calibration and that query's own) being exactly zero -- a degenerate
+        # reweighting whose CDF would be 0/0 = NaN, and NaN comparisons silently read as
+        # "insufficient mass" (q = inf) instead of raising.
+        raise ValueError("weighted_conformal requires a positive, finite total weight for every query.")
     scores = np.abs(cal_y - cal_pred)
     order = np.argsort(scores)
     s_sorted = scores[order]
-    w_sorted = w[order]
-    cdf = np.cumsum(w_sorted) / total_weight
-    k = np.searchsorted(cdf, 1.0 - alpha)
-    q = float(s_sorted[min(k, s_sorted.shape[0] - 1)]) if (cdf[-1] >= 1.0 - alpha) else float("inf")
+    cumulative = np.cumsum(w[order])  # (n,) unnormalised calibration mass
+    # Per query i: the smallest score s_(k) with cumulative_k >= (1 - alpha) * (W + w_test_i).
+    # The query's own weight sits at +inf (its score is unknown), so it never helps reach the
+    # level -- exactly the Tibshirani et al. construction, applied at each query's own ratio.
+    required = (1.0 - alpha) * total_weights  # (m,)
+    k = np.searchsorted(cumulative, required)
+    reachable = cumulative[-1] >= required
+    q = np.where(reachable, s_sorted[np.minimum(k, s_sorted.shape[0] - 1)], np.inf)
     return test_pred - q, test_pred + q
 
 
