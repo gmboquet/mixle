@@ -154,9 +154,19 @@ class AnsweredSliceGuard:
     """
 
     def __setattr__(self, name: str, value: Any) -> None:
-        object.__setattr__(self, name, value)
+        # Transactional (STAT-RR21-08): the first cut validated AFTER writing and did not roll
+        # back, so a refused mutation still left correct=2 on the object and a later report()
+        # emitted agreement 2.0 with a [NaN, NaN] interval -- the raise protected nothing.
         if name in _ANSWERED_SLICE_FIELDS and all(hasattr(self, f) for f in _ANSWERED_SLICE_FIELDS):
-            validate_answered_slice_counts(self.eval_rows, self.answered_eval_n, self.answered_eval_correct)
+            previous = getattr(self, name)
+            object.__setattr__(self, name, value)
+            try:
+                validate_answered_slice_counts(self.eval_rows, self.answered_eval_n, self.answered_eval_correct)
+            except ValueError:
+                object.__setattr__(self, name, previous)
+                raise
+        else:
+            object.__setattr__(self, name, value)
 
     def set_answered_slice(self, *, evaluated: int, answered: int, correct: int) -> None:
         """Atomically update the three answered-slice counts after validating the NEW triple."""

@@ -88,12 +88,15 @@ def forecast_price(
         ``mean``, the raw per-step predictive draws ``paths`` (for Monte-Carlo DCF scenario
         analysis downstream), and ``level``.
 
-    What ``(lo, hi)`` is: one MARGINAL interval PER LEAD, each calibrated to ``level`` at its own
-    horizon depth -- NOT a simultaneous band. The probability that the whole realized path stays
-    inside all ``horizon`` intervals at once is materially lower than ``level`` (with dependent
-    leads it can approach ``level`` but never exceeds it; independent misses would compound as
-    ``level**horizon``), so a plotted "tube" must not be read as containing the path with
-    ``level`` probability. For path-level statements, work from ``paths`` directly.
+    What ``(lo, hi)`` is: one MARGINAL interval PER LEAD, each with coverage AT LEAST ``level``
+    at its own horizon depth -- NOT a simultaneous band, and not exact: split conformal is a
+    lower-bound guarantee, so each lead can be conservative. Whole-path coverage is therefore
+    NOT controlled in either direction by the per-lead guarantee: independent misses at exactly
+    nominal would compound toward ``level**horizon``, while conservative, strongly dependent
+    leads can push joint coverage ABOVE ``level`` (an earlier version of this text said joint
+    coverage "never exceeds" the requested level, which is false for a lower-bound guarantee --
+    STAT-RR21-13). A plotted "tube" must not be read as containing the path with ``level``
+    probability in either direction; for path-level statements, work from ``paths`` directly.
 
     Read ``calibration_count`` before trusting the exact level. At the defaults the reserved
     window yields on the order of 20 residuals per lead; split conformal's finite-sample quantile

@@ -788,7 +788,7 @@ def runs_test(x: Any, *, cutoff: str | float = "median") -> TestResult:
         from math import comb
 
         total = comb(n, n1)
-        pmf = {}
+        masses = {}
         for r in range(2, n + 1):
             if r % 2 == 0:
                 k = r // 2
@@ -797,15 +797,33 @@ def runs_test(x: Any, *, cutoff: str | float = "median") -> TestResult:
                 k = (r - 1) // 2
                 mass = comb(n1 - 1, k) * comb(n2 - 1, k - 1) + comb(n1 - 1, k - 1) * comb(n2 - 1, k)
             if mass:
-                pmf[r] = mass / total
-        lower = sum(prob for r, prob in pmf.items() if r <= runs)
-        upper = sum(prob for r, prob in pmf.items() if r >= runs)
-        p = min(1.0, 2.0 * min(lower, upper))
+                masses[r] = mass
+        # Exact BIG-INTEGER tail sums, divided once at the end: summing per-run FLOAT
+        # probabilities underflowed a strictly positive tail to p = 0.0 while the label still
+        # said "exact" (STAT-RR21-16: a one-transition n=1100 sequence has log10 p = -328.9 --
+        # representable! -- and n=5000's true -1502.6 is below float range either way). The
+        # returned float is floored at the smallest positive subnormal when the exact mass is
+        # positive, and extra['log10_pvalue'] always carries the exact magnitude.
+        lower_mass = sum(mass for r, mass in masses.items() if r <= runs)
+        upper_mass = sum(mass for r, mass in masses.items() if r >= runs)
+        tail_mass = min(lower_mass, upper_mass)
+        doubled = min(2 * tail_mass, total)
+        if doubled == 0:
+            p = 0.0
+            log10_p = float("-inf")
+        else:
+            import math
+
+            log10_p = math.log10(doubled) - math.log10(total)
+            p = float(10.0**log10_p) if log10_p > -323.0 else 5e-324
         method = "exact"
     else:
         p = 2.0 * stats.norm.sf(abs(z))
         method = "normal"
-    return TestResult(float(runs), float(min(p, 1.0)), {"runs": runs, "zscore": float(z), "method": method})
+    extra = {"runs": runs, "zscore": float(z), "method": method}
+    if method == "exact":
+        extra["log10_pvalue"] = log10_p
+    return TestResult(float(runs), float(min(p, 1.0)), extra)
 
 
 __all__ = [

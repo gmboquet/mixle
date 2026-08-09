@@ -13,7 +13,7 @@ knowing which subpackage owns which verb::
     m.deploy("artifacts/m")          # durable artifact directory; Model.load() restores it
     m.explain()                      # what it is, what it supports, and how it was proposed
     m.explain_prediction(x)          # exact per-part attribution of one score
-    m.forecast(history, h)           # horizon predictions with calibrated intervals (HMMs)
+    m.forecast(history, h)           # horizon predictions, model-predictive MC intervals (HMMs)
     m.do({field: value})             # graph-surgery intervention (learned Bayesian networks)
     m(x)                             # use it: log-density of an observation
 

@@ -313,10 +313,12 @@ def calibration_null_expectation(
         prob: ``(n,)`` the forecaster's predicted probabilities (outcomes are not needed -- the
             null generates them).
         bins, strategy, norm: the same binning controls you pass to the real statistics.
-        n_sim: null simulations; at least 20, because the reported ``*_q95`` fields are 95th
-            percentiles and an empirical quantile's resolution is ~1/n_sim -- ``n_sim=1`` used
-            to label a single draw a "q95" whose fresh-null exceedance measured 49.8%, not 5%
-            (STAT-RR19-10). The default 500 puts the q95's own MC error near 0.01 quantile units.
+        n_sim: null simulations; at least 20. The ``*_q95`` fields are the CONSERVATIVE order
+            statistic ``X_(ceil(0.95 (n_sim+1)))``, whose fresh-null exceedance is exactly
+            ``1 - k/(n_sim + 1) <= 5%`` at every accepted ``n_sim`` (4.76% at the floor of 20) --
+            the interpolated quantile realized 9.83% there, and ``n_sim=1`` once labeled a single
+            draw a "q95" with 49.8% exceedance (STAT-RR19-10/STAT-RR21-09). The default 500 keeps
+            the threshold's own MC noise small while staying <= 5% by construction.
         seed: RNG seed.
 
     Returns:
@@ -354,11 +356,18 @@ def calibration_null_expectation(
         mce = np.maximum(mce, gap)
     if norm == "l2":
         ece = np.sqrt(ece)
+    # STAT-RR21-09: the interpolated quantile at the accepted n_sim floor realized 9.83%
+    # exceedance while the docstring called it a one-sided 5% test. The conservative order
+    # statistic X_(k) with k = ceil(0.95 (n_sim + 1)) has EXACT fresh-null exceedance
+    # 1 - k/(n_sim + 1) <= 5% at every accepted n_sim (4.76% at the n_sim = 20 floor).
+    k95 = int(np.ceil(0.95 * (n_sim + 1)))
+    ece_sorted = np.sort(ece)
+    mce_sorted = np.sort(mce)
     return {
         "ece": float(ece.mean()),
-        "ece_q95": float(np.quantile(ece, 0.95)),
+        "ece_q95": float(ece_sorted[k95 - 1]),
         "mce": float(mce.mean()),
-        "mce_q95": float(np.quantile(mce, 0.95)),
+        "mce_q95": float(mce_sorted[k95 - 1]),
         "n_sim": float(n_sim),
     }
 

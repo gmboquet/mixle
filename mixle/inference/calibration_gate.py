@@ -60,10 +60,13 @@ class CalibrationVerdict:
     """The outcome of a calibration check with an explicit three-way decision state.
 
     The DECISION is a Monte-Carlo p-value compared to ``1 - null_quantile`` (STAT-RR17-08): the
-    predictive gate uses a swap-randomization null that is exact under per-row exchangeability
-    whatever the cross-row dependence of the ensemble, and SBC uses an i.i.d.-uniform null,
-    which its protocol genuinely satisfies; both use ``(1 + count)/(1 + B)``, level-valid at any
-    replicate count. ``null_threshold`` remains as a descriptive scale and the ``score`` anchor,
+    predictive gate uses a column-swap randomization null that is exact in exactly TWO regimes --
+    the shared-draw ensemble construction (any cross-row dependence of the held-out data), and
+    fully independent rows AND entries -- and in no other: dependent rows with fresh entries
+    break the vector exchangeability and the test false-alarms (measured 83.9% at nominal 5%,
+    STAT-RR19-06/STAT-RR21-10; an earlier version of this docstring claimed exactness "whatever
+    the cross-row dependence"). SBC uses an i.i.d.-uniform null, which its protocol genuinely
+    satisfies. Both use ``(1 + count)/(1 + B)``, level-valid at any replicate count. ``null_threshold`` remains as a descriptive scale and the ``score`` anchor,
     never the decision constant (deciding against that estimated quantile realized levels of
     0.0033-0.0181 at nominal 0.01 depending only on its seed). ``calibration_status`` is
     ``'passed'`` only when the p-value clears alpha AND measured power against the named
@@ -100,6 +103,12 @@ class CalibrationVerdict:
     power_alternative: str = ""
     power_estimate_independent: float = float("nan")
     power_estimate_shared: float = float("nan")
+    # STAT-RR21-11: promotion decides on the one-sided 90% power LCB (and, for tolerance rules,
+    # a null-rejection UCB), so an affirmative verdict must retain that evidence -- a bare point
+    # estimate plus a Boolean could not be reconstructed or audited.
+    power_lower_bound: float = float("nan")
+    power_replicates: int = 0
+    null_rejection_ucb: float = float("nan")
     # the caller's declared ensemble construction; promotion power is gated on THIS regime's
     # executed power, and a misdeclaration is the caller asserting a false premise on record
     declared_dependence: str = ""
@@ -617,6 +626,7 @@ def posterior_predictive_calibration(
     # (STAT-RR19-07: a 60-replicate 0.55 promoted a gate whose 10,000-replay power was 0.4674).
     # NaN (unmeasurable within budget) still never promotes.
     power_sufficient = bool(legacy_power and power_lower_bound >= 0.5)
+    null_upper_bound = float("nan")
     if pit_tol is not None and declared_null_hits is not None:
         # STAT-P20-01: a fixed tolerance carries no level control, and at some tolerances the
         # rule PASSES miscalibration more often than calibration (measured 16.0% vs 5.0% --
@@ -717,6 +727,9 @@ def posterior_predictive_calibration(
         power_alternative=power_alternative,
         power_estimate_independent=power_independent,
         power_estimate_shared=power_shared,
+        power_lower_bound=power_lower_bound,
+        power_replicates=power_replicates,
+        null_rejection_ucb=null_upper_bound,
         declared_dependence=ensemble_dependence,
         coverage_at_reference_null_expectation=coverage_null_expectation,
     )
@@ -875,6 +888,7 @@ def simulation_based_calibration(
     # (STAT-P20-01: null-rejection UCB <= 0.5 and strictly below the power LCB)
     power_lower_bound = _power_lcb(int(power_receipts["hits"]), int(power_receipts["n"]))
     power_sufficient = bool(legacy_power and power_lower_bound >= 0.5)
+    null_upper_bound = float("nan")
     if error_tol is not None and power_receipts["null_hits"] is not None:
         null_upper_bound = _rejection_ucb(int(power_receipts["null_hits"]), int(power_receipts["n_null"]))
         power_sufficient = bool(power_sufficient and null_upper_bound <= 0.5 and power_lower_bound > null_upper_bound)
@@ -929,6 +943,9 @@ def simulation_based_calibration(
         n_null=0 if error_tol is not None else n_null,
         power_estimate=power_estimate,
         power_alternative=power_alternative,
+        power_lower_bound=power_lower_bound,
+        power_replicates=int(power_receipts["n"]),
+        null_rejection_ucb=null_upper_bound,
     )
 
 
@@ -1010,4 +1027,10 @@ class CalibrationVerifier:
             "power_sufficient": verdict.power_sufficient,
             "p_value": verdict.p_value,
             "power_estimate": verdict.power_estimate,
+            # STAT-RR21-11: the evidence promotion actually decided on -- an affirmative pass
+            # must be reconstructible from its own receipt
+            "power_lower_bound": verdict.power_lower_bound,
+            "power_replicates": verdict.power_replicates,
+            "null_rejection_ucb": verdict.null_rejection_ucb,
+            "declared_dependence": verdict.declared_dependence,
         }

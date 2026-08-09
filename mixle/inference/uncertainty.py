@@ -472,23 +472,34 @@ def semantic_entropy_receipt(
     k = int(np.asarray(clustering.probs).size)
     counted = log_probs is None and weights is None
     bias = (k - 1) / (2.0 * n) if (counted and n > 0) else None
-    # Delta-method standard error of the plug-in entropy (STAT-RR19-12's residual: the corrected
-    # estimator's spread was measured at 0.253 across replays with nothing on the receipt saying
-    # so): sqrt((sum p (log p)^2 - H^2) / n). It approximates the sampling SD of the plug-in AND
-    # of the Miller-Madow value (the correction is deterministic given K, so it shifts, not
-    # spreads, to first order); like the correction itself it applies to the counting estimator.
+    # Parametric-bootstrap standard error of the CORRECTED estimator (STAT-RR21-15): the
+    # first-order delta method is sqrt((sum p (log p)^2 - H^2)/n), which DEGENERATES to exactly
+    # 0 whenever the observed classes are equiprobable -- at the n=8 serving default a uniform
+    # eight-class pattern reported se=0.0 while the exact repeated-sampling SD of the corrected
+    # statistic is 0.2534, and a second pattern was 2.5x understated. Resampling counts from the
+    # fitted multinomial and recomputing the Miller-Madow value captures the second-order spread
+    # (including K-hat varying across resamples) that the delta method cannot see; like the
+    # correction itself it applies to the counting estimator only.
     entropy_se = None
     if counted and n > 0:
         probs = np.asarray(clustering.probs, dtype=float)
-        positive = probs[probs > 0]
-        second_moment = float(np.sum(positive * np.log(positive) ** 2))
-        entropy_se = float(np.sqrt(max(second_moment - plugin**2, 0.0) / n))
+        boot_rng = np.random.RandomState(20260809)
+        n_boot = 512
+        counts_boot = boot_rng.multinomial(n, probs / probs.sum(), size=n_boot)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            frac = counts_boot / float(n)
+            log_frac = np.where(counts_boot > 0, np.log(np.where(counts_boot > 0, frac, 1.0)), 0.0)
+        plugin_boot = -np.sum(frac * log_frac, axis=1)
+        k_boot = np.sum(counts_boot > 0, axis=1)
+        mm_boot = plugin_boot + (k_boot - 1) / (2.0 * n)
+        entropy_se = float(mm_boot.std(ddof=1))
     return {
         "entropy_plugin": plugin,
         "entropy_miller_madow": plugin + bias if bias is not None else plugin,
         "n_samples": n,
         "k_observed": k,
         "bias_estimate_nats": bias,
+        # multinomial parametric-bootstrap SE of entropy_miller_madow (None off the counting path)
         "entropy_se_estimate": entropy_se,
         "method": "plug-in over sampled meaning classes"
         + (" (Miller-Madow correction available)" if counted else " (probability-weighted; MM correction n/a)"),
