@@ -166,3 +166,31 @@ class SparsePoissonRegimeTest(unittest.TestCase):
         self.assertEqual(effects.shape, (300,))
         z = effects.mean() / np.sqrt(variances.mean() / 300.0)
         self.assertLess(abs(z), 3.0)
+
+    def test_batch_variances_cannot_correlate_with_the_effects(self):
+        # Pass-19 blocker: per-subject variances built from the SAME counts as the effects let
+        # inverse-variance pooling weight low-y subjects up (corr(1/v, y) = -0.72 measured),
+        # dragging a TRUE-NULL weighted mean to -0.15 and z to -7.8 at n=1000. Arm-level
+        # variances are constant across subjects, so weighting is inert by construction.
+        rng = np.random.RandomState(11)
+        effects, variances = poisson_lograte_effects(rng.poisson(4.6, 800), 1.0, rng.poisson(13.8, 800), 3.0)
+        self.assertEqual(np.unique(variances).size, 1)
+        weighted = float(np.average(effects, weights=1.0 / variances))
+        self.assertAlmostEqual(weighted, float(effects.mean()), places=12)
+
+    def test_batch_null_is_level_correct_after_debiasing(self):
+        # The Haldane offset is removed by exact pmf-summation debiasing; through the real
+        # DL pool the unequal-exposure true null must reject at ~5%, not 49-100%.
+        from mixle.inference.event_study import _random_effects
+
+        rejections = 0
+        reps = 120
+        for rep in range(reps):
+            rs = np.random.RandomState(60_000 + rep)
+            k_pre = rs.poisson(4.6, 1000)
+            k_post = rs.poisson(13.8, 1000)
+            y, v = poisson_lograte_effects(k_pre, 1.0, k_post, 3.0)
+            mean, var, _, _ = _random_effects(y, v)
+            rejections += abs(mean / np.sqrt(var)) > 1.959963984540054
+        self.assertLess(rejections / reps, 0.12)
+        self.assertGreater(rejections / reps, 0.005)
