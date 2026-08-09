@@ -281,6 +281,7 @@ class AdviTargetRankTest(unittest.TestCase):
         self.assertEqual(res.samples.shape, (8, 2))
 
 
+@unittest.skipUnless(HAS_TORCH, "torch not installed")
 class AdviObjectiveHonestyTest(unittest.TestCase):
     """Audit A-1/A-2/A-3: alpha-near-1 band, K disclosure, finiteness-not-convergence wording."""
 
