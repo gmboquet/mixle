@@ -618,7 +618,7 @@ def aalen_additive(x: np.ndarray, time: np.ndarray, event: np.ndarray, *, interc
     The estimator is only defined while the risk-set design has full column rank, and it degrades
     BEFORE it breaks: as the risk set shrinks toward ``p`` subjects the least-squares increments are
     dominated by noise, and the accumulated tail of ``B(t)`` is numerical garbage that LOOKS like a
-    dramatic late effect (measured: max |B| growing 1.4 -> 19 over the last few event times of a null
+    dramatic late effect (measured: ``max abs(B)`` growing 1.4 -> 19 over the last few event times of a null
     design). Estimation therefore STOPS at the first event time whose risk-set design is rank-deficient
     or numerically ill-conditioned -- the standard Aalen practice -- instead of silently substituting a
     minimum-norm solution and accumulating it. ``truncated_at`` reports where (None if the full curve
