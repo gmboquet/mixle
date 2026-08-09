@@ -299,3 +299,52 @@ Also this wave: my ADVI honesty tests gained the torch gate they were missing (c
 have no torch), and the marginalize_meaning docstring indentation that failed sphinx -W is fixed
 (both were CI failures on the a007775a push -- the remaining CI failures on that tip were these
 two plus runner preemptions).
+
+## Pass-20 status (2026-08-09, NO-GO, 9 High / 11 Medium, audited 569b36bf; Q2+Q6 PASS)
+
+Report archived at ~/mixle/review-archive/ (the pass-19 loss lesson); reviewer closed RR19-08
+(the sampling-declaration estimand reduction) and re-verified Q2 end to end. All 20 findings
+fixed this wave, one commit per cluster, each reproduced first:
+
+- STAT-RR19-03 (b37ca54c): the arm-mean debias assumed a shared baseline rate -- heterogeneous
+  0.1/9.1 null rejected 400/400 (z -20/-65). poisson_lograte_effects now takes the CONDITIONAL
+  route: k_post | n_i ~ Binomial(n_i, p) with the baseline rate cancelled EXACTLY; exact
+  pmf-summation bias/variance at (n_i, p_bar); variance a function of the subject's TOTAL only
+  (weights structurally inert); zero-total subjects excluded as informationless. Measured:
+  0.055/0.0417 at n=1e3/1e4 on the blocker fixture (was 1.000), 2/8 mix 0.018, homogeneous
+  0.048, power 1.000 at ratio 1.3. + P20-03: the single-call docstring now states the executable
+  contract (zero counts refused; 1/(k+0.5) variance).
+- STAT-RR19-06/-07 + P20-01 (5b7c2379): reproduced 0.8335 false-alarm on shared-latent rows +
+  fresh entries (calibrated data); exactness claim SCOPED to the two invariance regimes and
+  'independent' now asserts independent ROWS too, with shared-draws named as the remedy.
+  Promotion compares the exact one-sided 90% power LCB with the 0.5 floor (LCB(33,60)=0.459
+  refuses the reviewer's straddle; replicates 60->150). Tolerance modes additionally require
+  informativeness (null UCB <= 0.5 AND < power LCB): the 3.18x-inverted boundary fixture can no
+  longer promote at any draw (12-seed pin).
+- STAT-RR19-04/-13/-14 (f0220333 + follow-up): BM separation reports pvalue=NaN + labeled
+  p_exchangeability (the 1/C bound rejected 12.5% of a stochastic-equality null it claimed to
+  test); Wilcoxon exact ceiling 25 -> 300 (DP was never exponential; n=26 far tail was
+  overstated 278x, now bit-equal to scipy exact); runs test exact 60 -> 5000 (exhaustive C(61,3)
+  size 9.83% -> 0.80%).
+- STAT-RR19-11/-12 (d93ca05c): fit.summary() rows carry mcse = std/sqrt(ESS) (primary surface;
+  verified 1- and 4-chain); semantic-entropy calibration quantiles the SAME Miller-Madow
+  statistic serving gates on, at a RECORDED n that confident() enforces; receipts carry a
+  delta-method entropy SE. Pinned: threshold == MM-quantile replay to 1e-9; the reviewer's
+  pattern accepts at its own scale.
+- STAT-RR19-01/-02 (b240fcc1): label-economics is PAIRED (per-seed win/tie/loss + exact sign
+  test, printed claim gated on it; this machine 7W/4T/0L over 11, p=0.0078; the 4.14x multiple
+  is gone by design); cascade eval labels go through the odometer (total prints 990, was 690)
+  and the projection amortizes all 600 setup labels.
+- Mediums (2b1db534): heterogeneous oracle requires TV <= 0.05 (RR19-05); answered-slice counts
+  guarded on ASSIGNMENT with an atomic multi-field setter (RR19-09); calibration_null_expectation
+  refuses n_sim < 20 (RR19-10); NeuralResult.explain_fit() (RR19-15); explain_fit validates
+  against fit()'s exact vocabulary + sample fits record the EXECUTED route + em->map downgrades
+  record both names (RR19-16); bayes_action(n=1) mc_se is NaN, alternatives carry SEs, quantiles
+  documented plug-in (RR19-17); receipt assumption strings name certification_effective_count
+  (P20-02); forecast() wording is model-predictive with forecast_price as the calibrated route
+  (P20-04).
+- CI: the S-1 docstring's bare |B| read as an undefined reST substitution under CI's docutils
+  (Docs -W failure on 569b36bf); now ``max abs(B)``.
+
+The reviewer again notes no release-owner exact-artifact receipt: publication-time item, stays
+frozen (recurring note since pass 11).
