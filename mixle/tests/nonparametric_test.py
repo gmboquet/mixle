@@ -45,10 +45,20 @@ class AgainstScipyTest(unittest.TestCase):
         self.assertTrue(-1.0 <= r.rank_biserial <= 1.0)
 
     def test_wilcoxon(self):
+        # n=30 untied now routes to the EXACT null (STAT-RR19-13 raised the ceiling past the
+        # historical 25), so the parity reference is scipy's exact method; the approx branch is
+        # covered by the tied fixture below, which cannot go exact.
         r = wilcoxon_signed_rank(self.xp, self.yp)
-        s = ss.wilcoxon(self.xp, self.yp, method="approx")
+        s = ss.wilcoxon(self.xp, self.yp, method="exact")
+        self.assertEqual(r.method, "exact")
         self.assertAlmostEqual(r.statistic, s.statistic, places=9)
         self.assertAlmostEqual(r.pvalue, s.pvalue, places=9)
+        tied = np.round(self.xp - self.yp, 1)
+        tied = tied[tied != 0.0]
+        r2 = wilcoxon_signed_rank(tied)
+        s2 = ss.wilcoxon(tied, method="approx")
+        self.assertEqual(r2.method, "normal")
+        self.assertAlmostEqual(r2.pvalue, s2.pvalue, places=9)
 
     def test_kruskal(self):
         r = kruskal_wallis(*self.groups)
