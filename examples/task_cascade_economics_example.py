@@ -177,9 +177,12 @@ def main() -> None:
     print("\nserve round 2 on the fresh traffic and project the cheapest route at 1,000,000 requests")
     casc2.serve(evaluation)
 
-    # setup labels actually paid: train (300) AND calibration (300) -- projecting with only the
-    # training count understated the amortized setup by $3 at c_label = $0.01 (STAT-RR19-02)
-    plan = casc2.plan(volume=1_000_000, n_label=len(train) + len(cal))
+    # ALL labels the projected round-2 model actually consumed: train (300) + calibration (300)
+    # AND the harvested escalation labels its re-distillation trained on -- they were paid too
+    # (STAT-RR19-02 counted train+cal; STAT-RR21-03: the 56 harvested labels are part of the
+    # all-in cost of the model being projected, not a free byproduct; a forward-looking view
+    # would instead treat ALL setup labels as sunk -- this projection is the all-in one)
+    plan = casc2.plan(volume=1_000_000, n_label=len(train) + len(cal) + len(htexts))
     print(
         f"   recommended: {plan.route}  per-request ${plan.per_request:.5f}  "
         f"saves ${plan.savings_vs_frontier:,.0f} vs frontier-only"

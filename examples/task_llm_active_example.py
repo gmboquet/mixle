@@ -16,9 +16,9 @@ Then the distilled student is wrapped in a calibrated cascade and the realized s
 
 Scope: the LABELING-BUDGET side of the mixle.task loop. ``task_distill_example.py`` is the plain
 distill/save/reload entry point and ``task_cascade_economics_example.py`` prices the serving side;
-``label_economics_demo.py`` explores the acquisition-level EIG/BALD side (note its headline
-ratio compares one EIG run against unrelated random-seed runs -- a demonstration, not a paired
-replicated estimand like the comparison here).
+``label_economics_demo.py`` explores the acquisition-level EIG/BALD side (its receipt is a
+PAIRED per-seed win/tie/loss record with an exact sign test, the same conclusion discipline as
+the comparison here).
 
 Run: ``python examples/task_llm_active_example.py``  (needs ``pip install "mixle[torch]"``).
 """
@@ -110,9 +110,15 @@ def main() -> None:
         f"   discordant pairs: {active_only} active-only vs {random_only} random-only; "
         f"exact paired two-sided p = {p_exact:.3f}"
     )
-    if p_exact < 0.05:
+    if p_exact < 0.05 and active_only > random_only:
+        # STAT-RR21-02: the two-sided p-value is symmetric -- with 0 active-only vs 10
+        # random-only discordances it is 0.002, and gating on p alone announced an active WIN
+        # while every discordance favored random. The claim needs significance AND direction.
         print("   -> active labeling beats random AT THE SAME TRAINING BUDGET on this population")
-        print("      (exact paired evidence at the 5% level)")
+        print("      (exact paired evidence at the 5% level, in the active direction)")
+    elif p_exact < 0.05 and random_only > active_only:
+        print("   -> RANDOM labeling beat active on this run (exact paired evidence at the 5% level):")
+        print("      the discordances favor random; do not read this as an active win")
     else:
         print("   -> the exact paired evidence is INCONCLUSIVE at the 5% level on this run: too few")
         print("      disagreements to distinguish the policies; no superiority claim is made")

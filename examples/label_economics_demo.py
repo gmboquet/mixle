@@ -5,12 +5,10 @@ expected information gain (BALD) against an ensemble of scoreable models. ``mixl
 already proves the underlying claim as a single test assertion (EIG-ranked labeling reaches a target
 held-out likelihood with no more labels than the seeded random baseline in its bounded fixture). This example
 is that same claim, presented as something a human deciding "how many expert labels do I actually need to
-buy" can run and read directly: a budgeted labeling loop that ends with an explicit receipt --
-
-    "N_eig EIG-chosen labels matched k * N_eig random labels"
-
--- plus a small table of held-out likelihood vs. label count for both strategies, so the comparison reads
-as a curve rather than a single ratio number.
+buy" can run and read directly: a budgeted labeling loop that ends with an explicit PAIRED receipt --
+the per-seed win/tie/loss record with its exact sign test -- plus a small table of held-out likelihood
+vs. label count for one paired seed, so the comparison reads as a curve and a paired record, never a
+single pooled ratio (STAT-RR19-01/STAT-RR21-05).
 
 **Takeaway.** Which points you pay to label is a modeling decision. The evidence printed below is
 PAIRED: each master seed runs BOTH strategies on the same pool, and the receipt is the per-seed
