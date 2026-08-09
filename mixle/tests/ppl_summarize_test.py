@@ -72,8 +72,14 @@ class PosteriorSummaryTest(unittest.TestCase):
 
         table = posterior_summary(Fitted())
         self.assertGreater(table["iid"]["ess"], table["sticky"]["ess"])
-        self.assertEqual(table["iid"]["diagnostic_status"], "ok")
-        self.assertEqual(table["sticky"]["diagnostic_status"], "ok")
+        # STAT-RR17-11: a flat draw vector is ONE chain -- mixing is unassessable without R-hat,
+        # so this is never "ok" (the old semantics published parameter numbers under "ok" here);
+        # the mean's Monte Carlo noise floor now travels with the number
+        for name in ("iid", "sticky"):
+            self.assertEqual(table[name]["diagnostic_status"], "single-chain-mixing-unassessable")
+            self.assertIsNotNone(table[name]["mcse"])
+            self.assertGreater(table[name]["mcse"], 0.0)
+        self.assertGreater(table["sticky"]["mcse"], table["iid"]["mcse"])  # fewer effective draws
 
     def test_failed_diagnostics_are_explicit_in_fixed_schema(self):
         class Fitted:
@@ -96,6 +102,7 @@ class PosteriorSummaryTest(unittest.TestCase):
                 "ess",
                 "ess_tail",
                 "r_hat",
+                "mcse",
                 "diagnostic_status",
                 "diagnostic_error",
             },
@@ -107,3 +114,48 @@ class PosteriorSummaryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnusableDiagnosticsAreNeverOkTest(unittest.TestCase):
+    def test_nan_diagnostics_are_labeled_unusable(self):
+        # STAT-RR17-11: NaN split-R-hat / ESS published parameter numbers under "ok"
+        import numpy as np
+
+        class Result:
+            split_rhat = {"theta": float("nan")}
+            bulk_ess = {"theta": 100.0}
+            tail_ess = {"theta": 90.0}
+
+        class Fitted:
+            _result = Result()
+
+            def summary(self):
+                return {"theta": {"mean": 1.0, "std": 0.2}}
+
+            def posterior(self, _name):
+                return np.random.RandomState(0).normal(size=(2, 200))
+
+        row = posterior_summary(Fitted())["theta"]
+        self.assertEqual(row["diagnostic_status"], "unusable")
+        self.assertNotEqual(row["diagnostic_status"], "ok")
+
+    def test_multi_chain_finite_diagnostics_are_ok_with_mcse(self):
+        import numpy as np
+
+        class Result:
+            split_rhat = {"theta": 1.01}
+            bulk_ess = {"theta": 350.0}
+            tail_ess = {"theta": 300.0}
+
+        class Fitted:
+            _result = Result()
+
+            def summary(self):
+                return {"theta": {"mean": 1.0, "std": 0.2}}
+
+            def posterior(self, _name):
+                return np.random.RandomState(0).normal(size=(4, 200))
+
+        row = posterior_summary(Fitted())["theta"]
+        self.assertEqual(row["diagnostic_status"], "ok")
+        self.assertAlmostEqual(row["mcse"], 0.2 / np.sqrt(350.0), places=10)
