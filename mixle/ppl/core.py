@@ -708,6 +708,29 @@ _ROUTE_CAVEATS = {
     "mcmc": ["posterior samples via adaptive random-walk Metropolis"],
     "hmc": ["posterior samples via Hamiltonian Monte Carlo"],
     "nuts": ["posterior samples via the No-U-Turn Sampler"],
+    # STAT-RR18-03: these three previously carried NO caveats, so an accepted approximate fit
+    # explained itself with an empty limitations list
+    "sample": [
+        "DYNAMICALLY selects a concrete sampler (ensemble or NUTS) at fit time -- this pre-fit "
+        "explanation cannot name which; call explain_fit() on the FITTED model for the route "
+        "that actually ran",
+        "posterior samples, not an exact posterior: check R-hat/ESS/MCSE before promoting "
+        "(posterior_summary refuses 'ok' without usable diagnostics)",
+    ],
+    "ensemble": [
+        "affine-invariant ensemble sampler: approximate posterior samples; multimodal or "
+        "high-dimensional targets can mix poorly -- check R-hat/ESS/MCSE before promoting"
+    ],
+    "vmp": [
+        "variational message passing: a factorized (mean-field) approximation that "
+        "systematically UNDERSTATES posterior variance; intervals from it are optimistic"
+    ],
+    "neural": [
+        "neural-conditional fit: a point estimate of the network weights by stochastic "
+        "gradient training -- NOT a MAP under a stated prior and NOT a posterior; no "
+        "uncertainty over the network is quantified",
+        "training is stochastic: two fits differ unless the torch/global seeds are pinned",
+    ],
     "vi": ["variational (Gaussian) posterior approximation"],
 }
 
@@ -2486,7 +2509,20 @@ class RandomVariable:
             )
             route, reason = self._resolve_posterior_ladder(grouped=_grouped_for_posterior)
         elif how != "auto":
+            # STAT-RR18-03: fit() rejects unknown routes; explaining one with a plausible-looking
+            # empty-caveat answer presented a route that cannot run as an accepted plan
+            if how not in _FITTERS and how not in _ROUTE_CAVEATS:
+                raise ValueError(f"unknown fit route {how!r}: fit() would reject it, so there is nothing to explain")
             route, reason = how, f"explicit how={how!r}"
+        elif self._kind == "sample" and any(isinstance(a, _NeuralPredictor) for a in self._args):
+            # STAT-RR18-02: fit() dispatches a Net/Conv/Transformer parameter slot to the neural
+            # route BEFORE the auto ladder, and explain_fit used to miss this branch -- reporting
+            # "MAP point estimate" for a fit that runs stochastic network training and returns a
+            # NeuralResult with no explain_fit of its own
+            route, reason = (
+                "neural",
+                "a neural predictor (Net/Conv/Transformer) in a parameter slot -> neural-conditional fit",
+            )
         elif self._kind == "sample" and any(_expr_has_gather(a) for a in self._args):
             route, reason = "indexed", "a data-indexed latent theta[Field(...)] -> per-observation MAP"
         elif self._kind == "sample" and any(isinstance(a, _LinearPredictor) for a in self._args):
