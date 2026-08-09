@@ -348,3 +348,49 @@ fixed this wave, one commit per cluster, each reproduced first:
 
 The reviewer again notes no release-owner exact-artifact receipt: publication-time item, stays
 frozen (recurring note since pass 11).
+
+## Pass-21 status (2026-08-09, NO-GO, 6 High / 10 Medium / 1 Low, audited e05421ad; Q2+Q6 PASS)
+
+Report archived to ~/mixle/review-archive/ on arrival. Reviewer confirmed 16/20 pass-20 findings
+fully closed on their exact counterexamples (4 partial, reappearing as narrower RR21 items, all
+below). All 17 pass-21 findings fixed this wave, reproduce-first:
+
+- RR21-01 (176a45a1): DL precision weighting labeled as the DiD ATT rejected a TRUE ZERO ATT
+  92-100% (treated effects split +1/-1; weights track the totals that track the effects). The
+  identified path now uses equal-subject-weight means with empirical SEs: falsifier reads mean
+  +0.013 / rejection 0.010, power 1.000 at ATT 0.4; association paths stay DL and are NAMED
+  precision-weighted. + RR21-04: batch/pooled Poisson routes refuse Boolean counts/exposures on
+  the ORIGINAL items.
+- RR21-02/-03/-05 (63afee0a): the active-example win is gated on significance AND direction (a
+  0-vs-10 discordance split printed the active win at p=0.002 before); the 1M projection counts
+  the 56 paid harvested labels; both stale retired-ratio descriptions removed.
+- RR21-06/-07 (144187b6): cross-modal conformal SPLITS its holdout (scales half / rank half) --
+  self-normalized ranking measured joint coverage 0.179 at d=50 vs the claimed 0.90; replayed
+  panel now 1.000 at n_cal=10 (honest +inf boxes) and 0.899-0.905 with 100% finite boxes at
+  n_cal=40; docstring's 'k-th largest' corrected; n<4 refused. weighted_conformal requires
+  PER-QUERY test weights ((m,) array or an explicit constant-ratio scalar) -- the retired shared
+  default covered 0.589 at nominal 0.90 on the two-point shift fixture; per-query covers 1.000.
+- RR21-14 (75d2b799): ensemble walker states were flattened into one fake serial chain -- median
+  bulk ESS was the full 1,600 states, MCSE understated 3.97x, 33% coverage at +/-1.96 MCSE. Each
+  walker is now its own chain (ensembles x walkers as the chain set; single-ensemble fits keep
+  the deliberate NaN R-hat -- walkers interact -- but compute walker-chain ESS/MCSE). Reviewer
+  protocol replayed: SD/MCSE 0.88, coverage 0.96, median bulk ESS 44.
+- RR21-17 (b8d8dac2): the (alpha, delta)-PAC certificate is BOUND to its policy -- calibrate()
+  records the resolved n + generator/equivalence identities and answer() refuses any other
+  (n=1 override on an n=2 certificate had served 60.15% risk against the certified 10%; mutated
+  equivalence 60.4%; swapped generator 100%). Threshold 0.501 reproduced; matched policy serves
+  at 0.0000; assess() stays certificate-free.
+- Mediums (ab4eedd9): transactional AnsweredSliceGuard (refused writes roll back); q95 fields
+  are the conservative order statistic with exceedance <= 1 - k/(n_sim+1) (measured 0.0153 at
+  the n_sim=20 floor, was 0.0983); CalibrationVerdict docstring drops the disproved dependence-
+  free exactness claim; verdicts + verifier receipts retain power LCB / replicates / null UCB /
+  declared regime; lifecycle headline says model-predictive; forecast_price drops the false
+  'never exceeds' joint-coverage claim (lower-bound guarantee: uncontrolled in either
+  direction); entropy_se_estimate is a 512-draw multinomial bootstrap of the MM value (delta
+  method degenerated to 0.0 on equiprobable classes vs exact SD 0.2534); the exact runs test
+  sums big-integer tail masses, floors the float at the smallest subnormal, and always reports
+  log10_pvalue (n=1100 -328.912 and n=5000 -1502.6 reproduced).
+
+CI on aca8c4d4 (the |B| docstring fix): Docs GREEN (fix verified), Security/Extras green, Tests'
+single core/py3.12 failure was a runner preemption (exit 143, zero test failures), rerun
+dispatched. The reviewer's artifact-receipt note remains the frozen publication-time item.
