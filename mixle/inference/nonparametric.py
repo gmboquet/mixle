@@ -85,15 +85,23 @@ class MannWhitneyResult:
     pvalue: float
     rank_biserial: float  # effect size in [-1, 1]
     alternative: str
+    # STAT-RR17-17: the variance is an exchangeability (F = G) variance; testing stochastic
+    # ordering under unequal shapes with it inflates the level (12.5% measured at nominal 5%)
+    null_hypothesis: str = "exchangeability (F = G); use brunner_munzel for unequal shapes"
 
 
 def mann_whitney_u(x: Any, y: Any, *, alternative: str = "two-sided", use_continuity: bool = True) -> MannWhitneyResult:
     """Mann-Whitney U / Wilcoxon rank-sum test for two independent samples.
 
-    Tests whether ``x`` is stochastically greater/less than ``y``. Uses mid-ranks for ties, the
-    tie-corrected normal approximation, and (default) a continuity correction. ``alternative`` is
-    ``'two-sided'``, ``'greater'`` (x > y), or ``'less'``. The rank-biserial correlation
-    ``2*U1/(n1 n2) - 1`` is reported as the effect size.
+    THE NULL IS FULL EXCHANGEABILITY (``F = G``), not mere stochastic equality: the reference
+    variance is derived under identical distributions, so with equal ``P(X > Y) = 1/2`` but
+    UNEQUAL shapes/spreads and unbalanced sample sizes the level is not controlled -- measured
+    12.5% rejection at nominal 5% one way and 1.5% with the sizes reversed (STAT-RR17-17). For
+    the stochastic-equality null under unequal shapes use :func:`brunner_munzel`, whose variance
+    estimates each group separately. Uses mid-ranks for ties, the tie-corrected normal
+    approximation, and (default) a continuity correction. ``alternative`` is ``'two-sided'``,
+    ``'greater'`` (x > y), or ``'less'``. The rank-biserial correlation ``2*U1/(n1 n2) - 1`` is
+    reported as the effect size; ``null_hypothesis`` on the result names the null in force.
     """
     _alternative(alternative)
     x = _sample("x", x)
