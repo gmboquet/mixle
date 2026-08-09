@@ -162,3 +162,28 @@ scoped to the stated sharp null), RR17-10 (Forecast carries method/n_draws/mean_
 no longer claims the mean is exact). Still open: RR17-06 price leakage, RR17-09 sparse Poisson,
 RR17-01/02/03/04/05 examples, RR17-11 MCMC diagnostics/MCSE, RR17-14 semantic entropy receipt,
 RR18-02/03 route explanations, RR17-18/19/20.
+
+### Pass-18 fix wave 3 (2026-08-09): the queue is EMPTY
+
+Every remaining pass-17/18 finding closed, one commit each with adverse verification:
+RR17-06 (forecast_price requires the model_fit_length declaration; held-out receipt states its
+premise, fitting through the window flips to an explicit in-sample-optimistic disclosure);
+RR17-09 (zero-count refusal + arm-mean floor of 4.0 measured from bias curves +
+poisson_pooled_rate_ratio exact conditional route: level 0.041/0.05 over 2000 replicates of the
+reviewer's null, recovers a true ratio 2); RR17-14 (semantic_entropy_receipt with n/K/bias/
+Miller-Madow value; confident() decides on the corrected estimate, bias -0.657 -> -0.365);
+RR17-11 (posterior_summary publishes mcse with every number; 'ok' requires finite diagnostics
+AND multi-chain R-hat; single chain reads mixing-unassessable; NaN reads unusable; the hdi()
+1-D bug that silently failed every multi-chain fit is fixed); RR17-01 (active example all-in
+ledger: 1,020 pre-serving calls decomposed, setup-vs-serving economics, headline reduced);
+RR17-02/03/19 (cascade: counting teacher, all-in $6.563 vs $3.00 with the COSTS-MORE admission,
+harvest genuinely reused — 690 total calls vs 1,312 — per-stratum exact McNemar with the
+stratified estimand stated, synthetic disclosure at top and first print); RR17-04 (heterogeneous
+oracle checks category IDENTITY per matched cluster); RR17-05 (structured-HMM init displaced
+beyond the acceptance bound in example AND test: no-op fits structurally fail; measured 0.15
+fit error from 1.97 init error); RR18-02/03 (neural route explained as neural with honest
+caveats; sample/ensemble/vmp carry real limitations; unknown routes refused like fit());
+RR17-18 (uniform first symbol makes the dependence-only claim exactly true, TV 0.07 -> 0.000);
+RR17-20 (manifest --write requires --reviewed-by; attestation block recorded). Plus wave-2 and
+the round-2 gate fix. ALL 24 pass-17/18 findings now carry fixes; gate = full suite on the
+final tree, then push.
