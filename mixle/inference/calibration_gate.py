@@ -180,6 +180,31 @@ def _uniform_mc_pvalue(t_obs: float, n: int, *, bins: int, n_null: int, seed: in
     return float((1.0 + count) / (1.0 + int(n_null)))
 
 
+def _power_lcb(hits: int, n: int) -> float:
+    """Exact one-sided 90% LOWER confidence bound on a rejection probability from ``hits/n``.
+
+    Promotion compares THIS against the 0.5 floor, never the raw point estimate: pass 20
+    measured a 60-replicate point estimate of 0.55 promoting a gate whose true power over
+    10,000 replays was 0.4674 -- a noisy estimate straddling the floor promotes ~half the time
+    exactly when the truth is below it. The Clopper-Pearson bound at 33/60 is 0.458, which
+    correctly refuses.
+    """
+    from scipy.stats import beta as _beta
+
+    if n <= 0:
+        return 0.0
+    return 0.0 if hits <= 0 else float(_beta.ppf(0.10, hits, n - hits + 1))
+
+
+def _rejection_ucb(hits: int, n: int) -> float:
+    """Exact one-sided 90% UPPER confidence bound on a rejection probability from ``hits/n``."""
+    from scipy.stats import beta as _beta
+
+    if n <= 0:
+        return 1.0
+    return 1.0 if hits >= n else float(_beta.ppf(0.90, hits + 1, n - hits))
+
+
 def _column_swap_pvalue(y: np.ndarray, ens: np.ndarray, *, bins: int, pit_seed: Any) -> tuple[float, float]:
     """Exact randomization p-value for PIT uniformity under COLUMN exchangeability.
 
@@ -219,7 +244,7 @@ def _measured_power(
     n_alternative: int = 200,
     seed: int = 20260808,
     error_tol: float | None = None,
-) -> tuple[float, str]:
+) -> tuple[float, str, dict[str, Any]]:
     """Measured power of the SBC decision ACTUALLY IN USE at this sample size.
 
     Against ONE named canonical alternative -- predictive dispersion 0.8x the truth, PIT values
@@ -241,20 +266,29 @@ def _measured_power(
         pit_calibration_error(_norm.cdf(rs.standard_normal(int(n)) / 0.8), bins=bins) for _ in range(int(n_alternative))
     ]
     if error_tol is not None:
-        power = float(np.mean([t > error_tol for t in alt_stats]))
-        null_level = float(np.mean(null_stats > error_tol))
+        tol_hits = int(np.sum([t > error_tol for t in alt_stats]))
+        null_hits = int(np.sum(null_stats > error_tol))
+        power = float(tol_hits / float(n_alternative))
+        null_level = float(null_hits / null_stats.size)
         alternative = (
             "predictive dispersion 0.8x truth (PIT = Phi(z/0.8)); executed rule: statistic > "
             f"error_tol={error_tol:g}, whose MEASURED null rejection rate here is {null_level:.3f} "
             "(a fixed tolerance carries no built-in level control)"
         )
-        return power, alternative
+        receipts = {
+            "hits": tol_hits,
+            "n": int(n_alternative),
+            "null_hits": null_hits,
+            "n_null": int(null_stats.size),
+        }
+        return power, alternative, receipts
     hits = 0
     for t_alt in alt_stats:
         count = int(null_stats.size - np.searchsorted(null_stats, t_alt, side="left"))
         if (1.0 + count) / (1.0 + null_stats.size) <= alpha:
             hits += 1
-    return float(hits / float(n_alternative)), "predictive dispersion 0.8x truth (PIT = Phi(z/0.8))"
+    receipts = {"hits": int(hits), "n": int(n_alternative), "null_hits": None, "n_null": None}
+    return float(hits / float(n_alternative)), "predictive dispersion 0.8x truth (PIT = Phi(z/0.8))", receipts
 
 
 def _measured_gate_power(
@@ -263,11 +297,11 @@ def _measured_gate_power(
     *,
     bins: int,
     alpha: float,
-    n_alternative: int = 60,
+    n_alternative: int = 150,
     budget_ops: float = 6.5e9,
     seed: int = 20260809,
     pit_tol: float | None = None,
-) -> tuple[float, float, str]:
+) -> tuple[float, float, str, dict[str, Any]]:
     """Power of the ACTUAL column-swap decision, executed under BOTH supported dependence regimes.
 
     Pass 18 measured the previous helper -- an independent-rows approximation that never executed
@@ -316,18 +350,39 @@ def _measured_gate_power(
             f"(independent) / {null_sh / n_tol:.3f} (shared-column) -- a fixed tolerance "
             "carries no built-in level control"
         )
-        return float(hits_ind / n_tol), float(hits_sh / n_tol), alternative
+        receipts = {
+            "n": n_tol,
+            "hits_independent": int(hits_ind),
+            "hits_shared": int(hits_sh),
+            "null_hits_independent": int(null_ind),
+            "null_hits_shared": int(null_sh),
+        }
+        return float(hits_ind / n_tol), float(hits_sh / n_tol), alternative, receipts
     alternative = (
         "predictive marginal SD 0.8x truth (executed decision; min over independent and shared-column regimes)"
     )
     if 1.0 / (m + 1.0) > alpha:
-        return 0.0, 0.0, alternative  # p-values are quantized above alpha: the test cannot reject
+        empty = {
+            "n": 0,
+            "hits_independent": 0,
+            "hits_shared": 0,
+            "null_hits_independent": None,
+            "null_hits_shared": None,
+        }
+        return 0.0, 0.0, alternative, empty  # p-values are quantized above alpha: the test cannot reject
     per_replicate = 2.0 * (m + 1.0) * float(k) * float(m)  # both regimes execute the full decision
     n_alternative = int(min(n_alternative, np.floor(float(budget_ops) / per_replicate)))
     if n_alternative < 24:
         # fewer than 24 executed replicates cannot resolve the 0.5 promotion floor; an
         # unmeasured power never promotes (the caller sees indeterminate with this reason)
-        return float("nan"), float("nan"), alternative
+        empty = {
+            "n": 0,
+            "hits_independent": 0,
+            "hits_shared": 0,
+            "null_hits_independent": None,
+            "null_hits_shared": None,
+        }
+        return float("nan"), float("nan"), alternative, empty
     rs = RandomState(seed)
     hits_independent = 0
     hits_shared = 0
@@ -342,10 +397,20 @@ def _measured_gate_power(
         ens2 = 0.8 * (cols[None, :] + rs.standard_normal((k, m)))
         _, p_sh = _column_swap_pvalue(y2, ens2, bins=bins, pit_seed=seed + 3 * i + 1)
         hits_shared += p_sh <= alpha
+    receipts = {
+        "n": int(n_alternative),
+        "hits_independent": int(hits_independent),
+        "hits_shared": int(hits_shared),
+        # the p-value decision's null rejection is bounded by alpha by construction (exact
+        # randomization test); only the tolerance rule needs a measured null level
+        "null_hits_independent": None,
+        "null_hits_shared": None,
+    }
     return (
         float(hits_independent / float(n_alternative)),
         float(hits_shared / float(n_alternative)),
         alternative,
+        receipts,
     )
 
 
@@ -424,16 +489,29 @@ def posterior_predictive_calibration(
 ) -> CalibrationVerdict:
     """Check a posterior-predictive ensemble against held-out observations it never saw.
 
-    ``ensemble_dependence`` declares how the ensemble was BUILT, because the test's power (not
-    its level -- the column-swap p-value is exact in both regimes) differs radically between
-    them: ``"shared-draws"`` (the default, fail-safe) means the same posterior draws generated
-    every row (the documented construction), where power is often low and promotion honestly
-    refuses; ``"independent"`` asserts every row used fresh draws, unlocking that regime's
-    (usually much higher) executed power. The declaration is the CALLER'S assertion about their
-    own sampling code -- it is recorded in the verdict and the receipt, and misdeclaring it is
-    how a low-power non-rejection would masquerade as affirmative evidence (pass 18 measured a
+    ``ensemble_dependence`` declares how the ensemble AND the held-out rows were BUILT. The
+    column-swap p-value is exact in exactly TWO regimes, and the declaration selects which
+    executed power gates promotion:
+
+    * ``"shared-draws"`` (the default, fail-safe): ONE set of ``m`` posterior draws pushed
+      through every row's forward model. Exact under ANY cross-row dependence of the held-out
+      data -- the columns then carry the same dependence the observations do -- which is why
+      this is the construction to use when rows share a fitted posterior or latent state (the
+      typical single-fit evaluation). Power is often low here and promotion honestly refuses.
+    * ``"independent"``: the caller's recorded assertion that the ROWS THEMSELVES are mutually
+      independent (no latent shared across held-out points) AND every ensemble entry is a fresh
+      draw. BOTH halves are load-bearing: with rows sharing a latent but entries drawn fresh --
+      a construction a caller might reasonably call "independent draws" -- the swap group is NOT
+      an invariance and the test false-alarms on perfectly calibrated data (measured 83.4-84.3%
+      rejection at alpha = 0.05, k = 100, m = 20; STAT-RR19-06). If the held-out rows share
+      anything, do not declare this: rebuild the ensemble with the shared-draw construction,
+      which is exact regardless.
+
+    The declaration is recorded in the verdict and the receipt; misdeclaring it is how a
+    low-power non-rejection masquerades as affirmative evidence (pass 18 measured a
     shared-column mis-calibrated posterior promoted on an independent-rows power fiction of
-    0.95 against an actual 0.018).
+    0.95 against an actual 0.018) or how a dependent-row construction inherits a false-alarm
+    rate of 84% (pass 20).
 
     ``ensemble`` is ``(k, m)``: for each of ``k`` held-out points, ``m`` posterior-predictive draws
     (push ``m`` draws from the posterior through the forward model to the observation of each held-out
@@ -442,11 +520,13 @@ def posterior_predictive_calibration(
     The decision is an exact column-swap randomization test on the randomized PIT of the
     held-out data (STAT-RR17-08): the observation vector is swapped with each whole ensemble
     column in turn and the identical statistic recomputed, giving ``p = (1 + count)/(1 + m)``.
-    Under calibration, ``(y, col_1..col_m)`` are exchangeable as vectors BOTH for the documented
+    Under calibration, ``(y, col_1..col_m)`` are exchangeable as vectors for the shared-draw
     construction (the same ``m`` posterior draws pushed through the forward model for every
     point -- the i.i.d.-uniform reference this replaces wrongly failed a correctly calibrated
-    shared-parameter posterior 298/300 times there) AND for fully independent entries, so the
-    p-value is level-exact in either regime. It is quantized at ``1/(m+1)``: with few draws per
+    shared-parameter posterior 298/300 times there) and for FULLY independent data (rows and
+    entries both), so the p-value is level-exact in those two regimes -- and in NO OTHER:
+    dependent rows with fresh entries break the exchangeability and the test false-alarms
+    (STAT-RR19-06; see ``ensemble_dependence`` above). It is quantized at ``1/(m+1)``: with few draws per
     point the test cannot reject at small alpha, and the measured power reports that honestly.
     The decision rejects when ``p <= 1 - null_quantile``. ``null_threshold`` is still computed
     as a descriptive scale and the ``score`` anchor, never the decision constant. Pass
@@ -511,10 +591,20 @@ def posterior_predictive_calibration(
         base = pit_seed if isinstance(pit_seed, (int, np.integer)) else 0
         _t_decision, p_value = _column_swap_pvalue(y, ens, bins=bins, pit_seed=pit_seed)
         passed = p_value > alpha
-    power_independent, power_shared, power_alternative = _measured_gate_power(
+    power_independent, power_shared, power_alternative, power_receipts = _measured_gate_power(
         k, int(ens.shape[1]), bins=bins, alpha=alpha, pit_tol=pit_tol
     )
     power_estimate = float(power_independent if ensemble_dependence == "independent" else power_shared)
+    declared_hits = power_receipts["hits_independent" if ensemble_dependence == "independent" else "hits_shared"]
+    declared_null_hits = power_receipts[
+        "null_hits_independent" if ensemble_dependence == "independent" else "null_hits_shared"
+    ]
+    power_replicates = int(power_receipts["n"])
+    power_lower_bound = (
+        _power_lcb(int(declared_hits), power_replicates)
+        if power_replicates > 0 and np.isfinite(power_estimate)
+        else 0.0
+    )
     legacy_power, expected_count = _power_is_sufficient(
         k,
         bins=bins,
@@ -522,11 +612,19 @@ def posterior_predictive_calibration(
         low_power_threshold=low_power_threshold,
         min_expected_count_per_bin=min_expected_count_per_bin,
     )
-    # power is MEASURED against the named canonical alternative; the legacy bin-count floor is
-    # kept as a data-sufficiency screen, but it never substitutes for measured power again
-    # NaN (power unmeasurable within budget) intentionally fails this comparison: an unmeasured
-    # power never promotes (pass-18 closure: measure under every supported regime or reduce)
-    power_sufficient = bool(legacy_power and power_estimate >= 0.5)
+    # Power is MEASURED against the named canonical alternative, and promotion compares its exact
+    # one-sided 90% LOWER confidence bound with the 0.5 floor -- never the raw point estimate
+    # (STAT-RR19-07: a 60-replicate 0.55 promoted a gate whose 10,000-replay power was 0.4674).
+    # NaN (unmeasurable within budget) still never promotes.
+    power_sufficient = bool(legacy_power and power_lower_bound >= 0.5)
+    if pit_tol is not None and declared_null_hits is not None:
+        # STAT-P20-01: a fixed tolerance carries no level control, and at some tolerances the
+        # rule PASSES miscalibration more often than calibration (measured 16.0% vs 5.0% --
+        # 3.18x inverted). Promotion additionally requires the rule to be directionally
+        # informative in the declared regime: its measured null rejection must be bounded away
+        # from certainty (UCB <= 0.5) AND strictly below its measured power (LCB > UCB).
+        null_upper_bound = _rejection_ucb(int(declared_null_hits), power_replicates)
+        power_sufficient = bool(power_sufficient and null_upper_bound <= 0.5 and power_lower_bound > null_upper_bound)
     randomness_controlled = pit_seed is not None
 
     curve = coverage_curve(ens, y)
@@ -576,12 +674,16 @@ def posterior_predictive_calibration(
                 "power never promotes; reduce m, or decide with an explicit pit_tol"
                 if np.isnan(power_estimate)
                 else f"executed-decision power in the DECLARED '{ensemble_dependence}' regime is "
-                f"{power_estimate:.2f} (independent={power_independent:.2f}, "
+                f"{power_estimate:.2f} with one-sided 90% lower bound {power_lower_bound:.2f} "
+                f"over {power_replicates} replicates (independent={power_independent:.2f}, "
                 f"shared-column={power_shared:.2f}) against the canonical alternative "
                 f"({power_alternative}) at k={k} with {expected_count:.2f} expected points per bin; "
-                "promotion requires declared-regime power >= 0.50 and at least "
-                f"{min_expected_count_per_bin:.2f} per bin. Hold out more independent points, or "
-                "build the ensemble with fresh per-point draws and declare it."
+                "promotion requires the LOWER BOUND >= 0.50 (a point estimate straddling the floor "
+                "promoted a 0.4674-power gate, STAT-RR19-07), an informative tolerance rule when "
+                "one is in force (measured null rejection UCB <= 0.5 and below the power LCB, "
+                f"STAT-P20-01), and at least {min_expected_count_per_bin:.2f} per bin. Hold out "
+                "more independent points, or build the ensemble with fresh per-point draws and "
+                "declare it."
             )
         )
     if not randomness_controlled:
@@ -758,7 +860,7 @@ def simulation_based_calibration(
         mc_seed = (int(seed) + 404) if isinstance(seed, (int, np.integer)) else int(rng.randint(0, 2**31 - 1))
         p_value = _uniform_mc_pvalue(sbc_error, int(n_sims), bins=bins, n_null=n_null, seed=mc_seed)
         within_threshold = p_value > alpha
-    power_estimate, power_alternative = _measured_power(
+    power_estimate, power_alternative, power_receipts = _measured_power(
         int(n_sims), bins=bins, alpha=alpha, n_null=n_null, error_tol=error_tol
     )
     legacy_power, expected_count = _power_is_sufficient(
@@ -768,7 +870,14 @@ def simulation_based_calibration(
         low_power_threshold=low_power_threshold,
         min_expected_count_per_bin=min_expected_count_per_bin,
     )
-    power_sufficient = bool(legacy_power and power_estimate >= 0.5)
+    # promotion compares the exact one-sided 90% LOWER bound with the floor, never the point
+    # estimate (STAT-RR19-07); a tolerance rule must additionally be directionally informative
+    # (STAT-P20-01: null-rejection UCB <= 0.5 and strictly below the power LCB)
+    power_lower_bound = _power_lcb(int(power_receipts["hits"]), int(power_receipts["n"]))
+    power_sufficient = bool(legacy_power and power_lower_bound >= 0.5)
+    if error_tol is not None and power_receipts["null_hits"] is not None:
+        null_upper_bound = _rejection_ucb(int(power_receipts["null_hits"]), int(power_receipts["n_null"]))
+        power_sufficient = bool(power_sufficient and null_upper_bound <= 0.5 and power_lower_bound > null_upper_bound)
     randomness_controlled = seed is not None
     calibration_status: CalibrationStatus = (
         "failed"

@@ -423,3 +423,40 @@ def test_sbc_accepts_a_randomstate_seed():
     verdict = simulation_based_calibration(prior, simulate, fit, n_sims=40, seed=np.random.RandomState(7))
     assert verdict.calibration_status in ("passed", "failed", "indeterminate")
     assert verdict.randomness_controlled
+
+
+def test_promotion_uses_the_power_lower_bound_not_the_point_estimate():
+    """STAT-RR19-07: a 60-replicate point estimate of 0.55 promoted a gate whose 10,000-replay
+    power was 0.4674. Promotion now compares the exact one-sided 90% lower confidence bound
+    against the 0.5 floor."""
+    from mixle.inference.calibration_gate import _power_lcb, _rejection_ucb
+
+    assert _power_lcb(33, 60) < 0.5  # the reviewer's exact straddle: point 0.55, LCB 0.459
+    assert _power_lcb(58, 60) >= 0.5
+    assert _power_lcb(0, 60) == 0.0
+    assert _rejection_ucb(56, 60) > 0.9  # a 94% null-rejection tolerance cannot hide in noise
+
+
+def test_boundary_tolerance_cannot_promote_even_when_it_passes():
+    """STAT-P20-01: at a tolerance near the null median the rule rejects calibration ~95% and
+    miscalibration ~84% -- 'passed' 3.18x more often in the wrong state. Whatever the draw does,
+    a tolerance whose measured null rejection is not bounded below 0.5 (and below its own power)
+    must never reach 'passed'."""
+    for seed in range(12):
+        rs = np.random.RandomState(seed)
+        k, m = 100, 20
+        cols = rs.standard_normal(m)
+        ens = cols[None, :] + rs.standard_normal((k, m))
+        y = rs.standard_normal() + rs.standard_normal(k)
+        verdict = posterior_predictive_calibration(ens, y, pit_tol=0.30000000000000004)
+        assert verdict.calibration_status != "passed"
+
+
+def test_dependence_declaration_scopes_the_exactness_claim():
+    """STAT-RR19-06: rows sharing a latent with fresh entries false-alarmed 83.4-84.3% at
+    alpha=0.05 on calibrated data; the exactness claim is now scoped to the two regimes where
+    the swap group is an invariance, and 'independent' explicitly asserts independent ROWS."""
+    doc = posterior_predictive_calibration.__doc__
+    assert "STAT-RR19-06" in doc
+    assert "ROWS THEMSELVES are mutually" in doc
+    assert "in NO OTHER" in doc
