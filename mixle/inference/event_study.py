@@ -116,10 +116,114 @@ def poisson_lograte_effect(k_pre: float, t_pre: float, k_post: float, t_post: fl
         raise ValueError("event counts must be non-negative integers")
     if any(value <= 0 for value in durations):
         raise ValueError("exposures must be strictly positive")
+    if raw_counts[0] == 0.0 or raw_counts[1] == 0.0:
+        # STAT-RR17-09: with a zero count, log((k + 0.5)/t) is pure Haldane offset, not rate
+        # information -- under an exact null with unequal exposures those offsets do not cancel,
+        # and Gaussian pooling over many such subjects drove p to 1.37e-12 at n=1000 while the
+        # true effect was zero. Zero-count windows are refused here; pool the counts instead
+        # (poisson_pooled_rate_ratio, exact at any sparsity).
+        raise ValueError(
+            "poisson_lograte_effect: a zero-count window carries no per-subject rate-ratio "
+            "information at this scale (the Haldane offset would masquerade as an effect); "
+            "use poisson_pooled_rate_ratio over all subjects for the sparse regime"
+        )
     kp, kq = raw_counts[0] + 0.5, raw_counts[1] + 0.5
     effect = float(np.log(kq / t_post) - np.log(kp / t_pre))
     var = float(1.0 / kq + 1.0 / kp)
     return effect, var
+
+
+def poisson_lograte_effects(k_pre: Any, t_pre: float, k_post: Any, t_post: float) -> tuple[np.ndarray, np.ndarray]:
+    """Per-subject log rate-ratio effects for Gaussian pooling, GATED on a measured count floor.
+
+    The per-subject Gaussianization ``log((k + 0.5)/t)`` is structurally biased at sparse counts:
+    measured under an exact rate null with exposures 1:3, the per-subject bias/SE ratio is 0.48
+    at expected count 0.1, 0.13 at 1, 0.03 at 2, and 0.004 at 4 -- and pooling n subjects
+    multiplies the bias contribution to z by sqrt(n), which is how a true null reached
+    p = 1.37e-12 at n = 1000 (STAT-RR17-09). Both ARM MEANS must therefore reach 4.0 expected
+    counts (the measured level where the bias stays negligible out to ~1e5 subjects); below the
+    floor this refuses and names poisson_pooled_rate_ratio, which is exact at any sparsity for
+    the common-ratio estimand.
+    """
+    k_pre_arr = np.asarray(list(k_pre), dtype=float)
+    k_post_arr = np.asarray(list(k_post), dtype=float)
+    if k_pre_arr.shape != k_post_arr.shape or k_pre_arr.ndim != 1 or k_pre_arr.size == 0:
+        raise ValueError("k_pre and k_post must be equal-length non-empty count vectors")
+    mean_pre, mean_post = float(k_pre_arr.mean()), float(k_post_arr.mean())
+    if mean_pre < 4.0 or mean_post < 4.0:
+        raise ValueError(
+            f"sparse-count regime (arm means {mean_pre:.2f} pre / {mean_post:.2f} post are below "
+            "the measured floor of 4.0): the per-subject Gaussian approximation is biased here "
+            "and pooling amplifies the bias with sqrt(n) -- use poisson_pooled_rate_ratio, which "
+            "is exact at any sparsity for the common rate ratio"
+        )
+    # Above the floor, an isolated zero count is legitimate smallness, not the sparse-regime
+    # failure: the measured floor (bias/SE 0.004 at arm mean 4) was computed INCLUDING the
+    # zero-count draws that occur at these rates, so the batch applies the Haldane form directly
+    # rather than routing through the single-call refusal (which guards uncontexted sparse use).
+    if not (np.isfinite(t_pre) and np.isfinite(t_post) and t_pre > 0 and t_post > 0):
+        raise ValueError("exposures must be finite and positive")
+    for name, arr in (("k_pre", k_pre_arr), ("k_post", k_post_arr)):
+        if np.any(arr < 0) or np.any(arr != np.floor(arr)) or not np.all(np.isfinite(arr)):
+            raise ValueError(f"{name} must contain non-negative integer counts")
+    kp = k_pre_arr + 0.5
+    kq = k_post_arr + 0.5
+    effects = np.log(kq / float(t_post)) - np.log(kp / float(t_pre))
+    variances = 1.0 / kq + 1.0 / kp
+    return effects, variances
+
+
+def poisson_pooled_rate_ratio(
+    k_pre: Any, t_pre: float, k_post: Any, t_post: float, *, alpha: float = 0.05
+) -> dict[str, Any]:
+    """EXACT conditional inference for a COMMON post/pre rate ratio -- valid at any sparsity.
+
+    Sums the counts over subjects: with a common ratio ``theta`` and a constant per-subject
+    exposure ratio ``r = t_post/t_pre``, ``K_post | K_post + K_pre = N`` is exactly
+    ``Binomial(N, theta*r / (1 + theta*r))``, so the test of ``theta = 1`` is an exact binomial
+    test and the CI is the Clopper-Pearson interval transformed back to the ratio scale
+    (STAT-RR17-09's sparse-regime route). ESTIMAND: the common ratio -- a deliberate reduction
+    from the per-subject random-effects mean, which sparse counts cannot support; heterogeneity
+    across subjects is NOT estimated here.
+    """
+    from scipy.stats import beta as _beta
+    from scipy.stats import binomtest as _binomtest
+
+    k_pre_arr = np.asarray(list(k_pre), dtype=float)
+    k_post_arr = np.asarray(list(k_post), dtype=float)
+    if k_pre_arr.shape != k_post_arr.shape or k_pre_arr.ndim != 1 or k_pre_arr.size == 0:
+        raise ValueError("k_pre and k_post must be equal-length non-empty count vectors")
+    for name, arr in (("k_pre", k_pre_arr), ("k_post", k_post_arr)):
+        if np.any(arr < 0) or np.any(arr != np.floor(arr)) or not np.all(np.isfinite(arr)):
+            raise ValueError(f"{name} must contain non-negative integer counts")
+    if not (np.isfinite(t_pre) and np.isfinite(t_post) and t_pre > 0 and t_post > 0):
+        raise ValueError("exposures must be finite and positive")
+    if not 0.0 < alpha < 1.0:
+        raise ValueError("alpha must be in (0, 1)")
+    total_post = int(k_post_arr.sum())
+    total = int(k_pre_arr.sum()) + total_post
+    if total == 0:
+        raise ValueError("no events in either window: the rate ratio is unidentified")
+    r = float(t_post) / float(t_pre)
+    p0 = r / (1.0 + r)
+    p_value = float(_binomtest(total_post, total, p0).pvalue)
+    tail = alpha / 2.0
+    p_lo = 0.0 if total_post == 0 else float(_beta.ppf(tail, total_post, total - total_post + 1))
+    p_hi = 1.0 if total_post == total else float(_beta.ppf(1.0 - tail, total_post + 1, total - total_post))
+    ratio = (total_post / (total - total_post)) / r if total_post < total else float("inf")
+    lo = (p_lo / (1.0 - p_lo)) / r if p_lo < 1.0 else float("inf")
+    hi = (p_hi / (1.0 - p_hi)) / r if p_hi < 1.0 else float("inf")
+    return {
+        "estimand": "common post/pre rate ratio (conditional exact; per-subject heterogeneity not estimated)",
+        "ratio": ratio,
+        "ci": (lo, hi),
+        "ci_level": 1.0 - alpha,
+        "p_value_ratio_equals_1": p_value,
+        "events_post": total_post,
+        "events_total": total,
+        "exposure_ratio": r,
+        "method": "sum-Poisson -> conditional binomial; exact binomial test and Clopper-Pearson CI",
+    }
 
 
 def _random_effects(y: np.ndarray, v: np.ndarray) -> tuple[float, float, float, np.ndarray]:

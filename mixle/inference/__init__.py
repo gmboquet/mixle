@@ -122,6 +122,8 @@ from mixle.inference.event_study import (
     gaussian_effect,
     hierarchical_event_study,
     poisson_lograte_effect,
+    poisson_lograte_effects,
+    poisson_pooled_rate_ratio,
     tipping_drift,
 )
 from mixle.inference.explain import Explanation, FaultReport, diagnose, explain, explain_margin, explain_margin_mixture
@@ -782,6 +784,8 @@ __all__ = [
     "EventStudyIdentification",
     "gaussian_effect",
     "poisson_lograte_effect",
+    "poisson_lograte_effects",
+    "poisson_pooled_rate_ratio",
     "hierarchical_event_study",
     "tipping_drift",
 ]

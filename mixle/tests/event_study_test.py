@@ -12,6 +12,8 @@ from mixle.inference import (
     gaussian_effect,
     hierarchical_event_study,
     poisson_lograte_effect,
+    poisson_lograte_effects,
+    poisson_pooled_rate_ratio,
     tipping_drift,
 )
 
@@ -126,3 +128,41 @@ class EventStudyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SparsePoissonRegimeTest(unittest.TestCase):
+    """STAT-RR17-09: the sparse regime refuses Gaussianization; the exact pooled route replaces it."""
+
+    def test_zero_count_windows_are_refused(self):
+        with self.assertRaisesRegex(ValueError, "zero-count window"):
+            poisson_lograte_effect(0, 1.0, 2, 2.0)
+
+    def test_sparse_batches_are_refused_below_the_measured_floor(self):
+        rng = np.random.RandomState(0)
+        with self.assertRaisesRegex(ValueError, "measured floor"):
+            poisson_lograte_effects(rng.poisson(0.5, 200), 1.0, rng.poisson(1.0, 200), 2.0)
+
+    def test_pooled_exact_route_holds_its_level_on_the_reviewers_null(self):
+        # rate .5 in both windows, exposures 1 and 2: the Gaussianized pipeline reached
+        # p = 1.37e-12 at n=1000 under this exact null; the conditional exact test holds level
+        rejections = 0
+        for i in range(400):
+            rng = np.random.RandomState(20_000 + i)
+            out = poisson_pooled_rate_ratio(rng.poisson(0.5, 200), 1.0, rng.poisson(1.0, 200), 2.0)
+            rejections += out["p_value_ratio_equals_1"] <= 0.05
+        self.assertLessEqual(rejections / 400.0, 0.075)
+
+    def test_pooled_route_recovers_a_true_ratio(self):
+        rng = np.random.RandomState(7)
+        out = poisson_pooled_rate_ratio(rng.poisson(0.5, 1000), 1.0, rng.poisson(2.0, 1000), 2.0)
+        self.assertLess(out["ci"][0], 2.0)
+        self.assertGreater(out["ci"][1], 1.5)
+        self.assertLess(out["p_value_ratio_equals_1"], 1e-10)
+        self.assertIn("common", out["estimand"])
+
+    def test_dense_regime_still_gaussianizes(self):
+        rng = np.random.RandomState(3)
+        effects, variances = poisson_lograte_effects(rng.poisson(8.0, 300), 1.0, rng.poisson(8.0, 300), 1.0)
+        self.assertEqual(effects.shape, (300,))
+        z = effects.mean() / np.sqrt(variances.mean() / 300.0)
+        self.assertLess(abs(z), 3.0)
