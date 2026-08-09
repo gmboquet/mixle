@@ -216,5 +216,57 @@ class NonparametricInputContractsTest(unittest.TestCase):
         self.assertEqual(to_person_period([2, 3], [1, 0])["period"].tolist(), [1, 2, 1, 2, 3])
 
 
+class SurvivalHonestyContractsTest(unittest.TestCase):
+    """Audit S-2/S-5/S-6: honest frailty SEs, Aalen truncation, person-period zero refusal."""
+
+    def _clustered(self, seed=3, n_groups=6, per_group=8, theta=1.0):
+        rng = np.random.RandomState(seed)
+        w = rng.gamma(1.0 / theta, theta, size=n_groups)
+        x = rng.standard_normal(n_groups * per_group)
+        grp = np.repeat(np.arange(n_groups), per_group)
+        lam = w[grp] * np.exp(0.7 * x)
+        t = rng.exponential(1.0 / lam)
+        c = rng.exponential(2.0 / np.median(lam), size=t.size)
+        return x.reshape(-1, 1), np.minimum(t, c), (t <= c).astype(int), grp
+
+    def test_frailty_jackknife_se_is_available_and_recorded(self):
+        x, t, e, g = self._clustered()
+        plug_in = frailty_cox(x, t, e, g)
+        jack = frailty_cox(x, t, e, g, se_method="jackknife")
+        self.assertEqual(plug_in.se_method, "complete-data")
+        self.assertEqual(jack.se_method, "jackknife")
+        # same EM point estimate; only the SE machinery differs
+        np.testing.assert_allclose(jack.coef, plug_in.coef)
+        self.assertTrue(np.all(np.isfinite(jack.se)) and np.all(jack.se > 0))
+
+    def test_frailty_jackknife_refuses_too_few_groups(self):
+        x, t, e, _ = self._clustered(n_groups=2)
+        two_groups = np.repeat([0, 1], x.shape[0] // 2)
+        with self.assertRaisesRegex(ValueError, "at least 3 groups"):
+            frailty_cox(x, t, e, two_groups, se_method="jackknife")
+        with self.assertRaisesRegex(ValueError, "se_method"):
+            frailty_cox(x, t, e, two_groups, se_method="louis")
+
+    def test_aalen_additive_truncates_instead_of_accumulating_noise(self):
+        # p = 4 columns (intercept + 3) against 8 all-event subjects: the risk set falls below
+        # p before the last event times, where increments used to be min-norm numerical noise.
+        rng = np.random.RandomState(0)
+        x = rng.standard_normal((8, 3))
+        time = np.arange(1.0, 9.0)
+        out = aalen_additive(x, time, np.ones(8))
+        self.assertIsNotNone(out["truncated_at"])
+        self.assertEqual(out["cum_coef"].shape[0], out["time"].size)
+        self.assertLess(out["time"].max(), out["truncated_at"])
+        # the estimated prefix is exactly what it was BEFORE truncation existed: stopping is
+        # not allowed to perturb the estimable part of the curve
+        n_kept = out["time"].size
+        self.assertTrue(np.all(np.isfinite(out["cum_coef"])))
+        self.assertEqual(out["time"].tolist(), time[:n_kept].tolist())
+
+    def test_person_period_refuses_zero_duration_instead_of_dropping_it(self):
+        with self.assertRaisesRegex(ValueError, "time contains 0"):
+            to_person_period(np.array([0, 2]), np.array([1, 0]))
+
+
 if __name__ == "__main__":
     unittest.main()

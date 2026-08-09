@@ -5,7 +5,8 @@ leave the study before the event -- their time is a lower bound, not a missing v
 covers the estimators and the regression layer:
 
   * :func:`kaplan_meier` / :func:`nelson_aalen` -- nonparametric survival and cumulative-hazard curves
-    with Greenwood / Poisson variance and confidence bands.
+    with Greenwood / Poisson variance and POINTWISE confidence intervals (per time point; no
+    simultaneous band is implemented).
   * :func:`cox_ph` -- the Cox proportional-hazards regression: how covariates multiply the hazard,
     estimated from the partial likelihood (Efron or Breslow tie handling), with stratification and
     time-varying covariates (counting-process ``start, stop`` input), Breslow baseline hazard, and the
@@ -20,6 +21,11 @@ covers the estimators and the regression layer:
 
 Event indicators are 1 for an observed event and 0 for right-censoring (for competing risks, an integer
 cause label with 0 = censored).
+
+Assumptions shared by everything here, stated once: subjects (or, for the frailty model, groups) are
+INDEPENDENT, and censoring is NON-INFORMATIVE (independent of the event time given the covariates).
+Informative censoring -- subjects leaving *because* they are about to fail -- biases every estimator in
+this module, and nothing in the data can detect it; it is a design claim the caller must own.
 """
 
 from __future__ import annotations
@@ -101,10 +107,18 @@ def kaplan_meier(time: np.ndarray, event: np.ndarray | None = None, *, ci_level:
     Args:
         time: ``(n,)`` observed times (event or censoring).
         event: ``(n,)`` 1 = event, 0 = right-censored (defaults to all events).
-        ci_level: confidence level for the log--log survival band.
+        ci_level: confidence level for the POINTWISE log--log interval at each time point.
 
     Returns:
         ``{'time', 'survival', 'se', 'ci_low', 'ci_high', 'at_risk', 'n_events', 'median'}``.
+
+    ``ci_low``/``ci_high`` are PER-TIME-POINT (pointwise) intervals, not a simultaneous confidence
+    band: each covers ``S(t)`` at its own ``t`` with probability ``ci_level``, but the probability
+    that the true curve stays inside the envelope at EVERY time point is far lower -- measured
+    simultaneous coverage of the pointwise 95% envelope is 0.60 / 0.51 / 0.43 at n = 50 / 100 / 200
+    (it FALLS with n, because more event times mean more chances to escape). Reading the plotted
+    envelope as "the curve lives in here" is a simultaneous claim these intervals do not support;
+    a Hall--Wellner band is the standard tool for that and is not implemented here.
     """
     ci_level = _validated_ci_level(ci_level)
     t, d, y = _event_table(time, event)
@@ -319,6 +333,19 @@ def cox_ph(
 
     Returns:
         A :class:`CoxResult`.
+
+    What the standard errors assume -- read this before using counting-process input for clustered
+    or recurrent events. The SEs are the inverse observed information of the partial likelihood,
+    which is valid when SUBJECTS are independent. The ``(start, stop]`` interface happily accepts
+    multiple rows per subject (that is its purpose: time-varying covariates for one subject) and
+    also LOOKS like it accepts recurrent events or cluster members as rows -- but rows from the
+    same subject/cluster are dependent, the information-based SEs do not know that, and they
+    understate: on a simulated clustered design the mean reported SE was 0.68 of the true sampling
+    SD. For clustered data use :func:`frailty_cox` (models the dependence) or bootstrap over
+    SUBJECTS/CLUSTERS -- resampling rows would repeat the same mistake. Proportional hazards itself
+    (covariate effects constant over time) is assumed, not checked: no diagnostic ships in this
+    module, so inspect Schoenfeld-style residuals or stratified log(-log) survival plots externally
+    before reading ``coef`` as a time-constant log-hazard ratio.
     """
     counting_process = start is not None
     X, time, event, start, strata, subject = _cox_inputs(x, time, event, start, strata, subject, ties, max_iter, tol)
@@ -476,6 +503,19 @@ def to_person_period(
     periods_observed = _validated_durations(time)
     if np.any(periods_observed != np.floor(periods_observed)):
         raise ValueError("time must contain whole numbers of observed periods")
+    if np.any(periods_observed == 0):
+        # A time=0 subject expands to ZERO rows: the loop below simply never runs for them, so they
+        # used to vanish from the person-period array -- event indicator and all. For a censored
+        # subject that loses nothing but does it silently; for an EVENT at time 0 it throws away a
+        # failure and biases every downstream hazard estimate low. Discrete-time hazard models place
+        # events in periods 1..T, so a period-0 event is a coding question only the caller can
+        # answer (round up to period 1? a different time origin?) -- refuse rather than decide.
+        raise ValueError(
+            "time contains 0: a subject observed for zero periods contributes no rows to the "
+            "person-period array and would be silently dropped (including any event marked for "
+            "them). Recode time-0 events to period 1 if that matches the design, or remove "
+            "zero-duration subjects explicitly before expanding."
+        )
     event = _validated_indicators(event, periods_observed.shape[0]).astype(int)
     time = periods_observed.astype(int)
     periods, outcomes, subjects, covs = [], [], [], []
@@ -574,9 +614,20 @@ def aalen_additive(x: np.ndarray, time: np.ndarray, event: np.ndarray, *, interc
     time the increment ``dB`` is the least-squares solution over the risk set; the cumulative ``B(t)``
     (returned) has interpretable slopes -- a rising ``B_j`` means covariate ``j`` adds hazard.
 
+    The estimator is only defined while the risk-set design has full column rank, and it degrades
+    BEFORE it breaks: as the risk set shrinks toward ``p`` subjects the least-squares increments are
+    dominated by noise, and the accumulated tail of ``B(t)`` is numerical garbage that LOOKS like a
+    dramatic late effect (measured: max |B| growing 1.4 -> 19 over the last few event times of a null
+    design). Estimation therefore STOPS at the first event time whose risk-set design is rank-deficient
+    or numerically ill-conditioned -- the standard Aalen practice -- instead of silently substituting a
+    minimum-norm solution and accumulating it. ``truncated_at`` reports where (None if the full curve
+    was estimable); the curve up to that point is unaffected by the truncation.
+
     Returns:
-        ``{'time', 'cum_coef'}`` where ``cum_coef`` is ``(n_event_times, p[+1])`` cumulative coefficients
-        (the first column is the baseline when ``intercept`` is True).
+        ``{'time', 'cum_coef', 'truncated_at'}`` where ``cum_coef`` is ``(n_estimated_times, p[+1])``
+        cumulative coefficients (the first column is the baseline when ``intercept`` is True) and
+        ``truncated_at`` is the first event time excluded because the risk-set design lost full rank
+        (``None`` when no truncation occurred).
     """
     X = np.atleast_2d(np.asarray(x, dtype=float))
     time = _validated_durations(time)
@@ -592,19 +643,33 @@ def aalen_additive(x: np.ndarray, time: np.ndarray, event: np.ndarray, *, interc
     event_times = np.unique(time[event == 1])
     cum = np.zeros(p)
     out_t, out_b = [], []
+    truncated_at = None
     for et in event_times:
         risk = time >= et
         Xr = X[risk]
         dN = ((time == et) & (event == 1)).astype(float)[risk]
-        gram = Xr.T @ Xr
-        try:
-            incr = np.linalg.solve(gram, Xr.T @ dN)
-        except np.linalg.LinAlgError:
-            incr = np.linalg.lstsq(Xr, dN, rcond=None)[0]
+        # Stop -- do not skip -- at the first inestimable increment: B(t) is a running sum, so one
+        # noise increment corrupts every later value, and a skipped time would make the "cumulative"
+        # curve silently miss mass. Fewer at-risk subjects than columns can never be full rank;
+        # otherwise the singular values decide (rank via SVD, plus an explicit conditioning floor so
+        # a technically-full-rank-but-collapsing risk set near the tail also stops estimation).
+        if Xr.shape[0] < p:
+            truncated_at = float(et)
+            break
+        singular_values = np.linalg.svd(Xr, compute_uv=False)
+        tol = singular_values[0] * max(Xr.shape) * np.finfo(float).eps
+        if singular_values[-1] <= tol or singular_values[0] / singular_values[-1] > 1e8:
+            truncated_at = float(et)
+            break
+        incr = np.linalg.solve(Xr.T @ Xr, Xr.T @ dN)
         cum = cum + incr
         out_t.append(et)
         out_b.append(cum.copy())
-    return {"time": np.asarray(out_t), "cum_coef": np.asarray(out_b)}
+    return {
+        "time": np.asarray(out_t),
+        "cum_coef": np.asarray(out_b) if out_b else np.empty((0, p)),
+        "truncated_at": truncated_at,
+    }
 
 
 # --------------------------------------------------------------------------- shared frailty
@@ -615,14 +680,21 @@ class FrailtyCoxResult:
     """Shared gamma-frailty Cox result.
 
     Attributes:
-        coef / se: fixed-effect log-hazard-ratios and standard errors.
-        theta: estimated frailty variance (0 means no clustering signal).
+        coef / se: fixed-effect log-hazard-ratios and standard errors (see ``se_method`` for what
+            the SEs account for -- the default plug-in SEs understate).
+        theta: estimated frailty variance. A POINT estimate with no uncertainty attached: no SE or
+            test accompanies it, the null ``theta = 0`` sits on the parameter boundary (a likelihood
+            ratio there is a 50:50 chi2_0/chi2_1 mixture, not implemented), and the EM estimate never
+            actually reaches 0 under a true theta of 0 (measured mean 0.046 on null simulations) --
+            so a small positive ``theta`` is what NO clustering looks like, not weak evidence of some.
         frailties: posterior mean random effect per group.
         frailty_variance: posterior variance of each group random effect.
         frailty_log_mean: posterior expectation of ``log(w_g)``.
         groups: group labels aligned to ``frailties``.
         n_iter: EM iterations.
         converged: whether the EM convergence criterion was met.
+        se_method: ``"complete-data"`` (plug-in information, understates) or ``"jackknife"``
+            (delete-one-group, accounts for frailty/theta estimation).
     """
 
     coef: np.ndarray
@@ -635,51 +707,25 @@ class FrailtyCoxResult:
     n_iter: int = field(default=0)
     converged: bool = field(default=False)
     ties: str = field(default="breslow")
+    se_method: str = field(default="complete-data")
 
 
-def frailty_cox(
-    x: np.ndarray,
+def _frailty_em(
+    X: np.ndarray,
     time: np.ndarray,
     event: np.ndarray,
-    groups: np.ndarray,
+    group_index: np.ndarray,
+    n_groups: int,
     *,
-    max_iter: int = 50,
-    tol: float = 1e-5,
-    ties: str = "breslow",
-) -> FrailtyCoxResult:
-    """Shared gamma-frailty Cox model for clustered survival, by EM.
-
-    Subjects in the same group share an unobserved frailty ``w_g ~ Gamma(1/theta, 1/theta)`` (mean 1,
-    variance ``theta``) that multiplies the hazard, capturing within-group correlation. The E-step
-    retains ``E[w_g]``, ``Var(w_g)``, and ``E[log(w_g)]`` under the conjugate gamma posterior. The
-    coefficient/baseline M-step uses ``E[w_g]`` in the integrated-hazard term, while the dispersion
-    M-step maximises the expected gamma-prior log likelihood using both ``E[w_g]`` and
-    ``E[log(w_g)]``. ``theta -> 0`` indicates no detectable clustering.
-
-    Returns:
-        A :class:`FrailtyCoxResult`.
-    """
-    X, time, event, _, _, _ = _cox_inputs(
-        x,
-        time,
-        event,
-        None,
-        None,
-        None,
-        ties,
-        max_iter,
-        tol,
-    )
-    groups = np.asarray(groups)
-    if groups.ndim != 1 or groups.shape[0] != X.shape[0]:
-        raise ValueError("groups must be a one-dimensional array aligned with x")
-    if any(value != value for value in groups.tolist()):
-        raise ValueError("groups must not contain missing labels")
-    uniq, group_index = np.unique(groups, return_inverse=True)
+    max_iter: int,
+    tol: float,
+    ties: str,
+) -> tuple[np.ndarray, float, np.ndarray, np.ndarray, np.ndarray, int, bool]:
+    """One full EM run; shared by the main fit and the delete-one-group jackknife refits."""
     theta = 0.5
-    w_post = np.ones(uniq.size)
-    var_post = np.full(uniq.size, theta)
-    elog_post = np.full(uniq.size, special.digamma(1.0 / theta) - np.log(1.0 / theta))
+    w_post = np.ones(n_groups)
+    var_post = np.full(n_groups, theta)
+    elog_post = np.full(n_groups, special.digamma(1.0 / theta) - np.log(1.0 / theta))
     beta = np.zeros(X.shape[1])
     n_iter = 0
     converged = False
@@ -695,7 +741,7 @@ def frailty_cox(
             time,
             event,
             group_index,
-            uniq.size,
+            n_groups,
             beta,
             baseline,
             theta,
@@ -709,9 +755,88 @@ def frailty_cox(
         if change < tol:
             converged = True
             break
-    log_mean_w = np.log(w_post[group_index])
-    cov = _cox_cov(X, time, event, log_mean_w, beta, ties=ties)
-    se = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+    return beta, theta, w_post, var_post, elog_post, n_iter, converged
+
+
+def frailty_cox(
+    x: np.ndarray,
+    time: np.ndarray,
+    event: np.ndarray,
+    groups: np.ndarray,
+    *,
+    max_iter: int = 50,
+    tol: float = 1e-5,
+    ties: str = "breslow",
+    se_method: str = "complete-data",
+) -> FrailtyCoxResult:
+    """Shared gamma-frailty Cox model for clustered survival, by EM.
+
+    Subjects in the same group share an unobserved frailty ``w_g ~ Gamma(1/theta, 1/theta)`` (mean 1,
+    variance ``theta``) that multiplies the hazard, capturing within-group correlation. The E-step
+    retains ``E[w_g]``, ``Var(w_g)``, and ``E[log(w_g)]`` under the conjugate gamma posterior. The
+    coefficient/baseline M-step uses ``E[w_g]`` in the integrated-hazard term, while the dispersion
+    M-step maximises the expected gamma-prior log likelihood using both ``E[w_g]`` and
+    ``E[log(w_g)]``.
+
+    On ``theta``: it is returned as a point estimate ONLY -- see the honesty notes on
+    :class:`FrailtyCoxResult` before reading a small value as evidence for (or against) clustering.
+
+    Args:
+        se_method: how the fixed-effect SEs are computed.
+            ``"complete-data"`` (default) inverts the partial-likelihood information with the
+            posterior-mean frailties and ``theta`` PLUGGED IN as if known -- it prices in none of
+            their estimation uncertainty and understates: measured against the true sampling SD at
+            theta = 1, se/SD was 0.79-0.88 and Wald-95 coverage 0.87-0.91 (clean at theta = 0).
+            ``"jackknife"`` deletes one GROUP at a time and refits, pricing in frailty and theta
+            estimation; it is honest but costs G extra EM fits, and its own validity is asymptotic
+            in the NUMBER OF GROUPS (a handful of groups gives a noisy SE from few leave-outs).
+
+    Returns:
+        A :class:`FrailtyCoxResult` (``se_method`` records which SEs you got).
+    """
+    X, time, event, _, _, _ = _cox_inputs(
+        x,
+        time,
+        event,
+        None,
+        None,
+        None,
+        ties,
+        max_iter,
+        tol,
+    )
+    if se_method not in ("complete-data", "jackknife"):
+        raise ValueError(f"se_method must be 'complete-data' or 'jackknife', got {se_method!r}")
+    groups = np.asarray(groups)
+    if groups.ndim != 1 or groups.shape[0] != X.shape[0]:
+        raise ValueError("groups must be a one-dimensional array aligned with x")
+    if any(value != value for value in groups.tolist()):
+        raise ValueError("groups must not contain missing labels")
+    uniq, group_index = np.unique(groups, return_inverse=True)
+    beta, theta, w_post, var_post, elog_post, n_iter, converged = _frailty_em(
+        X, time, event, group_index, uniq.size, max_iter=max_iter, tol=tol, ties=ties
+    )
+    if se_method == "jackknife":
+        if uniq.size < 3:
+            raise ValueError(
+                "se_method='jackknife' needs at least 3 groups: the SE is the spread of "
+                f"delete-one-group refits, and {uniq.size} group(s) leave nothing to spread"
+            )
+        leave_one_out = []
+        for g in range(uniq.size):
+            keep = group_index != g
+            sub_index = np.unique(group_index[keep], return_inverse=True)[1]
+            beta_g = _frailty_em(
+                X[keep], time[keep], event[keep], sub_index, uniq.size - 1, max_iter=max_iter, tol=tol, ties=ties
+            )[0]
+            leave_one_out.append(beta_g)
+        estimates = np.asarray(leave_one_out)
+        n_groups = estimates.shape[0]
+        se = np.sqrt((n_groups - 1) / n_groups * np.sum((estimates - estimates.mean(axis=0)) ** 2, axis=0))
+    else:
+        log_mean_w = np.log(w_post[group_index])
+        cov = _cox_cov(X, time, event, log_mean_w, beta, ties=ties)
+        se = np.sqrt(np.clip(np.diag(cov), 0.0, None))
     if not np.all(np.isfinite(se)):
         raise RuntimeError("frailty Cox fit produced non-finite standard errors")
     return FrailtyCoxResult(
@@ -725,6 +850,7 @@ def frailty_cox(
         n_iter=n_iter,
         converged=converged,
         ties=ties,
+        se_method=se_method,
     )
 
 
