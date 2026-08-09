@@ -512,6 +512,7 @@ class LLMUncertainty:
         self.equivalent = equivalent
         self.n = _require_positive_n(n)
         self._threshold: float | None = None
+        self._certified_policy: dict | None = None
         self._alpha: float | None = None
         self._delta: float | None = None
 
@@ -728,6 +729,18 @@ class LLMUncertainty:
         self._threshold = _selective_risk_threshold(confs_arr, errs_arr, alpha=alpha, delta=delta)
         self._alpha = float(alpha)
         self._delta = float(delta)
+        # STAT-RR21-17: the PAC theorem certifies ONE fixed randomized prediction policy -- the
+        # generator, the answer-equivalence relation, and the per-prompt sample count together.
+        # The threshold used to survive any of them changing: answer(prompt, n=1) on an n=2
+        # certificate answered everything at selective risk 0.6015 against the certified 0.10,
+        # mutating `equivalent` reached 0.604, and swapping `generate` reached 1.0 -- all while
+        # answer() still advertised the guarantee. The certificate now names its policy and
+        # answer() refuses to serve under any other.
+        self._certified_policy = {
+            "n": _require_positive_n(n) if n is not None else self.n,
+            "generate": self.generate,
+            "equivalent": self.equivalent,
+        }
         return self
 
     def answer(self, prompt: str, n: int | None = None) -> LLMAssessment | None:
@@ -736,9 +749,35 @@ class LLMUncertainty:
         Requires a prior :meth:`calibrate`. Returns the :class:`LLMAssessment` when
         ``confidence >= threshold`` (so the answer meets the calibrated ``(alpha, delta)``
         selective-risk guarantee), else ``None``.
+
+        The guarantee covers exactly the CALIBRATED policy -- generator, equivalence relation,
+        and per-prompt sample count -- so serving under any other is refused rather than silently
+        keeping the certificate (STAT-RR21-17: an ``n=1`` override on an ``n=2`` certificate
+        answered 20,000/20,000 fresh queries at selective risk 0.6015 against the certified 0.10;
+        a mutated equivalence reached 0.604 and a swapped generator 1.0). To serve a different
+        policy, calibrate it: build the object with that generator/equivalence/n and call
+        :meth:`calibrate` again. :meth:`assess` remains available at any ``n`` -- it claims no
+        certificate.
         """
         if self._threshold is None:
             raise RuntimeError("call calibrate(...) before answer()")
+        certified = getattr(self, "_certified_policy", None)
+        if certified is not None:
+            requested_n = _require_positive_n(n) if n is not None else self.n
+            if requested_n != certified["n"]:
+                raise ValueError(
+                    f"answer(n={requested_n}) does not match the certified sample count "
+                    f"n={certified['n']}: the (alpha, delta) selective-risk certificate covers "
+                    "only the calibrated policy (STAT-RR21-17 -- an n=1 override served 60.15% "
+                    "risk against a 10% certificate). Serve at the certified n, or recalibrate."
+                )
+            if self.generate is not certified["generate"] or self.equivalent is not certified["equivalent"]:
+                raise ValueError(
+                    "the generator or equivalence relation changed after calibration: the "
+                    "(alpha, delta) certificate covers only the calibrated policy "
+                    "(STAT-RR21-17 -- a swapped generator served 100% risk under a 10% "
+                    "certificate). Recalibrate with the current policy before serving."
+                )
         a = self.assess(prompt, n)
         return a if a.confidence >= self._threshold else None
 

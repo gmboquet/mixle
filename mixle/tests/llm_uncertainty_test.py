@@ -318,5 +318,42 @@ class SelectiveRiskThresholdTest(unittest.TestCase):
         self.assertEqual(_selective_risk_threshold(np.array([]), np.array([]), alpha=0.1, delta=0.05), float("inf"))
 
 
+class CertificatePolicyBindingTest(unittest.TestCase):
+    """STAT-RR21-17: the (alpha, delta) PAC certificate covers ONE fixed policy -- generator,
+    equivalence, and sample count. An n=1 override on an n=2 certificate served 60.15% selective
+    risk against the certified 10%; mutating equivalence reached 60.4% and swapping the generator
+    100%, all while answer() still advertised the guarantee. answer() now refuses any of them."""
+
+    @staticmethod
+    def _calibrated(n_examples=200):
+        from mixle.reason.llm import LLMUncertainty
+
+        rng = np.random.RandomState(0)
+
+        def gen(prompt):
+            return "right" if rng.rand() < 0.4 else f"wrong-{rng.randint(10**9)}"
+
+        u = LLMUncertainty(gen, equivalent=lambda a, b: a == b, n=2)
+        u.calibrate([(f"p{i}", "right") for i in range(n_examples)], alpha=0.10, delta=0.05)
+        return u
+
+    def test_sample_count_override_is_refused(self):
+        u = self._calibrated()
+        with self.assertRaisesRegex(ValueError, "certified sample count"):
+            u.answer("q", n=1)
+        u.answer("q")  # the certified n serves
+        u.assess("q", n=1)  # assess claims no certificate and stays free
+
+    def test_mutated_equivalence_and_generator_are_refused(self):
+        u = self._calibrated()
+        u.equivalent = lambda a, b: True
+        with self.assertRaisesRegex(ValueError, "changed after calibration"):
+            u.answer("q")
+        u2 = self._calibrated()
+        u2.generate = lambda prompt: "hallucination"
+        with self.assertRaisesRegex(ValueError, "changed after calibration"):
+            u2.answer("q")
+
+
 if __name__ == "__main__":
     unittest.main()
