@@ -441,7 +441,8 @@ class CalibratedGenerator:
             # population: the certified policy never served. With this schedule a repeated prompt
             # contributes the identical served decision to certification, so the certificate can
             # only report what serving would do; duplicated prompts reduce the certificate's
-            # effective independent-sample count (see unique_prompt_count in the receipt).
+            # effective sample under the constructed default (see certification_effective_count
+            # in the receipt -- unique_prompt_count is stream metadata, not the bound's n).
             candidate, statistic = self._selection(prompt, seed=_derive_seed(self.seed, prompt))
             statistics.append(statistic)
             if i >= n_certify:
@@ -560,9 +561,11 @@ class CalibratedGenerator:
             "policy": self._describe_policy(),
             "assumptions": [
                 "calibration certification and serving cases are exchangeable",
-                "certification prompts are distinct enough that their accept/error events are "
-                "independent -- duplicated prompts repeat the identical served decision, so the "
-                "binomial bound's effective sample is unique_prompt_count, not certification_count",
+                "the binomial bound's effective sample is certification_effective_count -- the "
+                "row count AFTER the outcomes/sampling declarations are applied (duplicates "
+                "collapse under per-prompt+constructed, count as traffic weight under "
+                "iid-traffic, and all rows count under per-row); unique_prompt_count is audit "
+                "metadata about the prompt stream, not the bound's n (STAT-P20-02)",
                 "the certified generate/score callables behave identically at serving time "
                 "(their identity is enforced; their internal state is not observable here)",
             ],

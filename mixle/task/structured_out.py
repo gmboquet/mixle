@@ -41,7 +41,12 @@ from typing import Any
 
 import numpy as np
 
-from mixle.task._ledger import _clopper_pearson_interval, conformal_scope
+from mixle.task._ledger import (
+    AnsweredSliceGuard,
+    _clopper_pearson_interval,
+    conformal_scope,
+    validate_answered_slice_counts,
+)
 from mixle.task.regress import RegressionSolution, solve_regression
 from mixle.task.solve import Solution, _label_with, solve
 
@@ -51,7 +56,7 @@ def _is_number(v: Any) -> bool:
 
 
 @dataclass
-class StructuredSolution:
+class StructuredSolution(AnsweredSliceGuard):
     """Per-field calibrated students in front of the dict-valued routine they replace."""
 
     fields_cat: dict[str, Solution]
@@ -77,15 +82,7 @@ class StructuredSolution:
         # STAT-RR17-13: the answered-slice counts are one measurement, so their arithmetic is an
         # invariant, not a convention -- a hand-built object with correct > answered returned
         # agreement 2.0 and a [NaN, NaN] interval through report(). Impossible states refuse.
-        counts = (self.eval_rows, self.answered_eval_n, self.answered_eval_correct)
-        if any(isinstance(c, bool) or not isinstance(c, int) or c < 0 for c in counts):
-            raise ValueError("answered-slice counts must be non-negative integers")
-        if not self.answered_eval_correct <= self.answered_eval_n <= self.eval_rows:
-            raise ValueError(
-                "answered-slice counts must satisfy 0 <= correct <= answered <= evaluated; got "
-                f"correct={self.answered_eval_correct}, answered={self.answered_eval_n}, "
-                f"evaluated={self.eval_rows}"
-            )
+        validate_answered_slice_counts(self.eval_rows, self.answered_eval_n, self.answered_eval_correct)
 
     @property
     def schema(self) -> dict[str, str]:
@@ -469,7 +466,5 @@ def solve_structured(
         nums_match = all(abs(float(decided[key]) - float(truth[key])) <= numeric_tolerances[key] for key in fields_num)
         if cats_match and nums_match:
             answered_correct += 1
-    solution.eval_rows = len(eval_inputs)
-    solution.answered_eval_n = answered_n
-    solution.answered_eval_correct = answered_correct
+    solution.set_answered_slice(evaluated=len(eval_inputs), answered=answered_n, correct=answered_correct)
     return solution

@@ -341,5 +341,29 @@ class ReportReceiptCompletenessTest(unittest.TestCase):
         self.assertIn("calibration_evidence", report)
 
 
+class AnsweredSliceMutationGuardTest(unittest.TestCase):
+    """STAT-RR19-09: __post_init__ validation alone let a valid solution be mutated into
+    agreement 2.0 / [NaN, NaN] intervals; assignment now re-checks, and the internal multi-field
+    updates go through the atomic setter."""
+
+    def test_assignment_reruns_the_invariant(self):
+        from mixle.task._ledger import AnsweredSliceGuard, validate_answered_slice_counts
+
+        class Probe(AnsweredSliceGuard):
+            def __init__(self):
+                self.eval_rows = 1
+                self.answered_eval_n = 1
+                self.answered_eval_correct = 1
+
+        probe = Probe()
+        with self.assertRaisesRegex(ValueError, "correct <= answered"):
+            probe.answered_eval_correct = 2
+        probe.set_answered_slice(evaluated=5, answered=3, correct=2)
+        self.assertEqual((probe.eval_rows, probe.answered_eval_n, probe.answered_eval_correct), (5, 3, 2))
+        probe.set_answered_slice(evaluated=1, answered=1, correct=1)  # shrink atomically: legal
+        with self.assertRaisesRegex(ValueError, "non-negative integers"):
+            validate_answered_slice_counts(1, True, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

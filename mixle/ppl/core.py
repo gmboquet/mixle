@@ -2510,10 +2510,19 @@ class RandomVariable:
             )
             route, reason = self._resolve_posterior_ladder(grouped=_grouped_for_posterior)
         elif how != "auto":
-            # STAT-RR18-03: fit() rejects unknown routes; explaining one with a plausible-looking
-            # empty-caveat answer presented a route that cannot run as an accepted plan
-            if how not in _FITTERS and how not in _ROUTE_CAVEATS:
-                raise ValueError(f"unknown fit route {how!r}: fit() would reject it, so there is nothing to explain")
+            # STAT-RR18-03 + STAT-RR19-16: an explicit `how` is a plan fit() must be willing to
+            # execute, so it validates against fit()'s EXACT vocabulary. The caveat table's extra
+            # names (regression, state-space, indexed, lmm, glmm, neural, ...) are auto-ladder
+            # OUTCOMES -- fit(how='lmm') is rejected, so explain_fit(how='lmm') presenting an
+            # accepted plan was a false contract.
+            fit_vocabulary = {"posterior", "em", *_FITTERS}
+            if how not in fit_vocabulary:
+                raise ValueError(
+                    f"unknown fit route {how!r}: fit() accepts {sorted(fit_vocabulary | {'auto'})}. "
+                    "Internal auto-ladder route names (e.g. 'regression', 'state-space', 'indexed', "
+                    "'lmm', 'glmm', 'neural') are outcomes how='auto' can SELECT, not requests fit() "
+                    "executes (STAT-RR19-16); call explain_fit(how='auto') to see what the ladder picks"
+                )
             route, reason = how, f"explicit how={how!r}"
         elif self._kind == "sample" and any(isinstance(a, _NeuralPredictor) for a in self._args):
             # STAT-RR18-02: fit() dispatches a Net/Conv/Transformer parameter slot to the neural
@@ -2631,9 +2640,31 @@ class RandomVariable:
                 rv._cache["_group_labels"] = tuple(labels)
                 rv._cache["_group_index"] = dict(mapping)
             try:
-                rv._cache["_fit_explanation"] = self.explain_fit(
-                    how=_original_how, constraints=kw.get("constraints"), potentials=kw.get("potentials")
+                # `how` (read at CALL time) reflects any in-fit downgrade -- an explicit 'em' on a
+                # partial-free model executes MAP, and the record must say MAP, not repeat the
+                # request (STAT-RR19-16). A dispatching fitter (how='sample') additionally marks
+                # the algorithm it actually ran on the result; the record swaps to it and keeps
+                # the request under route_requested.
+                explanation = self.explain_fit(
+                    how=how, constraints=kw.get("constraints"), potentials=kw.get("potentials")
                 )
+                executed = rv._cache.get("_executed_route") if isinstance(getattr(rv, "_cache", None), dict) else None
+                if executed and executed != explanation.get("route"):
+                    explanation["route_requested"] = explanation.get("route")
+                    explanation["route"] = executed
+                    explanation["reason"] = (
+                        f"{explanation.get('reason', '')} -> executed as {executed!r} "
+                        "(dimension-dispatched by how='sample')"
+                    ).strip()
+                    explanation["caveats"] = list(_ROUTE_CAVEATS.get(executed, explanation.get("caveats", [])))
+                if _original_how != how:
+                    explanation["route_requested"] = _original_how
+                    explanation["reason"] = (
+                        f"{explanation.get('reason', '')} (requested how={_original_how!r}, "
+                        f"downgraded in fit: EM cannot hold parameters fixed / infer a structural "
+                        "vector parameter)"
+                    ).strip()
+                rv._cache["_fit_explanation"] = explanation
             except Exception:  # noqa: BLE001 - best-effort; must never block a fit
                 pass
             return rv

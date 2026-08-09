@@ -283,6 +283,15 @@ def _risk_profile(losses: np.ndarray, *, alpha: float, quantiles: Sequence[float
     )
 
 
+def _mc_se(std: float, n_draws: int) -> float:
+    """Monte Carlo SE of a mean from ``n_draws`` draws; NaN when one draw makes it inestimable.
+
+    ``std/sqrt(1)`` of a single draw is identically 0.0 -- ``bayes_action(n=1)`` used to report
+    ``expected_loss_mc_se=0.0``, dressing a one-draw guess as an exact number (STAT-RR19-17).
+    """
+    return float(std / np.sqrt(n_draws)) if n_draws >= 2 else float("nan")
+
+
 def bayes_action(
     posterior: Any,
     loss: Loss,
@@ -320,7 +329,11 @@ def bayes_action(
         n: number of posterior draws for the Monte-Carlo expectation.
         seed: RNG seed for the posterior draw (reproducible).
         cvar_alpha: tail mass for the CVaR / VaR of the chosen action (0.1 -> worst 10%).
-        quantiles: loss quantiles to report per action.
+        quantiles: loss quantiles to report per action. Reported quantiles (and the CVaR/VaR
+            fields) are plug-in Monte Carlo estimates and carry NO uncertainty quantification of
+            their own -- tail quantities converge far more slowly than the mean whose
+            ``expected_loss_mc_se`` is reported, so raise ``n`` before leaning on a far tail
+            (STAT-RR19-17).
         vectorized: the loss's calling convention. ``True`` -> called once per action with the whole
             draw array; ``False`` -> called once per draw; ``None`` (default) -> read ``loss.vectorized``
             if the loss declares it, else auto-detect by *probing* the array call once. A probe is a real
@@ -381,10 +394,15 @@ def bayes_action(
         "expected_loss": expected[best],
         # The scale of the winner's optimism (audit D-1): the argmin of K noisy estimates is
         # biased low by construction (~ -2.5 of these SEs at K = 100), so the SE ships with the
-        # estimate rather than leaving the post-selection number to be read as exact.
-        "expected_loss_mc_se": profiles[best].std / np.sqrt(len(draw_list)),
+        # estimate rather than leaving the post-selection number to be read as exact. One draw
+        # cannot estimate its own sampling error -- n = 1 reports NaN, never a false 0.0
+        # (STAT-RR19-17) -- and every alternative carries the same per-action SE.
+        "expected_loss_mc_se": _mc_se(profiles[best].std, len(draw_list)),
         "risk_profile": profiles[best].as_dict(),
-        "alternatives": [{"action": a, "expected_loss": e} for a, e in zip(actions, expected)],
+        "alternatives": [
+            {"action": a, "expected_loss": e, "expected_loss_mc_se": _mc_se(prof.std, len(draw_list))}
+            for a, e, prof in zip(actions, expected, profiles)
+        ],
         "report": report,
         # The convention this call resolved, so a caller that goes on to evaluate the same loss --
         # decision_regret_objective scoring the chosen action against real data, say -- can pass it
@@ -400,7 +418,7 @@ def bayes_action(
         fresh_profile = _risk_profile(fresh_losses, alpha=alpha, quantiles=levels)
         result["selection_expected_loss"] = expected[best]
         result["expected_loss"] = fresh_profile.expected_loss
-        result["expected_loss_mc_se"] = fresh_profile.std / np.sqrt(len(fresh_draws))
+        result["expected_loss_mc_se"] = _mc_se(fresh_profile.std, len(fresh_draws))
         result["risk_profile"] = fresh_profile.as_dict()
         result["vectorized"] = mode
     return result

@@ -182,6 +182,22 @@ class NeuralResult:
         x = self._design(given)
         return self.dist.predict(x) if self.kind == "categorical" else self.dist._forward(x)
 
+    def explain_fit(self, **_: Any) -> dict:
+        """What this fitted result IS: the neural route's record (STAT-RR19-15).
+
+        Every other fitted surface answers ``explain_fit()``; the neural route attached its
+        ``fit_request`` but exposed no way to read the route/caveats off the result.
+        """
+        from mixle.ppl.core import _ROUTE_CAVEATS
+
+        request = getattr(self, "fit_request", None) or {}
+        return {
+            "route": "neural",
+            "reason": "fitted neural conditional model (Net/Conv/Transformer parameter slot)",
+            "caveats": list(_ROUTE_CAVEATS.get("neural", [])),
+            "fit_request": dict(request),
+        }
+
     def score(self, data: Any, given: dict) -> float:
         """Held-out accuracy (Categorical) or R^2 (Normal) on ``(data, given)``."""
         pred = self.predict(given)

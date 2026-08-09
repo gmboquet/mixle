@@ -536,7 +536,10 @@ class Model:
         return explain(self._require_fitted(), x)
 
     def forecast(self, history: Any, horizon: int, **kw: Any):
-        """Horizon predictions with calibrated intervals — :func:`mixle.inference.forecast` (HMMs)."""
+        """Horizon predictions with MODEL-PREDICTIVE Monte Carlo intervals — :func:`mixle.inference.forecast`.
+
+        The intervals are the fitted model's own predictive quantiles, not held-out-calibrated
+        bands (STAT-P20-04); ``forecast_price`` is the recalibrated route."""
         from mixle.inference import forecast
 
         return forecast(self._require_fitted(), history, horizon, **kw)

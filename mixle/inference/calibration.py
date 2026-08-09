@@ -313,7 +313,10 @@ def calibration_null_expectation(
         prob: ``(n,)`` the forecaster's predicted probabilities (outcomes are not needed -- the
             null generates them).
         bins, strategy, norm: the same binning controls you pass to the real statistics.
-        n_sim: null simulations.
+        n_sim: null simulations; at least 20, because the reported ``*_q95`` fields are 95th
+            percentiles and an empirical quantile's resolution is ~1/n_sim -- ``n_sim=1`` used
+            to label a single draw a "q95" whose fresh-null exceedance measured 49.8%, not 5%
+            (STAT-RR19-10). The default 500 puts the q95's own MC error near 0.01 quantile units.
         seed: RNG seed.
 
     Returns:
@@ -326,6 +329,13 @@ def calibration_null_expectation(
     if norm not in ("l1", "l2"):
         raise ValueError("norm must be 'l1' or 'l2'.")
     n_sim = _positive_int("n_sim", n_sim)
+    if n_sim < 20:
+        # a 95th percentile needs at least ~20 draws to exist at all: with n_sim=1 the single
+        # simulation was labeled "q95" and fresh nulls exceeded it 49.8% of the time
+        raise ValueError(
+            f"n_sim must be at least 20 to report a 95th percentile (got {n_sim}); "
+            "the q95 fields are empirical quantiles with resolution ~1/n_sim"
+        )
     rng = _as_rng(seed)
     edges = _bin_edges(p, bins, strategy)
     nb = len(edges) - 1

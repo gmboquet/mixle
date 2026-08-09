@@ -158,6 +158,18 @@ class CalibrationNullFloorTest(unittest.TestCase):
         self.assertLess(cc["null_expectation"][0], 0.75)  # far below the diagonal at m=5
         self.assertLess(abs(cc["empirical"][0] - cc["null_expectation"][0]), 0.05)
 
+    def test_null_expectation_refuses_a_quantile_it_cannot_resolve(self):
+        # STAT-RR19-10: n_sim=1 labeled a single draw a "q95" whose fresh-null exceedance
+        # measured 49.8%; a 95th percentile needs at least ~20 draws to exist at all.
+        rng = np.random.RandomState(6)
+        p = rng.uniform(0.05, 0.95, size=200)
+        with self.assertRaisesRegex(ValueError, "at least 20"):
+            calibration_null_expectation(p, n_sim=1)
+        with self.assertRaisesRegex(ValueError, "at least 20"):
+            calibration_null_expectation(p, n_sim=19)
+        ok = calibration_null_expectation(p, n_sim=20, seed=7)
+        self.assertGreater(ok["ece_q95"], ok["ece"] * 0.5)
+
     def test_reliability_ci_reports_effective_bootstrap_counts(self):
         rng = np.random.RandomState(5)
         p = rng.uniform(0.0, 1.0, size=60)

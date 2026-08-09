@@ -126,6 +126,46 @@ def _clopper_pearson_interval(successes: int, n: int, level: float) -> tuple[flo
     return lower, upper
 
 
+_ANSWERED_SLICE_FIELDS = ("eval_rows", "answered_eval_n", "answered_eval_correct")
+
+
+def validate_answered_slice_counts(evaluated: Any, answered: Any, correct: Any) -> None:
+    """The answered-slice arithmetic invariant: 0 <= correct <= answered <= evaluated, all ints."""
+    counts = (evaluated, answered, correct)
+    if any(isinstance(c, bool) or not isinstance(c, int) or c < 0 for c in counts):
+        raise ValueError("answered-slice counts must be non-negative integers")
+    if not correct <= answered <= evaluated:
+        raise ValueError(
+            "answered-slice counts must satisfy 0 <= correct <= answered <= evaluated; got "
+            f"correct={correct}, answered={answered}, evaluated={evaluated}"
+        )
+
+
+class AnsweredSliceGuard:
+    """Re-validates the answered-slice invariant on ASSIGNMENT, not only at construction.
+
+    STAT-RR19-09: ``__post_init__`` validation alone let a validly constructed solution be
+    mutated afterwards -- setting ``answered_eval_correct`` from 1 to 2 with
+    ``answered = evaluated = 1`` made ``report()`` publish agreement 2.0 and a ``[NaN, NaN]``
+    interval. Any single-field assignment to one of the three counts now re-checks the triple;
+    internal multi-field updates go through :meth:`set_answered_slice`, which validates the NEW
+    triple once and writes atomically (a shrinking evaluation slice would otherwise refuse
+    transiently mid-update).
+    """
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        object.__setattr__(self, name, value)
+        if name in _ANSWERED_SLICE_FIELDS and all(hasattr(self, f) for f in _ANSWERED_SLICE_FIELDS):
+            validate_answered_slice_counts(self.eval_rows, self.answered_eval_n, self.answered_eval_correct)
+
+    def set_answered_slice(self, *, evaluated: int, answered: int, correct: int) -> None:
+        """Atomically update the three answered-slice counts after validating the NEW triple."""
+        validate_answered_slice_counts(evaluated, answered, correct)
+        object.__setattr__(self, "eval_rows", evaluated)
+        object.__setattr__(self, "answered_eval_n", answered)
+        object.__setattr__(self, "answered_eval_correct", correct)
+
+
 def conformal_scope(statement: str) -> dict[str, Any]:
     """Machine-readable scope block for any report that carries a conformal coverage label.
 
@@ -153,4 +193,6 @@ __all__ = [
     "write_ledger",
     "read_ledger",
     "conformal_scope",
+    "validate_answered_slice_counts",
+    "AnsweredSliceGuard",
 ]

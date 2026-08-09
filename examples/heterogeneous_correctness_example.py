@@ -86,30 +86,36 @@ def main():
 
     print("\n## mixle — Mixture(Composite(Gaussian, Categorical)), EM")
     fit = fit_mixle(data)
-    # STAT-RR17-04: the oracle checks WHICH cluster each component recovered, not just that
-    # magnitudes look plausible -- matching by mean sign, the mu=-3 cluster must concentrate
-    # category 0 and the mu=+3 cluster category 2, and the two components must claim DIFFERENT
-    # true clusters. (The old |mu|~3-and-max(prob)>0.6 oracle printed "recovered ... True" for
-    # scientifically wrong assignments like probs=[.1,.8,.1] or the categories swapped.)
+    # STAT-RR17-04 + STAT-RR19-05: the oracle checks WHICH cluster each component recovered AND
+    # that the FULL categorical vector is close -- the claim this example prints is that every
+    # field is recovered, and the previous identity-only oracle (argmax + mass > 0.6) accepted
+    # probability vectors at total-variation distance 0.28 from the truth while printing
+    # "recovered ... True". Total variation <= 0.05 per matched component is what "recovers the
+    # per-cluster Categorical probabilities" is allowed to mean here.
     ok = len(fit) == 2
     claimed = set()
     for i, c in enumerate(fit):
-        print(f"  comp{i}: normal.mean={c['mu']:+.2f}  cat.probs={[round(p, 2) for p in c['probs']]}")
         true_cluster = min(TRUE, key=lambda cl: abs(cl["mu"] - c["mu"]))
+        tv = 0.5 * float(np.sum(np.abs(np.asarray(c["probs"]) - np.asarray(true_cluster["probs"]))))
+        print(
+            f"  comp{i}: normal.mean={c['mu']:+.2f}  cat.probs={[round(p, 2) for p in c['probs']]}  "
+            f"TV-to-truth={tv:.3f}"
+        )
         expected_category = int(np.argmax(true_cluster["probs"]))
         ok = (
             ok
             and abs(c["mu"] - true_cluster["mu"]) < 0.3
             and int(np.argmax(c["probs"])) == expected_category
-            and c["probs"][expected_category] > 0.6
+            and tv <= 0.05
         )
         claimed.add(true_cluster["mu"])
     ok = ok and len(claimed) == 2
-    print(f"  -> both clusters recovered with the RIGHT category identities: {ok}")
+    print(f"  -> both clusters recovered: right identities AND full probabilities (TV <= 0.05): {ok}")
     if not ok:
         raise RuntimeError(
-            "acceptance failed: each fitted component must match a distinct true cluster's mean "
-            "AND concentrate that cluster's true category (identity, not just magnitude)"
+            "acceptance failed: each fitted component must match a distinct true cluster's mean, "
+            "concentrate its true category, AND reproduce its full categorical vector to total "
+            "variation <= 0.05 (identity alone is not probability recovery, STAT-RR19-05)"
         )
 
     print("\n## pomegranate 1.1.2 — GeneralMixtureModel([IndependentComponents([Normal, Categorical]), ...])")

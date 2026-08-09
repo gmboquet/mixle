@@ -1,4 +1,9 @@
-"""``forecast`` -- horizon predictions with calibrated intervals from a fitted sequence model.
+"""``forecast`` -- horizon predictions with MODEL-PREDICTIVE Monte Carlo intervals from a fitted sequence model.
+
+The intervals are quantiles of the FITTED MODEL's own predictive distribution -- no held-out
+calibration is performed here and no coverage-against-reality claim is made (STAT-P20-04): if the
+model is wrong, the intervals are wrong with it. For bands recalibrated against held-out outcomes,
+use :func:`mixle.inference.price_forecast.forecast_price`, whose receipt states its assumptions.
 
 The forecasting front door for state-space families. For a fitted HMM: filter the history to the
 current state posterior (the forward-backward's final step), propagate it through the transition

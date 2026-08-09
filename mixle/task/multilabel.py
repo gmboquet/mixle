@@ -33,7 +33,12 @@ from typing import Any
 
 import numpy as np
 
-from mixle.task._ledger import _clopper_pearson_interval, conformal_scope
+from mixle.task._ledger import (
+    AnsweredSliceGuard,
+    _clopper_pearson_interval,
+    conformal_scope,
+    validate_answered_slice_counts,
+)
 from mixle.task.model import HashedNGram
 from mixle.task.regress import (
     RecordRegressionFeaturizer,
@@ -163,7 +168,7 @@ def _normalize_label_sets(values: Sequence[Any], *, name: str) -> list[list[str]
 
 
 @dataclass
-class MultiLabelSolution:
+class MultiLabelSolution(AnsweredSliceGuard):
     """A per-label-calibrated tagger in front of the routine it replaces."""
 
     net: Any
@@ -201,15 +206,7 @@ class MultiLabelSolution:
         # STAT-RR17-13: the answered-slice counts are one measurement, so their arithmetic is an
         # invariant, not a convention -- a hand-built object with correct > answered returned
         # agreement 2.0 and a [NaN, NaN] interval through report(). Impossible states refuse.
-        counts = (self.eval_rows, self.answered_eval_n, self.answered_eval_correct)
-        if any(isinstance(c, bool) or not isinstance(c, int) or c < 0 for c in counts):
-            raise ValueError("answered-slice counts must be non-negative integers")
-        if not self.answered_eval_correct <= self.answered_eval_n <= self.eval_rows:
-            raise ValueError(
-                "answered-slice counts must satisfy 0 <= correct <= answered <= evaluated; got "
-                f"correct={self.answered_eval_correct}, answered={self.answered_eval_n}, "
-                f"evaluated={self.eval_rows}"
-            )
+        validate_answered_slice_counts(self.eval_rows, self.answered_eval_n, self.answered_eval_correct)
 
     def _scores(self, xs: list) -> np.ndarray:
         return _score_net(self.net, _validated_features(self.featurizer, xs), len(self.labels))
@@ -397,9 +394,11 @@ class MultiLabelSolution:
         self.upper_absent, self.lower_present = cand["upper_absent"], cand["lower_present"]
         self.joint_qhat = float(cand["joint_qhat"])
         self.holdout_set_agreement = float(cand["agreement"])
-        self.eval_rows = int(cand["eval_rows"])
-        self.answered_eval_n = int(cand["answered_eval_n"])
-        self.answered_eval_correct = int(cand["answered_eval_correct"])
+        self.set_answered_slice(
+            evaluated=int(cand["eval_rows"]),
+            answered=int(cand["answered_eval_n"]),
+            correct=int(cand["answered_eval_correct"]),
+        )
         self.train_inputs, self.train_sets = inputs, sets
         self.cal_inputs, self.cal_sets = fresh_cal_inputs, fresh_cal_sets
         self.eval_inputs, self.eval_sets = fresh_eval_inputs, fresh_eval_sets

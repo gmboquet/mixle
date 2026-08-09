@@ -2050,7 +2050,13 @@ def sample_fit(rv: RandomVariable, data, **kw) -> RandomVariable:
     ``rng``, ``chains``, ``parallel``, ``constraints``, and ``penalty``.
     """
     d = len(_target_parts(rv, data)[1])
-    return ensemble_fit(rv, data, **kw) if d <= 12 else nuts_fit(rv, data, **kw)
+    executed = "ensemble" if d <= 12 else "nuts"
+    fitted = ensemble_fit(rv, data, **kw) if d <= 12 else nuts_fit(rv, data, **kw)
+    # STAT-RR19-16: how='sample' is a dispatcher; the fit record must name the algorithm that
+    # actually ran (a 'sample' label on 160 retained ensemble draws hid the executed route)
+    if isinstance(getattr(fitted, "_cache", None), dict):
+        fitted._cache["_executed_route"] = executed
+    return fitted
 
 
 def map_fit(
