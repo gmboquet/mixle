@@ -218,9 +218,13 @@ def test_poisson_lograte_effect_refuses_boolean_event_counts():
             poisson_lograte_effect(bad, 1.0, 2.0, 1.0)
         with pytest.raises(TypeError, match="must be a number, not a Boolean"):
             poisson_lograte_effect(3.0, bad, 2.0, 1.0)
-    # Ordinary integer counts (including zero, via the Haldane correction) are untouched.
-    effect, var = poisson_lograte_effect(0, 2.0, 4, 2.0)
+    # Ordinary nonzero integer counts are untouched; a zero-count window is refused outright
+    # (STAT-RR17-02: the Haldane offset masquerades as an effect under unequal exposures) with
+    # the pooled exact route named in the message.
+    effect, var = poisson_lograte_effect(1, 2.0, 4, 2.0)
     assert effect > 0.0 and var > 0.0
+    with pytest.raises(ValueError, match="poisson_pooled_rate_ratio"):
+        poisson_lograte_effect(0, 2.0, 4, 2.0)
 
 
 # --------------------------------------------------------------------------------------------- #
@@ -390,3 +394,66 @@ def test_em_temperature_rejects_nan_and_booleans():
             AnnealedEM([bad])
     assert PosteriorTransformEM(temperature=np.float64(2.0)).temperature == 2.0
     assert AnnealedEM([2.0, 1.0, 0.0]).temperatures == (2.0, 1.0, 0.0)
+
+
+def test_bayes_action_surfaces_the_winners_curse_and_repairs_it_on_request():
+    """Audit D-1: the winner's expected_loss is the argmin of K noisy estimates -- biased low by
+    ~-2.5 MC SEs at K=100 (invariant in n). The SE now ships with the estimate, and
+    report='fresh-draws' re-estimates the winner on selection-independent draws."""
+
+    class _StdNormalPosterior:
+        def samples(self, n, rng):
+            return rng.standard_normal(n)
+
+    n_actions, n_draws, reps = 100, 400, 30
+    selected, ses, fresh = [], [], []
+    for rep in range(reps):
+
+        def _make_loss(rep=rep):
+            calls = {}
+
+            def vloss(action, draws):
+                k = calls.get(action, 0)
+                calls[action] = k + 1
+                rs = np.random.RandomState(100000 * rep + 1000 * int(action) + k)
+                return rs.standard_normal(len(np.asarray(draws)))
+
+            vloss.vectorized = True
+            return vloss
+
+        sel = bayes_action(_StdNormalPosterior(), _make_loss(), list(range(n_actions)), n=n_draws, seed=rep)
+        fre = bayes_action(
+            _StdNormalPosterior(), _make_loss(), list(range(n_actions)), n=n_draws, seed=rep, report="fresh-draws"
+        )
+        selected.append(sel["expected_loss"])
+        ses.append(sel["expected_loss_mc_se"])
+        fresh.append(fre["expected_loss"])
+        assert fre["report"] == "fresh-draws"
+        assert fre["selection_expected_loss"] == sel["expected_loss"]
+    mean_se = float(np.mean(ses))
+    assert float(np.mean(selected)) / mean_se < -1.5  # the curse is real and visible in SE units
+    assert abs(float(np.mean(fresh))) / mean_se < 1.0  # fresh draws remove it
+    assert abs(mean_se - 1.0 / np.sqrt(n_draws)) < 0.01  # the SE is the real MC SE
+
+
+def test_bayes_action_default_report_leaves_loss_call_counts_untouched():
+    """report='selection' (default) must not add loss invocations -- the exact-invocation-count
+    contract (MXR-080-1611) is itself a stated guarantee for metered losses."""
+
+    class _ThreeDraws:
+        def samples(self, n, rng):  # noqa: ARG002
+            return [0.0, 1.0, 2.0]
+
+    calls = []
+
+    def loss(action, draw):
+        calls.append(action)
+        return float(draw - action)
+
+    loss.vectorized = False
+    out = bayes_action(_ThreeDraws(), loss, [0.0, 1.0], n=3, seed=0)
+    assert len(calls) == 6  # 2 actions x 3 draws, exactly as before
+    assert out["report"] == "selection"
+    assert "expected_loss_mc_se" in out
+    with pytest.raises(ValueError, match="report must be"):
+        bayes_action(_ThreeDraws(), loss, [0.0], n=3, report="half")

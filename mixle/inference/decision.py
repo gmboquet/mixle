@@ -293,8 +293,24 @@ def bayes_action(
     cvar_alpha: float = 0.1,
     quantiles: Sequence[float] = (0.05, 0.5, 0.95),
     vectorized: bool | None = None,
+    report: str = "selection",
 ) -> dict[str, Any]:
     """Pick the Bayes action: ``argmin_a E_{draw ~ posterior}[ loss(a, draw) ]``.
+
+    The winner's reported numbers carry selection bias unless you pay to remove it. The chosen
+    action minimises K NOISY Monte-Carlo estimates, so its own ``expected_loss`` is optimistic
+    post-argmin (the winner's curse): measured bias about -2.5 Monte-Carlo standard errors at
+    K = 100 candidates -- and it does NOT shrink with ``n``, because more draws shrink the SE and
+    the bias together. ``expected_loss_mc_se`` is returned so the optimism has a scale; with many
+    near-tied candidates, read the winner's advertised loss as roughly that many SEs too good.
+    ``report="fresh-draws"`` removes the bias instead: the choice is made exactly as before, then
+    ``n`` NEW posterior draws are taken and the winner's reported ``expected_loss`` /
+    ``risk_profile`` are recomputed on them (selection-independent, hence conditionally unbiased
+    for the chosen action). That costs one more ``samples(n, rng)`` call and ``n`` more loss
+    evaluations (one vectorized call) FOR THE WINNER ONLY -- deliberately not the default, because
+    a loss may be metered or side-effecting and the exact-invocation-count contract below is
+    itself a stated guarantee; ``selection_expected_loss`` then preserves the in-sample value the
+    action won with. ``alternatives`` always carries selection-stage estimates.
 
     Args:
         posterior: any object exposing ``samples(n, rng)`` -- e.g.
@@ -311,10 +327,12 @@ def bayes_action(
             invocation of the loss, so a loss that keeps state, records calls, or has side effects should
             declare its convention (argument or attribute) to be evaluated exactly the required number of
             times.
+        report: ``"selection"`` (default) reports the winner's selection-stage estimates plus their
+            Monte-Carlo SE; ``"fresh-draws"`` re-estimates the winner on ``n`` new draws (see above).
 
     Returns:
-        ``{action, action_index, expected_loss, risk_profile, alternatives}`` -- the chosen action, its
-        expected loss, its tail-risk profile, and the expected loss of every candidate.
+        ``{action, action_index, expected_loss, expected_loss_mc_se, risk_profile, alternatives,
+        report, vectorized}`` -- plus ``selection_expected_loss`` when ``report="fresh-draws"``.
 
     Raises:
         ValueError: if ``actions`` is empty, ``n`` is not positive, ``cvar_alpha`` is outside ``(0, 1]``,
@@ -328,6 +346,8 @@ def bayes_action(
     actions = list(actions)
     if not actions:
         raise ValueError("bayes_action requires at least one candidate action")
+    if report not in ("selection", "fresh-draws"):
+        raise ValueError(f"report must be 'selection' or 'fresh-draws', got {report!r}")
 
     sample_fn = getattr(posterior, "samples", None)
     if not callable(sample_fn):
@@ -355,18 +375,35 @@ def bayes_action(
         expected.append(prof.expected_loss)
 
     best = int(np.argmin(expected))
-    return {
+    result = {
         "action": actions[best],
         "action_index": best,
         "expected_loss": expected[best],
+        # The scale of the winner's optimism (audit D-1): the argmin of K noisy estimates is
+        # biased low by construction (~ -2.5 of these SEs at K = 100), so the SE ships with the
+        # estimate rather than leaving the post-selection number to be read as exact.
+        "expected_loss_mc_se": profiles[best].std / np.sqrt(len(draw_list)),
         "risk_profile": profiles[best].as_dict(),
         "alternatives": [{"action": a, "expected_loss": e} for a, e in zip(actions, expected)],
+        "report": report,
         # The convention this call resolved, so a caller that goes on to evaluate the same loss --
         # decision_regret_objective scoring the chosen action against real data, say -- can pass it
         # straight back instead of probing the loss a second time. A probe is a real invocation of
         # user code; discovering the same fact twice is one wasted call per decision, forever.
         "vectorized": mode,
     }
+    if report == "fresh-draws":
+        # Selection-independent re-estimate for the WINNER only: new draws, one more loss batch.
+        # The choice above is untouched; only the advertised numbers change (winner's curse gone).
+        fresh_draws = _draw_list(sample_fn(requested, rng), requested)
+        fresh_losses, mode = _loss_samples(loss, actions[best], fresh_draws, vectorized=mode)
+        fresh_profile = _risk_profile(fresh_losses, alpha=alpha, quantiles=levels)
+        result["selection_expected_loss"] = expected[best]
+        result["expected_loss"] = fresh_profile.expected_loss
+        result["expected_loss_mc_se"] = fresh_profile.std / np.sqrt(len(fresh_draws))
+        result["risk_profile"] = fresh_profile.as_dict()
+        result["vectorized"] = mode
+    return result
 
 
 __all__ = ["bayes_action", "RiskProfile"]
