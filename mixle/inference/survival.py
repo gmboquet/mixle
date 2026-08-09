@@ -113,7 +113,8 @@ def kaplan_meier(time: np.ndarray, event: np.ndarray | None = None, *, ci_level:
         ``{'time', 'survival', 'se', 'ci_low', 'ci_high', 'at_risk', 'n_events', 'median'}``.
 
     ``ci_low``/``ci_high`` are PER-TIME-POINT (pointwise) intervals, not a simultaneous confidence
-    band: each covers ``S(t)`` at its own ``t`` with probability ``ci_level``, but the probability
+    band: each is a MARGINAL, asymptotic (Greenwood log--log) interval for ``S(t)`` at its own
+    ``t`` with probability ``ci_level`` under independent censoring, but the probability
     that the true curve stays inside the envelope at EVERY time point is far lower -- measured
     simultaneous coverage of the pointwise 95% envelope is 0.60 / 0.51 / 0.43 at n = 50 / 100 / 200
     (it FALLS with n, because more event times mean more chances to escape). Reading the plotted
