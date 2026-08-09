@@ -6,8 +6,9 @@ standard -- an effect size. Statistics are computed here (mid-ranks for ties); t
 exact small-sample nulls where SciPy / R use them (the Wilcoxon signed-rank enumeration at
 ``n <= 25`` without ties or zeros; the two-sample KS at small samples) and the asymptotic reference
 distributions (normal / chi-square / Student-t / Kolmogorov) with tie corrections otherwise. Not
-every asymptotic branch carries a continuity correction (the runs test and Page test do not), and
-the remaining small-sample normal approximations are approximations -- see each test's docstring.
+every asymptotic branch carries a continuity correction (the Page test does not; the runs test is
+EXACT at n <= 60), and the remaining small-sample normal approximations are approximations -- see
+each test's docstring.
 
 .. parsed-literal::
 
@@ -620,7 +621,11 @@ def runs_test(x: Any, *, cutoff: str | float = "median") -> TestResult:
 
     Dichotomizes ``x`` about its median (or a supplied numeric ``cutoff``) and tests whether the run
     count departs from what independence predicts (too few runs => clustering/trend; too many =>
-    over-alternation). Normal approximation, two-sided. ``extra`` carries the run count and z-score.
+    over-alternation). Two-sided. The null is EXACT (the closed-form run-count distribution given
+    ``(n1, n2)``) when ``n1 + n2 <= 60``, where the uncorrected normal approximation is
+    level-violating -- exhaustive enumeration at ``n1 = n2 = 5`` rejects 20/252 = 7.94% at nominal
+    5% (STAT-RR17-16); the normal approximation applies above that. ``extra`` carries the run
+    count, z-score, and ``method`` (``"exact"`` / ``"normal"``).
     """
     a = _sample("x", x, minimum=2)
     if isinstance(cutoff, str):
@@ -644,8 +649,31 @@ def runs_test(x: Any, *, cutoff: str | float = "median") -> TestResult:
     if var <= 0:
         raise ValueError("runs test requires enough observations for a positive reference variance")
     z = (runs - mu) / np.sqrt(var)
-    p = 2.0 * stats.norm.sf(abs(z))
-    return TestResult(float(runs), float(min(p, 1.0)), {"runs": runs, "zscore": float(z)})
+    if n <= 60:
+        # exact conditional null given (n1, n2): the closed-form run-count pmf (STAT-RR17-16).
+        # P(R = 2k) = 2 C(n1-1, k-1) C(n2-1, k-1) / C(n, n1);
+        # P(R = 2k+1) = [C(n1-1, k) C(n2-1, k-1) + C(n1-1, k-1) C(n2-1, k)] / C(n, n1).
+        from math import comb
+
+        total = comb(n, n1)
+        pmf = {}
+        for r in range(2, n + 1):
+            if r % 2 == 0:
+                k = r // 2
+                mass = 2 * comb(n1 - 1, k - 1) * comb(n2 - 1, k - 1)
+            else:
+                k = (r - 1) // 2
+                mass = comb(n1 - 1, k) * comb(n2 - 1, k - 1) + comb(n1 - 1, k - 1) * comb(n2 - 1, k)
+            if mass:
+                pmf[r] = mass / total
+        lower = sum(prob for r, prob in pmf.items() if r <= runs)
+        upper = sum(prob for r, prob in pmf.items() if r >= runs)
+        p = min(1.0, 2.0 * min(lower, upper))
+        method = "exact"
+    else:
+        p = 2.0 * stats.norm.sf(abs(z))
+        method = "normal"
+    return TestResult(float(runs), float(min(p, 1.0)), {"runs": runs, "zscore": float(z), "method": method})
 
 
 __all__ = [
