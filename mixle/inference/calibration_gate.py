@@ -218,30 +218,43 @@ def _measured_power(
     m: int | None = None,
     n_alternative: int = 200,
     seed: int = 20260808,
+    error_tol: float | None = None,
 ) -> tuple[float, str]:
-    """Measured power of the SBC decision (i.i.d. MC p-value) at this sample size.
+    """Measured power of the SBC decision ACTUALLY IN USE at this sample size.
 
     Against ONE named canonical alternative -- predictive dispersion 0.8x the truth, PIT values
-    ``Phi(z/0.8)``. This executes the implemented decision: reject when
-    ``(1 + #{T_null >= T_alt})/(1 + B) <= alpha``. Used by SBC only; the predictive gate's power
-    runs the column-swap decision itself under both supported dependence regimes
-    (:func:`_measured_gate_power`).
+    ``Phi(z/0.8)``. With ``error_tol=None`` this executes the MC-p-value decision: reject when
+    ``(1 + #{T_null >= T_alt})/(1 + B) <= alpha``. With ``error_tol`` set it executes the
+    CALLER'S OWN tolerance rule -- reject when the statistic exceeds ``error_tol`` -- and the
+    returned description also carries that rule's MEASURED null rejection rate, because a fixed
+    tolerance has no built-in level control (pass 19: the tol mode used to promote on the power
+    of the p-value decision, a test it never ran). Used by SBC only; the predictive gate's power
+    runs the column-swap decision itself (:func:`_measured_gate_power`).
     """
     from scipy.stats import norm as _norm
 
-    alternative = "predictive dispersion 0.8x truth (PIT = Phi(z/0.8))"
-    del m
     rs = RandomState(seed)
     null_stats = np.sort(
         [pit_calibration_error(rs.uniform(0.0, 1.0, size=int(n)), bins=bins) for _ in range(int(n_null))]
     )
+    alt_stats = [
+        pit_calibration_error(_norm.cdf(rs.standard_normal(int(n)) / 0.8), bins=bins) for _ in range(int(n_alternative))
+    ]
+    if error_tol is not None:
+        power = float(np.mean([t > error_tol for t in alt_stats]))
+        null_level = float(np.mean(null_stats > error_tol))
+        alternative = (
+            "predictive dispersion 0.8x truth (PIT = Phi(z/0.8)); executed rule: statistic > "
+            f"error_tol={error_tol:g}, whose MEASURED null rejection rate here is {null_level:.3f} "
+            "(a fixed tolerance carries no built-in level control)"
+        )
+        return power, alternative
     hits = 0
-    for _ in range(int(n_alternative)):
-        t_alt = pit_calibration_error(_norm.cdf(rs.standard_normal(int(n)) / 0.8), bins=bins)
+    for t_alt in alt_stats:
         count = int(null_stats.size - np.searchsorted(null_stats, t_alt, side="left"))
         if (1.0 + count) / (1.0 + null_stats.size) <= alpha:
             hits += 1
-    return float(hits / float(n_alternative)), alternative
+    return float(hits / float(n_alternative)), "predictive dispersion 0.8x truth (PIT = Phi(z/0.8))"
 
 
 def _measured_gate_power(
@@ -253,6 +266,7 @@ def _measured_gate_power(
     n_alternative: int = 60,
     budget_ops: float = 6.5e9,
     seed: int = 20260809,
+    pit_tol: float | None = None,
 ) -> tuple[float, float, str]:
     """Power of the ACTUAL column-swap decision, executed under BOTH supported dependence regimes.
 
@@ -266,6 +280,43 @@ def _measured_gate_power(
     when execution would exceed the operation budget -- an unmeasured power never promotes
     (claim reduction, per the pass-18 closure requirement).
     """
+    if pit_tol is not None:
+        # The caller's own tolerance rule is the decision in force -- measure THAT rule, not the
+        # p-value test the tol mode bypassed (pass 19: a loose tolerance used to be promoted on
+        # power figures for a decision that never ran). One randomized-PIT statistic per
+        # replicate: cheap enough that the budget is never the binding constraint here. The
+        # measured NULL rejection rate ships in the description because a fixed tolerance has no
+        # built-in level control -- the caller sees exactly what their tol buys in both regimes.
+        rs = RandomState(seed)
+        hits_ind = hits_sh = null_ind = null_sh = 0
+        n_tol = int(max(n_alternative, 200))
+        for i in range(n_tol):
+            jit = seed + 4 * i
+            ens = 0.8 * rs.standard_normal((k, m))
+            y = rs.standard_normal(k)
+            t = pit_calibration_error(pit_ensemble(y, ens, randomize=True, seed=jit), bins=bins)
+            hits_ind += t > pit_tol
+            cols = rs.standard_normal(m)
+            ens2 = 0.8 * (cols[None, :] + rs.standard_normal((k, m)))
+            y2 = rs.standard_normal() + rs.standard_normal(k)
+            t2 = pit_calibration_error(pit_ensemble(y2, ens2, randomize=True, seed=jit + 1), bins=bins)
+            hits_sh += t2 > pit_tol
+            ens_null = rs.standard_normal((k, m))
+            y_null = rs.standard_normal(k)
+            tn = pit_calibration_error(pit_ensemble(y_null, ens_null, randomize=True, seed=jit + 2), bins=bins)
+            null_ind += tn > pit_tol
+            cols_n = rs.standard_normal(m)
+            ens_null2 = cols_n[None, :] + rs.standard_normal((k, m))
+            y_null2 = rs.standard_normal() + rs.standard_normal(k)
+            tn2 = pit_calibration_error(pit_ensemble(y_null2, ens_null2, randomize=True, seed=jit + 3), bins=bins)
+            null_sh += tn2 > pit_tol
+        alternative = (
+            "predictive marginal SD 0.8x truth; executed rule: PIT error > pit_tol="
+            f"{pit_tol:g}, whose MEASURED null rejection rate is {null_ind / n_tol:.3f} "
+            f"(independent) / {null_sh / n_tol:.3f} (shared-column) -- a fixed tolerance "
+            "carries no built-in level control"
+        )
+        return float(hits_ind / n_tol), float(hits_sh / n_tol), alternative
     alternative = (
         "predictive marginal SD 0.8x truth (executed decision; min over independent and shared-column regimes)"
     )
@@ -461,7 +512,7 @@ def posterior_predictive_calibration(
         _t_decision, p_value = _column_swap_pvalue(y, ens, bins=bins, pit_seed=pit_seed)
         passed = p_value > alpha
     power_independent, power_shared, power_alternative = _measured_gate_power(
-        k, int(ens.shape[1]), bins=bins, alpha=alpha
+        k, int(ens.shape[1]), bins=bins, alpha=alpha, pit_tol=pit_tol
     )
     power_estimate = float(power_independent if ensemble_dependence == "independent" else power_shared)
     legacy_power, expected_count = _power_is_sufficient(
@@ -702,11 +753,14 @@ def simulation_based_calibration(
         # STAT-RR17-08: decide by the level-exact MC p-value, never the estimated quantile. The
         # i.i.d.-uniform null is CORRECT here (unlike the predictive gate): each SBC simulation
         # draws its own parameters and data, so ranks are independent across sims by protocol.
-        p_value = _uniform_mc_pvalue(
-            sbc_error, int(n_sims), bins=bins, n_null=n_null, seed=(0 if seed is None else int(seed)) + 404
-        )
+        # seed may be an int OR a RandomState (the signature admits both); int(RandomState)
+        # raised here before, so a replayable MC seed is derived from whichever was given
+        mc_seed = (int(seed) + 404) if isinstance(seed, (int, np.integer)) else int(rng.randint(0, 2**31 - 1))
+        p_value = _uniform_mc_pvalue(sbc_error, int(n_sims), bins=bins, n_null=n_null, seed=mc_seed)
         within_threshold = p_value > alpha
-    power_estimate, power_alternative = _measured_power(int(n_sims), bins=bins, alpha=alpha, n_null=n_null)
+    power_estimate, power_alternative = _measured_power(
+        int(n_sims), bins=bins, alpha=alpha, n_null=n_null, error_tol=error_tol
+    )
     legacy_power, expected_count = _power_is_sufficient(
         int(n_sims),
         bins=bins,

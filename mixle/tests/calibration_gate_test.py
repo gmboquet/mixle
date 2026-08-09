@@ -371,3 +371,55 @@ def test_direction_label_uses_finite_m_expectation():
     assert verdict.coverage_at_reference_null_expectation < 0.88  # far below the 0.90 nominal
     # coverage sits near the finite-m expectation, not near nominal
     assert abs(verdict.coverage_at_reference - verdict.coverage_at_reference_null_expectation) < 0.08
+
+
+def test_tolerance_modes_measure_their_own_rule_not_the_p_value_test():
+    """Pass-19 blocker: pit_tol/error_tol decide by 'statistic <= tol', but power_sufficient came
+    from the p-value decision -- a test the tol mode never ran -- so a loose tolerance promoted
+    'passed' on borrowed power. The power fields now execute the caller's own tol rule (its power
+    is ~0 for a loose tol, blocking promotion) and the description carries the tol rule's
+    MEASURED null rejection rate, since a fixed tolerance has no built-in level control."""
+    rs = np.random.RandomState(0)
+    k, m = 120, 32
+    mu = rs.normal(0, 2, k)
+    ens = mu[:, None] + rs.normal(0, 1.0, (k, m))
+    y = mu + rs.normal(0, 1.0, k)
+
+    loose = posterior_predictive_calibration(ens, y, pit_tol=5.0, ensemble_dependence="independent")
+    assert loose.calibration_status == "indeterminate"
+    assert loose.power_estimate_independent < 0.05
+    assert "MEASURED null rejection rate" in loose.power_alternative
+    assert "pit_tol=5" in loose.power_alternative
+
+    def prior(rng):
+        return np.array([rng.normal()])
+
+    def simulate(theta, rng):
+        return theta[0] + rng.normal(size=20)
+
+    def fit(y_obs, rng):
+        n = len(y_obs)
+        return rng.normal(np.mean(y_obs) * n / (n + 1), np.sqrt(1.0 / (n + 1)), size=200)
+
+    v_tol = simulation_based_calibration(prior, simulate, fit, n_sims=60, seed=3, error_tol=3.0)
+    assert v_tol.calibration_status == "indeterminate"
+    assert v_tol.power_estimate < 0.05
+    assert "error_tol=3" in v_tol.power_alternative
+
+
+def test_sbc_accepts_a_randomstate_seed():
+    """int(RandomState) raised inside the MC p-value seed derivation; the signature admits both."""
+
+    def prior(rng):
+        return np.array([rng.normal()])
+
+    def simulate(theta, rng):
+        return theta[0] + rng.normal(size=15)
+
+    def fit(y_obs, rng):
+        n = len(y_obs)
+        return rng.normal(np.mean(y_obs) * n / (n + 1), np.sqrt(1.0 / (n + 1)), size=150)
+
+    verdict = simulation_based_calibration(prior, simulate, fit, n_sims=40, seed=np.random.RandomState(7))
+    assert verdict.calibration_status in ("passed", "failed", "indeterminate")
+    assert verdict.randomness_controlled
