@@ -254,3 +254,48 @@ classifier at all (the claim verb went away with the scoping), so the signed man
 byte-identical to ba738d77 -- survival.py did NOT join the inventory, and no re-attestation
 happened or was needed. The commit's code change is exactly as described; only its "joins the
 reviewed claims inventory" clause is wrong, and this note is the append-only correction.
+
+## Pass-19 status (2026-08-09, NO-GO, 9 High / 8 Medium, audited 4aeb9c8b; Q2+Q6 PASS, Q1/Q3/Q4/Q5 FAIL)
+
+CAVEAT: the report directory (/private/tmp/mixle-rereview19.B4L9yi/) was destroyed by a disk-full
+cleanup before it could be read; only the four blockers NAMED in the delivery summary were
+reproducible. All four are fixed with in-session reproductions; the remaining itemized findings
+(~13) need the report re-dropped.
+
+### Pass-19 fix wave 1 (2026-08-09, this session): all four named blockers closed
+
+- Poisson batch route (c3df7f58): REPRODUCED 49-100% false rejection at nominal 5%, FLAT in n
+  (1e3..1e5) -- not the Haldane bias: the per-subject variances 1/(k+0.5) fed DL inverse-variance
+  weights ANTI-CORRELATED with the effects (corr(1/v, y) = -0.72 at arm means 4.6/13.8), dragging
+  a true-null weighted mean to -0.150 (z = -7.8). poisson_lograte_effects now returns exact
+  plug-in ARM-level variances (constant per call -- weights inert by construction, pinned
+  weighted == unweighted) and debiases by the exact pmf-summation Haldane offset (plug-in residual
+  SHRINKS with n). Measured through the real DL pool: 0.060/0.062/0.040 at n = 1e3/1e4/1e5.
+- Duplicate collapsing (ed8d18e4): REPRODUCED certified error_upper 0.080 vs served traffic risk
+  0.373-0.410 on 40%-heavy iid traffic whose heavy prompt always errs -- deterministic every
+  trial (the 500/500). The RR18-04 collapse silently swapped the estimand to uniform-over-
+  distinct-prompts. calibrate() takes sampling='constructed' (default; collapse + receipt NAMES
+  the estimand 'NOT traffic-weighted') | 'iid-traffic' (rows are the iid traffic draw; row error
+  indicators are iid Bernoulli of TRAFFIC risk even under per-prompt outcomes, duplicates carry
+  their weight; the blocker stream then correctly REFUSES alpha=0.15). 300-copies pin retained.
+- Tolerance modes borrowing power (fbaec7ce): pit_tol/error_tol decided by 'statistic <= tol' but
+  promoted on the P-VALUE decision's measured power -- a test those modes never ran (pit_tol=5 on
+  a well-powered fixture read power 0.87; its own rule's executed power is 0.000). Both power
+  helpers now execute the caller's tol rule (both dependence regimes for the gate) and disclose
+  its MEASURED null rejection rate (a fixed tol has no built-in level control); loose tolerances
+  land indeterminate. Verified in-session: column-swap stays conservative-valid on tied/discrete
+  ensembles (0.121/0.023 at attainable alpha 0.21, 800 reps); SBC MC p-value level-valid on an
+  exact conjugate posterior (0.0067 at nominal 0.01, 300 seeds); sbc(seed=RandomState) crash fixed.
+- MCMC/semantic-entropy reporting (97bcaf2d): REPRODUCED a real 4-chain fit labeled
+  'single-chain-mixing-unassessable' ("one chain: R-hat undefined") beside its finite multi-chain
+  R-hat -- posterior() pools chains flat and chain count was judged from draw shape, so 'ok' was
+  unreachable through the public path. Chain count now comes from the fit's own convergence
+  evidence; 4-chain reads ok, 1-chain reads single-chain with a real computed ESS and r_hat None
+  (the deliberate NaN marker no longer mislabeled 'unusable'; multi-chain NaN still surfaces as
+  unusable). semantic_entropy_receipt materializes samples once: generator inputs read
+  n_samples=0/bias None and published the uncorrected plug-in as the corrected value.
+
+Also this wave: my ADVI honesty tests gained the torch gate they were missing (core CI lanes
+have no torch), and the marginalize_meaning docstring indentation that failed sphinx -W is fixed
+(both were CI failures on the a007775a push -- the remaining CI failures on that tip were these
+two plus runner preemptions).
