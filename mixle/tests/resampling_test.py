@@ -270,3 +270,55 @@ class SubsamplingOrientationTest(unittest.TestCase):
         # the caller cannot opt back into the reflected orientation in m-mode
         again = bootstrap(x, np.max, m=60, n_boot=400, seed=7, method="percentile")
         self.assertEqual((res.ci_low, res.ci_high), (again.ci_low, again.ci_high))
+
+
+class ResamplingHonestyTest(unittest.TestCase):
+    """Audit RS-2/3/4/6: degenerate-jackknife fallback, mid-p z0, circular blocks, leverage."""
+
+    def test_bca_falls_back_labelled_for_quantile_statistics(self):
+        x = np.random.RandomState(1).standard_normal(60)
+        med = bootstrap(x, lambda d: float(np.median(d)), n_boot=300, method="bca", seed=2)
+        self.assertEqual(med.method, "percentile (bca-degenerate-jackknife)")
+        mean = bootstrap(x, lambda d: float(np.mean(d)), n_boot=300, method="bca", seed=2)
+        self.assertEqual(mean.method, "bca")
+
+    def test_bca_z0_uses_the_mid_p_convention_for_atoms_at_the_estimate(self):
+        # A balanced replicate set with a big atom AT the estimate: strict `<` reads prop = 0.1
+        # (z0 = -1.28, a strong spurious shift); mid-p reads 0.1 + 0.8/2 = 0.5, i.e. z0 = 0, and
+        # the BCa quantiles collapse to the plain percentile ones (up to tiny acceleration).
+        from mixle.inference.resampling import _bca_interval
+
+        rng = np.random.RandomState(3)
+        data = rng.standard_normal(40)
+        est = float(np.mean(data))
+        reps = np.concatenate([np.full(100, est - 1.0), np.full(800, est), np.full(100, est + 1.0)])
+        lo, hi = _bca_interval(data, lambda d: float(np.mean(d)), np.asarray(est), reps, alpha=0.05)
+        self.assertAlmostEqual(float(lo), float(np.quantile(reps, 0.025)), delta=0.05)
+        self.assertAlmostEqual(float(hi), float(np.quantile(reps, 0.975)), delta=0.05)
+
+    def test_circular_blocks_remove_the_centring_bias(self):
+        rng = np.random.RandomState(4)
+        series = np.cumsum(rng.standard_normal(300)) * 0.1 + rng.standard_normal(300)
+        blk = block_bootstrap(series, lambda d: float(np.mean(d)), block_length=25, n_boot=3000, seed=5)
+        gap = abs(float(blk.distribution.mean()) - float(series.mean()))
+        self.assertLess(gap, 0.02 * float(blk.distribution.std()) + 0.005)
+
+    def test_wild_leverage_adjustment_widens_high_leverage_intervals(self):
+        rng = np.random.RandomState(6)
+        n = 60
+        covariate = np.concatenate([rng.uniform(-1, 1, n - 3), np.array([6.0, 6.5, 7.0])])
+        design = np.column_stack([np.ones(n), covariate])
+        hat = np.diag(design @ np.linalg.inv(design.T @ design) @ design.T)
+        y = 1.0 + 2.0 * covariate + rng.standard_normal(n) * (0.3 + 0.5 * np.abs(covariate))
+        beta = np.linalg.lstsq(design, y, rcond=None)[0]
+        fitted = design @ beta
+        residuals = y - fitted
+
+        def slope(ystar):
+            return float(np.linalg.lstsq(design, ystar, rcond=None)[0][1])
+
+        raw = wild_bootstrap(fitted, residuals, slope, n_boot=800, seed=7)
+        adj = wild_bootstrap(fitted, residuals, slope, n_boot=800, seed=7, leverage=hat)
+        self.assertGreater(float(adj.ci_high) - float(adj.ci_low), float(raw.ci_high) - float(raw.ci_low))
+        with self.assertRaisesRegex(ValueError, "hat diagonals"):
+            wild_bootstrap(fitted, residuals, slope, n_boot=10, leverage=np.ones(n))

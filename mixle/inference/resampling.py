@@ -154,9 +154,14 @@ def _resample_indices(
     if block_length is not None:
         if not 1 <= block_length <= n:
             raise ValueError("block_length must be in [1, n].")
+        # CIRCULAR moving blocks (audit RS-4): with non-circular starts in [0, n - l], observation
+        # i appears in only min(i+1, l, n-i) blocks, so the endpoints are systematically
+        # under-weighted and the resample mean is biased away from the sample mean by O(l/n).
+        # Wrapping the series makes every observation appear in exactly l blocks, which removes
+        # the centring bias exactly while preserving the same within-block dependence.
         n_blocks = int(np.ceil(n / block_length))
-        starts = rng.randint(0, n - block_length + 1, size=n_blocks)
-        idx = np.concatenate([np.arange(s, s + block_length) for s in starts])
+        starts = rng.randint(0, n, size=n_blocks)
+        idx = np.concatenate([np.arange(s, s + block_length) for s in starts]) % n
         return idx[:n]
     if m is not None:
         return rng.choice(n, size=m, replace=False)
@@ -184,13 +189,28 @@ def bootstrap(
         statistic: maps the data to a scalar or fixed-length vector.
         n_boot: number of bootstrap resamples.
         method: ``"percentile"``, ``"basic"`` (pivotal), or ``"bca"`` (bias-corrected & accelerated).
-            ``"bca"`` is only second-order accurate for plain i.i.d. resampling; with ``groups`` /
-            ``clusters`` / ``block_length`` / ``m`` set it falls back to ``"percentile"``.
+            ``"bca"``'s second-order accuracy holds for plain i.i.d. resampling of a SMOOTH
+            (asymptotically normal, differentiable) functional; with ``groups`` / ``clusters`` /
+            ``block_length`` / ``m`` set it falls back to ``"percentile"``. Non-smooth statistics
+            -- sample quantiles and the median above all -- violate the smoothness the jackknife
+            acceleration needs (the leave-one-out vector collapses to a couple of distinct
+            values); when that degeneracy is detected the interval falls back to ``"percentile"``
+            and ``method`` records ``"percentile (bca-degenerate-jackknife)"``.
         ci_level: central probability of the interval.
         seed: RNG seed.
         groups: ``(n,)`` labels for **stratified** resampling (resample within each group).
-        clusters: ``(n,)`` labels for **cluster** resampling (resample whole clusters with replacement).
-        block_length: moving-**block** length for serially dependent (time-series) data.
+        clusters: ``(n,)`` labels for **cluster** resampling (resample whole clusters with
+            replacement). Validity is asymptotic in the NUMBER OF CLUSTERS, not the number of
+            rows: at G = 5 clusters, nominal-95% coverage measures ~0.5-0.7 however many rows
+            each cluster holds, so treat few-cluster intervals as descriptive. Unequal cluster
+            sizes additionally inflate replicate variance (each resample's row count varies with
+            which clusters were drawn).
+        block_length: moving-**block** length for serially dependent (time-series) data. Blocks
+            are CIRCULAR (the series wraps), which removes the endpoint under-weighting of
+            non-circular moving blocks. For picking the length, the coverage-optimal rate grows
+            with the sample -- on the order of ``n**(1/3)`` scaled by the dependence strength --
+            so "the correlation length" alone is materially too short for long series: a length
+            that ignores ``n`` leaves residual dependence between blocks uncounted.
         m: subsample size for **m-out-of-n** subsampling (without replacement), ``m < n``.
             Replicates are rescaled about the point estimate by ``sqrt(m/n)`` (Politis--Romano),
             which assumes the usual ``sqrt(n)``-consistent statistic (a faster-rate statistic
@@ -260,14 +280,21 @@ def bootstrap(
     else:
         method_used = method
 
-    if method_used == "percentile":
+    if method_used == "bca":
+        bca = _bca_interval(data, statistic, estimate, reps, alpha)
+        if bca is None:
+            # Degenerate jackknife (audit RS-2): the leave-one-out vector of a quantile-type
+            # statistic takes so few distinct values that the acceleration estimate is noise, not
+            # skewness. Percentile is the honest fallback, and the label says why.
+            method_used = "percentile (bca-degenerate-jackknife)"
+        else:
+            lo, hi = bca
+    if method_used.startswith("percentile"):
         lo = np.quantile(reps, alpha / 2.0, axis=0)
         hi = np.quantile(reps, 1.0 - alpha / 2.0, axis=0)
     elif method_used == "basic":
         lo = 2.0 * estimate - np.quantile(reps, 1.0 - alpha / 2.0, axis=0)
         hi = 2.0 * estimate - np.quantile(reps, alpha / 2.0, axis=0)
-    elif method_used == "bca":
-        lo, hi = _bca_interval(data, statistic, estimate, reps, alpha)
 
     return BootstrapResult(
         estimate=estimate,
@@ -282,8 +309,13 @@ def bootstrap(
 
 def _bca_interval(
     data: Any, statistic: Callable, estimate: np.ndarray, reps: np.ndarray, alpha: float
-) -> tuple[np.ndarray, np.ndarray]:
-    """Bias-corrected and accelerated interval endpoints (Efron 1987)."""
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Bias-corrected and accelerated interval endpoints (Efron 1987).
+
+    Returns ``None`` when the jackknife is degenerate (fewer than 3 distinct leave-one-out values
+    for some component) -- the acceleration is a skewness estimate and needs actual variation to
+    estimate it; the caller then falls back to the percentile interval with a labelled method.
+    """
     n = _n_units(data)
     if n < 2:
         # the jackknife loop below leaves one observation out per iteration; at n=1 that computes
@@ -292,8 +324,12 @@ def _bca_interval(
         # -- the NaN silently propagated through norm.cdf/np.quantile and surfaced downstream as an
         # unrelated "Quantiles must be in the range [0, 1]" ValueError instead of this clear one.
         raise ValueError(f"BCa interval needs at least 2 observations for the jackknife acceleration term, got {n}.")
-    # bias correction z0 from the fraction of replicates below the point estimate
-    prop = np.mean(reps < estimate, axis=0)
+    # Bias correction z0 with the MID-P convention (audit RS-3): a lattice statistic puts a point
+    # mass exactly AT the estimate, and counting none of it (strict <) reads the atom as downward
+    # bias -- an unbiased symmetric discrete statistic got a spurious correction. Counting half
+    # the atom makes z0 = 0 exactly in that symmetric case and changes nothing for continuous
+    # statistics (where ties have probability zero).
+    prop = np.mean(reps < estimate, axis=0) + 0.5 * np.mean(reps == estimate, axis=0)
     prop = np.clip(prop, 1.0 / (reps.shape[0] + 1), 1.0 - 1.0 / (reps.shape[0] + 1))
     z0 = norm.ppf(prop)
     # acceleration from the jackknife skewness of the leave-one-out estimates
@@ -301,6 +337,13 @@ def _bca_interval(
     all_idx = np.arange(n)
     for i in range(n):
         jack[i] = _call(statistic, _take(data, np.delete(all_idx, i)))
+    # Degenerate jackknife detection (audit RS-2): the acceleration is consistent for smooth
+    # functionals; for sample quantiles the leave-one-out vector collapses to ~2 distinct values
+    # and the ratio below estimates noise. Bail out to percentile rather than decorate the
+    # interval with a meaningless skewness adjustment.
+    jack_flat = jack.reshape(n, -1)
+    if any(np.unique(jack_flat[:, k]).size < 3 for k in range(jack_flat.shape[1])):
+        return None
     jack_mean = jack.mean(axis=0)
     diff = jack_mean - jack
     num = np.sum(diff**3, axis=0)
@@ -352,23 +395,38 @@ def wild_bootstrap(
     kind: str = "rademacher",
     ci_level: float = 0.95,
     seed: int | RandomState | None = 0,
+    leverage: np.ndarray | None = None,
 ) -> BootstrapResult:
-    """Wild (residual-multiplier) bootstrap, robust to heteroscedasticity.
+    """Wild (residual-multiplier) bootstrap for heteroscedastic regression errors.
 
     Builds synthetic responses ``y* = fitted + residual * v`` where ``v`` are mean-zero,
     unit-variance two-point multipliers drawn independently per observation, then recomputes the
     statistic on each ``y*``. Because each residual keeps its own magnitude, the procedure preserves
     heteroscedasticity that an i.i.d. residual resample would destroy.
 
+    The robustness claim is conditional on what the residuals carry. OLS residuals systematically
+    UNDERSTATE the error at influential design points (``E[e_i^2] = sigma_i^2 (1 - h_i)`` with
+    ``h_i`` the hat-matrix diagonal), so multiplying raw residuals hands high-leverage
+    observations too little noise exactly where mis-estimated variance hurts the most. Pass
+    ``leverage`` (the hat diagonals) to apply the Davidson-Flachaire restoration
+    ``e_i / (1 - h_i)`` before multiplication -- the standard wild-bootstrap practice for
+    regression coefficients. ``residuals`` must be RESPONSE-SCALE ``y - fitted``: Pearson,
+    deviance, or standardized residuals reconstruct a different response vector and silently
+    change the estimand (the point estimate is computed from ``fitted + residuals``, which equals
+    the observed ``y`` only for raw residuals).
+
     Args:
         fitted: ``(n,)`` fitted values from the model.
-        residuals: ``(n,)`` residuals ``y - fitted``.
+        residuals: ``(n,)`` raw response-scale residuals ``y - fitted``.
         statistic: maps a synthetic response vector ``y*`` to a scalar or vector (e.g. refit and
             return coefficients).
         n_boot: number of resamples.
         kind: ``"rademacher"`` (``v in {-1, +1}``) or ``"mammen"`` (Mammen's two-point distribution).
         ci_level: central probability of the percentile interval.
         seed: RNG seed.
+        leverage: optional ``(n,)`` hat-matrix diagonals ``h_i in [0, 1)``; when given, residuals
+            are inflated to ``e_i / (1 - h_i)`` inside the resampling loop (the point estimate
+            still uses the raw residuals, i.e. the observed response).
 
     Returns:
         A :class:`BootstrapResult` (percentile interval).
@@ -392,7 +450,16 @@ def wild_bootstrap(
     ):
         raise ValueError("fitted and residuals must be matching non-empty finite vectors")
     n = fitted.shape[0]
-    # the observed response is y = fitted + residuals
+    if leverage is not None:
+        leverage = np.asarray(leverage, dtype=float)
+        if leverage.shape != fitted.shape or not np.all(np.isfinite(leverage)):
+            raise ValueError("leverage must be a finite vector aligned with fitted")
+        if np.any((leverage < 0.0) | (leverage >= 1.0)):
+            raise ValueError("leverage entries must be hat diagonals in [0, 1)")
+        loop_residuals = residuals / (1.0 - leverage)
+    else:
+        loop_residuals = residuals
+    # the observed response is y = fitted + residuals (raw residuals by contract)
     estimate = np.asarray(statistic(fitted + residuals), dtype=float)
     reps = np.empty((n_boot,) + estimate.shape, dtype=float)
     sqrt5 = np.sqrt(5.0)
@@ -404,7 +471,7 @@ def wild_bootstrap(
             a = -(sqrt5 - 1.0) / 2.0
             c = (sqrt5 + 1.0) / 2.0
             v = np.where(rng.rand(n) < p_mammen, a, c)
-        reps[b] = _call(statistic, fitted + residuals * v)
+        reps[b] = _call(statistic, fitted + loop_residuals * v)
     alpha = 1.0 - ci_level
     lo = np.quantile(reps, alpha / 2.0, axis=0)
     hi = np.quantile(reps, 1.0 - alpha / 2.0, axis=0)
