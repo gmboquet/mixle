@@ -44,15 +44,28 @@ def low_rank():
         LowRankTransition(_row_normalize(rng.rand(k, r)), _row_normalize(rng.rand(r, k))),
     )
     seqs = [gen.sampler(seed=s).sample(50) for s in range(60)]
+    # STAT-RR17-05: the init is displaced FAR enough that a no-op "fit" cannot pass -- offsets
+    # of 1.5-2.0 against a recovery bound of 0.5 mean the printed "recovered" is earned by the
+    # optimizer, not planted by the initialization (the old Uniform(-1,1) init with an error<1
+    # oracle passed a fitter that returned its input unchanged).
+    offsets = [rng.uniform(1.5, 2.0) * rng.choice([-1.0, 1.0]) for _ in range(k)]
     init = StructuredHMM(
-        gaussians([4 * i + rng.uniform(-1, 1) for i in range(k)]),
+        gaussians([4 * i + offsets[i] for i in range(k)]),
         np.ones(k) / k,
         LowRankTransition(_row_normalize(rng.rand(k, r)), _row_normalize(rng.rand(r, k))),
     )
+    truth = [4.0 * i for i in range(k)]
+    init_error = max(abs(m - t) for m, t in zip(sorted(e.mu for e in init.emissions), truth))
     fit = optimize(seqs, init.estimator(), prev_estimate=init, max_its=40, out=None)
+    fit_error = max(abs(m - t) for m, t in zip(sorted(e.mu for e in fit.emissions), truth))
+    if not (fit_error < 0.5 < init_error):
+        raise RuntimeError(
+            f"recovery NOT demonstrated: fit error {fit_error:.2f} must be < 0.5 while the "
+            f"init error {init_error:.2f} stays above it (a no-op fitter fails this)"
+        )
     print(
         f"1. Low-rank HMM (K={k}, rank={r}): transition params {2 * k * r} vs dense {k * k}; "
-        f"recovered means {sorted(round(e.mu, 1) for e in fit.emissions)[:4]}..."
+        f"means recovered to max error {fit_error:.2f} from an init error of {init_error:.2f}"
     )
 
 

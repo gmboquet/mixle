@@ -47,21 +47,29 @@ class StructuredHMMTest(unittest.TestCase):
         rng = np.random.RandomState(0)
         K, r = 8, 2
         gen = StructuredHMM(
-            [S.GaussianDistribution(3.0 * k, 1.0) for k in range(K)],
+            [S.GaussianDistribution(4.0 * k, 1.0) for k in range(K)],
             np.ones(K) / K,
             LowRankTransition(_row_normalize(rng.rand(K, r)), _row_normalize(rng.rand(r, K))),
         )
         seqs = [gen.sampler(seed=s).sample(50) for s in range(50)]
+        # STAT-RR17-05: the init is displaced beyond the acceptance bound, so a no-op "fit"
+        # that returns its initialization CANNOT pass -- recovery must be earned by EM
+        # above the 1.0 no-op bar but inside the 2.0 half-spacing basin boundary (spacing 4.0)
+        offsets = [rng.uniform(1.2, 1.7) * rng.choice([-1.0, 1.0]) for _ in range(K)]
         init = StructuredHMM(
-            [S.GaussianDistribution(3.0 * k + rng.uniform(-1, 1), 1.0) for k in range(K)],
+            [S.GaussianDistribution(4.0 * k + offsets[k], 1.0) for k in range(K)],
             np.ones(K) / K,
             LowRankTransition(_row_normalize(rng.rand(K, r)), _row_normalize(rng.rand(r, K))),
         )
-        _, trace = init.fit(seqs, max_its=30)
+        truth = [4.0 * k for k in range(K)]
+        init_error = max(abs(m - t) for m, t in zip(sorted(e.mu for e in init.emissions), truth))
+        self.assertGreater(init_error, 1.0)  # the no-op bar: initialization alone must FAIL below
+        _, trace = init.fit(seqs, max_its=60)
         self.assertTrue(np.all(np.diff(trace) >= -1e-6))  # EM log-likelihood non-decreasing
         means = sorted(e.mu for e in init.emissions)
-        truth = [3.0 * k for k in range(K)]
-        self.assertLess(max(abs(m - t) for m, t in zip(means, truth)), 1.0)
+        fit_error = max(abs(m - t) for m, t in zip(means, truth))
+        self.assertLess(fit_error, 0.5)
+        self.assertLess(fit_error, init_error)
 
     def test_low_rank_has_fewer_parameters(self):
         K, r = 40, 2
@@ -389,7 +397,7 @@ class ExplicitDurationHMMTest(unittest.TestCase):
             np.ones((2, D)) / D,
             D,
         )
-        _, trace = init.fit(seqs, max_its=30)
+        _, trace = init.fit(seqs, max_its=60)
         self.assertTrue(np.all(np.diff(trace) >= -1e-6))
         d0 = float((np.arange(1, D + 1) * init.dur[0]).sum())  # mean dwell time, state 0
         self.assertAlmostEqual(d0, 3.8, delta=0.4)

@@ -86,13 +86,31 @@ def main():
 
     print("\n## mixle — Mixture(Composite(Gaussian, Categorical)), EM")
     fit = fit_mixle(data)
-    ok = True
+    # STAT-RR17-04: the oracle checks WHICH cluster each component recovered, not just that
+    # magnitudes look plausible -- matching by mean sign, the mu=-3 cluster must concentrate
+    # category 0 and the mu=+3 cluster category 2, and the two components must claim DIFFERENT
+    # true clusters. (The old |mu|~3-and-max(prob)>0.6 oracle printed "recovered ... True" for
+    # scientifically wrong assignments like probs=[.1,.8,.1] or the categories swapped.)
+    ok = len(fit) == 2
+    claimed = set()
     for i, c in enumerate(fit):
         print(f"  comp{i}: normal.mean={c['mu']:+.2f}  cat.probs={[round(p, 2) for p in c['probs']]}")
-        ok = ok and abs(abs(c["mu"]) - 3.0) < 0.3 and max(c["probs"]) > 0.6
-    print(f"  -> both fields recovered in every component: {ok}")
+        true_cluster = min(TRUE, key=lambda cl: abs(cl["mu"] - c["mu"]))
+        expected_category = int(np.argmax(true_cluster["probs"]))
+        ok = (
+            ok
+            and abs(c["mu"] - true_cluster["mu"]) < 0.3
+            and int(np.argmax(c["probs"])) == expected_category
+            and c["probs"][expected_category] > 0.6
+        )
+        claimed.add(true_cluster["mu"])
+    ok = ok and len(claimed) == 2
+    print(f"  -> both clusters recovered with the RIGHT category identities: {ok}")
     if not ok:
-        raise RuntimeError("acceptance failed: every fitted component must recover both heterogeneous fields")
+        raise RuntimeError(
+            "acceptance failed: each fitted component must match a distinct true cluster's mean "
+            "AND concentrate that cluster's true category (identity, not just magnitude)"
+        )
 
     print("\n## pomegranate 1.1.2 — GeneralMixtureModel([IndependentComponents([Normal, Categorical]), ...])")
     status, detail = try_pomegranate(data)
