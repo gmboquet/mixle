@@ -149,3 +149,16 @@ RR18-01 propose() outer-holdout leak (candidate families selected on all rows be
 RR18-02 explain_fit says MAP on the neural route; RR18-03 empty caveats on
 ensemble/sample/VMP routes; plus the carried RR17-01/02/03/04/05/06/09/10/11/12/14 and
 mediums RR17-13/15/16/17/18/19/20 (RR17-14 and RR17-17 severity RAISED to High).
+
+### Pass-18 fix wave 2 (2026-08-09, this session)
+
+Closed with adverse tests, one commit each: RR18-01 (propose() splits before candidate
+generation; spy test pins the exact train split), RR17-13 (answered-slice count invariant
+refuses impossible states at construction), RR17-15 (Wilcoxon descriptive z signed for the
+alternative + method field), RR17-16 (runs test exact conditional null at n <= 60; exhaustive
+level 4/252 vs the normal approximation's 20/252), RR17-17 (MWU exchangeability null named on
+docstring and result), RR17-12 (PermutationResult carries null_hypothesis per mode; 'exact'
+scoped to the stated sharp null), RR17-10 (Forecast carries method/n_draws/mean_mcse; docstring
+no longer claims the mean is exact). Still open: RR17-06 price leakage, RR17-09 sparse Poisson,
+RR17-01/02/03/04/05 examples, RR17-11 MCMC diagnostics/MCSE, RR17-14 semantic entropy receipt,
+RR18-02/03 route explanations, RR17-18/19/20.
