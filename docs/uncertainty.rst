@@ -132,8 +132,16 @@ Calibrated Answer-or-Abstain
 ----------------------------
 
 Sampling confidence is still only a signal until calibrated. ``calibrate`` uses
-labeled examples to choose the lowest confidence threshold whose answered set
-has empirical error at most ``alpha``.
+labeled examples to choose the most permissive confidence threshold whose TRUE
+selective risk is at most ``alpha`` with probability at least ``1 - delta``
+over the calibration draw -- a finite-sample ``(alpha, delta)``-PAC guarantee
+via exact Clopper-Pearson bounds, Bonferroni-corrected across the candidate
+grid, NOT a same-sample empirical-error pick (that older description understated
+what is certified and omitted ``delta`` entirely -- STAT-RR23-09). The guarantee
+covers the calibrated policy exactly: i.i.d. traffic, and a generator/
+equivalence/sample-count that remain behaviorally unchanged at serving.
+Distribution shift between the calibration examples and live traffic voids the
+statement silently -- recalibrate on drifted traffic.
 
 .. code-block:: python
 

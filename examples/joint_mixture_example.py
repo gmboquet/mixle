@@ -8,7 +8,9 @@ view 1's cluster is informative about view 2's. That coupling is the point -- fi
 separately would throw it away.
 
 Takeaway: the fit is scored against the generating model with :func:`empirical_kl_divergence` on a
-held-out split, so the printed number is a measured recovery statistic rather than an assertion.
+FINAL evaluation split that neither training nor restart selection ever touched (STAT-RR23-04: the
+restart-selection rows are part of model selection, so scoring on them is post-selection reuse),
+making the printed number a measured recovery statistic rather than an assertion.
 It is the held-out estimate of ``KL(True || Estimate)`` -- truth's expected log-density advantage
 over the fit, non-negative in expectation, lower is better. (An earlier revision passed the
 arguments the other way round, printing ``-KL(True||Estimate)`` under a ``KL[Estimate||True]``
@@ -67,7 +69,11 @@ if __name__ == "__main__":
     sampler = dist.sampler(seed=1)
     data = sampler.sample(10000)
 
-    train_data, valid_data = partition_data(data, [0.9, 0.1], rng)
+    # THREE-way split (STAT-RR23-04): best_of SELECTS a restart on valid_data, which makes those
+    # rows part of model selection -- reusing them for the printed KL is post-selection reuse
+    # (measured on a Gaussian analogue: 12.3% of reused estimates went negative, optimism
+    # ~0.0009). The final slice touches nothing until the last line.
+    train_data, valid_data, eval_data = partition_data(data, [0.8, 0.1, 0.1], rng)
 
     # --- the estimator mirrors the model tree, one estimator per view ----------------------------
     est1 = CompositeEstimator([CategoricalEstimator(pseudo_count=1.0), GaussianEstimator()])
@@ -82,9 +88,10 @@ if __name__ == "__main__":
     # estimates E_truth[log truth - log fit] = KL(True || Estimate) >= 0, lower is better. The
     # reversed order estimates the NEGATIVE of that quantity and rewards a worse fit for moving
     # "down".
-    enc_vdata = seq_encode(valid_data, model=mm)
-    kl, _, _ = empirical_kl_divergence(dist, mm, enc_vdata)
+    enc_eval = seq_encode(eval_data, model=mm)
+    kl, _, _ = empirical_kl_divergence(dist, mm, enc_eval)
 
-    print("KL(True || Estimate), held-out estimate (nats; lower is better) = %f" % (kl))
+    print("KL(True || Estimate), estimated on rows untouched by training OR restart selection")
+    print("  (nats; lower is better) = %f" % (kl))
 
     print(str(mm))

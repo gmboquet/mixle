@@ -9,9 +9,11 @@ quantities needed for downstream checks.
   * a torch module / any point predictor callable over arrays -> split-conformal calibration from a
     held-out ``(X, y)``; ``interval(x)`` returns a prediction interval with finite-sample coverage.
     Scope of that statement: the ``1 - alpha`` coverage is MARGINAL over the calibration draw and
-    the query jointly, under exchangeability of the calibration rows and incoming queries; it is
-    not a per-query statement, and distribution shift voids it silently -- re-calibrate on drifted
-    traffic. Give a LIST of predictors instead and it becomes a deep ensemble (epistemic spread +
+    the query jointly, under exchangeability of the calibration rows and incoming queries AND a
+    predictor whose behavior is unchanged since calibration (an in-place mutation moved intervals
+    from [0,0] to [100,100] with coverage 1.0 -> 0.0 while qhat sat unchanged -- STAT-RR22-08/
+    RR23-09); it is not a per-query statement, and shift or a predictor update voids it silently
+    -- re-calibrate on drifted traffic or after any model change. Give a LIST of predictors instead and it becomes a deep ensemble (epistemic spread +
     conformal).
   * an LLM-style callable over prompts (returns a string, or samples of strings) -> semantic entropy
     over meaning classes; ``confident(prompt)`` abstains when the model disagrees with itself.

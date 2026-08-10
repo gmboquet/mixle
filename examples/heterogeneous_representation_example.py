@@ -1,5 +1,10 @@
 """One embedding space for every modality -- and discrete tokens only if you want them, learned not guessed.
 
+Classification: illustrative -- runs on small SYNTHETIC / STAND-IN data. The "image" and
+"molecule" arrays are uniform random stand-ins and the "seismic" trace is planted Gaussian noise
+carrying the class shift; only the plumbing and the held-out gate are the demonstration
+(STAT-RR23-05).
+
 A single record here carries four modalities at once: a caption (text), an image, a seismic trace, and a molecule
 (a structure = a set of atom features). ``HeterogeneousEncoder`` embeds all of them into ONE shared space, so:
 

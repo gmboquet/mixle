@@ -18,6 +18,9 @@
     "docs/task-serving.rst": [
       "coverage"
     ],
+    "docs/uncertainty.rst": [
+      "certification"
+    ],
     "examples/calibrated_report_demo.py": [
       "certification"
     ],

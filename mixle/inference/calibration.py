@@ -363,8 +363,10 @@ def calibration_null_expectation(
         ece = np.sqrt(ece)
     # STAT-RR21-09: the interpolated quantile at the accepted n_sim floor realized 9.83%
     # exceedance while the docstring called it a one-sided 5% test. The conservative order
-    # statistic X_(k) with k = ceil(0.95 (n_sim + 1)) has EXACT fresh-null exceedance
-    # 1 - k/(n_sim + 1) <= 5% at every accepted n_sim (4.76% at the n_sim = 20 floor).
+    # statistic X_(k) with k = ceil(0.95 (n_sim + 1)) has STRICT fresh-null exceedance exactly
+    # 1 - k/(n_sim + 1) <= 5% for CONTINUOUS statistics (4.76% at the n_sim = 20 floor); with
+    # discrete ties the strict exceedance only drops further (conservative), while a >= reading
+    # can hit 1 -- compare with > (STAT-RR22-10/RR23-10).
     k95 = int(np.ceil(0.95 * (n_sim + 1)))
     ece_sorted = np.sort(ece)
     mce_sorted = np.sort(mce)

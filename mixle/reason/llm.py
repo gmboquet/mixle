@@ -17,8 +17,11 @@ stochastic samples into calibrated uncertainty:
   with probability >= ``1 - delta`` over the random calibration set itself (Geifman & El-Yaniv 2017;
   Angelopoulos et al. 2021 "Learn then Test"): a proper finite-sample ``(alpha, delta)``-PAC
   selective-risk guarantee via an exact Clopper-Pearson bound, Bonferroni-corrected across every
-  candidate threshold tried -- not a same-sample point estimate. The model abstains on questions it
-  does not know instead of confabulating.
+  candidate threshold tried -- not a same-sample point estimate. The guarantee is conditional on
+  i.i.d. traffic AND the entire serving policy (generator behavior, equivalence relation, sample
+  count) remaining exactly the calibrated one -- identity checks catch rebinding, not in-place
+  state change; pin and compare the policy token (STAT-RR22-09/RR23-09). The model abstains on
+  questions it does not know instead of confabulating.
 * **Claim-level corroboration** (:meth:`LLMUncertainty.assess_claims`): lexical overlap only ever
   establishes *candidacy* -- that a resample is plausibly about the same thing as a claim -- never
   support by itself; a negation/polarity check on the shared content words is what separates genuine
@@ -409,7 +412,8 @@ class FactualityModel:
 
     The signal (self-consistency, a token likelihood, ...) is only a raw number; the calibrator turns
     it into a genuine probability of the *information* being correct, learned against labeled facts.
-    ``discrimination`` (held-out AUC on the fit set, tie-correct -- see :func:`_auc`) reports how much
+    ``discrimination`` (RESUBSTITUTION AUC on the fit rows, tie-correct -- see :func:`_auc`;
+    "held-out" was a false label, STAT-RR23-07) reports how much
     the signal actually knew about correctness -- ~0.5 means the signal was unrelated to truth, no
     matter how confident it looked.
     """
@@ -827,9 +831,14 @@ class LLMUncertainty:
         probability that the information is correct -- it can be systematically over/under-confident,
         or unrelated to truth. This fits a :class:`~mixle.inference.ProbabilityCalibrator` mapping the
         signal to the empirical correctness rate, so the output *is* a probability of the information
-        being right. ``discrimination`` (tie-correct AUC of signal vs correctness -- see :func:`_auc`)
-        reports how much the raw signal knew at all -- ~0.5 means it was unrelated to truth, calibration
-        or not.
+        being right. ``discrimination`` is the RESUBSTITUTION (fit-sample) tie-corrected AUC of
+        signal vs correctness -- the same rows that fit the calibrator, so it is optimistic and
+        unstable at small n (STAT-RR23-07: a 20-row independent-null draw read 0.96 there while
+        100,000 fresh rows measured 0.4997); measure discrimination you intend to report on rows
+        this fit never saw. ``correct`` must return a REAL Boolean or exact 0/1 integer -- the
+        correctness verdicts are the calibration TARGET, and truthiness coercion let a callback
+        returning the string "false" turn an always-wrong generator (actual correctness 0.0) into
+        ``probability(...) == 1.0``; the same refusal already guards :meth:`calibrate`.
 
         Args:
             examples: labeled ``(prompt, gold_answer)`` pairs.
@@ -844,7 +853,20 @@ class LLMUncertainty:
         for prompt, gold in examples:
             a = self.assess(prompt, n)
             scores.append(float(signal(prompt)) if signal is not None else a.confidence)
-            outcomes.append(1.0 if corr(a.answer, gold) else 0.0)
+            verdict = corr(a.answer, gold)
+            # STAT-RR23-07 (the STAT-NEW3 class, third instance): bool("false") is True, so a
+            # string-returning oracle fabricated the calibration target -- every wrong answer
+            # counted correct and an always-wrong generator calibrated to probability 1.0.
+            if isinstance(verdict, (bool, np.bool_)):
+                is_correct = bool(verdict)
+            elif isinstance(verdict, (int, np.integer)) and int(verdict) in (0, 1):
+                is_correct = int(verdict) == 1
+            else:
+                raise ValueError(
+                    f"correct(answer, gold) must return a bool or 0/1 integer, got {verdict!r} "
+                    f"of type {type(verdict).__name__}"
+                )
+            outcomes.append(1.0 if is_correct else 0.0)
         scores_arr = np.asarray(scores, dtype=float)
         outcomes_arr = np.asarray(outcomes, dtype=float)
         calibrator = calibrate_probabilities(scores_arr, outcomes_arr, method=method)

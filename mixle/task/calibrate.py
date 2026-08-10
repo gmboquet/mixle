@@ -5,10 +5,12 @@ alone is not a coverage guarantee. Conformal prediction adds the serving
 contract: on a held-out calibration set it learns a score threshold
 (:func:`mixle.inference.conformal.conformal_label_threshold`) such that the
 prediction *set* covers the true label with probability ``>= 1 - alpha`` under
-the usual exchangeability assumption. Distribution shift -- any break of
-exchangeability between calibration rows and live traffic -- voids that
-statement silently; the density gate mitigates, and drifted traffic calls for
-re-measurement.
+the usual exchangeability assumption AND the condition that the underlying
+model's behavior is unchanged since calibration -- the threshold ranks the
+calibration-time model's scores, so an in-place retrain/update voids the
+statement exactly like distribution shift does, and just as silently
+(STAT-RR22-08/RR23-09). The density gate mitigates shift; drifted traffic or a
+changed model calls for recalibration.
 
 The decision rule the cascade and the cost model consume:
 

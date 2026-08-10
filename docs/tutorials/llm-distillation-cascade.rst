@@ -85,8 +85,17 @@ same teacher or by a trusted review process.
        cal_y,
    )
 
-``alpha`` is the target error rate for answered cases. Calibration may reduce
-coverage if the local model is not reliable enough.
+``alpha`` here controls MARGINAL label-set coverage: with probability at least
+``1 - alpha``, the true label is inside the predicted set, averaged over all
+queries. That is NOT an error rate among answered cases -- the answered slice
+(singleton sets) is a selected subset, and its conditional error is not
+controlled by this route: on a fixed population at ``alpha = 0.1``, marginal
+coverage measured 0.91 while 90 of the 190 answered singletons were wrong, a
+47.4% answered-slice error (STAT-RR23-08). If the number you need is "at most
+``alpha`` errors among the answers we give," calibrate the answered slice
+directly with ``calibrate_selective()``, which certifies exactly that quantity
+with its own ``(alpha, delta)`` guarantee. Calibration may reduce coverage if
+the local model is not reliable enough.
 
 Calibration should be rerun when the label set, teacher prompt, feature
 pipeline, or traffic distribution changes. Store the learned threshold and the
