@@ -162,7 +162,7 @@ class SparsePoissonRegimeTest(unittest.TestCase):
 
     def test_dense_regime_still_gaussianizes(self):
         rng = np.random.RandomState(3)
-        effects, variances = poisson_lograte_effects(rng.poisson(8.0, 300), 1.0, rng.poisson(8.0, 300), 1.0)
+        effects, variances, _receipt = poisson_lograte_effects(rng.poisson(8.0, 300), 1.0, rng.poisson(8.0, 300), 1.0)
         self.assertEqual(effects.shape, (300,))
         z = effects.mean() / np.sqrt(variances.mean() / 300.0)
         self.assertLess(abs(z), 3.0)
@@ -177,7 +177,7 @@ class SparsePoissonRegimeTest(unittest.TestCase):
         rng = np.random.RandomState(11)
         k_pre = rng.poisson(4.6, 800)
         k_post = rng.poisson(13.8, 800)
-        effects, variances = poisson_lograte_effects(k_pre, 1.0, k_post, 3.0)
+        effects, variances, _receipt = poisson_lograte_effects(k_pre, 1.0, k_post, 3.0)
         totals = (k_pre + k_post)[(k_pre + k_post) > 0]
         self.assertEqual(effects.shape, totals.shape)
         for total in np.unique(totals):
@@ -206,8 +206,8 @@ class SparsePoissonRegimeTest(unittest.TestCase):
             rs = np.random.RandomState(rep)
             lam = np.full(200, 6.0)
             theta = np.where(np.arange(200) % 2 == 0, np.e, 1.0 / np.e)
-            y_t, v_t = poisson_lograte_effects(rs.poisson(lam), 1.0, rs.poisson(lam * theta), 1.0)
-            y_c, v_c = poisson_lograte_effects(rs.poisson(lam), 1.0, rs.poisson(lam), 1.0)
+            y_t, v_t, _rt = poisson_lograte_effects(rs.poisson(lam), 1.0, rs.poisson(lam * theta), 1.0)
+            y_c, v_c, _rc = poisson_lograte_effects(rs.poisson(lam), 1.0, rs.poisson(lam), 1.0)
             res = hierarchical_event_study(y_t, v_t, y_c, v_c, identification=ident)
             estimates.append(res.effect)
             rejections += res.p_value < 0.05
@@ -229,6 +229,75 @@ class SparsePoissonRegimeTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "Boolean"):
             poisson_pooled_rate_ratio([1, 2], 1.0, [3, 4], True)
 
+    def test_selection_receipt_renames_the_population(self):
+        # STAT-RR22-01: zero-total exclusion is outcome-dependent; with baseline rates 0.01/10
+        # and a true all-subject ATT of zero, the retained-subject contrast read -0.94 with 100%
+        # rejection while wearing the all-treated label. The receipt now renames the estimand.
+        from mixle.inference.event_study import EventStudyIdentification, hierarchical_event_study
+
+        ident = EventStudyIdentification(
+            design_evidence=("probe",),
+            parallel_trends_evidence=("constructed",),
+            exchangeability=True,
+            positivity=True,
+            consistency=True,
+            no_interference=True,
+            no_anticipation=True,
+        )
+        rs = np.random.RandomState(0)
+        lam = np.where(np.arange(400) % 2 == 0, 0.01, 10.0)
+        y_t, v_t, receipt_t = poisson_lograte_effects(rs.poisson(lam), 1.0, rs.poisson(lam * 3), 3.0)
+        y_c, v_c, receipt_c = poisson_lograte_effects(rs.poisson(lam), 1.0, rs.poisson(lam * 3), 3.0)
+        self.assertGreater(receipt_t["n_dropped_zero_total"], 0)
+        res = hierarchical_event_study(
+            y_t, v_t, y_c, v_c, identification=ident, treated_selection=receipt_t, control_selection=receipt_c
+        )
+        self.assertIn("EVENT-POSITIVE", res.estimand)
+        self.assertIn("not identified", res.estimand)
+        self.assertEqual(res.n_treated_population, 400)
+        with self.assertRaisesRegex(ValueError, "exactly these arrays"):
+            hierarchical_event_study(y_t[:-1], v_t[:-1], y_c, v_c, identification=ident, treated_selection=receipt_t)
+
+    def test_identified_uncertainty_is_floored_and_self_consistent(self):
+        # STAT-RR22-02: all-identical arms with supplied variances 1 reported SE 0, CI [1,1],
+        # p 1 -- the CI excluded the null while p said no evidence. Floor + shared t reference.
+        from mixle.inference.event_study import EventStudyIdentification, hierarchical_event_study
+
+        ident = EventStudyIdentification(
+            design_evidence=("probe",),
+            parallel_trends_evidence=("constructed",),
+            exchangeability=True,
+            positivity=True,
+            consistency=True,
+            no_interference=True,
+            no_anticipation=True,
+        )
+        res = hierarchical_event_study([1.0] * 10, [1.0] * 10, [0.0] * 10, [1.0] * 10, identification=ident)
+        self.assertAlmostEqual(res.se, 0.4472, places=3)
+        self.assertEqual(res.p_value < 0.05, not (res.ci[0] <= 0.0 <= res.ci[1]))
+        self.assertEqual(res.ci_level, 0.95)
+        # small-n level: the t reference must not blow past nominal (normal hit 18.96% at n=2)
+        rejections = 0
+        for rep in range(600):
+            rg = np.random.RandomState(100_000 + rep)
+            rr = hierarchical_event_study(
+                rg.standard_normal(3),
+                np.full(3, 1e-12),
+                rg.standard_normal(3),
+                np.full(3, 1e-12),
+                identification=ident,
+            )
+            rejections += rr.p_value < 0.05
+        self.assertLess(rejections / 600, 0.09)
+
+    def test_custom_alpha_is_rendered_at_its_own_level(self):
+        # STAT-RR22-06: alpha=0.1 endpoints used to render under a hardcoded "95% CI" label.
+        from mixle.inference.event_study import hierarchical_event_study
+
+        res = hierarchical_event_study([0.4, 0.6, 0.5], [0.01, 0.01, 0.01], alpha=0.1)
+        self.assertEqual(res.ci_level, 0.9)
+        self.assertIn("90% CI", str(res))
+
     def test_batch_null_is_level_correct_under_heterogeneous_baselines(self):
         # STAT-RR19-03: the arm-mean debias assumed one shared baseline rate; with half the
         # subjects at rate 0.1 and half at 9.1 (exposures 1:3) and every true ratio exactly 1 it
@@ -241,7 +310,7 @@ class SparsePoissonRegimeTest(unittest.TestCase):
         for rep in range(reps):
             rs = np.random.RandomState(70_000 + rep)
             lam = np.where(rs.rand(1000) < 0.5, 0.1, 9.1)
-            y, v = poisson_lograte_effects(rs.poisson(lam), 1.0, rs.poisson(lam * 3.0), 3.0)
+            y, v, _r = poisson_lograte_effects(rs.poisson(lam), 1.0, rs.poisson(lam * 3.0), 3.0)
             mean, var, _, _ = _random_effects(y, v)
             rejections += abs(mean / np.sqrt(var)) > 1.959963984540054
         self.assertLess(rejections / reps, 0.15)
@@ -257,7 +326,7 @@ class SparsePoissonRegimeTest(unittest.TestCase):
             rs = np.random.RandomState(60_000 + rep)
             k_pre = rs.poisson(4.6, 1000)
             k_post = rs.poisson(13.8, 1000)
-            y, v = poisson_lograte_effects(k_pre, 1.0, k_post, 3.0)
+            y, v, _r = poisson_lograte_effects(k_pre, 1.0, k_post, 3.0)
             mean, var, _, _ = _random_effects(y, v)
             rejections += abs(mean / np.sqrt(var)) > 1.959963984540054
         self.assertLess(rejections / reps, 0.12)

@@ -15,10 +15,12 @@ Two stages, exact/closed-form where the family permits:
   1. **per-subject effect** -- from the activity family's sufficient statistics on the pre and post
      windows: a Gaussian mean-shift (``gaussian_effect``) or a Poisson log-rate shift for event counts
      (``poisson_lograte_effect``), each with its sampling variance.
-  2. **hierarchical pooling** -- a random-effects (DerSimonian-Laird) meta-analysis over the per-subject
-     effects: a precision-weighted population mean plus between-subject heterogeneity ``tau^2``, computed
-     per group, with the DiD contrast and its propagated variance and an empirical-Bayes shrinkage of each
-     subject's effect toward its group.
+  2. **pooling, weighted by the estimand** -- the ASSOCIATION paths report a random-effects
+     (DerSimonian-Laird) precision-weighted summary with between-subject heterogeneity ``tau^2``
+     and empirical-Bayes shrinkage; the IDENTIFIED DiD path instead uses equal-subject-weight
+     (arithmetic) group means with Student-t/Welch inference, because the ATT is an arithmetic
+     mean and precision weighting estimates a different quantity under effect-variance dependence
+     (STAT-RR21-01/STAT-RR22-07). DL diagnostics ride along in both modes.
 
 Within-subject differencing removes additive time-invariant subject effects and a treated/control
 contrast removes additive shocks common to both groups. Neither fact alone establishes parallel trends,
@@ -173,7 +175,9 @@ def _positive_exposure(name: str, value: Any) -> float:
     return float(value)
 
 
-def poisson_lograte_effects(k_pre: Any, t_pre: float, k_post: Any, t_post: float) -> tuple[np.ndarray, np.ndarray]:
+def poisson_lograte_effects(
+    k_pre: Any, t_pre: float, k_post: Any, t_post: float
+) -> tuple[np.ndarray, np.ndarray, dict[str, int]]:
     """Per-subject log rate-ratio effects for Gaussian pooling, via the CONDITIONAL (binomial) route.
 
     Conditioning is what makes the heterogeneous estimand reachable. Given a subject's total
@@ -205,6 +209,14 @@ def poisson_lograte_effects(k_pre: Any, t_pre: float, k_post: Any, t_post: float
     ratio of 1.3 on the 2/8 mixture is 1.000. The 4.0 arm-mean floor remains as the pooled-z
     normal-approximation gate; below it use poisson_pooled_rate_ratio, exact at any sparsity for
     the common-ratio estimand.
+
+    Returns ``(effects, variances, selection_receipt)``. The receipt records the POPULATION this
+    route can speak for (STAT-RR22-01): zero-total subjects are excluded because the conditional
+    likelihood is empty for them, and that exclusion is OUTCOME-DEPENDENT -- under extreme
+    baseline heterogeneity (rates 0.01 and 10, true effects +1/-1 with all-subject ATT exactly
+    zero), event-free low-rate subjects vanished differentially and the retained-subject contrast
+    read -0.94 with 100% rejection while silently wearing the all-treated label. Hand the receipt
+    to :func:`hierarchical_event_study` so the estimand names the population actually estimated.
     """
     k_pre_arr = _batch_counts("k_pre", k_pre)
     k_post_arr = _batch_counts("k_post", k_post)
@@ -248,7 +260,12 @@ def poisson_lograte_effects(k_pre: Any, t_pre: float, k_post: Any, t_post: float
         - np.asarray([bias_by_total[int(total)] for total in totals_kept])
     )
     variances = np.asarray([var_by_total[int(total)] for total in totals_kept])
-    return effects, variances
+    selection_receipt = {
+        "n_subjects": int(totals.size),
+        "n_kept": int(totals_kept.size),
+        "n_dropped_zero_total": int(totals.size - totals_kept.size),
+    }
+    return effects, variances, selection_receipt
 
 
 def poisson_pooled_rate_ratio(
@@ -354,13 +371,22 @@ class EventStudyResult:
     identified: bool
     interpretation: str
     identification: dict[str, Any] | None
+    # STAT-RR22-06: the level the interval was computed at -- __str__ used to hardcode "95% CI"
+    # while alpha=0.1 endpoints rendered under that label
+    ci_level: float = 0.95
+    # STAT-RR22-01: how many subjects each arm STARTED with before any route-level exclusion
+    # (zero-total subjects under the conditional Poisson route); equal to n_treated/n_control
+    # when nothing was excluded
+    n_treated_population: int | None = None
+    n_control_population: int | None = None
 
     def __str__(self) -> str:
         c = "" if self.control_mean is None else f", control {self.control_mean:+.4f}"
         return (
             f"EventStudyResult(estimand={self.estimand!r}, identified={self.identified}, "
             f"effect={self.effect:+.4f} ± {self.se:.4f}, "
-            f"95% CI [{self.ci[0]:+.4f}, {self.ci[1]:+.4f}], z={self.z:.2f}, p={self.p_value:.2e}, "
+            f"{self.ci_level:.0%} CI [{self.ci[0]:+.4f}, {self.ci[1]:+.4f}], z={self.z:.2f}, "
+            f"p={self.p_value:.2e}, "
             f"treated {self.treated_mean:+.4f}{c}, tau^2={self.tau2_treated:.4f}, "
             f"n={self.n_treated}+{self.n_control})"
         )
@@ -380,6 +406,8 @@ def hierarchical_event_study(
     *,
     alpha: float = 0.05,
     identification: EventStudyIdentification | None = None,
+    treated_selection: dict[str, int] | None = None,
+    control_selection: dict[str, int] | None = None,
 ) -> EventStudyResult:
     """Pool per-subject changes into an association or explicitly identified DiD estimate.
 
@@ -397,6 +425,25 @@ def hierarchical_event_study(
     contrast reported +0.197 with 92-100% rejection at nominal 5%. DL pooling remains what the
     ASSOCIATION paths report (a precision-weighted summary, named as such), and its tau^2 /
     shrunk-effect diagnostics are attached in both modes.
+
+    THE POPULATION FOLLOWS THE RECEIPT (STAT-RR22-01). The conditional Poisson route excludes
+    zero-total subjects -- an OUTCOME-DEPENDENT exclusion, so its arithmetic contrast estimates
+    the event-positive population, not all treated units (measured: with baseline rates 0.01/10
+    and true all-subject ATT exactly zero, differential exclusion drove the retained-subject
+    contrast to -0.94 with 100% rejection). Pass each arm's ``selection_receipt`` (the third
+    return of :func:`poisson_lograte_effects`); when any subjects were excluded, the identified
+    estimand names the event-positive population explicitly and the result carries the original
+    denominators. Refusing to attach the all-treated label is the point: this route cannot
+    identify it.
+
+    IDENTIFIED-PATH UNCERTAINTY (STAT-RR22-02): the reference is Student-t with Welch-
+    Satterthwaite degrees of freedom (a normal quantile rejected 18.96% at nominal 5% with 2
+    subjects per arm), the empirical variance is FLOORED by the supplied per-subject sampling
+    variances (``mean(vars)/n`` per arm -- a degenerate all-identical-estimates arm used to
+    report SE 0 and the contradiction ``CI=[1,1]`` with ``p=1``), the p-value and CI come from
+    the same t reference, and subjects are assumed INDEPENDENT units: with 10 clusters repeated
+    10 times per arm, rejection measured 55.6% at nominal 5% -- aggregate to cluster-level
+    effects first.
     """
     if not isinstance(alpha, (int, float, np.integer, np.floating)) or not np.isfinite(alpha):
         raise ValueError("alpha must be a finite number strictly between 0 and 1")
@@ -432,12 +479,43 @@ def hierarchical_event_study(
         raise ValueError(
             "identification must affirm exchangeability, positivity, consistency, no interference, and no anticipation"
         )
+
+    def _selection_counts(name: str, receipt: dict[str, int] | None, n_used: int) -> tuple[int, int]:
+        if receipt is None:
+            return n_used, 0
+        required = {"n_subjects", "n_kept", "n_dropped_zero_total"}
+        if not required.issubset(receipt):
+            raise ValueError(f"{name} must carry n_subjects/n_kept/n_dropped_zero_total")
+        if int(receipt["n_kept"]) != n_used:
+            raise ValueError(
+                f"{name} says {receipt['n_kept']} subjects were kept but {n_used} effects were "
+                "supplied -- the receipt must describe exactly these arrays"
+            )
+        return int(receipt["n_subjects"]), int(receipt["n_dropped_zero_total"])
+
+    n_t_population, n_t_dropped = _selection_counts("treated_selection", treated_selection, len(y_t))
+    n_c_population, n_c_dropped = (
+        _selection_counts("control_selection", control_selection, len(y_c)) if has_control else (0, 0)
+    )
+    student_df = None
     if identified:
-        estimand = "difference-in-differences average treatment effect on the treated"
+        any_dropped = n_t_dropped > 0 or n_c_dropped > 0
+        if any_dropped:
+            # STAT-RR22-01: outcome-dependent exclusion changes the population; say so in the
+            # estimand itself rather than letting the all-treated label ride a selected subset.
+            estimand = (
+                "difference-in-differences average treatment effect on EVENT-POSITIVE treated "
+                f"subjects ({len(y_t)}/{n_t_population} treated, {len(y_c)}/{n_c_population} "
+                "controls retained; zero-total subjects carry no within-subject ratio "
+                "information, so the ALL-TREATED ATT is not identified by this route)"
+            )
+        else:
+            estimand = "difference-in-differences average treatment effect on the treated"
         interpretation = (
             "causal contrast under the attached identification assumptions; equal-subject-weight "
-            "(arithmetic) group means with empirical SEs -- precision weighting estimates a "
-            "different, weight-dependent quantity under effect-variance dependence (STAT-RR21-01)"
+            "(arithmetic) group means, Student-t reference with Welch df, empirical SEs floored "
+            "by the supplied sampling variances (STAT-RR21-01/RR22-02); subjects are assumed "
+            "INDEPENDENT units -- aggregate clustered designs to cluster level first"
         )
         # The ATT is an ARITHMETIC mean over treated units: estimate it with equal weights and the
         # groups' own empirical spread. The DL numbers computed above stay as RE diagnostics.
@@ -448,9 +526,17 @@ def hierarchical_event_study(
             )
         t_mean = float(y_t.mean())
         c_mean = float(y_c.mean())
-        t_var = float(y_t.var(ddof=1) / len(y_t))
-        c_var = float(y_c.var(ddof=1) / len(y_c))
+        # empirical variance covers noise + heterogeneity in expectation, but a degenerate arm
+        # (all estimates identical) reported SE 0 beside supplied positive sampling variances --
+        # and then CI [1,1] with p = 1 (STAT-RR22-02). Floor each arm at the known-noise
+        # contribution mean(vars)/n; Welch df from the arm variances actually used.
+        t_var_emp = float(y_t.var(ddof=1) / len(y_t))
+        c_var_emp = float(y_c.var(ddof=1) / len(y_c))
+        t_var = max(t_var_emp, float(np.mean(v_t) / len(y_t)))
+        c_var = max(c_var_emp, float(np.mean(v_c) / len(y_c)))
         effect, var = t_mean - c_mean, t_var + c_var
+        denominator = (t_var**2) / (len(y_t) - 1) + (c_var**2) / (len(y_c) - 1)
+        student_df = float((t_var + c_var) ** 2 / denominator) if denominator > 0 else float(len(y_t) + len(y_c) - 2)
     elif has_control:
         estimand = "treated-minus-control change association (precision-weighted)"
         interpretation = "association only; parallel trends and causal assumptions were not established"
@@ -462,14 +548,23 @@ def hierarchical_event_study(
     z = effect / se if se > 0 else 0.0
     from math import sqrt
 
-    # normal quantile for the CI half-width
-    zq = 1.959963984540054 if abs(alpha - 0.05) < 1e-9 else _inv_norm_sf(alpha / 2)
-    half = zq * se
+    if student_df is not None:
+        # STAT-RR22-02: the identified path's small-sample reference is Student-t (a normal
+        # quantile rejected 18.96% at nominal 5% with 2 subjects per arm), and the p-value and
+        # CI use the SAME reference so they can never contradict each other.
+        from scipy import stats as _scipy_stats
+
+        p_value = float(2.0 * _scipy_stats.t.sf(abs(z), student_df))
+        quantile = float(_scipy_stats.t.ppf(1.0 - alpha / 2.0, student_df))
+    else:
+        p_value = float(2 * _norm_sf(z))
+        quantile = 1.959963984540054 if abs(alpha - 0.05) < 1e-9 else _inv_norm_sf(alpha / 2)
+    half = quantile * se
     return EventStudyResult(
         effect=effect,
         se=se,
         z=float(z),
-        p_value=float(2 * _norm_sf(z)),
+        p_value=p_value,
         ci=(effect - half, effect + half),
         treated_mean=t_mean,
         treated_se=float(sqrt(t_var)),
@@ -483,6 +578,9 @@ def hierarchical_event_study(
         identified=identified,
         interpretation=interpretation,
         identification=None if identification is None else identification.to_dict(),
+        ci_level=1.0 - alpha,
+        n_treated_population=n_t_population,
+        n_control_population=n_c_population if has_control else None,
     )
 
 
