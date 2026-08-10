@@ -45,6 +45,9 @@
     "mixle/inference/conformal.py": [
       "coverage"
     ],
+    "mixle/inference/price_forecast.py": [
+      "coverage"
+    ],
     "mixle/inference/risk.py": [
       "comparative"
     ],
