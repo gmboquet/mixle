@@ -750,9 +750,11 @@ def runs_test(x: Any, *, cutoff: str | float = "median") -> TestResult:
     Dichotomizes ``x`` about its median (or a supplied numeric ``cutoff``) and tests whether the run
     count departs from what independence predicts (too few runs => clustering/trend; too many =>
     over-alternation). Two-sided. The null is EXACT (the closed-form run-count distribution given
-    ``(n1, n2)``) when ``n1 + n2 <= 60``, where the uncorrected normal approximation is
-    level-violating -- exhaustive enumeration at ``n1 = n2 = 5`` rejects 20/252 = 7.94% at nominal
-    5% (STAT-RR17-16); the normal approximation applies above that. ``extra`` carries the run
+    ``(n1, n2)``, big-integer arithmetic) for all ``n1 + n2 <= 5000`` -- the uncorrected normal
+    approximation is level-violating at small and sparse sizes (exhaustive enumeration at
+    ``n1 = n2 = 5`` rejects 20/252 = 7.94%, and at ``n = 61, n1 = 3`` 9.83%, at nominal 5%;
+    STAT-RR17-16/STAT-RR19-14). The normal approximation applies only above 5000
+    (STAT-RR22-16: this sentence previously still said 60 while execution switched at 5001). ``extra`` carries the run
     count, z-score, and ``method`` (``"exact"`` / ``"normal"``).
     """
     a = _sample("x", x, minimum=2)

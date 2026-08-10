@@ -49,7 +49,7 @@ MANIFEST = ROOT / "mixle" / "tests" / "statistical_claims_manifest.json"
 # which are audited at the source, so docs/api is excluded. mixle/inference joined after a sweep
 # found uq.py claiming finite-sample coverage from an unscanned surface.
 COVERAGE_SURFACES = ("examples", "docs", "mixle/task", "mixle/reason", "mixle/inference")
-COMPARATIVE_SURFACES = ("examples", "mixle/tests")
+COMPARATIVE_SURFACES = ("examples", "mixle/tests", "mixle/task", "mixle/reason", "mixle/inference")
 
 # A claim LINE is explicit on its own: coverage coupled with guarantee/probability/contract
 # vocabulary in the same sentence fragment. File-level context pairing produced false positives

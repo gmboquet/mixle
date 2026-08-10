@@ -1,11 +1,15 @@
 """Active labeling -- spend the teacher's expensive labels only where they buy the most, not at random.
 
-Labeling is the dominant cost of building a task model: every label is a frontier call or a human minute. Random
-labeling wastes most of them on examples the student already gets right. This is experimental design applied to
-the labeling decision (the discrete-pool analogue of ``mixle.doe`` active learning): label a small seed, fit a
-student, then repeatedly query the teacher *only* for the pool examples the student is most unsure about (and,
-optionally, most novel), refit, and continue until the budget runs out. The same student quality is reached for
-far fewer labels -- direct money saved.
+Labeling is the dominant cost of building a task model: every label is a frontier call or a human minute. This
+is experimental design applied to the labeling decision (the discrete-pool analogue of ``mixle.doe`` active
+learning): label a small seed, fit a student, then repeatedly query the teacher *only* for the pool examples
+the student is most unsure about (and, optionally, most novel), refit, and continue until the budget runs out.
+Scope of the efficiency claim (STAT-RR22-05): whether ranked labeling reaches a given student quality with
+fewer labels than random -- and by how much -- depends on the pool, the model family, and the acquisition; the
+repository's own paired evidence is bounded and synthetic (a per-seed win/tie/loss record with an exact sign
+test in ``examples/label_economics_demo.py``, and a same-budget paired comparison in
+``examples/task_llm_active_example.py``). Measure on your own task before booking savings; the per-round
+labels-vs-agreement log below exists for exactly that.
 
 Acquisitions score the student's own predictions (uncertainty as a ranking, which needs no calibrated
 probability) and can blend in the generative density (:class:`mixle.task.density.DensityGate`) for diversity:

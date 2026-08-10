@@ -314,11 +314,16 @@ def calibration_null_expectation(
             null generates them).
         bins, strategy, norm: the same binning controls you pass to the real statistics.
         n_sim: null simulations; at least 20. The ``*_q95`` fields are the CONSERVATIVE order
-            statistic ``X_(ceil(0.95 (n_sim+1)))``, whose fresh-null exceedance is exactly
-            ``1 - k/(n_sim + 1) <= 5%`` at every accepted ``n_sim`` (4.76% at the floor of 20) --
-            the interpolated quantile realized 9.83% there, and ``n_sim=1`` once labeled a single
-            draw a "q95" with 49.8% exceedance (STAT-RR19-10/STAT-RR21-09). The default 500 keeps
-            the threshold's own MC noise small while staying <= 5% by construction.
+            statistic ``X_(ceil(0.95 (n_sim+1)))``, calibrated for the STRICT comparison
+            ``observed > q95``: for a continuous statistic its fresh-null strict exceedance is
+            exactly ``1 - k/(n_sim + 1) <= 5%`` at every accepted ``n_sim`` (4.76% at the floor
+            of 20). With DISCRETE ties the two operators split -- a single forecast at p = 0.5
+            makes every null ECE equal the threshold, so strict exceedance is 0 while ``>=``
+            reads 1 (STAT-RR22-10) -- so compare with ``>`` and read the bound as ``<=`` (ties
+            only make it more conservative). The interpolated quantile realized 9.83% at the
+            floor, and ``n_sim=1`` once labeled a single draw a "q95" with 49.8% exceedance
+            (STAT-RR19-10/STAT-RR21-09). The default 500 keeps the threshold's own MC noise
+            small.
         seed: RNG seed.
 
     Returns:

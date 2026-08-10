@@ -68,9 +68,9 @@ def conditional_value_at_risk(
     ``min_tail`` exceedances). It is OFF by default because it is measurably WORSE exactly where
     it fires (audit R-1): fitting a two-parameter heavy-tail MLE to the same 5-19 points it is
     meant to rescue, then plugging the estimates into ``VaR + scale/(1 - shape)``, multiplied
-    the estimator's spread instead of shrinking it -- measured on lognormal losses at n = 100
-    (true ES 8.54), the raw tail mean's sd was 2.36 while the GPD path's was 46.4 with a worst
-    case of 663. Use the refinement only with an exogenous reason to trust a GPD tail (e.g. a
+    the estimator's spread instead of shrinking it -- the estimand of that measurement is the
+    estimator's own sampling uncertainty: on lognormal losses at n = 100 (true ES 8.54), the raw
+    tail mean's sampling sd was 2.36 while the GPD path's was 46.4 with a worst case of 663. Use the refinement only with an exogenous reason to trust a GPD tail (e.g. a
     threshold chosen from much more data), and treat its output as a model extrapolation, not a
     sample statistic; its parameters are plug-in MLEs with no interval attached (audit R-2).
 

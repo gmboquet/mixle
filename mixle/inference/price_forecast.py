@@ -193,7 +193,8 @@ def forecast_price(
         assumptions = (
             "in_sample_calibration_residuals_optimistic (model fitted through calibration outcomes)",
             "stable_data_generating_process",
-            "per_lead_marginal_intervals (each lead at `level` on its own; joint path coverage is lower)",
+            "per_lead_marginal_intervals (lower-bound guarantee per lead; joint path coverage is "
+            "uncontrolled in either direction -- see the docstring, STAT-RR22-11)",
             "overlapping_rolling_origin_residuals (adjacent origins share outcomes; exchangeability approximate)",
         )
     else:
@@ -201,7 +202,8 @@ def forecast_price(
         assumptions = (
             "held_out_exchangeability (model fitting stopped before the calibration window, as declared)",
             "stable_data_generating_process",
-            "per_lead_marginal_intervals (each lead at `level` on its own; joint path coverage is lower)",
+            "per_lead_marginal_intervals (lower-bound guarantee per lead; joint path coverage is "
+            "uncontrolled in either direction -- see the docstring, STAT-RR22-11)",
             "overlapping_rolling_origin_residuals (adjacent origins share outcomes; exchangeability approximate)",
         )
     return PriceForecast(

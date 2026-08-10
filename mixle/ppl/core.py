@@ -2659,11 +2659,18 @@ class RandomVariable:
                     explanation["caveats"] = list(_ROUTE_CAVEATS.get(executed, explanation.get("caveats", [])))
                 if _original_how != how:
                     explanation["route_requested"] = _original_how
-                    explanation["reason"] = (
-                        f"{explanation.get('reason', '')} (requested how={_original_how!r}, "
-                        f"downgraded in fit: EM cannot hold parameters fixed / infer a structural "
-                        "vector parameter)"
-                    ).strip()
+                    # STAT-RR22-17: name the actual cause. Only the em -> map fallback is the
+                    # fixed/structural-parameter downgrade; a how='posterior' request RESOLVING
+                    # to laplace/conjugate is the posterior ladder doing its job, and the generic
+                    # message was calling that an "EM downgrade" it never was.
+                    if _original_how == "em":
+                        change_note = (
+                            "(requested how='em', downgraded in fit: EM cannot hold parameters "
+                            "fixed / infer a structural vector parameter)"
+                        )
+                    else:
+                        change_note = f"(requested how={_original_how!r}; resolved to {how!r} by fit)"
+                    explanation["reason"] = f"{explanation.get('reason', '')} {change_note}".strip()
                 rv._cache["_fit_explanation"] = explanation
             except Exception:  # noqa: BLE001 - best-effort; must never block a fit
                 pass

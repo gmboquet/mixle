@@ -2,7 +2,7 @@
   "_comment": "Reviewed inventory of user-facing statistical-claim sites. A new entry means a new claim surface: audit its scope, then regenerate with python scripts/scan_statistical_claims.py --write --reviewed-by '<name>'. The contract test refuses un-inventoried claim sites and inventoried sites whose scope tokens disappear.",
   "attestation": {
     "reviewed_by": "Grant Boquet (release owner)",
-    "reviewed_on": "2026-08-09",
+    "reviewed_on": "2026-08-10",
     "statement": "each inventoried site's scope language was read against its claim class"
   },
   "sites": {
@@ -45,6 +45,9 @@
     "mixle/inference/conformal.py": [
       "coverage"
     ],
+    "mixle/inference/risk.py": [
+      "comparative"
+    ],
     "mixle/inference/uq.py": [
       "coverage"
     ],
@@ -59,6 +62,9 @@
     ],
     "mixle/task/_ledger.py": [
       "coverage"
+    ],
+    "mixle/task/active.py": [
+      "comparative"
     ],
     "mixle/task/calibrate.py": [
       "certification",

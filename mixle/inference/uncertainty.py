@@ -481,10 +481,11 @@ def semantic_entropy_receipt(
     # (including K-hat varying across resamples) that the delta method cannot see; like the
     # correction itself it applies to the counting estimator only.
     entropy_se = None
+    entropy_se_receipt = None
     if counted and n > 0:
         probs = np.asarray(clustering.probs, dtype=float)
         boot_rng = np.random.RandomState(20260809)
-        n_boot = 512
+        n_boot = 2048
         counts_boot = boot_rng.multinomial(n, probs / probs.sum(), size=n_boot)
         with np.errstate(divide="ignore", invalid="ignore"):
             frac = counts_boot / float(n)
@@ -493,6 +494,17 @@ def semantic_entropy_receipt(
         k_boot = np.sum(counts_boot > 0, axis=1)
         mm_boot = plugin_boot + (k_boot - 1) / (2.0 * n)
         entropy_se = float(mm_boot.std(ddof=1))
+        # STAT-RR22-15: the estimate's own method and Monte-Carlo noise, on the receipt -- a
+        # bootstrap SE from B replicates carries ~1/sqrt(2(B-1)) relative MC error of its own
+        # (~1.6% at B=2048), plus plug-in error from resampling the OBSERVED profile rather
+        # than the truth (a [5,2,1] pattern measured 10.6% off the exact parametric SD at
+        # B=512; larger B shrinks only the first term).
+        entropy_se_receipt = {
+            "method": "parametric bootstrap: multinomial(n, observed profile), Miller-Madow recomputed",
+            "replicates": int(n_boot),
+            "seed": 20260809,
+            "se_relative_mc_error": float(1.0 / np.sqrt(2.0 * (n_boot - 1))),
+        }
     return {
         "entropy_plugin": plugin,
         "entropy_miller_madow": plugin + bias if bias is not None else plugin,
@@ -501,6 +513,7 @@ def semantic_entropy_receipt(
         "bias_estimate_nats": bias,
         # multinomial parametric-bootstrap SE of entropy_miller_madow (None off the counting path)
         "entropy_se_estimate": entropy_se,
+        "entropy_se_receipt": entropy_se_receipt,
         "method": "plug-in over sampled meaning classes"
         + (" (Miller-Madow correction available)" if counted else " (probability-weighted; MM correction n/a)"),
     }
