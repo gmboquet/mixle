@@ -142,6 +142,44 @@ class MarkovChainContractsTest(unittest.TestCase):
         )
         self.assertTrue(all(np.isclose(sum(row.values()), 1.0) for row in fitted.transition_map.values()))
 
+    def test_empty_accumulator_value_combines_and_reconstructs_without_raising(self):
+        # An undeclared-levels accumulator that has combined no data (e.g. a distributed backend's
+        # per-partition accumulator for a component that saw zero rows in that partition) must be
+        # readable and mergeable -- internal machinery (transactional snapshots, shuffle-merge)
+        # calls .value()/.combine()/.from_value() on exactly this state. Regression for a crash
+        # reached through mixle.stats.latent.mixture.MixtureAccumulator.from_value's pre-mutation
+        # snapshot when running optimize() over a Spark RDD (STAT-NB-estimation_using_spark).
+        empty = MarkovChainEstimator().accumulator_factory().make()
+        statistics = empty.value()
+        self.assertEqual(statistics.states, ())
+        self.assertEqual(statistics.initial_counts, ())
+        self.assertEqual(statistics.transition_counts, ())
+
+        reconstructed = MarkovChainEstimator().accumulator_factory().make().from_value(statistics)
+        self.assertIsNone(reconstructed.levels)
+        self.assertEqual(reconstructed.value().states, ())
+
+        merged = MarkovChainEstimator().accumulator_factory().make()
+        merged.combine(statistics)
+        self.assertIsNone(merged.levels)
+
+        # Merging empty-then-real data in either order recovers the real observation exactly --
+        # the empty statistics tuple is a true identity element for combine()/from_value().
+        real = MarkovChainEstimator(levels=("a", "b")).accumulator_factory().make()
+        real.update(["a", "b", "a"], 1.0, None)
+        real_statistics = real.value()
+
+        empty_then_real = MarkovChainEstimator().accumulator_factory().make()
+        empty_then_real.from_value(statistics)
+        empty_then_real.combine(real_statistics)
+        self.assertEqual(empty_then_real.value().states, ("a", "b"))
+        self.assertEqual(empty_then_real.value().initial_counts, real_statistics.initial_counts)
+
+        # The guard this replaces still fires, with better context, at the point that actually
+        # matters: trying to estimate a distribution from genuinely empty statistics.
+        with self.assertRaisesRegex(ValueError, "states cannot be empty"):
+            MarkovChainEstimator().estimate(0.0, statistics)
+
     def test_prior_layout_is_exact_and_evidence_cannot_disappear(self):
         alpha2 = DirichletDistribution([1.0, 1.0])
         valid = (("a", "b"), alpha2, (alpha2, alpha2))

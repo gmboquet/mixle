@@ -1975,6 +1975,14 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             MarkovChainAccumulator object.
 
         """
+        if not suff_stat.states:
+            # A partial accumulator that has combined no data yet (e.g. a Spark partition that
+            # routed zero rows to this component) -- fold in only the length statistic, which is
+            # independent of state layout, and leave counts/levels untouched rather than routing
+            # an empty state tuple through the strict validator built for user-facing calls.
+            self.len_accumulator.combine(suff_stat.length)
+            self.length_nobs += suff_stat.length_nobs
+            return self
         current_states = self.levels
         if current_states is None:
             observed_states = self._states()
@@ -2001,10 +2009,21 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> MarkovChainStatistics:
-        """Return initial-state, transition, and length sufficient statistics."""
+        """Return initial-state, transition, and length sufficient statistics.
+
+        An accumulator with no declared levels and no observed data returns an empty
+        (``states=()``) statistics tuple rather than raising: internal machinery reads a raw
+        accumulator's value in states that are legitimately empty -- a snapshot taken before any
+        data has been combined into it (transactional rollback), or a partial per-partition
+        accumulator during distributed shuffle-merge (e.g. a Spark partition that routed zero rows
+        to this component). ``combine()`` treats an empty statistics tuple as a no-op, so folding
+        one back in is safe. A caller that actually tries to *estimate* a distribution from empty
+        statistics is still refused, with better context, by
+        ``MarkovChainEstimator.estimate`` -> ``_validate_markov_statistics``.
+        """
         states = self._states()
         if not states:
-            raise ValueError("Markov statistics have no declared or observed states; configure estimator levels.")
+            return MarkovChainStatistics(1, (), (), (), self.length_nobs, self.len_accumulator.value())
         return MarkovChainStatistics(
             1,
             states,
@@ -2032,6 +2051,16 @@ class MarkovChainAccumulator(SequenceEncodableStatisticAccumulator):
             MarkovChainAccumulator object.
 
         """
+        if not x.states:
+            # Reconstructing from an empty statistics tuple (the value of an accumulator that has
+            # seen no data): reset counts, keep any already-declared level layout as-is -- there is
+            # no state information here to either confirm or contradict it -- and still take the
+            # length statistic, which carries independently of state layout.
+            self.init_count_map = {}
+            self.trans_count_map = {}
+            self.len_accumulator.from_value(x.length)
+            self.length_nobs = x.length_nobs
+            return self
         checked = _validate_markov_statistics(
             x,
             expected_states=self.levels,
