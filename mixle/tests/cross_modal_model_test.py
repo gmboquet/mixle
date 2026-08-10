@@ -412,6 +412,33 @@ class ConformalRefitInvalidationTest(unittest.TestCase):
     record byte-identical; the stale interval covered 0/150 on the unchanged query law after a
     calibrated 0.96. Refitting now clears every stored radius."""
 
+    def test_failed_refit_never_leaves_a_stale_certificate(self):
+        # STAT-RR23-06: a refit with lr='not-a-number' used to mutate normalization, raise, and
+        # leave the OLD fitted flag + conformal record live (stale coverage 0/150). Bad controls
+        # now refuse BEFORE mutation (previous fit and calibration intact); a crash after
+        # validation leaves an explicitly unfitted model.
+        from mixle.reason import CrossModalModel
+
+        rng = np.random.RandomState(0)
+        m = CrossModalModel(latent_dim=2, seed=0)
+        m.add_modality("A", 3).add_modality("Y", 2)
+        m.fit({"A": rng.standard_normal((40, 3)), "Y": rng.standard_normal((40, 2))}, epochs=3)
+        m.calibrate({"A": rng.standard_normal((16, 3)), "Y": rng.standard_normal((16, 2))}, "Y")
+        old_scale = m._mods["A"].scale.copy()
+        with self.assertRaises(TypeError):
+            m.fit({"A": rng.standard_normal((40, 3)) + 9, "Y": rng.standard_normal((40, 2))}, lr="nan?")
+        self.assertTrue(np.allclose(m._mods["A"].scale, old_scale))  # nothing mutated
+        self.assertTrue(m._fitted and m._conformal)  # previous certificate intact
+        original_poe = CrossModalModel._poe
+        CrossModalModel._poe = lambda self, experts: (_ for _ in ()).throw(RuntimeError("crash"))
+        try:
+            with self.assertRaises(RuntimeError):
+                m.fit({"A": rng.standard_normal((40, 3)), "Y": rng.standard_normal((40, 2))}, epochs=2)
+        finally:
+            CrossModalModel._poe = original_poe
+        self.assertFalse(m._fitted)
+        self.assertFalse(m._conformal)  # mid-fit crash fails closed, never stale
+
     def test_refit_clears_calibration(self):
         from mixle.reason import CrossModalModel
 

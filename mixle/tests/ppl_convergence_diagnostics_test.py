@@ -234,5 +234,31 @@ class BimodalCertificationTest(unittest.TestCase):
         self.assertLess(raw_ess, 400.0)  # the flattened pseudo-chain read 1,143 (30.7x the truth)
 
 
+class DivergenceGateTest(unittest.TestCase):
+    """STAT-RR23-12: fits with 15-16 recorded post-warmup NUTS divergences read `ok` on clean
+    R-hat/ESS; any recorded divergence now fails closed with the count named."""
+
+    def test_recorded_divergences_block_promotion(self):
+        import warnings
+
+        import mixle.ppl as P
+        from mixle.ppl.summarize import posterior_summary
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fit = P.Normal(P.Normal(0, 3, name="mu"), P.HalfNormal(3, name="tau")).fit(
+                list(np.random.RandomState(0).normal(0.5, 2.0, 12)),
+                how="nuts",
+                draws=300,
+                burn=150,
+                chains=2,
+                rng=np.random.RandomState(1),
+            )
+        result = fit.result
+        result.num_divergences = 4
+        statuses = {k: v["diagnostic_status"] for k, v in posterior_summary(fit).items() if not k.startswith("_")}
+        self.assertTrue(all(s == "divergent-transitions" for s in statuses.values()), statuses)
+
+
 if __name__ == "__main__":
     unittest.main()

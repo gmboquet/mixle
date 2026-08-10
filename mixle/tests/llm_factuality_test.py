@@ -133,5 +133,18 @@ class TieCorrectAucTest(unittest.TestCase):  # white-box: MXR-080-0294
             _auc(np.array([0.1, float("nan")]), np.array([0.0, 1.0]))
 
 
+class FactualityTargetIntegrityTest(unittest.TestCase):
+    """STAT-RR23-07: truthiness coercion let a string-returning oracle turn an always-wrong
+    generator (actual correctness 0.0) into probability(...) == 1.0."""
+
+    def test_string_verdicts_refuse_and_wrong_generators_calibrate_low(self):
+        rng = np.random.RandomState(0)
+        u = LLMUncertainty(lambda p: f"wrong-{rng.randint(10**9)}", equivalent=lambda a, b: a == b, n=2)
+        with self.assertRaisesRegex(ValueError, "bool or 0/1"):
+            u.fit_factuality([(f"p{i}", "right") for i in range(10)], correct=lambda a, g: "false")
+        model = u.fit_factuality([(f"p{i}", "right") for i in range(10)], correct=lambda a, g: False)
+        self.assertLess(model.probability("fresh"), 0.5)
+
+
 if __name__ == "__main__":
     unittest.main()
