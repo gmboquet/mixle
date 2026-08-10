@@ -40,11 +40,16 @@ def build_encoder() -> HeterogeneousEncoder:
 
 
 def record(seed: int) -> dict:
+    # The class is REAL structure in the record, carried by two modalities at once: the text
+    # names it (letters a/b vs c/d/e) and the seismic trace shifts with it. A learnable label
+    # must be a function of the features -- an earlier revision labeled records by seed parity,
+    # which no feature carries (STAT-RR22-04).
     rng = np.random.RandomState(seed)
+    positive = seed % 5 < 2
     return {
         "text": "sample-" + "abcde"[seed % 5],
         "image": rng.rand(3, 8, 8).astype(np.float32),
-        "seismic": rng.randn(64).astype(np.float32),
+        "seismic": (rng.randn(64) + (1.0 if positive else -1.0)).astype(np.float32),
         "molecule": rng.rand(rng.randint(4, 9), 5).astype(np.float32),
     }
 
@@ -56,20 +61,44 @@ def main() -> None:
     print(f"   unified stream: {stream.shape[0]} units, each a {DIM}-vector; {len(set(tags))} modalities\n")
 
     print("objective B (downstream): train the encoders to a label by pooling the stream")
+
+    # STAT-RR22-04: the label must be a FUNCTION OF THE FEATURES and the claim must be earned on
+    # records the training never saw. An earlier revision labeled records by seed parity -- pure
+    # RNG bookkeeping, unlearnable from any feature -- evaluated on its own 16 training rows, and
+    # printed "the encoders learned the task" at 94-100% while fresh-record accuracy measured
+    # 50.5-52.5% (chance). The label here is carried by the record itself (class-named text AND a
+    # class-shifted seismic trace), training uses 64 records, and the printed claim is GATED on
+    # 100 fresh records the optimizer never touched.
+    def label(seed: int) -> int:
+        return 1 if seed % 5 < 2 else 0
+
     head = torch.nn.Linear(DIM, 2)
     opt = torch.optim.Adam(enc.parameters() + list(head.parameters()), lr=1e-2)
-    recs = [record(i) for i in range(16)]
-    y = torch.tensor([i % 2 for i in range(16)])
-    for step in range(30):
+    recs = [record(i) for i in range(64)]
+    y = torch.tensor([label(i) for i in range(64)])
+    for step in range(120):
         opt.zero_grad()
         pooled = torch.stack([enc.encode(r)[0].mean(dim=0) for r in recs])
         loss = torch.nn.functional.cross_entropy(head(pooled), y)
         loss.backward()
         opt.step()
     with torch.no_grad():
-        acc = (head(torch.stack([enc.encode(r)[0].mean(dim=0) for r in recs])).argmax(1) == y).float().mean()
+        train_acc = (head(torch.stack([enc.encode(r)[0].mean(dim=0) for r in recs])).argmax(1) == y).float().mean()
+        fresh = [record(i) for i in range(100, 200)]
+        fresh_y = torch.tensor([label(i) for i in range(100, 200)])
+        fresh_acc = float(
+            (head(torch.stack([enc.encode(r)[0].mean(dim=0) for r in fresh])).argmax(1) == fresh_y).float().mean()
+        )
         final_loss = float(loss.detach())
-    print(f"   loss {final_loss:.3f}, train accuracy {float(acc):.2f} -- the encoders learned the task\n")
+    print(f"   loss {final_loss:.3f}, TRAINING accuracy {float(train_acc):.2f} (64 rows; fit, not evidence)")
+    print(f"   HELD-OUT accuracy on 100 fresh records: {fresh_acc:.2f}")
+    if fresh_acc >= 0.8:
+        print("   -> the encoders learned the task: the class carried by text+seismic transfers to unseen records\n")
+    else:
+        raise RuntimeError(
+            f"acceptance failed: held-out accuracy {fresh_acc:.2f} < 0.8 -- training fit alone is "
+            "memorization, not task learning (STAT-RR22-04)"
+        )
 
     print("objective A (generative / discrete): learn a cross-modal vocabulary, then model the token stream")
     big = np.vstack([enc.encode_numpy(r)[0] for r in recs])  # all units across all records + modalities

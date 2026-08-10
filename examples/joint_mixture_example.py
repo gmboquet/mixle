@@ -8,7 +8,13 @@ view 1's cluster is informative about view 2's. That coupling is the point -- fi
 separately would throw it away.
 
 Takeaway: the fit is scored against the generating model with :func:`empirical_kl_divergence` on a
-held-out split, so the printed KL is a measured recovery number rather than an assertion.
+held-out split, so the printed number is a measured recovery statistic rather than an assertion.
+It is the held-out estimate of ``KL(True || Estimate)`` -- truth's expected log-density advantage
+over the fit, non-negative in expectation, lower is better. (An earlier revision passed the
+arguments the other way round, printing ``-KL(True||Estimate)`` under a ``KL[Estimate||True]``
+label with "lower is better" -- a metric whose sign, orientation, AND improvement direction were
+all wrong: on a Gaussian oracle it printed -0.317 where the two true KLs are +0.318 and +0.807 --
+STAT-RR22-03.)
 
 Note on ``len_normalized``: the sequence views deliberately do NOT set it. A length-normalized sequence
 density is a geometric-mean *training objective*, not a generative probability law, and mixture
@@ -71,10 +77,14 @@ if __name__ == "__main__":
     # best_of runs 5 random restarts of EM (<=100 its each) and keeps the one the held-out split likes.
     _, mm = best_of(train_data, valid_data, est, 5, 100, 0.01, 1.0e-8, rng)
 
-    # Score the recovered model against the TRUE one on held-out data: lower KL is a better recovery.
+    # Score the recovered model against the TRUE one on held-out truth samples. Argument order is
+    # the estimand (STAT-RR22-03): with X ~ truth, empirical_kl_divergence(dist1=truth, dist2=fit)
+    # estimates E_truth[log truth - log fit] = KL(True || Estimate) >= 0, lower is better. The
+    # reversed order estimates the NEGATIVE of that quantity and rewards a worse fit for moving
+    # "down".
     enc_vdata = seq_encode(valid_data, model=mm)
-    kl, _, _ = empirical_kl_divergence(mm, dist, enc_vdata)
+    kl, _, _ = empirical_kl_divergence(dist, mm, enc_vdata)
 
-    print("KL[Estimate||True | data] = %f" % (kl))
+    print("KL(True || Estimate), held-out estimate (nats; lower is better) = %f" % (kl))
 
     print(str(mm))
