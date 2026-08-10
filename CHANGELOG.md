@@ -208,6 +208,73 @@ with a regression test that fails on the unfixed code):
   reconstruct a real instance), and the README's overclaim that this file exercises "each family"
   end to end (F-3; #516).
 
+Findings from the 2026-08 adversarial statistical review, passes 2–23 (per-finding `STAT-RR…` IDs,
+measured falsifiers, and reproductions live in `release-checklists/inference-stats-audit-2026-08-08.md`;
+every fix ships with a regression test that fails on the unfixed code):
+
+- Event studies (`mixle.inference.event_study`): the Poisson log-rate-ratio route now conditions on
+  per-subject totals — `k_post | n ~ Binomial(n, p)` with `logit(p) = log(theta) + log(r)` — so the
+  nuisance baseline rate cancels in the likelihood instead of being plugged in, and per-subject
+  variances are conditional pmf moments that depend on totals alone, which keeps inverse-variance
+  weights from correlating with sampling noise. Outcome-dependent exclusion is surfaced, not
+  laundered: `poisson_lograte_effects` reports a selection receipt, and any zero-total drop demotes
+  `hierarchical_event_study`'s label from ATT to a selected-sample (event-positive) association with
+  `identified=False`. The intermediate "estimate the event-positive mean instead" repair was itself
+  falsified — pooled debiasing left −0.092 bias and 0/80 CI coverage under heterogeneous effects — so
+  the association label is what the estimator actually supports. Drop-free data gets a real ATT:
+  equal-subject arithmetic arm means, one Welch–Student-t reference shared by the p-value and the CI,
+  empirical variance floored at `mean(supplied variances)/n`, `df`/`ci_level`/population counts on
+  the result, and the near-Normal arm-means condition stated together with its measured cost (31.0%
+  skew-law rejection at n=5). `tipping_drift` reads the result's own CI edge instead of recomputing
+  a different one.
+- Conformal prediction: `weighted_conformal` takes per-query likelihood-ratio weights (an `(m,)`
+  `test_weight`, or an explicit scalar) and computes per-query weighted quantiles — a single
+  implicit weight was wrong whenever covariate shift varied across queries. `CrossModalModel.calibrate`
+  splits its holdout into a scale half and a rank half (scaling and ranking the same residuals broke
+  exchangeability), refuses fewer than 4 holdout points, and binds intervals to the exact predictor
+  that produced the calibration scores; `fit` validates its arguments before mutating anything and
+  invalidates conformal state before refitting, so a failed refit can no longer leave stale
+  calibrated intervals behind.
+- Calibration gates: promotion decisions replaced point estimates with one-sided 90% Clopper–Pearson
+  bounds — measured-power lower bound ≥ 0.5, and tolerance rules additionally demand a
+  null-rejection upper bound ≤ 0.5 sitting below the power lower bound, so a gate cannot be promoted
+  in a regime where its replicate counts cannot distinguish calibration from miscalibration.
+  `calibration_null_expectation` refuses `n_sim < 20` and selects the conservative order statistic
+  `k = ceil(0.95 * (n_sim + 1))` with a strict `>` exceedance rule and an explicit tie caveat.
+  Column-swap randomization checks are scoped to the two regimes where the swap null is exact
+  (shared-draw construction under arbitrary row dependence; fully independent rows and entries);
+  outside them — shared latent rows with fresh entries — the measured false-alarm rate was 83.9%,
+  and the documentation now says so.
+- Nonparametric tests (`mixle.inference.nonparametric`): `brunner_munzel` no longer fabricates a
+  finite p-value under complete separation — it returns `pvalue=NaN` with the exact permutation
+  bound labeled `p_exchangeability`; Wilcoxon signed-rank uses its exact null distribution through
+  n=300; the runs test is exact through n=5000 via big-integer tail sums with a subnormal floor and
+  a `log10_pvalue` field.
+- Ensemble MCMC diagnostics (`mixle.ppl`, `mixle.inference.mcmc`): affine-invariant ensemble results
+  carry walker provenance stamped by the sampler itself (surviving pickling through process pools),
+  effective sample size sums per-walker Geyer estimates, and split R-hat is computed over ensembles
+  — walkers interact, so the ensemble is the unit of replication. Half of each ensemble's walkers
+  initialize from prior draws (scalar-shaped priors only), so a collapsed start cannot imitate
+  convergence. `summarize()` gained an honest status ladder: recorded post-warmup NUTS divergences
+  yield `divergent-transitions`; split R-hat above 1.01 or bulk/tail ESS below 100 yields
+  `unconverged-by-diagnostics`; `ok` requires passing all three checks and is the only promotable
+  status. Posterior summaries report `mcse` alongside each estimate.
+- LLM answer calibration (`mixle.reason.llm`, `mixle.task`): calibration receipts bind the policy
+  that produced them — `calibrate(..., policy_token=...)` records the sample size, generator, and
+  policy identity; `answer()` refuses under a changed policy; and the stated validity condition is
+  behavioral stability, not object identity. `fit_factuality` accepts only exact Boolean/0-1
+  verdicts (scores silently coerced through truthiness corrupted the calibration target), and its
+  discrimination number is labeled the resubstitution AUC it is. Calibrated generation declares its
+  estimand: `sampling="constructed"` collapses duplicate prompts (uniform-over-distinct) while
+  `sampling="iid-traffic"` counts rows as they arrive (traffic-weighted), and receipts carry the
+  declaration with the effective count. Answered-slice bookkeeping is validated and transactional —
+  marginal label-set coverage is not answered-slice risk (a 0.91 marginal figure coexisted with
+  47.4% answered-slice error in the audited configuration; `calibrate_selective` is the
+  answered-slice route).
+- Entropy uncertainty (`mixle.inference.uncertainty`): the Miller–Madow entropy standard error comes
+  from a 2048-replicate parametric bootstrap with a receipt (`entropy_se_receipt`), because the
+  delta-method standard error degenerates exactly at equiprobable classes.
+
 ### Changed
 
 - Exactness-preserving, parity-tested implementation changes: multivariate-Gaussian scoring
@@ -223,6 +290,15 @@ with a regression test that fails on the unfixed code):
   `mixle.inference.mpi_executor` transport (`mpi_fit`/`mpi_em_step`), a second, non-canonical MPI entry
   point kept only to preserve that tree-reduce technique, is removed now that the canonical backend
   uses it directly; verified equivalent to the removed transport under real `mpirun` before removal.
+- Statistical-review signature changes, called out for scripts written against 0.7.0:
+  `poisson_lograte_effects` returns `(effects, variances, selection_receipt)` — callers unpacking
+  two values must take three; `weighted_conformal` requires a per-query `test_weight` (the previous
+  implicit broadcast mis-stated coverage whenever shift varied across queries);
+  `hierarchical_event_study` accepts `treated_selection=`/`control_selection=` receipts and labels
+  any dropped-subject result an association (`identified=False`) rather than an ATT; and
+  `mixle.ppl.summarize` `diagnostic_status` values now include `divergent-transitions`,
+  `unconverged-by-diagnostics`, and `single-chain-mixing-unassessable` — code that string-matched
+  the old vocabulary should use the documented ladder.
 
 ### Security
 
