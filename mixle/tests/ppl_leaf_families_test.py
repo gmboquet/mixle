@@ -287,9 +287,12 @@ class MultiChainDiagnosticsTestCase(unittest.TestCase):
         mu = Normal(0, 10, name="mu")
         m = Normal(mu, free).fit(data, how="ensemble", draws=800, burn=300, rng=np.random.RandomState(1))
         self.assertAlmostEqual(float(m.result.mean("mu")), 5.0, delta=0.1)
-        # the stretch move mixes well across the walker ensemble
+        # the stretch move mixes across the walker ensemble; the pin is on the WALKER-AWARE ESS
+        # (STAT-RR22-14: the old 250 floor was calibrated against the flattened pseudo-chain,
+        # which read consecutive near-independent walker states as serial mixing evidence --
+        # the honest per-walker sum on this fixture is ~185)
         ess = float(np.atleast_1d(m.result.raw.effective_sample_size()).min())
-        self.assertGreater(ess, 250)
+        self.assertGreater(ess, 120)
 
     def test_ensemble_multichain_rhat(self):
         rng = np.random.RandomState(0)

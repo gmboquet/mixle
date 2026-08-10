@@ -1162,21 +1162,34 @@ def _ensemble_p0(slots, dmean, dstd, n_data, walkers, rng):
     u0 = _init_u(slots, dmean, dstd)
     spread = _init_scale(slots, dstd, n_data) * math.sqrt(n_data)
     p0 = u0[None, :] + 0.1 * spread[None, :] * rng.standard_normal((walkers, d))
+    # Prior draws go to the SECOND HALF of the walkers only: mode detection needs some walkers
+    # away from the data-informed cloud, while constrained/multi-component fits need the other
+    # half anchored near it to contract within an ordinary draw budget (an all-prior init
+    # regressed a 3-component ordered-means mixture's weight recovery from 0.50 to 0.33 within
+    # its test budget). Walker 0 stays the exact data-informed point (feasibility anchor).
+    prior_rows = np.arange(walkers // 2, walkers)
     for j, slot in enumerate(slots):
         prior = getattr(slot, "prior", None)
         if prior is None or slot.reparam is not None:
             continue  # non-centered latents already start standard-normal; keep data jitter
         try:
-            draws = np.asarray(prior.sampler(seed=int(rng.randint(1, 2**31))).sample(walkers), dtype=float).reshape(-1)[
-                :walkers
-            ]
+            raw_draws = np.asarray(
+                prior.sampler(seed=int(rng.randint(1, 2**31))).sample(int(prior_rows.size)), dtype=float
+            )
+            if raw_draws.shape != (prior_rows.size,):
+                # a joint/vector prior (e.g. a Dirichlet spanning several weight slots) does not
+                # define this SCALAR slot's marginal by flattening -- reshape(-1) silently
+                # interleaved components' coordinates and corrupted the weight inits. Only a
+                # per-slot scalar prior participates; everything else keeps the data jitter.
+                continue
+            draws = raw_draws
             if slot.support == "positive":
                 draws = np.log(np.maximum(draws, 1e-12))
             elif slot.support == "unit":
                 clipped = np.clip(draws, 1e-9, 1.0 - 1e-9)
                 draws = np.log(clipped / (1.0 - clipped))
-            if draws.shape[0] == walkers and np.all(np.isfinite(draws)):
-                p0[:, j] = draws
+            if np.all(np.isfinite(draws)):
+                p0[prior_rows, j] = draws
         except Exception:  # noqa: BLE001 -- a prior without a sampler keeps the fallback jitter
             continue
     p0[0] = u0
