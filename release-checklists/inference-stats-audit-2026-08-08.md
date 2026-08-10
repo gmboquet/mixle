@@ -394,3 +394,50 @@ below). All 17 pass-21 findings fixed this wave, reproduce-first:
 CI on aca8c4d4 (the |B| docstring fix): Docs GREEN (fix verified), Security/Extras green, Tests'
 single core/py3.12 failure was a runner preemption (exit 143, zero test failures), rerun
 dispatched. The reviewer's artifact-receipt note remains the frozen publication-time item.
+
+## Pass-22 status (2026-08-10, NO-GO, 8 High / 7 Medium / 2 Low, audited 6ef47afd; Q2+Q6 PASS)
+
+Report archived on arrival. EVERY pass-21 closure held on exact replay (reviewer's disposition
+table: all 17 closed or closed-with-narrower-residual). All 17 pass-22 findings fixed same-day:
+
+- RR22-01/-02/-06/-07 (7c95f0f4): poisson_lograte_effects returns a SELECTION RECEIPT and the
+  identified path renames its estimand to EVENT-POSITIVE subjects with both denominators when
+  any zero-total subjects were excluded (the outcome-dependent exclusion drove a true-zero ATT
+  to -0.94 with 100% rejection under the all-treated label); identified inference floors the arm
+  variances at mean(vars)/n (the all-identical-arms probe reads SE 0.4472 -- the reviewer's own
+  supplied-noise number -- instead of SE 0 beside CI [1,1] and p 1), uses Student-t with Welch
+  df for p AND CI (levels 0.026-0.053 at n=2..30 vs the normal's 0.19-0.06), and states subject
+  independence with the measured 55.6% clustered failure. EventStudyResult carries ci_level and
+  renders it; the module header describes stage two per path.
+- RR22-03/-04 (7ae686ca): the joint-mixture example's KL argument order estimated MINUS
+  KL(True||Estimate) under a KL[Estimate||True] label with lower-is-better; swapped and
+  relabeled (+0.005430 on this machine, the reviewer's magnitude with the right sign). The
+  representation example's seed-parity label was unlearnable by construction (fresh-record
+  accuracy 50.5-52.5% behind a 'learned the task' print); the class is now real record structure
+  (class-named text + class-shifted seismic), training accuracy is labeled fit-not-evidence, and
+  the claim is GATED on 100 fresh records (held-out 1.00 measured; the gate demonstrably raised
+  at 0.57 and 0.70 during intermediate revisions).
+- RR22-08/-09 (a0ef4104): CrossModalModel.fit() clears every conformal radius (a public refit
+  had left the record byte-identical: stale coverage 0/150 after a calibrated 0.96);
+  predict_interval names the predictor binding; CalibratedTaskModel and uq() state the
+  behavioral-immutability condition their arithmetic always assumed (with the measured 1.0->0.0
+  coverage flips) -- the reviewer counts the three as one finding with conditioning accepted.
+  The LLM certificate's guarantee now names behavioral immutability of the whole serving policy
+  as load-bearing, states exactly what identity refusals cannot catch (the in-place
+  generator.mode flip served risk 1.0 under a retained 0.10 certificate), and calibrate() takes
+  a caller-pinned policy_token exposed via certified_policy_token().
+- RR22-12/-13/-14 (81e07523): walker positions are PRIOR DRAWS wherever the slot records its
+  prior (walker 0 stays the data anchor) and R-hat is computed over ENSEMBLES as the
+  independent units -- the same-cloud starts had certified ONE mode of a symmetric bimodal
+  posterior at R-hat 1.0095/status ok/mean wrong by 4,054 MCSEs; replayed at four seeds the
+  walkers now cross modes (means 0.00-0.75) and every seed reads unconverged-by-diagnostics.
+  'ok' ENFORCES split R-hat <= 1.01 and bulk/tail ESS >= 100 (R-hat-1.363 and 1.236/ESS-9 fits
+  were 'ok'; healthy 4-chain fits still certify); the raw result's ESS is walker-aware (was
+  1,143 vs the corrected 37, 30.7x).
+- Mediums/Lows (bfb70fa5): active.py claim reduced to the bounded paired evidence + the
+  comparative scanner now covers mixle/task//reason//inference (caught and scoped one more
+  sentence in risk.py; manifest re-signed, 36 sites); strict-operator + tie caveat on the
+  calibration-null q95; price receipts say joint coverage is uncontrolled in either direction;
+  entropy SE receipt names method/replicates(2048)/seed/own MC error; runs_test docstring states
+  the executed 5000 ceiling; the fitted-route change note no longer calls a posterior->laplace
+  resolution an EM downgrade.
