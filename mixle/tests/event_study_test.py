@@ -252,11 +252,29 @@ class SparsePoissonRegimeTest(unittest.TestCase):
         res = hierarchical_event_study(
             y_t, v_t, y_c, v_c, identification=ident, treated_selection=receipt_t, control_selection=receipt_c
         )
-        self.assertIn("EVENT-POSITIVE", res.estimand)
-        self.assertIn("not identified", res.estimand)
+        # STAT-RR23-01 supersedes the pass-22 relabeling: outcome-dependent exclusion breaks the
+        # estimator for EVERY causal mean (bias -0.09, 0/80 coverage of the event-positive mean),
+        # so the result is a selected-sample ASSOCIATION, not a renamed ATT.
+        self.assertFalse(res.identified)
+        self.assertIn("association", res.estimand)
+        self.assertIn("event-positive", res.estimand)
+        self.assertNotIn("average treatment effect", res.estimand)
         self.assertEqual(res.n_treated_population, 400)
         with self.assertRaisesRegex(ValueError, "exactly these arrays"):
             hierarchical_event_study(y_t[:-1], v_t[:-1], y_c, v_c, identification=ident, treated_selection=receipt_t)
+        # nonsense provenance refuses instead of normalizing (STAT-RR23-01)
+        bad = dict(receipt_t)
+        bad["n_dropped_zero_total"] = -1
+        with self.assertRaisesRegex(ValueError, "non-negative|inconsistent"):
+            hierarchical_event_study(y_t, v_t, y_c, v_c, identification=ident, treated_selection=bad)
+        bad2 = dict(receipt_t)
+        bad2["n_subjects"] = bad2["n_kept"]
+        with self.assertRaisesRegex(ValueError, "inconsistent"):
+            hierarchical_event_study(y_t, v_t, y_c, v_c, identification=ident, treated_selection=bad2)
+        bad3 = dict(receipt_t)
+        bad3["n_kept"] = float(bad3["n_kept"]) + 0.5
+        with self.assertRaisesRegex(ValueError, "exact integer"):
+            hierarchical_event_study(y_t, v_t, y_c, v_c, identification=ident, treated_selection=bad3)
 
     def test_identified_uncertainty_is_floored_and_self_consistent(self):
         # STAT-RR22-02: all-identical arms with supplied variances 1 reported SE 0, CI [1,1],

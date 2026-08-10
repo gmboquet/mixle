@@ -379,13 +379,20 @@ class EventStudyResult:
     # when nothing was excluded
     n_treated_population: int | None = None
     n_control_population: int | None = None
+    # STAT-RR23-03: the reference behind `z`, `p_value`, and `ci`. None means the standard
+    # normal (the association paths); a number means Student-t with these Welch degrees of
+    # freedom -- `z` then HOLDS the t statistic (the field name is kept for compatibility, the
+    # reference is not), and consumers converting `z` to a p-value must use this df, not a
+    # normal table (2.236 reads p=.025 normal but p=.038 at the actual Welch df).
+    df: float | None = None
 
     def __str__(self) -> str:
         c = "" if self.control_mean is None else f", control {self.control_mean:+.4f}"
         return (
             f"EventStudyResult(estimand={self.estimand!r}, identified={self.identified}, "
             f"effect={self.effect:+.4f} ± {self.se:.4f}, "
-            f"{self.ci_level:.0%} CI [{self.ci[0]:+.4f}, {self.ci[1]:+.4f}], z={self.z:.2f}, "
+            f"{self.ci_level:.0%} CI [{self.ci[0]:+.4f}, {self.ci[1]:+.4f}], "
+            f"{'z' if self.df is None else f't(df={self.df:.1f})'}={self.z:.2f}, "
             f"p={self.p_value:.2e}, "
             f"treated {self.treated_mean:+.4f}{c}, tau^2={self.tau2_treated:.4f}, "
             f"n={self.n_treated}+{self.n_control})"
@@ -481,17 +488,36 @@ def hierarchical_event_study(
         )
 
     def _selection_counts(name: str, receipt: dict[str, int] | None, n_used: int) -> tuple[int, int]:
+        # Omitting a receipt is the caller's ASSERTION that these effect arrays were not
+        # outcome-selected (the Poisson batch route always returns one -- pass it through).
         if receipt is None:
             return n_used, 0
         required = {"n_subjects", "n_kept", "n_dropped_zero_total"}
         if not required.issubset(receipt):
             raise ValueError(f"{name} must carry n_subjects/n_kept/n_dropped_zero_total")
-        if int(receipt["n_kept"]) != n_used:
+        # STAT-RR23-01: `int()` coercion accepted booleans, fractional counts (silently
+        # truncated), negative drops, and populations smaller than the kept count -- a receipt
+        # is selection PROVENANCE and nonsense provenance must refuse, not normalize.
+        values = {}
+        for key in required:
+            value = receipt[key]
+            if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+                raise ValueError(f"{name}[{key!r}] must be an exact integer, got {value!r}")
+            values[key] = int(value)
+        if min(values.values()) < 0:
+            raise ValueError(f"{name} counts must be non-negative, got {values}")
+        if values["n_kept"] != n_used:
             raise ValueError(
-                f"{name} says {receipt['n_kept']} subjects were kept but {n_used} effects were "
+                f"{name} says {values['n_kept']} subjects were kept but {n_used} effects were "
                 "supplied -- the receipt must describe exactly these arrays"
             )
-        return int(receipt["n_subjects"]), int(receipt["n_dropped_zero_total"])
+        if values["n_subjects"] != values["n_kept"] + values["n_dropped_zero_total"]:
+            raise ValueError(
+                f"{name} is internally inconsistent: n_subjects ({values['n_subjects']}) != "
+                f"n_kept ({values['n_kept']}) + n_dropped_zero_total "
+                f"({values['n_dropped_zero_total']})"
+            )
+        return values["n_subjects"], values["n_dropped_zero_total"]
 
     n_t_population, n_t_dropped = _selection_counts("treated_selection", treated_selection, len(y_t))
     n_c_population, n_c_dropped = (
@@ -501,22 +527,42 @@ def hierarchical_event_study(
     if identified:
         any_dropped = n_t_dropped > 0 or n_c_dropped > 0
         if any_dropped:
-            # STAT-RR22-01: outcome-dependent exclusion changes the population; say so in the
-            # estimand itself rather than letting the all-treated label ride a selected subset.
+            # STAT-RR22-01 -> STAT-RR23-01: outcome-dependent exclusion does not merely rename
+            # the population -- it breaks the estimator for EVERY causal mean. The conditional
+            # debias is computed at one pooled working probability, which is exact under a
+            # common conditional law but biased for heterogeneous effects even as an estimate of
+            # the event-positive mean: measured bias -0.092 with 0/80 nominal-95% coverage at
+            # 4,000 subjects per arm (the SE shrinks, the bias does not). No relabeled ATT
+            # survives that; the result is a SELECTED-SAMPLE ASSOCIATION, stated as such.
+            identified = False
             estimand = (
-                "difference-in-differences average treatment effect on EVENT-POSITIVE treated "
-                f"subjects ({len(y_t)}/{n_t_population} treated, {len(y_c)}/{n_c_population} "
-                "controls retained; zero-total subjects carry no within-subject ratio "
-                "information, so the ALL-TREATED ATT is not identified by this route)"
+                "selected-sample (event-positive) treated-minus-control change association "
+                f"({len(y_t)}/{n_t_population} treated, {len(y_c)}/{n_c_population} controls "
+                "retained after outcome-dependent zero-total exclusion; neither the all-treated "
+                "nor the event-positive ATT is identified by this estimator -- the pooled-"
+                "working-probability debias is biased under heterogeneous effects, measured "
+                "-0.09 with 0% coverage of the event-positive mean)"
+            )
+            interpretation = (
+                "association only: the identification receipt was supplied, but the estimator "
+                "cannot deliver an unbiased causal mean for any pre-specifiable population once "
+                "subjects are excluded by their outcomes (STAT-RR23-01); use "
+                "poisson_pooled_rate_ratio for the exact common-ratio estimand, which needs no "
+                "per-subject exclusion"
             )
         else:
             estimand = "difference-in-differences average treatment effect on the treated"
-        interpretation = (
-            "causal contrast under the attached identification assumptions; equal-subject-weight "
-            "(arithmetic) group means, Student-t reference with Welch df, empirical SEs floored "
-            "by the supplied sampling variances (STAT-RR21-01/RR22-02); subjects are assumed "
-            "INDEPENDENT units -- aggregate clustered designs to cluster level first"
-        )
+            interpretation = (
+                "causal contrast under the attached identification assumptions; equal-subject-"
+                "weight (arithmetic) group means, Student-t reference with Welch df, empirical "
+                "SEs floored by the supplied sampling variances (STAT-RR21-01/RR22-02); subjects "
+                "are assumed INDEPENDENT units -- aggregate clustered designs to cluster level "
+                "first -- and the finite-sample t reference additionally assumes near-NORMAL arm "
+                "means: a legal skewed unit-effect law (0.95 at -1, 0.05 at +19, exact mean "
+                "zero) measured 31.0% rejection at nominal 5% with five treated subjects "
+                "(STAT-RR23-02) -- treat small-arm p-values as approximate and grow the arms "
+                "when unit effects may be heavy-tailed"
+            )
         # The ATT is an ARITHMETIC mean over treated units: estimate it with equal weights and the
         # groups' own empirical spread. The DL numbers computed above stay as RE diagnostics.
         if len(y_t) < 2 or len(y_c) < 2:
@@ -581,6 +627,7 @@ def hierarchical_event_study(
         ci_level=1.0 - alpha,
         n_treated_population=n_t_population,
         n_control_population=n_c_population if has_control else None,
+        df=student_df,
     )
 
 
@@ -650,11 +697,17 @@ def tipping_drift(result: EventStudyResult) -> dict:
 
     Within-subject DiD is unbiased only if, absent treatment, treated and control would have drifted
     equally. This returns the differential drift ``delta`` (in effect units) that nullifies the estimate
-    (``= effect``) and the value that pushes the 95% CI through zero -- so a reader can judge whether a
-    confound that large is plausible. Larger = more robust.
+    (``= effect``) and the value that pushes the result's OWN confidence interval through zero -- at
+    the result's own level and reference (STAT-RR23-03: a hard-coded Normal 1.96 disagreed with the
+    identified path's Welch-t interval edge, 0.1235 vs the actual 0.0604, and silently priced a 90%
+    result at 95%). Larger = more robust.
     """
+    edge = result.ci[0] if result.effect > 0 else result.ci[1]
     return {
         "drift_to_nullify_point": float(result.effect),
-        "drift_to_nullify_ci": float(result.effect - np.sign(result.effect) * 1.959963984540054 * result.se),
+        # the drift that moves the interval to touch zero = the near edge itself
+        "drift_to_nullify_ci": float(edge),
         "effect_in_se_units": float(result.z),
+        "ci_level": float(result.ci_level),
+        "reference": "normal" if result.df is None else f"student-t(df={result.df:.2f})",
     }
