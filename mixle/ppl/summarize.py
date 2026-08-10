@@ -70,6 +70,10 @@ def posterior_summary(fitted: RandomVariable, *, hdi_prob: float = 0.94) -> dict
       promotable state.
     * ``"unconverged-by-diagnostics"`` -- finite diagnostics that FAIL a threshold; the error
       names the failing number. Not promotable: run longer or with more chains.
+    * ``"divergent-transitions"`` -- the fit recorded post-warmup NUTS divergences
+      (STAT-RR23-12: 15- and 16-divergence funnel fits read ``ok`` on clean R-hat/ESS). Not
+      promotable: divergences are direct evidence of unexplored posterior geometry;
+      reparameterize or raise ``target_accept``.
     * ``"single-chain-mixing-unassessable"`` -- ESS computed, but one chain cannot assess mixing
       (no R-hat); run >= 2 chains before treating the summary as converged evidence.
     * ``"unusable"`` -- a diagnostic evaluated non-finite (NaN/inf ESS or R-hat).
@@ -82,6 +86,10 @@ def posterior_summary(fitted: RandomVariable, *, hdi_prob: float = 0.94) -> dict
         rhat = getattr(result, "rhat", None) if result is not None else None
     bulk_by_parameter = getattr(result, "bulk_ess", None) if result is not None else None
     tail_by_parameter = getattr(result, "tail_ess", None) if result is not None else None
+    try:
+        divergences = int(getattr(result, "num_divergences", 0) or 0) if result is not None else 0
+    except (TypeError, ValueError):
+        divergences = 0
     out: dict[str, dict[str, Any]] = {}
     for name, stat in summ.items():
         if name.startswith("_") or not isinstance(stat, dict):
@@ -185,6 +193,19 @@ def posterior_summary(fitted: RandomVariable, *, hdi_prob: float = 0.94) -> dict
                     "one chain: R-hat undefined; run >= 2 chains before promoting"
                     if not multi_chain
                     else "mixing unassessable: the fit supplied no usable multi-chain R-hat for this parameter"
+                )
+            elif divergences > 0:
+                # STAT-RR23-12: NUTS records post-warmup divergences and the fit exposes the
+                # count, but the only-promotable state never looked -- funnel fits with 15 and 16
+                # divergences read `ok` on clean R-hat/ESS. A divergent transition is direct
+                # evidence the sampler could not follow the geometry in some region, so the
+                # retained draws under-explore it no matter how smooth the summary statistics
+                # look. Fail closed and name the count.
+                row["diagnostic_status"] = "divergent-transitions"
+                row["diagnostic_error"] = (
+                    f"{divergences} post-warmup divergence(s) recorded -- the sampler failed in "
+                    "part of the posterior; reparameterize (non-centered) or raise target_accept "
+                    "before promoting"
                 )
             elif rhat_value > 1.01 or row["ess"] < 100.0 or row["ess_tail"] < 100.0:
                 # STAT-RR22-13: "ok" is the ONLY promotable state, so it must ENFORCE convergence

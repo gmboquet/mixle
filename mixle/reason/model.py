@@ -248,6 +248,25 @@ class CrossModalModel:
             raise ValueError(f"data modalities {sorted(data)} != registered {sorted(names)}")
         epochs = _require_positive_int(epochs, "epochs")
         arrays = self._validate_training_table(data, names)
+        # STAT-RR23-06: EVERY control converts and validates BEFORE any state mutates -- a refit
+        # with lr="not-a-number" used to overwrite both modalities' normalization, raise inside
+        # the Adam constructor, and leave _fitted=True with the OLD conformal record live: the
+        # stale interval covered 0/150 on the unchanged query law after a calibrated 0.96.
+        try:
+            lr = float(lr)
+            beta = float(beta)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(f"lr and beta must be real numbers, got lr={lr!r}, beta={beta!r}") from exc
+        if not (np.isfinite(lr) and lr > 0.0):
+            raise ValueError(f"lr must be a finite positive learning rate, got {lr!r}")
+        if not np.isfinite(beta) or beta < 0.0:
+            raise ValueError(f"beta must be a finite non-negative KL weight, got {beta!r}")
+        # ... and dependent state dies BEFORE the first mutation, not after the last: a crash
+        # anywhere past this line (optimizer step, torch OOM) leaves an explicitly UNFITTED
+        # model demanding refit/recalibration, never a stale-but-live certificate.
+        self._fitted = False
+        self._n_train = None
+        self._conformal = {}
 
         n = arrays[names[0]].shape[0]  # validated equal across every modality above
         tensors: dict[str, Any] = {}
@@ -261,7 +280,7 @@ class CrossModalModel:
         params: list[Any] = []
         for mod in self._mods.values():
             params += list(mod.encoder.parameters()) + list(mod.decoder.parameters())
-        opt = torch.optim.Adam(params, lr=float(lr))
+        opt = torch.optim.Adam(params, lr=lr)
 
         # subsets to train on: the full set, plus each singleton (so unimodal inference is learned).
         subsets: list[list[str]] = [names]
@@ -287,13 +306,9 @@ class CrossModalModel:
             opt.step()
         self._fitted = True
         self._n_train = n
-        # STAT-RR22-08: REFITTING is a predictor change -- every stored conformal radius was
-        # ranked against residuals of the OLD encoders/decoders and normalization. A public
-        # fit() on shifted training rows left the conformal record byte-identical and the stale
-        # interval then covered 0/150 on the unchanged query law (calibrated coverage had been
-        # 0.96). Calibration dies with the predictor that produced its scores; recalibrate after
-        # every fit.
-        self._conformal = {}
+        # STAT-RR22-08/RR23-06: the conformal record was already cleared before the first
+        # mutation above -- calibration dies with the predictor that produced its scores, and a
+        # FAILED refit must leave an unfitted model, never the previous certificate.
         return self
 
     # -- inference ----------------------------------------------------------------------------

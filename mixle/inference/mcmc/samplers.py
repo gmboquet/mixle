@@ -379,9 +379,18 @@ def affine_invariant_ensemble(
                 samples.append(p[k].copy())
                 log_probs.append(lp[k])
 
-    return MCMCResult(
+    result = MCMCResult(
         samples=samples, log_probs=np.asarray(log_probs, dtype=float), accepted=np.asarray(accepted, dtype=bool)
     )
+    # STAT-RR23-11: walker provenance is stamped HERE, by the sampler that knows it -- the
+    # process-pool worker and the exported low-level surface used to return results without it,
+    # so diagnostics flattened sweep-major walker states and manufactured convergence from the
+    # same draws the sequential path refused (identical 48,000-draw fits: sequential ESS 25.7
+    # refused promotion; process ESS 48,000 promoted a mean 56.65 reported MCSEs from truth).
+    # The attribute rides the frozen record as provenance metadata and survives pickling
+    # (dataclass state includes the instance __dict__), so process workers deliver it too.
+    object.__setattr__(result, "walkers", int(nwalkers))
+    return result
 
 
 def metropolis_within_gibbs(

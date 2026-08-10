@@ -1937,14 +1937,9 @@ def ensemble_fit(
             for k in range(walkers):
                 if not feasible(p0[k]):
                     p0[k] = _project_init(p0[0], feasible, crng)
-        result = affine_invariant_ensemble(log_target, p0, num_samples=draws, burn_in=burn, thin=thin, rng=crng)
-        # STAT-RR21-14: the samples are sweep-major pooled walker states; downstream diagnostics
-        # must be able to recover walker identity instead of reading W near-independent states
-        # per sweep as one serial chain (which inflated ESS ~4x and understated MCSE 3.97x).
-        # MCMCResult is frozen to write-lock its EVIDENCE fields; attaching provenance metadata
-        # (which walker count produced the rows) via object.__setattr__ does not touch those.
-        object.__setattr__(result, "walkers", int(walkers))
-        return result
+        # STAT-RR21-14/RR23-11: walker provenance is stamped by the sampler itself, so the
+        # sequential, process-pool, and low-level surfaces all carry it identically.
+        return affine_invariant_ensemble(log_target, p0, num_samples=draws, burn_in=burn, thin=thin, rng=crng)
 
     if chains == 1:
         return _finalize(rv, slots, run_one(int(rng.randint(1, 2**31))), build)
