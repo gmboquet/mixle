@@ -64,8 +64,12 @@ def posterior_summary(fitted: RandomVariable, *, hdi_prob: float = 0.94) -> dict
     raise", so a one-chain fit with ``r_hat=None`` or NaN split-R-hat still published parameter
     numbers under "ok"):
 
-    * ``"ok"`` -- ess, ess_tail, mcse are finite AND a finite multi-chain ``r_hat`` exists. The
-      ONLY promotable state.
+    * ``"ok"`` -- ess, ess_tail, mcse are finite, a finite multi-chain ``r_hat`` exists, AND the
+      values clear the standard convergence thresholds: split R-hat <= 1.01, bulk and tail ESS
+      >= 100 (STAT-RR22-13 -- finiteness alone labeled R-hat-1.363 fits "ok"). The ONLY
+      promotable state.
+    * ``"unconverged-by-diagnostics"`` -- finite diagnostics that FAIL a threshold; the error
+      names the failing number. Not promotable: run longer or with more chains.
     * ``"single-chain-mixing-unassessable"`` -- ESS computed, but one chain cannot assess mixing
       (no R-hat); run >= 2 chains before treating the summary as converged evidence.
     * ``"unusable"`` -- a diagnostic evaluated non-finite (NaN/inf ESS or R-hat).
@@ -182,6 +186,21 @@ def posterior_summary(fitted: RandomVariable, *, hdi_prob: float = 0.94) -> dict
                     if not multi_chain
                     else "mixing unassessable: the fit supplied no usable multi-chain R-hat for this parameter"
                 )
+            elif rhat_value > 1.01 or row["ess"] < 100.0 or row["ess_tail"] < 100.0:
+                # STAT-RR22-13: "ok" is the ONLY promotable state, so it must ENFORCE convergence
+                # rather than merely observe finiteness -- real fits with R-hat 1.363 and 1.236
+                # (bulk ESS 9.1) were labeled ok. The thresholds are the standard ones (split
+                # R-hat <= 1.01; bulk and tail ESS >= 100, Vehtari et al. 2021); failing any of
+                # them is a fail-closed non-promotable status that names the failing number.
+                failing = []
+                if rhat_value > 1.01:
+                    failing.append(f"split R-hat {rhat_value:.4f} > 1.01")
+                if row["ess"] < 100.0:
+                    failing.append(f"bulk ESS {row['ess']:.1f} < 100")
+                if row["ess_tail"] < 100.0:
+                    failing.append(f"tail ESS {row['ess_tail']:.1f} < 100")
+                row["diagnostic_status"] = "unconverged-by-diagnostics"
+                row["diagnostic_error"] = "; ".join(failing) + " -- run longer/more chains before promoting"
             else:
                 row["diagnostic_status"] = "ok"
         out[name] = row

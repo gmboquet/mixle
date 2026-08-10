@@ -1145,12 +1145,40 @@ def _nuts_worker(seed, rv, data, kw):
 
 
 def _ensemble_p0(slots, dmean, dstd, n_data, walkers, rng):
-    """Dispersed initial ensemble (walkers, d): walker 0 at the data-informed point, the rest
-    jittered by the prior/posterior width so the stretch move starts spread out."""
+    """Dispersed initial ensemble (walkers, d): PRIOR-DRAWN walker positions where a slot carries
+    a prior, data-scale jitter otherwise.
+
+    STAT-RR22-12: every ensemble used to start from the SAME small data-centered cloud, so on a
+    symmetric bimodal posterior (mu ~ N(0,5), y ~ N(mu^2, 0.5)) both 'independent' ensembles fell
+    into the same mode and the diagnostics certified half the posterior as `ok` with a mean wrong
+    by 4,054 reported MCSEs. The classic remedy is genuinely overdispersed starts: each walker's
+    coordinate is an INDEPENDENT PRIOR DRAW (mapped to u-space) whenever the slot records its
+    prior, so a single ensemble's walkers span every region the prior supports -- the stretch
+    move can then traverse between modes it would otherwise never see -- and independent
+    ensembles that still disagree blow up the cross-ensemble R-hat instead of certifying one
+    basin. Walker 0 stays at the data-informed point as the feasibility anchor; slots without a
+    recorded prior (or with non-finite prior draws) keep the data-scale jitter."""
     d = len(slots)
     u0 = _init_u(slots, dmean, dstd)
     spread = _init_scale(slots, dstd, n_data) * math.sqrt(n_data)
     p0 = u0[None, :] + 0.1 * spread[None, :] * rng.standard_normal((walkers, d))
+    for j, slot in enumerate(slots):
+        prior = getattr(slot, "prior", None)
+        if prior is None or slot.reparam is not None:
+            continue  # non-centered latents already start standard-normal; keep data jitter
+        try:
+            draws = np.asarray(prior.sampler(seed=int(rng.randint(1, 2**31))).sample(walkers), dtype=float).reshape(-1)[
+                :walkers
+            ]
+            if slot.support == "positive":
+                draws = np.log(np.maximum(draws, 1e-12))
+            elif slot.support == "unit":
+                clipped = np.clip(draws, 1e-9, 1.0 - 1e-9)
+                draws = np.log(clipped / (1.0 - clipped))
+            if draws.shape[0] == walkers and np.all(np.isfinite(draws)):
+                p0[:, j] = draws
+        except Exception:  # noqa: BLE001 -- a prior without a sampler keeps the fallback jitter
+            continue
     p0[0] = u0
     return p0
 
@@ -1236,6 +1264,24 @@ def _finalize_chains(rv, slots, results, build) -> RandomVariable:
         post.ess = None
         post.ess_by_parameter = None
     _attach_convergence(post, slots, np.stack([u[:n] for u in us], axis=0), results)
+    ensemble_walker_counts = [getattr(r, "walkers", None) for r in results]
+    if all(w for w in ensemble_walker_counts) and len(results) >= 2:
+        # STAT-RR22-12: walkers within an ensemble INTERACT (each stretch proposal uses a partner
+        # from the same ensemble), so 16 walker-chains from 2 ensembles are not 16 independent
+        # chains -- with both ensembles in one mode of a symmetric bimodal posterior, walker-level
+        # split-R-hat read 1.0095 and certified half the posterior. R-hat is therefore recomputed
+        # over ENSEMBLES as the independent units (each ensemble's pooled draws form one chain);
+        # combined with the overdispersed per-ensemble centers in _ensemble_p0, ensembles landing
+        # in different modes now blow this statistic up instead of averaging it away. ESS/MCSE
+        # keep the per-walker serial structure from _attach_convergence above.
+        from mixle.ppl.diagnostics import split_rhat as _split_rhat
+
+        n_min = min(u.shape[0] for u in us_raw)
+        ensemble_stack = np.stack([u[:n_min] for u in us_raw], axis=0)
+        post.split_rhat = {s_.name: float(_split_rhat(ensemble_stack[:, :, k])) for k, s_ in enumerate(slots)}
+        # the legacy Gelman-Rubin dict gets the same treatment: ensembles, not walkers
+        legacy_rhat = _gelman_rubin(ensemble_stack)
+        post.rhat = {s_.name: float(legacy_rhat[k]) for k, s_ in enumerate(slots)}
     if isinstance(post.bulk_ess, dict) and post.bulk_ess:
         finite_ess = [v for v in post.bulk_ess.values() if np.isfinite(v)]
         if finite_ess and len(finite_ess) == len(post.bulk_ess):

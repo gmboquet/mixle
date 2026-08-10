@@ -163,5 +163,76 @@ class EnsembleWalkerChainDiagnosticsTest(unittest.TestCase):
         self.assertLess(np.median(esses), 800)
 
 
+class BimodalCertificationTest(unittest.TestCase):
+    """STAT-RR22-12/-13: two same-cloud ensembles fell into ONE mode of a symmetric bimodal
+    posterior and certified it -- R-hat 1.0095, ESS 1,683, status ok, mean wrong by 4,054 MCSEs.
+    Prior-drawn walker inits + ensemble-level R-hat + real ok-thresholds close both halves."""
+
+    def test_one_mode_is_never_certified_ok(self):
+        import warnings
+
+        import mixle.ppl as P
+        from mixle.ppl.summarize import posterior_summary
+
+        y = np.random.RandomState(7).normal(4.0, 0.5, size=40)
+        for seed in range(2):
+            mu = P.Normal(0, 5)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                fit = P.Normal(mu**2, 0.5).fit(
+                    y,
+                    how="ensemble",
+                    draws=1500,
+                    burn=500,
+                    walkers=8,
+                    chains=2,
+                    rng=np.random.RandomState(seed),
+                )
+            summ = fit.summary()
+            name = next(k for k in summ if not k.startswith("_"))
+            mean = summ[name]["mean"]
+            row = next(v for k, v in posterior_summary(fit).items() if not k.startswith("_"))
+            certified_one_mode = row["diagnostic_status"] == "ok" and abs(mean) > 0.5
+            self.assertFalse(certified_one_mode, f"seed {seed}: certified a one-mode mean {mean:+.3f}")
+
+    def test_ok_enforces_thresholds_and_healthy_fits_keep_it(self):
+        import warnings
+
+        import mixle.ppl as P
+        from mixle.ppl.summarize import posterior_summary
+        from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
+
+        data = GaussianDistribution(1.0, 4.0).sampler(seed=0).sample(300)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            bad = P.Normal(P.Normal(0, 10), P.HalfNormal(5)).fit(data, how="mcmc", draws=60, burn=5, chains=2)
+            good = P.Normal(P.Normal(0, 10), P.HalfNormal(5)).fit(data, how="mcmc", draws=2000, burn=1000, chains=4)
+        bad_statuses = [v["diagnostic_status"] for k, v in posterior_summary(bad).items() if not k.startswith("_")]
+        self.assertIn("unconverged-by-diagnostics", bad_statuses)  # R-hat 1.24 / ESS 9 was "ok"
+        good_statuses = [v["diagnostic_status"] for k, v in posterior_summary(good).items() if not k.startswith("_")]
+        self.assertTrue(all(s == "ok" for s in good_statuses))
+
+    def test_raw_ensemble_ess_is_walker_aware(self):
+        import warnings
+
+        import mixle.ppl as P
+        from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
+
+        data = GaussianDistribution(1.0, 4.0).sampler(seed=0).sample(40)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fit = P.Normal(P.Normal(0, 10), 2.0).fit(
+                data,
+                how="ensemble",
+                draws=100,
+                burn=50,
+                walkers=8,
+                chains=2,
+                rng=np.random.RandomState(0),
+            )
+        raw_ess = float(np.min(np.atleast_1d(fit.result.raw.effective_sample_size())))
+        self.assertLess(raw_ess, 400.0)  # the flattened pseudo-chain read 1,143 (30.7x the truth)
+
+
 if __name__ == "__main__":
     unittest.main()

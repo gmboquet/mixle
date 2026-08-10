@@ -111,6 +111,23 @@ class MCMCResult:
             max_lag is not None and (not isinstance(max_lag, (int, np.integer)) or int(max_lag) < 0)
         ):
             raise ValueError("max_lag must be a non-negative integer or None.")
+        walkers = getattr(self, "walkers", None)
+        if walkers and n % int(walkers) == 0 and n // int(walkers) >= 2:
+            # STAT-RR22-14: ensemble samples are sweep-major pooled WALKER states; the flattened
+            # series reads near-independent (consecutive rows are different walkers), inflating
+            # ESS 30.7x against the walker-aware value on the same fit. Sum per-walker ESS
+            # instead -- each walker's series carries the real serial autocorrelation.
+            sweeps = n // int(walkers)
+            cube = arr.reshape((sweeps, int(walkers)) + arr.shape[1:])
+            per_walker = [
+                MCMCResult(
+                    samples=[cube[t, k] for t in range(sweeps)],
+                    log_probs=np.zeros(sweeps),
+                    accepted=np.zeros(sweeps, dtype=bool),
+                ).effective_sample_size(max_lag)
+                for k in range(int(walkers))
+            ]
+            return float(np.sum(per_walker)) if np.ndim(per_walker[0]) == 0 else np.sum(per_walker, axis=0)
         flat = arr.reshape((n, -1))
         centered = flat - flat.mean(axis=0, keepdims=True)
         within_var = np.var(flat, axis=0, ddof=1)
