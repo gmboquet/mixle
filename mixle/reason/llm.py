@@ -656,6 +656,7 @@ class LLMUncertainty:
         alpha: float = 0.1,
         delta: float = 0.05,
         n: int | None = None,
+        policy_token: str | None = None,
     ) -> LLMUncertainty:
         """Calibrate a selective-risk threshold with a finite-sample ``(alpha, delta)``-PAC guarantee.
 
@@ -667,9 +668,19 @@ class LLMUncertainty:
         -- Bonferroni-corrected across the whole grid -- is ``<= alpha``.
 
         Statistical guarantee and assumptions: assuming the calibration ``(prompt, gold)`` examples and
-        future queries are i.i.d. draws from the same distribution, with probability ``>= 1 -
-        delta`` over the randomness of the calibration set, the deployed threshold's TRUE selective
-        risk (``P(wrong | confidence >= threshold)`` on a fresh query) is ``<= alpha``. This is a proper
+        future queries are i.i.d. draws from the same distribution, AND the entire stochastic
+        serving policy -- the generator's conditional output law, the equivalence relation's
+        behavior, and the per-prompt sample count -- remains BEHAVIORALLY IDENTICAL to the
+        calibrated one, with probability ``>= 1 - delta`` over the randomness of the calibration
+        set, the deployed threshold's TRUE selective risk (``P(wrong | confidence >= threshold)``
+        on a fresh query) is ``<= alpha``. The behavioral condition is load-bearing and only
+        PARTLY enforceable: :meth:`answer` refuses rebound callables and sample-count overrides
+        (STAT-RR21-17), but IN-PLACE state mutation inside the same callable passes any identity
+        check -- an exact-wheel probe that flipped ``generator.mode`` served selective risk 1.0
+        under a retained 0.10 certificate (STAT-RR22-09). Pin the model identifier, prompt
+        template, decoding parameters, and equivalence version, pass them as ``policy_token``,
+        and recalibrate whenever any of them changes; the token is stored on the certificate and
+        echoed so serving infrastructure can compare it against the live deployment. This is a proper
         finite-sample ``(alpha, delta)``-PAC guarantee (Geifman & El-Yaniv 2017 "Selective
         Classification for Deep Neural Networks"; Angelopoulos et al. 2021 "Learn then Test") -- NOT a
         same-sample point estimate. The previous implementation picked the smallest threshold whose
@@ -740,8 +751,21 @@ class LLMUncertainty:
             "n": _require_positive_n(n) if n is not None else self.n,
             "generate": self.generate,
             "equivalent": self.equivalent,
+            # STAT-RR22-09: identity binds the OBJECT, not its behavior; the caller-supplied
+            # token names the model/prompt/decoding/equivalence VERSION the certificate covers.
+            "policy_token": None if policy_token is None else str(policy_token),
         }
         return self
+
+    def certified_policy_token(self) -> str | None:
+        """The caller-pinned policy version the certificate covers, or None if none was supplied.
+
+        STAT-RR22-09: callable identity cannot bind behavior; this token is the caller's own
+        record of the model/prompt/decoding/equivalence version, stored at calibration for
+        infrastructure-level comparison against the live deployment.
+        """
+        certified = getattr(self, "_certified_policy", None)
+        return None if certified is None else certified.get("policy_token")
 
     def answer(self, prompt: str, n: int | None = None) -> LLMAssessment | None:
         """Answer ``prompt`` if confident enough, else ``None`` (abstain).
@@ -754,10 +778,16 @@ class LLMUncertainty:
         and per-prompt sample count -- so serving under any other is refused rather than silently
         keeping the certificate (STAT-RR21-17: an ``n=1`` override on an ``n=2`` certificate
         answered 20,000/20,000 fresh queries at selective risk 0.6015 against the certified 0.10;
-        a mutated equivalence reached 0.604 and a swapped generator 1.0). To serve a different
-        policy, calibrate it: build the object with that generator/equivalence/n and call
-        :meth:`calibrate` again. :meth:`assess` remains available at any ``n`` -- it claims no
-        certificate.
+        a mutated equivalence reached 0.604 and a swapped generator 1.0). WHAT THE REFUSALS CAN
+        AND CANNOT CATCH (STAT-RR22-09): rebinding and count drift are caught by identity checks;
+        IN-PLACE mutation of state inside the same callable is not detectable from here -- a
+        flipped ``generator.mode`` passed the guard and served risk 1.0 under the retained 0.10
+        certificate -- so the certificate is conditional on the serving policy remaining
+        behaviorally identical, and ``certified_policy_token()`` exposes the caller-pinned
+        model/prompt/decoding/version token for infrastructure-level comparison. To serve a
+        different policy, calibrate it: build the object with that generator/equivalence/n and
+        call :meth:`calibrate` again. :meth:`assess` remains available at any ``n`` -- it claims
+        no certificate.
         """
         if self._threshold is None:
             raise RuntimeError("call calibrate(...) before answer()")

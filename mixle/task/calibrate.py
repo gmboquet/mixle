@@ -206,7 +206,17 @@ def selective_risk_threshold(
 
 
 class CalibratedTaskModel:
-    """A :class:`TaskModel` plus a conformal threshold: predicts label *sets* and decides answer-vs-escalate."""
+    """A :class:`TaskModel` plus a conformal threshold: predicts label *sets* and decides answer-vs-escalate.
+
+    THE THRESHOLD IS BOUND TO THE PREDICTOR THAT PRODUCED THE CALIBRATION SCORES (STAT-RR22-08).
+    ``qhat`` ranks nonconformity scores computed by the contained task model at calibration time;
+    every coverage/selective-risk statement is conditional on that model's behavior remaining
+    unchanged at serving. Mutating the contained model in place (retraining its raw weights,
+    swapping adapter state) silently voids the guarantee -- an exact-wheel probe that mutated the
+    contained model flipped prediction sets from correct to wrong with coverage 1.0 -> 0.0 while
+    ``qhat`` sat unchanged -- and no runtime check here can detect an in-place mutation. Every
+    library flow that changes the model (``improve()`` and friends) recalibrates in the same
+    operation; if you touch the model yourself, call ``calibrate(...)`` again before serving."""
 
     def __init__(
         self,

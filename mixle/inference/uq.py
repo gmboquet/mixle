@@ -277,6 +277,11 @@ def _uq_point(predictor: Any, data: Any, alpha: float) -> UQResult:
             "cal_pred": cal_pred,
             "cal_y": cal_y,
             "qhat": qhat,
+            # STAT-RR22-08: qhat ranks residuals of the predictor AS IT EXISTED at calibration;
+            # mutating the stored predictor in place (an exact-wheel probe moved intervals from
+            # [0,0] to [100,100], coverage 1.0 -> 0.0) silently voids the guarantee. No runtime
+            # check can see the mutation -- recalibrate after any predictor change.
+            "guarantee_condition": "predictor behaviorally unchanged since calibration; recalibrate after any update",
             "alpha": alpha,
             # IN-SAMPLE by construction: this is the band's hit rate on the very rows whose
             # residual quantile set qhat, so it is >= 1 - alpha mechanically and is NOT evidence

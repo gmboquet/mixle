@@ -407,5 +407,25 @@ class ConformalSplitScaleTest(unittest.TestCase):
             model.calibrate({"A": rng.standard_normal((3, 3)), "Y": rng.standard_normal((3, 4))}, "Y")
 
 
+class ConformalRefitInvalidationTest(unittest.TestCase):
+    """STAT-RR22-08: a public fit() changed normalization and parameters but left the conformal
+    record byte-identical; the stale interval covered 0/150 on the unchanged query law after a
+    calibrated 0.96. Refitting now clears every stored radius."""
+
+    def test_refit_clears_calibration(self):
+        from mixle.reason import CrossModalModel
+
+        rng = np.random.RandomState(0)
+        m = CrossModalModel(latent_dim=2, seed=0)
+        m.add_modality("A", 3).add_modality("Y", 2)
+        data = {"A": rng.standard_normal((60, 3)), "Y": rng.standard_normal((60, 2))}
+        m.fit(data, epochs=5)
+        m.calibrate({"A": rng.standard_normal((20, 3)), "Y": rng.standard_normal((20, 2))}, "Y")
+        m.predict_interval({"A": np.zeros(3)}, "Y")  # calibrated: serves
+        m.fit({"A": rng.standard_normal((60, 3)) + 5.0, "Y": rng.standard_normal((60, 2))}, epochs=5)
+        with self.assertRaisesRegex(RuntimeError, "calibrate"):
+            m.predict_interval({"A": np.zeros(3)}, "Y")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -287,6 +287,13 @@ class CrossModalModel:
             opt.step()
         self._fitted = True
         self._n_train = n
+        # STAT-RR22-08: REFITTING is a predictor change -- every stored conformal radius was
+        # ranked against residuals of the OLD encoders/decoders and normalization. A public
+        # fit() on shifted training rows left the conformal record byte-identical and the stale
+        # interval then covered 0/150 on the unchanged query law (calibrated coverage had been
+        # 0.96). Calibration dies with the predictor that produced its scores; recalibrate after
+        # every fit.
+        self._conformal = {}
         return self
 
     # -- inference ----------------------------------------------------------------------------
@@ -458,7 +465,11 @@ class CrossModalModel:
         """A conformally-calibrated prediction box ``(lower, upper)`` for ``target`` given ``obs``.
 
         Requires a prior :meth:`calibrate` call for ``target``. Coverage is distribution-free and
-        *simultaneous*: ``P(y in box) >= 1 - alpha`` jointly over the whole target vector.
+        *simultaneous*: ``P(y in box) >= 1 - alpha`` jointly over the whole target vector -- FOR
+        THE PREDICTOR THAT PRODUCED THE CALIBRATION SCORES. Refitting clears the stored radii
+        (STAT-RR22-08); the guarantee is additionally conditional on the encoders/decoders not
+        being mutated in place between calibration and serving, which no runtime check can
+        detect -- recalibrate after any parameter update.
         """
         if target not in self._conformal:
             raise RuntimeError(f"call calibrate(..., target={target!r}) before predict_interval")
