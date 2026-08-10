@@ -441,3 +441,44 @@ table: all 17 closed or closed-with-narrower-residual). All 17 pass-22 findings 
   entropy SE receipt names method/replicates(2048)/seed/own MC error; runs_test docstring states
   the executed 5000 ceiling; the fitted-route change note no longer calls a posterior->laplace
   resolution an EM downgrade.
+
+## Pass-23 status (2026-08-10, NO-GO, 7 High / 4 Medium / 1 Low, audited 5c4526bf local tip; Q6 PASS)
+
+Report archived on arrival. Reviewer replayed all 17 pass-22 findings: 12 fully closed, 5
+partially (reopening on the narrower boundaries below). All 12 pass-23 findings fixed same-day:
+
+- RR23-01/-02/-03 (2e24bfe6): outcome-dependent exclusion now yields a SELECTED-SAMPLE
+  ASSOCIATION with identified=False (no relabeled ATT survives a -0.092 bias with 0/80 coverage
+  of its own renamed target); receipts validate strictly (exact ints, non-negative,
+  n_subjects == n_kept + dropped); the Welch route states its near-Normal-arm-means condition
+  with the measured 31.0% skew-law rejection ON EVERY identified result; EventStudyResult
+  carries df, renders t(df), and tipping_drift prices off the result's own interval (the
+  1.96-vs-t edge 0.1235/0.0604 reproduced exactly).
+- RR23-04/-05 (bd3fae2d): joint-mixture uses a THREE-way split (restart selection can no longer
+  score itself); the representation example carries the F10.5 Classification tag + stand-in
+  disclosure.
+- RR23-06 (403b2dd6): CrossModal fit() validates controls BEFORE mutation (refused refits keep
+  the previous fit AND calibration -- verified) and invalidates state before the first mutation
+  (mid-training crashes leave an unfitted model -- verified by injected crash). The
+  lr='not-a-number' stale-certificate replay (0.96 -> 0/150) is structurally dead.
+- RR23-07 (403b2dd6): fit_factuality refuses non-Boolean verdicts (the string-'false' oracle
+  had calibrated an always-wrong generator to probability 1.0) and 'discrimination' is labeled
+  the resubstitution AUC it is (a 20-row null read 0.96 vs 0.4997 fresh).
+- RR23-08 (bd3fae2d): the distillation tutorial states the MARGINAL estimand (0.91 marginal
+  coexisted with 47.4% answered-slice error) and routes answered-slice targets to
+  calibrate_selective().
+- RR23-09/-10 (bd3fae2d): the behavioral-stability condition is propagated to every headline
+  surface (task/calibrate, uq, llm module docs; reasoning-systems; uncertainty.rst -- which also
+  gains the PAC/delta description it understated); the internal order-statistic comment carries
+  the strict/continuous qualifier. Manifest re-signed, 38 sites.
+- RR23-11 (403b2dd6): walker provenance is stamped BY THE SAMPLER, covering sequential, process
+  pool, and the exported low-level surface identically (survives pickling); process and
+  sequential runs of identical draws now return identical diagnostics (both ESS 40.1, both
+  refusing) where the process path had manufactured ESS 48,000/ok and promoted a mean 56.65
+  MCSEs from truth.
+- RR23-12 (403b2dd6): posterior_summary fails closed on ANY recorded post-warmup divergence
+  (new status divergent-transitions naming the count; 15/16-divergence funnel fits had read ok).
+
+Environment note: sphinx vanished from .venv312 mid-session (was present through pass-22's
+docs checks); restored per pyproject's docs extra. The remote release ref still holds 6ef47afd
+-- the pass-22 AND pass-23 waves ship in one push after this wave's full-suite gate.
