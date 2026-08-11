@@ -61,9 +61,25 @@ execution status in "Release Execution Status" below and the tree both say 57):
      - manual unless dependencies are provisioned
 
 Release Execution Status
-------------------------
+-------------------------
 
-**All 57 examples were executed on 2026-08-07** against ``release/0.8.0``, from the source tree on
+**2026-08-10 re-verification.** All 57 examples were re-executed against the current
+``release/0.8.0`` tip (``7f0c7bd1``), because the 2026-08-07 pass below predates an adversarial
+statistical-review campaign (passes 2-23, 2026-08-08..10) that changed public behavior on several
+``mixle.inference``, ``mixle.ppl``, ``mixle.reason``, and ``mixle.task`` surfaces -- including one
+this pass found the campaign itself had not touched: ``cross_modal_fit_receipt.py`` exercises the
+CrossModal transactional-fit repair (D-0171/D-0172) directly. Same method as 2026-08-07: source
+tree, Python 3.12.12, one script at a time in its own process under a resident-memory and
+free-disk watchdog (debounced against transient readings from other concurrent work on a shared
+machine). **57 passed, 0 failed** -- 355.5s total, slowest script (``skeptic_challenge_example.py``)
+16.2s, both faster than the 2026-08-07 figures (439s / 24.3s) and consistent with normal run-to-run
+variance rather than a real change. One environment gap, unrelated to ``mixle``: ``peft`` was
+missing from the execution venv despite being declared in the ``examples`` extras group
+(``pyproject.toml``); installed at the declared bound (``peft>=0.11,<1``), after which
+``peft_lora_grad_leaf.py`` passes. Zero regressions from the review campaign reached this corpus.
+
+**2026-08-07 pass (superseded environment identity; narrative below still current).** All 57
+examples were executed against ``release/0.8.0``, from the source tree on
 Python 3.12.12, one at a time in its own process session under a resident-memory watchdog. All 57
 completed successfully: 439s in total, peak 2.3 GB, and the slowest single script
 ``project_neural_to_structured.py`` at 24.3s.
