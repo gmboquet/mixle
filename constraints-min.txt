@@ -9,6 +9,8 @@
 # the `dependencies` floors in pyproject.toml. Keep in sync with those `>=` floors. Test tooling
 # (pytest/xdist/cov) is intentionally left unpinned: this gate tests mixle's code against its declared
 # runtime-dependency floors, not old test-harness versions.
-numpy==2.4.0
+# 2.4.1, not 2.4.0: 2.4.0 was yanked upstream and is no longer an installable floor, so pinning it
+# made this gate depend on a withdrawn release. Kept in lockstep with the pyproject `>=` floor.
+numpy==2.4.1
 scipy==1.16.0
 mpmath==1.3.0

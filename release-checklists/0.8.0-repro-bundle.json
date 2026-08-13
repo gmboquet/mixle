@@ -16,7 +16,7 @@
     {
       "path": "pyproject.toml",
       "role": "bundle-closure",
-      "sha256": "bba689d2d455b3f9a6abb42ccacd36c54477e0da50b26495c0dad1e9dcc0b056"
+      "sha256": "439cd4388e55bd1d5a3b9708b318d66b1d609c5c461570cac9ffdd2793b9f82a"
     },
     {
       "path": "release-checklists/0.8.0-repro-environment.json",
