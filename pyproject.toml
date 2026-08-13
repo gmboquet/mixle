@@ -49,7 +49,9 @@ classifiers = [
 # otherwise enforces (worklist P2.2; mixle/tests/optional_import_guard_test.py). See the `highprec` extra
 # below -- `mpmath>=1.3` moved there with its floor unchanged.
 dependencies = [
-    "numpy>=2.4,<3",
+    # 2.4.1 rather than 2.4: 2.4.0 is yanked upstream and is no longer an installable floor for a
+    # resolver, so declaring it made the minimum-version lane depend on a withdrawn release.
+    "numpy>=2.4.1,<3",
     "scipy>=1.16,<2",
 ]
 

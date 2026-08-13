@@ -86,8 +86,39 @@ def _git_commit() -> str | None:
     return _git_state()["git_commit"]
 
 
+def _embedded_build_provenance() -> dict | None:
+    """Read the provenance the wheel was built with, if this mixle came from a built artifact.
+
+    An installed wheel is not in a repository, so the ambient-git probe legitimately finds nothing
+    -- but the artifact carries its own attestation, and ignoring it reported an unknown commit for
+    an installation whose identity was recorded all along (SYS-07).
+    """
+    try:
+        import json
+        from pathlib import Path
+
+        import mixle
+
+        root = Path(next(iter(mixle.__path__)))
+        payload = json.loads((root / "_build_provenance.json").read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - absent or unreadable provenance is simply not available
+        return None
+    if not isinstance(payload, dict) or payload.get("artifact") != "mixle.build_provenance/v1":
+        return None
+    commit = payload.get("source_commit")
+    if not isinstance(commit, str) or len(commit) != 40 or any(c not in "0123456789abcdef" for c in commit):
+        return None
+    return payload
+
+
 def environment_info() -> dict:
-    """Snapshot of the software/hardware environment for reproducibility."""
+    """Snapshot of the software/hardware environment for reproducibility.
+
+    Source identity is taken from the ambient repository when there is one, and otherwise from the
+    installed artifact's embedded build provenance. ``provenance_source`` names which, because
+    "no repository here" and "a clean repository" are different facts and were previously reported
+    the same way.
+    """
     info = {
         "python": sys.version.split()[0],
         "platform": platform.platform(),
@@ -96,7 +127,19 @@ def environment_info() -> dict:
         "mixle_version": _version("mixle"),
         "cpu_count": os.cpu_count(),
     }
-    info.update(_git_state())
+    git_state = _git_state()
+    info.update(git_state)
+    if git_state.get("git_commit") is None:
+        embedded = _embedded_build_provenance()
+        if embedded is not None:
+            info["git_commit"] = embedded["source_commit"]
+            info["git_dirty"] = embedded.get("source_dirty")
+            info["source_tree"] = embedded.get("source_tree")
+            info["provenance_source"] = "installed-artifact-build-provenance"
+        else:
+            info["provenance_source"] = "unavailable"
+    else:
+        info["provenance_source"] = "ambient-repository"
     return info
 
 
