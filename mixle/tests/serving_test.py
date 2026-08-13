@@ -546,3 +546,58 @@ class UnscorableRecordIsNotAnOutageTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CheckpointResumeLineageTest(unittest.TestCase):
+    """SYS-04: recovered work must extend the interrupted chain, not root a second one."""
+
+    @staticmethod
+    def _data():
+        return np.random.RandomState(11).normal(3.0, 2.0, 2000).tolist()
+
+    def test_appending_with_a_fresh_same_name_checkpointer_keeps_the_chain_verifiable(self):
+        from mixle.inference import optimize
+        from mixle.stats import GaussianEstimator
+
+        data = self._data()
+        with tempfile.TemporaryDirectory() as d:
+            reg = Registry(d)
+            optimize(data, GaussianEstimator(), max_its=6, on_step=reg.checkpointer("run", every=2))
+            self.assertTrue(reg.verify_chain("run"))
+            first = list(reg.versions("run"))
+
+            model, _ = reg.get("run")
+            # a NEW checkpointer object under the same name -- what a resumed process does
+            optimize(
+                data,
+                GaussianEstimator(),
+                max_its=6,
+                prev_estimate=model,
+                on_step=reg.checkpointer("run", every=2),
+            )
+            self.assertGreater(len(reg.versions("run")), len(first))
+            self.assertTrue(reg.verify_chain("run"), "appended recovery must leave the chain verifiable")
+
+            metadata = [reg.metadata("run", v) for v in reg.versions("run")]
+            self.assertEqual(len({m["run_id"] for m in metadata}), 1, "one run identity across the lineage")
+            iterations = [m["checkpoint_iter"] for m in metadata]
+            self.assertEqual(iterations, sorted(set(iterations)), "iterations strictly increase across resume")
+
+    def test_resume_false_roots_a_new_lineage_deliberately(self):
+        from mixle.inference import optimize
+        from mixle.stats import GaussianEstimator
+
+        data = self._data()
+        with tempfile.TemporaryDirectory() as d:
+            reg = Registry(d)
+            optimize(data, GaussianEstimator(), max_its=4, on_step=reg.checkpointer("run", every=2))
+            model, _ = reg.get("run")
+            optimize(
+                data,
+                GaussianEstimator(),
+                max_its=4,
+                prev_estimate=model,
+                on_step=reg.checkpointer("run", every=2, resume=False),
+            )
+            # opting out is allowed, and the combined history then honestly does not verify
+            self.assertFalse(reg.verify_chain("run"))

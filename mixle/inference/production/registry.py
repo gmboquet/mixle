@@ -238,7 +238,9 @@ class Registry:
                 fcntl.flock(lock_f, fcntl.LOCK_UN)
         return ver
 
-    def checkpointer(self, name: str, *, every: int = 1) -> Callable[[Any], None]:
+    def checkpointer(
+        self, name: str, *, every: int = 1, resume: bool = True, trust_code: bool = False
+    ) -> Callable[[Any], None]:
         """Return an ``optimize(on_step=...)`` callback that snapshots the model under ``name`` every
         ``every`` iterations (recording the iteration + log-density in the version metadata).
 
@@ -250,6 +252,13 @@ class Registry:
             optimize(data, est, on_step=reg.checkpointer("run", every=5))
             model, _ = reg.get("run")              # latest checkpoint
             optimize(data, est, prev_estimate=model)   # continue training
+
+        A checkpointer created for a name that already holds a VERIFIABLE chain resumes it: it
+        adopts that chain's run identity, links its first new checkpoint to the existing tip, and
+        continues the iteration count, so appending recovered work leaves ``verify_chain`` true.
+        Pass ``resume=False`` to deliberately root a new lineage instead. ``trust_code`` is only
+        used to re-load models while checking whether the existing chain is adoptable, and carries
+        the same meaning as in :meth:`get`.
         """
         from mixle.data.hashing import model_hash
 
@@ -258,6 +267,36 @@ class Registry:
         parent_record_digest: str | None = None
         parent_transition_digest: str | None = None
         run_id = secrets.token_hex(16)
+        iteration_offset = 0
+
+        # Resume: adopt the existing lineage rather than rooting a second one under the same name.
+        # A fresh run_id with a null parent made the COMBINED chain unverifiable the moment a
+        # recovered run appended to it -- verify_chain requires one run_id, strictly increasing
+        # iterations, and exact parent linkage, and a restart broke all three (SYS-04). Adoption is
+        # conditional on the existing versions actually verifying, so a chain is only ever extended
+        # from an authenticated tip; the parent identity taken here is the same quadruple
+        # verify_chain will re-derive.
+        #
+        # If the existing versions do NOT verify (for example plain register() calls under the same
+        # name, which carry no lineage metadata at all), this falls back to rooting a new run. That
+        # combined history does not verify -- but it did not verify before this call either, and
+        # silently pretending otherwise is what the finding was about.
+        if resume:
+            existing = self.versions(name)
+            if existing:
+                try:
+                    adoptable = self.verify_chain(name, trust_code=trust_code)
+                except Exception:  # noqa: BLE001 - an unverifiable tip is simply not adoptable
+                    adoptable = False
+                if adoptable:
+                    tip = existing[-1]
+                    tip_metadata = self.metadata(name, tip)
+                    run_id = tip_metadata["run_id"]
+                    parent = tip_metadata["model_hash"]
+                    parent_version = tip
+                    parent_record_digest = self.record_digest(name, tip)
+                    parent_transition_digest = tip_metadata["transition_digest"]
+                    iteration_offset = int(tip_metadata["checkpoint_iter"])
 
         def _save(step: Any) -> None:
             nonlocal parent, parent_record_digest, parent_transition_digest, parent_version
@@ -266,7 +305,9 @@ class Registry:
                 metadata = {
                     "lineage_schema": "mixle-checkpoint-lineage-v1",
                     "run_id": run_id,
-                    "checkpoint_iter": step.iter,
+                    # a resumed optimize() restarts step.iter at 1; the chain requires strictly
+                    # increasing iterations across the whole lineage, so continue from the tip.
+                    "checkpoint_iter": iteration_offset + step.iter,
                     "log_density": step.log_density,
                     "model_hash": h,
                     "parent_hash": parent,
