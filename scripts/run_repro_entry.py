@@ -156,7 +156,107 @@ def _validate_output(entry: dict[str, Any], stdout: str) -> None:
             raise ValueError(f"{entry['id']}: {assertion['path']} is above its required maximum")
 
 
-def run_entry(bundle: dict[str, Any], entry_id: str) -> dict[str, Any]:
+_ARTIFACT_PROBE = """
+import json, sys
+info = {"importable": False, "installed_distribution": False}
+try:
+    import mixle
+    info["importable"] = True
+    info["package_root"] = getattr(mixle, "__file__", None) or (list(mixle.__path__) or [None])[0]
+    info["version"] = getattr(mixle, "__version__", None)
+except Exception as exc:
+    info["import_error"] = repr(exc)
+    print(json.dumps(info)); raise SystemExit(0)
+try:
+    import pathlib
+    from importlib.metadata import distribution
+    dist = distribution("mixle")
+    # The distribution is only the thing that EXECUTED if the imported package actually lives
+    # inside it. A source checkout on sys.path (cwd, PYTHONPATH, editable install) shadows an
+    # installed wheel while `distribution("mixle")` still resolves -- that is the false-verified
+    # case this probe exists to catch. Compared as resolved paths: string prefixes get this wrong
+    # (and `str.rstrip("mixle")` strips a character SET, not a suffix).
+    located = pathlib.Path(str(dist.locate_file("mixle"))).resolve()
+    root = pathlib.Path(info.get("package_root") or ".").resolve()
+    info["distribution_located_at"] = str(located)
+    info["installed_distribution"] = root == located or located in root.parents
+    info["distribution_version"] = dist.version
+except Exception as exc:
+    info["metadata_error"] = repr(exc)
+try:
+    from mixle.reproduction import installed_content_provenance
+    content = installed_content_provenance()
+    info["installed_content_verified"] = content.get("verified")
+    info["installed_content_digest"] = content.get("digest")
+except Exception as exc:
+    info["installed_content_error"] = repr(exc)
+try:
+    import json as _j, pathlib
+    root = pathlib.Path(info.get("package_root") or ".").parent
+    prov = _j.loads((root / "_build_provenance.json").read_text(encoding="utf-8"))
+    info["source_commit"] = prov.get("source_commit")
+    info["source_tree"] = prov.get("source_tree")
+    info["source_dirty"] = prov.get("source_dirty")
+except Exception:
+    info["source_commit"] = None
+print(json.dumps(info))
+"""
+
+
+def _executing_artifact(entry: dict[str, Any]) -> dict[str, Any]:
+    """Identify the mixle that actually executes the entry, under the entry's own import conditions.
+
+    The probe runs as a FILE placed beside the entry's own script, not via ``python -c``: for
+    ``python examples/foo.py`` the interpreter puts ``examples/`` on ``sys.path``, while ``-c``
+    puts the working directory there instead. Those resolve ``import mixle`` differently whenever
+    a source checkout is the working directory, so probing with ``-c`` would describe an import
+    the entry never performs.
+
+    Reporting the *installed* distribution without checking that the imported package lives inside
+    it is how a source-shadowed tree was recorded as candidate-verified evidence (SYS-03).
+    """
+    script_dir = (ROOT / entry["script"]).parent
+    probe_path = script_dir / "_mixle_repro_artifact_probe.py"
+    try:
+        probe_path.write_text(_ARTIFACT_PROBE, encoding="utf-8")
+        probe = subprocess.run(
+            [sys.executable, str(probe_path)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        return json.loads(probe.stdout.strip().splitlines()[-1])
+    except (OSError, ValueError, subprocess.SubprocessError, IndexError) as exc:
+        return {"importable": False, "installed_distribution": False, "probe_error": repr(exc)}
+    finally:
+        probe_path.unlink(missing_ok=True)
+
+
+def _resolve_candidate_records(bundle: dict[str, Any], records_root: Path | None) -> dict[str, Any]:
+    """Resolve the bundle's ``required_records`` against a retained-records directory.
+
+    ``validate_bundle`` only ever checked that this list was a list of at least four strings; it
+    never opened a single one, so a bundle whose records were entirely absent validated cleanly
+    (SYS-03). Resolution is reported per record, and absence is a stated fact rather than silence.
+    """
+    required = list(bundle["candidate_binding"]["required_records"])
+    if records_root is None:
+        return {"records_root": None, "resolved": False, "required": required, "present": [], "missing": required}
+    present, missing = [], []
+    for pattern in required:
+        (present if any(records_root.glob(pattern)) else missing).append(pattern)
+    return {
+        "records_root": str(records_root),
+        "resolved": not missing,
+        "required": required,
+        "present": present,
+        "missing": missing,
+    }
+
+
+def run_entry(bundle: dict[str, Any], entry_id: str, *, records_root: Path | None = None) -> dict[str, Any]:
     """Execute one validated entry and return a content-addressed success receipt."""
     validate_bundle(bundle)
     matches = [entry for entry in bundle["entries"] if entry["id"] == entry_id]
@@ -190,6 +290,24 @@ def run_entry(bundle: dict[str, Any], entry_id: str) -> dict[str, Any]:
         raise ValueError(f"{entry_id}: exited {result.returncode}: {result.stderr[-2000:]}")
     duration = time.monotonic() - started
     _validate_output(entry, result.stdout)
+
+    artifact = _executing_artifact(entry)
+    binding = _resolve_candidate_records(bundle, records_root)
+    # Execution and candidate binding are separate facts and are reported separately. The entry
+    # ran and its output matched byte for byte -- that is `execution_status`, and it is true even
+    # from a source checkout, which is how a local reviewer legitimately exercises the bundle.
+    # `claim_status` is the stronger statement: that this receipt is evidence ABOUT THE CANDIDATE
+    # ARTIFACT. It requires the executing mixle to be the installed distribution (not a shadowing
+    # source tree) with verified installed content, and the bundle's own required records to
+    # actually resolve. Previously it was the constant "verified" (SYS-03).
+    unbound: list[str] = []
+    if not artifact.get("installed_distribution"):
+        unbound.append("executing mixle is not the installed distribution (source tree shadows it)")
+    if artifact.get("installed_content_verified") is not True:
+        unbound.append("installed content did not verify")
+    if not binding["resolved"]:
+        unbound.append(f"candidate records unresolved: {', '.join(binding['missing']) or 'no records root given'}")
+
     return {
         "artifact": "mixle.reproduction_entry_receipt/v2",
         "entry": entry_id,
@@ -202,8 +320,11 @@ def run_entry(bundle: dict[str, Any], entry_id: str) -> dict[str, Any]:
         ).hexdigest(),
         "stdout_sha256": hashlib.sha256(result.stdout.encode("utf-8")).hexdigest(),
         "validated_output": entry["expected"],
+        "executing_artifact": artifact,
+        "candidate_binding": binding,
         "execution_status": "passed",
-        "claim_status": "verified",
+        "claim_status": "verified" if not unbound else "unbound",
+        "unbound_reasons": unbound,
         "passed": True,
     }
 
@@ -212,10 +333,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle", type=Path, default=DEFAULT_BUNDLE)
     parser.add_argument("--entry", required=True)
+    parser.add_argument(
+        "--records-root",
+        type=Path,
+        default=None,
+        help=(
+            "directory holding the retained candidate records named by the bundle's "
+            "candidate_binding.required_records. Without it a receipt can still record a passing "
+            "execution, but cannot claim to be candidate-bound evidence."
+        ),
+    )
     args = parser.parse_args(argv)
     try:
         bundle = json.loads(args.bundle.read_text(encoding="utf-8"))
-        receipt = run_entry(bundle, args.entry)
+        receipt = run_entry(bundle, args.entry, records_root=args.records_root)
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1

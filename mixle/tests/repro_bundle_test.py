@@ -109,3 +109,91 @@ def test_bundle_rejects_unresolved_license_and_integrity_placeholders():
     serialized = json.dumps(_bundle(), sort_keys=True).upper()
     for marker in ("CONFIRM-AT-PUBLISH", "TODO", "TBD"):
         assert marker not in serialized
+
+
+def _runner():
+    return _load(ROOT / "scripts" / "run_repro_entry.py", "_run_repro_entry")
+
+
+def test_required_records_are_resolved_not_merely_counted():
+    """SYS-03: the bundle's candidate records must be opened, not just counted.
+
+    ``validate_bundle`` checked that ``required_records`` was a list of at least four strings and
+    never looked at one of them, so a bundle whose records were entirely absent validated cleanly
+    and its receipts still said ``verified``.
+    """
+    runner, bundle = _runner(), _bundle()
+
+    unresolved = runner._resolve_candidate_records(bundle, None)
+    assert unresolved["resolved"] is False
+    assert unresolved["missing"] == bundle["candidate_binding"]["required_records"]
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "metadata").mkdir()
+        for name in ("release-candidate.json", "SHA256SUMS", "reproduction-a.json"):
+            (root / "metadata" / name).write_text("{}", encoding="utf-8")
+        partial = runner._resolve_candidate_records(bundle, root)
+        # a partially populated records root must NOT resolve -- every declared record is required
+        assert partial["resolved"] is False
+        assert partial["present"] and partial["missing"]
+
+        for pattern in bundle["candidate_binding"]["required_records"]:
+            target = root / pattern.replace("*", "x")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("{}", encoding="utf-8")
+        assert runner._resolve_candidate_records(bundle, root)["resolved"] is True
+
+
+def test_a_source_shadowed_run_cannot_claim_candidate_binding():
+    """SYS-03: executing from a source checkout is a legitimate run but not candidate evidence.
+
+    The receipt separates the two facts. ``execution_status`` says the entry ran and matched its
+    pinned output, which a local reviewer working from a checkout can legitimately produce.
+    ``claim_status`` is the stronger statement -- that the receipt is evidence about the candidate
+    ARTIFACT -- and it now requires the executing mixle to be an installed distribution whose
+    content verifies, plus resolved candidate records.
+    """
+    import subprocess
+    import sys
+    import tempfile
+
+    runner = _runner()
+
+    # The probe is what decides whether a receipt may claim candidate binding, so exercise it for
+    # real rather than inspecting its text. Run from a directory containing a decoy `mixle`
+    # package: the probe must report the package it actually imported, which is the decoy, and
+    # must not confuse that with the installed distribution.
+    with tempfile.TemporaryDirectory() as directory:
+        decoy = Path(directory) / "mixle"
+        decoy.mkdir()
+        (decoy / "__init__.py").write_text("__version__ = '0.0.0-decoy'\n", encoding="utf-8")
+        probe_file = Path(directory) / "_probe.py"
+        probe_file.write_text(runner._ARTIFACT_PROBE, encoding="utf-8")
+        completed = subprocess.run(
+            [sys.executable, str(probe_file)], cwd=directory, capture_output=True, text=True, timeout=120
+        )
+        info = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert info["importable"] is True
+    assert isinstance(info["installed_distribution"], bool)
+    # the shadowing decoy is what got imported, and the probe says so
+    assert info["version"] == "0.0.0-decoy"
+    assert Path(info["package_root"]).resolve().parent == decoy.resolve()
+    # and it must not be credited as the installed distribution, which is the whole point
+    assert info["installed_distribution"] is False
+
+
+def test_receipt_reports_binding_facts_instead_of_a_constant_verified():
+    """The receipt must carry the evidence for its own claim_status, not assert it."""
+    runner = _runner()
+    source = Path(runner.__file__ if hasattr(runner, "__file__") else "").name
+    del source
+    import inspect
+
+    body = inspect.getsource(runner.run_entry)
+    for field in ("executing_artifact", "candidate_binding", "unbound_reasons"):
+        assert field in body, f"receipt must record {field}"
+    assert '"claim_status": "verified" if not unbound else "unbound"' in body
