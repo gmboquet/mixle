@@ -10,6 +10,7 @@ from pathlib import Path
 
 from setuptools import setup
 from setuptools.command.build_py import build_py
+from setuptools.command.sdist import sdist
 
 
 def _git_value(root: Path, expression: str) -> str:
@@ -44,15 +45,17 @@ def _source_dirty(root: Path) -> bool | None:
     return bool(result.stdout) if result.returncode == 0 else None
 
 
-def _source_content_digest(root: Path) -> str:
-    digest = hashlib.sha256()
+def _source_content_files(root: Path) -> list[Path]:
     paths = [root / "pyproject.toml", root / "setup.py"]
     paths.extend(
-        path
-        for path in (root / "mixle").rglob("*")
-        if path.is_file() and path.suffix in {".json", ".py", ".pyx"}
+        path for path in (root / "mixle").rglob("*") if path.is_file() and path.suffix in {".json", ".py", ".pyx"}
     )
-    for path in sorted(paths):
+    return sorted(path for path in paths if path.is_file())
+
+
+def _source_content_digest(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in _source_content_files(root):
         relative = path.relative_to(root).as_posix().encode("utf-8")
         digest.update(len(relative).to_bytes(8, "big"))
         digest.update(relative)
@@ -62,28 +65,94 @@ def _source_content_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
+def _provenance_payload(root: Path) -> dict:
+    """Build the provenance record for the tree being built from.
+
+    ``source_content_sha256`` digests whatever the BUILD TREE contains, which is not the same set
+    of files in every build: a checkout carries the full working tree, while a tree unpacked from
+    an sdist carries only what the sdist ships. The two therefore produce different digests from
+    the same algorithm, and the bare field name suggested a single canonical "source" digest that
+    does not exist (SYS-08). The universe is now described alongside the value -- its file count
+    and its selection rule -- so a reader can tell which population was hashed instead of assuming.
+    """
+    source_commit = os.environ.get("MIXLE_SOURCE_COMMIT", "").strip().lower()
+    if len(source_commit) != 40 or any(character not in "0123456789abcdef" for character in source_commit):
+        source_commit = _git_value(root, "HEAD")
+    source_tree = os.environ.get("MIXLE_SOURCE_TREE", "").strip().lower()
+    if len(source_tree) != 40 or any(character not in "0123456789abcdef" for character in source_tree):
+        source_tree = _git_value(root, "HEAD^{tree}")
+    files = _source_content_files(root)
+    return {
+        "artifact": "mixle.build_provenance/v1",
+        "source_commit": source_commit,
+        "source_tree": source_tree,
+        "source_dirty": _source_dirty(root),
+        "source_content_sha256": _source_content_digest(root),
+        "source_content_file_count": len(files),
+        "source_content_universe": "pyproject.toml, setup.py, and mixle/**/*.{json,py,pyx} present in the build tree",
+    }
+
+
+def _carried_provenance(root: Path) -> dict | None:
+    """Return a valid provenance record already shipped in the tree, if there is one.
+
+    An sdist carries no ``.git``, so a wheel built from an unpacked sdist could not name the
+    commit it came from and recorded ``unknown``/``null`` -- the separately published sdist could
+    not preserve the candidate identity that the wheel asserts (SYS-01). The sdist now ships the
+    attestation produced when it was built, and this reads it back so the identity survives the
+    sdist -> wheel hop instead of being regenerated from a checkout that is not there.
+    """
+    shipped = root / "mixle" / "_build_provenance.json"
+    try:
+        payload = json.loads(shipped.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("artifact") != "mixle.build_provenance/v1":
+        return None
+    commit = payload.get("source_commit")
+    if not isinstance(commit, str) or len(commit) != 40 or any(c not in "0123456789abcdef" for c in commit):
+        return None
+    return payload
+
+
 class ProvenanceBuildPy(build_py):
     """Write build provenance into build_lib without mutating the source checkout."""
 
     def run(self) -> None:
         super().run()
         root = Path(__file__).resolve().parent
-        source_commit = os.environ.get("MIXLE_SOURCE_COMMIT", "").strip().lower()
-        if len(source_commit) != 40 or any(character not in "0123456789abcdef" for character in source_commit):
-            source_commit = _git_value(root, "HEAD")
-        source_tree = os.environ.get("MIXLE_SOURCE_TREE", "").strip().lower()
-        if len(source_tree) != 40 or any(character not in "0123456789abcdef" for character in source_tree):
-            source_tree = _git_value(root, "HEAD^{tree}")
-        payload = {
-            "artifact": "mixle.build_provenance/v1",
-            "source_commit": source_commit,
-            "source_tree": source_tree,
-            "source_dirty": _source_dirty(root),
-            "source_content_sha256": _source_content_digest(root),
-        }
+        payload = _provenance_payload(root)
+        if payload["source_commit"] == "unknown":
+            # No git here. Either this is a tree unpacked from an sdist -- in which case the sdist
+            # shipped the attestation from when it was built, and carrying it forward is what keeps
+            # the sdist-installed wheel bound to the candidate (SYS-01) -- or there is genuinely no
+            # provenance to state, and "unknown" stands. Only a well-formed record is adopted, and
+            # adoption is recorded so a reader can tell a carried identity from a freshly derived
+            # one rather than having to infer it.
+            carried = _carried_provenance(root)
+            if carried is not None:
+                payload = dict(carried)
+                payload["source_content_carried_through_sdist"] = True
         destination = Path(self.build_lib) / "mixle" / "_build_provenance.json"
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
 
 
-setup(cmdclass={"build_py": ProvenanceBuildPy})
+class ProvenanceSdist(sdist):
+    """Ship the build provenance inside the sdist so it survives the sdist -> wheel hop."""
+
+    def make_release_tree(self, base_dir, files):  # noqa: ANN001, ANN201 - distutils signature
+        super().make_release_tree(base_dir, files)
+        root = Path(__file__).resolve().parent
+        destination = Path(base_dir) / "mixle" / "_build_provenance.json"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        # make_release_tree HARD LINKS files from the checkout when it can, so writing through an
+        # existing path here would edit the developer's working tree. Unlink first: this command
+        # must leave the checkout byte-identical, which is the same rule ProvenanceBuildPy follows.
+        if destination.exists() or destination.is_symlink():
+            destination.unlink()
+        payload = _provenance_payload(root)
+        destination.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+
+
+setup(cmdclass={"build_py": ProvenanceBuildPy, "sdist": ProvenanceSdist})
