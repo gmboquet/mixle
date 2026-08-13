@@ -60,6 +60,34 @@ def _full_git_commit(repository: Path) -> str:
     return commit
 
 
+def _is_installer_bytecode(name: str) -> bool:
+    """True for a byte-compiled module the INSTALLER produced, not a distributed file.
+
+    Deliberately narrow: the name must end in ``.pyc`` AND sit directly inside a ``__pycache__``
+    directory, which is the only place ``pip``'s compileall step writes. A ``.pyc`` shipped
+    anywhere else in a distribution is not installer output and stays subject to the hash rule.
+    """
+    if not name.endswith(".pyc"):
+        return False
+    parts = name.split("/")
+    return len(parts) >= 2 and parts[-2] == "__pycache__"
+
+
+def _bytecode_source_path(name: str) -> str | None:
+    """Map ``pkg/__pycache__/mod.cpython-312.pyc`` back to the ``pkg/mod.py`` it was compiled from.
+
+    Returns ``None`` when the name does not decompose, so an undecodable bytecode path is treated
+    as unaccounted-for rather than silently exempted.
+    """
+    parts = name.split("/")
+    if len(parts) < 2 or parts[-2] != "__pycache__":
+        return None
+    stem = parts[-1].split(".")[0]
+    if not stem:
+        return None
+    return "/".join([*parts[:-2], f"{stem}.py"])
+
+
 def installed_content_provenance() -> dict[str, Any]:
     """Digest the installed distribution's RECORD identities and verify hashed files."""
     try:
@@ -72,13 +100,34 @@ def installed_content_provenance() -> dict[str, Any]:
         }
     entries: list[dict[str, Any]] = []
     failures: list[str] = []
+    hashed_names = {str(item) for item in (dist.files or ()) if item.hash is not None}
+    bytecode_exempt: list[str] = []
     for item in sorted(dist.files or (), key=str):
         if item.hash is None:
             # Skipping unhashed installed entries is the same tamper vector as the wheel side
             # (SYS-RR8-2): only RECORD may legitimately lack a hash. Installer-written metadata
             # (INSTALLER, REQUESTED, direct_url.json) is not distributed code and is exempt.
             name = str(item)
-            if not name.endswith(".dist-info/RECORD") and not name.startswith(("mixle-", "mixle.")):
+            if _is_installer_bytecode(name):
+                # Ordinary `pip install` byte-compiles every module and writes those .pyc rows to
+                # RECORD with no hash, because it generates them AFTER hashing the distributed
+                # files. Treating them as tampering made `mixle-reproduce` report passed:false on
+                # every normal installation (SYS-02) -- the check refused the standard install path
+                # rather than any actual modification.
+                #
+                # They are exempted, not ignored: each one must correspond to a distributed source
+                # file that IS hashed and verified below, the count is published in the receipt,
+                # and a .pyc with no such source is still a failure. What this does NOT prove is
+                # that the bytecode matches the source it names -- CPython's own invalidation
+                # (mtime/size, or hash for `--invalidation-mode`) is what forces a recompile from
+                # the verified .py, and a `unchecked_hash` .pyc would bypass that. The verified
+                # object is the distributed source, which is what the reproduction claim is about.
+                source = _bytecode_source_path(name)
+                if source is None or source not in hashed_names:
+                    failures.append(f"{item}: installer bytecode has no verified source file")
+                else:
+                    bytecode_exempt.append(name)
+            elif not name.endswith(".dist-info/RECORD") and not name.startswith(("mixle-", "mixle.")):
                 failures.append(f"{item}: installed entry carries no RECORD hash")
             elif name.endswith((".py", ".so", ".pyd", ".json")) and ".dist-info/" not in name:
                 failures.append(f"{item}: installed code entry carries no RECORD hash")
@@ -101,6 +150,7 @@ def installed_content_provenance() -> dict[str, Any]:
         "artifact": "mixle.installed_content/v1",
         "digest": hashlib.sha256(canonical).hexdigest(),
         "file_count": len(entries),
+        "installer_bytecode_exempt_count": len(bytecode_exempt),
         "verified": bool(entries) and not failures,
         "failures": failures,
     }

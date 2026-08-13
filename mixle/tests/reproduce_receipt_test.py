@@ -278,5 +278,57 @@ class ShadowInstallationTest(unittest.TestCase):
         self.assertTrue(result["mismatches"])
 
 
+class InstallerBytecodeExemptionTest(unittest.TestCase):
+    """SYS-02: pip's own byte-compilation must not read as tampering.
+
+    ``pip install`` compiles every module after hashing the distributed files, so it writes those
+    ``.pyc`` rows to RECORD with no hash. Treating them as modification made ``mixle-reproduce``
+    report ``passed: false`` on every ordinary installation -- 810 of them on this package -- while
+    the six claim checks and the exact subject binding all passed. The exemption is narrow, so
+    these pin both halves: the installer's own bytecode is exempt, and nothing else is.
+    """
+
+    def test_only_pycache_bytecode_is_treated_as_installer_output(self):
+        from mixle.reproduction import _is_installer_bytecode
+
+        for name in (
+            "mixle/__pycache__/blending.cpython-312.pyc",
+            "mixle/stats/__pycache__/dist.cpython-311.pyc",
+        ):
+            self.assertTrue(_is_installer_bytecode(name), name)
+        for name in (
+            "mixle/blending.py",  # distributed source
+            "mixle/vendored.pyc",  # a .pyc SHIPPED outside __pycache__ is not installer output
+            "mixle/__pycache__extra/x.pyc",  # not the __pycache__ directory
+            "mixle/stats/kernel.so",
+            "manifests/api_manifest.json",
+        ):
+            self.assertFalse(_is_installer_bytecode(name), name)
+
+    def test_bytecode_maps_back_to_the_source_it_was_compiled_from(self):
+        from mixle.reproduction import _bytecode_source_path
+
+        self.assertEqual(_bytecode_source_path("mixle/__pycache__/blending.cpython-312.pyc"), "mixle/blending.py")
+        self.assertEqual(
+            _bytecode_source_path("mixle/stats/__pycache__/dist.cpython-311.opt-1.pyc"), "mixle/stats/dist.py"
+        )
+        # an undecodable name returns None so the caller fails it rather than exempting it
+        self.assertIsNone(_bytecode_source_path("mixle/blending.py"))
+        self.assertIsNone(_bytecode_source_path("__pycache__/.cpython-312.pyc"))
+
+    def test_orphan_bytecode_is_a_failure_not_an_exemption(self):
+        """A .pyc whose source is absent (or unhashed) must still fail the check.
+
+        This is the property that keeps the exemption from becoming a hole: an attacker who adds an
+        unhashed ``.pyc`` under ``__pycache__`` gets no free pass, because the exemption is
+        conditional on a hashed distributed source of the same name.
+        """
+        from mixle.reproduction import _bytecode_source_path
+
+        hashed = {"mixle/blending.py"}
+        self.assertIn(_bytecode_source_path("mixle/__pycache__/blending.cpython-312.pyc"), hashed)
+        self.assertNotIn(_bytecode_source_path("mixle/__pycache__/evil.cpython-312.pyc"), hashed)
+
+
 if __name__ == "__main__":
     unittest.main()
