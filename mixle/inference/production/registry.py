@@ -385,12 +385,27 @@ class Registry:
             except FileNotFoundError:
                 pass
 
-    def current(self, name: str, alias: str = "production", *, trust_code: bool = False) -> tuple[Any, dict | None]:
-        """Load the model an ``alias`` points at (falls back to ``latest`` if the alias is unset).
+    def current(self, name: str, alias: str | None = None, *, trust_code: bool = False) -> tuple[Any, dict | None]:
+        """Load the model an ``alias`` points at.
+
+        Two deliberately different behaviours, split on whether the caller NAMED an alias:
+
+        * ``current(name)`` -- no alias requested. Resolves the default ``"production"`` alias if it
+          exists and falls back to ``latest`` if it does not. This is the bootstrap path: a registry
+          with registrations but no promotion yet still serves something.
+        * ``current(name, "production")`` -- an alias was explicitly requested. It must exist;
+          an absent alias raises :class:`KeyError`. A caller that names an alias is asserting "serve
+          the version promoted to this alias", and quietly substituting ``latest`` answers a
+          different question with an UNPROMOTED model -- which also silently defeats a rollback,
+          since rolling an alias back to a known-good version has no effect on a caller whose alias
+          name is misspelled or was never created (SYS-05).
 
         See :meth:`get` -- ``trust_code`` is required in the same way and for the same reason.
         """
-        p = os.path.join(self._model_dir(name, create=False), _safe_segment(alias, "alias") + ".alias")
+        requested = alias is not None
+        p = os.path.join(
+            self._model_dir(name, create=False), _safe_segment(alias if requested else "production", "alias") + ".alias"
+        )
         # the version READ FROM the alias file is still resolved against the known version list by get(),
         # so a tampered alias file cannot traverse either. O_NOFOLLOW for the same reason as the
         # registration lock and _load_payload: a symlinked alias would otherwise be followed and its
@@ -400,6 +415,12 @@ class Registry:
         try:
             fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW)
         except FileNotFoundError:
+            if requested:
+                raise KeyError(
+                    f"model {name!r} has no alias {alias!r}; promote a version to it "
+                    f"(Registry.promote) or call current({name!r}) without an alias to accept the "
+                    f"latest registered version"
+                ) from None
             version = "latest"
         else:
             with os.fdopen(fd, encoding="utf-8") as f:

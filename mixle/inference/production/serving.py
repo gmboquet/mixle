@@ -81,8 +81,13 @@ class Service:
         self.header = getattr(model, "header", None)
 
     @classmethod
-    def from_registry(cls, registry: Any, name: str, *, alias: str = "production", **kw: Any) -> Service:
-        """Load the model an alias points at in ``registry`` and serve it (carrying its provenance header)."""
+    def from_registry(cls, registry: Any, name: str, *, alias: str | None = None, **kw: Any) -> Service:
+        """Load the model an alias points at in ``registry`` and serve it (carrying its provenance header).
+
+        ``alias`` follows :meth:`Registry.current` exactly: naming one requires it to exist (an absent
+        or misspelled alias raises rather than serving an unpromoted version), while omitting it takes
+        the promoted ``production`` model if there is one and the latest registration otherwise.
+        """
         model, header = registry.current(name, alias)
         svc = cls(model, name=name, **kw)
         if header is not None and svc.header is None:  # the registry stores the header separately

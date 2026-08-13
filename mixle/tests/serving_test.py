@@ -144,6 +144,52 @@ class ModelRegistryTest(unittest.TestCase):
             model, _ = reg.current("g")  # no alias set -> latest
             self.assertIsInstance(model, GaussianDistribution)
 
+    def test_named_but_absent_alias_refuses_instead_of_serving_an_unpromoted_version(self):
+        """SYS-05: a misspelled/absent NAMED alias must not silently serve the latest registration.
+
+        The fail-open this pins against is worse than it first looks: the caller asked for the
+        version promoted to an alias and would have received an unpromoted one, and because the
+        substitution follows ``latest`` rather than the alias, rolling the alias back to a
+        known-good version does not change what a misspelled caller is served.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            reg = Registry(d)
+            reg.register(self._fit(0.0, 6), "g")  # v1, promoted below
+            reg.register(self._fit(5.0, 7), "g")  # v2, never promoted
+            reg.promote("g", "v1", alias="production")
+
+            promoted, _ = reg.current("g", "production")
+            self.assertAlmostEqual(promoted.mu, 0.0, delta=0.4)
+
+            # Case variants are deliberately NOT asserted here: alias lookup is a filename open, so
+            # "PRODUCTION" refuses on a case-sensitive filesystem and resolves to the production
+            # alias on a case-insensitive one (macOS APFS). That difference is real but benign for
+            # this finding -- where it resolves, it resolves to the PROMOTED version, never to an
+            # unpromoted one -- so pinning either outcome would pin the filesystem, not the contract.
+            for absent in ("prodcution", "production ", "staging", "prod"):
+                with self.assertRaises(KeyError, msg=f"alias {absent!r} must refuse"):
+                    reg.current("g", absent)
+
+            # the same refusal reaches the serving entry point, which is where an unpromoted
+            # model would actually have been served to traffic.
+            with self.assertRaises(KeyError):
+                Service.from_registry(reg, "g", alias="staging")
+
+            # and the bootstrap path (no alias NAMED) is deliberately still permitted.
+            model, _ = reg.current("g")
+            self.assertAlmostEqual(model.mu, 0.0, delta=0.4)  # resolves the production alias
+
+    def test_rollback_is_observable_through_a_named_alias(self):
+        """A rollback must change what a named-alias caller is served (the SYS-05 consequence)."""
+        with tempfile.TemporaryDirectory() as d:
+            reg = Registry(d)
+            reg.register(self._fit(0.0, 8), "g")
+            reg.register(self._fit(5.0, 9), "g")
+            reg.promote("g", "v2", alias="production")
+            self.assertAlmostEqual(reg.current("g", "production")[0].mu, 5.0, delta=0.4)
+            reg.promote("g", "v1", alias="production")  # roll back
+            self.assertAlmostEqual(reg.current("g", "production")[0].mu, 0.0, delta=0.4)
+
 
 class ModelServiceTest(unittest.TestCase):
     def test_score_logs_activity_and_health(self):
