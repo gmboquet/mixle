@@ -92,7 +92,7 @@ def _bytecode_matches_source(pyc: Path, source: Path) -> bool | None:
 
     try:
         raw = pyc.read_bytes()
-        payload = marshal.loads(raw[16:])
+        payload = marshal.loads(raw[16:])  # nosec B302 # the payload is the installed distribution's own __pycache__ bytecode, which CPython will unmarshal AND execute on the very next import of that module; this verifier unmarshals WITHOUT executing, precisely to compare it against a recompilation of the hash-verified source. Refusing to examine it would leave the bytes that actually execute unverified -- the second-pass SYS-02 finding this function closes. Undecidable payloads (the except below) fail closed.
         optimize = 2 if ".opt-2." in pyc.name else (1 if ".opt-1." in pyc.name else -1)
         recompiled = compile(source.read_bytes(), payload.co_filename, "exec", dont_inherit=True, optimize=optimize)
         return _code_equal(recompiled, payload)
