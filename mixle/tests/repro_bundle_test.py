@@ -115,36 +115,101 @@ def _runner():
     return _load(ROOT / "scripts" / "run_repro_entry.py", "_run_repro_entry")
 
 
-def test_required_records_are_resolved_not_merely_counted():
-    """SYS-03: the bundle's candidate records must be opened, not just counted.
+_CANDIDATE_COMMIT = "e" * 40
 
-    ``validate_bundle`` checked that ``required_records`` was a list of at least four strings and
-    never looked at one of them, so a bundle whose records were entirely absent validated cleanly
-    and its receipts still said ``verified``.
+
+def _write_valid_records(root: Path, *, commit: str = _CANDIDATE_COMMIT, release: str = "0.8.0") -> None:
+    """Write a records root whose contents actually assert what their names promise."""
+    metadata = root / "metadata"
+    metadata.mkdir(parents=True, exist_ok=True)
+    wheel, sdist = "mixle-0.8.0-py3-none-any.whl", "mixle-0.8.0.tar.gz"
+    wheel_digest, sdist_digest = "a" * 64, "b" * 64
+    (metadata / "release-candidate.json").write_text(
+        json.dumps(
+            {
+                "artifact": "mixle.release_candidate/v1",
+                "commit": commit,
+                "version": release,
+                "tag": "v0.8.0",
+                "workflow_run": "1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (metadata / "SHA256SUMS").write_text(f"{wheel_digest}  {wheel}\n{sdist_digest}  {sdist}\n", encoding="utf-8")
+    (metadata / f"{wheel}.json").write_text(json.dumps({"filename": wheel, "sha256": wheel_digest}), encoding="utf-8")
+    (metadata / "release-check-evidence.json").write_text(json.dumps({"checks": []}), encoding="utf-8")
+    (metadata / "reproduction-a.json").write_text(
+        json.dumps({"artifact": "mixle.reproduction_entry_receipt/v2"}), encoding="utf-8"
+    )
+
+
+def test_required_records_are_opened_not_merely_name_matched():
+    """SYS-03 second pass: matching FILENAMES must not authorize a candidate binding.
+
+    The first repair globbed for pathnames and never opened a match, so a directory of files
+    containing ``{}`` satisfied it -- and the regression test shipped alongside it asserted exactly
+    that as correct behaviour, which is how the defect survived its own fix.
     """
-    runner, bundle = _runner(), _bundle()
+    import tempfile
 
-    unresolved = runner._resolve_candidate_records(bundle, None)
+    runner, bundle = _runner(), _bundle()
+    executing = {"source_commit": _CANDIDATE_COMMIT}
+
+    unresolved = runner._resolve_candidate_records(bundle, None, executing)
     assert unresolved["resolved"] is False
     assert unresolved["missing"] == bundle["candidate_binding"]["required_records"]
-
-    import tempfile
 
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         (root / "metadata").mkdir()
-        for name in ("release-candidate.json", "SHA256SUMS", "reproduction-a.json"):
-            (root / "metadata" / name).write_text("{}", encoding="utf-8")
-        partial = runner._resolve_candidate_records(bundle, root)
-        # a partially populated records root must NOT resolve -- every declared record is required
-        assert partial["resolved"] is False
-        assert partial["present"] and partial["missing"]
-
         for pattern in bundle["candidate_binding"]["required_records"]:
             target = root / pattern.replace("*", "x")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("{}", encoding="utf-8")
-        assert runner._resolve_candidate_records(bundle, root)["resolved"] is True
+        empty = runner._resolve_candidate_records(bundle, root, executing)
+        assert empty["resolved"] is False, "files containing {} must not resolve a candidate binding"
+        assert empty["problems"]
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        _write_valid_records(root)
+        good = runner._resolve_candidate_records(bundle, root, executing)
+        assert good["resolved"] is True, good["problems"]
+        assert good["candidate_commit"] == _CANDIDATE_COMMIT
+
+
+def test_an_artifact_from_another_commit_cannot_satisfy_the_binding():
+    """The reviewer's sharpest falsifier: an older wheel executing against these records.
+
+    Resolution previously depended only on filenames, so a receipt reported ``verified`` while the
+    mixle that actually ran came from a different commit entirely.
+    """
+    import tempfile
+
+    runner, bundle = _runner(), _bundle()
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        _write_valid_records(root)
+        wrong = runner._resolve_candidate_records(bundle, root, {"source_commit": "7" * 40})
+        assert wrong["resolved"] is False
+        assert any("not the candidate commit" in problem for problem in wrong["problems"])
+
+
+def test_a_wheel_record_disagreeing_with_sha256sums_is_refused():
+    import tempfile
+
+    runner, bundle = _runner(), _bundle()
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        _write_valid_records(root)
+        wheel_record = root / "metadata" / "mixle-0.8.0-py3-none-any.whl.json"
+        wheel_record.write_text(
+            json.dumps({"filename": "mixle-0.8.0-py3-none-any.whl", "sha256": "c" * 64}), encoding="utf-8"
+        )
+        result = runner._resolve_candidate_records(bundle, root, {"source_commit": _CANDIDATE_COMMIT})
+        assert result["resolved"] is False
+        assert any("SHA256SUMS records" in problem for problem in result["problems"])
 
 
 def test_a_source_shadowed_run_cannot_claim_candidate_binding():

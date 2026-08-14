@@ -234,25 +234,132 @@ def _executing_artifact(entry: dict[str, Any]) -> dict[str, Any]:
         probe_path.unlink(missing_ok=True)
 
 
-def _resolve_candidate_records(bundle: dict[str, Any], records_root: Path | None) -> dict[str, Any]:
-    """Resolve the bundle's ``required_records`` against a retained-records directory.
+_SUMS_LINE = re.compile(r"^([0-9a-f]{64})\s+\*?(\S+)$")
 
-    ``validate_bundle`` only ever checked that this list was a list of at least four strings; it
-    never opened a single one, so a bundle whose records were entirely absent validated cleanly
-    (SYS-03). Resolution is reported per record, and absence is a stated fact rather than silence.
+
+def _read_json_record(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _resolve_candidate_records(
+    bundle: dict[str, Any], records_root: Path | None, artifact: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Open the bundle's ``required_records`` and cross-bind them to the executing artifact.
+
+    The first version of this globbed for matching PATHNAMES and never opened a match, so a
+    directory of files containing ``{}`` satisfied it and every receipt then read ``verified`` --
+    the same defect, one level up, as the finding it was written to fix. The reviewer's sharpest
+    falsifier was an older wheel from a different commit passing, because the executing commit was
+    never compared with the candidate's.
+
+    So each record is now parsed and checked for what it is supposed to assert, and the executing
+    artifact's ``source_commit``/``source_tree`` must equal the candidate record's. Every failure
+    is reported with its reason rather than collapsing to a single boolean.
     """
     required = list(bundle["candidate_binding"]["required_records"])
     if records_root is None:
-        return {"records_root": None, "resolved": False, "required": required, "present": [], "missing": required}
-    present, missing = [], []
+        return {
+            "records_root": None,
+            "resolved": False,
+            "required": required,
+            "present": [],
+            "missing": required,
+            "problems": ["no records root supplied"],
+        }
+
+    present: list[str] = []
+    missing: list[str] = []
+    problems: list[str] = []
+    matches: dict[str, list[Path]] = {}
     for pattern in required:
-        (present if any(records_root.glob(pattern)) else missing).append(pattern)
+        found = sorted(records_root.glob(pattern))
+        matches[pattern] = found
+        (present if found else missing).append(pattern)
+    for pattern in missing:
+        problems.append(f"absent: {pattern}")
+
+    # metadata/release-candidate.json -- the record that names WHICH candidate this is.
+    candidate_commit = None
+    candidate_paths = matches.get("metadata/release-candidate.json") or []
+    if candidate_paths:
+        record = _read_json_record(candidate_paths[0])
+        if record is None:
+            problems.append("release-candidate.json is not a JSON object")
+        elif record.get("artifact") != "mixle.release_candidate/v1":
+            problems.append("release-candidate.json is not a mixle.release_candidate/v1 record")
+        else:
+            candidate_commit = record.get("commit")
+            if not isinstance(candidate_commit, str) or len(candidate_commit) != 40:
+                problems.append("release-candidate.json has no full-length commit")
+                candidate_commit = None
+            elif record.get("version") != bundle.get("release"):
+                problems.append("release-candidate.json version does not match the bundle release")
+
+    # The binding that kills the wrong-wheel case: the mixle that EXECUTED must be the candidate.
+    if candidate_commit is not None and artifact is not None:
+        executing = artifact.get("source_commit")
+        if executing is None:
+            problems.append("executing artifact declares no source commit to compare")
+        elif executing != candidate_commit:
+            problems.append(f"executing commit {executing} is not the candidate commit {candidate_commit}")
+
+    # metadata/SHA256SUMS -- must name a wheel and an sdist with well-formed digests.
+    sums: dict[str, str] = {}
+    sums_paths = matches.get("metadata/SHA256SUMS") or []
+    if sums_paths:
+        try:
+            for line in sums_paths[0].read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                found = _SUMS_LINE.fullmatch(line.strip())
+                if found is None:
+                    problems.append("SHA256SUMS has a malformed line")
+                    break
+                sums[Path(found.group(2)).name] = found.group(1)
+        except (OSError, UnicodeError):
+            problems.append("SHA256SUMS is unreadable")
+        if sums and not any(name.endswith(".whl") for name in sums):
+            problems.append("SHA256SUMS names no wheel")
+        if sums and not any(name.endswith(".tar.gz") for name in sums):
+            problems.append("SHA256SUMS names no source distribution")
+        if not sums:
+            problems.append("SHA256SUMS is empty")
+
+    # metadata/<wheel>.json -- the wheel's own digest must be one SHA256SUMS vouches for.
+    for pattern, paths in matches.items():
+        if not pattern.endswith(".whl.json"):
+            continue
+        record = _read_json_record(paths[0]) if paths else None
+        if record is None:
+            problems.append(f"{pattern} is not a JSON object")
+            continue
+        digest = record.get("sha256")
+        filename = record.get("filename")
+        if not isinstance(digest, str) or len(digest) != 64:
+            problems.append(f"{pattern} has no valid sha256")
+        elif sums and sums.get(str(filename)) != digest:
+            problems.append(f"{pattern} digest is not the one SHA256SUMS records for {filename!r}")
+
+    # metadata/reproduction-*.json -- each match must be a receipt, and each must name this
+    # candidate. Completeness across all four entries is the publication manifest's gate, not this
+    # one: the first entry cannot require receipts that only later entries produce.
+    for path in matches.get("metadata/reproduction-*.json") or []:
+        record = _read_json_record(path)
+        if record is None or record.get("artifact") != "mixle.reproduction_entry_receipt/v2":
+            problems.append(f"{path.name} is not a reproduction entry receipt")
+
     return {
         "records_root": str(records_root),
-        "resolved": not missing,
+        "resolved": not missing and not problems,
         "required": required,
         "present": present,
         "missing": missing,
+        "problems": problems,
+        "candidate_commit": candidate_commit,
     }
 
 
@@ -292,7 +399,7 @@ def run_entry(bundle: dict[str, Any], entry_id: str, *, records_root: Path | Non
     _validate_output(entry, result.stdout)
 
     artifact = _executing_artifact(entry)
-    binding = _resolve_candidate_records(bundle, records_root)
+    binding = _resolve_candidate_records(bundle, records_root, artifact)
     # Execution and candidate binding are separate facts and are reported separately. The entry
     # ran and its output matched byte for byte -- that is `execution_status`, and it is true even
     # from a source checkout, which is how a local reviewer legitimately exercises the bundle.
@@ -306,7 +413,8 @@ def run_entry(bundle: dict[str, Any], entry_id: str, *, records_root: Path | Non
     if artifact.get("installed_content_verified") is not True:
         unbound.append("installed content did not verify")
     if not binding["resolved"]:
-        unbound.append(f"candidate records unresolved: {', '.join(binding['missing']) or 'no records root given'}")
+        detail = ", ".join(binding.get("problems") or binding["missing"]) or "no records root given"
+        unbound.append(f"candidate records unresolved: {detail}")
 
     return {
         "artifact": "mixle.reproduction_entry_receipt/v2",

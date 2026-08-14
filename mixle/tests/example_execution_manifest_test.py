@@ -67,6 +67,21 @@ class ExampleExecutionManifestTest(unittest.TestCase):
                         "validated_output": entry["expected"],
                         "execution_status": "passed",
                         "claim_status": "verified",
+                        # The evidence BEHIND claim_status. These fixtures previously omitted both
+                        # blocks and still built a signed manifest, because the builder trusted the
+                        # status string -- so the test suite could not have caught a receipt that
+                        # claimed "verified" while carrying nothing, or one produced by a different
+                        # commit entirely.
+                        "executing_artifact": {
+                            "installed_distribution": True,
+                            "installed_content_verified": True,
+                            "source_commit": "a" * 40,
+                        },
+                        "candidate_binding": {
+                            "resolved": True,
+                            "problems": [],
+                            "candidate_commit": "a" * 40,
+                        },
                         "passed": True,
                     }
                 ),
@@ -119,6 +134,49 @@ class ExampleExecutionManifestTest(unittest.TestCase):
         self.assertIn("build_example_execution_manifest.py", workflow)
         self.assertIn("--out candidate/metadata/example-execution-manifest.json", workflow)
         self.assertIn("candidate/metadata/*.json", workflow)
+
+
+class ManifestRequiresEvidenceNotAssertionTest(ExampleExecutionManifestTest):
+    """SYS-03 second pass: the manifest must re-derive the claim, not trust the receipt's word.
+
+    ``claim_status`` is a string a receipt writes about itself. The builder accepted it on faith,
+    so a receipt carrying no binding evidence at all -- or one produced by an artifact from a
+    different commit -- could be bound into a signed manifest.
+    """
+
+    def _rewrite(self, index, mutate):
+        receipt = json.loads(self.receipts[index].read_text(encoding="utf-8"))
+        mutate(receipt)
+        self.receipts[index].write_text(json.dumps(receipt), encoding="utf-8")
+
+    def test_a_receipt_without_binding_evidence_is_refused(self):
+        def drop(receipt):
+            receipt.pop("executing_artifact", None)
+            receipt.pop("candidate_binding", None)
+
+        self._rewrite(0, drop)
+        with self.assertRaisesRegex(ValueError, "no executing-artifact or candidate-binding"):
+            self.build()
+
+    def test_a_receipt_from_another_commit_is_refused(self):
+        self._rewrite(0, lambda r: r["executing_artifact"].update({"source_commit": "b" * 40}))
+        with self.assertRaisesRegex(ValueError, "not candidate"):
+            self.build()
+
+    def test_a_receipt_whose_records_did_not_resolve_is_refused(self):
+        self._rewrite(0, lambda r: r["candidate_binding"].update({"resolved": False}))
+        with self.assertRaisesRegex(ValueError, "candidate records were not resolved"):
+            self.build()
+
+    def test_a_receipt_with_recorded_binding_problems_is_refused(self):
+        self._rewrite(0, lambda r: r["candidate_binding"].update({"problems": ["digest mismatch"]}))
+        with self.assertRaisesRegex(ValueError, "candidate records were not resolved"):
+            self.build()
+
+    def test_a_receipt_not_produced_by_an_installed_distribution_is_refused(self):
+        self._rewrite(0, lambda r: r["executing_artifact"].update({"installed_distribution": False}))
+        with self.assertRaisesRegex(ValueError, "not produced by an installed distribution"):
+            self.build()
 
 
 if __name__ == "__main__":

@@ -74,6 +74,26 @@ def build_manifest(
             raise ValueError(f"{entry_id}: receipt is not a passing reproduction receipt")
         if receipt.get("execution_status") != "passed" or receipt.get("claim_status") != "verified":
             raise ValueError(f"{entry_id}: receipt did not separately verify execution and claimed behavior")
+        # `claim_status` is a string a receipt asserts about itself. Trusting it alone let receipts
+        # that carried no binding evidence at all -- and receipts produced by an artifact from a
+        # different commit -- into a signed manifest. Re-derive the claim here from the evidence
+        # the receipt is required to carry, and bind it to THIS candidate.
+        artifact = receipt.get("executing_artifact")
+        binding = receipt.get("candidate_binding")
+        if not isinstance(artifact, dict) or not isinstance(binding, dict):
+            raise ValueError(f"{entry_id}: receipt carries no executing-artifact or candidate-binding evidence")
+        if artifact.get("installed_distribution") is not True:
+            raise ValueError(f"{entry_id}: receipt was not produced by an installed distribution")
+        if artifact.get("installed_content_verified") is not True:
+            raise ValueError(f"{entry_id}: installed content did not verify when the receipt was produced")
+        if binding.get("resolved") is not True or binding.get("problems"):
+            raise ValueError(f"{entry_id}: candidate records were not resolved for this receipt")
+        if artifact.get("source_commit") != commit:
+            raise ValueError(
+                f"{entry_id}: receipt was produced by {artifact.get('source_commit')!r}, not candidate {commit!r}"
+            )
+        if binding.get("candidate_commit") not in (None, commit):
+            raise ValueError(f"{entry_id}: receipt is bound to a different candidate than this manifest")
         if receipt.get("entry_contract_sha256") != _contract_digest(entry):
             raise ValueError(f"{entry_id}: receipt is for a different entry contract")
         if receipt.get("argv") != entry["argv"] or receipt.get("tier") != entry["tier"]:
