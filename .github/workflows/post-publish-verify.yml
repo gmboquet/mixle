@@ -51,9 +51,24 @@ jobs:
             --sums retained/SHA256SUMS
       - name: Install the verified public wheel
         run: |
+          # The digests were checked in the previous step, so this installs bytes that have already
+          # been matched against the retained SHA256SUMS -- hash first, install second.
+          #
+          # If the install fails anyway, the environment is DESTROYED rather than reused. pip writes
+          # the .dist-info last, so an install that dies partway leaves the files it already
+          # unpacked importable with no metadata behind them, answering mixle.__version__ as
+          # "0+unknown" -- a fragment of a package that a later step would happily import and smoke
+          # test (SYS-06). Installing over that state does not fix it either: whatever orphans the
+          # retry does not overwrite survive. A fresh venv is the only clean recovery.
+          set -euo pipefail
+          rm -rf /tmp/verify-env
           python -m venv /tmp/verify-env
           /tmp/verify-env/bin/python -m pip install --upgrade pip
-          /tmp/verify-env/bin/python -m pip install public-artifacts/*.whl
+          if ! /tmp/verify-env/bin/python -m pip install public-artifacts/*.whl; then
+            rm -rf /tmp/verify-env
+            echo "::error::wheel install failed; removed the partially populated environment"
+            exit 1
+          fi
       - name: Version metadata and public behavior smoke
         env:
           VERSION: ${{ steps.release.outputs.version }}

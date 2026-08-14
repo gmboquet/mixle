@@ -88,11 +88,49 @@ def _bytecode_source_path(name: str) -> str | None:
     return "/".join([*parts[:-2], f"{stem}.py"])
 
 
+def _orphaned_package_files() -> int:
+    """Count importable mixle files present with no distribution metadata behind them.
+
+    A wheel install that fails partway -- a corrupt or truncated archive -- leaves the files it had
+    already unpacked in place, and pip writes the ``.dist-info`` LAST. The result imports and
+    answers ``mixle.__version__`` as ``0+unknown`` while being a fragment of a package (SYS-06).
+    """
+    try:
+        import mixle
+
+        root = Path(next(iter(mixle.__path__)))
+    except Exception:  # noqa: BLE001 - nothing importable is a real answer, not an error
+        return 0
+    try:
+        return sum(1 for path in root.rglob("*") if path.is_file())
+    except OSError:
+        return 0
+
+
 def installed_content_provenance() -> dict[str, Any]:
     """Digest the installed distribution's RECORD identities and verify hashed files."""
     try:
         dist = distribution("mixle")
     except PackageNotFoundError:
+        # Distinguish "no mixle here" from "a partially installed mixle here". Both fail closed,
+        # but they are different situations with different remedies, and reporting them
+        # identically understated the second: an importable package with no metadata behind it is
+        # a broken install that must be REMOVED, not an absent one that can simply be installed
+        # over (SYS-06). Installing on top leaves whatever orphaned files the new wheel does not
+        # happen to overwrite.
+        orphaned = _orphaned_package_files()
+        if orphaned:
+            return {
+                "artifact": "mixle.installed_content/v1",
+                "verified": False,
+                "reason": (
+                    f"partial install: {orphaned} importable mixle files are present with no "
+                    f"distribution metadata, so this environment is a fragment of a package rather "
+                    f"than an installation of one. Remove the orphaned package directory and "
+                    f"install a hash-verified artifact; installing over it can leave orphans behind."
+                ),
+                "orphaned_file_count": orphaned,
+            }
         return {
             "artifact": "mixle.installed_content/v1",
             "verified": False,

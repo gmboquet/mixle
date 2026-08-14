@@ -332,3 +332,40 @@ class InstallerBytecodeExemptionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PartialInstallDetectionTest(unittest.TestCase):
+    """SYS-06: a half-unpacked wheel must be reported as broken, not as absent.
+
+    pip writes the ``.dist-info`` last, so an install that dies on a corrupt archive leaves the
+    files it already unpacked in place with no metadata behind them. That environment imports and
+    answers ``mixle.__version__`` as ``0+unknown``. Reproduced with a CRC-corrupted wheel into an
+    empty venv: pip exits nonzero, 643 package files remain, and ``import mixle`` succeeds.
+    """
+
+    def test_orphaned_files_are_counted_from_the_importable_package(self):
+        from mixle.reproduction import _orphaned_package_files
+
+        # this test process has a real importable mixle, so the count is the honest nonzero one
+        self.assertGreater(_orphaned_package_files(), 0)
+
+    def test_absent_and_partial_installs_are_reported_differently(self):
+        """The two failure modes need different remedies, so they must not share one message."""
+        from unittest.mock import patch
+
+        from mixle import reproduction
+
+        with patch.object(reproduction, "distribution", side_effect=reproduction.PackageNotFoundError):
+            with patch.object(reproduction, "_orphaned_package_files", return_value=0):
+                absent = reproduction.installed_content_provenance()
+            with patch.object(reproduction, "_orphaned_package_files", return_value=643):
+                partial = reproduction.installed_content_provenance()
+
+        self.assertFalse(absent["verified"])
+        self.assertFalse(partial["verified"])
+        self.assertNotIn("orphaned_file_count", absent)
+        self.assertEqual(partial["orphaned_file_count"], 643)
+        # the partial case must say what to DO -- installing over orphans leaves orphans
+        self.assertIn("partial install", partial["reason"])
+        self.assertIn("Remove", partial["reason"])
+        self.assertNotEqual(absent["reason"], partial["reason"])
