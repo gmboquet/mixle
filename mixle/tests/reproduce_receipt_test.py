@@ -369,3 +369,77 @@ class PartialInstallDetectionTest(unittest.TestCase):
         self.assertIn("partial install", partial["reason"])
         self.assertIn("Remove", partial["reason"])
         self.assertNotEqual(absent["reason"], partial["reason"])
+
+
+class CarriedProvenanceVerificationTest(unittest.TestCase):
+    """SYS-01 second pass: a carried identity must still describe the tree that carries it.
+
+    The first repair copied the sdist's attestation into any wheel built from it without checking
+    that the tree still matched. That turned a missing label into a lying one: unpack, edit,
+    rebuild, and the wheel asserted the original commit over modified bytes. This exercises
+    ``setup.py``'s ``_carried_provenance`` directly, because the end-to-end proof (build sdist,
+    tamper, rebuild) is too slow for the unit tier -- it was run manually and is recorded in the
+    commit message.
+    """
+
+    @staticmethod
+    def _setup_module():
+        path = Path(__file__).resolve().parents[2] / "setup.py"
+        spec = importlib.util.spec_from_file_location("_mixle_setup", path)
+        module = importlib.util.module_from_spec(spec)
+        # setup.py calls setup() at import; stub it out so importing does not run a build
+        import setuptools
+
+        original = setuptools.setup
+        setuptools.setup = lambda *a, **k: None
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            setuptools.setup = original
+        return module
+
+    def _tree(self, directory, *, commit="a" * 40, with_digest=True, tamper=False):
+        setup = self._setup_module()
+        root = Path(directory)
+        (root / "mixle").mkdir(parents=True)
+        (root / "pyproject.toml").write_text("[project]\nname='mixle'\n", encoding="utf-8")
+        (root / "setup.py").write_text("# stub\n", encoding="utf-8")
+        (root / "mixle" / "__init__.py").write_text("__version__='0.8.0'\n", encoding="utf-8")
+        payload = {
+            "artifact": "mixle.build_provenance/v1",
+            "source_commit": commit,
+            "source_tree": "b" * 40,
+            "source_dirty": False,
+        }
+        if with_digest:
+            payload["sdist_content_sha256"] = setup._source_content_digest(root)
+        if tamper:  # edit a shipped file AFTER the digest was recorded
+            (root / "mixle" / "__init__.py").write_text("__version__='0.8.0'\nEVIL=1\n", encoding="utf-8")
+        (root / "mixle" / "_build_provenance.json").write_text(json.dumps(payload), encoding="utf-8")
+        return setup, root
+
+    def test_an_untouched_tree_carries_its_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            setup, root = self._tree(directory)
+            carried = setup._carried_provenance(root)
+            self.assertIsNotNone(carried)
+            self.assertEqual(carried["source_commit"], "a" * 40)
+
+    def test_a_modified_tree_does_not_carry_the_original_commit(self):
+        """The attack: unpack, edit, rebuild. The wheel must not assert the original commit."""
+        with tempfile.TemporaryDirectory() as directory:
+            setup, root = self._tree(directory, tamper=True)
+            self.assertIsNone(setup._carried_provenance(root), "a tampered tree must not be adoptable")
+
+    def test_a_record_without_a_content_digest_is_not_adoptable(self):
+        """An unverifiable record is refused rather than trusted for backward compatibility."""
+        with tempfile.TemporaryDirectory() as directory:
+            setup, root = self._tree(directory, with_digest=False)
+            self.assertIsNone(setup._carried_provenance(root))
+
+    def test_the_provenance_file_is_excluded_from_its_own_digest(self):
+        """Otherwise the recorded digest could never be recomputed."""
+        with tempfile.TemporaryDirectory() as directory:
+            setup, root = self._tree(directory)
+            names = [p.name for p in setup._source_content_files(root)]
+            self.assertNotIn("_build_provenance.json", names)

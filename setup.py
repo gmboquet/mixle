@@ -46,11 +46,15 @@ def _source_dirty(root: Path) -> bool | None:
 
 
 def _source_content_files(root: Path) -> list[Path]:
+    provenance = root / "mixle" / "_build_provenance.json"
     paths = [root / "pyproject.toml", root / "setup.py"]
     paths.extend(
         path for path in (root / "mixle").rglob("*") if path.is_file() and path.suffix in {".json", ".py", ".pyx"}
     )
-    return sorted(path for path in paths if path.is_file())
+    # The provenance file is excluded from its own digest. It has to be: the sdist digest is
+    # computed and then written INTO this file, so including it would make the recorded value
+    # unverifiable by construction.
+    return sorted(path for path in paths if path.is_file() and path != provenance)
 
 
 def _source_content_digest(root: Path) -> str:
@@ -94,13 +98,25 @@ def _provenance_payload(root: Path) -> dict:
 
 
 def _carried_provenance(root: Path) -> dict | None:
-    """Return a valid provenance record already shipped in the tree, if there is one.
+    """Return a shipped provenance record ONLY if it still describes this tree's contents.
 
-    An sdist carries no ``.git``, so a wheel built from an unpacked sdist could not name the
-    commit it came from and recorded ``unknown``/``null`` -- the separately published sdist could
-    not preserve the candidate identity that the wheel asserts (SYS-01). The sdist now ships the
-    attestation produced when it was built, and this reads it back so the identity survives the
-    sdist -> wheel hop instead of being regenerated from a checkout that is not there.
+    An sdist carries no ``.git``, so a wheel built from an unpacked sdist could not name the commit
+    it came from and recorded ``unknown`` (SYS-01). The sdist ships its attestation so the identity
+    survives the sdist -> wheel hop.
+
+    Carrying it forward unconditionally was worse than the bug it fixed: anyone could unpack the
+    sdist, edit the code, rebuild, and the wheel would assert the ORIGINAL commit over modified
+    bytes -- a label that lies rather than a label that is missing. So the record is only honoured
+    when ``sdist_content_sha256`` still matches a digest recomputed over the tree right now. Any
+    edit to a shipped ``.py``/``.json``/``.pyx``, ``pyproject.toml`` or ``setup.py`` breaks that
+    match and the identity is dropped back to ``unknown``, which is the honest answer for bytes
+    nobody can vouch for.
+
+    The digest compared here is over the SDIST's own file population, not the checkout's. The
+    checkout digest describes ~2,000 files and an unpacked sdist ships far fewer, so the original
+    ``source_content_sha256`` can never be recomputed from an sdist tree -- which is exactly why
+    the first version of this function skipped verification instead of doing it against the wrong
+    population.
     """
     shipped = root / "mixle" / "_build_provenance.json"
     try:
@@ -112,6 +128,11 @@ def _carried_provenance(root: Path) -> dict | None:
     commit = payload.get("source_commit")
     if not isinstance(commit, str) or len(commit) != 40 or any(c not in "0123456789abcdef" for c in commit):
         return None
+    recorded = payload.get("sdist_content_sha256")
+    if not isinstance(recorded, str) or len(recorded) != 64:
+        return None  # pre-verification record, or none written: not adoptable
+    if recorded != _source_content_digest(root):
+        return None  # the tree was modified after it was packed; the record no longer describes it
     return payload
 
 
@@ -152,6 +173,13 @@ class ProvenanceSdist(sdist):
         if destination.exists() or destination.is_symlink():
             destination.unlink()
         payload = _provenance_payload(root)
+        # Digest of what the SDIST actually ships, taken over the release tree rather than the
+        # checkout. A wheel built from this sdist recomputes it and refuses to carry the identity
+        # forward if it no longer matches, which is what stops an edited unpacked sdist from
+        # producing a wheel that asserts this commit over different bytes. The provenance file
+        # itself is excluded from the digest -- it is where the digest is about to be written.
+        payload["sdist_content_sha256"] = _source_content_digest(Path(base_dir))
+        payload["sdist_content_file_count"] = len(_source_content_files(Path(base_dir)))
         destination.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
 
 
