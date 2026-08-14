@@ -284,11 +284,15 @@ class Registry:
         if resume:
             existing = self.versions(name)
             if existing:
-                try:
-                    adoptable = self.verify_chain(name, trust_code=trust_code)
-                except Exception:  # noqa: BLE001 - an unverifiable tip is simply not adoptable
-                    adoptable = False
-                if adoptable:
+                # NOT wrapped in a broad except. verify_chain() already reports semantic corruption
+                # as False; anything it RAISES is a different state -- verification could not be
+                # performed at all. The commonest case is its deliberate trust refusal for a
+                # NeuralLeaf-family checkpoint when trust_code was not supplied, and swallowing
+                # that turned "I am not allowed to check this" into "a new root is safe here":
+                # the callback then appended an unlinked root to a valid neural chain and made it
+                # permanently unverifiable (CP2-01). An exception propagates, so the caller either
+                # passes trust_code=True to adopt or resume=False to root a new lineage on purpose.
+                if self.verify_chain(name, trust_code=trust_code):
                     tip = existing[-1]
                     tip_metadata = self.metadata(name, tip)
                     run_id = tip_metadata["run_id"]
@@ -301,6 +305,23 @@ class Registry:
         def _save(step: Any) -> None:
             nonlocal parent, parent_record_digest, parent_transition_digest, parent_version
             if every <= 1 or step.iter % every == 0:
+                # The predecessor was snapshotted when this callback was CONSTRUCTED. If another
+                # checkpointer adopted the same tip and appended first, writing against the cached
+                # predecessor forks the lineage: two versions claim one parent, and the chain --
+                # which requires each entry to link to the one before it -- stops verifying for
+                # everyone (CP2-02). Registration's version lock does not cover this, because
+                # adoption and append are separate operations. Re-check that the predecessor is
+                # still the tip and refuse rather than persist a fork; a fork cannot be repaired
+                # after the fact, so the useful moment to fail is before the write.
+                if parent_version is not None:
+                    current = self.versions(name)
+                    if current and current[-1] != parent_version:
+                        raise RuntimeError(
+                            f"checkpoint lineage for {name!r} moved from {parent_version!r} to "
+                            f"{current[-1]!r} while this checkpointer held it; another writer "
+                            f"appended to the same tip. Refusing to fork the chain -- construct a "
+                            f"new checkpointer to adopt the current tip."
+                        )
                 h = model_hash(step.model)
                 metadata = {
                     "lineage_schema": "mixle-checkpoint-lineage-v1",

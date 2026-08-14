@@ -601,3 +601,80 @@ class CheckpointResumeLineageTest(unittest.TestCase):
             )
             # opting out is allowed, and the combined history then honestly does not verify
             self.assertFalse(reg.verify_chain("run"))
+
+
+class CheckpointResumeTrustAndForkTest(unittest.TestCase):
+    """Second-pass systems review, CP2-01 / CP2-02.
+
+    The first SYS-04 fix adopted an existing chain but wrapped ``verify_chain`` in a broad
+    ``except Exception``. That collapsed two different states: "the persisted lineage is invalid"
+    (which ``verify_chain`` reports as ``False``) and "verification could not be performed at all"
+    -- the deliberate trust refusal for a NeuralLeaf-family checkpoint loaded without
+    ``trust_code``. Swallowing the refusal meant an ordinary ``checkpointer(name)`` rooted a fresh
+    lineage and appended it to a VALID neural chain, permanently destroying a chain that verified
+    before the call.
+    """
+
+    @staticmethod
+    def _data():
+        return np.random.RandomState(21).normal(3.0, 2.0, 400).tolist()
+
+    def _seed_chain(self, reg):
+        from mixle.inference import optimize
+        from mixle.stats import GaussianEstimator
+
+        optimize(self._data(), GaussianEstimator(), max_its=4, on_step=reg.checkpointer("chain", every=2))
+
+    def test_a_trust_refusal_refuses_instead_of_rooting_a_new_lineage(self):
+        from mixle.inference import optimize
+        from mixle.stats import GaussianEstimator
+        from mixle.utils.serialization import SerializationError
+
+        with tempfile.TemporaryDirectory() as d:
+            reg = Registry(d)
+            self._seed_chain(reg)
+            self.assertTrue(reg.verify_chain("chain"))
+            before = list(reg.versions("chain"))
+
+            # stand in for the trust-gated family: verification RAISES rather than returning False
+            real_verify = Registry.verify_chain
+
+            def trust_gated(self, name, *, trust_code=False):
+                if not trust_code:
+                    raise SerializationError("checkpoint requires trust_code=True")
+                return real_verify(self, name, trust_code=True)
+
+            Registry.verify_chain = trust_gated
+            try:
+                with self.assertRaises(SerializationError):
+                    reg.checkpointer("chain")
+                # refusing must not have touched the persisted lineage
+                self.assertEqual(list(reg.versions("chain")), before)
+
+                # opting into the trust gate adopts, appends, and leaves the chain verified
+                callback = reg.checkpointer("chain", trust_code=True)
+                optimize(self._data(), GaussianEstimator(), max_its=2, on_step=callback)
+                self.assertTrue(reg.verify_chain("chain", trust_code=True))
+            finally:
+                Registry.verify_chain = real_verify
+
+    def test_a_second_adopter_of_the_same_tip_refuses_rather_than_forking(self):
+        """CP2-02: adoption snapshots the tip, so two adopters would both write against it."""
+
+        class _Step:
+            def __init__(self, model, iteration):
+                self.model, self.iter, self.log_density = model, iteration, -1.0
+
+        with tempfile.TemporaryDirectory() as d:
+            reg = Registry(d)
+            self._seed_chain(reg)
+            first = reg.checkpointer("chain", every=1)
+            second = reg.checkpointer("chain", every=1)  # adopts the SAME tip
+            model, _ = reg.get("chain")
+
+            first(_Step(model, 1))
+            self.assertTrue(reg.verify_chain("chain"))
+            with self.assertRaises(RuntimeError):
+                second(_Step(model, 1))
+            # the losing writer must not have persisted a fork
+            self.assertTrue(reg.verify_chain("chain"))
