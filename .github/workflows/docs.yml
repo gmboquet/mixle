@@ -32,12 +32,18 @@ on:
 permissions:
   contents: read
 
-# One Pages deployment at a time; let an in-progress deploy finish rather than cancelling it. This
-# only ever applies to push/workflow_dispatch runs (build/deploy below skip pull_request), so PRs
-# never queue behind a Pages deploy or each other here -- see revision-check's own concurrency group.
+# Per-ref at the workflow level. The previous stanza put the WHOLE workflow in one global "pages"
+# group, believing revision-check's job-level group exempted the check-only runs -- it cannot:
+# workflow-level concurrency gates the run before any job-level group applies. Every release-branch
+# docs check therefore serialized through the single global queue, where a newly queued run cancels
+# the previously queued one; that is what produced the recurring "Docs: cancelled" conclusions on
+# release/0.8.0, misread for days as runner flakiness. The one-Pages-deployment-at-a-time
+# serialization the group was actually for now lives on the deploy job itself, which is the only
+# thing that needs it. cancel-in-progress supersedes stale check runs on PR/release refs but never
+# cancels a run that can reach the deploy job.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.event_name != 'release' && github.event_name != 'workflow_dispatch' }}
 
 jobs:
   build:
@@ -109,6 +115,11 @@ jobs:
       pages: write
       id-token: write
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || github.event_name == 'release'
+    # One Pages deployment at a time, never cancelled mid-publish -- the serialization the old
+    # workflow-level "pages" group provided, scoped to the only job that touches Pages.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
