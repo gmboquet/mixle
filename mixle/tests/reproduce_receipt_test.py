@@ -508,3 +508,62 @@ class BytecodeAuthenticationTest(unittest.TestCase):
         self.assertTrue(_code_equal(first, second))
         different = compile(source.replace("return a, b", "return b, a"), "m.py", "exec")
         self.assertFalse(_code_equal(first, different))
+
+
+class ProvenanceAndPartialInstallMediumsTest(unittest.TestCase):
+    """Second-pass Mediums: an unrelated repo must not override the artifact, and a partial
+    install that retains metadata must still be classified as one."""
+
+    def test_the_artifact_record_beats_an_unrelated_enclosing_repository(self):
+        from mixle.inference.production import provenance as module
+
+        embedded = {
+            "artifact": "mixle.build_provenance/v1",
+            "source_commit": "a" * 40,
+            "source_tree": "b" * 40,
+            "source_dirty": False,
+        }
+        ambient = {"git_commit": "f" * 40, "git_dirty": False, "git_worktree_digest": "x"}
+        with (
+            patch.object(module, "_embedded_build_provenance", return_value=embedded),
+            patch.object(module, "_git_state", return_value=ambient),
+        ):
+            info = module.environment_info()
+        # the executing bytes' own attestation wins; the surrounding directory is not evidence
+        self.assertEqual(info["git_commit"], "a" * 40)
+        self.assertEqual(info["provenance_source"], "installed-artifact-build-provenance")
+        # and the disagreement is recorded rather than discarded
+        self.assertEqual(info["ambient_repository_commit"], "f" * 40)
+
+    def test_ambient_repository_is_still_used_when_there_is_no_artifact_record(self):
+        from mixle.inference.production import provenance as module
+
+        ambient = {"git_commit": "f" * 40, "git_dirty": False, "git_worktree_digest": "x"}
+        with (
+            patch.object(module, "_embedded_build_provenance", return_value=None),
+            patch.object(module, "_git_state", return_value=ambient),
+        ):
+            info = module.environment_info()
+        self.assertEqual(info["git_commit"], "f" * 40)
+        self.assertEqual(info["provenance_source"], "ambient-repository")
+
+    def test_metadata_that_survives_a_partial_install_is_still_classified_as_partial(self):
+        """The first repair only recognised a partial install when metadata was absent entirely."""
+        from mixle import reproduction
+
+        class _Item(str):
+            hash = type("H", (), {"mode": "sha256", "value": "x"})()
+
+        class _Dist:
+            version = "0.8.0"
+            files = [_Item("mixle/__init__.py"), _Item("mixle/blending.py")]
+
+            @staticmethod
+            def locate_file(item):
+                return Path("/nonexistent") / str(item)
+
+        with patch.object(reproduction, "distribution", return_value=_Dist()):
+            result = reproduction.installed_content_provenance()
+        self.assertFalse(result["verified"])
+        self.assertIn("partial install", result["reason"])
+        self.assertEqual(result["missing_recorded_file_count"], 2)

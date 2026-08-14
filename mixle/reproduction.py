@@ -199,6 +199,24 @@ def installed_content_provenance() -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
     failures: list[str] = []
     hashed_names = {str(item) for item in (dist.files or ()) if item.hash is not None}
+    # A partial install does not always erase the metadata: an interrupted or replaced install can
+    # leave a .dist-info that resolves while its RECORD describes files that are not there. That
+    # case took the ordinary path below and reported plain "missing" failures, missing the
+    # partial-install classification and its remedy, which only fired when metadata was absent
+    # entirely. Recognise it here from the RECORD's own accounting.
+    recorded = [item for item in (dist.files or ()) if item.hash is not None]
+    absent = [item for item in recorded if not Path(dist.locate_file(item)).is_file()]
+    if recorded and len(absent) == len(recorded):
+        return {
+            "artifact": "mixle.installed_content/v1",
+            "verified": False,
+            "reason": (
+                f"partial install: the distribution metadata lists {len(recorded)} files and none "
+                f"of them are present. Remove the distribution and install a hash-verified "
+                f"artifact; installing over it can leave orphans behind."
+            ),
+            "missing_recorded_file_count": len(absent),
+        }
     bytecode_exempt: list[str] = []
     for item in sorted(dist.files or (), key=str):
         if item.hash is None:

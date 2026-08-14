@@ -127,19 +127,26 @@ def environment_info() -> dict:
         "mixle_version": _version("mixle"),
         "cpu_count": os.cpu_count(),
     }
+    # The ARTIFACT's own attestation wins when there is one. Preferring the ambient repository let
+    # an unrelated enclosing checkout -- a user who happens to run inside any git tree -- overwrite
+    # an installed wheel's recorded identity with a commit from a different project entirely. The
+    # embedded record describes the bytes that are executing; the surrounding directory does not.
+    embedded = _embedded_build_provenance()
     git_state = _git_state()
     info.update(git_state)
-    if git_state.get("git_commit") is None:
-        embedded = _embedded_build_provenance()
-        if embedded is not None:
-            info["git_commit"] = embedded["source_commit"]
-            info["git_dirty"] = embedded.get("source_dirty")
-            info["source_tree"] = embedded.get("source_tree")
-            info["provenance_source"] = "installed-artifact-build-provenance"
-        else:
-            info["provenance_source"] = "unavailable"
-    else:
+    if embedded is not None:
+        info["git_commit"] = embedded["source_commit"]
+        info["git_dirty"] = embedded.get("source_dirty")
+        info["source_tree"] = embedded.get("source_tree")
+        info["provenance_source"] = "installed-artifact-build-provenance"
+        if git_state.get("git_commit") not in (None, embedded["source_commit"]):
+            # Report the disagreement rather than silently discarding it: an artifact executing
+            # inside an unrelated checkout is worth seeing in a provenance record.
+            info["ambient_repository_commit"] = git_state["git_commit"]
+    elif git_state.get("git_commit") is not None:
         info["provenance_source"] = "ambient-repository"
+    else:
+        info["provenance_source"] = "unavailable"
     return info
 
 

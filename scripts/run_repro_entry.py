@@ -280,6 +280,13 @@ def _resolve_candidate_records(
         matches[pattern] = found
         (present if found else missing).append(pattern)
     for pattern in missing:
+        # The entry receipts are the output of THIS process, so requiring them as a precondition
+        # is circular: the first entry cannot wait for receipts only later entries produce, and
+        # demanding them made every publication receipt unbound -- which promotion then rejected,
+        # leaving the workflow unable to publish anything. Any receipt already present is still
+        # validated below; completeness across all four is the publication manifest's gate.
+        if pattern.startswith("metadata/reproduction-"):
+            continue
         problems.append(f"absent: {pattern}")
 
     # metadata/release-candidate.json -- the record that names WHICH candidate this is.
@@ -354,7 +361,7 @@ def _resolve_candidate_records(
 
     return {
         "records_root": str(records_root),
-        "resolved": not missing and not problems,
+        "resolved": not problems,
         "required": required,
         "present": present,
         "missing": missing,

@@ -36,7 +36,7 @@
     {
       "path": "scripts/run_repro_entry.py",
       "role": "bundle-closure",
-      "sha256": "258095a9f202966ec3bd3ccb04f51f908f1f8a484f8329d1e6edfec9dd204599"
+      "sha256": "af02c89137d0c1944c319cde206244ed53b19a3e6b8fe58aa243a5b4ad1ac2d5"
     }
   ],
   "code_license": {

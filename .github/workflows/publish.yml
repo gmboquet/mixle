@@ -211,8 +211,22 @@ jobs:
             --out metadata/sbom.json
           rm metadata/raw-sbom.json metadata/waiver-args.txt
           python -c 'import json, os, pathlib; pathlib.Path("metadata/release-candidate.json").write_text(json.dumps({"artifact": "mixle.release_candidate/v1", "commit": os.environ["CANDIDATE_SHA"], "tag": os.environ["CANDIDATE_TAG"], "version": os.environ["CANDIDATE_VERSION"], "workflow_run": os.environ["GITHUB_RUN_ID"]}, indent=2, sort_keys=True) + "\n", encoding="utf-8")'
+          # Produce the entry receipts against the CANDIDATE ARTIFACT, not the editable checkout,
+          # and with the retained records available. Run from the ambient interpreter with neither,
+          # every receipt was "unbound" -- and promotion then rejected exactly those receipts for
+          # not being "verified", so the workflow could not publish anything it produced. The
+          # records written earlier in this step (release-candidate.json, SHA256SUMS, the wheel
+          # metadata record) are what the runner cross-binds the executing artifact against.
+          python -m venv "$RUNNER_TEMP/repro-env"
+          "$RUNNER_TEMP/repro-env/bin/python" -m pip install --quiet --upgrade pip
+          "$RUNNER_TEMP/repro-env/bin/python" -m pip install --quiet dist/*.whl
+          # the bundle pins the reproduction environment exactly; byte-identical stdout is only
+          # meaningful under the arithmetic that produced it.
+          python -c 'import json,pathlib;d=json.loads(pathlib.Path("release-checklists/0.8.0-repro-environment.json").read_text());print("\n".join(f"{k}=={v}" for k,v in d["dependencies"].items()))' > "$RUNNER_TEMP/repro-pins.txt"
+          "$RUNNER_TEMP/repro-env/bin/python" -m pip install --quiet -r "$RUNNER_TEMP/repro-pins.txt"
           for entry in gallery-univariate gallery-structured production-provenance scaling-backend; do
-            python scripts/run_repro_entry.py --entry "$entry" > "metadata/reproduction-$entry.json"
+            "$RUNNER_TEMP/repro-env/bin/python" scripts/run_repro_entry.py \
+              --entry "$entry" --records-root . > "metadata/reproduction-$entry.json"
           done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
