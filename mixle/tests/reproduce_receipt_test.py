@@ -443,3 +443,68 @@ class CarriedProvenanceVerificationTest(unittest.TestCase):
             setup, root = self._tree(directory)
             names = [p.name for p in setup._source_content_files(root)]
             self.assertNotIn("_build_provenance.json", names)
+
+
+class BytecodeAuthenticationTest(unittest.TestCase):
+    """SYS-02 second pass: the bytecode that executes must match its verified source.
+
+    Exempting installer bytecode from the hash rule left the executing bytes unverified. CPython's
+    default timestamp invalidation does not help: an attacker who keeps the original header, so the
+    recorded mtime and size still match the ``.py``, gets the tampered bytecode loaded with no
+    recompile. The first repair recorded that limitation in a comment and stopped there.
+    """
+
+    def _compile_pair(self, directory, source_text, bytecode_text=None):
+        import marshal
+
+        root = Path(directory)
+        source = root / "m.py"
+        source.write_text(source_text, encoding="utf-8")
+        compiled = compile((bytecode_text or source_text).encode(), str(source), "exec")
+        pyc = root / "m.cpython-312.pyc"
+        pyc.write_bytes(b"\x00" * 16 + marshal.dumps(compiled))
+        return pyc, source
+
+    def test_matching_bytecode_is_accepted(self):
+        from mixle.reproduction import _bytecode_matches_source
+
+        with tempfile.TemporaryDirectory() as directory:
+            pyc, source = self._compile_pair(directory, "VALUE = 1\n")
+            self.assertIs(_bytecode_matches_source(pyc, source), True)
+
+    def test_bytecode_compiled_from_different_source_is_rejected(self):
+        """The attack: bytecode that does not correspond to the verified .py."""
+        from mixle.reproduction import _bytecode_matches_source
+
+        with tempfile.TemporaryDirectory() as directory:
+            pyc, source = self._compile_pair(directory, "VALUE = 1\n", bytecode_text="VALUE = 1\nBACKDOOR = True\n")
+            self.assertIs(_bytecode_matches_source(pyc, source), False)
+
+    def test_undecidable_bytecode_is_reported_as_undecidable_not_as_matching(self):
+        from mixle.reproduction import _bytecode_matches_source
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "m.py"
+            source.write_text("VALUE = 1\n", encoding="utf-8")
+            truncated = root / "m.cpython-312.pyc"
+            truncated.write_bytes(b"\x00" * 16 + b"not marshal data")
+            self.assertIsNone(_bytecode_matches_source(truncated, source))
+
+    def test_code_comparison_is_structural_not_serialized_bytes(self):
+        """marshal encodes back-references, so identical code can serialize differently.
+
+        Comparing ``marshal.dumps`` output produced 9 false mismatches over 810 files on a clean
+        install -- which would have reinstated the original defect of refusing ordinary
+        installations. This pins the structural comparison instead.
+        """
+        import marshal
+
+        from mixle.reproduction import _code_equal
+
+        source = "def f():\n    a = 'repeated'\n    b = 'repeated'\n    return a, b\n"
+        first = compile(source, "m.py", "exec")
+        second = marshal.loads(marshal.dumps(first))  # same code, different object sharing
+        self.assertTrue(_code_equal(first, second))
+        different = compile(source.replace("return a, b", "return b, a"), "m.py", "exec")
+        self.assertFalse(_code_equal(first, different))
