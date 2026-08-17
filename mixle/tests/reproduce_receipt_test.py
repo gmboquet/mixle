@@ -87,6 +87,8 @@ class ReproduceReceiptTest(unittest.TestCase):
                     "source_tree": "b" * 40,
                     "source_dirty": source_dirty,
                     "source_content_sha256": "c" * 64,
+                    "source_content_file_count": 3,
+                    "source_content_universe": "pyproject.toml, setup.py, and mixle/**/*.{json,py,pyx}",
                 }
                 with zipfile.ZipFile(wheel, "w") as archive:
                     archive.writestr("mixle-0.8.0.dist-info/METADATA", "Name: mixle\nVersion: 0.8.0\n")
@@ -125,6 +127,8 @@ class SubjectBindingTest(unittest.TestCase):
             "source_tree": "b" * 40,
             "source_dirty": False,
             "source_content_sha256": "c" * 64,
+            "source_content_file_count": 3,
+            "source_content_universe": "pyproject.toml, setup.py, and mixle/**/*.{json,py,pyx}",
         }
         fake_hash = base64.urlsafe_b64encode(bytes.fromhex("d" * 64)).decode("ascii").rstrip("=")
         record = "mixle/__init__.py,sha256=%s,10\nmixle-0.8.0.dist-info/RECORD,,\n" % fake_hash
@@ -560,8 +564,12 @@ class ProvenanceAndPartialInstallMediumsTest(unittest.TestCase):
         # the executing bytes' own attestation wins; the surrounding directory is not evidence
         self.assertEqual(info["git_commit"], "a" * 40)
         self.assertEqual(info["provenance_source"], "installed-artifact-build-provenance")
-        # and the disagreement is recorded rather than discarded
-        self.assertEqual(info["ambient_repository_commit"], "f" * 40)
+        # and the disagreement is recorded rather than discarded -- under its OWN key, in full,
+        # so the artifact's git_* fields describe one source only (SYS3-08)
+        self.assertEqual(info["ambient_repository"]["git_commit"], "f" * 40)
+        self.assertIsNone(
+            info["git_worktree_digest"], "an ambient worktree digest must not sit beside an artifact commit"
+        )
 
     def test_ambient_repository_is_still_used_when_there_is_no_artifact_record(self):
         from mixle.inference.production import provenance as module
@@ -595,3 +603,53 @@ class ProvenanceAndPartialInstallMediumsTest(unittest.TestCase):
         self.assertFalse(result["verified"])
         self.assertIn("partial install", result["reason"])
         self.assertEqual(result["missing_recorded_file_count"], 2)
+
+
+class SourceContentUniverseIsRequiredTest(unittest.TestCase):
+    """SYS3-07: SYS-08's population fields must be REQUIRED, not merely emitted.
+
+    Both fixture wheels in this file omitted ``source_content_file_count`` and
+    ``source_content_universe`` and passed ``wheel_provenance`` -- which is precisely the finding:
+    a record could drop the fields that say which population its digest covers and still verify.
+    """
+
+    def _wheel(self, directory, **overrides):
+        wheel = Path(directory) / "mixle-0.8.0-py3-none-any.whl"
+        provenance = {
+            "artifact": "mixle.build_provenance/v1",
+            "source_commit": "a" * 40,
+            "source_tree": "b" * 40,
+            "source_dirty": False,
+            "source_content_sha256": "c" * 64,
+            "source_content_file_count": 3,
+            "source_content_universe": "pyproject.toml, setup.py, and mixle/**/*.{json,py,pyx}",
+        }
+        provenance.update(overrides)
+        for key in [k for k, v in overrides.items() if v is None]:
+            provenance.pop(key, None)
+        with zipfile.ZipFile(wheel, "w") as archive:
+            archive.writestr("mixle-0.8.0.dist-info/METADATA", "Name: mixle\nVersion: 0.8.0\n")
+            archive.writestr("mixle/_build_provenance.json", json.dumps(provenance))
+        return wheel
+
+    def test_complete_record_verifies(self):
+        from mixle import reproduction
+
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertTrue(reproduction.wheel_provenance(self._wheel(directory))["verified"])
+
+    def test_missing_or_ill_typed_population_fields_are_refused(self):
+        from mixle import reproduction
+
+        cases = {
+            "count absent": {"source_content_file_count": None},
+            "count zero": {"source_content_file_count": 0},
+            "count bool": {"source_content_file_count": True},
+            "count string": {"source_content_file_count": "3"},
+            "universe absent": {"source_content_universe": None},
+            "universe empty": {"source_content_universe": "   "},
+        }
+        for label, overrides in cases.items():
+            with tempfile.TemporaryDirectory() as directory, self.subTest(label):
+                with self.assertRaisesRegex(ValueError, "source_content_(file_count|universe)"):
+                    reproduction.wheel_provenance(self._wheel(directory, **overrides))

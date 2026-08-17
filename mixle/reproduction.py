@@ -100,32 +100,64 @@ def _bytecode_matches_source(pyc: Path, source: Path) -> bool | None:
         return None
 
 
+# Every code-object field that participates in EXECUTION. Two code objects agreeing on all of these
+# (and, recursively, on their nested code constants) run identically. Deliberately excluded, because
+# they legitimately differ between a checkout compile and an installed compile of the same source
+# and do not affect behaviour: co_filename, co_firstlineno, and the line/position tables
+# (co_linetable, co_lnotab, co_lines, co_positions).
+#
+# This is an explicit allow-list checked against the running interpreter (see
+# _unaccounted_code_fields), so a future CPython that adds a behavioural field fails the check loudly
+# instead of being silently ignored -- which is precisely how co_exceptiontable (added in 3.11) was
+# omitted by the first version of this comparison: two functions differing only in their exception
+# table, one returning 7 and the other raising ZeroDivisionError, compared equal (SYS3-02).
+_BEHAVIOURAL_CODE_FIELDS = (
+    "co_argcount",
+    "co_posonlyargcount",
+    "co_kwonlyargcount",
+    "co_nlocals",
+    "co_stacksize",
+    "co_flags",
+    "co_code",
+    "co_exceptiontable",
+    "co_names",
+    "co_varnames",
+    "co_freevars",
+    "co_cellvars",
+    "co_name",
+    "co_qualname",
+)
+_METADATA_CODE_FIELDS = frozenset(
+    {"co_filename", "co_firstlineno", "co_linetable", "co_lnotab", "co_lines", "co_positions", "co_consts"}
+)
+
+
+def _unaccounted_code_fields() -> set[str]:
+    """``co_*`` fields on this interpreter's code objects that neither list above accounts for."""
+    probe = compile("pass", "<probe>", "exec")
+    present = {name for name in dir(probe) if name.startswith("co_")}
+    return present - set(_BEHAVIOURAL_CODE_FIELDS) - _METADATA_CODE_FIELDS
+
+
 def _code_equal(left: Any, right: Any) -> bool:
-    """Structural equality of two code objects, recursing through nested code constants.
+    """Behavioural equality of two code objects, recursing through nested code constants.
 
     Deliberately NOT ``marshal.dumps(a) == marshal.dumps(b)``: marshal encodes back-references for
     shared and interned objects, and that sharing differs between a freshly compiled object and one
     loaded from a file. Comparing the serialized bytes therefore reports differences that do not
     exist -- measured at 9 false mismatches over 810 files on a CLEAN install, which would have
     reinstated the very defect this check exists to fix (refusing ordinary installations).
+
+    Fails closed if the interpreter exposes a ``co_*`` field this module does not classify: an
+    unknown field might be behavioural, and guessing that it is not is how a hole gets left open.
     """
+    if _unaccounted_code_fields():
+        return False
     if type(left) is not type(right):
         return False
     if not isinstance(left, types.CodeType):
         return bool(left == right)
-    for attribute in (
-        "co_argcount",
-        "co_posonlyargcount",
-        "co_kwonlyargcount",
-        "co_nlocals",
-        "co_flags",
-        "co_code",
-        "co_names",
-        "co_varnames",
-        "co_freevars",
-        "co_cellvars",
-        "co_qualname",
-    ):
+    for attribute in _BEHAVIOURAL_CODE_FIELDS:
         if getattr(left, attribute, None) != getattr(right, attribute, None):
             return False
     if len(left.co_consts) != len(right.co_consts):
@@ -276,6 +308,9 @@ def installed_content_provenance() -> dict[str, Any]:
         "installer_bytecode_exempt_count": len(bytecode_exempt),
         "verified": bool(entries) and not failures,
         "failures": failures,
+        # The per-file identities the digest above is derived from, so a caller can bind the
+        # installation to a specific wheel's RECORD rather than only to a summary digest.
+        "entries": entries,
     }
 
 
@@ -315,6 +350,17 @@ def wheel_provenance(path: Path) -> dict[str, Any]:
         or any(c not in "0123456789abcdef" for c in content_digest)
     ):
         raise ValueError("wheel build provenance has invalid source_content_sha256")
+    # SYS-08 added the population these fields describe -- count and selection rule -- because the
+    # bare digest name implied a single canonical "source" digest that does not exist. Emitting the
+    # fields is only half the repair: a verifier that does not REQUIRE them lets a record omit or
+    # mistype them and still pass, so the population stays undeclared in exactly the receipts that
+    # matter (SYS3-07). Both must be present and well-typed; a stated universe must be non-empty.
+    file_count = provenance.get("source_content_file_count")
+    if isinstance(file_count, bool) or not isinstance(file_count, int) or file_count <= 0:
+        raise ValueError("wheel build provenance has invalid or missing source_content_file_count")
+    universe = provenance.get("source_content_universe")
+    if not isinstance(universe, str) or not universe.strip():
+        raise ValueError("wheel build provenance has invalid or missing source_content_universe")
     if provenance.get("source_dirty") is not False:
         raise ValueError("release reproduction requires a wheel built from a clean source candidate")
     return {
