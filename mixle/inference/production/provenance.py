@@ -133,20 +133,28 @@ def environment_info() -> dict:
     # embedded record describes the bytes that are executing; the surrounding directory does not.
     embedded = _embedded_build_provenance()
     git_state = _git_state()
-    info.update(git_state)
     if embedded is not None:
+        # Every git_* field describes ONE source. The earlier version copied the whole ambient
+        # git_state in first and then overwrote commit and dirty from the artifact -- leaving an
+        # ambient git_worktree_digest sitting beside an artifact commit, so the record mixed two
+        # provenances under one prefix (SYS3-08). The artifact's fields stand alone here; whatever
+        # the surrounding repository says goes under its own explicit key, in full, or not at all.
         info["git_commit"] = embedded["source_commit"]
         info["git_dirty"] = embedded.get("source_dirty")
+        info["git_worktree_digest"] = None
         info["source_tree"] = embedded.get("source_tree")
         info["provenance_source"] = "installed-artifact-build-provenance"
         if git_state.get("git_commit") not in (None, embedded["source_commit"]):
             # Report the disagreement rather than silently discarding it: an artifact executing
             # inside an unrelated checkout is worth seeing in a provenance record.
-            info["ambient_repository_commit"] = git_state["git_commit"]
-    elif git_state.get("git_commit") is not None:
-        info["provenance_source"] = "ambient-repository"
+            info["ambient_repository"] = {
+                "git_commit": git_state.get("git_commit"),
+                "git_dirty": git_state.get("git_dirty"),
+                "git_worktree_digest": git_state.get("git_worktree_digest"),
+            }
     else:
-        info["provenance_source"] = "unavailable"
+        info.update(git_state)
+        info["provenance_source"] = "ambient-repository" if git_state.get("git_commit") is not None else "unavailable"
     return info
 
 
