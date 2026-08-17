@@ -119,7 +119,7 @@ _CANDIDATE_COMMIT = "e" * 40
 
 
 def _write_valid_records(
-    root: Path, *, commit: str = _CANDIDATE_COMMIT, release: str = "0.8.0", tree: str = "t" * 40
+    root: Path, *, commit: str = _CANDIDATE_COMMIT, release: str = "0.8.0", tree: str = "7" * 40
 ) -> dict:
     """Write a records root whose contents actually assert what their names promise.
 
@@ -138,15 +138,24 @@ def _write_valid_records(
     (root / "dist").mkdir(exist_ok=True)
     wheel, sdist = "mixle-0.8.0-py3-none-any.whl", "mixle-0.8.0.tar.gz"
 
-    # a minimal but structurally real wheel: one module + a hashed RECORD
+    # a minimal but structurally VALID wheel: every member the archive holds is claimed by RECORD
+    # with its real digest, as real wheels do. An earlier fixture left METADATA unclaimed and was
+    # only exposed when the RECORD-vs-members check landed (SYS4-01) -- the fixture was the bug.
+    def _enc(data: bytes) -> str:
+        return base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode("ascii").rstrip("=")
+
     module = b"VALUE = 1\n"
+    metadata_text = b"Name: mixle\nVersion: 0.8.0\n"
     module_digest = hashlib.sha256(module).hexdigest()
-    encoded = base64.urlsafe_b64encode(bytes.fromhex(module_digest)).decode("ascii").rstrip("=")
-    record = f"mixle/__init__.py,sha256={encoded},{len(module)}\nmixle-0.8.0.dist-info/RECORD,,\n"
+    record = (
+        f"mixle/__init__.py,sha256={_enc(module)},{len(module)}\n"
+        f"mixle-0.8.0.dist-info/METADATA,sha256={_enc(metadata_text)},{len(metadata_text)}\n"
+        f"mixle-0.8.0.dist-info/RECORD,,\n"
+    )
     wheel_path = root / "dist" / wheel
     with zipfile.ZipFile(wheel_path, "w") as archive:
         archive.writestr("mixle/__init__.py", module)
-        archive.writestr("mixle-0.8.0.dist-info/METADATA", "Name: mixle\nVersion: 0.8.0\n")
+        archive.writestr("mixle-0.8.0.dist-info/METADATA", metadata_text)
         archive.writestr("mixle-0.8.0.dist-info/RECORD", record)
     wheel_digest = hashlib.sha256(wheel_path.read_bytes()).hexdigest()
     sdist_digest = "b" * 64
@@ -184,10 +193,13 @@ def _write_valid_records(
     (metadata / "reproduction-a.json").write_text(
         json.dumps({"artifact": "mixle.reproduction_entry_receipt/v2"}), encoding="utf-8"
     )
-    return {"mixle/__init__.py": module_digest}
+    return {
+        "mixle/__init__.py": module_digest,
+        "mixle-0.8.0.dist-info/METADATA": hashlib.sha256(metadata_text).hexdigest(),
+    }
 
 
-def _executing(commit: str = _CANDIDATE_COMMIT, tree: str = "t" * 40, record_hashes: dict | None = None) -> dict:
+def _executing(commit: str = _CANDIDATE_COMMIT, tree: str = "7" * 40, record_hashes: dict | None = None) -> dict:
     return {
         "source_commit": commit,
         "source_tree": tree,
@@ -335,12 +347,12 @@ def test_an_installation_that_is_not_the_pinned_wheel_bytes_is_refused():
         assert any("is not the pinned wheel" in problem for problem in result["problems"])
         # and an installation reporting NO record hashes at all is a stated problem, not a pass
         bare = runner._resolve_candidate_records(
-            bundle, root, {"source_commit": _CANDIDATE_COMMIT, "source_tree": "t" * 40}
+            bundle, root, {"source_commit": _CANDIDATE_COMMIT, "source_tree": "7" * 40}
         )
         assert bare["resolved"] is False
         assert any("no installed RECORD hashes" in problem for problem in bare["problems"])
         # tree is compared too (the half an earlier docstring promised and never implemented)
-        wrong_tree = runner._resolve_candidate_records(bundle, root, _executing(tree="u" * 40, record_hashes=hashes))
+        wrong_tree = runner._resolve_candidate_records(bundle, root, _executing(tree="8" * 40, record_hashes=hashes))
         assert wrong_tree["resolved"] is False
         assert any("not the candidate tree" in problem for problem in wrong_tree["problems"])
 
@@ -394,3 +406,73 @@ def test_publish_workflow_writes_receipts_outside_the_records_root_then_moves():
     assert '> "$RUNNER_TEMP/reproduction-$entry.json"' in loop, "receipt must be written outside records_root"
     assert 'mv "$RUNNER_TEMP/reproduction-$entry.json" "metadata/reproduction-$entry.json"' in loop
     assert '> "metadata/reproduction-$entry.json"' not in loop
+
+
+def test_candidate_record_without_a_tree_is_refused():
+    """SYS4-03: the tree is part of the identity contract and must be present, not merely compared
+    when it happens to be there."""
+    import tempfile
+
+    runner, bundle = _runner(), _bundle()
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        hashes = _write_valid_records(root)
+        record_path = root / "metadata" / "release-candidate.json"
+        for label, mutate in {
+            "absent": lambda r: r.pop("tree", None),
+            "short": lambda r: r.__setitem__("tree", "abc"),
+            "uppercase": lambda r: r.__setitem__("tree", "T" * 40),
+            "not a string": lambda r: r.__setitem__("tree", 12345),
+        }.items():
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            record["tree"] = "7" * 40
+            mutate(record)
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+            result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+            assert result["resolved"] is False, label
+            assert any("40-hex tree" in problem for problem in result["problems"]), (label, result["problems"])
+
+
+def test_a_pinned_wheel_whose_payload_disagrees_with_its_record_is_refused():
+    """SYS4-01: the pinned wheel's RECORD is a set of claims about its members; they must be checked
+    against the archived bytes before those declared hashes are used as candidate identity.
+
+    The reviewer's fixture: copy the pinned wheel, alter one member's bytes, leave RECORD stale,
+    update the outer digest and metadata exactly as a records producer would. Hashing the container
+    against SHA256SUMS passes; only recomputing the members catches it.
+    """
+    import hashlib
+    import tempfile
+    import zipfile
+
+    runner, bundle = _runner(), _bundle()
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        hashes = _write_valid_records(root)
+        wheel_path = root / "dist" / "mixle-0.8.0-py3-none-any.whl"
+        # alter the member, keep RECORD, re-pin the OUTER digest so SHA256SUMS still matches
+        stale = wheel_path.with_suffix(".stale")
+        with zipfile.ZipFile(wheel_path) as zi, zipfile.ZipFile(stale, "w") as zo:
+            for info in zi.infolist():
+                data = zi.read(info.filename)
+                if info.filename == "mixle/__init__.py":
+                    data = data + b"# altered\n"
+                zo.writestr(info, data)
+        stale.replace(wheel_path)
+        new_digest = hashlib.sha256(wheel_path.read_bytes()).hexdigest()
+        sums = root / "metadata" / "SHA256SUMS"
+        sums.write_text(
+            sums.read_text(encoding="utf-8").replace("\n", "\n", 1).split("\n")[0].split("  ")[0].join(["", ""]) or "",
+            encoding="utf-8",
+        ) if False else None
+        lines = sums.read_text(encoding="utf-8").splitlines()
+        lines = [f"{new_digest}  mixle-0.8.0-py3-none-any.whl" if l.endswith(".whl") else l for l in lines]
+        sums.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        meta = root / "metadata" / "mixle-0.8.0-py3-none-any.whl.json"
+        meta.write_text(
+            json.dumps({"filename": "mixle-0.8.0-py3-none-any.whl", "sha256": new_digest}), encoding="utf-8"
+        )
+        # an installation that matches the STALE RECORD (i.e. the original bytes) must not be authorized
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert result["resolved"] is False
+        assert any("does not match its RECORD hash" in problem for problem in result["problems"]), result["problems"]

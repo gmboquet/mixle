@@ -100,64 +100,68 @@ def _bytecode_matches_source(pyc: Path, source: Path) -> bool | None:
         return None
 
 
-# Every code-object field that participates in EXECUTION. Two code objects agreeing on all of these
-# (and, recursively, on their nested code constants) run identically. Deliberately excluded, because
-# they legitimately differ between a checkout compile and an installed compile of the same source
-# and do not affect behaviour: co_filename, co_firstlineno, and the line/position tables
-# (co_linetable, co_lnotab, co_lines, co_positions).
+# The comparison used to split code-object fields into "behavioural" and "metadata" and skip the
+# latter. That classification was wrong twice: co_exceptiontable was left out (SYS3-02), and then
+# co_filename was filed as metadata even though ``sys._getframe().f_code.co_filename`` reads it
+# (SYS4-02) -- and measured directly, co_firstlineno and the line table are readable the same way
+# via ``f_lineno``. Any field the program can observe can change its output, so NO field is
+# metadata for this purpose. There is also no need for a carve-out: the source is recompiled with
+# the ``.pyc``'s own recorded filename, so filename, first line and line tables are deterministic
+# functions of the same source text and match by construction -- verified on all 810 modules of a
+# real installation, where every data field matched. What remains is:
 #
-# This is an explicit allow-list checked against the running interpreter (see
-# _unaccounted_code_fields), so a future CPython that adds a behavioural field fails the check loudly
-# instead of being silently ignored -- which is precisely how co_exceptiontable (added in 3.11) was
-# omitted by the first version of this comparison: two functions differing only in their exception
-# table, one returning 7 and the other raising ZeroDivisionError, compared equal (SYS3-02).
-_BEHAVIOURAL_CODE_FIELDS = (
-    "co_argcount",
-    "co_posonlyargcount",
-    "co_kwonlyargcount",
-    "co_nlocals",
-    "co_stacksize",
-    "co_flags",
-    "co_code",
-    "co_exceptiontable",
-    "co_names",
-    "co_varnames",
-    "co_freevars",
-    "co_cellvars",
-    "co_name",
-    "co_qualname",
-)
-_METADATA_CODE_FIELDS = frozenset(
-    {"co_filename", "co_firstlineno", "co_linetable", "co_lnotab", "co_lines", "co_positions", "co_consts"}
-)
+#   * every ``co_*`` DATA attribute is compared for equality;
+#   * the two ``co_*`` METHODS (``co_lines``, ``co_positions``) return fresh iterators, which compare
+#     unequal as objects, so they are compared by materialised output;
+#   * ``co_consts`` is walked recursively so nested code objects get the same treatment;
+#   * the field set is taken from the LIVE interpreter, so a future CPython field is compared rather
+#     than silently skipped -- an unknown field can only make the check stricter, never looser.
+_CODE_METHOD_FIELDS = frozenset({"co_lines", "co_positions"})
 
 
-def _unaccounted_code_fields() -> set[str]:
-    """``co_*`` fields on this interpreter's code objects that neither list above accounts for."""
+def _code_fields() -> tuple[str, ...]:
+    """Every ``co_*`` name on this interpreter's code objects, data and method alike."""
     probe = compile("pass", "<probe>", "exec")
-    present = {name for name in dir(probe) if name.startswith("co_")}
-    return present - set(_BEHAVIOURAL_CODE_FIELDS) - _METADATA_CODE_FIELDS
+    return tuple(sorted(name for name in dir(probe) if name.startswith("co_")))
 
 
 def _code_equal(left: Any, right: Any) -> bool:
-    """Behavioural equality of two code objects, recursing through nested code constants.
+    """Equality of two code objects on every observable field, recursing through nested code.
 
     Deliberately NOT ``marshal.dumps(a) == marshal.dumps(b)``: marshal encodes back-references for
     shared and interned objects, and that sharing differs between a freshly compiled object and one
     loaded from a file. Comparing the serialized bytes therefore reports differences that do not
     exist -- measured at 9 false mismatches over 810 files on a CLEAN install, which would have
     reinstated the very defect this check exists to fix (refusing ordinary installations).
-
-    Fails closed if the interpreter exposes a ``co_*`` field this module does not classify: an
-    unknown field might be behavioural, and guessing that it is not is how a hole gets left open.
     """
-    if _unaccounted_code_fields():
-        return False
     if type(left) is not type(right):
         return False
     if not isinstance(left, types.CodeType):
+        # ``nan != nan``, so two identical code objects each holding a NaN constant compared UNEQUAL
+        # and a legitimate module was refused -- the original SYS-02 defect returning through a
+        # numeric edge. Compare floats (and complex parts) by identity-of-representation instead;
+        # for everything else plain equality is what we want.
+        if isinstance(left, float) or isinstance(left, complex):
+            return repr(left) == repr(right)
+        if isinstance(left, tuple) or isinstance(left, frozenset):
+            if len(left) != len(right):
+                return False
+            if isinstance(left, tuple):
+                return all(_code_equal(a, b) for a, b in zip(left, right))
+            return sorted(map(repr, left)) == sorted(map(repr, right))
         return bool(left == right)
-    for attribute in _BEHAVIOURAL_CODE_FIELDS:
+    for attribute in _code_fields():
+        if attribute == "co_consts":
+            continue
+        if attribute in _CODE_METHOD_FIELDS:
+            try:
+                if list(getattr(left, attribute)()) != list(getattr(right, attribute)()):
+                    return False
+            except Exception:  # noqa: BLE001 - an unreadable table is a difference, not a pass
+                return False
+            continue
+        if attribute == "co_lnotab":
+            continue  # deprecated alias of co_linetable/co_lines; reading it only emits a warning
         if getattr(left, attribute, None) != getattr(right, attribute, None):
             return False
     if len(left.co_consts) != len(right.co_consts):
@@ -414,6 +418,46 @@ def _wheel_record_hashes(path: Path) -> dict[str, str]:
         raise ValueError("wheel RECORD must contain exactly one self-referencing unhashed row")
     if not hashes:
         raise ValueError("wheel RECORD carries no hashed entries")
+
+    # The RECORD is a set of CLAIMS the wheel makes about its own members. Returning them without
+    # checking them turned every caller into a consumer of unverified assertions: a wheel whose
+    # member bytes had been altered while its RECORD stayed stale still "declared" the original
+    # digests, and a binding that compared an installation against those declarations authorized
+    # bytes nobody had reviewed (SYS4-01). Every RECORD claim is now recomputed from the archived
+    # member it names, and -- the neighbouring case -- every archived member must be claimed by the
+    # RECORD, so an extra file smuggled into the archive is refused too. Only after both hold do
+    # the declared hashes mean anything, and only then are they returned.
+    with zipfile.ZipFile(path) as archive:
+        infos = [info for info in archive.infolist() if not info.is_dir()]
+        member_names = [info.filename for info in infos]
+        # A zip may legally hold two entries with one name, and ``ZipFile.read(name)`` returns one
+        # of them while an installer may extract the other -- so a duplicate lets a member exist
+        # in two versions, only one of which the RECORD check sees. Refuse the ambiguity outright.
+        seen: set[str] = set()
+        for name in member_names:
+            if name in seen:
+                raise ValueError(f"wheel archive holds member {name!r} more than once")
+            seen.add(name)
+        # A member or RECORD row that escapes the archive root (``..`` segments, an absolute path,
+        # a drive letter) is a path-traversal payload, not a package file. Refuse before hashing.
+        for name in list(member_names) + list(hashes):
+            parts = Path(name).parts
+            if name.startswith(("/", "\\")) or ".." in parts or (len(name) > 1 and name[1] == ":"):
+                raise ValueError(f"wheel member path escapes the archive root: {name!r}")
+        members = set(member_names)
+        for name, declared in hashes.items():
+            if name not in members:
+                raise ValueError(f"wheel RECORD claims {name!r}, which is not in the archive")
+            actual = hashlib.sha256(archive.read(name)).hexdigest()
+            if actual != declared:
+                raise ValueError(
+                    f"wheel member {name!r} does not match its RECORD hash: archive has {actual}, RECORD claims {declared}"
+                )
+        unclaimed = members - set(hashes) - set(unhashed)
+        if unclaimed:
+            raise ValueError(
+                f"wheel archive holds {len(unclaimed)} member(s) the RECORD does not claim: {sorted(unclaimed)[:5]}"
+            )
     return hashes
 
 

@@ -157,12 +157,16 @@ class SubjectBindingTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             wheel = Path(directory) / "mixle-0.8.0-py3-none-any.whl"
-            digest = "e" * 64
+            import hashlib
+
+            member = b"x = 1"
+            digest = hashlib.sha256(member).hexdigest()
             encoded = base64.urlsafe_b64encode(bytes.fromhex(digest)).decode("ascii").rstrip("=")
             with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr("mixle/a.py", member)
                 archive.writestr(
                     "mixle-0.8.0.dist-info/RECORD",
-                    "mixle/a.py,sha256=%s,5\nmixle-0.8.0.dist-info/RECORD,,\n" % encoded,
+                    "mixle/a.py,sha256=%s,%d\nmixle-0.8.0.dist-info/RECORD,,\n" % (encoded, len(member)),
                 )
             self.assertEqual(reproduction._wheel_record_hashes(wheel), {"mixle/a.py": digest})
 
@@ -233,9 +237,60 @@ class RecordTamperTest(unittest.TestCase):
                 self.reproduction._wheel_record_hashes(wheel)
 
     def test_a_well_formed_record_still_parses(self):
+        """A RECORD whose claims match the archived members parses; the returned hashes are the
+        RECORDED ones, which the parser has now verified against the bytes (SYS4-01)."""
+        import base64
+        import hashlib
+
+        member = b"x = 1"
+        digest = hashlib.sha256(member).hexdigest()
+        encoded = base64.urlsafe_b64encode(bytes.fromhex(digest)).decode("ascii").rstrip("=")
         with tempfile.TemporaryDirectory() as directory:
-            wheel = self._wheel(directory, "mixle/a.py,sha256=%s,5\nmixle-0.8.0.dist-info/RECORD,,\n" % self.hash)
-            self.assertEqual(self.reproduction._wheel_record_hashes(wheel), {"mixle/a.py": "a" * 64})
+            wheel = Path(directory) / "mixle-0.8.0-py3-none-any.whl"
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr("mixle/a.py", member)
+                archive.writestr(
+                    "mixle-0.8.0.dist-info/RECORD",
+                    "mixle/a.py,sha256=%s,%d\nmixle-0.8.0.dist-info/RECORD,,\n" % (encoded, len(member)),
+                )
+            self.assertEqual(self.reproduction._wheel_record_hashes(wheel), {"mixle/a.py": digest})
+
+    def test_a_record_claim_that_the_archive_does_not_satisfy_is_refused(self):
+        """SYS4-01: RECORD claims are checked against the members, and members against the RECORD."""
+        import base64
+        import hashlib
+
+        member = b"x = 1"
+        good = base64.urlsafe_b64encode(hashlib.sha256(member).digest()).decode("ascii").rstrip("=")
+        wrong = base64.urlsafe_b64encode(bytes.fromhex("f" * 64)).decode("ascii").rstrip("=")
+        with tempfile.TemporaryDirectory() as directory:
+            # a) member bytes disagree with their RECORD hash (the reviewer's fixture shape)
+            wheel = Path(directory) / "a.whl"
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr("mixle/a.py", member)
+                archive.writestr(
+                    "mixle-0.8.0.dist-info/RECORD", "mixle/a.py,sha256=%s,5\nmixle-0.8.0.dist-info/RECORD,,\n" % wrong
+                )
+            with self.assertRaisesRegex(ValueError, "does not match its RECORD hash"):
+                self.reproduction._wheel_record_hashes(wheel)
+            # b) RECORD claims a member the archive does not hold
+            wheel = Path(directory) / "b.whl"
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr(
+                    "mixle-0.8.0.dist-info/RECORD", "mixle/a.py,sha256=%s,5\nmixle-0.8.0.dist-info/RECORD,,\n" % good
+                )
+            with self.assertRaisesRegex(ValueError, "not in the archive"):
+                self.reproduction._wheel_record_hashes(wheel)
+            # c) the archive holds a member the RECORD never claims (the neighbouring case)
+            wheel = Path(directory) / "c.whl"
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr("mixle/a.py", member)
+                archive.writestr("mixle/_smuggled.py", b"EVIL = 1")
+                archive.writestr(
+                    "mixle-0.8.0.dist-info/RECORD", "mixle/a.py,sha256=%s,5\nmixle-0.8.0.dist-info/RECORD,,\n" % good
+                )
+            with self.assertRaisesRegex(ValueError, "does not claim"):
+                self.reproduction._wheel_record_hashes(wheel)
 
 
 class ShadowInstallationTest(unittest.TestCase):
@@ -653,3 +708,83 @@ class SourceContentUniverseIsRequiredTest(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory, self.subTest(label):
                 with self.assertRaisesRegex(ValueError, "source_content_(file_count|universe)"):
                     reproduction.wheel_provenance(self._wheel(directory, **overrides))
+
+
+class FourthPassNeighboursTest(unittest.TestCase):
+    """Neighbours of SYS4-01/02, found by attacking the fixes before shipping them rather than after.
+
+    Three passes had each reopened the previous repairs at their boundaries. This wave the fixes were
+    attacked adversarially first; these are what that pass found, closed in the same commit.
+    """
+
+    @staticmethod
+    def _enc(data: bytes) -> str:
+        import base64
+        import hashlib
+
+        return base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode("ascii").rstrip("=")
+
+    def test_a_record_or_member_path_that_escapes_the_archive_root_is_refused(self):
+        from mixle.reproduction import _wheel_record_hashes
+
+        member = b"x = 1"
+        with tempfile.TemporaryDirectory() as directory:
+            wheel = Path(directory) / "t.whl"
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr("mixle/a.py", member)
+                archive.writestr("../escape.py", member)
+                archive.writestr(
+                    "mixle-0.8.0.dist-info/RECORD",
+                    "mixle/a.py,sha256=%s,5\n../escape.py,sha256=%s,5\nmixle-0.8.0.dist-info/RECORD,,\n"
+                    % (self._enc(member), self._enc(member)),
+                )
+            with self.assertRaisesRegex(ValueError, "escapes the archive root"):
+                _wheel_record_hashes(wheel)
+
+    def test_duplicate_zip_member_names_are_refused_even_when_identical(self):
+        """A zip may hold one name twice; the installer may extract the one the check did not read."""
+        import warnings
+
+        from mixle.reproduction import _wheel_record_hashes
+
+        member = b"x = 1"
+        with tempfile.TemporaryDirectory() as directory:
+            wheel = Path(directory) / "d.whl"
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with zipfile.ZipFile(wheel, "w") as archive:
+                    archive.writestr("mixle/a.py", member)
+                    archive.writestr("mixle/a.py", member)
+                    archive.writestr(
+                        "mixle-0.8.0.dist-info/RECORD",
+                        "mixle/a.py,sha256=%s,5\nmixle-0.8.0.dist-info/RECORD,,\n" % self._enc(member),
+                    )
+            with self.assertRaisesRegex(ValueError, "more than once"):
+                _wheel_record_hashes(wheel)
+
+    def test_identical_code_holding_a_nan_constant_compares_equal(self):
+        """``nan != nan`` made identical NaN-bearing modules compare unequal -- a false refusal that
+        would have reinstated the original SYS-02 defect through a numeric edge."""
+        from mixle.reproduction import _code_equal
+
+        code = compile("X = 1.5\n", "m.py", "exec")
+        with_nan = code.replace(co_consts=tuple(float("nan") if c == 1.5 else c for c in code.co_consts))
+        self.assertTrue(_code_equal(with_nan, with_nan.replace()))
+        with_other = with_nan.replace(co_consts=tuple(2.5 if isinstance(c, float) else c for c in with_nan.co_consts))
+        self.assertFalse(_code_equal(with_nan, with_other))
+
+    def test_every_observable_code_field_is_compared(self):
+        """SYS4-02 and its neighbours: filename, first line and line table are all readable by the
+        program (``f_code.co_filename``, ``f_lineno``), so none may be treated as metadata."""
+        import types
+
+        from mixle.reproduction import _code_equal
+
+        src = "def g():\n    import sys\n    return sys._getframe().f_code.co_filename\n"
+        a = compile(src, "original.py", "exec")
+        b = compile(src, "changed.py", "exec")
+        self.assertFalse(_code_equal(a, b), "co_filename is observable and must be compared")
+        g = next(c for c in a.co_consts if isinstance(c, types.CodeType))
+        self.assertFalse(_code_equal(g, g.replace(co_firstlineno=g.co_firstlineno + 50)))
+        self.assertFalse(_code_equal(g, g.replace(co_linetable=b"")))
+        self.assertTrue(_code_equal(g, g.replace()))

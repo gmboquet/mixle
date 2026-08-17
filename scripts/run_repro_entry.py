@@ -322,12 +322,20 @@ def _resolve_candidate_records(
             problems.append("executing artifact declares no source commit to compare")
         elif executing != candidate_commit:
             problems.append(f"executing commit {executing} is not the candidate commit {candidate_commit}")
+        # Tree is REQUIRED, not compared-if-present. The earlier "compare when the record supplies a
+        # 40-char string" made the tree optional: a record with the key removed resolved and
+        # produced verified, contradicting the stated commit-and-tree contract (SYS4-03). Commit
+        # transitively pins a tree, so the practical exposure was small -- but a contract the code
+        # does not enforce is the kind of gap that gets relied on later.
         candidate_tree = record.get("tree") if candidate_paths and record else None
-        if isinstance(candidate_tree, str) and len(candidate_tree) == 40:
-            if artifact.get("source_tree") != candidate_tree:
-                problems.append(
-                    f"executing tree {artifact.get('source_tree')} is not the candidate tree {candidate_tree}"
-                )
+        if (
+            not isinstance(candidate_tree, str)
+            or len(candidate_tree) != 40
+            or any(c not in "0123456789abcdef" for c in candidate_tree)
+        ):
+            problems.append("release-candidate.json has no full lowercase 40-hex tree")
+        elif artifact.get("source_tree") != candidate_tree:
+            problems.append(f"executing tree {artifact.get('source_tree')} is not the candidate tree {candidate_tree}")
 
     # metadata/release-check-evidence.json -- required, and previously never opened (SYS3-05). The
     # candidate-binding rule says these records bind APPROVED checks, so a record whose checks are
