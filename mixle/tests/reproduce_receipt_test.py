@@ -384,18 +384,46 @@ class CarriedProvenanceVerificationTest(unittest.TestCase):
 
     @staticmethod
     def _setup_module():
+        """Load setup.py's provenance helpers with setuptools stubbed out entirely.
+
+        setup.py imports setuptools and calls setup() at import time. The first version of this
+        helper imported the real setuptools to monkeypatch it, which passed locally only because
+        the developer venv happened to have setuptools installed -- Python 3.12 does not bundle it,
+        and the CI test environment does not have it either, so all four tests in this class failed
+        there with ModuleNotFoundError. Stubbing the modules in sys.modules removes the dependency
+        instead of relying on the environment to satisfy it.
+        """
+        import sys
+        import types
+
         path = Path(__file__).resolve().parents[2] / "setup.py"
         spec = importlib.util.spec_from_file_location("_mixle_setup", path)
         module = importlib.util.module_from_spec(spec)
-        # setup.py calls setup() at import; stub it out so importing does not run a build
-        import setuptools
 
-        original = setuptools.setup
-        setuptools.setup = lambda *a, **k: None
+        stub = types.ModuleType("setuptools")
+        stub.setup = lambda *args, **kwargs: None
+        build_py_module = types.ModuleType("setuptools.command.build_py")
+        build_py_module.build_py = type("build_py", (), {"run": lambda self: None})
+        sdist_module = types.ModuleType("setuptools.command.sdist")
+        sdist_module.sdist = type("sdist", (), {"make_release_tree": lambda self, base_dir, files: None})
+        command_pkg = types.ModuleType("setuptools.command")
+
+        names = {
+            "setuptools": stub,
+            "setuptools.command": command_pkg,
+            "setuptools.command.build_py": build_py_module,
+            "setuptools.command.sdist": sdist_module,
+        }
+        saved = {name: sys.modules.get(name) for name in names}
+        sys.modules.update(names)
         try:
             spec.loader.exec_module(module)
         finally:
-            setuptools.setup = original
+            for name, previous in saved.items():
+                if previous is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = previous
         return module
 
     def _tree(self, directory, *, commit="a" * 40, with_digest=True, tamper=False):

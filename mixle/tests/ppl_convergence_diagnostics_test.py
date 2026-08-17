@@ -203,10 +203,21 @@ class BimodalCertificationTest(unittest.TestCase):
         from mixle.stats.univariate.continuous.gaussian import GaussianDistribution
 
         data = GaussianDistribution(1.0, 4.0).sampler(seed=0).sample(300)
+        # Seeded, unlike the first version of this test. The "good" fit asserts every parameter
+        # reaches "ok" -- split R-hat <= 1.01 AND ESS >= 100 -- and an UNSEEDED 4-chain fit lands
+        # a hair over one of those thresholds by chance often enough to fail in CI (observed on
+        # full/py3.12/shard 3 at b4fed455 while passing at neighbouring commits that changed only
+        # setup.py; 6/6 green when re-run at the same commit). A test that asserts a strict
+        # diagnostic threshold has to fix the randomness it is judging, the same way the sibling
+        # tests above do with rng=RandomState(seed).
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            bad = P.Normal(P.Normal(0, 10), P.HalfNormal(5)).fit(data, how="mcmc", draws=60, burn=5, chains=2)
-            good = P.Normal(P.Normal(0, 10), P.HalfNormal(5)).fit(data, how="mcmc", draws=2000, burn=1000, chains=4)
+            bad = P.Normal(P.Normal(0, 10), P.HalfNormal(5)).fit(
+                data, how="mcmc", draws=60, burn=5, chains=2, rng=np.random.RandomState(0)
+            )
+            good = P.Normal(P.Normal(0, 10), P.HalfNormal(5)).fit(
+                data, how="mcmc", draws=2000, burn=1000, chains=4, rng=np.random.RandomState(0)
+            )
         bad_statuses = [v["diagnostic_status"] for k, v in posterior_summary(bad).items() if not k.startswith("_")]
         self.assertIn("unconverged-by-diagnostics", bad_statuses)  # R-hat 1.24 / ESS 9 was "ok"
         good_statuses = [v["diagnostic_status"] for k, v in posterior_summary(good).items() if not k.startswith("_")]
