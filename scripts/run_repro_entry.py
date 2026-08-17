@@ -188,6 +188,13 @@ try:
     content = installed_content_provenance()
     info["installed_content_verified"] = content.get("verified")
     info["installed_content_digest"] = content.get("digest")
+    # The per-file RECORD hashes of what is installed. The records root pins a wheel by SHA-256,
+    # and the caller compares THESE against that wheel's own RECORD to establish that the bytes
+    # executing are the pinned wheel's bytes -- not merely bytes built from the same commit. A wheel
+    # rebuilt from the candidate sdist shares the commit and differs in content (SYS3-01).
+    info["installed_record_hashes"] = {
+        entry["path"]: entry["sha256"] for entry in content.get("entries", []) if "sha256" in entry
+    }
 except Exception as exc:
     info["installed_content_error"] = repr(exc)
 try:
@@ -306,13 +313,44 @@ def _resolve_candidate_records(
             elif record.get("version") != bundle.get("release"):
                 problems.append("release-candidate.json version does not match the bundle release")
 
-    # The binding that kills the wrong-wheel case: the mixle that EXECUTED must be the candidate.
+    # Source identity of what EXECUTED must be the candidate's -- commit AND tree. The tree half was
+    # promised by an earlier docstring and never implemented (SYS3-01 notes it as the same gap).
+    # This is necessary but not sufficient: byte identity is bound separately below.
     if candidate_commit is not None and artifact is not None:
         executing = artifact.get("source_commit")
         if executing is None:
             problems.append("executing artifact declares no source commit to compare")
         elif executing != candidate_commit:
             problems.append(f"executing commit {executing} is not the candidate commit {candidate_commit}")
+        candidate_tree = record.get("tree") if candidate_paths and record else None
+        if isinstance(candidate_tree, str) and len(candidate_tree) == 40:
+            if artifact.get("source_tree") != candidate_tree:
+                problems.append(
+                    f"executing tree {artifact.get('source_tree')} is not the candidate tree {candidate_tree}"
+                )
+
+    # metadata/release-check-evidence.json -- required, and previously never opened (SYS3-05). The
+    # candidate-binding rule says these records bind APPROVED checks, so a record whose checks are
+    # not in a terminal passing state cannot support "verified". Schema: mixle.release_check_evidence/v1,
+    # bound to the candidate commit, with every required check name present and "success".
+    evidence_paths = matches.get("metadata/release-check-evidence.json") or []
+    if evidence_paths:
+        evidence = _read_json_record(evidence_paths[0])
+        if evidence is None:
+            problems.append("release-check-evidence.json is not a JSON object")
+        elif evidence.get("artifact") != "mixle.release_check_evidence/v1":
+            problems.append("release-check-evidence.json is not a mixle.release_check_evidence/v1 record")
+        else:
+            if candidate_commit is not None and evidence.get("commit") != candidate_commit:
+                problems.append("release-check-evidence.json is bound to a different commit than the candidate")
+            checks = evidence.get("checks")
+            if not isinstance(checks, dict):
+                problems.append("release-check-evidence.json has no checks mapping")
+            else:
+                for required_check in ("tests", "docs", "security", "extras_resolver_matrix"):
+                    state = checks.get(required_check)
+                    if state != "success":
+                        problems.append(f"release-check-evidence.json: {required_check} is {state!r}, not 'success'")
 
     # metadata/SHA256SUMS -- must name a wheel and an sdist with well-formed digests.
     sums: dict[str, str] = {}
@@ -350,6 +388,53 @@ def _resolve_candidate_records(
             problems.append(f"{pattern} has no valid sha256")
         elif sums and sums.get(str(filename)) != digest:
             problems.append(f"{pattern} digest is not the one SHA256SUMS records for {filename!r}")
+
+    # Bind the EXECUTING BYTES to the PINNED WHEEL, not merely to a shared source commit. A wheel
+    # rebuilt from the candidate sdist carries the same commit and different content, and comparing
+    # commit alone let it impersonate the frozen candidate (SYS3-01). The pinned wheel must be
+    # present beside the records (dist/<name>, the layout the publish workflow and the review
+    # candidate both use), its bytes must hash to the SHA256SUMS entry, and every hashed entry in
+    # ITS RECORD must appear in the installation with the same digest -- the same rule
+    # mixle.reproduction.subject_binding applies. Absent wheel bytes are a stated problem, not a
+    # silent downgrade to commit-only binding.
+    if artifact is not None and sums:
+        wheel_names = [name for name in sums if name.endswith(".whl")]
+        pinned_name = wheel_names[0] if len(wheel_names) == 1 else None
+        if pinned_name is None:
+            problems.append("SHA256SUMS must pin exactly one wheel to bind the executing artifact against")
+        else:
+            wheel_path = records_root / "dist" / pinned_name
+            installed = artifact.get("installed_record_hashes")
+            if not wheel_path.is_file():
+                problems.append(f"pinned wheel {pinned_name!r} is not present at dist/ beside the records")
+            elif not isinstance(installed, dict) or not installed:
+                problems.append("executing artifact reports no installed RECORD hashes to bind")
+            else:
+                actual = hashlib.sha256(wheel_path.read_bytes()).hexdigest()
+                if actual != sums[pinned_name]:
+                    problems.append(
+                        f"dist/{pinned_name} hashes to {actual[:12]}..., not the pinned {sums[pinned_name][:12]}..."
+                    )
+                else:
+                    try:
+                        from mixle.reproduction import _wheel_record_hashes
+
+                        pinned_records = _wheel_record_hashes(wheel_path)
+                    except (OSError, ValueError, ImportError) as exc:
+                        pinned_records = None
+                        problems.append(f"pinned wheel RECORD could not be read: {exc}")
+                    if pinned_records is not None:
+                        missing_or_different = [
+                            path
+                            for path, expected_digest in pinned_records.items()
+                            if installed.get(path) != expected_digest
+                        ]
+                        if missing_or_different:
+                            problems.append(
+                                f"executing installation is not the pinned wheel: "
+                                f"{len(missing_or_different)} of {len(pinned_records)} RECORD entries differ or are "
+                                f"absent (e.g. {missing_or_different[0]!r})"
+                            )
 
     # metadata/reproduction-*.json -- each match must be a receipt, and each must name this
     # candidate. Completeness across all four entries is the publication manifest's gate, not this

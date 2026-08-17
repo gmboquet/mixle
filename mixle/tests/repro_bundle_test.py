@@ -118,17 +118,45 @@ def _runner():
 _CANDIDATE_COMMIT = "e" * 40
 
 
-def _write_valid_records(root: Path, *, commit: str = _CANDIDATE_COMMIT, release: str = "0.8.0") -> None:
-    """Write a records root whose contents actually assert what their names promise."""
+def _write_valid_records(
+    root: Path, *, commit: str = _CANDIDATE_COMMIT, release: str = "0.8.0", tree: str = "t" * 40
+) -> dict:
+    """Write a records root whose contents actually assert what their names promise.
+
+    Includes a real (tiny) wheel under ``dist/`` whose bytes hash to the SHA256SUMS entry, and
+    passing check evidence -- because the binding now compares the executing installation's RECORD
+    hashes against the PINNED WHEEL's RECORD (SYS3-01) and requires the check evidence to be
+    terminal-passing (SYS3-05). Returns the wheel's RECORD hashes so a test can present a matching
+    or deliberately mismatching installation.
+    """
+    import base64
+    import hashlib
+    import zipfile
+
     metadata = root / "metadata"
     metadata.mkdir(parents=True, exist_ok=True)
+    (root / "dist").mkdir(exist_ok=True)
     wheel, sdist = "mixle-0.8.0-py3-none-any.whl", "mixle-0.8.0.tar.gz"
-    wheel_digest, sdist_digest = "a" * 64, "b" * 64
+
+    # a minimal but structurally real wheel: one module + a hashed RECORD
+    module = b"VALUE = 1\n"
+    module_digest = hashlib.sha256(module).hexdigest()
+    encoded = base64.urlsafe_b64encode(bytes.fromhex(module_digest)).decode("ascii").rstrip("=")
+    record = f"mixle/__init__.py,sha256={encoded},{len(module)}\nmixle-0.8.0.dist-info/RECORD,,\n"
+    wheel_path = root / "dist" / wheel
+    with zipfile.ZipFile(wheel_path, "w") as archive:
+        archive.writestr("mixle/__init__.py", module)
+        archive.writestr("mixle-0.8.0.dist-info/METADATA", "Name: mixle\nVersion: 0.8.0\n")
+        archive.writestr("mixle-0.8.0.dist-info/RECORD", record)
+    wheel_digest = hashlib.sha256(wheel_path.read_bytes()).hexdigest()
+    sdist_digest = "b" * 64
+
     (metadata / "release-candidate.json").write_text(
         json.dumps(
             {
                 "artifact": "mixle.release_candidate/v1",
                 "commit": commit,
+                "tree": tree,
                 "version": release,
                 "tag": "v0.8.0",
                 "workflow_run": "1",
@@ -138,10 +166,33 @@ def _write_valid_records(root: Path, *, commit: str = _CANDIDATE_COMMIT, release
     )
     (metadata / "SHA256SUMS").write_text(f"{wheel_digest}  {wheel}\n{sdist_digest}  {sdist}\n", encoding="utf-8")
     (metadata / f"{wheel}.json").write_text(json.dumps({"filename": wheel, "sha256": wheel_digest}), encoding="utf-8")
-    (metadata / "release-check-evidence.json").write_text(json.dumps({"checks": []}), encoding="utf-8")
+    (metadata / "release-check-evidence.json").write_text(
+        json.dumps(
+            {
+                "artifact": "mixle.release_check_evidence/v1",
+                "commit": commit,
+                "checks": {
+                    "tests": "success",
+                    "docs": "success",
+                    "security": "success",
+                    "extras_resolver_matrix": "success",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     (metadata / "reproduction-a.json").write_text(
         json.dumps({"artifact": "mixle.reproduction_entry_receipt/v2"}), encoding="utf-8"
     )
+    return {"mixle/__init__.py": module_digest}
+
+
+def _executing(commit: str = _CANDIDATE_COMMIT, tree: str = "t" * 40, record_hashes: dict | None = None) -> dict:
+    return {
+        "source_commit": commit,
+        "source_tree": tree,
+        "installed_record_hashes": dict(record_hashes or {}),
+    }
 
 
 def test_required_records_are_opened_not_merely_name_matched():
@@ -154,7 +205,7 @@ def test_required_records_are_opened_not_merely_name_matched():
     import tempfile
 
     runner, bundle = _runner(), _bundle()
-    executing = {"source_commit": _CANDIDATE_COMMIT}
+    executing = _executing()
 
     unresolved = runner._resolve_candidate_records(bundle, None, executing)
     assert unresolved["resolved"] is False
@@ -173,8 +224,8 @@ def test_required_records_are_opened_not_merely_name_matched():
 
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        _write_valid_records(root)
-        good = runner._resolve_candidate_records(bundle, root, executing)
+        hashes = _write_valid_records(root)
+        good = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
         assert good["resolved"] is True, good["problems"]
         assert good["candidate_commit"] == _CANDIDATE_COMMIT
 
@@ -190,8 +241,8 @@ def test_an_artifact_from_another_commit_cannot_satisfy_the_binding():
     runner, bundle = _runner(), _bundle()
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        _write_valid_records(root)
-        wrong = runner._resolve_candidate_records(bundle, root, {"source_commit": "7" * 40})
+        hashes = _write_valid_records(root)
+        wrong = runner._resolve_candidate_records(bundle, root, _executing(commit="7" * 40, record_hashes=hashes))
         assert wrong["resolved"] is False
         assert any("not the candidate commit" in problem for problem in wrong["problems"])
 
@@ -202,12 +253,12 @@ def test_a_wheel_record_disagreeing_with_sha256sums_is_refused():
     runner, bundle = _runner(), _bundle()
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        _write_valid_records(root)
+        hashes = _write_valid_records(root)
         wheel_record = root / "metadata" / "mixle-0.8.0-py3-none-any.whl.json"
         wheel_record.write_text(
             json.dumps({"filename": "mixle-0.8.0-py3-none-any.whl", "sha256": "c" * 64}), encoding="utf-8"
         )
-        result = runner._resolve_candidate_records(bundle, root, {"source_commit": _CANDIDATE_COMMIT})
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
         assert result["resolved"] is False
         assert any("SHA256SUMS records" in problem for problem in result["problems"])
 
@@ -262,3 +313,84 @@ def test_receipt_reports_binding_facts_instead_of_a_constant_verified():
     for field in ("executing_artifact", "candidate_binding", "unbound_reasons"):
         assert field in body, f"receipt must record {field}"
     assert '"claim_status": "verified" if not unbound else "unbound"' in body
+
+
+def test_an_installation_that_is_not_the_pinned_wheel_bytes_is_refused():
+    """SYS3-01: binding is to the pinned wheel's BYTES, not merely to a shared commit.
+
+    A wheel rebuilt from the candidate sdist carries the same commit and different content, and
+    comparing commit alone let it impersonate the frozen candidate. The executing installation's
+    RECORD hashes must equal the pinned wheel's RECORD.
+    """
+    import tempfile
+
+    runner, bundle = _runner(), _bundle()
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        hashes = _write_valid_records(root)
+        # same commit, same tree, but the installed module hashes to something else
+        impostor = _executing(record_hashes={"mixle/__init__.py": "f" * 64})
+        result = runner._resolve_candidate_records(bundle, root, impostor)
+        assert result["resolved"] is False
+        assert any("is not the pinned wheel" in problem for problem in result["problems"])
+        # and an installation reporting NO record hashes at all is a stated problem, not a pass
+        bare = runner._resolve_candidate_records(
+            bundle, root, {"source_commit": _CANDIDATE_COMMIT, "source_tree": "t" * 40}
+        )
+        assert bare["resolved"] is False
+        assert any("no installed RECORD hashes" in problem for problem in bare["problems"])
+        # tree is compared too (the half an earlier docstring promised and never implemented)
+        wrong_tree = runner._resolve_candidate_records(bundle, root, _executing(tree="u" * 40, record_hashes=hashes))
+        assert wrong_tree["resolved"] is False
+        assert any("not the candidate tree" in problem for problem in wrong_tree["problems"])
+
+
+def test_pinned_wheel_bytes_absent_or_altered_beside_the_records_is_refused():
+    import tempfile
+
+    runner, bundle = _runner(), _bundle()
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        hashes = _write_valid_records(root)
+        wheel_path = root / "dist" / "mixle-0.8.0-py3-none-any.whl"
+        wheel_path.write_bytes(wheel_path.read_bytes() + b"\x00")  # altered bytes, digest no longer matches
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert result["resolved"] is False
+        assert any("not the pinned" in problem for problem in result["problems"])
+        wheel_path.unlink()
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert any("not present at dist/" in problem for problem in result["problems"])
+
+
+def test_check_evidence_is_parsed_and_must_be_terminal_passing():
+    """SYS3-05: release-check-evidence.json was required but never opened; in-progress checks resolved."""
+    import tempfile
+
+    runner, bundle = _runner(), _bundle()
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        hashes = _write_valid_records(root)
+        evidence = root / "metadata" / "release-check-evidence.json"
+        payload = json.loads(evidence.read_text(encoding="utf-8"))
+        payload["checks"]["tests"] = "in_progress"
+        evidence.write_text(json.dumps(payload), encoding="utf-8")
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert result["resolved"] is False
+        assert any("tests is 'in_progress'" in problem for problem in result["problems"])
+        # bound to another commit is also refused
+        payload["checks"]["tests"] = "success"
+        payload["commit"] = "9" * 40
+        evidence.write_text(json.dumps(payload), encoding="utf-8")
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert any("different commit" in problem for problem in result["problems"])
+
+
+def test_publish_workflow_writes_receipts_outside_the_records_root_then_moves():
+    """SYS3-04: redirecting stdout into records_root created an empty file the runner then read as
+    a malformed prior receipt, deterministically unbinding every publication receipt."""
+    workflow = (ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
+    loop = workflow[workflow.index("for entry in gallery-univariate") :]
+    loop = loop[: loop.index("done")]
+    assert '> "$RUNNER_TEMP/reproduction-$entry.json"' in loop, "receipt must be written outside records_root"
+    assert 'mv "$RUNNER_TEMP/reproduction-$entry.json" "metadata/reproduction-$entry.json"' in loop
+    assert '> "metadata/reproduction-$entry.json"' not in loop

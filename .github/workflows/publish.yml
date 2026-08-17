@@ -224,9 +224,16 @@ jobs:
           # meaningful under the arithmetic that produced it.
           python -c 'import json,pathlib;d=json.loads(pathlib.Path("release-checklists/0.8.0-repro-environment.json").read_text());print("\n".join(f"{k}=={v}" for k,v in d["dependencies"].items()))' > "$RUNNER_TEMP/repro-pins.txt"
           "$RUNNER_TEMP/repro-env/bin/python" -m pip install --quiet -r "$RUNNER_TEMP/repro-pins.txt"
+          # Each receipt is written OUTSIDE the records root and moved in only after the runner
+          # exits successfully. Redirecting stdout straight to metadata/reproduction-$entry.json
+          # made the shell create that (empty) file BEFORE the runner resolved
+          # metadata/reproduction-*.json, so the runner read its own empty output as a malformed
+          # prior receipt and deterministically emitted "unbound" -- and promotion then rejected
+          # every receipt this step produced (SYS3-04). Earlier receipts stay fully validated.
           for entry in gallery-univariate gallery-structured production-provenance scaling-backend; do
             "$RUNNER_TEMP/repro-env/bin/python" scripts/run_repro_entry.py \
-              --entry "$entry" --records-root . > "metadata/reproduction-$entry.json"
+              --entry "$entry" --records-root . > "$RUNNER_TEMP/reproduction-$entry.json"
+            mv "$RUNNER_TEMP/reproduction-$entry.json" "metadata/reproduction-$entry.json"
           done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
