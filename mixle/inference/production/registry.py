@@ -27,6 +27,10 @@ from mixle.utils.serialization import (
     to_serializable,
 )
 
+# Distinguishes "caller passed expected_tip=None" (meaning: the name must be empty) from
+# "caller did not ask for a tip check at all".
+_UNSPECIFIED = object()
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -137,8 +141,22 @@ class Registry:
         vs = [f[:-5] for f in os.listdir(d) if f.endswith(".json")]
         return sorted(vs, key=lambda v: int(v[1:]) if v[1:].isdigit() else 0)
 
-    def register(self, model: Any, name: str, *, header: Any = None, metadata: dict | None = None) -> str:
+    def register(
+        self,
+        model: Any,
+        name: str,
+        *,
+        header: Any = None,
+        metadata: dict | None = None,
+        expected_tip: Any = _UNSPECIFIED,
+    ) -> str:
         """Store ``model`` under ``name`` as a new version; return its version id.
+
+        ``expected_tip`` makes the write conditional: the current latest version must equal it (or
+        the name must be empty when it is ``None``) at the moment of allocation, checked under the
+        same lock that allocates the version. A caller extending a lineage passes the tip it
+        adopted, and a concurrent writer that got there first makes this call refuse instead of
+        persisting a sibling successor.
 
         ``header`` defaults to ``model.header`` if present. The model is serialized with the safe mixle
         registry; the header (a :class:`Header` or dict) and ``metadata`` are stored alongside.
@@ -197,6 +215,20 @@ class Registry:
                 # v1,v2,v3) must not free up its number for reuse, or the next register() overwrites
                 # the surviving v3.
                 existing = self.versions(name)
+                # Checked INSIDE the lock, so "the tip is still what I adopted" and "allocate the
+                # next version" are one atomic step. Two checkpointers that adopted the same tip
+                # each passed a tip check taken outside this lock and then both registered,
+                # persisting sibling successors of one parent; two created on an EMPTY name each
+                # wrote an independent root. Both returned success and left the chain unverifiable
+                # (SYS3-06). Under the lock the second writer sees the moved tip and refuses.
+                if expected_tip is not _UNSPECIFIED:
+                    current_tip = existing[-1] if existing else None
+                    if current_tip != expected_tip:
+                        raise RuntimeError(
+                            f"registry conflict: {name!r} tip is {current_tip!r}, not the expected "
+                            f"{expected_tip!r}; another writer appended first. Refusing to write a "
+                            f"sibling of the same predecessor."
+                        )
                 next_n = max((int(v[1:]) for v in existing if v[1:].isdigit()), default=0) + 1
                 ver = f"v{next_n}"
                 payload = {
@@ -268,6 +300,17 @@ class Registry:
         parent_transition_digest: str | None = None
         run_id = secrets.token_hex(16)
         iteration_offset = 0
+        # What register() must see as the tip at write time. Three intents, kept distinct:
+        #   resume=True and a chain was adopted  -> the adopted tip (a moved tip is a fork; refuse)
+        #   resume=True and the name was empty   -> None (we are the root; a second root collides)
+        #   resume=False                         -> no condition: the caller ASKED for a fresh
+        #                                           unlinked lineage after whatever exists, so
+        #                                           the write is unconditional by design.
+        # Passing None for resume=False conflated the last two and made every deliberate
+        # resume=False on a non-empty name refuse as a "conflict".
+        expected_tip: Any = _UNSPECIFIED
+        if resume:
+            expected_tip = None
 
         # Resume: adopt the existing lineage rather than rooting a second one under the same name.
         # A fresh run_id with a null parent made the COMBINED chain unverifiable the moment a
@@ -277,10 +320,13 @@ class Registry:
         # from an authenticated tip; the parent identity taken here is the same quadruple
         # verify_chain will re-derive.
         #
-        # If the existing versions do NOT verify (for example plain register() calls under the same
-        # name, which carry no lineage metadata at all), this falls back to rooting a new run. That
-        # combined history does not verify -- but it did not verify before this call either, and
-        # silently pretending otherwise is what the finding was about.
+        # If the existing versions do NOT verify -- a truncated checkpoint, or plain register() calls
+        # under the same name that carry no lineage metadata -- resume REFUSES rather than rooting a
+        # new run on top of them. The earlier text here argued the fallthrough was harmless because
+        # "it did not verify before this call either"; that is only true for lineage-less
+        # registrations, and false for a chain that was valid until one file was damaged, which the
+        # fallthrough silently made unrecoverable (SYS3-03). Starting over is a decision the caller
+        # states with resume=False or a new name, never something inferred from damage.
         if resume:
             existing = self.versions(name)
             if existing:
@@ -292,36 +338,44 @@ class Registry:
                 # the callback then appended an unlinked root to a valid neural chain and made it
                 # permanently unverifiable (CP2-01). An exception propagates, so the caller either
                 # passes trust_code=True to adopt or resume=False to root a new lineage on purpose.
-                if self.verify_chain(name, trust_code=trust_code):
-                    tip = existing[-1]
-                    tip_metadata = self.metadata(name, tip)
-                    run_id = tip_metadata["run_id"]
-                    parent = tip_metadata["model_hash"]
-                    parent_version = tip
-                    parent_record_digest = self.record_digest(name, tip)
-                    parent_transition_digest = tip_metadata["transition_digest"]
-                    iteration_offset = int(tip_metadata["checkpoint_iter"])
+                if not self.verify_chain(name, trust_code=trust_code):
+                    # verify_chain returned False: the persisted lineage under this name does not
+                    # verify -- a truncated or corrupted checkpoint, or versions that never carried
+                    # lineage at all. Either way there is no authenticated tip to extend, and the
+                    # first repair's answer here was to fall through and quietly root a NEW run id
+                    # with a null parent on top of it. That is the SAME conflation CP2-01 fixed one
+                    # branch over ("cannot verify" treated as "safe to start over"), and it turned a
+                    # chain that had been valid until one file was damaged into one that verifies
+                    # nowhere, with no error raised at any point (SYS3-03). Refuse. A caller who
+                    # actually wants a fresh lineage says so with resume=False or a new name.
+                    raise ValueError(
+                        f"checkpoint lineage for {name!r} does not verify, so there is no "
+                        f"authenticated tip to resume from. Refusing to append a new root to it: "
+                        f"repair or remove the damaged versions, use a different name, or pass "
+                        f"resume=False to deliberately start an unlinked lineage."
+                    )
+                tip = existing[-1]
+                tip_metadata = self.metadata(name, tip)
+                run_id = tip_metadata["run_id"]
+                parent = tip_metadata["model_hash"]
+                parent_version = tip
+                parent_record_digest = self.record_digest(name, tip)
+                parent_transition_digest = tip_metadata["transition_digest"]
+                iteration_offset = int(tip_metadata["checkpoint_iter"])
+                expected_tip = tip
 
         def _save(step: Any) -> None:
-            nonlocal parent, parent_record_digest, parent_transition_digest, parent_version
+            nonlocal parent, parent_record_digest, parent_transition_digest, parent_version, expected_tip
             if every <= 1 or step.iter % every == 0:
                 # The predecessor was snapshotted when this callback was CONSTRUCTED. If another
                 # checkpointer adopted the same tip and appended first, writing against the cached
-                # predecessor forks the lineage: two versions claim one parent, and the chain --
-                # which requires each entry to link to the one before it -- stops verifying for
-                # everyone (CP2-02). Registration's version lock does not cover this, because
-                # adoption and append are separate operations. Re-check that the predecessor is
-                # still the tip and refuse rather than persist a fork; a fork cannot be repaired
-                # after the fact, so the useful moment to fail is before the write.
-                if parent_version is not None:
-                    current = self.versions(name)
-                    if current and current[-1] != parent_version:
-                        raise RuntimeError(
-                            f"checkpoint lineage for {name!r} moved from {parent_version!r} to "
-                            f"{current[-1]!r} while this checkpointer held it; another writer "
-                            f"appended to the same tip. Refusing to fork the chain -- construct a "
-                            f"new checkpointer to adopt the current tip."
-                        )
+                # predecessor forks the lineage. The first fix re-read the tip HERE and refused on a
+                # mismatch -- but that check and the register() below were two separate operations,
+                # so two writers could both pass the check and then both register (SYS3-06). The
+                # tip condition now travels INTO register() as expected_tip and is evaluated under
+                # the same lock that allocates the version number: exactly one of two racing
+                # writers appends, the other refuses. `expected_tip=None` on an empty name means
+                # "I am the root", so two roots created concurrently on one name also collide.
                 h = model_hash(step.model)
                 metadata = {
                     "lineage_schema": "mixle-checkpoint-lineage-v1",
@@ -341,9 +395,14 @@ class Registry:
                     step.model,
                     name,
                     metadata=metadata,
+                    expected_tip=expected_tip,
                 )
                 parent = h
                 parent_version = version
+                # this callback's next write must expect the version IT just produced; a
+                # resume=False callback stays unconditional (it never pinned a tip to begin with).
+                if expected_tip is not _UNSPECIFIED:
+                    expected_tip = version
                 parent_record_digest = self.record_digest(name, version)
                 parent_transition_digest = metadata["transition_digest"]
 

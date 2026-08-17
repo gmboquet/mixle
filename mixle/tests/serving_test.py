@@ -678,3 +678,122 @@ class CheckpointResumeTrustAndForkTest(unittest.TestCase):
                 second(_Step(model, 1))
             # the losing writer must not have persisted a fork
             self.assertTrue(reg.verify_chain("chain"))
+
+
+class CheckpointResumeRefusesDamagedChainTest(unittest.TestCase):
+    """SYS3-03: a NON-verifying existing chain must be refused by resume, not silently extended.
+
+    CP2-01 closed the case where ``verify_chain`` RAISES (a trust refusal). This is the case one
+    branch over: ``verify_chain`` RETURNS FALSE -- a truncated or corrupted checkpoint -- and the
+    first repair fell through and quietly rooted a fresh run id with a null parent on top of it.
+    A chain that had been valid until one file was damaged became one that verifies nowhere, and no
+    error was raised at any point. Damage is not a decision to start over; ``resume=False`` is.
+    """
+
+    @staticmethod
+    def _data():
+        return np.random.RandomState(31).normal(3.0, 2.0, 400).tolist()
+
+    def test_a_truncated_latest_checkpoint_refuses_default_resume(self):
+        import os
+
+        from mixle.inference import optimize
+        from mixle.stats import GaussianEstimator
+
+        with tempfile.TemporaryDirectory() as d:
+            reg = Registry(d)
+            optimize(self._data(), GaussianEstimator(), max_its=6, on_step=reg.checkpointer("chain", every=2))
+            self.assertTrue(reg.verify_chain("chain"))
+
+            latest = reg.versions("chain")[-1]
+            target = os.path.join(d, "chain", f"{latest}.json")
+            with open(target, "r+b") as handle:
+                handle.truncate(max(1, os.path.getsize(target) // 2))
+            self.assertFalse(reg.verify_chain("chain"))
+
+            before = list(reg.versions("chain"))
+            with self.assertRaisesRegex(ValueError, "does not verify"):
+                reg.checkpointer("chain")
+            # refusing must not have written anything
+            self.assertEqual(list(reg.versions("chain")), before)
+
+    def test_plain_registrations_under_the_name_also_refuse_default_resume(self):
+        """Lineage-less register() calls have no authenticated tip either; the caller must opt out."""
+        with tempfile.TemporaryDirectory() as d:
+            reg = Registry(d)
+            reg.register(GaussianDistribution(0.0, 1.0), "chain")  # no lineage metadata at all
+            with self.assertRaisesRegex(ValueError, "does not verify"):
+                reg.checkpointer("chain")
+            # and the explicit opt-out is still honoured
+            self.assertTrue(callable(reg.checkpointer("chain", resume=False)))
+
+
+class CheckpointAppendIsAtomicTest(unittest.TestCase):
+    """SYS3-06: tip check and version allocation must be ONE atomic step under the registration lock.
+
+    The CP2-02 repair re-read the tip in the callback and refused on a mismatch, but that check and
+    the ``register()`` that followed were separate operations: two writers could both pass the check
+    and both register, persisting sibling successors of one parent. Two callbacks created on an
+    EMPTY name likewise both wrote a root. Both returned success and left the chain unverifiable.
+    The condition now travels into ``register(expected_tip=...)`` and is evaluated under the lock.
+    """
+
+    class _Step:
+        def __init__(self, model, iteration):
+            self.model, self.iter, self.log_density = model, iteration, -1.0
+
+    def test_racing_adopters_of_one_tip_yield_exactly_one_successor(self):
+        import threading
+
+        from mixle.inference import optimize
+        from mixle.stats import GaussianEstimator
+
+        data = np.random.RandomState(41).normal(3.0, 2.0, 400).tolist()
+        with tempfile.TemporaryDirectory() as d:
+            reg = Registry(d)
+            optimize(data, GaussianEstimator(), max_its=4, on_step=reg.checkpointer("chain", every=2))
+            model, _ = reg.get("chain")
+            writers = 8
+            callbacks = [reg.checkpointer("chain", every=1) for _ in range(writers)]  # all adopt one tip
+            barrier = threading.Barrier(writers)
+            appended, refused = [], []
+
+            def race(callback):
+                barrier.wait()
+                try:
+                    callback(self._Step(model, 1))
+                    appended.append(1)
+                except RuntimeError:
+                    refused.append(1)
+
+            threads = [threading.Thread(target=race, args=(cb,)) for cb in callbacks]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(len(appended), 1, "exactly one racing writer may extend the tip")
+            self.assertEqual(len(refused), writers - 1)
+            self.assertTrue(reg.verify_chain("chain"))
+
+    def test_two_roots_on_an_empty_name_collide(self):
+        with tempfile.TemporaryDirectory() as d:
+            reg = Registry(d)
+            first = reg.checkpointer("fresh")
+            second = reg.checkpointer("fresh")  # both believe they are the root
+            model = GaussianDistribution(0.0, 1.0)
+            first(self._Step(model, 1))
+            with self.assertRaises(RuntimeError):
+                second(self._Step(model, 1))
+            self.assertTrue(reg.verify_chain("fresh"))
+
+    def test_a_single_run_still_writes_many_checkpoints(self):
+        """The atomic condition must advance with each write, or a run refuses its own second save."""
+        from mixle.inference import optimize
+        from mixle.stats import GaussianEstimator
+
+        data = np.random.RandomState(42).normal(3.0, 2.0, 400).tolist()
+        with tempfile.TemporaryDirectory() as d:
+            reg = Registry(d)
+            optimize(data, GaussianEstimator(), max_its=8, on_step=reg.checkpointer("run", every=1))
+            self.assertGreaterEqual(len(reg.versions("run")), 3)
+            self.assertTrue(reg.verify_chain("run"))
