@@ -63,6 +63,7 @@ def validate_bundle(bundle: object) -> dict[str, Any]:
     required_records = binding.get("required_records")
     if not isinstance(required_records, list) or len(required_records) < 4:
         raise ValueError("bundle candidate binding is incomplete")
+    _required_check_names(bundle)
     for item in bundle.get("closure", []):
         _validate_input(item)
     entries = bundle.get("entries")
@@ -252,6 +253,59 @@ def _read_json_record(path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+def _required_check_names(bundle: dict[str, Any]) -> list[str]:
+    """Return the bundle's embedded publication policy: the exact check-run names approval requires."""
+    names = bundle.get("candidate_binding", {}).get("required_checks")
+    if (
+        not isinstance(names, list)
+        or not names
+        or any(not isinstance(name, str) or not name.strip() for name in names)
+        or len(set(names)) != len(names)
+    ):
+        raise ValueError("bundle candidate binding must name the required checks (unique, nonempty strings)")
+    return list(names)
+
+
+def _check_evidence_problems(bundle: dict[str, Any], evidence: dict[str, Any]) -> list[str]:
+    """Report every way ``evidence`` fails to be a generator-shaped record approving every required check."""
+    problems: list[str] = []
+    try:
+        required = _required_check_names(bundle)
+    except ValueError as exc:
+        return [str(exc)]
+    checks = evidence.get("checks")
+    if not isinstance(checks, dict):
+        return ["release-check-evidence.json has no checks mapping"]
+    seen_ids: dict[int, str] = {}
+    for name in required:
+        selected = checks.get(name)
+        if selected is None:
+            problems.append(f"release-check-evidence.json: required check {name!r} is absent")
+            continue
+        if not isinstance(selected, dict):
+            problems.append(
+                f"release-check-evidence.json: required check {name!r} is {selected!r}, "
+                "not a selected check-run record (check_run_id + details_url)"
+            )
+            continue
+        run_id = selected.get("check_run_id")
+        details_url = selected.get("details_url")
+        if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id < 0:
+            problems.append(f"release-check-evidence.json: required check {name!r} has no valid check_run_id")
+        elif run_id in seen_ids:
+            problems.append(
+                f"release-check-evidence.json: required checks {seen_ids[run_id]!r} and {name!r} "
+                f"cite the same check run {run_id}"
+            )
+        else:
+            seen_ids[run_id] = name
+        if not isinstance(details_url, str) or "/actions/runs/" not in details_url:
+            problems.append(f"release-check-evidence.json: required check {name!r} lacks an Actions run URL")
+    if evidence.get("publication_authorized") is not True:
+        problems.append("release-check-evidence.json does not carry the generator's publication_authorized=true")
+    return problems
+
+
 def _resolve_candidate_records(
     bundle: dict[str, Any], records_root: Path | None, artifact: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -339,8 +393,21 @@ def _resolve_candidate_records(
 
     # metadata/release-check-evidence.json -- required, and previously never opened (SYS3-05). The
     # candidate-binding rule says these records bind APPROVED checks, so a record whose checks are
-    # not in a terminal passing state cannot support "verified". Schema: mixle.release_check_evidence/v1,
-    # bound to the candidate commit, with every required check name present and "success".
+    # not in a terminal passing state cannot support "verified".
+    #
+    # The record has exactly one producer: scripts/verify_required_checks.py, run by publish.yml
+    # over the GitHub check-runs of the candidate SHA. It writes nothing at all unless every check
+    # named in .github/release-required-checks.txt is completed/success, and what it writes is
+    #   {"artifact": "mixle.release_check_evidence/v1", "commit": <sha>,
+    #    "checks": {<exact check-run name>: {"check_run_id": <int>, "details_url": <Actions URL>}, ...},
+    #    "publication_authorized": true}
+    # The first SYS3-05 repair validated a different, invented shape ({"tests": "success", ...}) that
+    # only the hand-written review-candidate stubs ever had -- so it accepted the stubs and would
+    # have rejected every real record, leaving publication unable to bind any receipt. The
+    # required names now come from the bundle, which embeds the same policy file the generator
+    # reads (build_repro_bundle.py parses it with the generator's own parser), and each entry is
+    # checked for the generator's selected-check shape. This is necessary, not sufficient: the
+    # check runs themselves are only verifiable against GitHub, which the generator does.
     evidence_paths = matches.get("metadata/release-check-evidence.json") or []
     if evidence_paths:
         evidence = _read_json_record(evidence_paths[0])
@@ -351,14 +418,7 @@ def _resolve_candidate_records(
         else:
             if candidate_commit is not None and evidence.get("commit") != candidate_commit:
                 problems.append("release-check-evidence.json is bound to a different commit than the candidate")
-            checks = evidence.get("checks")
-            if not isinstance(checks, dict):
-                problems.append("release-check-evidence.json has no checks mapping")
-            else:
-                for required_check in ("tests", "docs", "security", "extras_resolver_matrix"):
-                    state = checks.get(required_check)
-                    if state != "success":
-                        problems.append(f"release-check-evidence.json: {required_check} is {state!r}, not 'success'")
+            problems.extend(_check_evidence_problems(bundle, evidence))
 
     # metadata/SHA256SUMS -- must name a wheel and an sdist with well-formed digests.
     sums: dict[str, str] = {}

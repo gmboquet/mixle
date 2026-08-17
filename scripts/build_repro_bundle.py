@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BUNDLE = ROOT / "release-checklists" / "0.8.0-repro-bundle.json"
+
+# The check-evidence record that binds a candidate to APPROVED checks is produced by exactly one
+# generator (scripts/verify_required_checks.py, run by publish.yml) over exactly one policy (the
+# check-run names below). The bundle embeds that policy so the receipt resolver can require every
+# name against the generator's own schema, and closes over both files so a change to either
+# without regenerating the bundle fails the canonical-bundle test rather than drifting silently.
+REQUIRED_CHECKS_POLICY = ".github/release-required-checks.txt"
+CHECK_EVIDENCE_GENERATOR = "scripts/verify_required_checks.py"
 
 _CLOSURE_PATHS = (
     "pyproject.toml",
@@ -16,7 +25,20 @@ _CLOSURE_PATHS = (
     "release-checklists/0.8.0-repro-requirements.txt",
     "scripts/build_repro_bundle.py",
     "scripts/run_repro_entry.py",
+    REQUIRED_CHECKS_POLICY,
+    CHECK_EVIDENCE_GENERATOR,
 )
+
+
+def _required_check_names() -> list[str]:
+    """Parse the publication policy with the generator's own parser, so the two cannot disagree."""
+    spec = importlib.util.spec_from_file_location("_verify_required_checks", ROOT / CHECK_EVIDENCE_GENERATOR)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {CHECK_EVIDENCE_GENERATOR}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return list(module.required_check_names(ROOT / REQUIRED_CHECKS_POLICY))
+
 
 _ENTRIES = (
     # No hosted-network entry: the repository carries no direct dataset usage (release owner's
@@ -136,6 +158,9 @@ def build() -> dict:
                 "metadata/mixle-0.8.0-py3-none-any.whl.json",
                 "metadata/reproduction-*.json",
             ],
+            "required_checks": _required_check_names(),
+            "required_checks_policy": REQUIRED_CHECKS_POLICY,
+            "check_evidence_generator": CHECK_EVIDENCE_GENERATOR,
             "rule": (
                 "The final bundle is incomplete unless these retained records bind its source commit, "
                 "approved checks, wheel SHA-256, and local entry receipts to the signed v0.8.0 tag."

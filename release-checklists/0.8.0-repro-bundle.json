@@ -2,7 +2,35 @@
   "acceptance": "Every entry is local and self-contained: each passes exact output validation offline, and retained candidate/check/wheel records bind the bundle to publication.",
   "artifact": "mixle.reproduction_bundle/v2",
   "candidate_binding": {
+    "check_evidence_generator": "scripts/verify_required_checks.py",
     "policy": "exact-publish-workflow-candidate",
+    "required_checks": [
+      "smoke / collection-light",
+      "release decisions / accepted review",
+      "lint (ruff enforced, mypy advisory)",
+      "core / py3.11",
+      "core / py3.12",
+      "core / macOS arm64 / py3.11",
+      "core / macOS arm64 / py3.12",
+      "core / minimum versions",
+      "full / py3.12 / shard 0",
+      "full / py3.12 / shard 1",
+      "full / py3.12 / shard 2",
+      "full / py3.12 / shard 3",
+      "full / coverage floor",
+      "clean-wheel install + import sweep",
+      "optional extras / py3.12 / shard 0",
+      "optional extras / py3.12 / shard 1",
+      "numerical / repeated-seed stress",
+      "hardware / MPI and torchrun",
+      "extras matrix / exact candidate",
+      "Revision check (single-revision, warnings as errors)",
+      "gitleaks (full history)",
+      "pip-audit (base install)",
+      "pip-audit (all runtime features)",
+      "bandit (source security)"
+    ],
+    "required_checks_policy": ".github/release-required-checks.txt",
     "required_records": [
       "metadata/release-candidate.json",
       "metadata/release-check-evidence.json",
@@ -31,12 +59,22 @@
     {
       "path": "scripts/build_repro_bundle.py",
       "role": "bundle-closure",
-      "sha256": "d1b55c49c6d9b8099f590f7c0a871772513bcedb710b0c5ec7e99d99cdb829a0"
+      "sha256": "35a3f8675d33d07969da07a127b13f95cce7557f3ba260b82702dd5a4940ca05"
     },
     {
       "path": "scripts/run_repro_entry.py",
       "role": "bundle-closure",
-      "sha256": "3bda8e365c5cbf37de7ac5a490771d1d149cf45a02e0c3a00637ded42ed6cc6c"
+      "sha256": "9ea70795a1a17551e0eaff68ea879e16f2bfa32c449b78724be6242c2de8890d"
+    },
+    {
+      "path": ".github/release-required-checks.txt",
+      "role": "bundle-closure",
+      "sha256": "9b1250edc6982d7ed8e922005d4858921504ef6f7718ab992978ca85559bc7ee"
+    },
+    {
+      "path": "scripts/verify_required_checks.py",
+      "role": "bundle-closure",
+      "sha256": "99c6301ff4f159aae7a8fce9109fa7ecfc4e84d5a61e1c04af931177a6ea9f47"
     }
   ],
   "code_license": {

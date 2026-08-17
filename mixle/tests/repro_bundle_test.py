@@ -116,6 +116,53 @@ def _runner():
 
 
 _CANDIDATE_COMMIT = "e" * 40
+_REQUIRED_CHECKS_POLICY = ROOT / ".github" / "release-required-checks.txt"
+_CHECK_EVIDENCE_GENERATOR = ROOT / "scripts" / "verify_required_checks.py"
+
+
+def _github_check_runs(commit: str, names, *, first_id: int = 1000, conclusion: str = "success") -> dict:
+    """A GitHub ``check-runs`` payload with one completed run per name on ``commit``."""
+    return {
+        "total_count": len(names),
+        "check_runs": [
+            {
+                "name": name,
+                "id": first_id + index,
+                "head_sha": commit,
+                "status": "completed",
+                "conclusion": conclusion,
+                "details_url": f"https://github.com/gmboquet/mixle/actions/runs/{500 + index}/job/{first_id + index}",
+            }
+            for index, name in enumerate(names)
+        ],
+    }
+
+
+def _generated_check_evidence(commit: str = _CANDIDATE_COMMIT) -> str:
+    """Produce release-check-evidence.json exactly as publish.yml does: the generator's own ``main``.
+
+    The record's only real producer is scripts/verify_required_checks.py over the check runs of
+    the candidate SHA. The first SYS3-05 fixture hand-wrote a shape the generator never emits
+    ({"tests": "success", ...}); the resolver was written against that fiction and would have
+    rejected every real record. Building the fixture through the generator's ``main`` -- not a
+    re-implementation of its output -- is what makes this test a contract between the two.
+    """
+    import contextlib
+    import io
+    import tempfile
+
+    generator = _load(_CHECK_EVIDENCE_GENERATOR, "_verify_required_checks_for_bundle")
+    names = generator.required_check_names(_REQUIRED_CHECKS_POLICY)
+    with tempfile.TemporaryDirectory() as directory:
+        payload = Path(directory) / "check-runs.json"
+        payload.write_text(json.dumps(_github_check_runs(commit, names)), encoding="utf-8")
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            status = generator.main(
+                ["--required", str(_REQUIRED_CHECKS_POLICY), "--input", str(payload), "--sha", commit]
+            )
+    assert status == 0, "generator refused an all-success payload"
+    return stdout.getvalue()
 
 
 def _write_valid_records(
@@ -175,21 +222,7 @@ def _write_valid_records(
     )
     (metadata / "SHA256SUMS").write_text(f"{wheel_digest}  {wheel}\n{sdist_digest}  {sdist}\n", encoding="utf-8")
     (metadata / f"{wheel}.json").write_text(json.dumps({"filename": wheel, "sha256": wheel_digest}), encoding="utf-8")
-    (metadata / "release-check-evidence.json").write_text(
-        json.dumps(
-            {
-                "artifact": "mixle.release_check_evidence/v1",
-                "commit": commit,
-                "checks": {
-                    "tests": "success",
-                    "docs": "success",
-                    "security": "success",
-                    "extras_resolver_matrix": "success",
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
+    (metadata / "release-check-evidence.json").write_text(_generated_check_evidence(commit), encoding="utf-8")
     (metadata / "reproduction-a.json").write_text(
         json.dumps({"artifact": "mixle.reproduction_entry_receipt/v2"}), encoding="utf-8"
     )
@@ -382,19 +415,117 @@ def test_check_evidence_is_parsed_and_must_be_terminal_passing():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         hashes = _write_valid_records(root)
+        # the generator's record, unmodified, resolves
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert result["resolved"] is True, result["problems"]
         evidence = root / "metadata" / "release-check-evidence.json"
         payload = json.loads(evidence.read_text(encoding="utf-8"))
-        payload["checks"]["tests"] = "in_progress"
+        first = bundle["candidate_binding"]["required_checks"][0]
+        # a required check that is not a selected (completed/success) run: the generator never
+        # writes such a value, so any non-record state means the file was not the generator's
+        payload["checks"][first] = "in_progress"
         evidence.write_text(json.dumps(payload), encoding="utf-8")
         result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
         assert result["resolved"] is False
-        assert any("tests is 'in_progress'" in problem for problem in result["problems"])
+        assert any(f"{first!r} is 'in_progress'" in problem for problem in result["problems"])
+        # a required check missing altogether
+        del payload["checks"][first]
+        evidence.write_text(json.dumps(payload), encoding="utf-8")
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert any(f"{first!r} is absent" in problem for problem in result["problems"])
         # bound to another commit is also refused
-        payload["checks"]["tests"] = "success"
+        payload = json.loads(_generated_check_evidence())
         payload["commit"] = "9" * 40
         evidence.write_text(json.dumps(payload), encoding="utf-8")
         result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
         assert any("different commit" in problem for problem in result["problems"])
+
+
+def test_check_evidence_must_be_the_generators_record_not_an_invented_shape():
+    """The receipt resolver and the record generator must agree on ONE schema.
+
+    The first SYS3-05 repair validated ``checks == {"tests": "success", "docs": ..., ...}`` -- a
+    shape invented for the hand-written review-candidate stubs. scripts/verify_required_checks.py,
+    which publish.yml runs, emits ``checks == {<check-run name>: {check_run_id, details_url}}`` for
+    the 24 policy names and writes nothing unless all are completed/success. Under the real
+    workflow every receipt would therefore have been unbound and the manifest builder would have
+    refused, so no candidate could publish -- the same failure the resolver's own comment records
+    fixing once before. Found the first time the generator was run on a real candidate.
+    """
+    import tempfile
+
+    runner, bundle = _runner(), _bundle()
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        hashes = _write_valid_records(root)
+        evidence = root / "metadata" / "release-check-evidence.json"
+        # the exact stub the review candidates carried
+        evidence.write_text(
+            json.dumps(
+                {
+                    "artifact": "mixle.release_check_evidence/v1",
+                    "commit": _CANDIDATE_COMMIT,
+                    "checks": {
+                        "tests": "success",
+                        "docs": "success",
+                        "security": "success",
+                        "extras_resolver_matrix": "success",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert result["resolved"] is False
+        absent = [problem for problem in result["problems"] if "is absent" in problem]
+        assert len(absent) == len(bundle["candidate_binding"]["required_checks"])
+        assert any("publication_authorized" in problem for problem in result["problems"])
+
+        # generator-shaped but hollow: one bogus entry, or the same check run cited for every name,
+        # or an id/URL that is not a check run's
+        payload = json.loads(_generated_check_evidence())
+        for corrupt in (
+            lambda p: p["checks"].update(
+                {name: {"check_run_id": 1, "details_url": "https://x/actions/runs/1/"} for name in p["checks"]}
+            ),
+            lambda p: p["checks"][next(iter(p["checks"]))].update({"check_run_id": "95335978969"}),
+            lambda p: p["checks"][next(iter(p["checks"]))].update({"check_run_id": True}),
+            lambda p: p["checks"][next(iter(p["checks"]))].update({"details_url": "https://github.com/gmboquet/mixle"}),
+            lambda p: p.pop("publication_authorized"),
+            lambda p: p.update({"publication_authorized": "true"}),
+        ):
+            damaged = json.loads(json.dumps(payload))
+            corrupt(damaged)
+            evidence.write_text(json.dumps(damaged), encoding="utf-8")
+            result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+            assert result["resolved"] is False, damaged
+
+        # and the bundle itself must carry the policy; a bundle without it cannot bind anything
+        evidence.write_text(_generated_check_evidence(), encoding="utf-8")
+        stripped = json.loads(json.dumps(bundle))
+        del stripped["candidate_binding"]["required_checks"]
+        result = runner._resolve_candidate_records(stripped, root, _executing(record_hashes=hashes))
+        assert result["resolved"] is False
+        assert any("must name the required checks" in problem for problem in result["problems"])
+        with pytest.raises(ValueError, match="must name the required checks"):
+            runner.validate_bundle(stripped)
+
+
+def test_bundle_required_checks_equal_the_publication_policy():
+    """The bundle's embedded check list IS the publication policy, parsed by the generator's parser."""
+    generator = _load(_CHECK_EVIDENCE_GENERATOR, "_verify_required_checks_policy")
+    policy = list(generator.required_check_names(_REQUIRED_CHECKS_POLICY))
+    binding = _bundle()["candidate_binding"]
+    assert binding["required_checks"] == policy
+    assert binding["required_checks_policy"] == ".github/release-required-checks.txt"
+    assert binding["check_evidence_generator"] == "scripts/verify_required_checks.py"
+    # both files are content-addressed by the closure so a change to either forces regeneration
+    closure = {item["path"] for item in _bundle()["closure"]}
+    assert {".github/release-required-checks.txt", "scripts/verify_required_checks.py"} <= closure
+    # and the workflow that consumes the record reads the same shape the resolver requires
+    workflow = (ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
+    assert '["checks"]["pip-audit (all runtime features)"]["details_url"]' in workflow
+    assert "pip-audit (all runtime features)" in policy
 
 
 def test_publish_workflow_writes_receipts_outside_the_records_root_then_moves():
