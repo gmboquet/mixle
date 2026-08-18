@@ -804,29 +804,31 @@ def test_attestation_is_verified_offline_with_gh_bound_to_repo_workflow_and_comm
         digest = hashlib.sha256(record.read_bytes()).hexdigest()
         seen: list[list[str]] = []
 
+        def gh_response(**overrides):
+            # the shape and fields real gh returned for the fb8c02d6 candidate (retained verify.json)
+            certificate = {
+                "buildSignerURI": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.0",
+                "subjectAlternativeName": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.0",
+                "issuer": "https://token.actions.githubusercontent.com",
+                "sourceRepositoryURI": "https://github.com/gmboquet/mixle",
+                "sourceRepositoryDigest": _CANDIDATE_COMMIT,
+                "githubWorkflowRepository": "gmboquet/mixle",
+                "githubWorkflowSHA": _CANDIDATE_COMMIT,
+                "runnerEnvironment": "github-hosted",
+                "runInvocationURI": "https://github.com/gmboquet/mixle/actions/runs/1/attempts/1",
+            }
+            statement = {
+                "predicateType": contract["predicate_type"],
+                "predicate": {"commit": _CANDIDATE_COMMIT, "phase": "review-candidate"},
+                "subject": [{"name": "release-check-evidence.json", "digest": {"sha256": digest}}],
+            }
+            certificate.update({k: v for k, v in overrides.items() if k in certificate})
+            statement.update({k: v for k, v in overrides.items() if k in statement})
+            return [{"verificationResult": {"statement": statement, "signature": {"certificate": certificate}}}]
+
         def fake_run(command):
             seen.append(list(command))
-            output = json.dumps(
-                [
-                    {
-                        "verificationResult": {
-                            "statement": {
-                                "predicateType": contract["predicate_type"],
-                                "subject": [{"name": "release-check-evidence.json", "digest": {"sha256": digest}}],
-                            },
-                            "signature": {
-                                "certificate": {
-                                    "buildSignerURI": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.0",
-                                    "sourceRepositoryURI": "https://github.com/gmboquet/mixle",
-                                    "sourceRepositoryDigest": _CANDIDATE_COMMIT,
-                                    "runInvocationURI": "https://github.com/gmboquet/mixle/actions/runs/1/attempts/1",
-                                }
-                            },
-                        }
-                    }
-                ]
-            )
-            return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(gh_response()), stderr="")
 
         # the resolver's gh call goes through a module-local seam; replacing the process-wide
         # subprocess.run here once leaked a fake gh into every later test's subprocesses
@@ -873,7 +875,48 @@ def test_attestation_is_verified_offline_with_gh_bound_to_repo_workflow_and_comm
 
         runner._run_gh = other_subject
         result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
-        assert any("no verified attestation names this record" in p for p in result["problems"])
+        assert any("no verified attestation binds this record" in p for p in result["problems"])
+
+        # gh's exit code is not the verdict; its RESPONSE must bind every flag's expectation. The
+        # reviewer's stand-in -- digest and predicate type only -- was accepted before (pass 6).
+        seen.clear()
+        stub = [
+            {
+                "verificationResult": {
+                    "statement": {
+                        "predicateType": contract["predicate_type"],
+                        "subject": [{"digest": {"sha256": digest}}],
+                    },
+                    "signature": {"certificate": {}},
+                }
+            }
+        ]
+        runner._run_gh = lambda command: subprocess.CompletedProcess(command, 0, stdout=json.dumps(stub), stderr="")
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert result["resolved"] is False
+        assert any("does not bind: predicate.commit, signer identity, OIDC issuer" in p for p in result["problems"]), (
+            result["problems"]
+        )
+        for field, wrong in (
+            ("sourceRepositoryDigest", "0" * 40),
+            ("githubWorkflowSHA", "0" * 40),
+            ("sourceRepositoryURI", "https://github.com/gmboquet/mixle-fork"),
+            ("githubWorkflowRepository", "gmboquet/mixle-fork"),
+            ("issuer", "https://accounts.google.com"),
+            ("runnerEnvironment", "self-hosted"),
+            ("runInvocationURI", "https://github.com/someone/else/actions/runs/1/attempts/1"),
+            ("buildSignerURI", "https://github.com/gmboquet/mixle/.github/workflows/docs.yml@refs/heads/main"),
+            ("predicate", {"commit": "1" * 40}),
+        ):
+            response = gh_response(**{field: wrong})
+            if field == "buildSignerURI":
+                response[0]["verificationResult"]["signature"]["certificate"]["subjectAlternativeName"] = wrong
+            runner._run_gh = lambda command, response=response: subprocess.CompletedProcess(
+                command, 0, stdout=json.dumps(response), stderr=""
+            )
+            result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+            assert result["resolved"] is False, field
+            assert any("does not bind" in p for p in result["problems"]), (field, result["problems"])
 
         # gh refuses -> refused, with gh's last line
         runner._run_gh = lambda command: subprocess.CompletedProcess(
@@ -960,7 +1003,7 @@ def test_check_evidence_workflows_attest_and_verify_and_the_bundle_names_them():
             assert Path(contract[record]).name in text, (workflow, record)
     tests = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
     assert "if: github.event_name == 'workflow_dispatch'" in tests.split("release-check-evidence:", 1)[1]
-    assert "release-check-evidence-${{ github.sha }}" in tests
+    assert "release-check-evidence-${{ github.sha }}-attempt-${{ github.run_attempt }}" in tests
     publish = (ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
     assert "--check-evidence candidate/metadata/release-check-evidence.json" in publish
     assert "--check-evidence-bundle candidate/metadata/release-check-evidence.sigstore.json" in publish

@@ -370,20 +370,58 @@ def _verify_check_evidence_attestation(
     except json.JSONDecodeError as exc:
         raise ValueError("gh attestation verify returned no JSON result") from exc
     digest = _sha256(record_path)
-    verified = []
+    # The exit code says gh was satisfied; the RESPONSE must say gh verified what this resolver
+    # meant. Every binding the flags demand is re-required on the returned certificate -- the
+    # signing identity, the OIDC issuer, the repository, the source commit, a hosted runner, an
+    # invocation of this repository -- and the statement's own predicate must name the commit. A
+    # response that only carried the digest and predicate type was accepted before (systems review
+    # pass 6): a stand-in verifier, or a gh answering some other question, produced "verified".
+    identity_pattern = re.compile(identity)
+    repository_uri = f"https://github.com/{contract['repository']}"
+    problems: list[str] = []
+    verified: dict[str, Any] | None = None
     for result in results if isinstance(results, list) else []:
         if not isinstance(result, dict):
             continue
-        statement = (result.get("verificationResult") or {}).get("statement") or {}
+        outcome = result.get("verificationResult") or {}
+        statement = outcome.get("statement") or {}
         subjects = statement.get("subject") or []
-        if any(
+        if not any(
             (subject.get("digest") or {}).get("sha256") == digest for subject in subjects if isinstance(subject, dict)
         ):
-            if statement.get("predicateType") == contract["predicate_type"]:
-                verified.append(result)
-    if not verified:
-        raise ValueError("no verified attestation names this record's digest with the expected predicate type")
-    certificate = ((verified[0].get("verificationResult") or {}).get("signature") or {}).get("certificate") or {}
+            continue
+        certificate = (outcome.get("signature") or {}).get("certificate") or {}
+        predicate = statement.get("predicate") if isinstance(statement.get("predicate"), dict) else {}
+        signer = certificate.get("buildSignerURI") or certificate.get("subjectAlternativeName")
+        expectations = (
+            ("predicateType", statement.get("predicateType") == contract["predicate_type"]),
+            ("predicate.commit", predicate.get("commit") == commit),
+            ("signer identity", isinstance(signer, str) and identity_pattern.match(signer) is not None),
+            ("OIDC issuer", certificate.get("issuer") == _OIDC_ISSUER),
+            ("sourceRepositoryURI", certificate.get("sourceRepositoryURI") == repository_uri),
+            ("sourceRepositoryDigest", certificate.get("sourceRepositoryDigest") == commit),
+            ("githubWorkflowRepository", certificate.get("githubWorkflowRepository") == contract["repository"]),
+            ("githubWorkflowSHA", certificate.get("githubWorkflowSHA") == commit),
+            ("runnerEnvironment", certificate.get("runnerEnvironment") == "github-hosted"),
+            (
+                "runInvocationURI",
+                isinstance(certificate.get("runInvocationURI"), str)
+                and certificate["runInvocationURI"].startswith(f"{repository_uri}/actions/runs/"),
+            ),
+        )
+        failed = [name for name, ok in expectations if not ok]
+        if failed:
+            problems.append("verified statement for this digest does not bind: " + ", ".join(failed))
+            continue
+        verified = {"certificate": certificate, "statement": statement}
+        break
+    if verified is None:
+        detail = f" ({'; '.join(problems)})" if problems else ""
+        raise ValueError(
+            "no verified attestation binds this record to the candidate commit, this repository, "
+            f"the signing workflows and GitHub's issuer{detail}"
+        )
+    certificate = verified["certificate"]
     return {
         "attested": True,
         "record_sha256": digest,
@@ -391,7 +429,9 @@ def _verify_check_evidence_attestation(
         "source_repository": certificate.get("sourceRepositoryURI"),
         "source_digest": certificate.get("sourceRepositoryDigest"),
         "run_invocation_uri": certificate.get("runInvocationURI"),
-        "verifier": "gh attestation verify --bundle (Sigstore public-good root via gh)",
+        "runner_environment": certificate.get("runnerEnvironment"),
+        "issuer": certificate.get("issuer"),
+        "verifier": "gh attestation verify --bundle (Sigstore public-good root via gh); response fields re-required",
     }
 
 

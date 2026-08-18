@@ -567,6 +567,29 @@ class BytecodeAuthenticationTest(unittest.TestCase):
             pyc, source = self._compile_pair(directory, "VALUE = 1\n", bytecode_text="VALUE = 1\nBACKDOOR = True\n")
             self.assertIs(_bytecode_matches_source(pyc, source), False)
 
+    def test_bytecode_naming_another_filename_is_rejected_the_trusted_path_supplies_it(self):
+        """Pass 6: the comparison recompiled the source with the filename the .pyc itself recorded,
+        so an altered ``co_filename`` was copied into the expected object and accepted -- although
+        tracebacks and code inspection observe it. The trusted installed source path now supplies
+        the compile filename; the file under check contributes nothing to what it is checked against.
+        On a real pip install (810/810 modules) ``co_filename`` equals that path, so no false refusal."""
+        import marshal
+
+        from mixle.reproduction import _bytecode_matches_source
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "m.py"
+            source.write_text("VALUE = 1\n", encoding="utf-8")
+            for other in ("/somewhere/else/m.py", "m.py", str(root / "n.py")):
+                compiled = compile(b"VALUE = 1\n", other, "exec")  # right code, wrong filename
+                pyc = root / "m.cpython-312.pyc"
+                pyc.write_bytes(b"\x00" * 16 + marshal.dumps(compiled))
+                self.assertIs(_bytecode_matches_source(pyc, source), False, other)
+            # and the genuine pair, compiled with the trusted path, still matches
+            pyc, source = self._compile_pair(directory, "VALUE = 1\n")
+            self.assertIs(_bytecode_matches_source(pyc, source), True)
+
     def test_undecidable_bytecode_is_reported_as_undecidable_not_as_matching(self):
         from mixle.reproduction import _bytecode_matches_source
 
