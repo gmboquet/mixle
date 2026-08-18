@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import csv
 import hashlib
+import io
 import json
 import platform
 import subprocess
@@ -331,8 +333,13 @@ def wheel_provenance(path: Path) -> dict[str, Any]:
                 raise ValueError("wheel must contain exactly one METADATA and one Mixle build-provenance record")
             metadata = archive.read(metadata_names[0]).decode("utf-8")
             provenance = json.loads(archive.read(provenance_names[0]))
-    except (OSError, UnicodeError, zipfile.BadZipFile, json.JSONDecodeError) as exc:
-        raise ValueError("reproduction artifact is not a valid Mixle wheel") from exc
+    except Exception as exc:  # noqa: BLE001 -- untrusted archive: decompressor/feature errors are not ValueErrors
+        # zipfile surfaces a corrupt member as zlib.error or lzma.LZMAError, an unsupported method,
+        # version or flag as NotImplementedError, and an encrypted member as RuntimeError; none is a
+        # subclass of the classes first enumerated here, so `mixle-reproduce --wheel <such wheel>`
+        # exited with a traceback instead of a receipt (SYS5-03's sibling, found by attacking the
+        # repair). Every failure to read the archive is one refusal with the cause named.
+        raise ValueError(f"reproduction artifact is not a valid Mixle wheel: {type(exc).__name__}: {exc}") from exc
     fields = {}
     for line in metadata.splitlines():
         if ": " in line:
@@ -378,6 +385,34 @@ def wheel_provenance(path: Path) -> dict[str, Any]:
     }
 
 
+def _record_rows(text: str) -> list[tuple[str, str, str]]:
+    """Split a RECORD into ``(path, hash, size)`` rows with the CSV semantics the wheel spec gives it.
+
+    RECORD is CSV -- PEP 376 specifies the ``csv`` module with ``,`` as delimiter and ``"`` as the
+    quote character, which is what installers read it with -- so a path containing a comma MUST
+    be quoted and any path MAY be. The previous parser used
+    ``rsplit(",", 2)``: a wheel whose unchanged first path was legally quoted installed fine with
+    pip, but the resolver kept the quote characters as part of the filename and refused the wheel
+    as claiming a member that was not in the archive (SYS5-04). ``csv.reader`` over the raw text
+    (``newline=""`` so the reader, not the file layer, owns line ends) accepts LF and CRLF alike and
+    unquotes exactly as an installer does; ``strict=True`` turns malformed quoting into a refusal
+    with a precise message instead of a silently tolerated field. Blank lines are skipped, as
+    before; every other row must carry exactly three fields, or the RECORD is refused -- a
+    non-quoted comma is a four-field row, never a path.
+    """
+    rows: list[tuple[str, str, str]] = []
+    try:
+        for index, row in enumerate(csv.reader(io.StringIO(text, newline=""), strict=True), start=1):
+            if not row or (len(row) == 1 and not row[0].strip()):
+                continue
+            if len(row) != 3:
+                raise ValueError(f"wheel RECORD row {index} has {len(row)} fields; expected exactly 3 (path,hash,size)")
+            rows.append((row[0], row[1], row[2]))
+    except csv.Error as exc:
+        raise ValueError(f"wheel RECORD is not well-formed CSV: {exc}") from exc
+    return rows
+
+
 def _wheel_record_hashes(path: Path) -> dict[str, str]:
     """Parse the wheel's RECORD into ``{path: sha256-hex}`` for every hashed entry."""
     with zipfile.ZipFile(path) as archive:
@@ -387,13 +422,7 @@ def _wheel_record_hashes(path: Path) -> dict[str, str]:
         text = archive.read(record_names[0]).decode("utf-8")
     hashes: dict[str, str] = {}
     unhashed: list[str] = []
-    for line in text.splitlines():
-        if not line.strip():
-            continue
-        parts = line.rsplit(",", 2)
-        if len(parts) != 3:
-            raise ValueError(f"wheel RECORD line is malformed: {line!r}")
-        name, hash_field, _size = parts
+    for name, hash_field, _size in _record_rows(text):
         if not hash_field:
             # RECORD cannot hash itself; ANY other unhashed row is the tamper vector -- strip a
             # file's hash and the comparison silently skipped it, so altered code installed and
@@ -519,13 +548,13 @@ def subject_binding(path: Path, build: dict[str, Any]) -> dict[str, Any]:
             )
     try:
         wheel_hashes = _wheel_record_hashes(path)
-    except (ValueError, OSError, zipfile.BadZipFile) as exc:
+    except Exception as exc:  # noqa: BLE001 -- untrusted archive, same boundary as wheel_provenance
         # append rather than replace: the import-path mismatches found above are the more
         # diagnostic half of a shadowed-install failure and must not be discarded here
         return {
             "artifact": "mixle.subject_binding/v1",
             "verified": False,
-            "mismatches": [*mismatches, str(exc)],
+            "mismatches": [*mismatches, f"{type(exc).__name__}: {exc}"],
         }
     installed_hashes: dict[str, str] = {}
     try:

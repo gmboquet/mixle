@@ -532,3 +532,92 @@ jobs:
           path: hardware.json
           if-no-files-found: error
           retention-days: 90
+
+  release-check-evidence:
+    # Produces the ONE record that binds a review candidate to approved checks, and attests it.
+    # metadata/release-check-evidence.json is only ever written by scripts/verify_required_checks.py
+    # over the commit's real check runs, only when every check in .github/release-required-checks.txt
+    # is completed/success -- and shape alone is not approval (systems review pass 5, SYS5-01), so
+    # the record is signed through this workflow's OIDC identity (actions/attest -> Sigstore) and the
+    # receipt resolver verifies that attestation, bound to this repository, this workflow file, and
+    # the commit it ran at. It lives here rather than in its own file because workflow_dispatch needs
+    # the workflow file on the default branch, and tests.yml is there. Dispatch-only, and it needs
+    # every other job green: on push it is skipped. publish.yml does the same in its own
+    # verify-candidate step, signed as publish.yml.
+    name: release check evidence / attested record
+    if: github.event_name == 'workflow_dispatch'
+    needs:
+      - decision-reviews
+      - smoke
+      - lint
+      - fast
+      - fast-macos
+      - min-versions
+      - full
+      - full-coverage
+      - clean-wheel
+      - optional
+      - numerical
+      - hardware
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Generate the record for the exact tip (fails closed)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SHA"
+          mkdir -p evidence
+          gh api --paginate --slurp "repos/$REPOSITORY/commits/$SHA/check-runs?per_page=100" > evidence/check-runs.json
+          python scripts/verify_required_checks.py \
+            --required .github/release-required-checks.txt \
+            --input evidence/check-runs.json \
+            --sha "$SHA" \
+            --repository "$REPOSITORY" > evidence/release-check-evidence.json
+      - id: attest
+        name: Attest the record through this workflow's identity
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: evidence/release-check-evidence.json
+          predicate-type: https://github.com/gmboquet/mixle/release-check-evidence/v1
+          predicate: '{"commit": "${{ github.sha }}", "phase": "review-candidate"}'
+          show-summary: false
+      - name: Retain the bundle and verify it exactly as the receipt resolver will
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          cp "$BUNDLE" evidence/release-check-evidence.sigstore.json
+          gh attestation verify evidence/release-check-evidence.json \
+            --bundle evidence/release-check-evidence.sigstore.json \
+            --repo "$REPOSITORY" \
+            --cert-identity-regex "^https://github\\.com/$REPOSITORY/\\.github/workflows/tests\\.yml@" \
+            --cert-oidc-issuer https://token.actions.githubusercontent.com \
+            --source-digest "$SHA" \
+            --predicate-type https://github.com/gmboquet/mixle/release-check-evidence/v1 \
+            --deny-self-hosted-runners \
+            --format json > /dev/null
+          sha256sum evidence/*
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-check-evidence-${{ github.sha }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 90

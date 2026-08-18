@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import tempfile
@@ -50,6 +51,58 @@ class ExampleExecutionManifestTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        # the retained, attested check-evidence record every receipt was resolved against, and a
+        # live regeneration the caller made moments before building the manifest (SYS5-01)
+        required = self.bundle["candidate_binding"]["required_checks"]
+        evidence = {
+            "artifact": "mixle.release_check_evidence/v1",
+            "commit": "a" * 40,
+            "checks": {
+                name: {
+                    "check_run_id": 1000 + index,
+                    "details_url": f"https://github.com/gmboquet/mixle/actions/runs/{500 + index}/job/{1000 + index}",
+                }
+                for index, name in enumerate(required)
+            },
+            "publication_authorized": True,
+        }
+        self.check_evidence = root / "release-check-evidence.json"
+        self.check_evidence.write_text(json.dumps(evidence), encoding="utf-8")
+        self.live_check_evidence = root / "live-check-evidence.json"
+        self.live_check_evidence.write_text(
+            json.dumps(evidence, indent=1), encoding="utf-8"
+        )  # same selection, other bytes
+        self.evidence_digest = hashlib.sha256(self.check_evidence.read_bytes()).hexdigest()
+        self.evidence_bundle = root / "release-check-evidence.sigstore.json"
+        self.evidence_bundle.write_text('{"fixture": "sigstore bundle"}\n', encoding="utf-8")
+        self.live_evidence_bundle = root / "live-check-evidence.sigstore.json"
+        self.live_evidence_bundle.write_text('{"fixture": "sigstore bundle 2"}\n', encoding="utf-8")
+        # the builder verifies BOTH records' attestations itself through the resolver's gh binding;
+        # a unit test cannot mint Sigstore bundles, so the resolver it loads is given a verifier that
+        # accepts exactly the two issued digests (as GitHub would) and no other, and reports the
+        # retained record as signed by the prepare run and the live one by the promote run
+        self.live_evidence_digest = hashlib.sha256(self.live_check_evidence.read_bytes()).hexdigest()
+        signed = {
+            self.evidence_digest: "https://github.com/gmboquet/mixle/actions/runs/1/attempts/1",
+            self.live_evidence_digest: "https://github.com/gmboquet/mixle/actions/runs/2/attempts/1",
+        }
+
+        def verify(record_path, bundle_path, contract, commit):
+            digest = hashlib.sha256(Path(record_path).read_bytes()).hexdigest()
+            if digest not in signed:
+                raise ValueError("check-evidence attestation did not verify: no attestation names this record")
+            return {
+                "attested": True,
+                "record_sha256": digest,
+                "signer_workflow": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.0",
+                "source_digest": commit,
+                "run_invocation_uri": signed[digest],
+            }
+
+        self.signed = signed
+        resolver = self.builder._resolver()
+        resolver._verify_check_evidence_attestation = verify
+        self.builder._resolver = lambda: resolver
         self.receipts = []
         for entry in self.bundle["entries"]:
             receipt = root / f"{entry['id']}.json"
@@ -81,6 +134,7 @@ class ExampleExecutionManifestTest(unittest.TestCase):
                             "resolved": True,
                             "problems": [],
                             "candidate_commit": "a" * 40,
+                            "check_evidence": {"attested": True, "record_sha256": self.evidence_digest},
                         },
                         "passed": True,
                     }
@@ -92,12 +146,16 @@ class ExampleExecutionManifestTest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def build(self, receipts=None):
+    def build(self, receipts=None, *, check_evidence=None, live_check_evidence=None):
         return self.builder.build_manifest(
             bundle_path=BUNDLE,
             candidate_path=self.candidate,
             wheel_metadata_path=self.wheel,
             receipt_paths=self.receipts if receipts is None else receipts,
+            check_evidence_path=self.check_evidence if check_evidence is None else check_evidence,
+            check_evidence_bundle_path=self.evidence_bundle,
+            live_check_evidence_path=self.live_check_evidence if live_check_evidence is None else live_check_evidence,
+            live_check_evidence_bundle_path=self.live_evidence_bundle,
         )
 
     def test_complete_manifest_binds_candidate_wheel_profile_and_every_example(self):
@@ -134,6 +192,111 @@ class ExampleExecutionManifestTest(unittest.TestCase):
         self.assertIn("build_example_execution_manifest.py", workflow)
         self.assertIn("--out candidate/metadata/example-execution-manifest.json", workflow)
         self.assertIn("candidate/metadata/*.json", workflow)
+        self.assertIn("--check-evidence candidate/metadata/release-check-evidence.json", workflow)
+        self.assertIn("--live-check-evidence promotion/release-check-evidence.json", workflow)
+
+    def test_manifest_records_the_attested_evidence_it_was_bound_to(self):
+        manifest = self.build()
+        self.assertEqual(
+            manifest["check_evidence"],
+            {
+                "sha256": self.evidence_digest,
+                "checks": len(self.bundle["candidate_binding"]["required_checks"]),
+                "attested": True,
+                "attestation": {
+                    "signer_workflow": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.0",
+                    "source_digest": "a" * 40,
+                    "run_invocation_uri": "https://github.com/gmboquet/mixle/actions/runs/1/attempts/1",
+                },
+                "live_regeneration": {
+                    "sha256": self.live_evidence_digest,
+                    "signer_workflow": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.0",
+                    "run_invocation_uri": "https://github.com/gmboquet/mixle/actions/runs/2/attempts/1",
+                    "matched": True,
+                },
+            },
+        )
+
+
+class ManifestBindsAttestedEvidenceTest(ExampleExecutionManifestTest):
+    """SYS5-01: the manifest reused the resolver's ``resolved`` and never asked what the check-evidence
+    record was. A hand-authored record with the right shape yielded four verified receipts and a
+    complete manifest. The manifest now requires every receipt to have been resolved against ONE
+    attested record (its digest travels in the receipt) and that record to select the same check runs
+    as a live regeneration the caller just made."""
+
+    def _edit_receipt(self, index, mutate):
+        receipt = json.loads(self.receipts[index].read_text(encoding="utf-8"))
+        mutate(receipt)
+        self.receipts[index].write_text(json.dumps(receipt), encoding="utf-8")
+
+    def test_a_receipt_not_resolved_against_an_attested_record_is_refused(self):
+        self._edit_receipt(1, lambda r: r["candidate_binding"].pop("check_evidence"))
+        with self.assertRaisesRegex(ValueError, "not resolved against an attested check-evidence record"):
+            self.build()
+        self._edit_receipt(1, lambda r: r["candidate_binding"].update({"check_evidence": {"attested": False}}))
+        with self.assertRaisesRegex(ValueError, "not resolved against an attested check-evidence record"):
+            self.build()
+
+    def test_a_receipt_bound_to_a_different_record_than_the_retained_one_is_refused(self):
+        self._edit_receipt(2, lambda r: r["candidate_binding"]["check_evidence"].update({"record_sha256": "0" * 64}))
+        with self.assertRaisesRegex(ValueError, "different check-evidence record than the retained one"):
+            self.build()
+
+    def test_the_manifest_verifies_the_retained_records_attestation_itself(self):
+        # a retained record GitHub never signed: the receipts may say attested; the manifest checks
+        retained = json.loads(self.check_evidence.read_text(encoding="utf-8"))
+        self.check_evidence.write_text(
+            json.dumps(retained, indent=2), encoding="utf-8"
+        )  # same selection, unsigned bytes
+        digest = hashlib.sha256(self.check_evidence.read_bytes()).hexdigest()
+        for index in range(len(self.receipts)):
+            self._edit_receipt(
+                index, lambda r: r["candidate_binding"]["check_evidence"].update({"record_sha256": digest})
+            )
+        with self.assertRaisesRegex(ValueError, "attestation did not verify"):
+            self.build()
+        workflow = (ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
+        self.assertIn("--check-evidence-bundle candidate/metadata/release-check-evidence.sigstore.json", workflow)
+        self.assertIn("--live-check-evidence-bundle promotion/release-check-evidence.sigstore.json", workflow)
+
+    def test_the_live_record_must_be_attested_by_a_different_run_than_the_retained_one(self):
+        # one file passed as both retained and live: same digest, same run invocation -> refused
+        # (a self-consistent forgery, or an operator short-cut, satisfied the old checks-only compare)
+        with self.assertRaisesRegex(ValueError, "different workflow run"):
+            self.build(live_check_evidence=self.check_evidence)
+        # a live record GitHub never signed -> refused by the live attestation, before the compare
+        unsigned = Path(self.temp.name) / "unsigned-live.json"
+        unsigned.write_text(
+            json.dumps(json.loads(self.live_check_evidence.read_text(encoding="utf-8")), indent=3), encoding="utf-8"
+        )
+        with self.assertRaisesRegex(ValueError, "attestation did not verify"):
+            self.build(live_check_evidence=unsigned)
+        # two genuinely attested records from different runs with the same selection -> accepted
+        self.assertTrue(self.build()["check_evidence"]["live_regeneration"]["matched"])
+
+    def test_a_live_regeneration_selecting_other_check_runs_refuses_the_manifest(self):
+        live = json.loads(self.live_check_evidence.read_text(encoding="utf-8"))
+        first = next(iter(live["checks"]))
+        live["checks"][first]["check_run_id"] += 1  # a newer run appeared for a required check
+        self.live_check_evidence.write_text(json.dumps(live), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "does not select the same check runs as the live regeneration"):
+            self.build()
+
+    def test_evidence_records_must_be_generator_shaped_for_this_candidate(self):
+        retained = json.loads(self.check_evidence.read_text(encoding="utf-8"))
+        for corrupt, message in (
+            (lambda r: r.update({"commit": "b" * 40}), "bound to"),
+            (lambda r: r["checks"].popitem(), "exactly the required checks"),
+            (lambda r: r.update({"publication_authorized": "true"}), "publication_authorized"),
+            (lambda r: r.update({"artifact": "other"}), "not a mixle.release_check_evidence/v1 record"),
+        ):
+            damaged = json.loads(json.dumps(retained))
+            corrupt(damaged)
+            path = Path(self.temp.name) / "damaged.json"
+            path.write_text(json.dumps(damaged), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, message):
+                self.build(live_check_evidence=path)
 
 
 class ManifestRequiresEvidenceNotAssertionTest(ExampleExecutionManifestTest):

@@ -3,8 +3,19 @@
   "artifact": "mixle.reproduction_bundle/v2",
   "candidate_binding": {
     "candidate_record_producer": "scripts/release_candidate_record.py",
+    "check_evidence_attestation": {
+      "bundle_record": "metadata/release-check-evidence.sigstore.json",
+      "check_runs_record": "metadata/check-runs.json",
+      "predicate_type": "https://github.com/gmboquet/mixle/release-check-evidence/v1",
+      "signer_workflows": [
+        ".github/workflows/publish.yml",
+        ".github/workflows/tests.yml"
+      ],
+      "verifier": "gh attestation verify --bundle --repo --cert-identity-regex --cert-oidc-issuer --source-digest --predicate-type --deny-self-hosted-runners"
+    },
     "check_evidence_generator": "scripts/verify_required_checks.py",
     "policy": "exact-publish-workflow-candidate",
+    "repository": "gmboquet/mixle",
     "required_checks": [
       "smoke / collection-light",
       "release decisions / accepted review",
@@ -35,6 +46,8 @@
     "required_records": [
       "metadata/release-candidate.json",
       "metadata/release-check-evidence.json",
+      "metadata/release-check-evidence.sigstore.json",
+      "metadata/check-runs.json",
       "metadata/SHA256SUMS",
       "metadata/mixle-0.8.0-py3-none-any.whl.json",
       "metadata/reproduction-*.json"
@@ -60,12 +73,12 @@
     {
       "path": "scripts/build_repro_bundle.py",
       "role": "bundle-closure",
-      "sha256": "495b29932019f697d68ff687639b3e3c33dfde23e8373e589741bd8be4d25746"
+      "sha256": "32c060029a6344b3cda9e593dd22be62e67d0362b674ad8e3d250841d31a6a6f"
     },
     {
       "path": "scripts/run_repro_entry.py",
       "role": "bundle-closure",
-      "sha256": "9ea70795a1a17551e0eaff68ea879e16f2bfa32c449b78724be6242c2de8890d"
+      "sha256": "a59b383b2b27baf11c47a310fa6163985f7858262e770b04ec47030824e370c1"
     },
     {
       "path": ".github/release-required-checks.txt",
@@ -75,7 +88,7 @@
     {
       "path": "scripts/verify_required_checks.py",
       "role": "bundle-closure",
-      "sha256": "c11be12f5e3eec6ebf3c16d96e02c577dbfeb13cc690c252f402d8fa2fe2d2cf"
+      "sha256": "14ae5f67225ce5c706ca87d259228a35944e8f5e17b3d5a2e2b72d6805cd2367"
     },
     {
       "path": "scripts/release_candidate_record.py",

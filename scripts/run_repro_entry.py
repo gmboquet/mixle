@@ -64,6 +64,7 @@ def validate_bundle(bundle: object) -> dict[str, Any]:
     if not isinstance(required_records, list) or len(required_records) < 4:
         raise ValueError("bundle candidate binding is incomplete")
     _required_check_names(bundle)
+    _attestation_contract(bundle)
     for item in bundle.get("closure", []):
         _validate_input(item)
     entries = bundle.get("entries")
@@ -266,16 +267,180 @@ def _required_check_names(bundle: dict[str, Any]) -> list[str]:
     return list(names)
 
 
-def _check_evidence_problems(bundle: dict[str, Any], evidence: dict[str, Any]) -> list[str]:
-    """Report every way ``evidence`` fails to be a generator-shaped record approving every required check."""
+_HEX40 = re.compile(r"^[0-9a-f]{40}$")
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+# GitHub grammar: an owner is alphanumerics/hyphens not starting with a hyphen; a repository name is
+# alphanumerics, ".", "_", "-" and is never "." or ".."
+_REPOSITORY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*/(?!\.\.?$)[A-Za-z0-9_.-]+$")
+_WORKFLOW_FILE = re.compile(r"^\.github/workflows/[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\.ya?ml$")
+_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
+
+
+def _attestation_contract(bundle: dict[str, Any]) -> dict[str, Any]:
+    """The bundle's statement of who may produce the check-evidence record and how that is verified."""
+    binding = bundle.get("candidate_binding", {})
+    repository = binding.get("repository")
+    contract = binding.get("check_evidence_attestation")
+    if not isinstance(repository, str) or not _REPOSITORY.fullmatch(repository):
+        raise ValueError("bundle candidate binding must name the GitHub repository (owner/repo)")
+    if not isinstance(contract, dict):
+        raise ValueError("bundle candidate binding must describe the check-evidence attestation")
+    workflows = contract.get("signer_workflows")
+    # exact workflow files, in a grammar with no regex metacharacters but '.', so the identity
+    # pattern built from them below is exactly the intended alternatives (a prefix-only entry or a
+    # name with '+' would widen the SubjectAlternativeName the verifier accepts)
+    if (
+        not isinstance(workflows, list)
+        or not workflows
+        or any(not isinstance(w, str) or not _WORKFLOW_FILE.fullmatch(w) for w in workflows)
+        or len(set(workflows)) != len(workflows)
+    ):
+        raise ValueError("check-evidence attestation must name distinct workflow files .github/workflows/<name>.yml")
+    for key in ("predicate_type", "bundle_record", "check_runs_record"):
+        if not isinstance(contract.get(key), str) or not contract[key].strip():
+            raise ValueError(f"check-evidence attestation must state {key}")
+    return {"repository": repository, **contract}
+
+
+def _job_url_pattern(repository: str) -> re.Pattern[str]:
+    # GitHub Actions check runs point at the job page of their run, and the job segment IS the
+    # check-run id (verified 68/68 on the real candidate). The reviewer's forged record used
+    # https://example.invalid/actions/runs/... and passed the old substring test (SYS5-01).
+    return re.compile(rf"^https://github\.com/{re.escape(repository)}/actions/runs/([1-9][0-9]*)/job/([1-9][0-9]*)$")
+
+
+def _run_gh(command: list[str]) -> subprocess.CompletedProcess[str]:
+    """The one call into the gh CLI; a module-local seam so tests replace it without touching the
+    process-wide subprocess module (which poisoned unrelated tests once)."""
+    return subprocess.run(command, capture_output=True, text=True, timeout=120, check=False)
+
+
+def _verify_check_evidence_attestation(
+    record_path: Path, bundle_path: Path, contract: dict[str, Any], commit: str
+) -> dict[str, Any]:
+    """Verify with the gh CLI that GitHub signed ``record_path`` for THIS repository, from one of the
+    bundle's signing workflows, at the candidate commit. Returns what was verified, or raises
+    ValueError with the reason. Nothing else can turn a record's shape into approval evidence.
+
+    The trust anchor is Sigstore's public-good root as gh obtains it (TUF, cached after first use):
+    a "trusted root" shipped beside the record would be chosen by whoever ships the record, and gh
+    would consult nothing else -- an attacker with their own CA then verifies. So no
+    ``--custom-trusted-root`` is ever passed; a host that has never been online cannot verify, and
+    the receipt says so rather than trusting a supplied root. ``--cert-identity-regex`` binds the
+    signing identity to this repository AND its named workflows in one expression (gh refuses it
+    together with ``--signer-repo``); ``--source-digest`` binds to the candidate commit;
+    ``--predicate-type`` to this record kind; ``--cert-oidc-issuer`` to GitHub's OIDC issuer.
+    """
+    escaped = [w.replace(".", "\\.") for w in contract["signer_workflows"]]  # grammar allows no other metachar
+    identity = (
+        rf"^https://github\.com/{contract['repository'].replace('.', chr(92) + '.')}/(" + "|".join(escaped) + ")@"
+    )
+    command = [
+        "gh",
+        "attestation",
+        "verify",
+        str(record_path),
+        "--bundle",
+        str(bundle_path),
+        "--repo",
+        contract["repository"],
+        "--cert-identity-regex",
+        identity,
+        "--cert-oidc-issuer",
+        _OIDC_ISSUER,
+        "--source-digest",
+        commit,
+        "--predicate-type",
+        contract["predicate_type"],
+        "--deny-self-hosted-runners",
+        "--format",
+        "json",
+    ]
+    try:
+        completed = _run_gh(command)
+    except FileNotFoundError as exc:
+        raise ValueError("gh CLI is unavailable, so the check-evidence attestation cannot be verified") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("gh attestation verify did not finish within 120 seconds") from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip().splitlines()
+        raise ValueError(f"check-evidence attestation did not verify: {detail[-1] if detail else 'no output'}")
+    try:
+        results = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError("gh attestation verify returned no JSON result") from exc
+    digest = _sha256(record_path)
+    verified = []
+    for result in results if isinstance(results, list) else []:
+        if not isinstance(result, dict):
+            continue
+        statement = (result.get("verificationResult") or {}).get("statement") or {}
+        subjects = statement.get("subject") or []
+        if any(
+            (subject.get("digest") or {}).get("sha256") == digest for subject in subjects if isinstance(subject, dict)
+        ):
+            if statement.get("predicateType") == contract["predicate_type"]:
+                verified.append(result)
+    if not verified:
+        raise ValueError("no verified attestation names this record's digest with the expected predicate type")
+    certificate = ((verified[0].get("verificationResult") or {}).get("signature") or {}).get("certificate") or {}
+    return {
+        "attested": True,
+        "record_sha256": digest,
+        "signer_workflow": certificate.get("buildSignerURI") or certificate.get("subjectAlternativeName"),
+        "source_repository": certificate.get("sourceRepositoryURI"),
+        "source_digest": certificate.get("sourceRepositoryDigest"),
+        "run_invocation_uri": certificate.get("runInvocationURI"),
+        "verifier": "gh attestation verify --bundle (Sigstore public-good root via gh)",
+    }
+
+
+def _rederive_selection(payload_path: Path, required: list[str], commit: str, repository: str) -> dict[str, Any]:
+    """Run the generator's own selection over the retained check-runs payload; the bundle closes over
+    the generator, so this is the same code the record claims to have come from."""
+    import importlib.util
+
+    generator_path = ROOT / "scripts" / "verify_required_checks.py"
+    spec = importlib.util.spec_from_file_location("_verify_required_checks_rederive", generator_path)
+    if spec is None or spec.loader is None:
+        raise ValueError("the check-evidence generator is not available beside this checkout")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    return module.verify_required_checks(payload, tuple(required), commit, repository=repository)
+
+
+def _check_evidence_problems(
+    bundle: dict[str, Any],
+    evidence: dict[str, Any],
+    *,
+    evidence_path: Path | None = None,
+    records_root: Path | None = None,
+    candidate_commit: str | None = None,
+) -> tuple[list[str], dict[str, Any]]:
+    """Report every way ``evidence`` fails to be THE generator's attested record approving every required
+    check for this candidate, and return what was verified about it.
+
+    Layers, each necessary: (1) the generator's shape -- every required name present as a selected
+    check-run record with a distinct id and a job URL of this repository whose job segment is the id;
+    (2) provenance of the selection -- the record commits to the digest of the check-runs payload it was
+    derived from, that payload is retained beside it, and running the generator over it reproduces the
+    same selection; (3) authenticity -- a Sigstore attestation, signed through GitHub's OIDC identity of
+    one of the bundle's signing workflows at the candidate commit, names this record's digest, verified
+    offline against the retained trusted root. A hand-written record can satisfy (1) and, with a
+    hand-written payload, (2); it cannot satisfy (3) (SYS5-01).
+    """
     problems: list[str] = []
+    info: dict[str, Any] = {"attested": False}
     try:
         required = _required_check_names(bundle)
+        contract = _attestation_contract(bundle)
     except ValueError as exc:
-        return [str(exc)]
+        return [str(exc)], info
     checks = evidence.get("checks")
     if not isinstance(checks, dict):
-        return ["release-check-evidence.json has no checks mapping"]
+        return ["release-check-evidence.json has no checks mapping"], info
+    job_url = _job_url_pattern(contract["repository"])
     seen_ids: dict[int, str] = {}
     for name in required:
         selected = checks.get(name)
@@ -290,20 +455,80 @@ def _check_evidence_problems(bundle: dict[str, Any], evidence: dict[str, Any]) -
             continue
         run_id = selected.get("check_run_id")
         details_url = selected.get("details_url")
-        if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id < 0:
+        if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id <= 0:
             problems.append(f"release-check-evidence.json: required check {name!r} has no valid check_run_id")
-        elif run_id in seen_ids:
+            continue
+        if run_id in seen_ids:
             problems.append(
                 f"release-check-evidence.json: required checks {seen_ids[run_id]!r} and {name!r} "
                 f"cite the same check run {run_id}"
             )
         else:
             seen_ids[run_id] = name
-        if not isinstance(details_url, str) or "/actions/runs/" not in details_url:
-            problems.append(f"release-check-evidence.json: required check {name!r} lacks an Actions run URL")
+        found = job_url.fullmatch(details_url) if isinstance(details_url, str) else None
+        if found is None or int(found.group(2)) != run_id:
+            problems.append(
+                f"release-check-evidence.json: required check {name!r} does not point at a "
+                f"{contract['repository']} Actions job page for check run {run_id}"
+            )
     if evidence.get("publication_authorized") is not True:
         problems.append("release-check-evidence.json does not carry the generator's publication_authorized=true")
-    return problems
+
+    source = evidence.get("source")
+    payload_digest = source.get("check_runs_sha256") if isinstance(source, dict) else None
+    if not isinstance(source, dict) or source.get("repository") != contract["repository"]:
+        problems.append(f"release-check-evidence.json does not name {contract['repository']} as its source repository")
+    if not isinstance(payload_digest, str) or not _HEX64.fullmatch(payload_digest):
+        problems.append(
+            "release-check-evidence.json does not commit to the digest of the check-runs payload it came from"
+        )
+        payload_digest = None
+
+    if records_root is None or evidence_path is None or candidate_commit is None:
+        problems.append("check evidence cannot be authenticated without the records root and candidate commit")
+        return problems, info
+
+    payload_path = records_root / contract["check_runs_record"]
+    if not payload_path.is_file():
+        problems.append(f"absent: {contract['check_runs_record']} (the check-runs payload the record was derived from)")
+    elif payload_digest is not None:
+        try:
+            actual = _sha256(payload_path)
+        except OSError as exc:
+            actual = None
+            problems.append(f"{contract['check_runs_record']} is unreadable: {exc}")
+        if actual is None:
+            pass
+        elif actual != payload_digest:
+            problems.append(
+                f"{contract['check_runs_record']} hashes to {actual[:12]}..., not the {payload_digest[:12]}... "
+                "the record commits to"
+            )
+        else:
+            try:
+                rederived = _rederive_selection(payload_path, required, candidate_commit, contract["repository"])
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                rederived = None
+                problems.append(f"the retained check-runs payload does not approve this candidate: {exc}")
+            if rederived is not None and rederived != checks:
+                problems.append(
+                    "release-check-evidence.json checks do not re-derive from the retained check-runs payload"
+                )
+            info["check_runs_sha256"] = actual
+
+    bundle_path = records_root / contract["bundle_record"]
+    if not bundle_path.is_file():
+        problems.append(f"absent: {contract['bundle_record']} (the attestation bundle)")
+    else:
+        try:
+            info.update(_verify_check_evidence_attestation(evidence_path, bundle_path, contract, candidate_commit))
+        except (ValueError, OSError) as exc:
+            problems.append(str(exc))
+    try:
+        info.setdefault("record_sha256", _sha256(evidence_path))
+    except OSError as exc:
+        problems.append(f"release-check-evidence.json is unreadable: {exc}")
+    return problems, info
 
 
 def _resolve_candidate_records(
@@ -330,6 +555,7 @@ def _resolve_candidate_records(
             "present": [],
             "missing": required,
             "problems": ["no records root supplied"],
+            "check_evidence": {"attested": False},
         }
 
     present: list[str] = []
@@ -408,6 +634,7 @@ def _resolve_candidate_records(
     # reads (build_repro_bundle.py parses it with the generator's own parser), and each entry is
     # checked for the generator's selected-check shape. This is necessary, not sufficient: the
     # check runs themselves are only verifiable against GitHub, which the generator does.
+    check_evidence: dict[str, Any] = {"attested": False}
     evidence_paths = matches.get("metadata/release-check-evidence.json") or []
     if evidence_paths:
         evidence = _read_json_record(evidence_paths[0])
@@ -418,7 +645,14 @@ def _resolve_candidate_records(
         else:
             if candidate_commit is not None and evidence.get("commit") != candidate_commit:
                 problems.append("release-check-evidence.json is bound to a different commit than the candidate")
-            problems.extend(_check_evidence_problems(bundle, evidence))
+            evidence_problems, check_evidence = _check_evidence_problems(
+                bundle,
+                evidence,
+                evidence_path=evidence_paths[0],
+                records_root=records_root,
+                candidate_commit=candidate_commit,
+            )
+            problems.extend(evidence_problems)
 
     # metadata/SHA256SUMS -- must name a wheel and an sdist with well-formed digests.
     sums: dict[str, str] = {}
@@ -478,8 +712,14 @@ def _resolve_candidate_records(
             elif not isinstance(installed, dict) or not installed:
                 problems.append("executing artifact reports no installed RECORD hashes to bind")
             else:
-                actual = hashlib.sha256(wheel_path.read_bytes()).hexdigest()
-                if actual != sums[pinned_name]:
+                try:
+                    actual = hashlib.sha256(wheel_path.read_bytes()).hexdigest()
+                except OSError as exc:
+                    actual = None
+                    problems.append(f"dist/{pinned_name} is unreadable: {exc}")
+                if actual is None:
+                    pass
+                elif actual != sums[pinned_name]:
                     problems.append(
                         f"dist/{pinned_name} hashes to {actual[:12]}..., not the pinned {sums[pinned_name][:12]}..."
                     )
@@ -488,9 +728,18 @@ def _resolve_candidate_records(
                         from mixle.reproduction import _wheel_record_hashes
 
                         pinned_records = _wheel_record_hashes(wheel_path)
-                    except (OSError, ValueError, ImportError) as exc:
+                    except Exception as exc:  # noqa: BLE001 -- the archive is untrusted input; see below
+                        # A pinned wheel with a truncated central directory escaped as an uncaught
+                        # zipfile.BadZipFile traceback (exit 1) instead of an unbound receipt with its
+                        # reason (SYS5-03); the first repair enumerated exception classes and missed
+                        # zlib.error, lzma.LZMAError, NotImplementedError (unsupported method / version /
+                        # flags) and RuntimeError (encrypted member). Reading an untrusted archive can
+                        # raise anything its decompressors raise, and every one of them means the same
+                        # thing here: the pinned bytes cannot be read, so the binding fails closed with
+                        # the exception named. Nothing is swallowed -- the type and message are the
+                        # problem string -- and nothing else in this branch can raise but the read.
                         pinned_records = None
-                        problems.append(f"pinned wheel RECORD could not be read: {exc}")
+                        problems.append(f"pinned wheel RECORD could not be read: {type(exc).__name__}: {exc}")
                     if pinned_records is not None:
                         missing_or_different = [
                             path
@@ -520,6 +769,10 @@ def _resolve_candidate_records(
         "missing": missing,
         "problems": problems,
         "candidate_commit": candidate_commit,
+        # What was established about the check-evidence record: its digest, whether GitHub's
+        # attestation for it verified (and by which workflow, at which commit), and the digest of the
+        # check-runs payload it re-derives from. The manifest builder binds on these.
+        "check_evidence": check_evidence,
     }
 
 

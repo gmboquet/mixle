@@ -788,3 +788,215 @@ class FourthPassNeighboursTest(unittest.TestCase):
         self.assertFalse(_code_equal(g, g.replace(co_firstlineno=g.co_firstlineno + 50)))
         self.assertFalse(_code_equal(g, g.replace(co_linetable=b"")))
         self.assertTrue(_code_equal(g, g.replace()))
+
+
+class RecordCsvSemanticsTest(unittest.TestCase):
+    """SYS5-04: RECORD is CSV (path,hash,size) per the wheel spec, and was parsed with ``rsplit``.
+
+    A wheel whose first RECORD path was legally quoted installed fine with pip, but the resolver
+    treated the quote characters as part of the filename and refused it as an unclaimed member. A
+    path containing a comma MUST be quoted, so such a wheel could never have been accepted at all.
+    The parser now uses the ``csv`` module (``,`` delimiter, ``"`` quote character, as PEP 376 says
+    RECORD is read) while every existing check keeps its strength: every claim is recomputed against
+    the member, unclaimed members and duplicate paths are refused, and only RECORD may be unhashed.
+
+    ``_pip_installs`` proves the fixtures are wheels pip accepts: it installs them with ``--no-deps``
+    into a fresh venv created from the running interpreter (measured at well under a second) and
+    imports the result. If pip is unavailable to the running interpreter the pip half is skipped,
+    and the parser half still runs.
+    """
+
+    DIST = "recq-0.0.1.dist-info"
+    METADATA = b"Metadata-Version: 2.1\nName: recq\nVersion: 0.0.1\n"
+    WHEEL = b"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+
+    @staticmethod
+    def _digest(data: bytes) -> tuple[str, str]:
+        import base64
+        import hashlib
+
+        raw = hashlib.sha256(data).digest()
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("="), raw.hex()
+
+    def _wheel(self, directory, members, record_lines, newline="\n"):
+        """Write an installable wheel: ``members`` plus METADATA/WHEEL, RECORD from ``record_lines``.
+
+        ``record_lines`` receives a ``row(name, data, quote=False)`` helper and returns the rows for
+        the distributed members; the metadata rows and the unhashed RECORD row are appended here.
+        """
+        wheel = Path(directory) / "recq-0.0.1-py3-none-any.whl"
+
+        def row(name, data, quote=False):
+            encoded, _ = self._digest(data)
+            path = '"%s"' % name if quote else name
+            return "%s,sha256=%s,%d" % (path, encoded, len(data))
+
+        rows = list(record_lines(row))
+        rows.append(row(self.DIST + "/METADATA", self.METADATA))
+        rows.append(row(self.DIST + "/WHEEL", self.WHEEL))
+        rows.append(self.DIST + "/RECORD,,")
+        with zipfile.ZipFile(wheel, "w") as archive:
+            for name, data in members.items():
+                archive.writestr(name, data)
+            archive.writestr(self.DIST + "/METADATA", self.METADATA)
+            archive.writestr(self.DIST + "/WHEEL", self.WHEEL)
+            archive.writestr(self.DIST + "/RECORD", newline.join(rows) + newline)
+        return wheel
+
+    def _expected(self, members):
+        _, meta = self._digest(self.METADATA)
+        _, whl = self._digest(self.WHEEL)
+        expected = {name: self._digest(data)[1] for name, data in members.items()}
+        expected[self.DIST + "/METADATA"] = meta
+        expected[self.DIST + "/WHEEL"] = whl
+        return expected
+
+    def _pip_installs(self, wheel, directory, probe):
+        """Install ``wheel`` into a fresh venv with pip and run ``probe`` (Python source) in it."""
+        import subprocess
+        import sys
+
+        try:
+            import pip
+        except ImportError:
+            self.skipTest("pip is not importable by the running interpreter")
+        release = tuple(int(part) for part in pip.__version__.split(".")[:2] if part.isdigit())
+        if release < (22, 3):
+            self.skipTest("pip --python (used to target the fresh venv) needs pip 22.3+")
+        venv_dir = Path(directory) / "venv"
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv_dir)], check=True, timeout=60)
+        target = venv_dir / ("Scripts" if sys.platform == "win32" else "bin") / "python"
+        install = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "--python",
+                str(target),
+                "install",
+                "--no-deps",
+                "--no-index",
+                "--disable-pip-version-check",
+                "-q",
+                str(wheel),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(install.returncode, 0, "pip refused the fixture wheel:\n" + install.stdout + install.stderr)
+        result = subprocess.run([str(target), "-c", probe], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result.stdout
+
+    def test_a_quoted_first_path_is_accepted_and_pip_installs_the_same_wheel(self):
+        from mixle.reproduction import _wheel_record_hashes
+
+        members = {"recq/__init__.py": b"x = 1\n"}
+        with tempfile.TemporaryDirectory() as directory:
+            wheel = self._wheel(
+                directory, members, lambda row: [row("recq/__init__.py", members["recq/__init__.py"], quote=True)]
+            )
+            self.assertIn(b'"recq/__init__.py",sha256=', zipfile.ZipFile(wheel).read(self.DIST + "/RECORD"))
+            self.assertEqual(_wheel_record_hashes(wheel), self._expected(members))
+            out = self._pip_installs(wheel, directory, "import recq; print(recq.x)")
+            self.assertEqual(out.strip(), "1")
+
+    def test_a_member_whose_name_contains_a_comma_is_accepted_and_pip_installs_it(self):
+        from mixle.reproduction import _wheel_record_hashes
+
+        members = {"recq/__init__.py": b"x = 1\n", "recq/data,1.txt": b"payload\n"}
+        with tempfile.TemporaryDirectory() as directory:
+            wheel = self._wheel(
+                directory,
+                members,
+                lambda row: [
+                    row("recq/__init__.py", members["recq/__init__.py"]),
+                    row("recq/data,1.txt", members["recq/data,1.txt"], quote=True),
+                ],
+            )
+            self.assertEqual(_wheel_record_hashes(wheel), self._expected(members))
+            probe = (
+                "import importlib.metadata as m, pathlib, recq;"
+                "p = pathlib.Path(recq.__file__).parent / 'data,1.txt';"
+                "print(p.read_text(), sorted(str(f) for f in m.files('recq') if ',' in str(f)))"
+            )
+            out = self._pip_installs(wheel, directory, probe)
+            self.assertEqual(out.strip(), "payload\n ['recq/data,1.txt']")
+
+    def test_crlf_line_endings_are_accepted(self):
+        from mixle.reproduction import _wheel_record_hashes
+
+        members = {"recq/__init__.py": b"x = 1\n"}
+        with tempfile.TemporaryDirectory() as directory:
+            wheel = self._wheel(
+                directory, members, lambda row: [row("recq/__init__.py", members["recq/__init__.py"])], newline="\r\n"
+            )
+            self.assertIn(b"\r\n", zipfile.ZipFile(wheel).read(self.DIST + "/RECORD"))
+            self.assertEqual(_wheel_record_hashes(wheel), self._expected(members))
+
+    def test_rows_without_exactly_three_fields_are_refused(self):
+        from mixle.reproduction import _wheel_record_hashes
+
+        members = {"recq/__init__.py": b"x = 1\n"}
+        good = members["recq/__init__.py"]
+        with tempfile.TemporaryDirectory() as directory:
+            two = self._wheel(directory, members, lambda row: [row("recq/__init__.py", good).rsplit(",", 1)[0]])
+            with self.assertRaisesRegex(ValueError, r"RECORD row 1 has 2 fields; expected exactly 3"):
+                _wheel_record_hashes(two)
+            four = self._wheel(directory, members, lambda row: [row("recq/__init__.py", good) + ",extra"])
+            with self.assertRaisesRegex(ValueError, r"RECORD row 1 has 4 fields; expected exactly 3"):
+                _wheel_record_hashes(four)
+            # a comma in an UNQUOTED path is a 4-field row, not a path: the spec requires quoting
+            unquoted = self._wheel(
+                directory,
+                {**members, "recq/data,1.txt": good},
+                lambda row: [row("recq/__init__.py", good), row("recq/data,1.txt", good)],
+            )
+            with self.assertRaisesRegex(ValueError, r"RECORD row 2 has 4 fields; expected exactly 3"):
+                _wheel_record_hashes(unquoted)
+
+    def test_csv_parsing_does_not_weaken_the_existing_checks(self):
+        """The strengthened parser still refuses stale claims, unclaimed members, duplicate paths,
+        escaping paths, and unhashed non-RECORD rows -- now also when the offending row is quoted."""
+        from mixle.reproduction import _wheel_record_hashes
+
+        good = b"x = 1\n"
+        members = {"recq/__init__.py": good}
+        with tempfile.TemporaryDirectory() as directory:
+            stale = self._wheel(
+                directory, {"recq/__init__.py": b"x = 2\n"}, lambda row: [row("recq/__init__.py", good, quote=True)]
+            )
+            with self.assertRaisesRegex(ValueError, "does not match its RECORD hash"):
+                _wheel_record_hashes(stale)
+            unclaimed = self._wheel(
+                directory, {**members, "recq/extra.py": good}, lambda row: [row("recq/__init__.py", good, quote=True)]
+            )
+            with self.assertRaisesRegex(ValueError, "the RECORD does not claim"):
+                _wheel_record_hashes(unclaimed)
+            duplicate = self._wheel(
+                directory,
+                members,
+                lambda row: [row("recq/__init__.py", good), row("recq/__init__.py", good, quote=True)],
+            )
+            with self.assertRaisesRegex(ValueError, "more than once"):
+                _wheel_record_hashes(duplicate)
+            escaping = self._wheel(
+                directory,
+                {**members, "../escape.py": good},
+                lambda row: [row("recq/__init__.py", good), row("../escape.py", good, quote=True)],
+            )
+            with self.assertRaisesRegex(ValueError, "escapes the archive root"):
+                _wheel_record_hashes(escaping)
+            unhashed = self._wheel(directory, members, lambda row: [row("recq/__init__.py", good), '"recq/other.py",,'])
+            with self.assertRaisesRegex(ValueError, "omits hashes"):
+                _wheel_record_hashes(unhashed)
+            # malformed quoting is refused with a precise message rather than silently tolerated
+            malformed = Path(directory) / "malformed.whl"
+            with zipfile.ZipFile(malformed, "w") as archive:
+                archive.writestr("recq/__init__.py", good)
+                archive.writestr(
+                    self.DIST + "/RECORD", '"recq/__init__.py" x,sha256=abc,5\n' + self.DIST + "/RECORD,,\n"
+                )
+            with self.assertRaisesRegex(ValueError, "RECORD is not well-formed CSV"):
+                _wheel_record_hashes(malformed)

@@ -45,6 +45,12 @@ jobs:
     name: Verify immutable release candidate
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: read
+      # the check-evidence record is attested through this workflow's OIDC identity (SYS5-01)
+      id-token: write
+      attestations: write
     outputs:
       candidate-sha: ${{ steps.candidate.outputs.sha }}
       candidate-tag: ${{ steps.candidate.outputs.tag }}
@@ -107,19 +113,53 @@ jobs:
             --require-final
           # every page: the generator requires the runs to add up to GitHub's total_count, because
           # "latest run per name" is meaningless over a truncated first page
-          gh api --paginate --slurp "repos/$REPOSITORY/commits/$SHA/check-runs?per_page=100" > "$RUNNER_TEMP/check-runs.json"
+          mkdir -p "$RUNNER_TEMP/approval"
+          gh api --paginate --slurp "repos/$REPOSITORY/commits/$SHA/check-runs?per_page=100" > "$RUNNER_TEMP/approval/check-runs.json"
+          # The record commits to the digest of this exact payload and is retained beside it, so
+          # any consumer can re-derive the selection; the attestation below is what makes it
+          # approval evidence rather than a well-shaped file (SYS5-01).
           python scripts/verify_required_checks.py \
             --required .github/release-required-checks.txt \
-            --input "$RUNNER_TEMP/check-runs.json" \
-            --sha "$SHA" > "$RUNNER_TEMP/release-check-evidence.json"
+            --input "$RUNNER_TEMP/approval/check-runs.json" \
+            --sha "$SHA" \
+            --repository "$REPOSITORY" > "$RUNNER_TEMP/approval/release-check-evidence.json"
 
           printf 'sha=%s\n' "$SHA" >> "$GITHUB_OUTPUT"
           printf 'tag=%s\n' "$TAG" >> "$GITHUB_OUTPUT"
           printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+      - id: attest
+        name: Attest the check-evidence record through this workflow's identity
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/approval/release-check-evidence.json
+          predicate-type: https://github.com/gmboquet/mixle/release-check-evidence/v1
+          predicate: '{"commit": "${{ steps.candidate.outputs.sha }}", "phase": "${{ inputs.phase }}"}'
+          show-summary: false
+      - name: Retain the bundle and verify it exactly as the receipt resolver will
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ steps.candidate.outputs.sha }}
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          cp "$BUNDLE" "$RUNNER_TEMP/approval/release-check-evidence.sigstore.json"
+          # the same binding the resolver applies: identity regex (repository + workflow), GitHub's
+          # OIDC issuer, the candidate commit, this predicate type; Sigstore's public-good root via
+          # gh -- never a root shipped beside the record
+          gh attestation verify "$RUNNER_TEMP/approval/release-check-evidence.json" \
+            --bundle "$RUNNER_TEMP/approval/release-check-evidence.sigstore.json" \
+            --repo "$REPOSITORY" \
+            --cert-identity-regex "^https://github\\.com/$REPOSITORY/\\.github/workflows/publish\\.yml@" \
+            --cert-oidc-issuer https://token.actions.githubusercontent.com \
+            --source-digest "$SHA" \
+            --predicate-type https://github.com/gmboquet/mixle/release-check-evidence/v1 \
+            --deny-self-hosted-runners \
+            --format json > /dev/null
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: candidate-approval-${{ steps.candidate.outputs.sha }}-${{ inputs.phase }}
-          path: ${{ runner.temp }}/release-check-evidence.json
+          path: ${{ runner.temp }}/approval/
           if-no-files-found: error
           retention-days: 90
 
@@ -399,6 +439,9 @@ jobs:
             --name "sbom-all-$CANDIDATE_SHA" \
             --dir candidate/metadata/security \
             --repo "$REPOSITORY"
+          # the receipts were resolved against the prepare phase's attested record; the promote
+          # phase regenerated approval from the GitHub API minutes ago (promotion/), and the two
+          # must select the same check runs
           python scripts/build_example_execution_manifest.py \
             --bundle release-checklists/0.8.0-repro-bundle.json \
             --candidate candidate/metadata/release-candidate.json \
@@ -407,6 +450,10 @@ jobs:
             --receipt candidate/metadata/reproduction-gallery-structured.json \
             --receipt candidate/metadata/reproduction-production-provenance.json \
             --receipt candidate/metadata/reproduction-scaling-backend.json \
+            --check-evidence candidate/metadata/release-check-evidence.json \
+            --check-evidence-bundle candidate/metadata/release-check-evidence.sigstore.json \
+            --live-check-evidence promotion/release-check-evidence.json \
+            --live-check-evidence-bundle promotion/release-check-evidence.sigstore.json \
             --out candidate/metadata/example-execution-manifest.json
           gh release upload "$CANDIDATE_TAG" \
             candidate/docs-dist/* \

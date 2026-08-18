@@ -20,6 +20,29 @@ REQUIRED_CHECKS_POLICY = ".github/release-required-checks.txt"
 CHECK_EVIDENCE_GENERATOR = "scripts/verify_required_checks.py"
 CANDIDATE_RECORD_PRODUCER = "scripts/release_candidate_record.py"
 
+# The check-evidence record is APPROVAL evidence only if it was produced by this repository's own
+# workflow over the candidate commit's real check runs. A record with the right shape, all 24 names,
+# distinct integer ids and plausible URLs is not that (SYS5-01: such a record, authored by hand with
+# invented run ids, yielded four verified receipts and a complete manifest). So the record is only
+# ever written by one of the workflows below, which attest it through GitHub's OIDC identity
+# (actions/attest -> Sigstore); the receipt resolver verifies that attestation with gh against
+# Sigstore's public-good root, bound to this repository, the signing workflow, and the candidate
+# commit (`--source-digest`), and re-derives the record's selection from the retained check-runs
+# payload whose digest the record commits to.
+REPOSITORY = "gmboquet/mixle"
+CHECK_EVIDENCE_ATTESTATION = {
+    "predicate_type": "https://github.com/gmboquet/mixle/release-check-evidence/v1",
+    # publish.yml signs the release's record; tests.yml's final dispatch-only job signs a review
+    # candidate's (a workflow that only exists on a release branch cannot be dispatched at all --
+    # workflow_dispatch needs the file on the default branch -- and tests.yml is there)
+    "signer_workflows": [".github/workflows/publish.yml", ".github/workflows/tests.yml"],
+    "bundle_record": "metadata/release-check-evidence.sigstore.json",
+    "check_runs_record": "metadata/check-runs.json",
+    # no retained trusted root: gh's own TUF-fetched Sigstore public-good root is the anchor; a
+    # root shipped beside the record would be chosen by whoever ships the record
+    "verifier": "gh attestation verify --bundle --repo --cert-identity-regex --cert-oidc-issuer --source-digest --predicate-type --deny-self-hosted-runners",
+}
+
 _CLOSURE_PATHS = (
     "pyproject.toml",
     "release-checklists/0.8.0-repro-environment.json",
@@ -153,9 +176,12 @@ def build() -> dict:
         "release": "0.8.0",
         "candidate_binding": {
             "policy": "exact-publish-workflow-candidate",
+            "repository": REPOSITORY,
             "required_records": [
                 "metadata/release-candidate.json",
                 "metadata/release-check-evidence.json",
+                CHECK_EVIDENCE_ATTESTATION["bundle_record"],
+                CHECK_EVIDENCE_ATTESTATION["check_runs_record"],
                 "metadata/SHA256SUMS",
                 "metadata/mixle-0.8.0-py3-none-any.whl.json",
                 "metadata/reproduction-*.json",
@@ -163,6 +189,7 @@ def build() -> dict:
             "required_checks": _required_check_names(),
             "required_checks_policy": REQUIRED_CHECKS_POLICY,
             "check_evidence_generator": CHECK_EVIDENCE_GENERATOR,
+            "check_evidence_attestation": dict(CHECK_EVIDENCE_ATTESTATION),
             "candidate_record_producer": CANDIDATE_RECORD_PRODUCER,
             "rule": (
                 "The final bundle is incomplete unless these retained records bind its source commit, "

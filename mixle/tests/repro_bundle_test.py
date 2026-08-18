@@ -112,7 +112,15 @@ def test_bundle_rejects_unresolved_license_and_integrity_placeholders():
 
 
 def _runner():
-    return _load(ROOT / "scripts" / "run_repro_entry.py", "_run_repro_entry")
+    runner = _load(ROOT / "scripts" / "run_repro_entry.py", "_run_repro_entry")
+
+    # hermetic by default: no test here may reach the real gh CLI (or the network behind it); a
+    # test that wants to observe the gh command line installs its own fake on this seam
+    def _no_gh(command):
+        raise FileNotFoundError("gh is not consulted by unit tests")
+
+    runner._run_gh = _no_gh
+    return runner
 
 
 _CANDIDATE_COMMIT = "e" * 40
@@ -132,6 +140,7 @@ def _github_check_runs(commit: str, names, *, first_id: int = 1000, conclusion: 
                 "head_sha": commit,
                 "status": "completed",
                 "conclusion": conclusion,
+                "app": {"slug": "github-actions"},
                 "details_url": f"https://github.com/gmboquet/mixle/actions/runs/{500 + index}/job/{first_id + index}",
             }
             for index, name in enumerate(names)
@@ -140,6 +149,10 @@ def _github_check_runs(commit: str, names, *, first_id: int = 1000, conclusion: 
 
 
 def _generated_check_evidence(commit: str = _CANDIDATE_COMMIT) -> str:
+    return _generated_check_evidence_and_payload(commit)[0]
+
+
+def _generated_check_evidence_and_payload(commit: str = _CANDIDATE_COMMIT) -> tuple[str, bytes]:
     """Produce release-check-evidence.json exactly as publish.yml does: the generator's own ``main``.
 
     The record's only real producer is scripts/verify_required_checks.py over the check runs of
@@ -157,13 +170,50 @@ def _generated_check_evidence(commit: str = _CANDIDATE_COMMIT) -> str:
     with tempfile.TemporaryDirectory() as directory:
         payload = Path(directory) / "check-runs.json"
         payload.write_text(json.dumps(_github_check_runs(commit, names)), encoding="utf-8")
+        payload_bytes = payload.read_bytes()
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
             status = generator.main(
-                ["--required", str(_REQUIRED_CHECKS_POLICY), "--input", str(payload), "--sha", commit]
+                [
+                    "--required",
+                    str(_REQUIRED_CHECKS_POLICY),
+                    "--input",
+                    str(payload),
+                    "--sha",
+                    commit,
+                    "--repository",
+                    "gmboquet/mixle",
+                ]
             )
     assert status == 0, "generator refused an all-success payload"
-    return stdout.getvalue()
+    return stdout.getvalue(), payload_bytes
+
+
+def _attest(runner, root: Path) -> None:
+    """Stand in for GitHub: the attestation verifier accepts exactly the record at ``root`` as signed.
+
+    Real verification shells out to ``gh attestation verify`` over a Sigstore bundle that only a
+    workflow of this repository can produce; a unit test cannot mint one. So the verifier is replaced
+    by one that accepts precisely the digest of the record the fixture wrote and refuses every other,
+    which is the property the real one has. The gh command line itself is asserted separately.
+    """
+    issued = hashlib.sha256((root / "metadata" / "release-check-evidence.json").read_bytes()).hexdigest()
+
+    def verify(record_path, bundle_path, contract, commit):
+        digest = hashlib.sha256(Path(record_path).read_bytes()).hexdigest()
+        if digest != issued:
+            raise ValueError("check-evidence attestation did not verify: no attestation names this record")
+        return {
+            "attested": True,
+            "record_sha256": digest,
+            "signer_workflow": f"https://github.com/{contract['repository']}/{contract['signer_workflows'][0]}@refs/heads/x",
+            "source_repository": f"https://github.com/{contract['repository']}",
+            "source_digest": commit,
+            "run_invocation_uri": f"https://github.com/{contract['repository']}/actions/runs/1/attempts/1",
+            "verifier": "test double for gh attestation verify",
+        }
+
+    runner._verify_check_evidence_attestation = verify
 
 
 def _write_valid_records(
@@ -222,7 +272,12 @@ def _write_valid_records(
     )
     (metadata / "SHA256SUMS").write_text(f"{wheel_digest}  {wheel}\n{sdist_digest}  {sdist}\n", encoding="utf-8")
     (metadata / f"{wheel}.json").write_text(json.dumps({"filename": wheel, "sha256": wheel_digest}), encoding="utf-8")
-    (metadata / "release-check-evidence.json").write_text(_generated_check_evidence(commit), encoding="utf-8")
+    record, payload = _generated_check_evidence_and_payload(commit)
+    (metadata / "release-check-evidence.json").write_text(record, encoding="utf-8")
+    (metadata / "check-runs.json").write_bytes(payload)
+    # the attestation bundle is opaque to the resolver -- gh reads it; the unit tests replace the
+    # gh call (see _attest) and assert its argv separately
+    (metadata / "release-check-evidence.sigstore.json").write_text('{"fixture": "sigstore bundle"}\n', encoding="utf-8")
     (metadata / "reproduction-a.json").write_text(
         json.dumps({"artifact": "mixle.reproduction_entry_receipt/v2"}), encoding="utf-8"
     )
@@ -270,9 +325,15 @@ def test_required_records_are_opened_not_merely_name_matched():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         hashes = _write_valid_records(root)
+        _attest(runner, root)
         good = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
         assert good["resolved"] is True, good["problems"]
         assert good["candidate_commit"] == _CANDIDATE_COMMIT
+        assert good["check_evidence"]["attested"] is True
+        assert (
+            good["check_evidence"]["record_sha256"]
+            == hashlib.sha256((root / "metadata" / "release-check-evidence.json").read_bytes()).hexdigest()
+        )
 
 
 def test_an_artifact_from_another_commit_cannot_satisfy_the_binding():
@@ -415,7 +476,8 @@ def test_check_evidence_is_parsed_and_must_be_terminal_passing():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         hashes = _write_valid_records(root)
-        # the generator's record, unmodified, resolves
+        _attest(runner, root)
+        # the generator's record, unmodified and attested, resolves
         result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
         assert result["resolved"] is True, result["problems"]
         evidence = root / "metadata" / "release-check-evidence.json"
@@ -607,3 +669,353 @@ def test_a_pinned_wheel_whose_payload_disagrees_with_its_record_is_refused():
         result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
         assert result["resolved"] is False
         assert any("does not match its RECORD hash" in problem for problem in result["problems"]), result["problems"]
+
+
+def test_an_unissued_but_well_shaped_check_record_is_refused():
+    """SYS5-01: shape is not approval. A record with all 24 names, distinct integer ids,
+    ``publication_authorized: true`` and URLs containing ``/actions/runs/`` -- authored by hand, its cited
+    runs never issued -- produced four verified receipts and a complete manifest. Now the record must
+    (1) point at THIS repository's Actions job pages whose job segment is the check-run id, (2) commit
+    to and re-derive from a retained check-runs payload, and (3) carry a GitHub attestation from one
+    of the bundle's signing workflows at the candidate commit. A forger can fake (1) and (2); the
+    attestation is what they cannot produce, and it is required.
+    """
+    import tempfile
+
+    runner, bundle = _runner(), _bundle()
+    names = bundle["candidate_binding"]["required_checks"]
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        hashes = _write_valid_records(root)
+        _attest(runner, root)  # GitHub signed exactly the fixture's record
+        evidence = root / "metadata" / "release-check-evidence.json"
+
+        # the reviewer's exact forgery: unique positive ids, invented example.invalid URLs
+        forged = {
+            "artifact": "mixle.release_check_evidence/v1",
+            "commit": _CANDIDATE_COMMIT,
+            "checks": {
+                name: {
+                    "check_run_id": 900000 + index,
+                    "details_url": f"https://example.invalid/actions/runs/{700 + index}/job/{900000 + index}",
+                }
+                for index, name in enumerate(names)
+            },
+            "publication_authorized": True,
+        }
+        evidence.write_text(json.dumps(forged), encoding="utf-8")
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert result["resolved"] is False
+        assert sum("does not point at a gmboquet/mixle Actions job page" in p for p in result["problems"]) == len(names)
+        assert any("attestation did not verify" in p for p in result["problems"])
+        assert result["check_evidence"]["attested"] is False
+
+        # a more careful forgery: repo-correct URLs whose job segment is the id, a matching payload
+        # retained beside it (so it re-derives), the source block filled in -- everything but the
+        # signature. Still refused, and only by the attestation.
+        payload = _github_check_runs(_CANDIDATE_COMMIT, names, first_id=900000)
+        payload_bytes = json.dumps(payload).encode("utf-8")
+        (root / "metadata" / "check-runs.json").write_bytes(payload_bytes)
+        careful = json.loads(_generated_check_evidence())  # generator shape for the digest layout
+        careful["checks"] = {
+            name: {
+                "check_run_id": 900000 + index,
+                "details_url": f"https://github.com/gmboquet/mixle/actions/runs/{500 + index}/job/{900000 + index}",
+            }
+            for index, name in enumerate(names)
+        }
+        careful["source"] = dict(careful["source"], check_runs_sha256=hashlib.sha256(payload_bytes).hexdigest())
+        evidence.write_text(json.dumps(careful), encoding="utf-8")
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert result["resolved"] is False
+        assert not any("Actions job page" in p or "re-derive" in p or "hashes to" in p for p in result["problems"]), (
+            result["problems"]
+        )
+        assert [p for p in result["problems"] if "attestation" in p], result["problems"]
+
+        # and the genuine record, restored, resolves again
+        record, genuine_payload = _generated_check_evidence_and_payload()
+        evidence.write_text(record, encoding="utf-8")
+        (root / "metadata" / "check-runs.json").write_bytes(genuine_payload)
+        _attest(runner, root)
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert result["resolved"] is True, result["problems"]
+
+
+def test_check_evidence_must_re_derive_from_the_retained_payload():
+    """The record commits to the payload it came from; both halves are checked."""
+    import tempfile
+
+    runner, bundle = _runner(), _bundle()
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        hashes = _write_valid_records(root)
+        _attest(runner, root)
+        payload_path = root / "metadata" / "check-runs.json"
+        evidence = root / "metadata" / "release-check-evidence.json"
+        original_payload = payload_path.read_bytes()
+
+        # payload altered -> digest mismatch
+        payload_path.write_bytes(original_payload + b"\n")
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert any("the record commits to" in p for p in result["problems"])
+        payload_path.write_bytes(original_payload)
+
+        # payload absent
+        payload_path.unlink()
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert any("absent: metadata/check-runs.json" in p for p in result["problems"])
+        payload_path.write_bytes(original_payload)
+
+        # payload intact but the record's selection edited (a different, real-looking id): the
+        # attestation would refuse it anyway, but re-derivation names the defect precisely
+        payload = json.loads(evidence.read_text(encoding="utf-8"))
+        first = bundle["candidate_binding"]["required_checks"][0]
+        payload["checks"][first]["check_run_id"] += 1
+        payload["checks"][first]["details_url"] = payload["checks"][first]["details_url"][:-1] + "1"
+        evidence.write_text(json.dumps(payload), encoding="utf-8")
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert any("do not re-derive" in p for p in result["problems"]), result["problems"]
+
+        # a payload that does not approve (one required run failed) cannot back a record either
+        names = bundle["candidate_binding"]["required_checks"]
+        failing = _github_check_runs(_CANDIDATE_COMMIT, names)
+        failing["check_runs"][0]["conclusion"] = "failure"
+        failing_bytes = json.dumps(failing).encode("utf-8")
+        payload_path.write_bytes(failing_bytes)
+        record = json.loads(_generated_check_evidence())
+        record["source"]["check_runs_sha256"] = hashlib.sha256(failing_bytes).hexdigest()
+        evidence.write_text(json.dumps(record), encoding="utf-8")
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert any("does not approve this candidate" in p for p in result["problems"]), result["problems"]
+
+
+def test_attestation_is_verified_offline_with_gh_bound_to_repo_workflow_and_commit():
+    """The verifier's exact gh command line is the binding; assert every flag that makes it one."""
+    import subprocess
+    import tempfile
+
+    runner, bundle = _runner(), _bundle()
+    contract = runner._attestation_contract(bundle)
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        hashes = _write_valid_records(root)
+        record = root / "metadata" / "release-check-evidence.json"
+        digest = hashlib.sha256(record.read_bytes()).hexdigest()
+        seen: list[list[str]] = []
+
+        def fake_run(command):
+            seen.append(list(command))
+            output = json.dumps(
+                [
+                    {
+                        "verificationResult": {
+                            "statement": {
+                                "predicateType": contract["predicate_type"],
+                                "subject": [{"name": "release-check-evidence.json", "digest": {"sha256": digest}}],
+                            },
+                            "signature": {
+                                "certificate": {
+                                    "buildSignerURI": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.0",
+                                    "sourceRepositoryURI": "https://github.com/gmboquet/mixle",
+                                    "sourceRepositoryDigest": _CANDIDATE_COMMIT,
+                                    "runInvocationURI": "https://github.com/gmboquet/mixle/actions/runs/1/attempts/1",
+                                }
+                            },
+                        }
+                    }
+                ]
+            )
+            return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+        # the resolver's gh call goes through a module-local seam; replacing the process-wide
+        # subprocess.run here once leaked a fake gh into every later test's subprocesses
+        runner._run_gh = fake_run
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert result["resolved"] is True, result["problems"]
+        assert result["check_evidence"]["source_digest"] == _CANDIDATE_COMMIT
+        (command,) = seen
+        assert command[:3] == ["gh", "attestation", "verify"]
+        assert command[3] == str(record)
+        joined = " ".join(command)
+        assert f"--bundle {root / 'metadata' / 'release-check-evidence.sigstore.json'}" in joined
+        assert "--repo gmboquet/mixle" in joined
+        assert f"--source-digest {_CANDIDATE_COMMIT}" in joined
+        assert f"--predicate-type {contract['predicate_type']}" in joined
+        assert "--cert-oidc-issuer https://token.actions.githubusercontent.com" in joined
+        assert "--deny-self-hosted-runners" in joined and "--format json" in joined
+        # gh refuses --signer-repo together with --cert-identity-regex (the first repair passed
+        # both and could never have verified anything real), and a trusted root read from the
+        # caller's records is no trust anchor: neither flag may appear
+        assert "--signer-repo" not in joined and "--custom-trusted-root" not in joined
+        identity = command[command.index("--cert-identity-regex") + 1]
+        assert identity.startswith("^https://github\\.com/gmboquet/mixle/(")
+        for workflow in contract["signer_workflows"]:
+            assert workflow.replace(".", "\\.") in identity
+        assert identity.endswith(")@")
+        # the identity regex is exactly the two workflow alternatives -- verified against a real SAN
+        import re as _re
+
+        assert _re.match(
+            identity, "https://github.com/gmboquet/mixle/.github/workflows/tests.yml@refs/heads/release/0.8.0"
+        )
+        assert _re.match(identity, "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.0")
+        assert not _re.match(identity, "https://github.com/gmboquet/mixle/.github/workflows/docs.yml@refs/heads/main")
+        assert not _re.match(
+            identity, "https://github.com/gmboquet/mixle-fork/.github/workflows/tests.yml@refs/heads/x"
+        )
+
+        # gh says the signed subject is a DIFFERENT digest -> refused
+        def other_subject(command):
+            payload = json.loads(fake_run(command).stdout)
+            payload[0]["verificationResult"]["statement"]["subject"][0]["digest"]["sha256"] = "0" * 64
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+
+        runner._run_gh = other_subject
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert any("no verified attestation names this record" in p for p in result["problems"])
+
+        # gh refuses -> refused, with gh's last line
+        runner._run_gh = lambda command: subprocess.CompletedProcess(
+            command, 1, stdout="", stderr="Error: verifying with issuer\nfailed to verify"
+        )
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert any("attestation did not verify: failed to verify" in p for p in result["problems"])
+
+        # gh absent -> refused, and says so
+        def no_gh(command):
+            raise FileNotFoundError("gh")
+
+        runner._run_gh = no_gh
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert any("gh CLI is unavailable" in p for p in result["problems"])
+
+        # bundle missing -> named absent, no gh call
+        runner._run_gh = fake_run
+        seen.clear()
+        (root / "metadata" / "release-check-evidence.sigstore.json").unlink()
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert any("release-check-evidence.sigstore.json (the attestation bundle)" in p for p in result["problems"])
+        assert seen == []
+
+
+def test_a_pinned_wheel_with_a_truncated_central_directory_is_a_structured_problem():
+    """SYS5-03: zipfile.BadZipFile escaped the record-resolution boundary as a traceback (exit 1)
+    instead of an unbound receipt with its reason. Every way the archive can be unreadable is now a
+    problem string, and the CLI exits 0 with claim_status unbound."""
+    import tempfile
+
+    runner, bundle = _runner(), _bundle()
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        hashes = _write_valid_records(root)
+        _attest(runner, root)
+        wheel_path = root / "dist" / "mixle-0.8.0-py3-none-any.whl"
+        original = wheel_path.read_bytes()
+        truncated = original[: len(original) - 40]  # cuts into the central directory / EOCD
+        wheel_path.write_bytes(truncated)
+        # keep SHA256SUMS honest about the bytes so the failure is the archive, not the digest
+        sums = root / "metadata" / "SHA256SUMS"
+        sums.write_text(
+            sums.read_text(encoding="utf-8").replace(
+                hashlib.sha256(original).hexdigest(), hashlib.sha256(truncated).hexdigest()
+            ),
+            encoding="utf-8",
+        )
+        (root / "metadata" / "mixle-0.8.0-py3-none-any.whl.json").write_text(
+            json.dumps({"filename": "mixle-0.8.0-py3-none-any.whl", "sha256": hashlib.sha256(truncated).hexdigest()}),
+            encoding="utf-8",
+        )
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert result["resolved"] is False
+        assert any("pinned wheel RECORD could not be read: BadZipFile" in p for p in result["problems"]), result[
+            "problems"
+        ]
+
+
+def test_check_evidence_workflows_attest_and_verify_and_the_bundle_names_them():
+    """The signing workflows named by the bundle exist on disk, attest with a pinned action, retain the
+    payload and bundle, and verify with the same flags the resolver uses -- and none of the flags gh
+    refuses to combine, nor a trusted root read from the artifact."""
+    contract = _bundle()["candidate_binding"]["check_evidence_attestation"]
+    assert _bundle()["candidate_binding"]["repository"] == "gmboquet/mixle"
+    assert contract["signer_workflows"] == [".github/workflows/publish.yml", ".github/workflows/tests.yml"]
+    for workflow in contract["signer_workflows"]:
+        text = (ROOT / workflow).read_text(encoding="utf-8")
+        assert "uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6" in text
+        assert f"predicate-type: {contract['predicate_type']}" in text
+        assert "id-token: write" in text and "attestations: write" in text
+        assert '--repository "$REPOSITORY"' in text
+        for flag in (
+            '--repo "$REPOSITORY"',
+            '--source-digest "$SHA"',
+            f"--predicate-type {contract['predicate_type']}",
+            "--cert-identity-regex",
+            "--cert-oidc-issuer https://token.actions.githubusercontent.com",
+            "--deny-self-hosted-runners",
+        ):
+            assert flag in text, (workflow, flag)
+        assert "--signer-repo" not in text and "--custom-trusted-root" not in text and "trusted-root" not in text
+        for record in ("check_runs_record", "bundle_record"):
+            assert Path(contract[record]).name in text, (workflow, record)
+    tests = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+    assert "if: github.event_name == 'workflow_dispatch'" in tests.split("release-check-evidence:", 1)[1]
+    assert "release-check-evidence-${{ github.sha }}" in tests
+    publish = (ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
+    assert "--check-evidence candidate/metadata/release-check-evidence.json" in publish
+    assert "--check-evidence-bundle candidate/metadata/release-check-evidence.sigstore.json" in publish
+    assert "--live-check-evidence promotion/release-check-evidence.json" in publish
+    assert "--live-check-evidence-bundle promotion/release-check-evidence.sigstore.json" in publish
+    assert "path: ${{ runner.temp }}/approval/" in publish
+    assert not (ROOT / ".github" / "workflows" / "release-check-evidence.yml").exists()
+
+
+def test_every_archive_read_failure_is_a_structured_problem_not_only_bad_zip_file():
+    """Attacking the SYS5-03 repair: the first fix enumerated exception classes and missed what the
+    decompressors raise. A pinned wheel whose RECORD member is LZMA-compressed and corrupt raised
+    lzma.LZMAError (likewise zlib.error, NotImplementedError for unsupported methods/flags,
+    RuntimeError for an encrypted member) straight through the boundary. Every failure to read the
+    untrusted archive is now the same structured problem, with the exception type named."""
+    import tempfile
+    import zipfile
+
+    runner, bundle = _runner(), _bundle()
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        hashes = _write_valid_records(root)
+        _attest(runner, root)
+        wheel_path = root / "dist" / "mixle-0.8.0-py3-none-any.whl"
+        # rewrite the fixture wheel with an LZMA-compressed RECORD, then corrupt that member's data
+        with zipfile.ZipFile(wheel_path) as archive:
+            members = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
+        with zipfile.ZipFile(wheel_path, "w") as archive:
+            for name, data in members:
+                method = zipfile.ZIP_LZMA if name.endswith("RECORD") else zipfile.ZIP_STORED
+                archive.writestr(name, data, compress_type=method)
+        with zipfile.ZipFile(wheel_path) as archive:
+            record = next(info for info in archive.infolist() if info.filename.endswith("RECORD"))
+            data_start = record.header_offset + 30 + len(record.filename.encode()) + len(record.extra)
+            assert record.compress_type == zipfile.ZIP_LZMA and record.compress_size > 8
+        raw = bytearray(wheel_path.read_bytes())
+        for offset in range(data_start + 4, data_start + record.compress_size):
+            raw[offset] ^= 0xFF
+        wheel_path.write_bytes(bytes(raw))
+        digest = hashlib.sha256(bytes(raw)).hexdigest()
+        sums = root / "metadata" / "SHA256SUMS"
+        sums.write_text(
+            "\n".join(
+                (f"{digest}  mixle-0.8.0-py3-none-any.whl" if line.endswith("mixle-0.8.0-py3-none-any.whl") else line)
+                for line in sums.read_text(encoding="utf-8").splitlines()
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (root / "metadata" / "mixle-0.8.0-py3-none-any.whl.json").write_text(
+            json.dumps({"filename": "mixle-0.8.0-py3-none-any.whl", "sha256": digest}), encoding="utf-8"
+        )
+        result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+        assert result["resolved"] is False
+        problems = [p for p in result["problems"] if p.startswith("pinned wheel RECORD could not be read: ")]
+        assert problems, result["problems"]
+        assert not any("BadZipFile" in p for p in problems), problems  # this one is a decompressor error
+        assert any("LZMAError" in p or "zlib" in p or "Error" in p for p in problems), problems
