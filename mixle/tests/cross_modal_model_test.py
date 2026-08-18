@@ -372,6 +372,7 @@ class CrossModalModelTest(unittest.TestCase):
         self.assertTrue(np.isfinite(q))
 
 
+@unittest.skipUnless(HAS_TORCH, "cross-modal model needs torch")
 class ConformalSplitScaleTest(unittest.TestCase):
     """STAT-RR21-06: scales fitted on the ranked residuals broke exchangeability -- joint coverage
     0.179 at d=50 against the claimed 0.90 floor. The internal split (scale half / rank half)
@@ -407,6 +408,7 @@ class ConformalSplitScaleTest(unittest.TestCase):
             model.calibrate({"A": rng.standard_normal((3, 3)), "Y": rng.standard_normal((3, 4))}, "Y")
 
 
+@unittest.skipUnless(HAS_TORCH, "cross-modal model needs torch")
 class ConformalRefitInvalidationTest(unittest.TestCase):
     """STAT-RR22-08: a public fit() changed normalization and parameters but left the conformal
     record byte-identical; the stale interval covered 0/150 on the unchanged query law after a
