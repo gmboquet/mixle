@@ -105,7 +105,9 @@ jobs:
             --receipts release-checklists/0.8.0-receipts \
             --candidate-sha "$SHA" \
             --require-final
-          gh api "repos/$REPOSITORY/commits/$SHA/check-runs?per_page=100" > "$RUNNER_TEMP/check-runs.json"
+          # every page: the generator requires the runs to add up to GitHub's total_count, because
+          # "latest run per name" is meaningless over a truncated first page
+          gh api --paginate --slurp "repos/$REPOSITORY/commits/$SHA/check-runs?per_page=100" > "$RUNNER_TEMP/check-runs.json"
           python scripts/verify_required_checks.py \
             --required .github/release-required-checks.txt \
             --input "$RUNNER_TEMP/check-runs.json" \
@@ -210,7 +212,17 @@ jobs:
             --waivers metadata/accepted-waivers.json \
             --out metadata/sbom.json
           rm metadata/raw-sbom.json metadata/waiver-args.txt
-          python -c 'import json, os, pathlib; pathlib.Path("metadata/release-candidate.json").write_text(json.dumps({"artifact": "mixle.release_candidate/v1", "commit": os.environ["CANDIDATE_SHA"], "tag": os.environ["CANDIDATE_TAG"], "version": os.environ["CANDIDATE_VERSION"], "workflow_run": os.environ["GITHUB_RUN_ID"]}, indent=2, sort_keys=True) + "\n", encoding="utf-8")'
+          # The candidate record names the source commit AND tree; the receipt resolver compares
+          # both against the executing artifact's embedded provenance. One producer, shared with
+          # the tests, so the workflow cannot write a shape the resolver does not read.
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          python scripts/release_candidate_record.py \
+            --commit "$CANDIDATE_SHA" \
+            --tree "$(git rev-parse 'HEAD^{tree}')" \
+            --tag "$CANDIDATE_TAG" \
+            --version "$CANDIDATE_VERSION" \
+            --workflow-run "$GITHUB_RUN_ID" \
+            --out metadata/release-candidate.json
           # Produce the entry receipts against the CANDIDATE ARTIFACT, not the editable checkout,
           # and with the retained records available. Run from the ambient interpreter with neither,
           # every receipt was "unbound" -- and promotion then rejected exactly those receipts for

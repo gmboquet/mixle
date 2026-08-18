@@ -18,6 +18,7 @@ BUNDLE = ROOT / "release-checklists" / "0.8.0-repro-bundle.json"
 # without regenerating the bundle fails the canonical-bundle test rather than drifting silently.
 REQUIRED_CHECKS_POLICY = ".github/release-required-checks.txt"
 CHECK_EVIDENCE_GENERATOR = "scripts/verify_required_checks.py"
+CANDIDATE_RECORD_PRODUCER = "scripts/release_candidate_record.py"
 
 _CLOSURE_PATHS = (
     "pyproject.toml",
@@ -27,6 +28,7 @@ _CLOSURE_PATHS = (
     "scripts/run_repro_entry.py",
     REQUIRED_CHECKS_POLICY,
     CHECK_EVIDENCE_GENERATOR,
+    CANDIDATE_RECORD_PRODUCER,
 )
 
 
@@ -161,6 +163,7 @@ def build() -> dict:
             "required_checks": _required_check_names(),
             "required_checks_policy": REQUIRED_CHECKS_POLICY,
             "check_evidence_generator": CHECK_EVIDENCE_GENERATOR,
+            "candidate_record_producer": CANDIDATE_RECORD_PRODUCER,
             "rule": (
                 "The final bundle is incomplete unless these retained records bind its source commit, "
                 "approved checks, wheel SHA-256, and local entry receipts to the signed v0.8.0 tag."

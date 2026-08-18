@@ -2,6 +2,7 @@
   "acceptance": "Every entry is local and self-contained: each passes exact output validation offline, and retained candidate/check/wheel records bind the bundle to publication.",
   "artifact": "mixle.reproduction_bundle/v2",
   "candidate_binding": {
+    "candidate_record_producer": "scripts/release_candidate_record.py",
     "check_evidence_generator": "scripts/verify_required_checks.py",
     "policy": "exact-publish-workflow-candidate",
     "required_checks": [
@@ -59,7 +60,7 @@
     {
       "path": "scripts/build_repro_bundle.py",
       "role": "bundle-closure",
-      "sha256": "35a3f8675d33d07969da07a127b13f95cce7557f3ba260b82702dd5a4940ca05"
+      "sha256": "495b29932019f697d68ff687639b3e3c33dfde23e8373e589741bd8be4d25746"
     },
     {
       "path": "scripts/run_repro_entry.py",
@@ -74,7 +75,12 @@
     {
       "path": "scripts/verify_required_checks.py",
       "role": "bundle-closure",
-      "sha256": "99c6301ff4f159aae7a8fce9109fa7ecfc4e84d5a61e1c04af931177a6ea9f47"
+      "sha256": "c11be12f5e3eec6ebf3c16d96e02c577dbfeb13cc690c252f402d8fa2fe2d2cf"
+    },
+    {
+      "path": "scripts/release_candidate_record.py",
+      "role": "bundle-closure",
+      "sha256": "c41cc4118941cbae6c3d0f1da073958a5ecfde1ce11907dc8318a89de708f487"
     }
   ],
   "code_license": {

@@ -23,15 +23,46 @@ def required_check_names(path: Path) -> tuple[str, ...]:
     return names
 
 
+def _all_check_runs(payload: object) -> list[dict]:
+    """Every check run in the evidence, or raise if the evidence is not demonstrably complete.
+
+    Accepts one GitHub ``check-runs`` page object or a list of them (``gh api --paginate --slurp``).
+    Every page reports the commit's ``total_count``; the runs supplied must add up to it, because
+    "latest run per name" is only meaningful over ALL runs -- a truncated first page can omit the
+    newest run and leave an older success standing in for a newer failure.
+    """
+    pages = payload if isinstance(payload, list) else [payload]
+    if not pages:
+        raise ValueError("check-run evidence is empty")
+    runs: list[dict] = []
+    totals: set[int] = set()
+    for page in pages:
+        if not isinstance(page, dict) or not isinstance(page.get("check_runs"), list):
+            raise ValueError("check-run evidence must be a GitHub check-runs object")
+        total = page.get("total_count")
+        if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+            raise ValueError("check-run evidence lacks GitHub's total_count")
+        totals.add(total)
+        runs.extend(page["check_runs"])
+    if len(totals) != 1:
+        raise ValueError(f"check-run evidence pages disagree on total_count: {sorted(totals)}")
+    (total,) = totals
+    if len(runs) != total:
+        raise ValueError(
+            f"check-run evidence is incomplete: GitHub reports {total} check runs for the commit "
+            f"but {len(runs)} were supplied (paginate the request)"
+        )
+    return runs
+
+
 def verify_required_checks(payload: object, required: tuple[str, ...], sha: str) -> dict[str, dict[str, object]]:
     """Return selected successful check identities, or raise for missing/stale/failed evidence."""
     if not isinstance(sha, str) or len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha.lower()):
         raise ValueError("candidate SHA must be a full 40-character hexadecimal commit ID")
-    if not isinstance(payload, dict) or not isinstance(payload.get("check_runs"), list):
-        raise ValueError("check-run evidence must be a GitHub check-runs object")
+    check_runs = _all_check_runs(payload)
 
     by_name: dict[str, list[dict]] = {name: [] for name in required}
-    for run in payload["check_runs"]:
+    for run in check_runs:
         if not isinstance(run, dict) or run.get("name") not in by_name:
             continue
         if run.get("head_sha") != sha:
@@ -49,10 +80,7 @@ def verify_required_checks(payload: object, required: tuple[str, ...], sha: str)
             continue
         latest = max(runs, key=lambda run: run["id"])
         if latest.get("status") != "completed" or latest.get("conclusion") != "success":
-            failures.append(
-                f"{name}: latest run {latest['id']} is "
-                f"{latest.get('status')}/{latest.get('conclusion')}"
-            )
+            failures.append(f"{name}: latest run {latest['id']} is {latest.get('status')}/{latest.get('conclusion')}")
             continue
         details_url = latest.get("details_url")
         if not isinstance(details_url, str) or "/actions/runs/" not in details_url:

@@ -118,6 +118,7 @@ def _runner():
 _CANDIDATE_COMMIT = "e" * 40
 _REQUIRED_CHECKS_POLICY = ROOT / ".github" / "release-required-checks.txt"
 _CHECK_EVIDENCE_GENERATOR = ROOT / "scripts" / "verify_required_checks.py"
+_CANDIDATE_RECORD_PRODUCER = ROOT / "scripts" / "release_candidate_record.py"
 
 
 def _github_check_runs(commit: str, names, *, first_id: int = 1000, conclusion: str = "success") -> dict:
@@ -207,16 +208,15 @@ def _write_valid_records(
     wheel_digest = hashlib.sha256(wheel_path.read_bytes()).hexdigest()
     sdist_digest = "b" * 64
 
+    # written by the record's one real producer (scripts/release_candidate_record.py, called by
+    # publish.yml), not by hand: the hand-written fixture carried a `tree` the workflow's inline
+    # writer never emitted, and the resolver was repaired against the fixture (see D-0180)
+    producer = _load(_CANDIDATE_RECORD_PRODUCER, "_release_candidate_record_for_bundle")
     (metadata / "release-candidate.json").write_text(
-        json.dumps(
-            {
-                "artifact": "mixle.release_candidate/v1",
-                "commit": commit,
-                "tree": tree,
-                "version": release,
-                "tag": "v0.8.0",
-                "workflow_run": "1",
-            }
+        producer.render(
+            producer.release_candidate_record(
+                commit=commit, tree=tree, tag=f"v{release}", version=release, workflow_run="1"
+            )
         ),
         encoding="utf-8",
     )
