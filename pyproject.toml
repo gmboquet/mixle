@@ -281,6 +281,13 @@ python_functions = ["test_*"]
 # --dist loadgroup honors the xdist_group marks conftest puts on minute-scale setUpClass classes
 # (the setup runs once per suite instead of once per worker); ungrouped tests keep plain load-balancing.
 addopts = "-ra --strict-markers -n auto --dist loadgroup -m fast"
+# A test that runs 15 minutes has stopped being a test. When one does, pytest's built-in faulthandler
+# dumps every thread's stack to stderr (it does not fail or stop the test), so a hosted lane that goes
+# silent NAMES the item and where it is stuck instead of leaving a 20-minute gap and a budget kill.
+# Twice on 2026-08-17/18 `core / py3.12` went quiet at 98% and was later killed with nothing in the log
+# to say whether a test hung or the runner VM had stalled before its shutdown signal; this settles it.
+# 900 s is far above any single test in the core/full lanes and below every tier budget.
+faulthandler_timeout = 900
 # Warning ownership (T3.3): a DeprecationWarning issued by mixle's OWN code during tests is promoted to an
 # error. A deprecation MUST be asserted with pytest.warns / assertWarns (which consumes it before this
 # filter sees it); a leaked one is a defect -- a deprecated path used somewhere it should not be, or a
