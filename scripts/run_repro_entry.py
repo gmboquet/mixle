@@ -516,8 +516,10 @@ def _check_evidence_problems(
     derived from, that payload is retained beside it, and running the generator over it reproduces the
     same selection; (3) authenticity -- a Sigstore attestation, signed through GitHub's OIDC identity of
     one of the bundle's signing workflows at the candidate commit, names this record's digest, verified
-    offline against the retained trusted root. A hand-written record can satisfy (1) and, with a
-    hand-written payload, (2); it cannot satisfy (3) (SYS5-01).
+    by the gh CLI against Sigstore's public-good root as gh obtains it (never a root supplied beside the
+    record -- that would be chosen by whoever supplies the record), with the returned certificate and
+    statement re-required to bind. A hand-written record can satisfy (1) and, with a hand-written
+    payload, (2); it cannot satisfy (3) (SYS5-01).
     """
     problems: list[str] = []
     info: dict[str, Any] = {"attested": False}

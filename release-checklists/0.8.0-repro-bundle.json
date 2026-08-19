@@ -78,7 +78,7 @@
     {
       "path": "scripts/run_repro_entry.py",
       "role": "bundle-closure",
-      "sha256": "347cf66b244029d07bee89a7883fcf70f7de551d3ca7d102925c090be6cc7f74"
+      "sha256": "7e61c29c905e7160730f3f8e5f737c04c9dbaa9c4ea36c6012b3420c50ad4655"
     },
     {
       "path": ".github/release-required-checks.txt",

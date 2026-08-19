@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -113,11 +114,27 @@ def build_manifest(
     )
     if live_attestation.get("record_sha256") != live_digest:
         raise ValueError("the verified attestation does not name the live check-evidence record")
-    invocations = (attestation.get("run_invocation_uri"), live_attestation.get("run_invocation_uri"))
-    if not all(isinstance(uri, str) and uri for uri in invocations) or invocations[0] == invocations[1]:
+    # "A different workflow run" means a different GitHub run ID -- what publish.yml's prepare and
+    # promote phases are by construction -- not merely a different attempt of one run. Comparing the
+    # whole invocation URI let attempts 2 and 3 of a single run satisfy the rule (SYS8-M01); the run
+    # ID is parsed and compared, and a URI that is not a run invocation of this repository is refused.
+    invocation_pattern = re.compile(
+        rf"^https://github\.com/{re.escape(contract['repository'])}/actions/runs/([1-9][0-9]*)/attempts/([1-9][0-9]*)$"
+    )
+    run_ids = []
+    for label, record_attestation in (("retained", attestation), ("live", live_attestation)):
+        uri = record_attestation.get("run_invocation_uri")
+        found = invocation_pattern.fullmatch(uri) if isinstance(uri, str) else None
+        if found is None:
+            raise ValueError(
+                f"the {label} check-evidence attestation does not name a workflow run invocation of this repository: {uri!r}"
+            )
+        run_ids.append(found.group(1))
+    if run_ids[0] == run_ids[1]:
         raise ValueError(
-            "the live check-evidence record must be attested by a different workflow run than the retained one; "
-            f"got {invocations!r}"
+            "the live check-evidence record must be attested by a different workflow run (run ID) than the retained "
+            f"one; both are run {run_ids[0]} ({attestation.get('run_invocation_uri')} and "
+            f"{live_attestation.get('run_invocation_uri')}) -- attempts of one run are not different runs"
         )
 
     wheel = _read(wheel_metadata_path)
@@ -128,12 +145,14 @@ def build_manifest(
         raise ValueError("wheel metadata has no valid SHA-256")
 
     receipts: dict[str, dict[str, Any]] = {}
+    receipt_bytes: dict[str, bytes] = {}
     for path in receipt_paths:
         receipt = _read(path)
         entry_id = receipt.get("entry")
         if not isinstance(entry_id, str) or entry_id in receipts:
             raise ValueError(f"duplicate or invalid example receipt: {entry_id!r}")
         receipts[entry_id] = receipt
+        receipt_bytes[entry_id] = path.read_bytes()
 
     expected_entries = {entry["id"]: entry for entry in bundle["entries"]}
     if set(receipts) != set(expected_entries):
@@ -200,9 +219,14 @@ def build_manifest(
                 "claim_status": "verified",
                 "acceptance_contract": entry["expected"],
                 "stdout_sha256": receipt["stdout_sha256"],
-                "receipt_sha256": hashlib.sha256(
+                # the retained file's own bytes -- an ordinary checksum anyone can recompute with
+                # sha256sum (SYS8-M03); the canonical-JSON digest is kept beside it, named for what
+                # it is, with its serialization rule stated
+                "receipt_file_sha256": hashlib.sha256(receipt_bytes[entry_id]).hexdigest(),
+                "receipt_canonical_json_sha256": hashlib.sha256(
                     json.dumps(receipt, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
                 ).hexdigest(),
+                "receipt_canonical_json_rule": "json.dumps(receipt, sort_keys=True, separators=(',', ':'), allow_nan=False).encode('utf-8')",
             }
         )
 
@@ -233,11 +257,17 @@ def build_manifest(
                 "signer_workflow": attestation.get("signer_workflow"),
                 "source_digest": attestation.get("source_digest"),
                 "run_invocation_uri": attestation.get("run_invocation_uri"),
+                "run_id": run_ids[0],
+                # which executable established this half of the approval claim (SYS8-M02)
+                "verifier": attestation.get("verifier"),
             },
             "live_regeneration": {
                 "sha256": live_digest,
                 "signer_workflow": live_attestation.get("signer_workflow"),
+                "source_digest": live_attestation.get("source_digest"),
                 "run_invocation_uri": live_attestation.get("run_invocation_uri"),
+                "run_id": run_ids[1],
+                "verifier": live_attestation.get("verifier"),
                 "approves_every_required_check": True,
                 "selection_identical": not reselected,
                 "reselected_checks": reselected,

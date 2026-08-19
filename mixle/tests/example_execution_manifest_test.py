@@ -87,6 +87,14 @@ class ExampleExecutionManifestTest(unittest.TestCase):
             self.live_evidence_digest: "https://github.com/gmboquet/mixle/actions/runs/2/attempts/1",
         }
 
+        self.verifier = {
+            "tool": "gh attestation verify (fixture)",
+            "executable": "/fixture/bin/gh",
+            "version": "gh version 2.93.0 (fixture)",
+            "sha256": "f" * 64,
+            "trust_prerequisite": "the host that ran this receipt and the gh executable named above",
+        }
+
         def verify(record_path, bundle_path, contract, commit):
             digest = hashlib.sha256(Path(record_path).read_bytes()).hexdigest()
             if digest not in signed:
@@ -97,6 +105,7 @@ class ExampleExecutionManifestTest(unittest.TestCase):
                 "signer_workflow": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.0",
                 "source_digest": commit,
                 "run_invocation_uri": signed[digest],
+                "verifier": dict(self.verifier),
             }
 
         self.signed = signed
@@ -170,6 +179,14 @@ class ExampleExecutionManifestTest(unittest.TestCase):
         self.assertEqual(manifest["artifact"], "mixle.example_execution_manifest/v2")
         self.assertTrue(all(example["execution_status"] == "passed" for example in manifest["examples"]))
         self.assertTrue(all(example["claim_status"] == "verified" for example in manifest["examples"]))
+        # receipt_file_sha256 is the retained file's own bytes -- sha256sum reproduces it (SYS8-M03)
+        by_id = {example["id"]: example for example in manifest["examples"]}
+        for path in self.receipts:
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                by_id[receipt["entry"]]["receipt_file_sha256"], hashlib.sha256(path.read_bytes()).hexdigest()
+            )
+            self.assertIn("receipt_canonical_json_rule", by_id[receipt["entry"]])
 
     def test_exit_success_without_claim_verification_fails_closed(self):
         receipt = json.loads(self.receipts[0].read_text(encoding="utf-8"))
@@ -207,11 +224,16 @@ class ExampleExecutionManifestTest(unittest.TestCase):
                     "signer_workflow": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.0",
                     "source_digest": "a" * 40,
                     "run_invocation_uri": "https://github.com/gmboquet/mixle/actions/runs/1/attempts/1",
+                    "run_id": "1",
+                    "verifier": self.verifier,
                 },
                 "live_regeneration": {
                     "sha256": self.live_evidence_digest,
                     "signer_workflow": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.0",
+                    "source_digest": "a" * 40,
                     "run_invocation_uri": "https://github.com/gmboquet/mixle/actions/runs/2/attempts/1",
+                    "run_id": "2",
+                    "verifier": self.verifier,
                     "approves_every_required_check": True,
                     "selection_identical": True,
                     "reselected_checks": [],
@@ -267,6 +289,15 @@ class ManifestBindsAttestedEvidenceTest(ExampleExecutionManifestTest):
         # (a self-consistent forgery, or an operator short-cut, satisfied the old checks-only compare)
         with self.assertRaisesRegex(ValueError, "different workflow run"):
             self.build(live_check_evidence=self.check_evidence)
+        # two attempts of ONE run are not two runs: attempts 2 and 3 of run 32224236194 satisfied the
+        # whole-URI comparison (pass 8, SYS8-M01); the run ID is what must differ
+        self.signed[self.live_evidence_digest] = "https://github.com/gmboquet/mixle/actions/runs/1/attempts/2"
+        with self.assertRaisesRegex(ValueError, "attempts of one run are not different runs"):
+            self.build()
+        self.signed[self.live_evidence_digest] = "https://example.invalid/actions/runs/2/attempts/1"
+        with self.assertRaisesRegex(ValueError, "does not name a workflow run invocation of this repository"):
+            self.build()
+        self.signed[self.live_evidence_digest] = "https://github.com/gmboquet/mixle/actions/runs/2/attempts/1"
         # a live record GitHub never signed -> refused by the live attestation, before the compare
         unsigned = Path(self.temp.name) / "unsigned-live.json"
         unsigned.write_text(
