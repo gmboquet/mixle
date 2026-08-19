@@ -91,11 +91,13 @@ def build_manifest(
         raise ValueError("bundle candidate binding names no required checks")
     retained, retained_digest = _check_evidence_record(check_evidence_path, commit, required, "retained check evidence")
     live, live_digest = _check_evidence_record(live_check_evidence_path, commit, required, "live check evidence")
-    if live["checks"] != retained["checks"]:
-        raise ValueError(
-            "the retained check-evidence record does not select the same check runs as the live regeneration; "
-            "the approval basis changed after the receipts were produced"
-        )
+    # Both records approve every required check for this commit (that is what _check_evidence_record
+    # established). They need NOT cite the same check-run ids: rerunning any job of a tests.yml run
+    # re-materializes every job's check-run id, so two attested records of the same approval can
+    # legitimately differ in ids -- requiring identity made the manifest unbuildable after any rerun.
+    # What matters is that approval holds at both times, attested by two different runs; which names
+    # were re-run is recorded, not hidden.
+    reselected = sorted(name for name in required if live["checks"].get(name) != retained["checks"].get(name))
     # A receipt's `check_evidence.attested` is the receipt's own word. The manifest establishes the
     # facts itself, through the same gh binding the resolver uses: both records' attestations must
     # verify for THIS commit, and they must come from different workflow run invocations.
@@ -236,7 +238,9 @@ def build_manifest(
                 "sha256": live_digest,
                 "signer_workflow": live_attestation.get("signer_workflow"),
                 "run_invocation_uri": live_attestation.get("run_invocation_uri"),
-                "matched": True,
+                "approves_every_required_check": True,
+                "selection_identical": not reselected,
+                "reselected_checks": reselected,
             },
         },
         "examples": examples,

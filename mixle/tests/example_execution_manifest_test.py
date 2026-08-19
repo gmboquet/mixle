@@ -212,7 +212,9 @@ class ExampleExecutionManifestTest(unittest.TestCase):
                     "sha256": self.live_evidence_digest,
                     "signer_workflow": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.0",
                     "run_invocation_uri": "https://github.com/gmboquet/mixle/actions/runs/2/attempts/1",
-                    "matched": True,
+                    "approves_every_required_check": True,
+                    "selection_identical": True,
+                    "reselected_checks": [],
                 },
             },
         )
@@ -273,14 +275,27 @@ class ManifestBindsAttestedEvidenceTest(ExampleExecutionManifestTest):
         with self.assertRaisesRegex(ValueError, "attestation did not verify"):
             self.build(live_check_evidence=unsigned)
         # two genuinely attested records from different runs with the same selection -> accepted
-        self.assertTrue(self.build()["check_evidence"]["live_regeneration"]["matched"])
+        self.assertTrue(self.build()["check_evidence"]["live_regeneration"]["selection_identical"])
 
-    def test_a_live_regeneration_selecting_other_check_runs_refuses_the_manifest(self):
+    def test_a_live_regeneration_with_reselected_check_runs_is_accepted_and_recorded(self):
+        # rerunning any job re-materializes every job's check-run id (measured on run 32201448676),
+        # so two attested approvals of the same commit legitimately differ in ids; identity was
+        # unbuildable after any rerun. The manifest records which names were re-selected.
         live = json.loads(self.live_check_evidence.read_text(encoding="utf-8"))
         first = next(iter(live["checks"]))
-        live["checks"][first]["check_run_id"] += 1  # a newer run appeared for a required check
+        live["checks"][first]["check_run_id"] += 1
+        live["checks"][first]["details_url"] = live["checks"][first]["details_url"][:-1] + "9"
         self.live_check_evidence.write_text(json.dumps(live), encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "does not select the same check runs as the live regeneration"):
+        self.signed[hashlib.sha256(self.live_check_evidence.read_bytes()).hexdigest()] = self.signed.pop(
+            self.live_evidence_digest
+        )
+        manifest = self.build()
+        self.assertFalse(manifest["check_evidence"]["live_regeneration"]["selection_identical"])
+        self.assertEqual(manifest["check_evidence"]["live_regeneration"]["reselected_checks"], [first])
+        # but a live record that does not approve every required check is still refused
+        del live["checks"][first]
+        self.live_check_evidence.write_text(json.dumps(live), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "exactly the required checks"):
             self.build()
 
     def test_evidence_records_must_be_generator_shaped_for_this_candidate(self):

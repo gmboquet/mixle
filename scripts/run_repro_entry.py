@@ -315,6 +315,39 @@ def _run_gh(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, capture_output=True, text=True, timeout=120, check=False)
 
 
+def _gh_identity() -> dict[str, Any]:
+    """Which executable answers to ``gh`` on this host, and its version and digest.
+
+    The attestation verdict is only as trustworthy as the host and the verifier it resolves; that
+    prerequisite was implicit and unrecorded (systems review pass 7, SYS7-E01). The receipt now
+    names the resolved executable, its version line, and its SHA-256, so a reader can see what
+    produced the verdict rather than assume it. A ``gh`` older than the first release with
+    ``attestation verify`` (2.49) is refused outright.
+    """
+    import shutil
+
+    resolved = shutil.which("gh")
+    if resolved is None:
+        raise ValueError("gh CLI is unavailable, so the check-evidence attestation cannot be verified")
+    path = Path(resolved).resolve()
+    try:
+        digest = _sha256(path)
+    except OSError as exc:
+        raise ValueError(f"gh CLI at {path} is unreadable: {exc}") from exc
+    version_line = ""
+    try:
+        version = _run_gh([str(path), "--version"])
+        version_line = (version.stdout or "").strip().splitlines()[0] if version.stdout else ""
+    except (OSError, subprocess.TimeoutExpired, IndexError):
+        version_line = ""
+    match = re.search(r"gh version (\d+)\.(\d+)\.(\d+)", version_line)
+    if match is None:
+        raise ValueError(f"gh CLI at {path} did not report a version (got {version_line!r})")
+    if tuple(int(part) for part in match.groups()) < (2, 49, 0):
+        raise ValueError(f"gh CLI at {path} is {version_line!r}; 2.49.0 or newer is required for attestation verify")
+    return {"executable": str(path), "version": version_line, "sha256": digest}
+
+
 def _verify_check_evidence_attestation(
     record_path: Path, bundle_path: Path, contract: dict[str, Any], commit: str
 ) -> dict[str, Any]:
@@ -356,6 +389,8 @@ def _verify_check_evidence_attestation(
         "--format",
         "json",
     ]
+    verifier = _gh_identity()
+    command[0] = verifier["executable"]  # the resolved, recorded executable, not a bare name
     try:
         completed = _run_gh(command)
     except FileNotFoundError as exc:
@@ -380,18 +415,26 @@ def _verify_check_evidence_attestation(
     repository_uri = f"https://github.com/{contract['repository']}"
     problems: list[str] = []
     verified: dict[str, Any] | None = None
+
+    def _object(value: object) -> dict[str, Any]:
+        # a nested value that is not an object is not gh's shape; it must become a structured
+        # refusal, not an AttributeError out of the resolver (systems review pass 7, SYS7-E02)
+        return value if isinstance(value, dict) else {}
+
+    if not isinstance(results, list):
+        problems.append("gh attestation verify returned a non-list JSON document")
     for result in results if isinstance(results, list) else []:
         if not isinstance(result, dict):
+            problems.append("a verification result is not an object")
             continue
-        outcome = result.get("verificationResult") or {}
-        statement = outcome.get("statement") or {}
-        subjects = statement.get("subject") or []
-        if not any(
-            (subject.get("digest") or {}).get("sha256") == digest for subject in subjects if isinstance(subject, dict)
-        ):
+        outcome = _object(result.get("verificationResult"))
+        statement = _object(outcome.get("statement"))
+        subjects = statement.get("subject")
+        subjects = subjects if isinstance(subjects, list) else []
+        if not any(_object(_object(subject).get("digest")).get("sha256") == digest for subject in subjects):
             continue
-        certificate = (outcome.get("signature") or {}).get("certificate") or {}
-        predicate = statement.get("predicate") if isinstance(statement.get("predicate"), dict) else {}
+        certificate = _object(_object(outcome.get("signature")).get("certificate"))
+        predicate = _object(statement.get("predicate"))
         signer = certificate.get("buildSignerURI") or certificate.get("subjectAlternativeName")
         expectations = (
             ("predicateType", statement.get("predicateType") == contract["predicate_type"]),
@@ -431,7 +474,13 @@ def _verify_check_evidence_attestation(
         "run_invocation_uri": certificate.get("runInvocationURI"),
         "runner_environment": certificate.get("runnerEnvironment"),
         "issuer": certificate.get("issuer"),
-        "verifier": "gh attestation verify --bundle (Sigstore public-good root via gh); response fields re-required",
+        # The verdict presupposes a trusted host and a trusted verifier executable; both are named
+        # here so the receipt states its prerequisite instead of assuming it (SYS7-E01).
+        "verifier": {
+            "tool": "gh attestation verify --bundle (Sigstore public-good root via gh); response fields re-required",
+            **verifier,
+            "trust_prerequisite": "the host that ran this receipt and the gh executable named above",
+        },
     }
 
 

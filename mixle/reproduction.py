@@ -114,9 +114,10 @@ def _bytecode_matches_source(pyc: Path, source: Path) -> bool | None:
 # (SYS4-02) -- and measured directly, co_firstlineno and the line table are readable the same way
 # via ``f_lineno``. Any field the program can observe can change its output, so NO field is
 # metadata for this purpose. There is also no need for a carve-out: the source is recompiled with
-# the ``.pyc``'s own recorded filename, so filename, first line and line tables are deterministic
-# functions of the same source text and match by construction -- verified on all 810 modules of a
-# real installation, where every data field matched. What remains is:
+# the TRUSTED installed source path as its filename (never the ``.pyc``'s own -- systems review pass
+# 6), which is exactly what pip compiled with, so filename, first line and line tables are
+# deterministic functions of the same source text and match by construction -- verified on all 810
+# modules of a real installation, where every data field matched. What remains is:
 #
 #   * every ``co_*`` DATA attribute is compared for equality;
 #   * the two ``co_*`` METHODS (``co_lines``, ``co_positions``) return fresh iterators, which compare

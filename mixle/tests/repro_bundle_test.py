@@ -120,6 +120,12 @@ def _runner():
         raise FileNotFoundError("gh is not consulted by unit tests")
 
     runner._run_gh = _no_gh
+    # ...and the resolved-executable identity the receipt records is a fixture too
+    runner._gh_identity = lambda: {
+        "executable": "/fixture/bin/gh",
+        "version": "gh version 2.93.0 (fixture)",
+        "sha256": "f" * 64,
+    }
     return runner
 
 
@@ -837,8 +843,12 @@ def test_attestation_is_verified_offline_with_gh_bound_to_repo_workflow_and_comm
         assert result["resolved"] is True, result["problems"]
         assert result["check_evidence"]["source_digest"] == _CANDIDATE_COMMIT
         (command,) = seen
-        assert command[:3] == ["gh", "attestation", "verify"]
+        # the resolved executable, not a bare name, is what runs -- and the receipt names it
+        assert command[:3] == ["/fixture/bin/gh", "attestation", "verify"]
         assert command[3] == str(record)
+        assert result["check_evidence"]["verifier"]["executable"] == "/fixture/bin/gh"
+        assert result["check_evidence"]["verifier"]["sha256"] == "f" * 64
+        assert "trust_prerequisite" in result["check_evidence"]["verifier"]
         joined = " ".join(command)
         assert f"--bundle {root / 'metadata' / 'release-check-evidence.sigstore.json'}" in joined
         assert "--repo gmboquet/mixle" in joined
@@ -876,6 +886,44 @@ def test_attestation_is_verified_offline_with_gh_bound_to_repo_workflow_and_comm
         runner._run_gh = other_subject
         result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
         assert any("no verified attestation binds this record" in p for p in result["problems"])
+
+        # nested values that are not objects are gh's-shape violations: each must be a structured
+        # refusal (unbound receipt), never an exception out of the resolver (pass 7, SYS7-E02)
+        for label, response in (
+            ("verificationResult is a string", [{"verificationResult": "ok"}]),
+            ("statement is a list", [{"verificationResult": {"statement": ["x"], "signature": {}}}]),
+            (
+                "signature is an int",
+                [
+                    {
+                        "verificationResult": {
+                            "statement": gh_response()[0]["verificationResult"]["statement"],
+                            "signature": 7,
+                        }
+                    }
+                ],
+            ),
+            (
+                "subject entries are strings",
+                [
+                    {
+                        "verificationResult": {
+                            "statement": {"predicateType": contract["predicate_type"], "subject": ["x"]},
+                            "signature": {},
+                        }
+                    }
+                ],
+            ),
+            ("top level is an object", {"verificationResult": {}}),
+            ("results contain a non-object", ["x", 3]),
+        ):
+            runner._run_gh = lambda command, response=response: subprocess.CompletedProcess(
+                command, 0, stdout=json.dumps(response), stderr=""
+            )
+            result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
+            assert result["resolved"] is False, label
+            assert result["check_evidence"]["attested"] is False, label
+            assert any("attestation" in p for p in result["problems"]), (label, result["problems"])
 
         # gh's exit code is not the verdict; its RESPONSE must bind every flag's expectation. The
         # reviewer's stand-in -- digest and predicate type only -- was accepted before (pass 6).
