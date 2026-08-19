@@ -512,8 +512,10 @@ jobs:
           python-version: "3.12"
       - name: Install MPI, torchrun, and the test harness
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libopenmpi-dev openmpi-bin
+          # bounded and retried: an apt mirror hang must not consume the lane's whole timeout
+          apt_bounded() { for attempt in 1 2 3; do if timeout 240 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 "$@"; then return 0; fi; echo "apt-get $* attempt $attempt failed or timed out; retrying" >&2; sleep 10; done; return 1; }
+          apt_bounded update
+          apt_bounded install -y libopenmpi-dev openmpi-bin
           python -m pip install --upgrade pip
           python -m pip install -e ".[test,mpi,torch]"
       - name: Run the hard-budget hardware tier

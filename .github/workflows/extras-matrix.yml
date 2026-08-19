@@ -62,7 +62,11 @@ jobs:
       - name: System build dependencies
         run: |
           if [ "${{ matrix.extra }}" = "mpi" ]; then
-            sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin
+            # apt on hosted runners occasionally hangs on a mirror; unbounded, that hang consumed
+            # this job's whole 30-minute timeout and failed the publication gate three times.
+            # Every call is bounded and retried.
+            apt_bounded() { for attempt in 1 2 3; do if timeout 240 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 "$@"; then return 0; fi; echo "apt-get $* attempt $attempt failed or timed out; retrying" >&2; sleep 10; done; return 1; }
+            apt_bounded update && apt_bounded install -y libopenmpi-dev openmpi-bin
           fi
       # `packaging` parses the requirement strings (markers included) for the two helper scripts.
       # It lives in its own venv on purpose: both the candidate and the floor environments have their
