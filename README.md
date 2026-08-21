@@ -235,8 +235,10 @@ Normal(free * Field("x") + free * Field("z") + free, free).fit(
   adds a custom log-factor; constraints (`a < b`) shape inference and sampling.
 - **Neural densities:** `Flow`, `MDN`, `VAE` fit with `.fit()` and compose into mixtures like any
   distribution.
-- **Diagnostics:** multi-chain fits fold R̂ / ESS into `m.result.summary()`; `waic` / `loo` / `compare`
-  rank fitted models.
+- **Diagnostics:** multi-chain fits fold R̂ / ESS into `m.result.summary()`; `compare` ranks fitted
+  models by AIC/BIC (including regression and mixed-effects fits, whose marginal likelihood is
+  reported exactly), and `waic` / `loo` rank *Bayesian* fits — they need posterior draws, so a
+  point-estimate fit refuses them and points at AIC/BIC.
 
 ## Beyond the basics
 

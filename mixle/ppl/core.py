@@ -1441,6 +1441,20 @@ def _inferable_parameter_dimension(rv: RandomVariable) -> int | None:
     return model(rv)
 
 
+def _compare_label(model) -> str:
+    """A row label that never forces a lowering.
+
+    The label used to be ``m.name or type(m.dist).__name__``, and ``.dist`` lowers the model -- which
+    a conditional (regression / mixed-effects) fit cannot do, so labelling alone raised (D-0190).
+    """
+    if getattr(model, "name", None):
+        return str(model.name)
+    result = getattr(model, "_result", None)
+    if getattr(model, "_dist", None) is None and result is not None:
+        return type(result).__name__
+    return type(model.dist).__name__
+
+
 def compare(models, data, *, by: str = "aic"):
     """Compare fitted models on ``data``. Returns rows sorted best-first by ``by``
     ('aic' | 'bic' | 'loglik' | 'waic' | 'loo').
@@ -1458,6 +1472,15 @@ def compare(models, data, *, by: str = "aic"):
     }
     if by not in keys:
         raise ValueError(f"by must be one of {sorted(keys)}, got {by!r}.")
+    # A bare RandomVariable is iterable by the legacy __getitem__ protocol (it defines
+    # __getitem__ and no __len__), so list() on one never terminates: compare(model, data) --
+    # a fitted model passed positionally where a list belongs -- HUNG indefinitely instead of
+    # raising (use case E14.4, D-0190). Reject it by type before any iteration.
+    if isinstance(models, RandomVariable):
+        raise TypeError(
+            "compare() takes a LIST of fitted models: compare([model_a, model_b], data). "
+            "A single RandomVariable was passed where the list belongs."
+        )
     try:
         models = list(models)
     except TypeError as exc:
@@ -1476,7 +1499,7 @@ def compare(models, data, *, by: str = "aic"):
     rows = []
     for m in models:
         ll = m.log_likelihood(data)
-        row = {"model": (m.name or type(m.dist).__name__), "loglik": ll, "aic": m.aic(data), "bic": m.bic(data)}
+        row = {"model": _compare_label(m), "loglik": ll, "aic": m.aic(data), "bic": m.bic(data)}
         if by in ("waic", "loo"):
             res = m.waic(data) if by == "waic" else m.loo(data)
             row[by] = res[by]
@@ -1978,10 +2001,12 @@ class RandomVariable:
         (e.g. ``{'mean': 5.0, 'sd': 2.0}`` for Normal — not the internal ``sigma2``).
         Falls back to ``.dist`` for families without a registered reader.
         """
-        d = lower(self, target="dist")
-        if d is None and self._result is not None and hasattr(self._result, "coefficients"):
+        # Ask FIRST whether this is a conditional (regression / mixed-effects) fit. This used to
+        # lower() and test the result for None -- which is why lower() returning None was
+        # load-bearing here while every other caller dereferenced it and crashed (D-0190).
+        if self._is_conditional_fit() and hasattr(self._result, "coefficients"):
             return self._result.coefficients  # regression: report coefficients
-        return read_params(d)
+        return read_params(lower(self, target="dist"))
 
     @property
     def result(self) -> Any | None:
@@ -2155,8 +2180,37 @@ class RandomVariable:
         return self.log_prob(x)
 
     def log_likelihood(self, data) -> float:
-        """Total log-likelihood of ``data`` under the fitted model (sum of log_prob)."""
+        """Total log-likelihood of ``data`` under the fitted model.
+
+        For an ordinary fit this is the sum of per-observation ``log_prob``. For a conditional
+        (regression / mixed-effects) fit it is the MARGINAL log-likelihood recorded by the fit --
+        for a mixed model the random effects are integrated out, so the likelihood factors per
+        GROUP, not per observation, and no per-observation sum would be correct.
+        """
+        marginal = self._regression_loglik()
+        if marginal is not None:
+            observations = list(data)
+            recorded = getattr(self._result, "nobs", None)
+            if recorded is not None and len(observations) != int(recorded):
+                raise ValueError(
+                    f"this fit's marginal log-likelihood was computed on {int(recorded)} observations; "
+                    f"{len(observations)} were passed. Scoring a conditional fit on different data needs the "
+                    "covariates too, which this call does not carry."
+                )
+            return float(marginal)
         return float(np.sum(self.log_prob(list(data))))
+
+    def _is_conditional_fit(self) -> bool:
+        """True for a fitted regression / mixed-effects model: bound, with its content on ``.result``
+        rather than in a single distribution object."""
+        return self._kind == "bound" and self._dist is None and self._result is not None
+
+    def _regression_loglik(self):
+        """The marginal log-likelihood of a conditional fit, or None if this is not one."""
+        if not self._is_conditional_fit():
+            return None
+        value = getattr(self._result, "loglik", None)
+        return None if value is None else float(value)
 
     def aic(self, data, k: int | None = None) -> float:
         """Akaike information criterion (lower is better).
@@ -2166,6 +2220,8 @@ class RandomVariable:
         """
         if k is None:
             k = self._cache.get("_free_parameter_count")
+            if k is None:
+                k = getattr(self._result, "n_params", None)
             if k is None:
                 raise ValueError("AIC needs k= because this artifact has no recorded inferable parameter dimension.")
         if isinstance(k, (bool, np.bool_)) or not isinstance(k, Integral) or k < 0:
@@ -2177,6 +2233,8 @@ class RandomVariable:
         """Bayesian information criterion (lower is better)."""
         if k is None:
             k = self._cache.get("_free_parameter_count")
+            if k is None:
+                k = getattr(self._result, "n_params", None)
             if k is None:
                 raise ValueError("BIC needs k= because this artifact has no recorded inferable parameter dimension.")
         if isinstance(k, (bool, np.bool_)) or not isinstance(k, Integral) or k < 0:
@@ -2201,6 +2259,14 @@ class RandomVariable:
             if matrix.ndim != 2 or matrix.shape[0] < 2:
                 raise ValueError("posterior pointwise log likelihood must contain at least two draw rows.")
             return matrix
+        if self._regression_loglik() is not None:
+            raise NotImplementedError(
+                "WAIC / PSIS-LOO need per-observation posterior draws, which a point-estimate conditional "
+                "(regression / mixed-effects) fit does not have -- and a mixed model's marginal likelihood "
+                "factors per GROUP, not per observation, so there is no per-observation plug-in vector either. "
+                "Use log_likelihood(data), aic(data) or bic(data), which are exact for this fit, or refit with "
+                "how='mcmc' for a posterior."
+            )
         raise NotImplementedError(
             "Bayesian pointwise log likelihood is unavailable for this point-estimate artifact; "
             "use plugin_log_likelihood(data), AIC, or BIC instead."
@@ -2208,6 +2274,12 @@ class RandomVariable:
 
     def plugin_log_likelihood(self, data) -> np.ndarray:
         """Per-observation log likelihood under the fitted point estimate (no posterior integration)."""
+        if self._regression_loglik() is not None:
+            raise NotImplementedError(
+                "a conditional (regression / mixed-effects) fit has no per-observation plug-in vector: with the "
+                "random effects integrated out its marginal likelihood factors per GROUP, not per observation. "
+                "Use log_likelihood(data) for the exact total, or aic(data) / bic(data)."
+            )
         values = np.asarray(self.log_prob(list(data)), dtype=float)
         if values.ndim != 1 or not values.size or np.isnan(values).any() or np.isposinf(values).any():
             raise ValueError("plug-in log likelihood must be a non-empty one-dimensional vector without NaN or +Inf.")
@@ -3079,6 +3151,16 @@ def lower(rv: RandomVariable, *, target: str = "dist"):
 
     if rv._kind == "bound":
         if target == "dist":
+            if rv._dist is None:
+                # A fitted regression / mixed-effects model is bound but has no single
+                # distribution object: its content is the conditional fit on `.result`. Returning
+                # None here leaked as `AttributeError: 'NoneType' object has no attribute
+                # 'dist_to_encoder'` out of every caller (D-0190). Refuse in terms the caller can act on.
+                raise NotImplementedError(
+                    "this fitted model is a conditional (regression / mixed-effects) fit, which has no "
+                    "single distribution object to lower to; its estimates are on `.result`, and its total "
+                    "marginal log-likelihood is available from `log_likelihood(data)` / `aic(data)` / `bic(data)`."
+                )
             cache[target] = rv._dist
             return rv._dist
         raise ValueError("a bound RandomVariable has no estimator to lower to")

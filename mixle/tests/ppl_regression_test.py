@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from mixle.ppl import Bernoulli, Field, Group, Normal, Poisson, free
+from mixle.ppl import Bernoulli, Field, Group, Normal, Poisson, compare, free
 
 
 class RegressionTestCase(unittest.TestCase):
@@ -290,6 +290,138 @@ class RegularizedRegressionTestCase(unittest.TestCase):
         enet = Normal(build(lambda j: Laplace(0, 0.1)), free).fit(list(y), given=given, l2=2.0)
         # the global L2 spreads weight across the correlated group instead of concentrating on one
         self.assertGreater(np.abs(coefs(enet)[:3]).min(), np.abs(coefs(lasso)[:3]).min())
+
+
+class ConditionalFitModelSelectionTestCase(unittest.TestCase):
+    """A fitted regression / mixed-effects model must report a real log-likelihood.
+
+    Before D-0190, `aic`/`bic`/`log_likelihood`/`plugin_log_likelihood`/`compare` all crashed on any
+    model containing a `Field(...)` with a leaked `AttributeError: 'NoneType' object has no attribute
+    'dist_to_encoder'`: `lower()` returned None for a conditional fit and every caller but `.params`
+    dereferenced it. The EM never computed a likelihood at all, so there was nothing to report.
+    """
+
+    def _radonish(self, seed=0, n=240, groups=12):
+        rng = np.random.default_rng(seed)
+        g = np.array([f"g{i % groups}" for i in range(n)])
+        effect = {f"g{i}": rng.normal(0.0, 0.7) for i in range(groups)}
+        x = rng.normal(0.0, 1.0, n)
+        y = 1.5 + 2.0 * x + np.array([effect[k] for k in g]) + rng.normal(0.0, 0.5, n)
+        return list(y), list(x), list(g)
+
+    @staticmethod
+    def _dense_marginal_loglik(y, X, Z, beta, Sigma, sigma2, g):
+        """Reference marginal log-likelihood built the DENSE way: form V = Z Sigma Z' + sigma^2 I
+        over the whole sample and evaluate the multivariate normal directly. This shares no code
+        path with the implementation's per-group Woodbury / determinant-lemma route."""
+        y = np.asarray(y, float)
+        n = y.size
+        V = np.eye(n) * sigma2
+        for a in range(n):
+            for b in range(n):
+                if g[a] == g[b]:
+                    V[a, b] += Z[a] @ Sigma @ Z[b]
+        r = y - X @ beta
+        # Cholesky rather than slogdet: V is positive definite by construction, and this gives both
+        # the log-determinant and the quadratic form stably (slogdet on the dense V underflows here).
+        L = np.linalg.cholesky(V)
+        logdet = 2.0 * float(np.sum(np.log(np.diag(L))))
+        quad = float(np.linalg.solve(L, r) @ np.linalg.solve(L, r))
+        return float(-0.5 * (n * np.log(2 * np.pi) + logdet + quad))
+
+    def test_mixed_model_loglik_matches_a_dense_reference(self):
+        y, x, g = self._radonish()
+        m = Normal(free * Field("x") + free + Group("gid"), free).fit(y, given={"x": x, "gid": g})
+        r = m.result
+        n = len(y)
+        X = (
+            np.column_stack([np.asarray(x), np.ones(n)])
+            if r.names[0] == "x"
+            else np.column_stack([np.ones(n), np.asarray(x)])
+        )
+        Z = np.ones((n, 1))
+        reference = self._dense_marginal_loglik(y, X, Z, r.beta, r.random_cov, r.sigma**2, g)
+        self.assertAlmostEqual(m.log_likelihood(y), reference, places=6)
+        self.assertEqual(r.nobs, n)
+        # fixed effects (2) + Sigma upper triangle (1) + residual variance (1)
+        self.assertEqual(r.n_params, 4)
+
+    def test_mixed_model_aic_bic_are_consistent_with_the_loglik(self):
+        y, x, g = self._radonish()
+        m = Normal(free * Field("x") + free + Group("gid"), free).fit(y, given={"x": x, "gid": g})
+        ll, k, n = m.log_likelihood(y), m.result.n_params, len(y)
+        self.assertAlmostEqual(m.aic(y), 2 * k - 2 * ll, places=9)
+        self.assertAlmostEqual(m.bic(y), k * np.log(n) - 2 * ll, places=9)
+
+    def test_plain_gaussian_regression_loglik_matches_closed_form(self):
+        y, x, _g = self._radonish()
+        m = Normal(free * Field("x") + free, free).fit(y, given={"x": x})
+        yv = np.asarray(y)
+        fitted = (
+            m.result.beta @ np.column_stack([np.asarray(x), np.ones(yv.size)]).T if m.result.names[0] == "x" else None
+        )
+        self.assertIsNotNone(fitted)
+        resid = yv - fitted
+        sigma = m.result.sigma
+        expected = float(-0.5 * yv.size * (np.log(2 * np.pi) + 2 * np.log(sigma)) - resid @ resid / (2 * sigma**2))
+        self.assertAlmostEqual(m.log_likelihood(y), expected, places=6)
+
+    def test_compare_ranks_conditional_fits_and_prefers_the_grouped_model(self):
+        y, x, g = self._radonish()
+        mixed = Normal(free * Field("x") + free + Group("gid"), free).fit(y, given={"x": x, "gid": g})
+        plain = Normal(free * Field("x") + free, free).fit(y, given={"x": x})
+        rows = compare([mixed, plain], y)
+        self.assertEqual(len(rows), 2)
+        # the data really do have group structure, so the mixed model must win on AIC
+        self.assertLess(rows[0]["aic"], rows[1]["aic"])
+        self.assertEqual(rows[0]["model"], "LMMResult")
+
+    def test_compare_refuses_a_single_model_instead_of_hanging(self):
+        """compare(model, data) used to iterate the RandomVariable through the legacy __getitem__
+        protocol -- which never terminates -- and hung indefinitely instead of raising."""
+        y, x, _g = self._radonish()
+        m = Normal(free * Field("x") + free, free).fit(y, given={"x": x})
+        with self.assertRaises(TypeError) as ctx:
+            compare(m, y)
+        self.assertIn("LIST", str(ctx.exception))
+
+    def test_unavailable_quantities_refuse_clearly_and_do_not_recommend_broken_calls(self):
+        y, x, g = self._radonish()
+        m = Normal(free * Field("x") + free + Group("gid"), free).fit(y, given={"x": x, "gid": g})
+        # a mixed model's marginal likelihood factors per GROUP, so there is no per-observation vector
+        with self.assertRaises(NotImplementedError) as plug:
+            m.plugin_log_likelihood(y)
+        self.assertIn("per GROUP", str(plug.exception))
+        for name in ("waic", "loo"):
+            with self.assertRaises(NotImplementedError) as ctx:
+                getattr(m, name)(y)
+            message = str(ctx.exception)
+            # the old message recommended plugin_log_likelihood/AIC/BIC, all of which then crashed
+            self.assertNotIn("plugin_log_likelihood(data), AIC, or BIC instead", message)
+            self.assertIn("log_likelihood(data)", message)
+
+    def test_lowering_a_conditional_fit_refuses_instead_of_returning_none(self):
+        from mixle.ppl.core import lower
+
+        y, x, g = self._radonish()
+        m = Normal(free * Field("x") + free + Group("gid"), free).fit(y, given={"x": x, "gid": g})
+        with self.assertRaises(NotImplementedError):
+            lower(m, target="dist")
+
+    def test_params_still_reports_coefficients_for_a_conditional_fit(self):
+        """`.params` was the one caller that handled lower()'s None, so it must keep working now
+        that the sentinel is gone."""
+        y, x, g = self._radonish()
+        m = Normal(free * Field("x") + free + Group("gid"), free).fit(y, given={"x": x, "gid": g})
+        self.assertIn("x", m.params)
+        self.assertAlmostEqual(m.params["x"]["mean"], 2.0, delta=0.15)
+
+    def test_log_likelihood_refuses_a_different_sized_dataset(self):
+        y, x, g = self._radonish()
+        m = Normal(free * Field("x") + free + Group("gid"), free).fit(y, given={"x": x, "gid": g})
+        with self.assertRaises(ValueError) as ctx:
+            m.log_likelihood(y[:50])
+        self.assertIn("observations", str(ctx.exception))
 
 
 if __name__ == "__main__":

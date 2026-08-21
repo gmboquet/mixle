@@ -171,7 +171,17 @@ class RegressionResult:
         iterations=1,
         termination_reason="closed_form",
         objective_delta=0.0,
+        loglik=None,
+        n_params=None,
+        nobs=None,
     ):
+        # Log-likelihood of the fitted regression, with the parameter count that goes with it, so
+        # aic()/bic()/log_likelihood() have an exact quantity instead of dereferencing a None
+        # lowering (D-0190). None whenever it is not exactly available (non-Gaussian family,
+        # quantile regression); the caller then reports "unavailable" rather than a fabricated value.
+        self.loglik = None if loglik is None else float(loglik)
+        self.n_params = None if n_params is None else int(n_params)
+        self.nobs = None if nobs is None else int(nobs)
         self.names = list(names)  # unique display aliases
         self.parameter_ids = [f"coef:{i}" for i in range(len(self.names))]
         self.beta = np.asarray(beta, dtype=float).copy()
@@ -400,9 +410,18 @@ class LMMResult:
         converged,
         iterations,
         objective_delta,
+        loglik=None,
+        n_params=None,
+        nobs=None,
     ):
         self.names = names
         self.parameter_ids = [f"fixed:{i}" for i in range(len(names))]
+        # Marginal log-likelihood (random effects integrated out) and the parameter count that goes
+        # with it, so aic()/bic()/log_likelihood() have an exact quantity to report for a mixed fit.
+        # loglik is None when the variance components are degenerate -- reported as unavailable, never faked.
+        self.loglik = None if loglik is None else float(loglik)
+        self.n_params = None if n_params is None else int(n_params)
+        self.nobs = None if nobs is None else int(nobs)
         self.beta = beta
         self.cov = cov
         self.random_cov = np.asarray(Sigma)  # random-effects covariance (q x q)
@@ -439,6 +458,69 @@ class LMMResult:
             "termination_reason": self.termination_reason,
             "objective_delta": self.objective_delta,
         }
+
+
+def _gaussian_regression_loglik(y, offset, X, beta, sigma):
+    """Exact log-likelihood of a Gaussian identity-link regression, or None if not computable.
+
+    y ~ N(offset + X beta, sigma^2):  ll = -N/2 log(2 pi sigma^2) - RSS / (2 sigma^2).
+    Only ever called for a Normal response on the identity link; other families would need their
+    own family term, and are reported as unavailable rather than approximated.
+    """
+    sigma = float(sigma)
+    if not np.isfinite(sigma) or sigma <= 0.0:
+        return None
+    resid = np.asarray(y, dtype=float) - (np.asarray(offset, dtype=float) + X @ beta)
+    n = resid.size
+    if n == 0:
+        return None
+    rss = float(resid @ resid)
+    ll = -0.5 * n * (math.log(2.0 * math.pi) + 2.0 * math.log(sigma)) - rss / (2.0 * sigma**2)
+    return float(ll) if np.isfinite(ll) else None
+
+
+def _lmm_marginal_loglik(y, X, Z, beta, Sigma, sigma2, groups):
+    """Marginal log-likelihood of a linear mixed model, random effects integrated out.
+
+    y = X beta + Z b_g + eps with b_g ~ N(0, Sigma) and eps ~ N(0, sigma^2) gives
+    y ~ N(X beta, V), V block-diagonal with V_g = Z_g Sigma Z_g' + sigma^2 I. Per group, by the
+    matrix determinant lemma and Woodbury (the same identities the GLS covariance above uses, and
+    the same posterior cov_g):
+
+        log|V_g| = n_g log sigma^2 + log|Sigma| - log|cov_g|
+        r_g' V_g^-1 r_g = (r_g'r_g - (Z_g'r_g)' cov_g (Z_g'r_g) / sigma^2) / sigma^2
+        cov_g = (Sigma^-1 + Z_g'Z_g / sigma^2)^-1
+
+    The EM above converges on parameter deltas and never formed this quantity, so aic()/bic()/
+    log_likelihood() had nothing to report for a mixed fit (D-0190). Returns None when the
+    variance components are degenerate (singular Sigma, non-finite result), so the caller reports
+    "unavailable" rather than a fabricated number.
+    """
+    if sigma2 <= 0.0 or not np.isfinite(sigma2):
+        return None
+    q = Z.shape[1]
+    sign_S, logdet_S = np.linalg.slogdet(Sigma)
+    if sign_S <= 0 or not np.isfinite(logdet_S):
+        return None  # degenerate random-effects covariance (e.g. tau collapsed to 0)
+    try:
+        Sinv = np.linalg.inv(Sigma)
+    except np.linalg.LinAlgError:
+        return None
+    resid = y - X @ beta if X.shape[1] else y.copy()
+    total = 0.0
+    for idx in groups:
+        Zg, rg = Z[idx], resid[idx]
+        n_g = rg.size
+        cov_g = np.linalg.inv(Sinv + Zg.T @ Zg / sigma2)
+        sign_c, logdet_c = np.linalg.slogdet(cov_g)
+        if sign_c <= 0 or not np.isfinite(logdet_c):
+            return None
+        Ztr = Zg.T @ rg
+        quad = (float(rg @ rg) - float(Ztr @ cov_g @ Ztr) / sigma2) / sigma2
+        logdet_V = n_g * math.log(sigma2) + logdet_S - logdet_c
+        total += logdet_V + quad
+    ll = -0.5 * (y.size * math.log(2.0 * math.pi) + total)
+    return float(ll) if np.isfinite(ll) else None
 
 
 def _lmm_fit(rv, y, given, linpred, max_iter, tol):
@@ -522,6 +604,9 @@ def _lmm_fit(rv, y, given, linpred, max_iter, tol):
         cov = np.linalg.inv(xtvx)
     else:
         cov = np.zeros((0, 0))
+    loglik = _lmm_marginal_loglik(yv, X, Z, beta, Sigma, sigma2, groups)
+    # free parameters: fixed effects + the q(q+1)/2 distinct entries of Sigma + the residual variance
+    n_params = int(p + q * (q + 1) // 2 + 1)
     result = LMMResult(
         names,
         beta,
@@ -534,6 +619,9 @@ def _lmm_fit(rv, y, given, linpred, max_iter, tol):
         converged=converged,
         iterations=iteration,
         objective_delta=delta,
+        loglik=loglik,
+        n_params=n_params,
+        nobs=int(y.size),
     )
     return RandomVariable._bound(None, name=rv._name, result=result)
 
@@ -1151,6 +1239,9 @@ def regression_fit(
             sigma,
             columns,
             link="identity",
+            loglik=_gaussian_regression_loglik(y, offset, X, beta, sigma),
+            n_params=int(p + (0 if fixed_sigma2 is not None else 1)),
+            nobs=int(N),
             converged=converged,
             iterations=iterations,
             termination_reason="tolerance" if converged else "max_iterations",
@@ -1203,6 +1294,9 @@ def regression_fit(
     else:
         sigma = float("nan")
 
+    # Exact only for a Normal response on the identity link; any other family needs its own
+    # likelihood term and is reported as unavailable rather than approximated (D-0190).
+    _ll = _gaussian_regression_loglik(y, offset, X, beta, sigma) if (fam == "Normal" and link == "identity") else None
     result = RegressionResult(
         names,
         idx_of,
@@ -1211,6 +1305,9 @@ def regression_fit(
         sigma,
         columns,
         link=link,
+        loglik=_ll,
+        n_params=(int(p + (0 if sigma_fixed else 1)) if _ll is not None else None),
+        nobs=int(N),
         converged=converged,
         iterations=iteration,
         termination_reason="tolerance" if converged else "max_iterations",
