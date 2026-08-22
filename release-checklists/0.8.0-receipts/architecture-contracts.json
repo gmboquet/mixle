@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && $HOME/mixle/.venv/bin/lint-imports",
   "date": "2026-08-22",
-  "evidence_digest": "bc41ab475bb8069ad469bc79b93d147c62c45a301454e83d54e4bf4d692008f8",
+  "evidence_digest": "55a6fe2c3f987918f72758393454cafcf96a0c01f9bb05f1c5bdf4396d9790dd",
   "gate": "Architecture contracts",
   "note": "Numbers drifted from the recorded 809 files / 3,148 dependencies to 810 / 3,161 -- the contract verdict is unchanged. lint-imports is absent from .venv312 so I ran it from $HOME/mixle/.venv (import-linter 2.13, Python 3.14.5); this is safe for THIS check specifically because import-linter's grimp backend is static analysis and imports nothing at lint time (pyproject.toml:208 says so explicitly). Hosted confirmation: job 96967302250 step 8 `lint-imports (architecture contracts)` :: success.",
   "result": "Analyzed 810 files, 3161 dependencies; \"Contracts: 3 kept, 0 broken\" (all three of the Y4.4 contracts KEPT)"

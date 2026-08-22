@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/api_consistency_test.py mixle/tests/duplicate_body_scan_test.py mixle/tests/signature_docstring_sync_test.py -p no:randomly -q -m \"\" -n 0",
   "date": "2026-08-22",
-  "evidence_digest": "bc41ab475bb8069ad469bc79b93d147c62c45a301454e83d54e4bf4d692008f8",
+  "evidence_digest": "55a6fe2c3f987918f72758393454cafcf96a0c01f9bb05f1c5bdf4396d9790dd",
   "gate": "Accidental or duplicate public surface",
   "note": "Exactly the three focused checks the row names, all green on the release tip under Python 3.12.12.",
   "result": "38 passed, 7 subtests passed in 5.78s (exit 0)"
