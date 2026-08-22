@@ -171,5 +171,56 @@ class DaskEncodedDataTestCase(unittest.TestCase):
         self.assertAlmostEqual(fitted_h.sigma2, fitted_l.sigma2, places=10)
 
 
+class MixleOwnedDaskClientTestCase(unittest.TestCase):
+    """A client mixle creates for itself must not start a diagnostics dashboard.
+
+    `Client(processes=False)` starts a bokeh/tornado HTTP server. Two problems: it binds a port the
+    caller never asked for, and with recent bokeh, tearing that server down from inside a running
+    event loop (a notebook kernel) raises "Cannot synchronously wait on a running event loop" out of
+    distributed's scheduler.close() -- which failed `tutorials/parallel_estimation.ipynb` at cleanup
+    *after* its numbers were already computed, in third-party frames with no mixle code in them.
+    """
+
+    def test_owned_client_is_created_without_a_dashboard(self):
+        import sys
+        import types
+
+        from mixle.utils.parallel import planner
+
+        seen = {}
+
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                seen.update(kwargs)
+
+        def _get_client():
+            raise ValueError("no client in this context")
+
+        stub = types.ModuleType("distributed")
+        stub.Client = _FakeClient
+        stub.get_client = _get_client
+        real = sys.modules.get("distributed")
+        sys.modules["distributed"] = stub
+        try:
+            client, owned = planner._dask_client(None)
+        finally:
+            if real is None:
+                sys.modules.pop("distributed", None)
+            else:
+                sys.modules["distributed"] = real
+        self.assertTrue(owned)
+        self.assertIsInstance(client, _FakeClient)
+        self.assertIn("dashboard_address", seen)
+        self.assertIsNone(seen["dashboard_address"])
+
+    def test_a_caller_supplied_client_is_reused_untouched(self):
+        from mixle.utils.parallel import planner
+
+        sentinel = object()
+        client, owned = planner._dask_client(sentinel)
+        self.assertIs(client, sentinel)
+        self.assertFalse(owned)  # mixle must not close a client it did not create
+
+
 if __name__ == "__main__":
     unittest.main()

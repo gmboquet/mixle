@@ -1699,7 +1699,15 @@ def _dask_client(client: Any | None) -> tuple[Any, bool]:
     try:
         return get_client(), False
     except ValueError:
-        return Client(processes=False), True
+        # A client mixle creates for itself is a short-lived compute client, so it starts no
+        # diagnostics dashboard: the dashboard is a bokeh/tornado HTTP server, and (a) binding a
+        # port is a side effect the caller never asked for, (b) with recent bokeh, tearing that
+        # server down from inside a running event loop -- a notebook kernel, say -- raises
+        # "Cannot synchronously wait on a running event loop" out of
+        # distributed's scheduler.close(), failing the fit at cleanup after the numbers are
+        # already computed. A caller who wants a dashboard creates their own Client; get_client()
+        # above then finds and reuses it, untouched.
+        return Client(processes=False, dashboard_address=None), True
 
 
 def _dask_worker_count(client: Any) -> int:
