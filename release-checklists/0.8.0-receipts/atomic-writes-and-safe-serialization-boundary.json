@@ -1,0 +1,10 @@
+{
+  "artifact": "mixle.release_gate_receipt/v1",
+  "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
+  "command": "cd /Users/grantboquet/mixle/mixle/.worktrees/release-prep-080 && PYTHONPATH=/Users/grantboquet/mixle/mixle/.worktrees/release-prep-080 /Users/grantboquet/mixle/.venv312/bin/python -m pytest mixle/tests/artifact_atomic_write_test.py mixle/tests/security_test.py -p no:randomly -q -m \"\" -n 0",
+  "date": "2026-08-22",
+  "evidence_digest": "236a9c41724a8c5e7d9901388aa4d9586871c5cdedca6ef7e058ca66379e191a",
+  "gate": "Atomic writes and safe serialization boundary",
+  "note": "Exactly the two files the checklist names. Both also re-ran clean inside the 162-test persistence batch under -W error::ResourceWarning.",
+  "result": "41 passed in 3.09s"
+}

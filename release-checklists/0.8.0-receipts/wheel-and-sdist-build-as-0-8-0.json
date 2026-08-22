@@ -1,0 +1,10 @@
+{
+  "artifact": "mixle.release_gate_receipt/v1",
+  "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
+  "command": "cd $SC/srcA && SOURCE_DATE_EPOCH=1700000000 .venv312/bin/python -m build --no-isolation --outdir $SC/dist-a  (same for srcB->dist-b, both from `git archive 483add7c`) && python scripts/normalize_sdist.py $SC/dist-{a,b}/mixle-0.8.0.tar.gz 1700000000 && python scripts/verify_reproducible_builds.py --left $SC/dist-a --right $SC/dist-b --out $SC/reproducible-builds.json",
+  "date": "2026-08-22",
+  "evidence_digest": "236a9c41724a8c5e7d9901388aa4d9586871c5cdedca6ef7e058ca66379e191a",
+  "gate": "Wheel and sdist build as 0.8.0",
+  "note": "THIS IS LOCAL, NOT HOSTED. There is NO hosted build/byte-equality job on 483add7c: `verify_reproducible_builds.py` and `normalize_sdist.py` appear only in .github/workflows/publish.yml, and `gh run list --workflow publish.yml --limit 10` shows its most recent run is v0.7.0 (2026-07-09) \u2014 publish.yml has never executed for 0.8.0, and `git ls-remote --tags origin | grep -c v0.8.0` -> 0. The hosted `clean-wheel install + import sweep` job (completed/success) does build both artifacts with `python -m build --no-isolation` from 0.8.0-build-requirements.txt, but it does not double-build or compare bytes. Caveats on my local run: builds were done in /private/tmp from `git archive 483add7c` (so no .git, and the wheel's provenance records source_commit unknown, exactly as the checklist warns); SOURCE_DATE_EPOCH was an arbitrary 1700000000, not the candidate commit time; the venv has setuptools 83.0.0 and wheel 0.47.0 and build 1.5.0 matching the pins but pip 26.2 vs the pinned 26.1.2; platform is macOS arm64, not the ubuntu-latest publish runner. These digests are NOT candidate fingerprints.",
+  "result": "exit 0, {\"passed\": true} with 2 byte-identical artifacts: mixle-0.8.0-py3-none-any.whl sha256 1d4c5ff15896f47d4484bb55669a04910d7c7226db544b5e8912d46e13fc3452, mixle-0.8.0.tar.gz sha256 312fbff0ef00551c70b9763a4021c66449cc333f1d07fc61a38ba42bdfb5dde7"
+}

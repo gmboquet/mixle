@@ -1,0 +1,10 @@
+{
+  "artifact": "mixle.release_gate_receipt/v1",
+  "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
+  "command": "$SC/cleanwheel/bin/python -m pip install $SC/dist-a/mixle-0.8.0-py3-none-any.whl && $SC/cleanwheel/bin/python -m pip check && $SC/cleanwheel/bin/python -m pip list --format=freeze && $SC/cleanwheel/bin/python /path/to/scripts/import_sweep.py",
+  "date": "2026-08-22",
+  "evidence_digest": "236a9c41724a8c5e7d9901388aa4d9586871c5cdedca6ef7e058ca66379e191a",
+  "gate": "Base optional-dependency guards",
+  "note": "Local measurement against a wheel I built from 483add7c; the hosted equivalent `clean-wheel install + import sweep` is completed/success on the tip. The guard tests also pass locally: `pytest mixle/tests/optional_import_guard_test.py mixle/tests/optional_deps_contract_test.py mixle/tests/optional_contract_test.py mixle/tests/optional_extras_union_test.py -p no:randomly -q -m \"\" -n 0` -> 21 passed in 5.05s. Drift vs the checklist text: it cites numpy 2.5.1 / scipy 1.18.0 and 808 modules; today's resolution is numpy 2.5.2 / scipy 1.18.1 and 809 modules \u2014 the claim's substance (exactly numpy+scipy, everything imports) holds, the recorded numbers are stale. pytest was installed into that venv only AFTER the base pip list above was captured.",
+  "result": "base graph is exactly 4 lines: mixle==0.8.0, numpy==2.5.2, scipy==1.18.1, pip==26.2.1; pip check 'No broken requirements found.' (exit 0); import_sweep swept 809 public modules with no optional framework installed"
+}

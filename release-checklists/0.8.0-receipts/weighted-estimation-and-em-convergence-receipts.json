@@ -1,0 +1,10 @@
+{
+  "artifact": "mixle.release_gate_receipt/v1",
+  "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
+  "command": "cd /Users/grantboquet/mixle/mixle/.worktrees/release-prep-080 && PYTHONPATH=/Users/grantboquet/mixle/mixle/.worktrees/release-prep-080 /Users/grantboquet/mixle/.venv312/bin/python -m pytest mixle/tests/weighted_estimation_test.py mixle/tests/em_convergence_contract_test.py -p no:randomly -q -m \"\" -n 0",
+  "date": "2026-08-22",
+  "evidence_digest": "236a9c41724a8c5e7d9901388aa4d9586871c5cdedca6ef7e058ca66379e191a",
+  "gate": "Weighted estimation and EM convergence receipts",
+  "note": "Both files the evidence names ran and passed. Also re-ran inside the wider 31-test numerical batch (Stable-family gate above) with the same result, so the pass is not an artifact of running them in isolation.",
+  "result": "18 passed, 28 subtests passed in 2.63s (exit 0)"
+}
