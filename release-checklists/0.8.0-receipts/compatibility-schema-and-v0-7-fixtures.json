@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "gh api repos/gmboquet/mixle/commits/<tip>/check-runs (installed-profile equality on the optional and clean-wheel jobs) AND, for the v0.7 half: build the wheel from the tip, pip install it into a fresh venv, assert mixle imports from site-packages, then python -m pytest cross_version_fixtures_test.py -q -m '' with the v0_7_0 fixtures and the schema manifest in place",
   "date": "2026-08-22",
-  "evidence_digest": "236a9c41724a8c5e7d9901388aa4d9586871c5cdedca6ef7e058ca66379e191a",
+  "evidence_digest": "bc41ab475bb8069ad469bc79b93d147c62c45a301454e83d54e4bf4d692008f8",
   "gate": "Compatibility schema and v0.7 fixtures",
   "note": "CORRECTED after audit, which found the original command evidenced only the schema half and could not speak to v0.7 fixtures at all. The v0.7 half was then measured directly rather than deferred. DEFERRED GAP, recorded rather than fixed during finalization: cross_version_fixtures_test.py is named by no workflow and is not among the four files copied into the clean-artifact job, so hosted CI exercises the v0.7 fixtures only against the source tree. Adding it to that job would change a required lane during finalization for no correctness gain -- the wheel is built from the same source and the local run above covers the installed case -- so it is left for 0.8.1.",
   "result": "schema half: verify_installed_schema_manifest.py equality checks completed/success on the exact commit for both the --profile full optional shard and the --profile base clean-wheel job; v0.7 half: 2 passed, 5 subtests passed against a wheel-installed mixle (import asserted to resolve into site-packages)"

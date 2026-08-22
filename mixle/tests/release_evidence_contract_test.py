@@ -151,11 +151,19 @@ class DecisionReviewTest(unittest.TestCase):
         must keep stating that this was a human-approved AI review rather than the fully independent
         human review the gate originally contemplated. Deleting that sentence would upgrade the
         evidence by edit, which is exactly what this file exists to prevent.
+
+        The row was `IMPLEMENTED` until 2026-08-22, when it closed on a measured receipt (D-0197), and
+        this test pinned that status as a tripwire against closing it early. It fired on exactly that
+        edit. The status assertion now guards the other direction -- the row is `DONE` and must stay
+        so -- while the assertion that actually carries the weight is unchanged and is now scoped to
+        the row itself rather than to the file: a caveat that survives only because some other row
+        happens to repeat the phrase is not a caveat on this gate.
         """
         checklist = (ROOT / "release-checklists" / "0.8.0.md").read_text(encoding="utf-8")
         required = (ROOT / ".github" / "release-required-checks.txt").read_text(encoding="utf-8")
-        self.assertIn("Decision review acceptance | `IMPLEMENTED`", checklist)
-        self.assertIn("human-approved AI review", checklist)
+        self.assertIn("Decision review acceptance | `DONE`", checklist)
+        row = next(line for line in checklist.splitlines() if line.startswith("| Decision review acceptance |"))
+        self.assertIn("human-approved AI review", row)
         self.assertIn("release decisions / accepted review", required.splitlines())
         decisions = (ROOT / "release-checklists" / "0.8.0-decisions.md").read_text(encoding="utf-8")
         self.assertIn("## Review record · 2026-08-04 resolution campaign", decisions)

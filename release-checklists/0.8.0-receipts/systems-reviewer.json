@@ -1,9 +1,9 @@
 {
   "artifact": "mixle.release_gate_receipt/v1",
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
-  "command": "ls -1d ~/mixle/review-archive/sysreview-*/ | wc -l && grep -cE '^## D-01(7[6-9]|8[0-9])\\b' release-checklists/0.8.0-decisions.md",
+  "command": "ls -1d $REVIEW_ARCHIVE/sysreview-*/ | wc -l && grep -cE '^## D-01(7[6-9]|8[0-9])\\b' release-checklists/0.8.0-decisions.md",
   "date": "2026-08-22",
-  "evidence_digest": "236a9c41724a8c5e7d9901388aa4d9586871c5cdedca6ef7e058ca66379e191a",
+  "evidence_digest": "bc41ab475bb8069ad469bc79b93d147c62c45a301454e83d54e4bf4d692008f8",
   "gate": "Systems reviewer",
   "note": "Closed 2026-08-20 by the release owner on the nine-pass record (D-0189). Pass 9 returned 0 findings on owner-confirmed d797eae5. Two limits accepted knowingly and recorded in D-0189 rather than papered over.",
   "result": "9 per-pass systems-review archives retained and digest-verified; 14 decision entries D-0176..D-0189 record the passes, their 25 findings and the repairs"

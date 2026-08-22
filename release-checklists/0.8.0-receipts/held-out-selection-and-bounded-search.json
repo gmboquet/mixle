@@ -1,9 +1,9 @@
 {
   "artifact": "mixle.release_gate_receipt/v1",
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
-  "command": "cd /Users/grantboquet/mixle/mixle/.worktrees/release-prep-080 && PYTHONPATH=/Users/grantboquet/mixle/mixle/.worktrees/release-prep-080 /Users/grantboquet/mixle/.venv312/bin/python -m pytest mixle/tests/model_selection_benchmark_test.py mixle/tests/propose_budget_test.py -p no:randomly -q -m \"\" -n 0",
+  "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/model_selection_benchmark_test.py mixle/tests/propose_budget_test.py -p no:randomly -q -m \"\" -n 0",
   "date": "2026-08-22",
-  "evidence_digest": "236a9c41724a8c5e7d9901388aa4d9586871c5cdedca6ef7e058ca66379e191a",
+  "evidence_digest": "bc41ab475bb8069ad469bc79b93d147c62c45a301454e83d54e4bf4d692008f8",
   "gate": "Held-out selection and bounded search",
   "note": "These are the two files the evidence text names ('model-selection benchmark and proposal-budget tests'). Both halves of the gate are covered: held-out selection by model_selection_benchmark_test.py, bounded search by propose_budget_test.py.",
   "result": "10 passed, 2 subtests passed in 5.33s"
