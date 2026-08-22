@@ -17,10 +17,17 @@ def _module():
     return module
 
 
-def test_current_candidate_is_deliberately_blocked_until_final_document_transition() -> None:
-    errors = _module().validate(ROOT, "0.8.0")
-    assert "CHANGELOG.md has no dated 0.8.0 release heading" in errors
-    assert "0.8.0 migration guide still declares a development draft" in errors
+def test_release_documents_have_made_the_final_transition() -> None:
+    """The tree's own release documents must describe 0.8.0 as released.
+
+    This assertion used to run the other way: it required the candidate to be BLOCKED, asserting that
+    the changelog was undated and the migration guide still said "development draft". That was the
+    tripwire that kept anyone from quietly flipping the documents to "released" early, and it fired --
+    correctly -- the moment the transition was made (2026-08-22). The transition is a one-way door, so
+    the guard now points the other way and catches a regression back to draft wording, which would
+    make publish.yml's own `check_release_document_state.py` gate fail at verify-candidate time.
+    """
+    assert _module().validate(ROOT, "0.8.0") == []
 
 
 def test_released_document_state_passes(tmp_path: Path) -> None:

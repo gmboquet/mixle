@@ -10,8 +10,8 @@ summarizes user-visible documentation, public API coverage, validation
 expectations, and migration guidance. Use :doc:`release-notes` for the detailed
 current-release narrative and the git history for exact implementation commits.
 
-Unreleased
-----------
+0.8.0
+-----
 
 See :doc:`release-notes` for the full release-branch summary.
 

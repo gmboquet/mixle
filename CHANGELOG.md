@@ -4,7 +4,7 @@ All notable changes to mixle are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [0.8.0] — Unreleased
+## [0.8.0] — 2026-08-22
 
 The credibility, stability, and proof release: turning mixle from a broad, fast-moving research
 package into one whose supported core, performance, artifacts, and public claims can be independently
@@ -70,6 +70,25 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 
 ### Fixed
 
+- Model selection works on regression and mixed-effects fits. `aic()`, `bic()`, `log_likelihood()`,
+  `plugin_log_likelihood()` and `compare()` previously raised
+  `AttributeError: 'NoneType' object has no attribute 'dist_to_encoder'` for any model containing a
+  `Field(...)` term. A fitted conditional model carries its estimates on `.result` rather than in a
+  single distribution object, and the internal lowering returned `None` for it. Linear mixed models
+  now report the exact marginal log-likelihood (random effects integrated out), and Gaussian
+  identity-link regressions their exact log-likelihood, each with the matching parameter count --
+  verified against `statsmodels` to within 3e-12. Quantities that are genuinely undefined are refused
+  with a reason rather than approximated: a mixed model's marginal likelihood factors per group, not
+  per observation, so `plugin_log_likelihood()`, `waic()` and `loo()` say so instead of recommending
+  calls that used to crash.
+- `compare(model, data)` raises `TypeError` instead of hanging forever. `compare()` takes a *list* of
+  models; a single fitted model passed positionally was iterated through the legacy `__getitem__`
+  protocol, which never terminates.
+- A dask client that mixle creates for itself no longer starts a diagnostics dashboard. The dashboard
+  is a bokeh/tornado HTTP server: it bound a port the caller never requested, and recent bokeh refuses
+  to stop it synchronously from inside a running event loop, so `optimize(..., backend='dask')` failed
+  at cleanup inside a notebook kernel after its results were already computed. A client you create
+  yourself is still discovered, reused untouched, and never closed by mixle.
 - Release artifacts no longer ship the `mixle.tests` tree in the runtime wheel. Required Cython sources and
   quantitative-semantics data remain explicit package data, while the source distribution retains the
   changelog and generated release manifests.

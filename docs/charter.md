@@ -43,7 +43,7 @@ Mixle status repository.
 
 ## Current status
 
-Version 0.8.0 is an active development target, not a published-release claim.
+Version 0.8.0 is a published release; its claims are the ones its dated evidence supports.
 The maturity guide, changelog, source tests, and dated status evidence define
 what is observed or verified. Forward-looking plans never override those
 sources.
