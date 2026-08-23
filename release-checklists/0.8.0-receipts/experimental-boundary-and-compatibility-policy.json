@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONPATH=. $HOME/mixle/.venv/bin/lint-imports --no-cache",
   "date": "2026-08-22",
-  "evidence_digest": "55a6fe2c3f987918f72758393454cafcf96a0c01f9bb05f1c5bdf4396d9790dd",
+  "evidence_digest": "f07a610eb8614e6e91e1cf6553ba13029411c4b16a5f16f8a9f87a5e7773526e",
   "gate": "Experimental boundary and compatibility policy",
   "note": "Drift vs the checklist text: it cites 809 files / 3,148 dependencies; the tip measures 810 files / 3161 dependencies. The contract verdict is unchanged (KEPT). import-linter is only installed in $HOME/mixle/.venv (Python 3.14.5, not the supported interpreter), so I PYTHONPATH-pinned it and confirmed before running that it resolves mixle to the worktree: `$HOME/mixle/.venv/bin/python -c \"import mixle;print(mixle.__file__)\"` -> .../.worktrees/release-prep-080/mixle/__init__.py. import-linter is static (grimp) so the interpreter version does not affect the graph. I did not verify the separate 'two-minor deprecation policy' half of this row.",
   "result": "Analyzed 810 files, 3161 dependencies; Contracts: 3 kept, 0 broken (including 'experimental is never a dependency of the stable core (Y4.4)' KEPT)"
