@@ -600,10 +600,15 @@ def glm(
     if not np.isfinite(phi) or phi <= 0:
         raise RuntimeError("fit produced an invalid dispersion estimate")
     if robust:
-        # per-observation score x_i * w_i (y-mu) (dmu/deta) / V(mu); sandwich B (sum gg') B
+        # per-observation score x_i * w_i (y-mu) (dmu/deta) / V(mu); sandwich B (sum gg') B,
+        # formed as (S B)' (S B) so it is positive semidefinite BY CONSTRUCTION. The algebraically
+        # equal B (S'S) B loses PSD-ness to cancellation at cond(X)^2: OpenBLAS produced negative
+        # sandwich diagonals on a cond ~2e8 design (clipped to se = 0.0 -- a false claim of EXACT
+        # knowledge of coefficients the design cannot identify) where Accelerate stayed positive,
+        # so the same wheel reported different answers per platform (wave-3 CI).
         score = X * (w * (y - mu) * dmu / var)[:, None]
-        meat = score.T @ score
-        cov = xtwx_inv @ meat @ xtwx_inv
+        half = score @ xtwx_inv
+        cov = half.T @ half
     else:
         cov = phi * xtwx_inv
     if not np.all(np.isfinite(cov)):

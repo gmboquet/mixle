@@ -130,8 +130,13 @@ class B4CovarianceConditioningTest(unittest.TestCase):
         # the collinear pair's uncertainty dwarfs the intercept's (collapse gave ~0.5x)
         self.assertGreater(float(se[1] / se[0]), 1e3)
         self.assertGreater(float(se[2] / se[0]), 1e3)
-        # and the intercept itself stays at its well-identified scale on every platform
-        self.assertLess(abs(float(se[0]) - 4.648e-02) / 4.648e-02, 1.0)
+        # With the sandwich formed as (S B)'(S B) the cond^2 cancellation is gone and the value
+        # itself is stable again -- this tree matches statsmodels 0.14.6 HC0 to ~5 digits where
+        # the old B(S'S)B triple product scattered by BLAS (7.7e6-9.2e6 on Accelerate, negative
+        # diagonals clipped to se=0.0 on OpenBLAS). A 1% band leaves room for cross-BLAS ulps
+        # while refusing both historical failure shapes outright.
+        statsmodels_hc0 = np.array([4.648168808710404e-02, 5.064743770828102e06, 5.064743776942883e06])
+        np.testing.assert_allclose(se, statsmodels_hc0, rtol=1e-2)
 
     def test_numerically_rank_deficient_design_is_said_not_silently_full_ranked(self):
         # cond(X) ~ 2e15: statsmodels itself is ill-posed here. mixle must flag it -- reduced
