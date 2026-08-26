@@ -19,6 +19,18 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 
+# The declared support is x >= 0, and scoring an exact zero works (the density vanishes there) --
+# but *fitting* on exact zeros cannot: log f(0) = -inf for every sigma, so the EM objective is
+# never finite and the run used to die with an internal "fused EM did not produce a finite
+# objective" error that never mentioned the zeros. Refuse the evidence by name at accumulation
+# time instead. Zeros carrying zero weight stay admissible, so a mixture component that assigns
+# them no responsibility is unaffected.
+_RAYLEIGH_ZERO_FIT_MESSAGE = (
+    "RayleighDistribution cannot be fit to data containing exact zeros: %d observation(s) with "
+    "positive weight are exactly 0.0, where the Rayleigh density vanishes for every scale. Drop "
+    "or shift the zeros, or model the zero mass separately."
+)
+
 
 class RayleighDistribution(SequenceEncodableProbabilityDistribution):
     """Rayleigh distribution with scale sigma > 0."""
@@ -229,6 +241,8 @@ class RayleighAccumulator(SequenceEncodableStatisticAccumulator):
         """Accumulate weighted squared observations for one sample."""
         if x < 0.0:
             raise ValueError("RayleighDistribution requires observations x >= 0.")
+        if x == 0.0 and weight > 0.0:
+            raise ValueError(_RAYLEIGH_ZERO_FIT_MESSAGE % 1)
         self.count += weight
         self.sum2 += x * x * weight
 
@@ -243,6 +257,9 @@ class RayleighAccumulator(SequenceEncodableStatisticAccumulator):
         estimate: RayleighDistribution | None,
     ) -> None:
         """Accumulate weighted squared observations from encoded data."""
+        zero_evidence = int(np.count_nonzero((x[0] == 0.0) & (np.asarray(weights) > 0.0)))
+        if zero_evidence:
+            raise ValueError(_RAYLEIGH_ZERO_FIT_MESSAGE % zero_evidence)
         self.count += np.sum(weights, dtype=np.float64)
         self.sum2 += np.dot(x[1], weights)
 
@@ -328,7 +345,13 @@ class RayleighDataEncoder(DataSequenceEncoder):
     def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Encode observations as values, squared values, and log-values."""
         rv = np.asarray(x, dtype=np.float64)
-        if rv.size and (np.any(rv < 0.0) or np.any(np.isnan(rv))):
+        nan_count = int(np.count_nonzero(np.isnan(rv)))
+        if nan_count:
+            raise ValueError(
+                "Rayleigh observations contain %d NaN value(s). NaN marks missing data, not a "
+                "support violation; drop or impute the missing entries before fitting." % nan_count
+            )
+        if rv.size and np.any(rv < 0.0):
             raise ValueError("RayleighDistribution requires observations x >= 0.")
         with np.errstate(divide="ignore"):
             lx = np.log(rv)

@@ -14,6 +14,7 @@ artifact and reloads identically.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Sequence
 from hashlib import sha256
 from typing import Any
@@ -122,6 +123,17 @@ class DensityGate:
         ld = self._log_density_rows(cal_rows)
         if ld.shape != (len(cal_rows),) or not np.all(np.isfinite(ld)):
             raise ValueError("fitted density returned invalid calibration scores")
+        if len(cal_rows) > 1 and float(np.ptp(ld)) == 0.0:
+            # every calibration row scored identically: the featurizer mapped these inputs to
+            # indistinguishable vectors, so the floor sits exactly on every score and the gate
+            # cannot separate typical inputs from novel ones (B13's collapsed-feature symptom)
+            warnings.warn(
+                "density gate calibration scores are all identical: the featurizer does not "
+                "distinguish these inputs, so the OOD floor cannot separate typical from novel "
+                "inputs. Check the input featurization (e.g. constant or duplicate records).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         self.log_threshold = float(np.quantile(ld, alpha, method="lower"))
         self.calibration_receipt = {
             "kind": split_kind,
@@ -149,17 +161,34 @@ class DensityGate:
             raise RuntimeError("call fit(...) (or load a fitted gate) before scoring")
         return self._log_density_rows(self._rows(texts))
 
+    def _below_floor(self, scores: np.ndarray) -> np.ndarray:
+        """Below-threshold test with a guard band against reduction-order noise.
+
+        ``seq_log_density`` reduces in a batch-shape-dependent order, so the same input scored
+        alone and scored inside a batch can differ by a few ULPs. The floor is itself one of the
+        calibration scores (an ``alpha``-quantile with ``method="lower"``), so a calibration-typical
+        input can land exactly ON it -- and then that noise alone decided the gate: the batch path
+        (offline metrics, ``health()``) passed the row while the one-at-a-time serving path
+        (``is_ood``/``decide``) escalated it, giving 100% live escalation against a single-digit
+        reported rate (B14). The band is ~1e-9 relative: orders of magnitude above reduction-order
+        noise, orders of magnitude below any real novelty gap in log-density units, so both paths
+        agree and an input at the floor counts as in-distribution on each.
+        """
+        threshold = float(self.log_threshold)
+        band = 1e-9 * max(1.0, abs(threshold))
+        return scores < threshold - band
+
     def is_ood(self, text: str) -> bool:
         """True when the input is atypical: ``log p(x)`` below the calibrated floor."""
         if self.log_threshold is None:
             raise RuntimeError("density gate has not been calibrated")
-        return bool(self.log_density([text])[0] < self.log_threshold)
+        return bool(self._below_floor(self.log_density([text]))[0])
 
     def ood_mask(self, texts: Sequence[str]) -> np.ndarray:
         """Return a boolean mask marking inputs below the calibrated density floor."""
         if self.log_threshold is None:
             raise RuntimeError("density gate has not been calibrated")
-        return self.log_density(texts) < self.log_threshold
+        return self._below_floor(self.log_density(texts))
 
     def to_spec(self) -> dict[str, Any]:
         """Serialize the featurizer, fitted density, and threshold for task artifacts."""

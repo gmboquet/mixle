@@ -784,7 +784,15 @@ class LogGaussianDataEncoder(DataSequenceEncoder):
             A numpy array of floats.
 
         """
-        rv = np.asarray(np.log(x), dtype=float)
+        arr = np.asarray(x, dtype=float)
+        nan_count = int(np.count_nonzero(np.isnan(arr)))
+        if nan_count:
+            raise ValueError(
+                "LogGaussian observations contain %d NaN value(s). NaN marks missing data, not a "
+                "support violation; drop or impute the missing entries before fitting." % nan_count
+            )
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rv = np.asarray(np.log(arr), dtype=float)
 
         if np.any(np.isnan(rv)) or np.any(np.isinf(rv)):
             raise ValueError("LogGaussianDistribution requires support x in (0,inf).")

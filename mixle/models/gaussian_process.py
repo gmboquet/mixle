@@ -354,7 +354,7 @@ def _torch_engine(engine: Any | None, precision: Any | None = None) -> tuple[Any
     try:
         import torch
     except ImportError as e:  # pragma: no cover
-        raise ImportError("GaussianProcessRegressor requires torch.") from e
+        raise ImportError('GaussianProcessRegressor requires torch; install it with pip install "mixle[torch]".') from e
     if engine is None:
         from mixle.engines import TorchEngine
 

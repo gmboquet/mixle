@@ -1920,7 +1920,7 @@
           "state_version": 1
         },
         "mixle.stats.multivariate.multivariate_gaussian.MultivariateGaussianDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -5065,7 +5065,7 @@
           "state_version": 1
         },
         "mixle.stats.multivariate.multivariate_gaussian.MultivariateGaussianDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,

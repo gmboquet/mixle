@@ -136,6 +136,7 @@ from mixle.inference.glm import (
     Family,
     GLMResult,
     PenalizedResult,
+    PerfectSeparationError,
     RegressionFit,
     elastic_net,
     glm,
@@ -637,6 +638,7 @@ __all__ = [
     # GLM + penalized / robust / quantile regression (array-level)
     "glm",
     "GLMResult",
+    "PerfectSeparationError",
     "Family",
     "ridge_regression",
     "elastic_net",

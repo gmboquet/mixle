@@ -166,13 +166,34 @@ def tail_ess(draws: np.ndarray) -> float:
 
 
 def convergence_diagnostics(draws: np.ndarray) -> dict:
-    """Return modern convergence metrics plus an explicit availability receipt."""
-    metrics = {"split_rhat": split_rhat(draws), "bulk_ess": bulk_ess(draws), "tail_ess": tail_ess(draws)}
+    """Return modern convergence metrics plus an explicit availability receipt.
+
+    Every unavailability is a RECEIPT, not an exception: a metric that cannot be computed for these
+    draws comes back ``NaN``, is listed under ``unavailable``, and gets a plain-language entry in
+    ``unavailable_because``. In particular a single chain -- the default configuration of every
+    sampling route -- receipts ``split_rhat`` (which compares independent chains) while still
+    returning the finite single-chain ``bulk_ess``/``tail_ess`` estimates, instead of raising the
+    2-chain ``ValueError`` for one cause and receipting the other (t5 wave-3). Malformed input
+    (wrong shape, NaN/Inf draws, too few draws to split) still raises.
+    """
+    x = _validate_chains(draws, "convergence_diagnostics", min_chains=1)
+    because = {}
+    if x.shape[0] < 2:
+        rhat_value = float("nan")
+        because["split_rhat"] = (
+            "split_rhat compares at least 2 independent chains, got 1 -- refit with chains=2 or more"
+        )
+    else:
+        rhat_value = split_rhat(x)
+    metrics = {"split_rhat": rhat_value, "bulk_ess": bulk_ess(x), "tail_ess": tail_ess(x)}
     unavailable = [name for name, value in metrics.items() if not np.isfinite(value)]
+    for name in unavailable:
+        because.setdefault(name, "the draws are constant; no scale is estimable")
     return {
         **metrics,
         "available": not unavailable,
         "unavailable": unavailable,
+        "unavailable_because": {name: because[name] for name in unavailable},
         "status": "available" if not unavailable else "unavailable",
     }
 

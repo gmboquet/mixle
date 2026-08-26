@@ -99,14 +99,29 @@ class HashedNGram:
         return cls(n=spec["n"], dim=spec["dim"], seed=spec["seed"])
 
 
+# Numeric fields are encoded as bounded ``tanh(value / scale)`` features, one bucket per scale, plus
+# one saturation-free magnitude feature (``tanh(arcsinh(value) / 40)``, strictly inside (-1, 1) for the
+# entire float64 range). The 0.7.x scheme was a single raw ``tanh(value)``, which saturates to exactly
+# +/-1.0 for |value| > ~19: every large same-signed field (masses, prices, counts, timestamps) mapped
+# to the same constant, so ordinary tabular records collapsed to ONE identical feature vector -- an
+# information-free student and a degenerate density gate behind the README quickstart (B13/B14). The
+# ladder keeps the transform stateless and deterministic while some scale always resolves the value:
+# scale ``s`` distinguishes magnitudes up to ~19*s, and the arcsinh feature separates anything larger.
+# The legacy scheme is kept under ``numeric_encoding="tanh"`` so featurizers rebuilt from pre-0.8.0
+# artifact specs produce bit-identical features for the models trained on them.
+_NUMERIC_SCALES = (1.0, 1e2, 1e4, 1e6)
+_NUMERIC_ENCODINGS = ("tanh", "tanh-multiscale")
+
+
 class HashedRecord:
     """Map a heterogeneous record to a fixed-width hashed feature vector.
 
     Each tuple position or dictionary key owns a hashed namespace. Categorical,
     string, and boolean values contribute an indicator feature; numeric values
-    contribute a bounded value feature and a presence feature. The transform is
-    stateless and deterministic, so it serializes as two scalar settings and
-    rebuilds without a fitted encoder or vocabulary.
+    contribute bounded value features at several fixed scales (so large-magnitude
+    fields do not saturate to a constant), a magnitude feature, and a presence
+    feature. The transform is stateless and deterministic, so it serializes as
+    scalar settings and rebuilds without a fitted encoder or vocabulary.
     """
 
     def __init__(
@@ -117,9 +132,13 @@ class HashedRecord:
         record_kind: str | None = None,
         field_keys: list[str] | None = None,
         record_width: int | None = None,
+        numeric_encoding: str = "tanh-multiscale",
     ) -> None:
         self.dim = _exact_positive_int(dim, "dim")
         self.seed = _exact_int(seed, "seed")
+        if numeric_encoding not in _NUMERIC_ENCODINGS:
+            raise ValueError(f"numeric_encoding must be one of {list(_NUMERIC_ENCODINGS)}, got {numeric_encoding!r}.")
+        self.numeric_encoding = numeric_encoding
         if record_kind not in (None, "dict", "sequence", "scalar"):
             raise ValueError("record_kind must be None, 'dict', 'sequence', or 'scalar'.")
         if record_kind == "dict":
@@ -219,7 +238,13 @@ class HashedRecord:
                     numeric = float(value)
                     if not np.isfinite(numeric):
                         raise ValueError(f"record numeric field {key!r} must be finite.")
-                    out[i, self._bucket(f"num:{key}")] += float(np.tanh(numeric))
+                    if self.numeric_encoding == "tanh":
+                        # legacy 0.7.x scheme, kept only so pre-0.8.0 artifacts reload bit-identically
+                        out[i, self._bucket(f"num:{key}")] += float(np.tanh(numeric))
+                    else:
+                        for scale in _NUMERIC_SCALES:
+                            out[i, self._bucket(f"num:{key}@{scale:g}")] += float(np.tanh(numeric / scale))
+                        out[i, self._bucket(f"mag:{key}")] += float(np.tanh(np.arcsinh(numeric) / 40.0))
                     out[i, self._bucket(f"has:{key}")] += 1.0
                 else:
                     out[i, self._bucket(f"{key}={value!r}")] += 1.0
@@ -234,17 +259,24 @@ class HashedRecord:
             "record_kind": self.record_kind,
             "field_keys": list(self.field_keys) if self.field_keys is not None else None,
             "record_width": self.record_width,
+            "numeric_encoding": self.numeric_encoding,
         }
 
     @classmethod
     def from_spec(cls, spec: dict[str, Any]) -> HashedRecord:
-        """Rebuild a record featurizer from :meth:`to_spec` output."""
+        """Rebuild a record featurizer from :meth:`to_spec` output.
+
+        A spec with no ``numeric_encoding`` key predates the multiscale numeric features (0.8.0),
+        so it rebuilds with the legacy single-``tanh`` scheme -- the features the artifact's model
+        was trained on -- rather than silently scrambling a saved model's inputs.
+        """
         return cls(
             dim=spec["dim"],
             seed=spec["seed"],
             record_kind=spec.get("record_kind"),
             field_keys=spec.get("field_keys"),
             record_width=spec.get("record_width"),
+            numeric_encoding=spec.get("numeric_encoding", "tanh"),
         )
 
 

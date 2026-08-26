@@ -260,9 +260,11 @@ class Posterior:
                 "q2.5": float(np.percentile(col, 2.5)),
                 "q97.5": float(np.percentile(col, 97.5)),
             }
-            # Fold the per-parameter convergence diagnostics into the same row (ArviZ-style one table),
-            # when a multi-chain fit produced them. The aggregate ``_rhat``/``_ess`` keys below stay for
-            # back-compat.
+            # Fold the per-parameter convergence diagnostics into the same row (ArviZ-style one table).
+            # ess_bulk/ess_tail are the split-chain estimators and are finite for a single-chain fit
+            # too (computed from the halves of the one chain); split_r_hat needs >= 2 independent
+            # chains and stays NaN there -- the mixing caveat, not a missing ESS. The aggregate
+            # ``_rhat``/``_ess`` keys below stay for back-compat.
             if isinstance(self.rhat, dict) and s.name in self.rhat:
                 row["r_hat"] = float(self.rhat[s.name])
             if isinstance(self.split_rhat, dict) and s.name in self.split_rhat:
@@ -1025,11 +1027,22 @@ def _attach_convergence(post, slots, arr, results) -> None:
     from mixle.ppl.diagnostics import bulk_ess, split_rhat, tail_ess
 
     if arr.shape[0] < 2:
-        # These diagnostics require independent chains. Preserve a valid single-chain posterior but
-        # do not misrepresent the two halves of that chain as independent convergence evidence.
+        # Split-R-hat compares INDEPENDENT chains and stays a deliberate NaN for one chain -- mixing
+        # is unassessable. Bulk/tail ESS are the split-chain estimators (Vehtari et al. 2021): each
+        # chain is halved first, so a single long chain is exactly the standard split-ESS input, and
+        # bulk_ess/tail_ess accept min_chains=1 for precisely that reason. Blanketing them to NaN
+        # here orphaned that still-tested capability and made every default (single-chain) fit
+        # report ess_bulk/ess_tail as NaN while bulk_ess() computed a finite value from the same
+        # draws (t5 wave-3). Too-few-draws chains still receipt NaN instead of raising.
+        def _single_chain(estimator, column):
+            try:
+                return float(estimator(column))
+            except ValueError:
+                return float("nan")  # fewer than 8 draws: halves cannot clear the 4-draw floor
+
         post.split_rhat = {s.name: float("nan") for s in slots}
-        post.bulk_ess = {s.name: float("nan") for s in slots}
-        post.tail_ess = {s.name: float("nan") for s in slots}
+        post.bulk_ess = {s.name: _single_chain(bulk_ess, arr[:, :, k]) for k, s in enumerate(slots)}
+        post.tail_ess = {s.name: _single_chain(tail_ess, arr[:, :, k]) for k, s in enumerate(slots)}
         post.num_divergences = int(sum(int(np.sum(getattr(r, "divergences", np.zeros(0)))) for r in results))
         return
     post.split_rhat = {s.name: float(split_rhat(arr[:, :, k])) for k, s in enumerate(slots)}

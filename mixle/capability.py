@@ -464,8 +464,47 @@ def _protocol_methods(capability: type) -> tuple[str, ...]:
     return cached
 
 
-def supports(obj: Any, capability: type) -> bool:
-    """Return whether ``obj`` provides ``capability`` (a Protocol or a PredicateCapability).
+def _resolve_capability(capability: Any, caller: str) -> type:
+    """Resolve ``capability`` -- the capability type itself, or its catalogued name string.
+
+    :func:`capabilities` and :func:`describe` report capabilities as NAME STRINGS, so the query
+    surface must accept its own vocabulary back: ``supports(x, "HasMoments")`` used to leak a raw
+    ``isinstance() arg 2 must be a type`` TypeError for exactly the strings the library itself emits
+    (t2/MXR wave-3). A name string resolves to the class of the same name in this module; a
+    catalogued name with no queryable class here (a core contract / subsystem role such as
+    ``"Relation"``) and an unknown name each get an error naming the string and what to pass instead.
+    """
+    if isinstance(capability, type):
+        return capability
+    if isinstance(capability, str):
+        resolved = globals().get(capability)
+        if isinstance(resolved, type):
+            return resolved
+        spec = _CATALOG_BY_NAME.get(capability)
+        if spec is not None:
+            raise TypeError(
+                "%s(): %r is catalogued as a %s backed by %s and has no queryable capability class in "
+                "mixle.capability -- import the contract from %s and pass the type itself."
+                % (caller, capability, spec.kind, spec.backed_by, spec.home)
+            )
+        known = ", ".join(sorted(s.name for s in CAPABILITY_CATALOG if isinstance(globals().get(s.name), type)))
+        raise TypeError(
+            "%s(): unknown capability name %r -- pass a capability type (e.g. mixle.capability.HasMoments) "
+            "or one of the catalogued names mixle.capabilities()/mixle.describe() report: %s."
+            % (caller, capability, known)
+        )
+    raise TypeError(
+        "%s(): capability must be a capability type or its catalogued name string, got %s."
+        % (caller, type(capability).__name__)
+    )
+
+
+def supports(obj: Any, capability: type | str) -> bool:
+    """Return whether ``obj`` provides ``capability`` (a Protocol, a PredicateCapability, or its name).
+
+    ``capability`` may be the capability class itself or the catalogued NAME STRING that
+    :func:`capabilities` / :func:`describe` report (``supports(x, "HasMoments")``), so the query
+    surface round-trips its own vocabulary.
 
     For a ``runtime_checkable`` ``Protocol``, ``isinstance`` establishes attribute *presence* only,
     not callable shape -- an object with ``condition = 3`` cleared ``supports(obj, Conditionable)``
@@ -473,6 +512,7 @@ def supports(obj: Any, capability: type) -> bool:
     operation. These are authoritative dispatch declarations, so every declared protocol method must
     at least be callable on ``obj``.
     """
+    capability = _resolve_capability(capability, "supports")
     try:
         if isinstance(capability, type) and issubclass(capability, PredicateCapability):
             if isinstance(obj, type):
@@ -492,8 +532,12 @@ def capabilities(obj: Any) -> frozenset[str]:
     return frozenset(cap.__name__ for cap in ALL_CAPABILITIES if supports(obj, cap))
 
 
-def require(obj: Any, capability: type, op: str | None = None) -> None:
-    """Raise :class:`CapabilityError` (early, with a clear message) if ``obj`` lacks ``capability``."""
+def require(obj: Any, capability: type | str, op: str | None = None) -> None:
+    """Raise :class:`CapabilityError` (early, with a clear message) if ``obj`` lacks ``capability``.
+
+    Accepts the capability class or its catalogued name string, exactly like :func:`supports`.
+    """
+    capability = _resolve_capability(capability, "require")
     if not supports(obj, capability):
         msg = "%s does not support %s" % (type(obj).__name__, capability.__name__)
         if op:
@@ -835,7 +879,7 @@ def catalog() -> tuple[CapabilitySpec, ...]:
     return CAPABILITY_CATALOG
 
 
-def _category(have: frozenset[str]) -> str:
+def _category(have: frozenset[str], obj: Any = None) -> str:
     if "SetValued" in have:
         return "set-valued distribution"
     if "TemporalPointProcess" in have:
@@ -846,6 +890,8 @@ def _category(have: frozenset[str]) -> str:
         return "discrete distribution (countable support)"
     if "LatentStructured" in have:
         return "latent-variable model"
+    if obj is not None and callable(getattr(obj, "edges", None)):
+        return "graphical model (factored joint over record fields)"
     return "distribution"
 
 
@@ -859,7 +905,15 @@ def describe(obj: Any) -> str:
     # capabilities only — the rich distribution view needs a live instance.
     is_instance = not isinstance(obj, type)
     name = obj.__name__ if isinstance(obj, type) else type(obj).__name__
-    is_dist = is_instance and hasattr(obj, "log_density") and hasattr(obj, "estimator")
+    # The rich distribution view covers anything that can SCORE plus either sample or estimate.
+    # Requiring an estimator() too blanked describe() on the flagship optimize() default -- the
+    # structure-learned HeterogeneousBayesianNetwork scores and samples but carries no estimator,
+    # and reported "no catalogued capability detected" (t5 wave-3). ``can`` below states only the
+    # operations the object actually exposes.
+    can_score = is_instance and hasattr(obj, "log_density")
+    can_estimate = is_instance and callable(getattr(obj, "estimator", None))
+    can_sample = is_instance and callable(getattr(obj, "sampler", None))
+    is_dist = can_score and (can_estimate or can_sample)
     if not is_dist:
         have = sorted(s.name for s in CAPABILITY_CATALOG if _safe_supports(obj, s.name))
         base = "%s — %s" % (name, ("supports: " + " · ".join(have)) if have else "no catalogued capability detected")
@@ -881,12 +935,13 @@ def describe(obj: Any) -> str:
 
     semantics = obj.density_semantics() if hasattr(obj, "density_semantics") else None
     can = (
-        ["score", "estimate"]
-        + ([] if semantics is DensitySemantics.LIKELIHOOD_FACTOR else ["sample"])
+        ["score"]
+        + (["estimate"] if can_estimate else [])
+        + ([] if semantics is DensitySemantics.LIKELIHOOD_FACTOR or not can_sample else ["sample"])
         + sorted(have & set(_HIGHLIGHT))
         + sorted(c for c in ("SupportsBackendScoring", "PosteriorPredictive") if c in have)
     )
-    lines = ["%s — %s." % (name, _category(have))]
+    lines = ["%s — %s." % (name, _category(have, obj))]
     lines.append("  can:       " + " · ".join(can))
     if "ExactDensity" not in have and hasattr(obj, "density_semantics"):  # flag non-exact densities
         label = {
@@ -901,12 +956,93 @@ def describe(obj: Any) -> str:
         lines.append("  engines:   " + ", ".join(engines))
     if "ConjugateUpdatable" in have:
         lines.append("  inference: closed-form conjugate Bayes, or numerical (MAP/Laplace/MCMC/VI)")
-    else:
+    elif can_estimate:
         lines.append("  inference: numerical (MAP/Laplace/MCMC/VI) — no closed-form conjugate prior")
+    else:
+        # No estimator: this is a fitted artifact -- advertising MAP/MCMC refit routes it cannot run
+        # would be wrong; say how it is actually (re)fit instead.
+        lines.append("  inference: a fitted artifact (no estimator) — refit from data with mixle.inference.optimize")
+    if callable(getattr(obj, "describe", None)):
+        lines.append("  more:      .describe() returns this object's own structured fit report")
     missing = [c for c in _HIGHLIGHT if c not in have]
     if missing:
         lines.append("  cannot:    " + " · ".join(missing))
     return "\n".join(lines)
+
+
+_FINITE_SUMMARY_CAP = 100_000  # exact finite-support summation cap (density_rank's max_exact convention)
+
+
+def _finite_support_table(obj: Any) -> tuple[tuple[list, list] | None, str | None]:
+    """Exact ``(values, probabilities)`` over a small finite enumerable support, else ``(None, why)``.
+
+    A finite weighted sum over the whole support IS a closed form: it is exact, not sampled or
+    truncated. Only genuinely finite-and-enumerable objects qualify, and only up to
+    ``_FINITE_SUMMARY_CAP`` support points (past that the receipt says so instead of stalling).
+    """
+    import math
+    from itertools import islice
+
+    try:
+        finite = FiniteSupport.check(obj) and Enumerable.check(obj)
+    except Exception:  # noqa: BLE001 - a broken predicate is "not derivable", not a summarize crash
+        finite = False
+    if not finite:
+        return None, "no closed-form methods and no finite enumerable support to sum exactly"
+    n = obj.support_size()
+    if n == 0:
+        return None, "the support is empty"
+    if n > _FINITE_SUMMARY_CAP:
+        return None, "finite support is too large to sum exactly (support_size=%d > %d)" % (n, _FINITE_SUMMARY_CAP)
+    try:
+        items = list(islice(obj.enumerator(), n))
+    except Exception as exc:  # noqa: BLE001 - enumeration declined; report why instead of raising
+        return None, "enumerating the support failed: %s: %s" % (type(exc).__name__, exc)
+    values = [v for v, _ in items]
+    probs = [math.exp(float(lp)) for _, lp in items]
+    return (values, probs), None
+
+
+def _mixture_moment_values(obj: Any) -> tuple[tuple[Any, Any] | None, str | None]:
+    """Closed-form (mean, variance) of a finite mixture from its component moments, else ``(None, why)``.
+
+    ``mean = sum_k w_k m_k`` and the law of total variance ``var = sum_k w_k (v_k + m_k^2) - mean^2``
+    are elementary closed forms for ANY finite mixture whose components expose closed-form moments --
+    a fitted Gaussian mixture returning an empty summary contradicted the docstring's "not available
+    in closed form" promise (t5/t4 wave-3). Returns ``(None, None)`` for a non-mixture.
+    """
+    import numpy as np
+
+    from mixle.stats.latent.mixture import MixtureDistribution
+
+    if not isinstance(obj, MixtureDistribution):
+        return None, None
+    bad = sorted({type(c).__name__ for c in obj.components if not supports(c, HasMoments)})
+    if bad:
+        return None, "mixture component(s) %s expose no closed-form mean()/variance()" % ", ".join(bad)
+    try:
+        w = np.asarray(obj.w, dtype=float)
+        means = [np.asarray(c.mean(), dtype=float) for c in obj.components]
+        variances = [np.asarray(c.variance(), dtype=float) for c in obj.components]
+    except Exception as exc:  # noqa: BLE001 - a component moment failed; report why
+        return None, "a mixture component moment failed: %s: %s" % (type(exc).__name__, exc)
+    mean_ndim = means[0].ndim
+    var_ndim = variances[0].ndim
+    if any(m.ndim != mean_ndim for m in means) or any(v.ndim != var_ndim for v in variances):
+        return None, "mixture components report moments of differing dimension"
+    if mean_ndim == 0 and var_ndim == 0:
+        mean = float(sum(wk * float(mk) for wk, mk in zip(w, means)))
+        second = float(sum(wk * (float(vk) + float(mk) ** 2) for wk, mk, vk in zip(w, means, variances)))
+        return (mean, second - mean**2), None
+    if mean_ndim == 1 and var_ndim == 1:  # diagonal/per-coordinate variances
+        mean = sum(wk * mk for wk, mk in zip(w, means))
+        second = sum(wk * (vk + mk**2) for wk, mk, vk in zip(w, means, variances))
+        return (mean, second - mean**2), None
+    if mean_ndim == 1 and var_ndim == 2:  # full component covariances
+        mean = sum(wk * mk for wk, mk in zip(w, means))
+        cov = sum(wk * (vk + np.outer(mk, mk)) for wk, mk, vk in zip(w, means, variances)) - np.outer(mean, mean)
+        return (mean, cov), None
+    return None, "mixture component moments have an unrecognized shape combination"
 
 
 def summarize(obj: Any) -> dict[str, Any]:
@@ -914,8 +1050,13 @@ def summarize(obj: Any) -> dict[str, Any]:
 
     The numeric companion to :func:`describe` (which says *what* an object can do): mean/variance/std
     (plus skewness/kurtosis when present) for a ``HasMoments`` distribution, ``entropy`` for
-    ``HasEntropy``, and the median for ``HasCDF``. Keys absent from the result are not available in
-    closed form for ``obj`` -- so ``summarize`` never raises on a partially-featured distribution.
+    ``HasEntropy``, and the median for ``HasCDF``. Two closed forms are DERIVED when the methods are
+    absent: a finite mixture's mean/variance from its component moments (law of total variance), and
+    exact mean/variance/std/entropy/median/mode for a small finite enumerable support by summing the
+    whole support. Keys absent from the result are not available in closed form for ``obj`` -- and
+    the ``_status`` receipt names each core statistic that could not be produced and why -- so
+    ``summarize`` never raises on a partially-featured distribution and never returns a bare empty
+    report.
     """
     import numpy as np
 
@@ -952,6 +1093,19 @@ def summarize(obj: Any) -> dict[str, Any]:
         out[name] = value
         return value
 
+    import numbers
+
+    finite_table = finite_reason = None
+    need_finite = not (supports(obj, HasMoments) and supports(obj, HasEntropy) and supports(obj, HasCDF))
+    if need_finite:
+        finite_table, finite_reason = _finite_support_table(obj)
+    numeric_values = probabilities = None
+    if finite_table is not None:
+        values, probs = finite_table
+        probabilities = probs
+        if all(isinstance(v, numbers.Real) and not isinstance(v, bool) for v in values):
+            numeric_values = [float(v) for v in values]
+
     if supports(obj, HasMoments):
         capture("mean", obj.mean)
         variance = capture("variance", obj.variance)
@@ -963,12 +1117,60 @@ def summarize(obj: Any) -> dict[str, Any]:
             capture("skewness", obj.skewness)
         if callable(getattr(obj, "kurtosis", None)):
             capture("kurtosis", obj.kurtosis)
+    else:
+        moments, moment_reason = _mixture_moment_values(obj)
+        if moments is not None:
+            mixture_mean, mixture_variance = moments
+            capture("mean", lambda: mixture_mean)
+            variance = capture("variance", lambda: mixture_variance)
+            if variance is not None:
+                arr = np.asarray(variance, dtype=float)
+                # std from a full covariance is the sqrt of its DIAGONAL, not an elementwise sqrt
+                capture("std", lambda: np.sqrt(np.diag(arr)) if arr.ndim == 2 else np.sqrt(arr))
+        elif numeric_values is not None:
+            mean = float(np.dot(probabilities, numeric_values))
+            second = float(np.dot(probabilities, np.square(numeric_values)))
+            capture("mean", lambda: mean)
+            capture("variance", lambda: second - mean**2)
+            capture("std", lambda: np.sqrt(max(second - mean**2, 0.0)))
+        else:
+            if moment_reason is None and finite_table is not None:
+                moment_reason = "support values are not numeric; mean/variance are undefined for labels"
+            reason = moment_reason or finite_reason or "no closed form is available"
+            for name in ("mean", "variance", "std"):
+                status[name] = {"status": "unavailable", "reason": reason}
+
     if supports(obj, HasEntropy):
         capture("entropy", obj.entropy)
+    elif probabilities is not None:
+        entropy = -float(sum(q * np.log(q) for q in probabilities if q > 0.0))
+        capture("entropy", lambda: entropy)
+    else:
+        status["entropy"] = {
+            "status": "unavailable",
+            "reason": finite_reason or "no entropy() and no finite enumerable support to sum exactly",
+        }
+
     if supports(obj, HasCDF):
         capture("median", lambda: obj.quantile(0.5))
+    elif numeric_values is not None:
+        order = np.argsort(numeric_values)
+        cumulative = np.cumsum(np.asarray(probabilities, dtype=float)[order])
+        median = numeric_values[int(order[int(np.searchsorted(cumulative, 0.5))])]
+        capture("median", lambda: median)
+    else:
+        reason = finite_reason or (
+            "support values are not numeric; a median needs an ordered support"
+            if finite_table is not None
+            else "no cdf()/quantile() pair and no finite numeric support"
+        )
+        status["median"] = {"status": "unavailable", "reason": reason}
+
     if callable(getattr(obj, "mode", None)):
         capture("mode", obj.mode)
+    elif finite_table is not None and finite_table[0]:
+        capture("mode", lambda: finite_table[0][0])  # the enumerator streams in descending probability
+
     out["_status"] = status
     return out
 

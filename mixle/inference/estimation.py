@@ -38,12 +38,117 @@ def _resolve_rng_arg(rng: RandomState | int | None, seed: int | None) -> RandomS
     ``seed`` is the spelling every other entry point takes (``create``/``forecast``/``advi``/...),
     so the fit verbs accept it too. Passing both raises ``TypeError`` (the standard alias
     double-supply policy); an integer ``rng`` is coerced to a ``RandomState`` the way ``advi`` /
-    ``nuts`` coerce theirs. ``None`` is returned unchanged so each caller keeps its own default.
+    ``nuts`` coerce theirs. A modern :class:`numpy.random.Generator` (``np.random.default_rng``)
+    is accepted as well: the internals draw through the legacy ``RandomState`` surface
+    (``.randint`` partition/initialization seeding), so a ``RandomState`` is derived from one draw
+    of the generator -- deterministic given the generator's state, and it advances the generator
+    exactly once, matching what handing over an rng means everywhere else. ``None`` is returned
+    unchanged so each caller keeps its own default.
     """
     value = coalesce_alias("rng", rng, "seed", seed, required=False, default=None)
     if isinstance(value, (int, np.integer)):
         return RandomState(int(value))
+    if isinstance(value, np.random.Generator):
+        return RandomState(int(value.integers(2**31 - 1)))
     return value
+
+
+def _reject_masked_data(data: Any, entry: str) -> None:
+    """Reject a numpy masked array whose mask actually masks something, at the public entry.
+
+    Every encoder coerces through ``np.asarray``, which returns a MaskedArray's bare ``.data`` --
+    the fill values under the mask would be fit as real observations with no error anywhere. Only
+    an array with at least one masked value is rejected; a trivial (all-False) mask carries no
+    missingness and fits like any ndarray.
+    """
+    if np.ma.isMaskedArray(data) and np.ma.is_masked(data):
+        raise ValueError(
+            "%s received a numpy masked array with %d masked value(s); the mask would be silently "
+            "dropped and the masked entries fit as real data. Pass data.compressed() to drop the "
+            "masked entries, or use OptionalEstimator/MISSING for missingness-aware fitting."
+            % (entry, int(np.ma.count_masked(data)))
+        )
+
+
+def _estimator_carries_prior(estimator: Any, _depth: int = 0) -> bool:
+    """True if any estimator in the (small, nested) estimator tree declares prior information.
+
+    Zero total evidence is only an unfittable request when the estimator has NOTHING to fall back
+    on but its arbitrary no-evidence defaults. An estimator carrying ``suff_stat`` or
+    ``pseudo_count`` defines the zero-evidence posterior to BE that prior -- returning it is the
+    documented MAP semantics, not a fabricated fit -- so the all-zero-weight guard must not fire
+    (found by the wave-3 adversarial check: the guard's first version rejected exactly that
+    legitimate state, this codebase's historical defect class). Duck-typed attribute walk, no
+    concrete-family imports (compute_metadata contract).
+    """
+    if estimator is None or _depth > 6:
+        return False
+    for name in ("suff_stat", "pseudo_count"):
+        value = getattr(estimator, name, None)
+        # families default these to tuples OF Nones (e.g. GaussianEstimator suff_stat=(None, None)):
+        # a container with no actual value in it declares no prior.
+        if value is None:
+            continue
+        if isinstance(value, (tuple, list)):
+            if any(item is not None for item in value):
+                return True
+        else:
+            return True
+    children: list[Any] = []
+    for name in ("estimator", "estimators", "components", "accumulator"):
+        child = getattr(estimator, name, None)
+        if child is None:
+            continue
+        children.extend(child if isinstance(child, (list, tuple)) else [child])
+    return any(_estimator_carries_prior(child, _depth + 1) for child in children)
+
+
+def _reject_all_zero_observation_weights(data: Any, entry: str) -> None:
+    """Reject USER-SUPPLIED observation weights that sum to zero, at the public entry only.
+
+    A dataset of ``WeightedObservation`` rows whose weights are all ``0.0`` carries no evidence:
+    the estimators' no-evidence defaults (e.g. a Gaussian at ``mu=0.0`` with the floor variance)
+    would be returned as if they were a fit of the data. Weight ``0.0`` on SOME rows is the
+    documented "contributes nothing" meaning and is untouched; only the all-zero total is an
+    unfittable request, and it is named here -- at the entry point, where the weights are the
+    user's -- because inside EM a zero total weight is the routine dead-component M-step that the
+    no-evidence defaults exist to serve (raising there would crash ordinary mixture fits).
+
+    DECLARED LIMIT: the guard reads ``data`` and therefore covers only the ``data=`` path.
+    Pre-encoded ``enc_data`` is opaque here by design -- its layout is per-family knowledge this
+    module is barred from having (compute_metadata contract) -- so an all-zero-weight dataset
+    passed as ``enc_data`` still fits to the no-evidence defaults; that fit is not silent to
+    provenance readers (``numerical_repairs()`` reports the floored variance). Estimators carrying
+    real prior information (``suff_stat``/``pseudo_count``) are exempted at the call sites: zero
+    evidence there returns the prior, the documented MAP semantics.
+    """
+    if data is None or not hasattr(data, "__len__") or len(data) == 0:
+        return
+    try:
+        first = data[0]
+    except (TypeError, KeyError, IndexError):
+        return
+    # Identified by type name, not isinstance: this file is barred from importing concrete
+    # mixle.stats modules (compute_metadata contract), and the guard only ever needs to recognize
+    # mixle's own payload wrapper -- anything else falls through to the combinator's validation.
+    payload_type = type(first)
+    if payload_type.__name__ != "WeightedObservation" or not payload_type.__module__.startswith("mixle.stats."):
+        return
+    for obs in data:
+        if type(obs) is not payload_type:
+            return  # mixed payloads are validated by the weighted combinator itself
+        try:
+            weight = float(obs.weight)
+        except (TypeError, ValueError):
+            return  # non-numeric weights get the combinator's own error
+        if weight != 0.0:
+            # any nonzero weight (non-finite ones included -- those raise downstream) is evidence
+            return
+    raise ValueError(
+        "%s received observation weights that sum to zero: all %d WeightedObservation weights "
+        "are 0.0, so the data carry no evidence to fit. Give at least one observation a positive "
+        "weight, or drop the zero-weight rows." % (entry, len(data))
+    )
 
 
 # --- estimator coercion -----------------------------------------------------
@@ -1053,9 +1158,12 @@ def optimize(
     Each iteration re-estimates every part of the model by whatever its structure calls for -- closed-form
     for conjugate / exponential-family leaves, gradient descent for neural leaves, coordinate descent for
     GLMs, responsibility-weighted EM for latent structure (mixtures, HMMs) -- so a single call fits a
-    heterogeneous tree without the caller choosing an algorithm. (The convergence objective is MLE by
-    default; a parameter prior switches it to penalized-LL / MAP, and a variational model to the ELBO -- see
-    ``objective``.)
+    heterogeneous tree without the caller choosing an algorithm. (The convergence objective defaults to the
+    family-defined maximum-likelihood objective: each leaf applies its own documented estimator update,
+    which for some families is a closed-form moment update rather than an iterative likelihood
+    maximization, and families may apply documented numerical floors/repairs -- read them back via
+    ``model.numerical_repairs()``. A parameter prior switches the objective to penalized-LL / MAP, and a
+    variational model to the ELBO -- see ``objective``.)
 
     Args:
         data (Optional[List[T]]): List of data type T containing observed data. Must be compatible with data type of
@@ -1132,7 +1240,12 @@ def optimize(
         objective (str): Convergence/selection objective. ``'auto'`` (default) makes the prior the
             single switch -- a model exposing a variational ELBO (``seq_local_elbo``) is fit by
             variational Bayes (``'vb'``), an estimator carrying a parameter prior by penalized
-            log-likelihood (``'map'``), and everything else by plain maximum likelihood (``'mle'``).
+            log-likelihood (``'map'``), and everything else by maximum likelihood (``'mle'``).
+            ``'mle'`` is the family-defined maximum-likelihood objective: what is guaranteed is
+            each leaf family's documented estimator update -- exact MLE for exponential-family
+            leaves, a documented closed-form moment update for families whose class docstring says
+            so -- and families may apply documented numerical floors/repairs, reported on the
+            fitted model via ``numerical_repairs()``.
             Pass ``'mle'`` / ``'map'`` / ``'vb'`` to force a specific objective. ``fit`` accepts the
             same argument; both share this resolution so a Bayesian estimator is fit on the correct
             objective regardless of the verb used. (Only ``'mle'`` is compatible with the fused
@@ -1307,11 +1420,20 @@ def optimize(
 
     backend_name = str(backend or "local").lower()
     if data is None and enc_data is None and not (backend_name == "mpi" and root_only):
-        raise ValueError("Optimization called with empty data or enc_data.")
+        raise ValueError(
+            "optimize() received no observations: data and enc_data are both None. "
+            "Pass a non-empty data sequence or pre-encoded enc_data."
+        )
     # Empty (but non-None) data previously slipped through and silently returned the initialized
-    # prior/default model -- a wrong answer, not a fit. Match ppl's "fit() received empty data."
+    # prior/default model -- a wrong answer, not a fit. The message names the entry the caller
+    # actually used (fit() raises its own before forwarding here) and says "no observations", the
+    # one spelling both empty-input paths share.
     if data is not None and enc_data is None and hasattr(data, "__len__") and len(data) == 0:
-        raise ValueError("optimize() received empty data.")
+        raise ValueError("optimize() received no observations: data is empty. Pass a non-empty data sequence.")
+    if enc_data is None:
+        _reject_masked_data(data, "optimize()")
+        if not _estimator_carries_prior(estimator if init_estimator is None else init_estimator):
+            _reject_all_zero_observation_weights(data, "optimize()")
 
     est = estimator if init_estimator is None else init_estimator
 
@@ -1562,7 +1684,11 @@ def fit(
 
       - ``'auto'`` -- the prior is the single switch: ``'vb'`` when the model exposes ``seq_local_elbo``,
         ``'map'`` when the estimator carries a parameter prior, else ``'mle'``;
-      - ``'mle'`` -- plain data log-likelihood (ignores any prior in the objective);
+      - ``'mle'`` -- the family-defined maximum-likelihood objective on the data log-likelihood (ignores
+        any prior in the objective). What is guaranteed is each leaf family's documented estimator
+        update -- some families document a closed-form moment update rather than an iterative
+        likelihood maximization -- and families may apply documented numerical floors/repairs; read
+        them back via ``model.numerical_repairs()``;
       - ``'map'`` / ``'vb'`` -- penalized log-likelihood / ELBO ``obj = data term + prior term``, where the
         data term is the observed-data LL (MAP) or local-ELBO contributions (variational), and the prior
         term is ``estimator.model_log_density(model)``.
@@ -1629,7 +1755,18 @@ def fit(
     if init_estimator is not None:
         init_estimator = _coerce_estimator(init_estimator, data)
     if data is None and kwargs.get("enc_data") is None:
-        raise ValueError("fit called with empty data or enc_data.")
+        raise ValueError(
+            "fit() received no observations: data and enc_data are both None. "
+            "Pass a non-empty data sequence or pre-encoded enc_data."
+        )
+    # Raised here rather than in the forwarded optimize() call so the error names the entry point
+    # the user actually called (same condition, same "no observations" spelling).
+    if data is not None and kwargs.get("enc_data") is None and hasattr(data, "__len__") and len(data) == 0:
+        raise ValueError("fit() received no observations: data is empty. Pass a non-empty data sequence.")
+    if kwargs.get("enc_data") is None:
+        _reject_masked_data(data, "fit()")
+        if not _estimator_carries_prior(estimator if init_estimator is None else init_estimator):
+            _reject_all_zero_observation_weights(data, "fit()")
     # opt-in sample-structure check: a tagged DataSource is verified against the model it feeds (warns on
     # a mismatch, e.g. a SEQUENTIAL source handed to an i.i.d. leaf). Bare lists carry no structure tag.
     if data is not None and getattr(data, "structure", None) is not None:
@@ -1704,7 +1841,16 @@ def best_of(
     """
     rng = _resolve_rng_arg(rng, seed)
     if data is None and enc_data is None:
-        raise ValueError("Optimization called with empty data or enc_data.")
+        raise ValueError(
+            "best_of() received no observations: data and enc_data are both None. "
+            "Pass a non-empty data sequence or pre-encoded enc_data."
+        )
+    if data is not None and enc_data is None and hasattr(data, "__len__") and len(data) == 0:
+        raise ValueError("best_of() received no observations: data is empty. Pass a non-empty data sequence.")
+    if enc_data is None:
+        _reject_masked_data(data, "best_of()")
+        if not _estimator_carries_prior(est if init_estimator is None else init_estimator):
+            _reject_all_zero_observation_weights(data, "best_of()")
 
     est = _coerce_estimator(est, data)
     if init_estimator is not None:

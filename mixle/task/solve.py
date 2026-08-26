@@ -265,6 +265,9 @@ class Solution:
 
     Call it like the original function. ``promoted`` says whether the student passed verification --
     when False the callable simply runs the teacher instead of deploying an unverified student.
+    Verification covers the live rule, not just raw agreement: a student whose calibrated
+    answer-or-escalate rule answered zero selection rows would escalate every request, so it is
+    demoted rather than presented as a working local answerer.
     """
 
     cascade: Cascade
@@ -503,7 +506,11 @@ class Solution:
         self.holdout_agreement, self.escalation_rate = agree, esc
         self.sel_rows = len(sel_in)
         self.answered_sel_n, self.answered_sel_correct = answered_n, answered_correct
-        self.promoted = self.promoted or self._passes_target(agree)
+        # same honesty rule as solve(): a candidate whose gated rule answered zero selection rows --
+        # or answered rows and got EVERY one wrong (an all-wrong answered slice is disconfirming
+        # evidence, found promoting at n_answered=1/agreement=0.0 by the wave-3 adversarial check)
+        # -- must not present as a promoted local answerer, however well its raw agreement scored
+        self.promoted = (self.promoted or self._passes_target(agree)) and (answered_correct > 0 or not sel_in)
         self.cascade.stats.escalated_texts.clear()
         self.cascade.stats.escalated_labels.clear()
         if new_edge is not None:
@@ -601,6 +608,10 @@ class Solution:
 
     def save(self, path: str) -> str:
         """Persist the calibrated student as a load-anywhere artifact, with its verification record.
+
+        The artifact holds the student, its calibration, and the verification record -- not the
+        teacher, which is an arbitrary callable: reloading in a fresh process is
+        ``Solution.load(path, teacher)`` with the escalation target re-supplied.
 
         Every deployed artifact carries how it was verified — held-out agreement with the teacher, the
         escalation rate, the conformal alpha, and how much of its training data was synthetic — so "is
@@ -747,7 +758,8 @@ def solve(
             error of the locally-answered slice (answering conditions on the set being a singleton),
             so answered-slice agreement is reported as a measurement -- ``report()['answered_slice']``
             runs the real answer-or-escalate rule over the selection rows and carries the answered
-            denominator and an exact 95% Clopper-Pearson interval -- certify an answered-slice
+            denominator and an exact 95% Clopper-Pearson interval (``None`` when the rule answered
+            none of them, in which case the Solution is demoted) -- certify an answered-slice
             target separately with
             :meth:`mixle.task.calibrate.CalibratedTaskModel.calibrate_selective`. Both statements
             fail silently under distribution shift; the ``ood`` gate below mitigates, and drifted
@@ -791,7 +803,9 @@ def solve(
         cost: Optional :class:`~mixle.task.economics.CostModel` for realized-savings reporting.
         seed: Split + fit determinism.
         **distill_kw: Student knobs forwarded to distillation (``dim``, ``hidden``, ``epochs``, ``lr``, …).
-            ``student="generative"`` swaps the hashed-feature MLP for mixle's generative student —
+            The default student is a torch MLP, so it requires the optional torch extra
+            (``pip install "mixle[torch]"``); on a base install the check runs before any teacher
+            calls are spent. ``student="generative"`` swaps the hashed-feature MLP for mixle's generative student —
             per-class token models for text (:mod:`mixle.task.generative_text`) or the structure-learned
             joint for records (:func:`~mixle.task.distill.distill_structured_from_labels`): exact
             posteriors, no torch needed at inference, and a built-in ``log p(x)``.
@@ -809,6 +823,17 @@ def solve(
     if len(items) < 8:
         raise ValueError("solve() needs at least 8 example inputs to train and calibrate honestly")
     k = _validated_kind(kind) if kind is not None else _input_kind(items[0])
+    # Fail fast on a base install BEFORE any teacher calls are spent: the default student is a torch
+    # MLP, and propose="auto"'s recipe search runs on a torch GP surrogate. Only those two paths are
+    # pre-blocked -- student="generative" without recipe search is fully torch-free, and a device=
+    # search space can contain torch-free families, so neither is refused here.
+    if device is None:  # a plain-string device= was already folded into distill_kw above
+        from mixle.task.distill import _require_torch
+
+        if distill_kw.get("student", "mlp") != "generative":
+            _require_torch("solve()'s default student (a torch MLP)")
+        elif propose == "auto":
+            _require_torch('solve(propose="auto") recipe search (a torch Gaussian-process surrogate)')
     # one view for the whole call: the calling convention is discovered once, not per labeling pass,
     # and the same resolved view is handed to the Cascade so escalation never re-probes either.
     call = as_batch_view(teacher, teacher_mode)
@@ -869,6 +894,13 @@ def solve(
     esc = cal.escalation_rate(sel_inputs)
     answered_n, answered_correct = _answered_slice_counts(cal, sel_inputs, sel_labels)
     promoted = target_agreement is None or agree >= target_agreement
+    if sel_inputs and answered_correct == 0:
+        # The REAL answer-or-escalate rule either answered zero selection rows or got every answered
+        # row WRONG. Zero answered means: deployed, this student would escalate every request, so
+        # "promoted" would claim a verified local answerer while serving
+        # pure teacher traffic. Demote precisely on that measured state -- everything still routes to
+        # the teacher, but report()['promoted'] now says so honestly (B13).
+        promoted = False
     if edge_result is not None and not edge_result.feasible:
         promoted = False  # nothing fit the device: serve the teacher, never a budget-busting student
 

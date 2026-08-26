@@ -933,6 +933,46 @@ def _resolve_run_em_objective(
     return lambda model: scorer(enc_data, model)[1]
 
 
+def _attach_run_em_provenance(
+    model: SequenceEncodableProbabilityDistribution,
+    *,
+    strategy: Any,
+    estimator: ParameterEstimator,
+    objective_label: str,
+    iterations: int,
+    max_its: int,
+    converged: bool,
+    delta: float | None,
+    final_objective: float | None,
+    objective_gain: float | None,
+    enc_data: Any,
+) -> SequenceEncodableProbabilityDistribution:
+    """Attach the run's :class:`~mixle.stats.compute.pdist.FitProvenance` receipt; never raises.
+
+    Reuses ``optimize``'s recorder so a model fitted through ``run_em`` answers ``fit_provenance()``
+    the same way: without it, a run stopped by the ``max_its`` cap (10 by default -- routinely still
+    on the initialization plateau) was indistinguishable from one that converged on ``delta``.
+    """
+    from mixle.inference.estimation import _FitTrace, _record_fit_provenance
+
+    trace = _FitTrace()
+    trace.iterations = int(iterations)
+    trace.converged = bool(converged)
+    trace.final_objective = final_objective
+    trace.objective_gain = objective_gain
+    return _record_fit_provenance(
+        model,
+        trace,
+        algorithm=f"run_em[{type(strategy).__name__}]",
+        estimator=estimator,
+        objective=objective_label,
+        max_its=max(1, int(max_its)),
+        delta=delta,
+        enc_data=enc_data,
+        seed=None,
+    )
+
+
 def run_em(
     enc_data: Any,
     estimator: ParameterEstimator,
@@ -955,17 +995,28 @@ def run_em(
     ``monotone=True`` transactionally rejects an objective decrease independently of whether
     ``delta`` is disabled. Set it to ``False`` only for a strategy whose changing surrogate objective
     intentionally permits temporary decreases in the supplied reporting objective.
+
+    The returned model carries a :class:`~mixle.stats.compute.pdist.FitProvenance` receipt
+    (``model.fit_provenance()``): iterations actually run, whether the run converged on ``delta`` or
+    stopped at the ``max_its`` cap (or on a rejected step), and the final objective. A run exiting on
+    the cap reports ``converged=False``, so a truncated fit is distinguishable from a finished one.
     """
     if max_iter is not None:
         max_its = max_iter
     strategy = StandardEM() if strategy is None else strategy
+    objective_label = "mle" if objective is None else (objective if isinstance(objective, str) else "custom")
     objective = _resolve_run_em_objective(objective, enc_data, estimator, initial_model, engine)
     model = initial_model
     last_good = model
     old_value = objective(model)
+    iterations = 0
+    converged = False
+    final_objective: float | None = float(old_value) if np.isfinite(old_value) else None
+    objective_gain: float | None = None
     for _ in range(max(1, int(max_its))):
         transaction = MutableStateSnapshot.capture(model, estimator, strategy)
         strategy_transaction = AlgorithmStateSnapshot.capture(strategy, enc_data, estimator, model, engine, objective)
+        iterations += 1
         try:
             result = strategy.step(enc_data, estimator, model, engine=engine, objective=objective)
             candidate = result.model
@@ -979,13 +1030,28 @@ def run_em(
         if not accepted:
             transaction.restore()
             strategy_transaction.restore()
-            return last_good
+            break
         model = candidate
         last_good = model
+        final_objective = float(value)
+        objective_gain = float(gain)
         if delta is not None and 0.0 <= gain < delta:
+            converged = True
             break
         old_value = value
-    return model
+    return _attach_run_em_provenance(
+        last_good,
+        strategy=strategy,
+        estimator=estimator,
+        objective_label=objective_label,
+        iterations=iterations,
+        max_its=max_its,
+        converged=converged,
+        delta=delta,
+        final_objective=final_objective,
+        objective_gain=objective_gain,
+        enc_data=enc_data,
+    )
 
 
 def observed_log_likelihood(enc_data: Any, engine: Any | None = None) -> Callable[[Any], float]:

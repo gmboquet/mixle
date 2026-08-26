@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import inspect
 import math
+from collections import Counter
 from collections.abc import Callable, Sequence
 from numbers import Integral, Real
 from typing import Any
@@ -1442,16 +1443,24 @@ def _inferable_parameter_dimension(rv: RandomVariable) -> int | None:
 
 
 def _compare_label(model) -> str:
-    """A row label that never forces a lowering.
+    """A row label that never forces a lowering, carrying the model's formula identity when it has one.
 
     The label used to be ``m.name or type(m.dist).__name__``, and ``.dist`` lowers the model -- which
     a conditional (regression / mixed-effects) fit cannot do, so labelling alone raised (D-0190).
+    A bare result-type label made every regression row read ``'RegressionResult'`` (t5 wave-3), so a
+    result that carries coefficient display names (``result.names``) appends them -- e.g.
+    ``'RegressionResult(flip + dep + intercept)'`` -- still without any lowering: only attributes the
+    fitted result already holds are read.
     """
     if getattr(model, "name", None):
         return str(model.name)
     result = getattr(model, "_result", None)
     if getattr(model, "_dist", None) is None and result is not None:
-        return type(result).__name__
+        label = type(result).__name__
+        names = getattr(result, "names", None)
+        if isinstance(names, (list, tuple)) and names and all(isinstance(n, str) for n in names):
+            label = "%s(%s)" % (label, " + ".join(names))
+        return label
     return type(model.dist).__name__
 
 
@@ -1496,10 +1505,20 @@ def compare(models, data, *, by: str = "aic"):
     if not data:
         raise ValueError("compare() data must not be empty.")
 
+    # Rows must stay identifiable after the best-first sort: when two models produce the same label
+    # (same family, or same regression formula), suffix each duplicate with its 1-based position in
+    # the caller's list, so every row maps back to exactly one input model.
+    labels = [_compare_label(m) for m in models]
+    label_counts = Counter(labels)
+    labels = [
+        label if label_counts[label] == 1 else "%s (model %d)" % (label, position + 1)
+        for position, label in enumerate(labels)
+    ]
+
     rows = []
-    for m in models:
+    for m, label in zip(models, labels):
         ll = m.log_likelihood(data)
-        row = {"model": _compare_label(m), "loglik": ll, "aic": m.aic(data), "bic": m.bic(data)}
+        row = {"model": label, "loglik": ll, "aic": m.aic(data), "bic": m.bic(data)}
         if by in ("waic", "loo"):
             res = m.waic(data) if by == "waic" else m.loo(data)
             row[by] = res[by]
@@ -1514,6 +1533,34 @@ def compare(models, data, *, by: str = "aic"):
         for r in rows:
             r["d_elpd"] = r["elpd"] - best
     return rows
+
+
+def _reraise_as_missing_data(data, missing: str, error: BaseException) -> None:
+    """Re-raise a fit-time rejection as a missing-data error when NaN is the actual cause.
+
+    The leaf support checks reject NaN with messages like ``"GaussianDistribution requires support
+    x in (-inf,inf)."`` -- technically true (NaN fails every support), but it names the wrong problem:
+    the user has MISSING data, not out-of-support data, and the message never mentions the
+    ``missing='marginalize'`` option that handles it (t5/t4 wave-3). Translation is deliberately
+    narrow: only a ``ValueError`` raised by the actual fitting call, only under ``missing='error'``,
+    and only when the data really does contain NaN -- a model built to accept NaN (e.g.
+    ``mixle.stats.marginalized()`` leaves) raises nothing and is never touched, and infinite (but
+    non-NaN) data keeps its genuine support error. The original error stays chained underneath.
+    """
+    if missing != "error" or not isinstance(error, ValueError):
+        return
+    try:
+        arr = np.asarray(data, dtype=float)
+    except (TypeError, ValueError):
+        return  # non-rectangular / non-numeric data: NaN-as-missing does not apply
+    if arr.dtype.kind != "f" or not np.isnan(arr).any():
+        return
+    n_missing = int(np.isnan(arr).sum())
+    raise ValueError(
+        "fit() data contains %d NaN entr%s -- missing values, which missing='error' (the default) "
+        "rejects. Drop the incomplete rows, or pass missing='marginalize' to integrate each missing "
+        "entry out of the likelihood." % (n_missing, "y" if n_missing == 1 else "ies")
+    ) from error
 
 
 def _indexed_group_layout(labels, expected_rows: int) -> tuple[np.ndarray, tuple, dict]:
@@ -2945,7 +2992,11 @@ class RandomVariable:
                     kw.setdefault("max_iter", max_its)
                 if delta != 1e-8:
                     kw.setdefault("tol", delta)
-            result = fitter(self, data, **kw)
+            try:
+                result = fitter(self, data, **kw)
+            except ValueError as fit_error:
+                _reraise_as_missing_data(data, missing, fit_error)
+                raise
             if has_constraints or has_potentials:
                 # A penalized objective (soft constraints / residual factors / potentials) means the
                 # optimum is for the surrogate, not the likelihood, so downgrade the certificate.
@@ -2996,19 +3047,23 @@ class RandomVariable:
 
         out = open("/dev/null", "w") if not print_iter else sys.stdout
         try:
-            fitted = optimize(
-                data,
-                est,
-                max_its=max_its,
-                delta=delta,
-                backend=backend,
-                num_workers=num_workers,
-                engine=engine,
-                precision=precision,
-                print_iter=max(print_iter, 1),
-                out=out,
-                **kw,
-            )
+            try:
+                fitted = optimize(
+                    data,
+                    est,
+                    max_its=max_its,
+                    delta=delta,
+                    backend=backend,
+                    num_workers=num_workers,
+                    engine=engine,
+                    precision=precision,
+                    print_iter=max(print_iter, 1),
+                    out=out,
+                    **kw,
+                )
+            except ValueError as fit_error:
+                _reraise_as_missing_data(data, missing, fit_error)
+                raise
         finally:
             if not print_iter:
                 out.close()

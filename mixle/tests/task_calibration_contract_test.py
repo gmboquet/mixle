@@ -177,8 +177,18 @@ class SelectiveRiskThresholdTest(unittest.TestCase):
         # argmax label whenever the top probability clears tau, and escalates the rest.
         matrix = [[0.9473, 0.0527]] * 150 + [[0.5891, 0.4109]] * 50
         labels = ["a"] * 150 + ["a", "b"] * 25  # clean rows always right, trap rows right half the time
-        rows = ["x"] * 200
-        model = CalibratedTaskModel(_task(matrix), alpha=0.10).calibrate_selective(rows, labels)
+        # Distinct rows and a row-keyed stub: serving is row-pure (each decision is its own adapter
+        # call, so report and live arithmetic cannot diverge on at-threshold rows), which means a
+        # canned stub must honor the adapter contract -- one probability row PER REQUESTED ROW --
+        # rather than returning its whole matrix regardless of the batch.
+        rows = [f"x{i}" for i in range(200)]
+        by_row = dict(zip(rows, matrix))
+        adapter = SimpleNamespace(
+            labels=["a", "b"],
+            proba_batch=lambda _model, batch: np.asarray([by_row[r] for r in batch]),
+        )
+        task = SimpleNamespace(adapter=adapter, model=object())
+        model = CalibratedTaskModel(task, alpha=0.10).calibrate_selective(rows, labels)
         self.assertIsNone(model.qhat)
         self.assertAlmostEqual(model.tau, 0.590)  # first grid point clearing the trap cluster
 

@@ -9,6 +9,21 @@ the circular analogue of a Gaussian (kappa = 0 is uniform on the circle; large k
 mu). This is the one-dimensional companion to :class:`~mixle.stats.directional.von_mises_fisher` (the von
 Mises-Fisher distribution on a sphere).
 
+Wrap-around semantics -- read this before comparing scores across families. Any finite real ``x``
+is accepted and interpreted *modulo* ``2*pi``: only ``cos(x)`` and ``sin(x)`` ever enter the
+density, the sufficient statistics, and the estimator, so ``x``, ``x + 2*pi`` and ``x + 200*pi``
+are indistinguishable observations of the same angle. The density integrates to one over a single
+period ``(-pi, pi]``, not over the real line -- integrated over a wider interval it exceeds one.
+Two consequences for non-angular data:
+
+* Fitting a real-line column (money, durations, counts) silently wraps it onto the circle; the
+  fit is a valid circular density of ``x mod 2*pi`` but says nothing about ``x`` itself.
+* The log-density is **not comparable** to real-line families' log-densities. A column spanning
+  ``k`` periods overlays its mass onto one period, so the wrapped model can "win" a likelihood
+  comparison against any real-line family by roughly ``log(k)`` nats per observation without
+  modeling the data at all. Compare von Mises scores only against other circular models, on data
+  that is genuinely angular.
+
 It is a two-parameter exponential family with sufficient statistics ``(cos theta, sin theta)``:
 
         log(f) = eta1*cos(theta) + eta2*sin(theta) + log_const,
@@ -99,7 +114,14 @@ def _solve_kappa(r: float) -> float:
 
 
 class VonMisesDistribution(SequenceEncodableProbabilityDistribution):
-    """Von Mises distribution on the circle with mean direction mu and concentration kappa >= 0."""
+    """Von Mises distribution on the circle with mean direction mu and concentration kappa >= 0.
+
+    Observations are angles in radians, interpreted modulo ``2*pi``: ``log_density(x)`` equals
+    ``log_density(x + 2*pi*k)`` for every integer ``k``, and the density normalizes over one
+    period, not over the real line. Scores are therefore comparable only to other circular
+    models -- see the module docstring for why a wrapped fit of real-line data can spuriously
+    out-score every real-line family.
+    """
 
     @classmethod
     def compute_capabilities(cls):
@@ -233,7 +255,11 @@ class VonMisesDistribution(SequenceEncodableProbabilityDistribution):
         return math.exp(self.log_density(x))
 
     def log_density(self, x: float) -> float:
-        """Return the log-density at a single angle (radians)."""
+        """Return the log-density at a single angle (radians), wrapping ``x`` modulo ``2*pi``.
+
+        Any finite real is accepted; values outside ``(-pi, pi]`` are folded onto the circle, so
+        this is the density of ``x mod 2*pi``, normalized over one period only.
+        """
         theta = validated_angle(x)
         return self.kappa * math.cos(theta - self.mu) + self.log_const
 
@@ -438,6 +464,11 @@ class VonMisesEstimator(ParameterEstimator):
 
     The MLE is ``mu = atan2(sum sin, sum cos)`` and ``kappa = A^{-1}(R)`` where ``R`` is the mean
     resultant length and ``A(kappa) = I_1(kappa) / I_0(kappa)``.
+
+    The data must be angles in radians. Any finite real is accepted and wrapped modulo ``2*pi``
+    (only ``cos``/``sin`` enter the statistics), so fitting a non-angular real-line column does not
+    fail -- it silently fits the circular law of ``x mod 2*pi``, whose log-likelihood is normalized
+    over one period and is not comparable to real-line families (see the module docstring).
     """
 
     def __init__(

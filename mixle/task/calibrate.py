@@ -273,23 +273,29 @@ class CalibratedTaskModel:
         """ONE validated probability pass per serving batch: ``(probabilities, impossible_mask)``.
 
         Impossible structured evidence is data, not an adapter defect: those rows get a zero
-        probability row and a True mask entry, and every consumer treats them as escalate. The
-        batch is re-evaluated per row only when the batch call raises. Serving used to make TWO
-        adapter calls (sets, then the tau check), which is how a mixed valid/impossible batch
-        passed the first and crashed the second (STAT-NEW2); everything downstream now shares
-        this single pass.
+        probability row and a True mask entry, and every consumer treats them as escalate. Serving
+        used to make TWO adapter calls (sets, then the tau check), which is how a mixed
+        valid/impossible batch passed the first and crashed the second (STAT-NEW2); everything
+        downstream now shares this single pass.
+
+        DECISION PURITY: every serving row is evaluated in its own adapter call, never as part of
+        a larger batch. A float32 forward pass gives ulp-different scores at different batch
+        sizes, and at a score sitting exactly on the conformal threshold that difference flips
+        the ``<=`` -- solve()'s offline report (batch) and live ``decide()`` (single row)
+        disagreed on at-threshold rows, to the point of promoted=True with a report claiming 98%
+        escalation while live serving escalated nothing (wave-3 adversarial check, B13/B14 seam).
+        A decision must be a function of the row, not of its batch companions; per-row evaluation
+        makes report arithmetic identical to serving arithmetic by construction. Calibration
+        stays batched -- its scores set the threshold once and have no parity counterpart.
         """
-        try:
-            return self._proba(rows), np.zeros(len(rows), dtype=bool)
-        except ImpossibleEvidenceError:
-            prob = np.zeros((len(rows), len(self.labels)))
-            impossible = np.zeros(len(rows), dtype=bool)
-            for i, row in enumerate(rows):
-                try:
-                    prob[i] = self._proba([row])[0]
-                except ImpossibleEvidenceError:
-                    impossible[i] = True
-            return prob, impossible
+        prob = np.zeros((len(rows), len(self.labels)))
+        impossible = np.zeros(len(rows), dtype=bool)
+        for i, row in enumerate(rows):
+            try:
+                prob[i] = self._proba([row])[0]
+            except ImpossibleEvidenceError:
+                impossible[i] = True
+        return prob, impossible
 
     def _calibration_probabilities(
         self, texts: Sequence[Any], teacher_labels: Sequence[Any]

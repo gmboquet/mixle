@@ -382,8 +382,28 @@ def _select_index(values: Any, n: int, *, largest: bool, context: str) -> int:
     return int(np.argmax(masked) if largest else np.argmin(masked))
 
 
+def _require_default_surrogate() -> None:
+    """Refuse cleanly, with the extra named, when the default GP surrogate cannot run (base install).
+
+    The default surrogate is the torch :class:`~mixle.models.gaussian_process.GaussianProcessRegressor`.
+    On a base install its lazy ``import torch`` used to surface only after real objective budget had
+    been spent -- ``minimize`` evaluated its full ``n_init`` design (expensive black-box calls, the
+    exact resource this module exists to conserve) and then crashed with an unexplained
+    ``ImportError``. Callers check this BEFORE any evaluation is spent.
+    """
+    try:
+        import torch  # noqa: F401
+    except ImportError as error:
+        raise ImportError(
+            "Bayesian optimization's default Gaussian-process surrogate requires the optional torch "
+            'dependency, which is not installed. Install it with pip install "mixle[torch]". '
+            "Refusing before any objective evaluations are spent."
+        ) from error
+
+
 def _fit_surrogate(x: np.ndarray, y: np.ndarray, gp: Surrogate | None, fit_kwargs: dict[str, Any] | None) -> Surrogate:
     _validate_observations(x, y, context="_fit_surrogate")
+    default_surrogate = gp is None
     if gp is None:
         from mixle.models.gaussian_process import GaussianProcessRegressor
 
@@ -395,6 +415,10 @@ def _fit_surrogate(x: np.ndarray, y: np.ndarray, gp: Surrogate | None, fit_kwarg
         scale = std if std > 0.0 else 1.0
         gp = GaussianProcessRegressor(lengthscale=1.0, amplitude=scale, noise=0.1 * scale + 1.0e-6)
     kwargs = {"out": None, **(fit_kwargs or {})}
+    if default_surrogate:
+        # name the missing extra for the DEFAULT surrogate only: a caller-supplied surrogate's
+        # ImportError is its own contract and must not be re-labeled as torch advice
+        _require_default_surrogate()
     # With no observations there is no log marginal likelihood to maximize, and GaussianProcessRegressor
     # .fit validates its inputs first, so it raises "x must contain at least one row" -- turning the
     # documented empty path noted above into a crash instead of the NaN it used to produce. Fitting is
@@ -710,6 +734,10 @@ def minimize(
 
     A non-finite objective response is recorded in ``failed_evaluations`` and stops the run with
     ``stopped_reason='objective_failed'``. It is never admitted to the fitted ``x``/``y`` history.
+
+    The GP surrogate needs the optional torch extra (``pip install "mixle[torch]"``). On a base
+    install that is checked up front, before the first objective evaluation -- never after the
+    ``n_init`` design has already spent expensive black-box calls.
     """
     b = _as_bounds(bounds)
     rng = _as_rng(seed)
@@ -718,6 +746,10 @@ def minimize(
     n_candidates = _require_exact_positive_int(n_candidates, "n_candidates")
     if type(maximize) is not bool:
         raise TypeError(f"maximize must be a bool, got {type(maximize).__name__}.")
+    if n_iter > 0:
+        # the surrogate is only ever fit for acquisition-driven steps; a pure n_init design
+        # (n_iter=0) is torch-free and stays runnable on a base install
+        _require_default_surrogate()
     x_rows: list[np.ndarray] = []
     y_values: list[float] = []
     failed_evaluations: list[dict[str, Any]] = []

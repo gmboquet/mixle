@@ -20,6 +20,7 @@ is deliberately not faked here; audit G-6).
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -45,7 +46,12 @@ def _solve_psd(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     IRLS on collinear predictors (e.g. high-dim modality feature vectors as parents in a factor) yields
     a singular ``X'WX``; a bare ``solve`` would raise. Fall back to the minimum-norm least-squares
     solution (``lstsq``), which is well-defined and stable there and identical when the system is full
-    rank -- so a well-conditioned fit is unchanged and a rank-deficient one no longer crashes."""
+    rank -- so a well-conditioned fit is unchanged and a rank-deficient one no longer crashes.
+
+    Used by the ridge / robust / quantile solvers, whose inference machinery is deliberately absent
+    (audit G-6). :func:`glm` does NOT use it: its coefficients and covariance carry Wald inference,
+    so it factorizes the weighted design ``sqrt(W) X`` directly -- forming the normal equations
+    squares the condition number and silently corrupts the standard errors (audit B4)."""
     try:
         return np.linalg.solve(a, b)
     except np.linalg.LinAlgError:
@@ -94,9 +100,31 @@ def _response_support(family: Family, y: np.ndarray) -> None:
         raise ValueError(f"{family.name} responses must be strictly positive")
 
 
+class PerfectSeparationError(RuntimeError):
+    """The binomial classes are perfectly separated (or perfectly predicted): no finite MLE exists.
+
+    Raised by :func:`glm` when IRLS drives fitted binomial probabilities to exactly 0 or 1 -- the
+    numerical signature of (quasi-)complete separation, where ``|coef|`` diverges and the working
+    weights vanish. A subclass of :class:`RuntimeError`, so pre-existing handlers keep working."""
+
+
 def _mean_support(family: Family, mu: np.ndarray) -> None:
-    if family.name == "binomial" and np.any((mu <= 0) | (mu >= 1)):
-        raise RuntimeError("IRLS produced binomial means outside (0, 1)")
+    if family.name == "binomial":
+        # A monotone inverse link keeps mu inside [0, 1]; hitting the endpoints EXACTLY is the
+        # numerical signature of separation (diverging coefficients, vanishing working weights),
+        # not a solver defect -- so name the statistical condition, not the internal symptom.
+        pinned = (mu == 0.0) | (mu == 1.0)
+        if np.any(pinned):
+            raise PerfectSeparationError(
+                "perfect separation detected between the binomial classes: the design predicts "
+                f"y exactly on {int(np.count_nonzero(pinned))} of {mu.size} observations (fitted "
+                "probabilities reached exactly 0 or 1), so the coefficients diverge and no finite "
+                "maximum-likelihood estimate exists. Remove or coarsen the separating "
+                "predictor(s), or use penalized estimation (ridge_regression / elastic_net), "
+                "which stays finite under separation."
+            )
+        if np.any((mu < 0) | (mu > 1)):
+            raise RuntimeError("IRLS produced binomial means outside (0, 1)")
     if family.name in {"poisson", "negativebinomial", "gamma", "inverse_gaussian"} and np.any(mu <= 0):
         raise RuntimeError(f"IRLS produced non-positive {family.name} means")
 
@@ -251,7 +279,10 @@ class GLMResult:
         n_iter: IRLS iterations to convergence.
         converged: whether the IRLS convergence criterion was met. Public fits
             currently raise instead of returning this as false.
-        rank: effective design rank among positive-weight observations.
+        rank: effective NUMERICAL rank of the weighted design ``sqrt(W) X`` at the solution,
+            from the same SVD the covariance is computed from (cutoff at ``cond(X)``, not
+            ``cond(X)^2``; audit B4). ``rank < p`` -- exact or near collinearity -- is announced
+            by a ``UserWarning`` at fit time and makes ``z_values`` / ``p_values`` refuse.
         family / link: names.
         cov: ``(p, p)`` coefficient covariance.
     """
@@ -316,8 +347,9 @@ class GLMResult:
         return float(-2.0 * self.log_likelihood + np.log(n_effective) * self._n_parameters)
 
     def _require_identifiable(self) -> None:
-        # audit G-3: with rank < p the individual coefficients are NOT identified -- pinv returns
-        # the minimum-norm representative, which splits a shared effect across collinear columns
+        # audit G-3: with rank < p the individual coefficients are NOT identified -- the SVD
+        # least-squares solve returns the minimum-norm representative (verified: identical to
+        # ``pinv(X) @ y`` for the Gaussian/identity fit), which splits a shared effect across collinear columns
         # and shrinks each SE to match (a duplicated column halved both the coefficient and its
         # SE, leaving z unchanged and the collinearity invisible). Only estimable functions have
         # sampling distributions there, so per-coefficient Wald inference refuses.
@@ -471,7 +503,6 @@ def glm(
     if np.any(w < 0) or not np.any(w > 0):
         raise ValueError("weights must be non-negative with at least one positive value")
     active = w > 0
-    rank = int(np.linalg.matrix_rank(X[active]))
 
     # initialise mu in the interior of the family's support
     if fam.name == "binomial":
@@ -504,8 +535,13 @@ def glm(
         z = (eta - off) + (y - mu) / dmu
         if not np.all(np.isfinite(wls_w)) or not np.all(np.isfinite(z)):
             raise RuntimeError("IRLS produced non-finite working values")
-        XtW = X.T * wls_w
-        new_beta = _solve_psd(XtW @ X, XtW @ z)
+        # audit B4: solve the WLS step on the weighted design sqrt(W)X itself, never via the
+        # normal equations X'WX -- squaring the design squares its condition number, so every
+        # rank/cutoff decision would happen at cond(X)^2 instead of cond(X). lstsq's SVD also
+        # returns the true minimum-norm solution when the design is rank-deficient, which is
+        # exactly the representative _require_identifiable's message describes.
+        sqrt_wls = np.sqrt(wls_w)
+        new_beta = np.linalg.lstsq(X * sqrt_wls[:, None], z * sqrt_wls, rcond=None)[0]
         new_eta = X @ new_beta + off
         if not (np.all(np.isfinite(new_beta)) and np.all(np.isfinite(new_eta))):
             raise RuntimeError("IRLS diverged before convergence")
@@ -527,7 +563,32 @@ def glm(
     dmu = np.asarray(lk.mu_eta(eta), dtype=float)
     var = np.asarray(fam.variance(mu), dtype=float)
     wls_w = w * dmu**2 / var
-    xtwx_inv = np.linalg.pinv((X.T * wls_w) @ X)  # pinv: robust to collinear high-dim parents
+    # audit B4: the coefficient covariance comes from an SVD of the WEIGHTED DESIGN sqrt(W)X,
+    # never from pinv(X'WX). cond(X'WX) = cond(sqrt(W)X)^2, so pinv's default cutoff silently
+    # truncated singular values once cond(X) passed ~1e8 and collapsed the standard errors by
+    # up to 8 orders of magnitude -- with rank reported full, converged=True, and no warning.
+    # Factorizing sqrt(W)X keeps rank and cutoff decisions at cond(X); zero-weight rows enter
+    # as zero rows, so this is still the effective rank among positive-weight observations.
+    _, singular, vt = np.linalg.svd(X * np.sqrt(wls_w)[:, None], full_matrices=False)
+    cutoff = np.finfo(float).eps * max(n, p) * (singular[0] if singular.size else 0.0)
+    significant = singular > cutoff
+    rank = int(np.count_nonzero(significant))
+    inv_sq_singular = np.zeros_like(singular)
+    inv_sq_singular[significant] = 1.0 / singular[significant] ** 2
+    xtwx_inv = (vt.T * inv_sq_singular) @ vt
+    if rank < p:
+        # exact OR numerical rank deficiency: say so instead of silently full-ranking the fit.
+        # The fit itself still returns (minimum-norm coefficients, as documented); z_values /
+        # p_values refuse via _require_identifiable because rank < p.
+        warnings.warn(
+            f"the design is rank-deficient at working precision: effective rank {rank} < {p} "
+            "columns, so some predictors are exactly or nearly collinear. Coefficients are the "
+            "minimum-norm least-squares representative and per-coefficient Wald inference "
+            "(z_values / p_values) will refuse; drop, combine, or center/rescale the collinear "
+            "columns to make individual coefficients identifiable.",
+            UserWarning,
+            stacklevel=2,
+        )
     dev = float(np.sum(w * fam.unit_deviance(y, mu)))
     if fam.estimate_dispersion:
         residual_df = int(np.count_nonzero(active)) - rank
@@ -832,6 +893,7 @@ __all__ = [
     "Link",
     "Family",
     "GLMResult",
+    "PerfectSeparationError",
     "glm",
     "PenalizedResult",
     "ridge_regression",

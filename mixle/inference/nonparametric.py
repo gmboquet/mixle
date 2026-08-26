@@ -284,7 +284,17 @@ def ks_2samp(x: Any, y: Any, *, alternative: str = "two-sided") -> TestResult:
 
 
 def ks_1samp(x: Any, cdf: Callable[[np.ndarray], np.ndarray], *, alternative: str = "two-sided") -> TestResult:
-    """One-sample Kolmogorov-Smirnov goodness-of-fit test against a fully-specified ``cdf`` callable."""
+    """One-sample Kolmogorov-Smirnov goodness-of-fit test against a fully-specified ``cdf`` callable.
+
+    The p-value is ASYMPTOTIC in every mode: ``two-sided`` uses the limiting Kolmogorov distribution
+    (scipy's ``method='asymp'``) and the one-sided modes use the large-sample exponential bound
+    ``exp(-2 n D^2)``. No small-sample (Marsaglia-Tsang-Wang exact) correction is applied, so at
+    small ``n`` the reported p-value is LARGER than the exact one -- it understates the evidence
+    against the hypothesized cdf and overstates goodness-of-fit (e.g. ~26% relative near p=0.005 at
+    n=50; the gap shrinks as ``n`` grows). For an exact small-sample p-value use
+    ``scipy.stats.ks_1samp(x, cdf, method='exact')``; the ``statistic`` here matches scipy's to
+    machine precision either way.
+    """
     _alternative(alternative)
     if not callable(cdf):
         raise TypeError("cdf must be callable")

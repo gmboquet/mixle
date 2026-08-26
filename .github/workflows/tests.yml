@@ -366,6 +366,24 @@ jobs:
               --manifest "$GITHUB_WORKSPACE/manifests/serialization_schema_manifest.json" \
               --profile base
           done
+      - name: Load v0.7 fixtures from each clean artifact
+        # The cross-version test resolves its fixtures beside itself and the schema manifest two
+        # levels up, so it runs from a reconstructed mixle/tests/ + manifests/ skeleton -- never from
+        # the workspace root, where the source tree would shadow the installed package. Before this
+        # step existed the v0.7 fixtures were exercised only against the source tree (found by the
+        # 0.8.0 gate-receipt audit): the wheel's serialization path had no installed-artifact check.
+        run: |
+          mkdir -p "$RUNNER_TEMP/xver/mixle/tests/fixtures" "$RUNNER_TEMP/xver/manifests"
+          cp mixle/tests/cross_version_fixtures_test.py "$RUNNER_TEMP/xver/mixle/tests/"
+          cp -R mixle/tests/fixtures/v0_7_0 "$RUNNER_TEMP/xver/mixle/tests/fixtures/"
+          cp manifests/serialization_schema_manifest.json "$RUNNER_TEMP/xver/manifests/"
+          cd "$RUNNER_TEMP/xver/mixle/tests"
+          for kind in wheel sdist; do
+            env="$RUNNER_TEMP/clean-$kind-env"
+            "$env/bin/python" -c \
+              'import pathlib,mixle; p=pathlib.Path(mixle.__file__).resolve(); assert "site-packages" in p.parts, p'
+            "$env/bin/python" -m pytest -q -n 0 -m "" cross_version_fixtures_test.py
+          done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: clean-wheel-behavior-${{ github.sha }}

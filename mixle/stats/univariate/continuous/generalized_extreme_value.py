@@ -41,6 +41,16 @@ from mixle.stats.univariate.continuous._observation_contracts import (
 _XI_TOL = 1.0e-8  # |xi| below this is treated as the Gumbel limit
 _EULER = 0.5772156649015329
 _GUMBEL_SKEW = 12.0 * math.sqrt(6.0) * 1.2020569031595943 / math.pi**3  # 12 sqrt(6) zeta(3) / pi^3
+# How much worse (in nats) the covering-clamped shape may score the observation nearest the fitted
+# support endpoint, relative to the Gumbel member with the same mean and variance, before the
+# estimate abandons the clamped shape for that Gumbel limit. The clamp guarantees the endpoint lies
+# outside the observed range, but with a Frechet-type shape the density decays like exp(-s^(-1/xi))
+# at the endpoint, so "outside" can still mean a log-density of -1e28 for one real observation -- a
+# fit that is numerically indistinguishable from declaring its own training data impossible
+# (MXR-080 B12). Thirty nats is on the order of the tail penalty the Gumbel member itself assigns
+# to a 3-4 sd extreme observation, so the clamped fit is kept whenever it remains comparable and
+# dropped only when it is catastrophically worse.
+_COVERING_FALLBACK_NATS = 30.0
 
 
 def _gev_skewness(xi: float) -> float:
@@ -479,7 +489,15 @@ class GeneralizedExtremeValueAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class GeneralizedExtremeValueEstimator(ParameterEstimator):
-    """Method-of-moments estimator for GEV location, scale and shape."""
+    """Method-of-moments estimator for GEV location, scale and shape.
+
+    This is a moment estimator, not an MLE: the shape is solved from the skewness-vs-``xi``
+    relation, and the shape is additionally constrained so the fitted support covers the observed
+    range (see :func:`_shape_covering_range`). Whenever that constraint rewrites the shape -- or the
+    rewritten shape still scores the extreme observation catastrophically and the estimate falls
+    back to the Gumbel limit -- the returned distribution is not the raw moment fit, and the change
+    is recorded in ``numerical_repairs()`` so ``fit_provenance()`` carries it (MXR-080-1202).
+    """
 
     def __init__(
         self,
@@ -543,15 +561,17 @@ class GeneralizedExtremeValueEstimator(ParameterEstimator):
         # var<=0.0 branch above already uses, rather than let a non-finite parameter reach the
         # constructor's validation as an opaque crash.
         gumbel_fallback = math.sqrt(6.0 * var) / math.pi, mean - math.sqrt(6.0 * var) / math.pi * _EULER, 0.0
+        repairs: list[str] = []
         if not np.isfinite(skew):
             scale, loc, xi = gumbel_fallback
         else:
-            xi = _xi_from_skewness(skew, self.xi_min, self.xi_max)
+            xi_skew = _xi_from_skewness(skew, self.xi_min, self.xi_max)
             # Trade the third moment for support coverage before building the parameters: a shape
             # solved purely from skewness can put the bounded end of the GEV inside the very sample
             # it summarizes, which scores those observations -inf and leaves EM with a permanently
             # non-finite model (the moments never move, so the estimate never recovers).
-            xi = _shape_covering_range(xi, mean, math.sqrt(var), min_val, max_val)
+            xi_cov = _shape_covering_range(xi_skew, mean, math.sqrt(var), min_val, max_val)
+            xi = xi_cov
             if abs(xi) < _XI_TOL:  # Gumbel limit
                 scale = math.sqrt(6.0 * var) / math.pi
                 loc = mean - scale * _EULER
@@ -563,11 +583,35 @@ class GeneralizedExtremeValueEstimator(ParameterEstimator):
                 else:
                     scale = math.sqrt(var) * abs(xi) / math.sqrt(denom)
                     loc = mean - scale * (g1 - 1.0) / xi
+            if xi_cov != xi_skew and xi == xi_cov and np.isfinite(loc) and np.isfinite(scale):
+                # The covering clamp rewrote the moment shape, so the returned parameters are not
+                # the raw moment fit -- record the repair the same way the Gaussian records its
+                # variance floor (MXR-080-1202). The clamp only guarantees the endpoint lies
+                # *outside* the data; when the surviving margin is so thin that the extreme
+                # observation still scores astronomically below what the Gumbel member would give
+                # it, the clamped shape has effectively declared training data impossible after
+                # all, and the estimate takes the (unbounded-support) Gumbel limit instead.
+                extreme = min_val if xi > 0.0 else max_val
+                candidate = GeneralizedExtremeValueDistribution(loc, max(scale, self.min_scale), xi)
+                gumbel = GeneralizedExtremeValueDistribution(
+                    gumbel_fallback[1], max(gumbel_fallback[0], self.min_scale), 0.0
+                )
+                if candidate.log_density(extreme) < gumbel.log_density(extreme) - _COVERING_FALLBACK_NATS:
+                    scale, loc, xi = gumbel_fallback
+                    repairs.append("shape-covering-fallback(%.6g -> gumbel)" % xi_skew)
+                else:
+                    repairs.append("shape-covering-clamped(%.6g -> %.6g)" % (xi_skew, xi))
+        unfloored_scale = scale
         scale = max(scale, self.min_scale)
+        if scale > unfloored_scale:
+            repairs.append("scale-floored(%.3g -> %.3g)" % (unfloored_scale, self.min_scale))
         if not (np.isfinite(loc) and np.isfinite(scale) and np.isfinite(xi)):
             scale, loc, xi = gumbel_fallback
             scale = max(scale, self.min_scale)
-        return GeneralizedExtremeValueDistribution(loc, scale, xi, name=self.name, keys=self.keys)
+        dist = GeneralizedExtremeValueDistribution(loc, scale, xi, name=self.name, keys=self.keys)
+        if repairs:
+            dist._numerical_repairs = tuple(repairs)
+        return dist
 
 
 class GeneralizedExtremeValueDataEncoder(DataSequenceEncoder):

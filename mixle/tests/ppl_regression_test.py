@@ -374,7 +374,7 @@ class ConditionalFitModelSelectionTestCase(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         # the data really do have group structure, so the mixed model must win on AIC
         self.assertLess(rows[0]["aic"], rows[1]["aic"])
-        self.assertEqual(rows[0]["model"], "LMMResult")
+        self.assertEqual(rows[0]["model"], "LMMResult(x + intercept)")
 
     def test_compare_refuses_a_single_model_instead_of_hanging(self):
         """compare(model, data) used to iterate the RandomVariable through the legacy __getitem__

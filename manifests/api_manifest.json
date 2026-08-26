@@ -724,6 +724,7 @@
         "ParameterEstimator",
         "ParameterPosterior",
         "PenalizedResult",
+        "PerfectSeparationError",
         "PermutationResult",
         "PlacementPlan",
         "PoolSpec",

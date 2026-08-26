@@ -161,7 +161,11 @@ class EmptyDataAndValueErrorNarrowingTestCase(unittest.TestCase):
 
         with self.assertRaises(ValueError) as ctx:
             optimize(None, GaussianEstimator())
-        self.assertEqual(str(ctx.exception), "Optimization called with empty data or enc_data.")
+        self.assertEqual(
+            str(ctx.exception),
+            "optimize() received no observations: data and enc_data are both None. "
+            "Pass a non-empty data sequence or pre-encoded enc_data.",
+        )
 
     def test_fit_none_data_raises_value_error(self):
         from mixle.inference import fit
@@ -169,7 +173,11 @@ class EmptyDataAndValueErrorNarrowingTestCase(unittest.TestCase):
 
         with self.assertRaises(ValueError) as ctx:
             fit(None, GaussianEstimator())
-        self.assertEqual(str(ctx.exception), "fit called with empty data or enc_data.")
+        self.assertEqual(
+            str(ctx.exception),
+            "fit() received no observations: data and enc_data are both None. "
+            "Pass a non-empty data sequence or pre-encoded enc_data.",
+        )
 
     def test_former_exception_sites_now_raise_value_error(self):
         # representative narrowed sites, message-preserving (S-4)
@@ -183,6 +191,15 @@ class EmptyDataAndValueErrorNarrowingTestCase(unittest.TestCase):
 
         with self.assertRaises(ValueError) as ctx:
             GaussianDistribution(0.0, 1.0).dist_to_encoder().seq_encode([1.0, float("nan")])
+        self.assertEqual(
+            str(ctx.exception),
+            "GaussianDistribution observations contain 1 NaN entry -- missing values. Drop the "
+            "incomplete rows, or model the gaps: fit(..., missing='marginalize') in mixle.ppl, or "
+            "wrap the leaf with mixle.stats.marginalized().",
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            GaussianDistribution(0.0, 1.0).dist_to_encoder().seq_encode([1.0, float("inf")])
         self.assertEqual(str(ctx.exception), "GaussianDistribution requires support x in (-inf,inf).")
 
         with self.assertRaises(ValueError) as ctx:

@@ -84,6 +84,14 @@ class GaussianMixtureDistribution(MixtureDistribution):
     ) -> None:
         w = coalesce_alias("w", w, "weights", weights, default=MISSING)
         self.mu = np.asarray(mu, dtype=float)
+        if self.mu.ndim != 2:
+            # A 1-D mu is the natural first attempt at a univariate mixture; it used to die as a
+            # bare ``IndexError: tuple index out of range`` on the shape lookup below.
+            raise ValueError(
+                f"component means must have shape (K, d) -- one length-d mean vector per component; "
+                f"got a {self.mu.ndim}-D array of shape {self.mu.shape}. For a univariate mixture "
+                f"write mu=[[m1], [m2], ...] (each mean is a length-1 vector)."
+            )
 
         num_comp = self.mu.shape[0]
         dim = self.mu.shape[1]
@@ -301,7 +309,19 @@ class GaussianMixtureEstimator(MixtureEstimator):
         base = super().estimate(nobs, suff_stat)
         mu = np.asarray([comp.mu for comp in base.components])
         sig2 = np.asarray([comp.covar for comp in base.components])
-        return GaussianMixtureDistribution(mu, sig2, base.w, name=self.name)
+        packed = GaussianMixtureDistribution(mu, sig2, base.w, name=self.name)
+        # The repack builds a FRESH distribution from bare parameter arrays, which discarded the
+        # component objects -- and with them any covariance-ridge/variance-floor repair records the
+        # component estimators had attached, so a ridged mixture fit read as repair-free
+        # (wave-3 adversarial check, B5). Carry the records across, component-indexed.
+        repairs = tuple(
+            f"component[{i}]: {note}"
+            for i, comp in enumerate(base.components)
+            for note in getattr(comp, "_numerical_repairs", ())
+        )
+        if repairs:
+            packed._numerical_repairs = repairs + tuple(getattr(packed, "_numerical_repairs", ()))
+        return packed
 
 
 class GaussianMixtureDataEncoder(MixtureDataEncoder):

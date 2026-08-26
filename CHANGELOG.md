@@ -4,7 +4,7 @@ All notable changes to mixle are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [0.8.0] — 2026-08-22
+## [0.8.0] — 2026-08-26
 
 The credibility, stability, and proof release: turning mixle from a broad, fast-moving research
 package into one whose supported core, performance, artifacts, and public claims can be independently
@@ -69,6 +69,67 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
   remain unverified until retained receipts exist.
 
 ### Fixed
+
+- A maintainer-executed release-candidate test campaign (five sessions on public data the maintainer
+  did not design, every finding independently re-measured; D-0200) found and fixed the following.
+  `glm()` computed the coefficient covariance as a pseudo-inverse of the normal-equations matrix,
+  whose conditioning is the square of the design's, so on strongly collinear designs standard errors
+  came out orders of magnitude too small with `converged=True` and no warning -- covariance, rank and
+  the IRLS solve now come from an SVD of the weighted design, agree with reference implementations
+  wherever those are well-posed, report the factorization's numerical rank, warn on near-collinearity,
+  and the rank-deficiency message's minimum-norm claim is now true. Perfect separation in binomial
+  fits is detected and named (`PerfectSeparationError`, a `RuntimeError` subclass, newly public)
+  instead of surfacing an internal IRLS symptom.
+- The Gaussian sufficient-statistics accumulator lost variance to catastrophic cancellation
+  (`E[x^2]-E[x]^2`), so fitted variance was not shift-invariant and collapsed to the internal floor at
+  large offsets; it now accumulates shifted statistics and is shift-stable to 1e-9 at offsets up to
+  1e9. One pinned reproduction digest moved by one ulp as a result and the bundle is regenerated.
+  Masked arrays are refused with the masks named (their masks were silently dropped by every
+  array consumer); NaN observations are named as missing data with the `missing='marginalize'` /
+  `marginalized()` remedies instead of a support-interval message; all-zero user-supplied observation
+  weights are rejected instead of returning a fabricated `mu=0`; `np.random.Generator` is accepted at
+  the public fit entries; the two empty-input paths give one consistent message naming the called
+  entry point.
+- `propose()` -- the automatic entry point -- failed open in four ways, all closed: a DataFrame was
+  iterated as its column names and modeled as a categorical over headers (now routed through the same
+  tabular path `optimize()` uses); a degenerate likelihood-spike candidate could win the frontier on
+  held-out mean log-density alone (candidates are now screened for spike degeneracy and pathological
+  calibration, with the rejection recorded in `Model.notes`); when every candidate failed to score, an
+  unverified winner was returned silently with a `succeeded` certificate (now disclosed in notes and
+  the certificate says so); the dtype-derived candidate universe (integer input proposes discrete
+  families) is now stated in `Model.notes` and the docstring. `Model.spec` now carries the winning
+  family after `propose(fit=True)`, so the proposal is refittable without re-inferring.
+- Mixture EM stopped on its initialization plateau under the default iteration budget and silently
+  ignored supplied initializations; `restarts="auto"` did not diversify. EM now runs to its tolerance,
+  honors `init_estimator=`/`estimator=` starting points, diversifies restarts, and reaches the known
+  optimum on the Old Faithful reference within 1 nat, deterministically.
+- Multivariate Gaussian estimation documented and now records its covariance ridge through the same
+  repairs channel as the scalar variance floor, and its serialized artifacts are scipy-version
+  independent (old artifacts still load).
+- `Model.load()`/`deploy()` error taxonomy: unreadable-manifest states each name their actual cause
+  instead of uniformly claiming a pickle-format artifact; `trust_code` is demanded only for artifacts
+  that actually contain code; corrupt files no longer leak raw stdlib exceptions; a manifest whose
+  JSON is not an object is refused cleanly; when a manifest names `model_sha256`, the model file is
+  verified against it on load.
+- `mixle.task.solve()` produced a student whose live out-of-distribution gate escalated everything
+  while `report()` advertised the offline rate and `promoted=True`: the numeric featurization now
+  matches between training and serving (legacy artifacts rebuild their original features), the gate's
+  threshold is calibrated on the training distribution, promotion reflects the live gate, and
+  `answered_slice` is populated. Base installs get named-extra refusals instead of import tracebacks.
+- Family error reporting: a failed generalized-extreme-value optimization is surfaced instead of
+  presenting as a clean MLE; Gamma fits on data containing zeros fail closed naming the zeros; Weibull,
+  Rayleigh and Beta boundary/zero errors name the offending observations; LogGaussian names NaN as
+  missing data and no longer emits a raw divide-by-zero warning on zeros.
+- Diagnostics and introspection: single-chain fits report finite `ess_bulk`/`ess_tail` (split-chain
+  estimators) instead of NaN, with `split_rhat` receipted as unavailable; `convergence_diagnostics()`
+  returns its documented availability receipt for one chain instead of raising; `summarize()` returns
+  closed-form moments for mixtures and says what is unavailable instead of returning an empty dict;
+  `compare()` rows carry distinguishable model labels; `describe()` recognizes the default
+  `optimize()` result; `supports()` accepts the capability strings the library itself emits;
+  `ks_1samp` documents that its p-value is asymptotic; `AutoregressiveEnumerable.unrank`'s quantized
+  ordering is documented accurately and the README example matches its own output.
+- The v0.7 compatibility fixtures now run against the installed wheel and sdist in CI's
+  clean-artifact job, not only against the source tree.
 
 - Model selection works on regression and mixed-effects fits. `aic()`, `bic()`, `log_likelihood()`,
   `plugin_log_likelihood()` and `compare()` previously raised

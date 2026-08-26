@@ -79,6 +79,37 @@ four orders of magnitude."""
 # is the only caller, so it drains this immediately after the call.
 _LAST_REPAIR: list[str] = []
 
+_RIDGE_MATERIAL_RATIO = 1e-3
+"""Relative inflation of the smallest raw variance above which the M-step's default covariance ridge
+is recorded as a numerical repair on the fitted distribution. The ridge
+``eps = max(min_covar, ridge * trace/d)`` is designed as a ~1e-6 relative perturbation, and it is one
+when the coordinates share a scale. Its trace-MEAN coupling makes it scale-dependent, though: on
+heterogeneous-unit data the same default inflated the smallest variance of a 203x3 macro-style
+dataset by 2.1x and cost 25.3 log-likelihood units (B5). This threshold sits 1000x above the design
+point, so scale-homogeneous fits stay quiet, while a 0.1% variance inflation -- roughly where
+likelihood/AIC comparisons start to move at realistic sample sizes -- is reported. Reporting only,
+never a guard: crossing it records a repair string; it never rejects or alters the fit."""
+
+
+def _record_covariance_ridge(dist: Any, eps: float, smallest_raw_variance: float) -> Any:
+    """Note on ``dist`` when the M-step covariance ridge bound materially, so a fit can report it.
+
+    The ridge exists so a singular empirical covariance (an EM component holding fewer than ``d``
+    points) stays factorizable. Because it is scaled by the MEAN diagonal variance, on
+    heterogeneous-unit data it can inflate the smallest variances far beyond its nominal ~1e-6
+    relative size, and a caller reading only the parameters cannot tell (B5). Mirrors the univariate
+    ``variance-floored(...)`` reporting in ``gaussian.py``; an ordinary scale-homogeneous fit stays
+    below ``_RIDGE_MATERIAL_RATIO`` and records nothing.
+    """
+    if smallest_raw_variance > 0.0:
+        if eps <= _RIDGE_MATERIAL_RATIO * smallest_raw_variance:
+            return dist
+        note = "covariance-ridged(%.3g; %.3gx the smallest variance)" % (eps, eps / smallest_raw_variance)
+    else:
+        note = "covariance-ridged(%.3g; onto a non-positive variance)" % eps
+    dist._numerical_repairs = (note,) + tuple(getattr(dist, "_numerical_repairs", ()))
+    return dist
+
 
 def _robust_cho_factor(covar: np.ndarray) -> tuple[tuple[np.ndarray, bool], np.ndarray]:
     """Cholesky-factor a covariance, self-healing a covariance that lost positive-definiteness.
@@ -214,6 +245,30 @@ class MultivariateGaussianFisherView(FixedFisherView):
         return 0.5 * (out + out.T)
 
 
+# The multivariate Gaussian's serialized state is its PARAMETERS, nothing else. Everything the
+# constructor derives from them -- the Cholesky factor and its downstream caches, plus the
+# conjugate-prior expansions ``set_prior`` computes -- is excluded, because their exact bytes belong
+# to the scipy/LAPACK build that computed them, not to the model: ``cho_factor``'s ``lower`` flag
+# changed Python type (bool -> 0-d ndarray) and its unused triangle changed content (input scratch ->
+# zeros) at scipy 1.18, so persisting them made an artifact deployed under one in-range scipy refuse
+# to load under another, in both directions (B6). Legacy artifacts that still carry the derived
+# fields decode through ``__pysp_setstate__``, which recomputes all of them from the parameters.
+_MVN_PARAMETER_STATE_FIELDS = frozenset({"mu", "covar", "name", "keys", "prior"})
+_MVN_DERIVED_STATE_FIELDS = frozenset(
+    {
+        "chol",
+        "chol_const",
+        "conj_prior_params",
+        "dim",
+        "e_log_det",
+        "has_conj_prior",
+        "inv_covar",
+        "log_det",
+        "use_lstsq",
+    }
+)
+
+
 class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution):
     """Multivariate normal distribution with mean vector mu and full covariance matrix covar."""
 
@@ -320,7 +375,8 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
             dim: Dimension of the Gaussian.
             mu: Mean vector.
             covar: Validated covariance matrix backing scoring and sampling.
-            chol: Cholesky factor when available.
+            chol: Cholesky factor when available (normalized: plain bool flag, unused triangle
+                zeroed; derived from ``covar``, never serialized).
             name: Optional diagnostic name.
             keys: Optional sufficient-statistic key.
             use_lstsq: Whether scoring falls back to least-squares solves.
@@ -345,9 +401,16 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         # input -- so every downstream reader of self.covar (the sampler, __str__, condition/marginal,
         # the Fisher view, ...) agrees with what chol/log_det/inv_covar drive scoring from.
         _LAST_REPAIR.clear()
-        self.chol, self.covar = _robust_cho_factor(self.covar)
+        chol_factor, self.covar = _robust_cho_factor(self.covar)
         self._numerical_repairs = tuple(_LAST_REPAIR)
         _LAST_REPAIR.clear()
+        # Normalize scipy's raw ``cho_factor`` output before storing it: the ``lower`` flag's Python
+        # type (bool vs 0-d ndarray) and the unused triangle's content (input scratch vs zeros) are
+        # scipy implementation details that changed at scipy 1.18, not parameter state. Storing them
+        # verbatim tied a persisted model's bytes to the scipy build that wrote it (B6).
+        chol_matrix, chol_lower = chol_factor
+        chol_lower = bool(chol_lower)
+        self.chol = (np.tril(chol_matrix) if chol_lower else np.triu(chol_matrix), chol_lower)
         self.name = name
         self.keys = keys
 
@@ -675,6 +738,60 @@ class MultivariateGaussianDistribution(SequenceEncodableProbabilityDistribution)
         """Return an encoder for iid multivariate Gaussian observations."""
         return MultivariateGaussianDataEncoder(dim=self.dim)
 
+    # --- serialization: parameters only, environment-independent. The artifact state is
+    # (mu, covar, name, keys, prior); every derived cache is recomputed by __init__ on load. Storing
+    # the caches -- above all scipy's raw ``cho_factor`` tuple -- made the serialized bytes depend on
+    # the scipy/LAPACK build, so an artifact deployed under one in-range scipy refused to load under
+    # another (B6). See _MVN_PARAMETER_STATE_FIELDS / _MVN_DERIVED_STATE_FIELDS. ---
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        """Return the parameter-only serialized state (derived caches are recomputed on load)."""
+        state = dict(self.__dict__)
+        for field in _MVN_DERIVED_STATE_FIELDS:
+            state.pop(field, None)
+        return state
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        """Rebuild from serialized parameters through ``__init__`` so every invariant re-runs.
+
+        Accepts both the parameter-only state written by ``__pysp_getstate__`` and the legacy early-
+        0.8.0 state that persisted the derived caches alongside the parameters. Legacy cache VALUES
+        are never adopted -- recomputing them locally is exactly what makes the artifact portable
+        across scipy versions -- but the one exact invariant they carry (``dim``) is checked, so a
+        tampered artifact whose parameters and caches disagree is refused by name.
+        """
+        from mixle.utils.serialization import SerializationError
+
+        if not isinstance(state, dict):
+            raise SerializationError("serialized multivariate Gaussian state must be a dict of parameters")
+        unknown = sorted(set(state) - _MVN_PARAMETER_STATE_FIELDS - _MVN_DERIVED_STATE_FIELDS)
+        if unknown:
+            raise SerializationError(
+                "serialized multivariate Gaussian state carries fields that are not "
+                "MultivariateGaussianDistribution parameters: %s" % ", ".join(unknown)
+            )
+        missing = sorted({"mu", "covar"} - set(state))
+        if missing:
+            raise SerializationError(
+                "serialized multivariate Gaussian state is missing required parameters: %s" % ", ".join(missing)
+            )
+        try:
+            self.__init__(
+                mu=state["mu"],
+                covar=state["covar"],
+                name=state.get("name"),
+                keys=state.get("keys"),
+                prior=state.get("prior"),
+            )
+        except Exception as exc:
+            raise SerializationError(
+                "serialized multivariate Gaussian parameters do not form a valid distribution: %s" % exc
+            ) from exc
+        if "dim" in state and state["dim"] != self.dim:
+            raise SerializationError(
+                "serialized multivariate Gaussian state is inconsistent: dim=%r does not match its "
+                "length-%d mean vector" % (state["dim"], self.dim)
+            )
+
 
 class MultivariateGaussianSampler(DistributionSampler):
     """Sampler for iid multivariate Gaussian observations."""
@@ -924,7 +1041,20 @@ class MultivariateGaussianAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class MultivariateGaussianEstimator(ParameterEstimator):
-    """Estimator for multivariate Gaussian distributions."""
+    """Estimator for multivariate Gaussian distributions.
+
+    The fitted covariance is NOT the raw maximum-likelihood estimate unless ``ridge=0.0`` is
+    passed: by default the M-step regularizes the empirical covariance as ``cov + eps * I`` with
+    ``eps = max(min_covar, ridge * trace(cov) / d)`` (defaults ``min_covar=1e-8``, ``ridge=1e-6``)
+    so a singular empirical covariance -- e.g. an EM component holding fewer than ``d`` points --
+    remains factorizable. Because ``eps`` scales with the MEAN diagonal variance, the ridge is a
+    negligible ~1e-6 relative perturbation when the coordinates share a scale, but on unstandardized
+    data whose columns have heterogeneous units it can inflate the SMALLEST variances materially
+    (and with them the log-likelihood and AIC). A materially binding ridge is recorded on the fitted
+    distribution as a ``covariance-ridged(...)`` entry in ``numerical_repairs()`` -- and therefore in
+    ``fit_provenance().repairs`` -- see ``_RIDGE_MATERIAL_RATIO``. Pass ``ridge=0.0`` to recover the
+    exact MLE up to the ``min_covar`` absolute jitter floor.
+    """
 
     def __init__(
         self,
@@ -958,7 +1088,12 @@ class MultivariateGaussianEstimator(ParameterEstimator):
                 the covariance is regularized as ``cov + eps * I`` with
                 ``eps = max(min_covar, ridge * trace(cov) / d)`` so a singular empirical
                 covariance (a component holding fewer than ``d`` points) remains factorizable.
-                Non-finite statistics are rejected. Bias is negligible at the defaults.
+                Non-finite statistics are rejected. The bias is ~``ridge`` relative when the
+                coordinates share a scale, but because ``eps`` is set by the MEAN diagonal
+                variance, heterogeneous-unit columns can have their smallest variances inflated
+                materially; when that happens the fitted distribution records a
+                ``covariance-ridged(...)`` entry in ``numerical_repairs()``. Pass ``0.0`` for the
+                exact MLE (up to the ``min_covar`` floor).
             track_conditioning (bool): Opt-in numerics-conditioning receipt. When ``True``,
                 ``estimate`` computes the eigenspectrum of the RAW (pre-ridge) empirical covariance
                 and attaches it to the returned distribution as ``.conditioning_receipt`` -- a
@@ -1116,7 +1251,7 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             d = inferred_dim
             mu = np.asarray(self.prior_mu, dtype=float) if self.prior_mu is not None else vec.zeros(d)
             raw_covar = np.asarray(self.prior_covar, dtype=float) if self.prior_covar is not None else np.eye(d)
-            covar = self._regularize_covar(raw_covar)
+            covar, ridge_eps, smallest_raw = self._regularized_covar_and_ridge(raw_covar)
             dist = MultivariateGaussianDistribution(
                 mu,
                 covar,
@@ -1124,6 +1259,7 @@ class MultivariateGaussianEstimator(ParameterEstimator):
                 keys=self.keys,
                 prior=self.prior,
             )
+            _record_covariance_ridge(dist, ridge_eps, smallest_raw)
             self._attach_conditioning_receipt(dist, raw_covar)
             return dist
 
@@ -1147,7 +1283,7 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             diagonal=False,
         )
 
-        covar = self._regularize_covar(raw_covar)
+        covar, ridge_eps, smallest_raw = self._regularized_covar_and_ridge(raw_covar)
 
         dist = MultivariateGaussianDistribution(
             mu,
@@ -1156,6 +1292,7 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             keys=self.keys,
             prior=self.prior,
         )
+        _record_covariance_ridge(dist, ridge_eps, smallest_raw)
         self._attach_conditioning_receipt(dist, raw_covar)
         return dist
 
@@ -1167,11 +1304,12 @@ class MultivariateGaussianEstimator(ParameterEstimator):
 
         dist.conditioning_receipt = conditioning_receipt(raw_covar, degenerate_ratio=self.degenerate_ratio)
 
-    def _regularize_covar(self, covar: np.ndarray) -> np.ndarray:
-        """P1 covariance ridge: cov <- cov + eps*I with eps = max(min_covar, ridge*trace/d).
+    def _regularized_covar_and_ridge(self, covar: np.ndarray) -> tuple[np.ndarray, float, float]:
+        """Apply the P1 covariance ridge and return ``(regularized, eps, smallest_raw_variance)``.
 
-        The sufficient-statistic validator rejects non-finite input before this point.
-        Symmetrization absorbs accumulation round-off. Bias is negligible at the defaults.
+        The extra two values feed ``_record_covariance_ridge``: ``eps`` is what was added to every
+        diagonal entry and ``smallest_raw_variance`` is the pre-ridge diagonal minimum it is judged
+        against, so ``estimate`` can report a materially binding ridge without recomputing either.
         """
         covar = np.asarray(covar, dtype=float)
         if covar.shape != (self.dim or len(covar), self.dim or len(covar)):
@@ -1182,7 +1320,19 @@ class MultivariateGaussianEstimator(ParameterEstimator):
         covar = 0.5 * (covar + covar.T)
         trace = float(np.trace(covar))
         eps = max(self.min_covar, self.ridge * trace / d if trace > 0.0 else 0.0)
-        return covar + eps * np.eye(d)
+        return covar + eps * np.eye(d), eps, float(np.diag(covar).min())
+
+    def _regularize_covar(self, covar: np.ndarray) -> np.ndarray:
+        """P1 covariance ridge: cov <- cov + eps*I with eps = max(min_covar, ridge*trace/d).
+
+        The sufficient-statistic validator rejects non-finite input before this point.
+        Symmetrization absorbs accumulation round-off. The bias is ~``ridge`` relative on
+        scale-homogeneous coordinates but scale-dependent in general; see the class docstring and
+        ``_record_covariance_ridge``, which reports a materially binding ridge through
+        ``numerical_repairs()``.
+        """
+        regularized, _eps, _smallest = self._regularized_covar_and_ridge(covar)
+        return regularized
 
 
 class MultivariateGaussianDataEncoder(DataSequenceEncoder):
@@ -1224,6 +1374,17 @@ class MultivariateGaussianDataEncoder(DataSequenceEncoder):
             Encoded data matrix with shape (len(x), dim).
 
         """
+        # np.asarray on a MaskedArray returns the bare fill data -- the masked (excluded) entries
+        # would be fit as real observations with no error anywhere. The public fit verbs guard this
+        # already; this direct-encoder guard closes the bypass the wave-3 adversarial check found
+        # (a masked 2-D array encoded here still produced the exact silently-wrong mean).
+        if np.ma.isMaskedArray(x) and np.ma.is_masked(x):
+            raise ValueError(
+                "multivariate Gaussian observations are a numpy masked array with %d masked "
+                "value(s); the mask would be silently dropped and the masked entries fit as real "
+                "data. Drop incomplete rows, or use OptionalEstimator/MISSING for missingness-aware "
+                "fitting." % int(np.ma.count_masked(x))
+            )
         raw = np.asarray(x, dtype=np.float64)
         if self.dim is None:
             if raw.ndim != 2 or raw.shape[1] == 0:

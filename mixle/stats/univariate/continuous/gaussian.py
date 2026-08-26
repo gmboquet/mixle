@@ -534,19 +534,59 @@ class GaussianSampler(DistributionSampler):
 
 
 class GaussianSuffStat(tuple):
-    """A ``(sum, sum2, count, count2)`` sufficient statistic that also carries a numerics receipt.
+    """A ``(sum, sum2, count, count2)`` sufficient statistic that also carries side payloads.
 
     Behaves exactly like the plain 4-tuple everywhere it is indexed, unpacked, or iterated (it *is*
     one); ``receipt`` is extra payload that :meth:`GaussianAccumulator.combine` reads to fold the
     Kahan round-off bookkeeping (``abs_total``, ``n`` for ``sum`` and ``sum2``) into the receiving
-    accumulator when both sides are ``compensated``. Code that doesn't know about ``compensated``
-    accumulation (serialization, generic ``scale_suff_stat``, ...) sees an ordinary tuple.
+    accumulator when both sides are ``compensated``, and ``anchored`` is the shift-anchored moment
+    payload ``(anchor, sum_i w_i*(x_i - anchor), sum_i w_i*(x_i - anchor)^2)`` the accumulator
+    maintains alongside the raw moments so the M-step variance survives large-offset data (see
+    :class:`GaussianAccumulator`). Code that doesn't know about either payload (generic
+    ``scale_suff_stat``, engine kernels, ...) sees an ordinary tuple.
     """
 
     def __new__(cls, sum_: float, sum2_: float, count_: float, count2_: float, receipt: dict | None = None):
         obj = super().__new__(cls, (sum_, sum2_, count_, count2_))
         obj.receipt = receipt
+        # Set by the accumulator's value() after construction (a payload attribute, not a
+        # constructor parameter -- the constructor signature is release-pinned).
+        obj.anchored = None
         return obj
+
+    def __reduce__(self):
+        # A plain tuple subclass with a payload-bearing __new__ does not pickle by default; the
+        # Spark/mp reducers round-trip accumulator values through pickle, so keep both payloads.
+        return (_rebuild_gaussian_suff_stat, (tuple(self), self.receipt, self.anchored))
+
+
+def _rebuild_gaussian_suff_stat(values: tuple, receipt: dict | None, anchored: tuple | None) -> "GaussianSuffStat":
+    """Unpickle helper for :class:`GaussianSuffStat` (module-level so pickle can import it)."""
+    stat = GaussianSuffStat(values[0], values[1], values[2], values[3], receipt=receipt)
+    stat.anchored = anchored
+    return stat
+
+
+# Conditioning threshold for the anchored-moment gate: the raw ``E[x^2]-E[x]^2`` variance loses
+# about ``eps * (mean/sd)^2`` relative accuracy, so a (mean/sd)^2 up to 4e6 (ratio ~2000) keeps the
+# raw form within ~1e-9 relative error -- the historical single-pass path is bit-preserved there.
+# Beyond it the anchored track takes over. Chunks pooled from gate-passing content stay
+# well-conditioned as a pool (Cauchy-Schwarz: n*mean_pool^2 <= sum_i n_i*mean_i^2), so a pool built
+# only from gate-passing chunks never needs the anchor retroactively.
+_ANCHOR_CONDITION_RATIO = 4.0e6
+
+
+def _needs_anchor(chunk_sum: float, chunk_sum2: float, w_sum: float) -> bool:
+    """Whether a chunk's weighted moments are too ill-conditioned for the raw variance form.
+
+    ``spread2`` computed here is itself the cancellation-prone estimate, but as a GATE it is
+    reliable: when cancellation has corrupted it, the corruption is bounded by ``eps * m^2``, which
+    still leaves ``m*m`` orders of magnitude above ``_ANCHOR_CONDITION_RATIO * spread2``.
+    A non-positive computed spread activates the anchor outright (constant or near-constant data).
+    """
+    m = chunk_sum / w_sum
+    spread2 = chunk_sum2 / w_sum - m * m
+    return spread2 <= 0.0 or m * m > _ANCHOR_CONDITION_RATIO * spread2
 
 
 class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
@@ -561,8 +601,10 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
             compensated: Opt-in Kahan-compensated accumulation of ``sum``/``sum2`` with a
                 running numerics-error estimate (see :mod:`mixle.stats.compute.error_receipts`), read
                 back via :meth:`error_bound`. ``False`` (the default) is the plain float64
-                accumulation this class always used -- that code path is untouched, so it carries no
-                measurable overhead over the pre-existing behavior.
+                accumulation this class always used, plus an O(1)-per-chunk conditioning check
+                that activates the shift-anchored moment track only on data whose |mean|/spread
+                ratio would corrupt the raw variance -- well-conditioned data accumulates the
+                historical single-pass way with no measurable overhead.
 
         Attributes:
             sum: Weighted sum of observations.
@@ -582,6 +624,38 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.compensated = compensated
         self._sum_acc = CompensatedAccumulator(compensated=True) if compensated else None
         self._sum2_acc = CompensatedAccumulator(compensated=True) if compensated else None
+        # Shift-anchored moments, kept alongside the raw (sum, sum2) when the data needs them. The
+        # variance computed from raw reduced moments is the classic cancellation-prone
+        # ``E[x^2]-E[x]^2`` form: it loses ~2*log2(|mean|/sd) bits, so data with sd 0.8 at offset
+        # 1.7e9 collapses the fitted variance to the floor. Anchoring at the first value seen keeps
+        # every term of the scatter O(count * spread^2), making the M-step variance
+        # shift-invariant. The track is CONDITIONING-GATED: a chunk whose |mean|/spread ratio the
+        # raw form handles to ~1e-9 relative error (see ``_needs_anchor``) accumulates exactly the
+        # historical single-pass way -- bit-identical statistics, no second pass -- and the anchor
+        # activates only when a chunk (or a scalar ``update``) would corrupt the variance. The raw
+        # moments remain the exchange format -- ``(sum, sum2, count, count2)`` is the declared
+        # StatisticSpec tuple consumed by engine kernels and the Fisher view -- so the anchored
+        # track rides along as a payload on :class:`GaussianSuffStat`.
+        self._anchor: float | None = None
+        self._anchored_sum = 0.0
+        self._anchored_sum2 = 0.0
+
+    def _activate_anchor(self, anchor: float) -> None:
+        """Start the shift-anchored moment track at ``anchor``.
+
+        Any content already accumulated raw-only is converted about the new anchor. The conversion
+        is the cancellation-prone form, but it is only ever applied to content that accumulated
+        WITHOUT activating the gate -- i.e. content the gate certified as well-conditioned (raw
+        error ~1e-9 relative or better) -- or to pre-existing raw statistics restored through
+        ``from_value``/``combine``, where the conversion is no less accurate than the raw-only
+        estimate those statistics supported before.
+        """
+        self._anchor = float(anchor)
+        if self.sum != 0.0 or self.sum2 != 0.0 or self.count != 0.0:
+            self._anchored_sum += self.sum - self._anchor * self.count
+            self._anchored_sum2 += max(
+                self.sum2 - 2.0 * self._anchor * self.sum + self._anchor * self._anchor * self.count, 0.0
+            )
 
     def update(self, x: float, weight: float, estimate: Optional["GaussianDistribution"]) -> None:
         """Update sufficient statistics for GaussianAccumulator with one weighted observation.
@@ -596,6 +670,15 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        # Scalar updates carry no chunk to assess conditioning from, so the anchor activates on the
+        # first observation (a zero-cost O(1) bookkeeping track on this path). Activation happens
+        # BEFORE the raw fold so any pre-anchor content is converted from statistics that the
+        # conditioning gate has already vouched for.
+        if self._anchor is None:
+            self._activate_anchor(x)
+        dx = x - self._anchor
+        self._anchored_sum += dx * weight
+        self._anchored_sum2 += dx * dx * weight
         x_weight = x * weight
         if self.compensated:
             self._sum_acc.add(x_weight)
@@ -649,6 +732,19 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        chunk_sum = np.dot(x, weights)
+        chunk_sum2 = np.dot(x * x, weights)
+        w_sum = weights.sum()
+        # Conditioning gate: activate the anchored track only when this chunk's raw moments would
+        # corrupt the variance (or the anchor is already live). BEFORE the raw fold, so activation
+        # converts only pre-chunk content -- content the gate has already passed as well-conditioned.
+        if len(x) > 0 and (self._anchor is not None or (w_sum > 0.0 and _needs_anchor(chunk_sum, chunk_sum2, w_sum))):
+            if self._anchor is None:
+                self._activate_anchor(float(x[0]))
+            dx = x - self._anchor
+            wdx = dx * weights
+            self._anchored_sum += float(np.sum(wdx))
+            self._anchored_sum2 += float(np.dot(wdx, dx))
         if self.compensated:
             for xi, wi in zip(x, weights):
                 xw = float(xi) * float(wi)
@@ -658,9 +754,8 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
             self.sum2 = self._sum2_acc.total
             w_sum = float(np.sum(weights))
         else:
-            self.sum += np.dot(x, weights)
-            self.sum2 += np.dot(x * x, weights)
-            w_sum = weights.sum()
+            self.sum += chunk_sum
+            self.sum2 += chunk_sum2
         self.count += w_sum
         self.count2 += w_sum
 
@@ -684,6 +779,28 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
             This accumulator.
 
         """
+        anchored = getattr(suff_stat, "anchored", None)
+        if anchored is not None:
+            # Chan's parallel-merge: re-express the incoming anchored moments about this
+            # accumulator's anchor. The anchor gap ``d`` is between two data values, so every
+            # term stays O(count * spread^2) -- no large-offset cancellation is reintroduced.
+            # Activation (when this side has no anchor yet) runs BEFORE the raw fold below so it
+            # converts only this side's pre-existing content.
+            b_anchor, b_asum, b_asum2 = anchored
+            b_count = float(suff_stat[2])
+            if self._anchor is None:
+                self._activate_anchor(b_anchor)
+            d = b_anchor - self._anchor
+            self._anchored_sum += b_asum + b_count * d
+            self._anchored_sum2 += b_asum2 + 2.0 * d * b_asum + b_count * d * d
+        elif self._anchor is not None and (suff_stat[0] != 0.0 or suff_stat[1] != 0.0 or suff_stat[2] != 0.0):
+            # Raw-only statistics (an engine kernel, a hand-built tuple, a gate-passing peer)
+            # joining an anchored pool: convert about our anchor. See _activate_anchor for why the
+            # cancellation-prone conversion is acceptable exactly here.
+            a = self._anchor
+            self._anchored_sum += suff_stat[0] - a * float(suff_stat[2])
+            self._anchored_sum2 += max(suff_stat[1] - 2.0 * a * suff_stat[0] + a * a * float(suff_stat[2]), 0.0)
+
         self.sum += suff_stat[0]
         self.sum2 += suff_stat[1]
         self.count += suff_stat[2]
@@ -718,17 +835,27 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
     def value(self) -> tuple[float, float, float, float]:
         """Returns sufficient statistics of GaussianAccumulator object (Tuple[float, float, float, float]).
 
-        When ``compensated``, the returned value is a :class:`GaussianSuffStat` -- a drop-in 4-tuple
+        When ``compensated``, or once any data has been seen (so the shift-anchored moment track is
+        live), the returned value is a :class:`GaussianSuffStat` -- a drop-in 4-tuple
         (indexing/unpacking/iteration all behave identically) that additionally carries the
-        numerics-error receipt in its ``.receipt`` attribute, so :meth:`combine` can fold it in.
+        numerics-error receipt in its ``.receipt`` attribute and the anchored moments in its
+        ``.anchored`` attribute, so :meth:`combine` can fold them in and
+        :meth:`GaussianEstimator.estimate` can compute a shift-invariant variance.
         """
+        receipt = None
         if self.compensated:
             receipt = {
                 "sum": (self._sum_acc.abs_total, self._sum_acc.n),
                 "sum2": (self._sum2_acc.abs_total, self._sum2_acc.n),
             }
-            return GaussianSuffStat(self.sum, self.sum2, self.count, self.count2, receipt=receipt)
-        return self.sum, self.sum2, self.count, self.count2
+        anchored = None
+        if self._anchor is not None:
+            anchored = (self._anchor, self._anchored_sum, self._anchored_sum2)
+        if receipt is None and anchored is None:
+            return self.sum, self.sum2, self.count, self.count2
+        stat = GaussianSuffStat(self.sum, self.sum2, self.count, self.count2, receipt=receipt)
+        stat.anchored = anchored
+        return stat
 
     def from_value(self, x: tuple[float, float, float, float]) -> "GaussianAccumulator":
         """Replace this accumulator's sufficient statistics.
@@ -750,6 +877,16 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum2 = x[1]
         self.count = x[2]
         self.count2 = x[3]
+
+        anchored = getattr(x, "anchored", None)
+        if anchored is not None:
+            self._anchor, self._anchored_sum, self._anchored_sum2 = anchored
+        else:
+            # Raw-only statistics replace the state: the anchored track restarts unactivated, and
+            # a later activation (first update / anchored merge) converts this content then.
+            self._anchor = None
+            self._anchored_sum = 0.0
+            self._anchored_sum2 = 0.0
 
         if self.compensated:
             receipt = getattr(x, "receipt", None)
@@ -790,6 +927,58 @@ class GaussianAccumulatorFactory(StatisticAccumulatorFactory):
     def make(self) -> "GaussianAccumulator":
         """Return a GaussianAccumulator object with name and keys passed."""
         return GaussianAccumulator(name=self.name, keys=self.keys, compensated=self.compensated)
+
+
+def _consistent_anchored_moments(suff_stat: Any, sum_x: float, count: float) -> tuple[float, float, float] | None:
+    """Return the anchored moment payload of ``suff_stat`` when it is usable, else ``None``.
+
+    ``None`` falls back to the raw reduced-moment M-step, so a payload is only trusted when it is
+    finite and agrees with the raw first moment it claims to describe -- a hand-built
+    :class:`GaussianSuffStat` whose payload contradicts its tuple must not silently change the
+    estimate the tuple alone would have produced.
+    """
+    anchored = getattr(suff_stat, "anchored", None)
+    if anchored is None or count <= 0.0:
+        return None
+    anchor, a_sum, a_sum2 = anchored
+    if not (np.isfinite(anchor) and np.isfinite(a_sum) and np.isfinite(a_sum2)) or a_sum2 < 0.0:
+        return None
+    implied_sum = a_sum + count * anchor
+    tolerance = 1.0e-6 * max(abs(sum_x), abs(count * anchor), 1.0)
+    if abs(implied_sum - sum_x) > tolerance:
+        return None
+    return float(anchor), float(a_sum), float(a_sum2)
+
+
+def _anchored_pooled_variance(
+    anchor: float,
+    a_sum: float,
+    a_sum2: float,
+    count: float,
+    mean: float,
+    pseudo_count: float | None,
+    prior_mean: float | None,
+    prior_variance: float | None,
+) -> float:
+    """:func:`pooled_scalar_variance` computed from shift-anchored moments.
+
+    Same pooling contract as the raw-moment form (see
+    :func:`mixle.stats.univariate.continuous._gaussian_contracts.pooled_scalar_variance`), but the
+    observed scatter about ``mean`` is expanded about the data anchor, so every term is
+    O(count * spread^2) and the result is shift-invariant instead of losing
+    ~2*log2(|mean|/sd) bits to cancellation.
+    """
+    delta = mean - anchor
+    observed_scatter = a_sum2 - 2.0 * delta * a_sum + count * delta * delta
+    # Mathematically >= 0; only last-ulp rounding of O(count * spread^2) terms can undershoot.
+    observed_scatter = max(observed_scatter, 0.0)
+    if pseudo_count not in (None, 0.0) and prior_variance is not None:
+        offset = 0.0 if prior_mean is None else (prior_mean - mean) ** 2
+        prior_scatter = pseudo_count * (prior_variance + offset)
+        return (observed_scatter + prior_scatter) / (count + pseudo_count)
+    if count == 0.0:
+        return 0.0
+    return observed_scatter / count
 
 
 class GaussianEstimator(ParameterEstimator):
@@ -864,7 +1053,11 @@ class GaussianEstimator(ParameterEstimator):
             return float(self.prior.log_density((model.mu, 1.0 / model.sigma2)))
         return 0.0
 
-    def _estimate_conjugate(self, suff_stat: tuple[float, float, float, float]) -> "GaussianDistribution":
+    def _estimate_conjugate(
+        self,
+        suff_stat: tuple[float, float, float, float],
+        anchored: tuple[float, float, float] | None = None,
+    ) -> "GaussianDistribution":
         """Closed-form NormalGamma conjugate posterior update returning the joint MAP estimate."""
         sum_x, sum_xx, count = scalar_gaussian_moments(suff_stat)
         nobs_loc1 = count
@@ -884,7 +1077,13 @@ class GaussianEstimator(ParameterEstimator):
         # cancellation-prone form: on near-constant / large-offset data it can round slightly negative,
         # driving ``new_b`` (and hence the variance) negative -- a ValueError for the scalar Gaussian, a
         # silent NaN log-density for the diagonal one. Floor it at 0 (the MLE path floors equivalently).
-        new_b0 = max(sum_xx - sample_mean2 * sum_xxx, 0.0)
+        # When the accumulator's shift-anchored moments are available, use the same scatter expanded
+        # about the anchor instead: bit-for-bit the same quantity mathematically, but shift-invariant.
+        if anchored is not None and count > 0.0:
+            _, a_sum, a_sum2 = anchored
+            new_b0 = max(a_sum2 - a_sum * a_sum / count, 0.0)
+        else:
+            new_b0 = max(sum_xx - sample_mean2 * sum_xxx, 0.0)
         new_b1 = (old_lam * nobs_loc1 / new_n) * np.power(sample_mean1 - old_mu, 2)
         new_b = old_b + 0.5 * (new_b0 + new_b1)
 
@@ -911,9 +1110,10 @@ class GaussianEstimator(ParameterEstimator):
 
         """
         sum_x, sum_xx, count = scalar_gaussian_moments(suff_stat)
+        anchored = _consistent_anchored_moments(suff_stat, sum_x, count)
         checked_stat = (sum_x, sum_xx, count, count)
         if self.has_conj_prior:
-            return self._estimate_conjugate(checked_stat)
+            return self._estimate_conjugate(checked_stat, anchored)
 
         pc1, pc2 = self.pseudo_count
         prior_mean, prior_variance = self.suff_stat
@@ -928,15 +1128,30 @@ class GaussianEstimator(ParameterEstimator):
         else:
             mu = 0.0
 
-        sigma2 = pooled_scalar_variance(
-            sum_x,
-            sum_xx,
-            count,
-            mu,
-            pc2,
-            prior_mean,
-            prior_variance,
-        )
+        # The mean is a plain same-sign sum and is computed from the raw moments unchanged; only
+        # the variance loses to cancellation, so only its scatter switches to the anchored form
+        # when the accumulator carried one (raw-only producers keep the historical path).
+        if anchored is not None:
+            sigma2 = _anchored_pooled_variance(
+                anchored[0],
+                anchored[1],
+                anchored[2],
+                count,
+                mu,
+                pc2,
+                prior_mean,
+                prior_variance,
+            )
+        else:
+            sigma2 = pooled_scalar_variance(
+                sum_x,
+                sum_xx,
+                count,
+                mu,
+                pc2,
+                prior_mean,
+                prior_variance,
+            )
         if count == 0.0 and pc2 in (None, 0.0) and prior_variance is not None:
             sigma2 = prior_variance
 
@@ -978,8 +1193,29 @@ class GaussianDataEncoder(DataSequenceEncoder):
             A numpy array of floats.
 
         """
+        if np.ma.isMaskedArray(x) and np.ma.is_masked(x):
+            # np.asarray on a MaskedArray returns the bare .data, so the fill values under the mask
+            # would be fit as real observations with no error anywhere. Only a mask that actually
+            # masks something is rejected: a trivial (all-False) mask carries no missingness and
+            # encodes like any ndarray.
+            raise ValueError(
+                "Gaussian data is a numpy masked array with %d masked value(s); the mask would be "
+                "silently dropped and the masked entries fit as real data. Pass x.compressed() to "
+                "drop the masked entries, or use OptionalEstimator/MISSING for missingness-aware "
+                "fitting." % int(np.ma.count_masked(x))
+            )
         rv = np.asarray(x, dtype=float)
 
-        if np.any(np.isnan(rv)) or np.any(np.isinf(rv)):
+        if np.any(np.isnan(rv)):
+            # NaN is MISSING data, not an out-of-support value: "requires support x in (-inf,inf)"
+            # sent users hunting for the wrong problem and never named the option that handles it
+            # (t5/t4 wave-3).
+            raise ValueError(
+                "GaussianDistribution observations contain %d NaN entr%s -- missing values. Drop the "
+                "incomplete rows, or model the gaps: fit(..., missing='marginalize') in mixle.ppl, or "
+                "wrap the leaf with mixle.stats.marginalized()."
+                % (int(np.isnan(rv).sum()), "y" if int(np.isnan(rv).sum()) == 1 else "ies")
+            )
+        if np.any(np.isinf(rv)):
             raise ValueError("GaussianDistribution requires support x in (-inf,inf).")
         return rv

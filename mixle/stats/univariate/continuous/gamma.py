@@ -529,7 +529,18 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
             None
 
         """
-        if x <= 0.0 or not np.isfinite(x):
+        if np.isnan(x):
+            raise ValueError(
+                "Gamma observations contain a NaN value. NaN marks missing data, not a support "
+                "violation; drop or impute the missing entries before fitting."
+            )
+        if x == 0.0:
+            raise ValueError(
+                "GammaDistribution has support x > 0, but an observation is exactly 0.0. The Gamma "
+                "likelihood is degenerate on exact zeros (E[log x] diverges); drop or shift the "
+                "zeros, or model them separately (e.g. an Exponential or a hurdle-style composite)."
+            )
+        if x < 0.0 or not np.isfinite(x):
             raise ValueError("GammaDistribution has support x > 0.")
         self.count += weight
         self.sum += x * weight
@@ -549,6 +560,20 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        # Zeros encode (the boundary density limit is legitimate to score) but cannot be FIT:
+        # log(0) = -inf poisons sum_of_logs, which the M-step used to repair into a silent
+        # k = 1 (Exponential) fit stamped converged with no note. A zero-weight zero contributes
+        # nothing and stays accepted -- EM legitimately zeroes out responsibilities.
+        zero_mask = x[0] == 0.0
+        if np.any(zero_mask & (weights != 0.0)):
+            zero_count = int(np.count_nonzero(zero_mask & (weights != 0.0)))
+            raise ValueError(
+                "GammaDistribution has support x > 0, but at least %d observation(s) are exactly "
+                "0.0 (estimation encodes in chunks; the first offending chunk refuses). The Gamma "
+                "likelihood is degenerate on exact zeros (E[log x] diverges); drop or shift the "
+                "zeros, or model them separately (e.g. an Exponential or a hurdle-style "
+                "composite)." % zero_count
+            )
         self.sum += np.dot(x[0], weights)
         self.sum_of_logs += np.dot(x[1], weights)
         self.count += np.sum(weights)
@@ -772,7 +797,11 @@ class GammaDataEncoder(DataSequenceEncoder):
     def seq_encode(self, x: list[float] | np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Encode iid sequence of gamma observations for vectorized ``seq_`` function calls.
 
-        Note: Each entry of x must be positive float.
+        Note: Each entry of x must be a non-negative float. Exact zeros encode (density evaluation
+        at the boundary is well-defined in the limit), but ESTIMATION rejects them in the
+        accumulator: the Gamma likelihood is degenerate on zeros (``E[log x]`` diverges), which
+        used to collapse the fitted shape to ``k = 1`` silently. NaN is rejected as missing data,
+        by name.
 
         Args:
             x (Union[List[float], np.ndarray]): IID sequence of gamma distributed observations.
@@ -783,9 +812,14 @@ class GammaDataEncoder(DataSequenceEncoder):
         """
         rv1 = np.asarray(x, dtype=float)
 
+        nan_count = int(np.count_nonzero(np.isnan(rv1)))
+        if nan_count:
+            raise ValueError(
+                "Gamma observations contain %d NaN value(s). NaN marks missing data, not a support "
+                "violation; drop or impute the missing entries before fitting." % nan_count
+            )
         if np.any(rv1 < 0) or np.any(~np.isfinite(rv1)):
-            raise ValueError("GammaDistribution has support x >= 0.")
-        else:
-            with np.errstate(divide="ignore"):
-                rv2 = np.log(rv1)
-            return rv1, rv2
+            raise ValueError("GammaDistribution has support x > 0.")
+        with np.errstate(divide="ignore"):
+            rv2 = np.log(rv1)
+        return rv1, rv2

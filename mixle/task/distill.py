@@ -671,6 +671,26 @@ def _fit_density_gate(
     )
 
 
+def _require_torch(what: str) -> None:
+    """Refuse cleanly, with the extra named, when a torch-backed path runs on a base install.
+
+    Without this the base install surfaced a bare ``ModuleNotFoundError: No module named 'torch'``
+    from several frames inside the student fit -- after the teacher had already labeled every
+    input. ``what`` names the caller's feature in the caller's vocabulary; the remedy (the extra
+    to install, and the torch-free alternative where one exists) rides along so the error says
+    what to do, not just what broke.
+    """
+    try:
+        import torch  # noqa: F401
+    except ImportError as error:
+        raise ImportError(
+            f"{what} requires the optional torch dependency, which is not installed. "
+            'Install it with pip install "mixle[torch]", or use the torch-free generative student '
+            '(student="generative" in solve(), or distill_structured_from_labels / the '
+            "mixle.task.generative_text distillers for text)."
+        ) from error
+
+
 # Early-stopping schedule for _fit_mlp: check the training loss every _ES_CHECK_EVERY gradient steps, stop once
 # it hasn't improved by _ES_MIN_DELTA for _ES_PATIENCE consecutive checks. Internal constants, not exposed on the
 # public distill*() signatures -- epochs stays the one knob callers see; it now means "ceiling", not "exact count".
@@ -692,6 +712,7 @@ def _fit_mlp(x: np.ndarray, y: np.ndarray, n_labels: int, hidden, epochs, lr, se
     by the caller as ``recipe["epochs_run"]`` so the speedup is observable, not just internal. The fourth return
     value is the final chunk's optimizer receipt.
     """
+    _require_torch("the default distilled student (a torch MLP)")
     import torch
 
     from mixle.inference import optimize

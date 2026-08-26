@@ -848,11 +848,25 @@ class AutoregressiveEnumerable:
         return lo, lo + float(si.dropped_upper)
 
     def unrank(self, i: int) -> tuple[tuple, float]:
-        """The ``i``-th most probable sequence (0-based) and its exact log-probability, by random access."""
+        """The ``i``-th most probable sequence (0-based, QUANTIZED order) and its exact log-probability.
+
+        Random access through the count index, so the ordering carries the index's quantization
+        (:meth:`~mixle.enumeration.seek_index.SeekIndex.unrank`): exact **between** fine buckets
+        (width ``bin_width_bits / oversample`` bits), unspecified **within** one -- two sequences
+        whose log-probabilities differ by less than a bucket's width can come back in either relative
+        order, so ``rank(unrank(i))`` can differ from ``i`` for near-tied neighbours. The returned
+        log-probability is always exact regardless. Shrink the ambiguity window by raising
+        ``oversample`` or lowering ``bin_width_bits``; for a strictly-sorted head use :meth:`top_k`
+        (exact best-first), and for a sequence's exact rank use :meth:`rank`.
+        """
         return self.seek_index().unrank(i)
 
     def threshold(self, rank: int) -> float:
-        """Log-probability of the ``rank``-th most probable sequence -- the boundary of the top-``rank`` set."""
+        """Log-probability of the ``rank``-th most probable sequence -- the boundary of the top-``rank`` set.
+
+        Read off :meth:`unrank`, so it inherits the same fine-bucket quantization of the ordering
+        (exact between buckets, unspecified within one); the returned log-probability itself is exact.
+        """
         return self.seek_index().threshold(rank)
 
     def mass_above(self, min_log_prob: float) -> tuple[float, float]:

@@ -32,6 +32,7 @@ import os
 import pickle
 import tempfile
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +69,49 @@ def _write_text_atomically(path: Path, text: str) -> None:
         with contextlib.suppress(OSError):
             os.unlink(tmp_name)
         raise
+
+
+def _tabular_records(data: Any) -> list:
+    """``data`` as a list of observation records -- always one record per ROW, never per column.
+
+    A pandas ``DataFrame`` iterates as its column labels and a mapping iterates as its keys, so a bare
+    ``list(data)`` silently modeled the five HEADER STRINGS of an 891-row table (and stamped
+    ``n_rows=5``) while :func:`mixle.inference.optimize` handled the same frame correctly. Convert the
+    tabular inputs into the row records the estimation path expects (DataFrame -> one record per row
+    via :func:`mixle.data.sources.pandas_source.dataframe_records`, exactly the shape ``optimize``'s
+    ``fields`` path produces; DataSource -> ``records()``; mapping-of-columns expanded here), and
+    leave already-row-shaped sequences byte-identical to the historical ``list(data)``.
+    """
+    if hasattr(data, "records") and callable(data.records) and hasattr(data, "structure"):
+        return list(data.records())  # a mixle DataSource
+    if hasattr(data, "columns") and hasattr(data, "itertuples"):  # a pandas DataFrame (duck-typed)
+        from mixle.data.sources.pandas_source import dataframe_records
+
+        return dataframe_records(data)
+    if isinstance(data, Mapping):
+        # {field: column}: iterating the mapping would model the field-name strings. Build one
+        # record per row across the columns (scalar for a single column, tuple otherwise) --
+        # the same shape a DataFrame of those columns produces.
+        if not data:
+            raise ValueError(
+                "received an empty mapping; pass records (a list of observations) or a mapping of "
+                "equal-length columns keyed by field name"
+            )
+        lengths: dict[Any, int] = {}
+        columns: list[list[Any]] = []
+        for name, column in data.items():
+            if isinstance(column, (str, bytes)) or not hasattr(column, "__len__"):
+                raise ValueError(
+                    f"a mapping is read as {{field: column}}, but field {name!r} is not a sized "
+                    f"column (got {type(column).__name__}); for row-shaped data pass a list of "
+                    "records instead of a single mapping"
+                )
+            columns.append(list(column))
+            lengths[name] = len(columns[-1])
+        if len(set(lengths.values())) > 1:
+            raise ValueError(f"mapping-of-columns input needs equal-length columns, got lengths {lengths}")
+        return columns[0] if len(columns) == 1 else [tuple(row) for row in zip(*columns, strict=True)]
+    return list(data)
 
 
 def saddle_suspect(fitted: Any, data: Any, *, sample: int = 200, tol: float = 0.02) -> bool:
@@ -111,6 +155,14 @@ class Model:
 
     def __init__(self, spec: Any = None, *, notes: list[str] | None = None) -> None:
         """``spec`` is a prototype distribution, an estimator, or ``None`` (infer from data at fit time)."""
+        if isinstance(spec, type):
+            # A class here used to travel all the way into the estimation engine and die as
+            # ``AttributeError: type object ... has no attribute 'accumulator_factory'``.
+            raise TypeError(
+                f"Model spec must be a distribution or estimator INSTANCE (or None to infer the "
+                f"estimator from the data at fit time); got the class {spec.__name__} itself -- "
+                f"instantiate it first, e.g. Model({spec.__name__}(...))."
+            )
         self.spec = spec
         self.fitted: Any = None
         self.notes: list[str] = list(notes or [])
@@ -144,12 +196,26 @@ class Model:
     def fit(self, data: Any, *, restarts: Any = "auto", calibrate: float | bool = False, **optimize_kw: Any) -> Model:
         """Fit via :func:`mixle.inference.optimize`; the algorithm follows from the model's structure.
 
+        The fit iterates EM to its tolerance: unless the caller passes ``max_its=``, the iteration
+        cap defaults to 500 here (``optimize``'s own default of 10 regularly stops a mixture fit on
+        the initialization plateau -- 58 nats short of the optimum on Old Faithful -- with no signal).
+        The ``delta`` stopping rule ends a converged fit long before the cap; a fit that does hit the
+        cap without converging is disclosed in ``notes`` and in ``self._fit_info`` (``n_iter``,
+        ``converged``, read from the model's :meth:`~mixle.stats.compute.pdist.FitProvenance` receipt).
+
+        A ``spec`` that is a prototype *distribution* also supplies the EM starting point: its
+        parameter values are honored as the initialization (``optimize``'s bare prototype coercion
+        keeps only the structure and draws a random subsample start). Pass ``prev_estimate=`` yourself
+        to override the start explicitly.
+
         ``restarts="auto"`` (default) makes latent-variable fitting genuinely automatic: after the
         plain fit, a family-agnostic saddle check runs (a mixture stuck at the symmetric saddle gives
-        every observation a ~uniform component posterior), and on suspicion the fit silently reruns as
-        multi-restart EM (:func:`mixle.inference.best_of`), keeping the better log-likelihood and
-        recording what happened in ``notes``. Pass an int to force that many restarts up front, or
-        ``restarts=None`` for the raw single fit.
+        every observation a ~uniform component posterior) -- and a latent fit that exhausted its
+        iteration cap without converging is treated as equally suspect. On suspicion the fit reruns
+        from diversified initializations (hard-partition component starts, falling back to
+        :func:`mixle.inference.best_of`), keeping the better log-likelihood and recording what
+        happened in ``notes``. Pass an int to force that many restarts up front, or ``restarts=None``
+        for the raw single fit.
 
         ``calibrate`` (opt-in, default off): reserve a holdout slice (a fraction, or ``True`` for
         25%), fit on the rest, and attach a :class:`~mixle.inference.CalibrationReport` on
@@ -162,10 +228,16 @@ class Model:
         shows it). ``certificate=None`` alone cannot tell you whether certification was never
         applicable or raised."""
         from mixle.inference import certify, optimize
+        from mixle.stats.compute.pdist import SequenceEncodableProbabilityDistribution
 
         optimize_kw.setdefault("out", None)
+        # optimize()'s stable default (max_its=10) exists for its own callers; a lifecycle fit is
+        # "fit this model", so run EM until the delta tolerance actually stops it. 500 is a safety
+        # cap, not a target -- converged fits exit on delta far earlier, and hitting the cap is
+        # disclosed below via the fit-provenance receipt.
+        optimize_kw.setdefault("max_its", 500)
         source = data.records() if hasattr(data, "records") and callable(data.records) else data
-        rows = list(source)
+        rows = _tabular_records(source)
         if not rows:
             raise ValueError("fit requires at least one training record")
         if restarts not in ("auto", None) and (
@@ -190,25 +262,57 @@ class Model:
             cal_holdout = [rows[i] for i in order[:n_cal]]
             fit_data = [rows[i] for i in order[n_cal:]]
 
+        # A prototype DISTRIBUTION carries parameter values the caller chose; honor them as the EM
+        # start. optimize() alone coerces a prototype to its estimator (structure only) and then
+        # initializes from a fixed-seed random subsample, so the supplied mu/sig2/w were silently
+        # ignored. Estimators and spec=None keep the automatic initialization, and an explicit
+        # init_estimator= keeps its own initialization role.
+        if isinstance(self.spec, SequenceEncodableProbabilityDistribution) and "init_estimator" not in optimize_kw:
+            optimize_kw.setdefault("prev_estimate", self.spec)
+
         self.fitted = optimize(fit_data, self.spec, **optimize_kw)
         self._fit_info = {"n": len(fit_data) if hasattr(fit_data, "__len__") else None, "when": time.time()}
 
+        # Surface the run's own receipt: a fit that stopped on the iteration cap instead of the
+        # delta tolerance is an under-converged fit, and silence here is exactly how a 58-nat
+        # deficit shipped with empty notes.
+        provenance = self.fitted.fit_provenance() if callable(getattr(self.fitted, "fit_provenance", None)) else None
+        hit_cap = False
+        if provenance is not None:
+            self._fit_info["n_iter"] = int(provenance.iterations)
+            self._fit_info["converged"] = bool(provenance.converged)
+            hit_cap = not provenance.converged and provenance.delta is not None
+            if hit_cap:
+                self.notes.append(
+                    f"EM stopped at the iteration cap ({provenance.iterations} iterations) before "
+                    f"reaching its tolerance; the fit may be under-converged -- raise max_its to continue"
+                )
+
         escape_tested = False
         want = 4 if restarts == "auto" else restarts
+        is_latent = hasattr(self.fitted, "posterior") and hasattr(self.fitted, "components")
         # fit_data, never data: fit_data IS data when calibrate is off (or too little data to hold
         # anything out) -- the assignment above only diverges when cal_holdout was actually carved out.
         # A restart/saddle-check against the caller's original data would (a) let calibration rows sway
         # the saddle-suspicion verdict and (b) let _refit_symmetry_broken refit on them outright; the
         # replacement model would then get "evaluated held-out" against rows it was just trained on.
-        if want and (restarts != "auto" or saddle_suspect(self.fitted, fit_data)):
+        saddle = saddle_suspect(self.fitted, fit_data) if restarts == "auto" else False
+        # An unconverged latent fit is suspect for the same reason a saddle is: the returned
+        # parameters are wherever the budget ran out, not a chosen optimum. Only latent models get
+        # the diversified refit -- restarting a closed-form fit re-runs the identical computation.
+        if want and (restarts != "auto" or saddle or (hit_cap and is_latent)):
             better, delta_ll, how = self._refit_symmetry_broken(fit_data, int(want), optimize_kw)
+            why = (
+                "restarts requested"
+                if restarts != "auto"
+                else ("saddle suspected" if saddle else "iteration cap reached on a latent fit")
+            )
             if better is not None:
                 self.fitted = better
                 escape_tested = True
-                why = "saddle suspected" if restarts == "auto" else "restarts requested"
                 self.notes.append(f"{why}: {how} kept (log-lik +{delta_ll:.3f})")
             elif restarts == "auto":
-                self.notes.append("saddle suspected: symmetry-broken refits did not improve — inspect the fit")
+                self.notes.append(f"{why}: symmetry-broken refits did not improve — inspect the fit")
         # the estimation certificate: which method solved each block, how strong the guarantee, and
         # exactly where (if anywhere) gradient descent was unavoidable. Low-overhead inspection, computed once.
         # A failure here still does not break the fit, but it is RECORDED (see _record_evidence): a
@@ -315,7 +419,7 @@ class Model:
     def evaluate(self, data: Any) -> dict[str, Any]:
         """Held-out fit quality: total and mean log-density over ``data``."""
         d = self._require_fitted()
-        rows = list(data)
+        rows = _tabular_records(data)
         if not rows:
             raise ValueError("evaluate requires at least one held-out record")
         enc = d.dist_to_encoder().seq_encode(rows)
@@ -462,6 +566,9 @@ class Model:
            ``trust_code=True`` -- an explicit statement that the artifact's source is trusted. Without
            it, a pickle-format artifact raises immediately, and a JSON artifact raises only if it
            actually contains an embedded module (a pure-statistical model still loads normally).
+           ``trust_code=False``, ``None`` and ``0`` are all read as "no trust" (an artifact that needs
+           no trust loads under any of them); any other value -- a truthy string, ``1`` -- is rejected
+           loudly, because only the exact ``True`` may authorize code execution.
 
         When the manifest records a ``model_sha256`` (every artifact written by this version does),
         the named model file is hashed and checked against it *before* anything is deserialized, so a
@@ -476,17 +583,71 @@ class Model:
         from mixle.utils.serialization import SerializationError, trusted_deserialization
 
         p = Path(path)
+        # Every unreadable-manifest state used to collapse into "is a pickle-format artifact ...
+        # Pass trust_code=True": a nonexistent path, a plain file, an empty directory and the
+        # directory an interrupted deploy() leaves behind all got a false message whose remedy was
+        # to enable arbitrary code execution. Name each actual problem instead.
+        if not p.exists():
+            raise SerializationError(
+                f"no artifact at {path!r}: the path does not exist. Model.load expects the artifact "
+                "directory Model.deploy() created."
+            )
+        if not p.is_dir():
+            raise SerializationError(
+                f"{path!r} is a file, not an artifact directory. Model.load expects the directory "
+                "Model.deploy() created (manifest.json next to the model file)."
+            )
+        manifest_path = p / "manifest.json"
+        if not manifest_path.exists():
+            found = [name for name in ("model.json", "model.pkl") if (p / name).exists()]
+            if found:
+                raise SerializationError(
+                    f"{path!r} contains {found[0]} but no manifest.json -- the state an interrupted "
+                    "deploy() leaves behind (the manifest is promoted last). Re-run deploy() to "
+                    "produce a complete artifact; without the manifest that names and digests the "
+                    "model file, it cannot be loaded."
+                )
+            raise SerializationError(
+                f"{path!r} is not a mixle artifact: it contains no manifest.json and no model file. "
+                "Point Model.load at the directory Model.deploy() created."
+            )
         try:
-            manifest = json.loads((p / "manifest.json").read_text())
-        except (OSError, ValueError):
-            manifest = {}
-        fmt = manifest.get("format", "pickle")  # artifacts predating the format field are pickle-only
+            manifest_text = manifest_path.read_text()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise SerializationError(
+                f"{path!r}: manifest.json exists but could not be read ({exc}); fix the file or re-deploy the artifact."
+            ) from exc
+        try:
+            manifest = json.loads(manifest_text)
+        except ValueError as exc:
+            raise SerializationError(
+                f"{path!r}: manifest.json is not valid JSON ({exc}); the manifest is corrupt or "
+                "truncated. Re-deploy the artifact or restore the manifest from its source."
+            ) from exc
+        if not isinstance(manifest, dict):
+            raise SerializationError(
+                f"{path!r}: manifest.json must hold a JSON object describing the artifact, got "
+                f"{type(manifest).__name__}. Re-deploy the artifact; this manifest was not written "
+                "by Model.deploy()."
+            )
+        fmt = manifest.get("format", "pickle")  # manifests predating the format field described pickle artifacts
         model_file = str(manifest.get("model_file") or ("model.json" if fmt == "json" else "model.pkl"))
         if Path(model_file).name != model_file:
             raise SerializationError(f"manifest model_file {model_file!r} must be a plain file name")
+        if not (p / model_file).exists():
+            raise SerializationError(
+                f"{path!r}: the manifest names {model_file} but that file is not in the artifact "
+                "directory; the artifact is incomplete -- re-deploy it."
+            )
         expected_digest = manifest.get("model_sha256")
         if expected_digest is not None:
-            actual = _sha256_file(p / model_file)
+            try:
+                actual = _sha256_file(p / model_file)
+            except OSError as exc:
+                raise SerializationError(
+                    f"{path!r}: {model_file} could not be read to verify its digest ({exc}); fix the "
+                    "file or re-deploy the artifact."
+                ) from exc
             if actual != expected_digest:
                 raise SerializationError(
                     f"{path!r}: {model_file} does not match the digest recorded in its manifest "
@@ -496,26 +657,62 @@ class Model:
         # trust_code="false" -- the string, straight out of a config file or CLI argument -- opened
         # both. Not named by the audit, which cited the same defect in Embedder.load and Registry.get;
         # it is the same gate and is closed the same way (MXR-080-1881).
-        if trust_code is not False:
+        # None and a plain integer 0 are unambiguous "no trust" answers (cfg.get("trust_code") is the
+        # ordinary way a pipeline says no); rejecting them pushed callers toward True on artifacts
+        # that need no trust at all. Only ambiguous/truthy non-True values still get the loud gate.
+        says_no = trust_code is False or trust_code is None or (type(trust_code) is int and trust_code == 0)
+        if trust_code is not True and not says_no:
             require_explicit_true(
                 trust_code,
                 "Model.load trust_code",
                 because="It authorizes unpickling this artifact, which executes arbitrary code from the file.",
             )
-        with trusted_deserialization() if trust_code else contextlib.nullcontext():
+        trusted = trust_code is True
+        with trusted_deserialization() if trusted else contextlib.nullcontext():
             if fmt == "json":
                 from mixle.utils.serialization import ensure_pysp_serialization_registry, from_serializable
 
                 ensure_pysp_serialization_registry()
-                fitted = from_serializable(json.loads((p / model_file).read_text()))
+                try:
+                    payload_text = (p / model_file).read_text()
+                except (OSError, UnicodeDecodeError) as exc:
+                    raise SerializationError(
+                        f"{path!r}: {model_file} could not be read as text ({exc}); the model file is "
+                        "corrupt or not the JSON artifact its manifest describes -- re-deploy it."
+                    ) from exc
+                try:
+                    payload = json.loads(payload_text)
+                except ValueError as exc:
+                    raise SerializationError(
+                        f"{path!r}: {model_file} is not valid JSON ({exc}); the model file is corrupt "
+                        "or truncated -- re-deploy the artifact."
+                    ) from exc
+                fitted = from_serializable(payload)
             else:
-                if not trust_code:
+                if not trusted:
                     raise SerializationError(
                         f"{path!r} is a pickle-format artifact: loading it executes arbitrary code from "
                         "the file. Pass trust_code=True to Model.load() only if you trust its source."
                     )
-                with open(p / model_file, "rb") as f:
+                try:
+                    f = open(p / model_file, "rb")
+                except OSError as exc:
+                    raise SerializationError(
+                        f"{path!r}: {model_file} could not be opened ({exc}); the artifact is "
+                        "incomplete -- re-deploy it."
+                    ) from exc
+                with f:
                     fitted = pickle.load(f)  # noqa: S301 - trust_code=True required by the caller above  # nosec B301 # MXR-080-1881: Model.load runs require_explicit_true(trust_code) above, so only the True singleton opens this path -- a truthy string out of a config file no longer does
+        family = manifest.get("family")
+        if family is not None and type(fitted).__name__ != str(family):
+            # The digest binds the manifest to the model file's BYTES; this binds its self-description
+            # to what those bytes deserialize to, so a swapped model.json with a recomputed digest
+            # cannot carry another model's provenance.
+            raise SerializationError(
+                f"{path!r}: the manifest describes a {family} but {model_file} deserialized to "
+                f"{type(fitted).__name__}; the manifest and model file do not belong to the same "
+                "deployment. Re-deploy so the manifest matches its model."
+            )
         m = cls(fitted)
         m.fitted = fitted
         m.notes = list(manifest.get("notes", []))
@@ -568,6 +765,100 @@ class Model:
         return f"Model({inner}, fitted={self.fitted is not None})"
 
 
+def _dtype_universe_note(rows: list) -> str | None:
+    """The candidate-universe disclosure for scalar data: which hypothesis class the element type chose.
+
+    The automatic profiler deliberately branches on element type (an ``int`` column is modeled by
+    discrete families, a ``float`` column by continuous densities -- the two universes score in
+    incommensurable units and cannot share a leaderboard), but nothing at the propose() level said
+    so. Returns ``None`` for non-scalar or mixed-type data (the composite path discloses per field).
+    """
+    if not rows or isinstance(rows[0], (tuple, list, dict, str, bytes)):
+        return None
+    if all(isinstance(v, (int, np.integer)) and not isinstance(v, (bool, np.bool_)) for v in rows):
+        return (
+            "integer dtype: discrete candidate families considered "
+            "(cast the column to float to model it as a continuous quantity)"
+        )
+    if all(isinstance(v, (float, np.floating)) for v in rows):
+        return (
+            "float dtype: continuous candidate families considered "
+            "(an integer column arriving as float is modeled as continuous; keep integer dtype for "
+            "discrete families)"
+        )
+    return None
+
+
+#: Reject a frontier candidate as a likelihood spike only past BOTH of these (see
+#: :func:`_degenerate_likelihood_spike`); values chosen an order of magnitude beyond anything a sane
+#: fit was measured to produce, so the guard condemns exactly the collapsed-scale state.
+_SPIKE_SPREAD_NATS = 20.0
+_PATHOLOGICAL_PIT = 1.0
+
+
+def _degenerate_likelihood_spike(fitted: Any, val: list, scores: np.ndarray) -> str | None:
+    """The reason a candidate's held-out win is a degenerate likelihood spike, or ``None`` when sound.
+
+    A continuous family whose scale collapses onto a repeated value (a near-Dirac fit) *wins* mean
+    held-out log-density -- the unbounded density at the atom is exactly what the criterion rewards --
+    while sampling a constant and reporting infinite moments. Rejected only when BOTH of these hold,
+    so a legitimate fit is never caught:
+
+    * some held-out log-density is positive (pointwise density above one -- possible for a sound fit
+      only on very small scales, where it then holds roughly uniformly);
+    * the PIT calibration is pathological: total-variation error at least ``_PATHOLOGICAL_PIT`` (of a
+      1.8 maximum at ten bins). A model with no scalar predictive CDF is never rejected here -- the
+      spike signals alone cannot distinguish a legitimate high-density multivariate fit.
+
+    The max-minus-median spread against ``_SPIKE_SPREAD_NATS`` distinguishes the two collapse shapes
+    for the note but no longer GATES the PIT check: with a MAJORITY of held-out rows sitting on the
+    atom, the median is pulled up to the spike itself and a spread precondition let the MORE
+    degenerate fit through as a verified winner (wave-3 adversarial check). Deterministic (the
+    randomized PIT is seeded); the calibration pass runs only on candidates whose pointwise density
+    already exceeded one somewhere.
+    """
+    finite = scores[np.isfinite(scores)]
+    if finite.size == 0:
+        return None
+    top = float(np.max(finite))
+    mid = float(np.median(finite))
+    if top <= 0.0:
+        return None
+    try:
+        from mixle.inference import calibration_report
+
+        report = calibration_report(fitted, val)
+    except Exception:  # noqa: BLE001 - what cannot be measured must not be condemned
+        return None
+    if report.pit_error is None or report.pit_error < _PATHOLOGICAL_PIT:
+        return None
+    if top - mid > _SPIKE_SPREAD_NATS:
+        return (
+            f"held-out log-density spikes to +{top:.1f} (median {mid:.1f}) with pathological PIT "
+            f"calibration ({report.pit_error:.2f} of {report.max_pit_error():.1f} max): the fitted scale "
+            "collapsed toward a point mass at a repeated value"
+        )
+    # No spread: the median itself sits at the spike. That is THIS defect class only when a genuine
+    # atom carries it -- a single repeated value holding the majority of the held-out rows. Without
+    # an atom, a flat high profile with bad PIT is a different pathology (e.g. the variance floor
+    # over-widening a legitimate tiny-scale fit, disclosed via numerical_repairs()), and condemning
+    # it here would reject sound tiny-scale data (found while validating the reorder on
+    # normal(0, 1e-6) draws: floored sigma2=1e-8 gives PIT 1.60 with zero repeated values).
+    try:
+        values, counts = np.unique(np.asarray(val, dtype=float), return_counts=True)
+    except (TypeError, ValueError):
+        return None  # non-scalar rows: no atom evidence obtainable here
+    if counts.size == 0 or counts.max() <= 0.5 * len(val):
+        return None
+    atom = float(values[int(np.argmax(counts))])
+    return (
+        f"held-out log-density is positive across the atom (max +{top:.1f}, median {mid:.1f}) with "
+        f"pathological PIT calibration ({report.pit_error:.2f} of {report.max_pit_error():.1f} max): "
+        f"the fitted scale collapsed toward a point mass on the repeated value {atom:g} carried by a "
+        "MAJORITY of held-out rows"
+    )
+
+
 def propose(
     data: Any,
     *,
@@ -582,12 +873,35 @@ def propose(
 ) -> Model:
     """Propose a model for ``data`` from a *verified frontier* of candidates and return the winner.
 
-    ``max_candidates=0`` or ``timeout=0.0`` is the one exception to "verified": every candidate is then
-    skipped rather than fitted/scored, and the returned winner falls back to the raw, unverified heuristic
-    recommendation -- honestly disclosed (never silently), via a ``"search budget: skipped ..."`` line in
-    ``Model.notes`` and a ``"skipped": "search budget reached (...)"`` entry per candidate in
-    ``Model.frontier``, both readable through ``explain()``. Any other ``max_candidates``/``timeout`` still
-    verifies every candidate it has budget for before choosing a winner.
+    ``data`` is anything row-shaped: a list of records, a numpy array, a pandas ``DataFrame`` (one
+    record per row across its columns -- never a model of the column names), a mapping of equal-length
+    columns, a ``DataSource``, or a one-shot iterator (materialized once).
+
+    Two paths return an *unverified* winner, and both are honestly disclosed (never silently).
+    ``max_candidates=0`` or ``timeout=0.0`` skips every candidate: the winner falls back to the raw
+    heuristic recommendation, with a ``"search budget: skipped ..."`` line in ``Model.notes`` and a
+    ``"skipped": "search budget reached (...)"`` entry per candidate in ``Model.frontier``, both
+    readable through ``explain()``. And when every candidate *fails* to verify (scoring errors, or
+    every fit rejected as degenerate), the same fallback applies with a ``"no candidate could be
+    verified: ..."`` note naming each failure. On BOTH routes, with ``fit=True`` the
+    ``evidence["certificate"]`` record is downgraded from ``succeeded`` to ``attempted`` -- a
+    certificate produced for a winner nothing verified out-of-sample is not verification, whether
+    the candidates failed or the budget skipped them. Any other ``max_candidates``/``timeout``
+    still verifies every candidate it has budget for before choosing a winner.
+
+    The verified frontier is guarded against degenerate wins: a candidate whose held-out score is a
+    likelihood spike -- a continuous fit whose scale collapsed onto a repeated value, detected by a
+    positive log-density spike (max over held-out rows above 0, whether localized or median-wide, per
+    the median) *combined with* pathological PIT calibration (total-variation error >= 1.0 of the 1.8
+    maximum) -- is rejected from the frontier with a note, and the win falls to the best
+    non-degenerate candidate. The criterion is deterministic and never fires on a model without a
+    scalar predictive CDF (see ``_degenerate_likelihood_spike``).
+
+    For scalar data the candidate universe follows the ELEMENT TYPE, and the choice is recorded in
+    ``Model.notes``: integer-typed values are modeled by discrete families (categorical / Poisson /
+    binomial ...), float-typed values by continuous densities -- the two universes score in different
+    units (log-mass vs log-density) and cannot be ranked against each other, so passing
+    ``.astype(float)`` on a count column is an affirmative statement that it is continuous.
 
     Candidates come from every proposer the library has — the heuristic recommendation
     (:func:`mixle.task.recommend.recommend_model`, dependency-aware in the narrow sense of a joint
@@ -642,7 +956,7 @@ def propose(
     if isinstance(max_its, (bool, np.bool_)) or not isinstance(max_its, (int, np.integer)) or max_its < 1:
         raise ValueError(f"max_its must be a positive integer, got {max_its!r}")
 
-    rows = list(data)
+    rows = _tabular_records(data)
     if len(rows) < 3:
         raise ValueError("propose requires at least three records for a non-empty train/holdout split")
     # STAT-RR18-01: the outer split happens BEFORE any candidate generation, and every proposer
@@ -713,6 +1027,14 @@ def propose(
                 )
             if not np.isfinite(scores).all():
                 raise ValueError("candidate scorer returned a non-finite held-out log density")
+            degenerate = _degenerate_likelihood_spike(fitted, val, scores)
+            if degenerate is not None:
+                # A likelihood spike would WIN the mean-log-density ranking; record it as a failed
+                # candidate (same disclosure plumbing as a scoring error) so the win falls to the
+                # best non-degenerate candidate instead.
+                frontier.append({"name": name, "estimator": est, "error": f"degenerate fit rejected: {degenerate}"})
+                evaluated += 1
+                continue
             score = float(np.mean(scores))
             entry = {
                 "name": name,
@@ -738,6 +1060,11 @@ def propose(
     frontier = scored + [f for f in frontier if "error" in f or "skipped" in f]
     winner = scored[0]["estimator"] if scored else rec.estimator
     skipped_names = [f["name"] for f in frontier if "skipped" in f]
+    # Every candidate FAILED (scoring error or degenerate rejection): the winner below is the raw
+    # heuristic recommendation, which nothing verified out-of-sample. The budget-skip path already
+    # discloses its fallback; this path gets the same honesty (a roll-up note here, and the
+    # certificate downgrade after the fit).
+    unverified_fallback = not scored and any("error" in f for f in frontier)
 
     notes = [
         f"field {c.path}: {c.family}"
@@ -750,6 +1077,9 @@ def propose(
     ]
     notes += [f"dependency: {a} <-> {b} ({bits:.1f} bits for joint modeling)" for a, b, bits in rec.dependencies]
     notes += list(rec.warnings)
+    universe_note = _dtype_universe_note(rows)
+    if universe_note is not None:
+        notes.append(universe_note)
 
     def _candidate_note(f: dict[str, Any]) -> str:
         if "skipped" in f:
@@ -761,10 +1091,49 @@ def propose(
     notes += [_candidate_note(f) for f in frontier]
     if skipped_names:
         notes.append(f"search budget: skipped {len(skipped_names)} candidate(s) unevaluated: {skipped_names}")
+    if unverified_fallback:
+        reasons = "; ".join(f"{f['name']}: {f['error']}" for f in frontier if "error" in f)
+        notes.append(
+            f"no candidate could be verified: {reasons}; returning the unverified heuristic "
+            f"recommendation ({type(winner).__name__})"
+        )
     m = Model(winner, notes=notes)
     m.frontier = frontier
     if fit:
         m.fit(rows, restarts=None, max_its=int(max_its), rng=np.random.RandomState(int(seed)))
+        nothing_verified = unverified_fallback or (
+            skipped_names and not any("heldout_mean_log_density" in f for f in frontier)
+        )
+        if nothing_verified and m.evidence.get("certificate", {}).get("status") == "succeeded":
+            # certify() ran, but a certificate produced for a winner nothing verified out-of-sample
+            # must not read 'succeeded' -- 'attempted' is the honest status the evidence schema
+            # already supports (see _record_evidence). The same rule covers BOTH documented
+            # unverified routes: candidates all failed/rejected, and the search budget skipping
+            # every candidate (max_candidates=0 / timeout=0.0) -- the wave-3 check found the two
+            # identically-unverified winners carrying different certificate statuses.
+            reason = (
+                "no candidate could be verified on held-out data; the winner is the unverified heuristic recommendation"
+                if unverified_fallback
+                else "the search budget skipped every candidate unevaluated; the winner is the "
+                "unverified heuristic recommendation"
+            )
+            m._record_evidence(
+                "certificate",
+                "attempted",
+                n_rows=m.evidence["certificate"].get("n_rows"),
+                reason=reason,
+            )
+        if m.spec is None and m.fitted is not None and callable(getattr(m.fitted, "estimator", None)):
+            # The structured candidate's estimator slot is None ("infer at fit time"), which made the
+            # returned proposal non-reusable: Model(m.spec).fit(other_data) silently re-inferred a
+            # different family. Carry the winning family's estimator so the proposal round-trips.
+            try:
+                m.spec = m.fitted.estimator()
+            except Exception as exc:  # noqa: BLE001 - a proposal without a reusable spec is still a valid fit
+                m.notes.append(
+                    f"winning spec could not be reconstructed for reuse "
+                    f"({type(exc).__name__}: {exc}); Model.spec stays None"
+                )
         try:
             from mixle.data.hashing import model_hash
 

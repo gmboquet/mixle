@@ -22,6 +22,19 @@ from mixle.stats.compute.pdist import (
 )
 from mixle.utils.special import digamma, gammaln, trigamma
 
+# The encoder admits the closed interval [0, 1] because *scoring* boundary values is well defined
+# (density 0, finite, or infinite depending on the shapes) -- but *fitting* on them is not:
+# log(0) = -inf poisons ``sum_of_logs``/``sum_of_log1m`` and the run used to die with an internal
+# "Beta sufficient statistics must be finite" error that never mentioned the boundary
+# observations. Refuse the evidence by name at accumulation time instead. Boundary values carrying
+# zero weight stay admissible, so a mixture component that assigns them no responsibility is
+# unaffected.
+_BETA_BOUNDARY_FIT_MESSAGE = (
+    "BetaDistribution cannot be fit to data containing boundary values: %d observation(s) with "
+    "positive weight are exactly 0.0 or 1.0, where log(x) or log(1-x) diverges. Nudge them "
+    "strictly inside (0, 1) (e.g. (x*(n-1) + 0.5)/n) or model the boundary mass separately."
+)
+
 
 class BetaFisherView(FixedFisherView):
     """Fisher view for Beta sufficient statistics."""
@@ -347,6 +360,10 @@ class BetaAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: float, weight: float, estimate: BetaDistribution | None) -> None:
         """Accumulate weighted statistics for one observation in ``(0, 1)``."""
+        if x == 0.0 or x == 1.0:
+            if weight > 0.0:
+                raise ValueError(_BETA_BOUNDARY_FIT_MESSAGE % 1)
+            return  # zero-weight boundary evidence contributes nothing (0 * -inf would be NaN)
         if x <= 0.0 or x >= 1.0:
             raise ValueError("BetaDistribution requires observations in (0, 1).")
         self.count += weight
@@ -367,11 +384,21 @@ class BetaAccumulator(SequenceEncodableStatisticAccumulator):
     ) -> None:
         """Accumulate weighted statistics from encoded observations."""
         lx, l1mx, xx, xx2 = x
-        self.count += np.sum(weights, dtype=np.float64)
-        self.sum_of_logs += np.dot(lx, weights)
-        self.sum_of_log1m += np.dot(l1mx, weights)
-        self.sum += np.dot(xx, weights)
-        self.sum2 += np.dot(xx2, weights)
+        ww = np.asarray(weights, dtype=np.float64)
+        boundary = (xx == 0.0) | (xx == 1.0)
+        if np.any(boundary):
+            boundary_evidence = int(np.count_nonzero(boundary & (ww > 0.0)))
+            if boundary_evidence:
+                raise ValueError(_BETA_BOUNDARY_FIT_MESSAGE % boundary_evidence)
+            # Zero-weight boundary rows contribute nothing, but 0 * (-inf) is NaN, not 0 -- drop
+            # them so they cannot poison the dot products below.
+            keep = ~boundary
+            lx, l1mx, xx, xx2, ww = lx[keep], l1mx[keep], xx[keep], xx2[keep], ww[keep]
+        self.count += np.sum(ww, dtype=np.float64)
+        self.sum_of_logs += np.dot(lx, ww)
+        self.sum_of_log1m += np.dot(l1mx, ww)
+        self.sum += np.dot(xx, ww)
+        self.sum2 += np.dot(xx2, ww)
 
     def seq_initialize(
         self, x: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None
@@ -500,6 +527,12 @@ class BetaDataEncoder(DataSequenceEncoder):
     def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Encode observations as log and moment arrays for vectorized updates."""
         rv = np.asarray(x, dtype=np.float64)
+        nan_count = int(np.count_nonzero(np.isnan(rv)))
+        if nan_count:
+            raise ValueError(
+                "Beta observations contain %d NaN value(s). NaN marks missing data, not a support "
+                "violation; drop or impute the missing entries before fitting." % nan_count
+            )
         if rv.size and (np.any(rv < 0.0) or np.any(rv > 1.0) or np.any(~np.isfinite(rv))):
             raise ValueError("BetaDistribution requires finite observations in [0, 1].")
         with np.errstate(divide="ignore"):

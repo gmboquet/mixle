@@ -19,6 +19,18 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 
+# The declared support is x >= 0, and scoring an exact zero works (density 0, 1/scale, or inf by
+# shape) -- but *fitting* on exact zeros cannot: for any shape != 1 the log-density at 0 is -inf or
+# +inf, so the EM objective is never finite and the run used to die with an internal
+# "fused EM did not produce a finite objective" error that never mentioned the zeros. Refuse the
+# evidence by name at accumulation time instead. Zeros carrying zero weight stay admissible, so a
+# mixture component that assigns them no responsibility is unaffected.
+_WEIBULL_ZERO_FIT_MESSAGE = (
+    "WeibullDistribution cannot be fit to data containing exact zeros: %d observation(s) with "
+    "positive weight are exactly 0.0, where the Weibull log-density is non-finite for any shape "
+    "other than 1. Drop or shift the zeros, or model the zero mass separately."
+)
+
 
 def _weibull_cv2(shape: float) -> float:
     a = math.lgamma(1.0 + 2.0 / shape)
@@ -293,6 +305,8 @@ class WeibullAccumulator(SequenceEncodableStatisticAccumulator):
         """Accumulate weighted first and second moments for one observation."""
         if x < 0.0:
             raise ValueError("WeibullDistribution requires observations x >= 0.")
+        if x == 0.0 and weight > 0.0:
+            raise ValueError(_WEIBULL_ZERO_FIT_MESSAGE % 1)
         self.sum += x * weight
         self.sum2 += x * x * weight
         self.count += weight
@@ -306,6 +320,9 @@ class WeibullAccumulator(SequenceEncodableStatisticAccumulator):
     ) -> None:
         """Accumulate weighted first and second moments from encoded data."""
         xx, _ = x
+        zero_evidence = int(np.count_nonzero((xx == 0.0) & (np.asarray(weights) > 0.0)))
+        if zero_evidence:
+            raise ValueError(_WEIBULL_ZERO_FIT_MESSAGE % zero_evidence)
         self.sum += np.dot(xx, weights)
         self.sum2 += np.dot(xx * xx, weights)
         self.count += np.sum(weights, dtype=np.float64)
@@ -405,7 +422,13 @@ class WeibullDataEncoder(DataSequenceEncoder):
     def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
         """Encode observations as values and log-values."""
         rv = np.asarray(x, dtype=np.float64)
-        if rv.size and (np.any(rv < 0.0) or np.any(np.isnan(rv))):
+        nan_count = int(np.count_nonzero(np.isnan(rv)))
+        if nan_count:
+            raise ValueError(
+                "Weibull observations contain %d NaN value(s). NaN marks missing data, not a "
+                "support violation; drop or impute the missing entries before fitting." % nan_count
+            )
+        if rv.size and np.any(rv < 0.0):
             raise ValueError("WeibullDistribution requires observations x >= 0.")
         with np.errstate(divide="ignore"):
             lx = np.log(rv)

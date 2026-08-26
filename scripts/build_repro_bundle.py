@@ -79,9 +79,9 @@ _ENTRIES = (
         "configuration": {"seed": "declared in script", "dataset": "synthetic"},
         "expected": {
             "format": "text",
-            "stdout_sha256": "813f26e144a823777d5d56fd9ddf96c621c8dda510ee43b9b14cce48b77416ac",
+            "stdout_sha256": "58f8fc929cf2d72302f9f5b9aad5c551b7941ca66dda0b03e50e7f872f146229",
             "contains": [
-                "fit : GaussianDistribution(1.5485975768849254, 4.020409881516557",
+                "fit : GaussianDistribution(1.5485975768849254, 4.020409881516533",
                 "fit : PoissonDistribution(4.027",
                 "fit : BernoulliDistribution(0.7004",
             ],

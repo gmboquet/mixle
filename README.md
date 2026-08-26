@@ -196,7 +196,11 @@ continuations = AutoregressiveEnumerable(next_logprobs, max_len=3, branch_cap=8)
 [tokenizer.decode(seq) for seq, _ in continuations.top_k(3)]
 # -> [' located in the', ' the city of', ' the capital of']
 
-# rank() inverts unrank(); cumulative_prob is exact, never approximated
+# unrank() is random access in QUANTIZED descending order: exact between fine buckets
+# (bin_width_bits/oversample wide), unspecified within one -- so rank(unrank(i)) can be
+# off by a near-tie at the default resolution (here: 6, not 5). rank() and cumulative_prob
+# are exact; shrink the ambiguity with oversample=/bin_width_bits=, or use top_k() for a
+# strictly sorted head.
 continuations.rank(continuations.unrank(5)[0])   # -> rank=6, cumulative_prob=0.114
 ```
 
