@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/numerical_stress_panel_test.py mixle/tests/numerics_test.py mixle/tests/numerical_guards_test.py mixle/tests/invariant_catalog_test.py mixle/tests/automatic_factory_contract_test.py mixle/tests/automatic_mixture_test.py mixle/tests/automatic_detectors_test.py mixle/tests/serialization_test.py mixle/tests/checkpoint_test.py mixle/tests/registry_test.py -p no:randomly -q -m \"\" -n 0 -W error::ResourceWarning",
   "date": "2026-08-22",
-  "evidence_digest": "f07a610eb8614e6e91e1cf6553ba13029411c4b16a5f16f8a9f87a5e7773526e",
+  "evidence_digest": "087ce3f4e96c91399fc31618d4d1f1b7850d4fcb25fadfe2528b18254f54258d",
   "gate": "Warning ownership",
   "note": "Genuine evidence for the claim's mechanism: -W error::ResourceWarning turns any unclosed handle into a test failure, and none fired. CAVEAT: the 10-file selection is mine (representatives of the numerical / automatic-modeling / persistence areas the checklist names), NOT the checklist's exact batch -- I could not identify the precise file list behind its '224 tests, 642 subtests' figure, so my counts differ and do not reproduce that number.",
   "result": "141 passed, 101 subtests passed in 11.91s under -W error::ResourceWarning; 0 ResourceWarnings raised (exit 0)"

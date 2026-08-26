@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/release_gate_negative_controls_test.py mixle/tests/duplicate_body_scan_test.py mixle/tests/normalize_sdist_test.py mixle/tests/fuzz_soak_contract_test.py mixle/tests/example_execution_manifest_test.py -p no:randomly -q -m \"\" -n 0",
   "date": "2026-08-22",
-  "evidence_digest": "f07a610eb8614e6e91e1cf6553ba13029411c4b16a5f16f8a9f87a5e7773526e",
+  "evidence_digest": "087ce3f4e96c91399fc31618d4d1f1b7850d4fcb25fadfe2528b18254f54258d",
   "gate": "Negative controls and legacy separation",
   "note": "IMPORTANT CORRECTION to the checklist text: release_gate_negative_controls_test.py alone collects only 7 tests and covers only 7 of the 11 named controls (non-finite-fit, API-export/duplicate-exports, optional-union, public-claim, reproducible-build, license, import-boundary). The other four named controls -- duplicate-body, sdist-replacement, fuzz-soak, example-claim -- live in duplicate_body_scan_test.py, normalize_sdist_test.py, fuzz_soak_contract_test.py, example_execution_manifest_test.py, which I added to reach the 45-test batch above. The evidence sentence reads as if one file carries all 11; it does not. Legacy separation verified by a second command (`-m legacy --collect-only`): the marker is applied in mixle/tests/conftest.py and cleanly partitions 16 tests.",
   "result": "45 passed in 5.39s (exit 0); legacy separation measured separately: 16/15436 tests collected under -m legacy, 15420 deselected"

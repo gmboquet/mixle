@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && ruff --version && ruff check mixle && ruff format --check mixle",
   "date": "2026-08-22",
-  "evidence_digest": "f07a610eb8614e6e91e1cf6553ba13029411c4b16a5f16f8a9f87a5e7773526e",
+  "evidence_digest": "087ce3f4e96c91399fc31618d4d1f1b7850d4fcb25fadfe2528b18254f54258d",
   "gate": "Ruff and formatting",
   "note": "Two drifts from the recorded evidence, both benign but worth correcting in the checklist: (1) the local ruff on PATH is 0.15.17, NOT the 0.15.20 that pyproject's `lint` extra pins -- so this local run is not the pinned version; (2) the count is 2007 files, not the recorded 2009. Hosted confirmation on 483add7c does use the pin: job 96967302250 (`lint`) steps 5 `ruff format --check` and 6 `ruff check` are both `success`.",
   "result": "ruff 0.15.17: `ruff check mixle` -> \"All checks passed!\" (exit 0); `ruff format --check mixle` -> \"2007 files already formatted\" (exit 0)"
