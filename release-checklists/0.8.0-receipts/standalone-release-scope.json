@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd /private/tmp/.../gatework/whlx && unzip -q ../dist/mixle-0.8.0-py3-none-any.whl && cat mixle-0.8.0.dist-info/top_level.txt && grep -c '^Requires-Dist' mixle-0.8.0.dist-info/METADATA && grep -icE '^Requires-Dist.*(mixle-|mixle_)' mixle-0.8.0.dist-info/METADATA; cd . && sed -n '14,25p' docs/family-release.rst",
   "date": "2026-08-22",
-  "evidence_digest": "decb8f6a2ed080e72c89f6a23433b1f31075c3d6de01aee1916f1e804135ed27",
+  "evidence_digest": "cf497f5262f29c262955212b725340aa56d12a1fd0cfd61dd822cc1de7493f54",
   "gate": "Standalone release scope",
   "note": "Artifact half is machine-measured against the wheel I built from release tip 483add7c: no sibling distribution is a dependency and the wheel ships exactly one top-level package. The 'support/compatibility claims' half is prose in docs/family-release.rst lines 14-25 (explicit exclusion of mixle-knowledge/mlops/pde/discrete/agent/demos/notebooks/ios) - I read it, no script enforces it. Sibling names still appear 20 times across README/CHANGELOG/docs, all as cross-links or the exclusion statement itself, not as co-installation claims.",
   "result": "wheel top_level.txt = 1 entry ('mixle'); 93 Requires-Dist lines, 0 of which name any sibling mixle-* project; docs/family-release.rst \"0.8.0 Scope Decision\" names 8 excluded siblings and states the family process applies only to a future release adopting a versioned family manifest"
