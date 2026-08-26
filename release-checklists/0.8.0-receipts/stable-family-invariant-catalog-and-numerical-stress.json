@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/invariant_catalog_test.py mixle/tests/numerical_stress_panel_test.py mixle/tests/weighted_estimation_test.py mixle/tests/em_convergence_contract_test.py mixle/tests/fit_seed_test.py mixle/tests/sampler_seed_test.py -p no:randomly -q -m \"\" -n 0",
   "date": "2026-08-22",
-  "evidence_digest": "cf497f5262f29c262955212b725340aa56d12a1fd0cfd61dd822cc1de7493f54",
+  "evidence_digest": "40d1ea9657aafd59b3e6d08d87425f14d2840e69d923ce4283f28129d9988a0d",
   "gate": "Stable-family invariant catalog and numerical stress",
   "note": "The allowlist half of the claim also checks out exactly. manifests/stable_api_signatures.json `stable_modules` is 11 entries: the 7 statistical families (gaussian, gamma, exponential, log_gaussian, poisson, geometric, categorical) plus stats.parameter_packing, inference.em, inference.estimation, semantics -- and invariant_catalog_test.py defines Cases for precisely those same 7 families and no others. NOT covered by my run: the checklist's additional claim that invariant_catalog_test.py ran against two clean artifact installs; I ran it in-tree only.",
   "result": "31 passed, 595 subtests passed in 4.65s -- an exact reproduction of the recorded 31-passed / 595-subtest figure"
