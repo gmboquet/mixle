@@ -112,20 +112,26 @@ class B4CovarianceConditioningTest(unittest.TestCase):
         np.testing.assert_allclose(fit.se, reference_se, rtol=1e-4)
 
     def test_robust_sandwich_does_not_collapse_at_cond_2e8(self):
-        # statsmodels 0.14.6 HC0 on this design: [4.648e-02, 5.065e+06, 5.065e+06]. The old
-        # pinv(X'WX) bread reported the collinear pair ~7 ORDERS OF MAGNITUDE smaller. The
-        # sandwich's intrinsic noise floor grows with cond(X)^2 and is BLAS-dependent: the same
-        # tree measures se/statsmodels ratios up to 1.82 on macOS Accelerate and past 3 on
-        # ubuntu OpenBLAS (the factor-3 first version of this band failed only in CI). A
-        # factor-100 band is platform-robust and still refuses the guarded defect with five
-        # orders of margin -- what is being pinned here is "no truncation collapse", not
-        # cross-BLAS agreement, which test_robust_matches_reference_at_cond_2e5 pins where the
-        # arithmetic is well-posed.
+        # At cond(X) ~ 2e8 the HC0 sandwich VALUE is not a cross-platform quantity: its noise
+        # floor grows with cond(X)^2 and is BLAS-dependent -- this tree measured the collinear
+        # pair's se at 7.7e6-9.2e6 under macOS Accelerate, statsmodels 0.14.6 at 5.06e6, and
+        # ubuntu OpenBLAS more than two orders below that (a factor-3 and then a factor-100 band
+        # around the statsmodels number each failed ONLY in CI). So no band around a hardcoded
+        # reference; pin the STRUCTURAL property that separates correct arithmetic from the
+        # guarded defect on every platform. The truncation collapse reported the nearly
+        # unidentifiable collinear pair at the INTERCEPT's scale (se ratio ~0.5, claiming
+        # precise knowledge of coefficients the design cannot identify); a correct sandwich puts
+        # the pair many orders above the intercept (~1.6e8x here). Cross-BLAS value agreement is
+        # pinned by test_robust_matches_reference_at_cond_2e5, where the arithmetic is well-posed.
         X, y = self._collinear_design(1e-8)
         fit = glm(X, y, family="gaussian", robust=True)
-        statsmodels_hc0 = np.array([4.648168808710404e-02, 5.064743770828102e06, 5.064743776942883e06])
-        self.assertTrue(np.all(fit.se > statsmodels_hc0 / 100.0))
-        self.assertTrue(np.all(fit.se < statsmodels_hc0 * 100.0))
+        se = np.asarray(fit.se)
+        self.assertTrue(np.all(np.isfinite(se)) and np.all(se > 0.0))
+        # the collinear pair's uncertainty dwarfs the intercept's (collapse gave ~0.5x)
+        self.assertGreater(float(se[1] / se[0]), 1e3)
+        self.assertGreater(float(se[2] / se[0]), 1e3)
+        # and the intercept itself stays at its well-identified scale on every platform
+        self.assertLess(abs(float(se[0]) - 4.648e-02) / 4.648e-02, 1.0)
 
     def test_numerically_rank_deficient_design_is_said_not_silently_full_ranked(self):
         # cond(X) ~ 2e15: statsmodels itself is ill-posed here. mixle must flag it -- reduced
