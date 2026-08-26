@@ -113,14 +113,19 @@ class B4CovarianceConditioningTest(unittest.TestCase):
 
     def test_robust_sandwich_does_not_collapse_at_cond_2e8(self):
         # statsmodels 0.14.6 HC0 on this design: [4.648e-02, 5.065e+06, 5.065e+06]. The old
-        # pinv(X'WX) bread reported the collinear pair ~7 orders of magnitude smaller. A
-        # factor-3 band around statsmodels absorbs the sandwich's cond^2 noise floor while
-        # still failing on any truncation collapse.
+        # pinv(X'WX) bread reported the collinear pair ~7 ORDERS OF MAGNITUDE smaller. The
+        # sandwich's intrinsic noise floor grows with cond(X)^2 and is BLAS-dependent: the same
+        # tree measures se/statsmodels ratios up to 1.82 on macOS Accelerate and past 3 on
+        # ubuntu OpenBLAS (the factor-3 first version of this band failed only in CI). A
+        # factor-100 band is platform-robust and still refuses the guarded defect with five
+        # orders of margin -- what is being pinned here is "no truncation collapse", not
+        # cross-BLAS agreement, which test_robust_matches_reference_at_cond_2e5 pins where the
+        # arithmetic is well-posed.
         X, y = self._collinear_design(1e-8)
         fit = glm(X, y, family="gaussian", robust=True)
         statsmodels_hc0 = np.array([4.648168808710404e-02, 5.064743770828102e06, 5.064743776942883e06])
-        self.assertTrue(np.all(fit.se > statsmodels_hc0 / 3.0))
-        self.assertTrue(np.all(fit.se < statsmodels_hc0 * 3.0))
+        self.assertTrue(np.all(fit.se > statsmodels_hc0 / 100.0))
+        self.assertTrue(np.all(fit.se < statsmodels_hc0 * 100.0))
 
     def test_numerically_rank_deficient_design_is_said_not_silently_full_ranked(self):
         # cond(X) ~ 2e15: statsmodels itself is ill-posed here. mixle must flag it -- reduced
