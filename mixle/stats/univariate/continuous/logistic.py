@@ -267,11 +267,11 @@ class LogisticAccumulator(SequenceEncodableStatisticAccumulator):
 
     Alongside the raw ``(sum, sum2, count)`` the accumulator keeps a CONDITIONING-GATED
     shift-anchored moment track. The naive ``E[x^2]-E[x]^2`` form the M-step needs loses
-    ~2*log2(|mean|/sd) bits to cancellation, so data with sd ~0.99 at offset 1.7e9 fits a scale
+    ~2*log2(abs(mean)/sd) bits to cancellation, so data with sd ~0.99 at offset 1.7e9 fits a scale
     12.6x too large with no warning. Anchoring at a data value keeps every term of the scatter
     O(count * spread^2), making the M-step variance shift-invariant.
 
-    The track is CONDITIONING-GATED: a chunk whose ``|mean|/spread`` ratio the raw form handles to
+    The track is CONDITIONING-GATED: a chunk whose ``abs(mean)/spread`` ratio the raw form handles to
     ~1e-9 relative error (see :func:`_needs_anchor`) accumulates exactly the historical single-pass
     way -- bit-identical statistics, no second pass -- and the anchor activates only when a chunk (or
     a scalar ``update``) would corrupt the variance. The raw moments remain the exchange format --
@@ -464,7 +464,7 @@ def _spread_is_resolvable(variance: float, magnitude: float) -> bool:
 
 
 # Bound on how far the reported mean can sit from the exact sample mean the anchored track knows:
-# ~4-8 grid steps of ``|mean|``. It bounds a rounding residue of the mean, not a spread, so a
+# ~4-8 grid steps of ``abs(mean)``. It bounds a rounding residue of the mean, not a spread, so a
 # multiple of the ulp is the right shape here -- and it is deliberately the same constant the
 # previous whole-scatter clamp used, so every degenerate payload that collapsed to exactly zero
 # before still does. Same constant as the Gaussian family's own bound.
@@ -501,7 +501,7 @@ def _anchored_pooled_variance(
     data magnitude, and the ONLY place the large magnitude enters. Clamping the rounding term alone
     leaves the data untouched; a single combined sum could only clamp the total, so its ulp-scale
     threshold would have to be crossed by the spread as well, and any spread below
-    ~``4 eps |mean|`` per observation would read as constant -- exactly the defect this split fixes
+    ~``4 eps abs(mean)`` per observation would read as constant -- exactly the defect this split fixes
     (see mixle.stats.univariate.continuous.gaussian._anchored_pooled_variance for the reference
     repair this mirrors).
     """

@@ -75,7 +75,7 @@ _ANCHOR_CONDITION_RATIO = 4.0e6
 
 _ANCHOR_MEAN_ULP = 8.8817841970012523e-16
 """4 * eps -- the granularity of recomputing a mean at a given magnitude. A scatter below
-``count * (_ANCHOR_MEAN_ULP * |mean|)^2`` is the mean's own rounding, not data (see
+``count * (_ANCHOR_MEAN_ULP * abs(mean))^2`` is the mean's own rounding, not data (see
 ``_anchored_pooled_variances``)."""
 
 
@@ -167,7 +167,7 @@ def _anchored_mean_offset(
     """The pooled mean MINUS the anchor, computed entirely in offset space.
 
     Same estimator as ``(sum_x + pc*prior_mu) / (count + pc)`` -- ``a_sum`` is ``sum_x - count*anchor``
-    -- but every term is O(count * spread) instead of O(count * |mean|), so the result does not
+    -- but every term is O(count * spread) instead of O(count * abs(mean)), so the result does not
     inherit the ~5-ulp-of-the-offset error that summing 1e3 values near 1.7e9 puts into ``sum_x``.
     That error is harmless in the mean itself and NOT harmless in the variance: the scatter's
     sensitivity to the mean is second order, so a mean off by ``e`` inflates every variance by
@@ -193,7 +193,7 @@ def _anchored_pooled_variances(
 
     Same pooling contract as the raw-moment form, but the observed scatter is expanded about the
     data anchor, so every term is O(count * spread^2) and the result is shift-invariant instead of
-    losing ~2*log2(|mean|/sd) bits to cancellation. ``mean_offset`` is the pooled mean relative to
+    losing ~2*log2(abs(mean)/sd) bits to cancellation. ``mean_offset`` is the pooled mean relative to
     the anchor (see :func:`_anchored_mean_offset`), never the mean itself -- the whole point is that
     no quantity here carries the data's offset.
     """
@@ -208,7 +208,7 @@ def _anchored_pooled_variances(
     # source that actually applies to it -- instead of one combined array against one combined
     # threshold -- leaves genuine spread at extreme magnitude untouched: the old combined form's
     # ulp-scale threshold had to be crossed by the spread as well as by cancellation noise, so any
-    # per-coordinate spread below ~4 eps |mean| per observation read as constant even when
+    # per-coordinate spread below ~4 eps abs(mean) per observation read as constant even when
     # ``count * spread^2`` -- the actual scatter -- was orders of magnitude above it.
     centroid_offset = a_sum / count if count > 0.0 else np.zeros_like(a_sum)
     core = a_sum2 - centroid_offset * a_sum
@@ -779,7 +779,7 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
     Alongside the declared raw moments ``(sum, sum2, count)`` this keeps a SHIFT-ANCHORED moment
     track, for the reason the univariate :class:`~mixle.stats.univariate.continuous.gaussian.
     GaussianAccumulator` keeps one: the variance computed from raw reduced moments is the classic
-    cancellation-prone ``E[x^2] - mu^2`` form, which loses ~2*log2(|mean|/sd) bits, so unit-spread
+    cancellation-prone ``E[x^2] - mu^2`` form, which loses ~2*log2(abs(mean)/sd) bits, so unit-spread
     data at offset 1e7 fits variances tens of percent wrong and data at offset 1.7e9 fits variances
     thousands of times too large (or collapsed onto the floor -- the sign of the garbage is
     data-dependent), on data whose variance a two-pass computation returns exactly. Epoch seconds

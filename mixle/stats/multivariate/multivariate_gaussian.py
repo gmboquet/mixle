@@ -102,7 +102,7 @@ _ANCHOR_CONDITION_RATIO = 4.0e6
 
 _ANCHOR_MEAN_ULP = 8.8817841970012523e-16
 """4 * eps -- the granularity of recomputing a mean at a given magnitude. A scatter below
-``count * (_ANCHOR_MEAN_ULP * |mean|)^2`` is the mean's own rounding, not data (see
+``count * (_ANCHOR_MEAN_ULP * abs(mean))^2`` is the mean's own rounding, not data (see
 ``_anchored_pooled_covariance``)."""
 
 
@@ -971,7 +971,7 @@ def _anchored_mean_offset(
     """The pooled mean MINUS the anchor, computed entirely in offset space.
 
     Same estimator as ``(sum_x + pc*prior_mu) / (count + pc)`` -- ``a_sum`` is ``sum_x - count*anchor``
-    -- but every term is O(count * spread) instead of O(count * |mean|), so the result does not
+    -- but every term is O(count * spread) instead of O(count * abs(mean)), so the result does not
     inherit the ~5-ulp-of-the-offset error that summing 1e3 values near 1.7e9 puts into ``sum_x``.
     That error is harmless in the mean itself and NOT harmless in the covariance: the scatter's
     sensitivity to the mean is second order, so a mean off by ``e`` inflates every variance by
@@ -998,7 +998,7 @@ def _anchored_pooled_covariance(
     Same pooling contract as the raw-moment form (see
     :func:`mixle.stats.multivariate._vector_contracts.pooled_gaussian_covariance`), but the observed
     scatter is expanded about the data anchor, so every term is O(count * spread^2) and the result
-    is shift-invariant instead of losing ~2*log2(|mean|/sd) bits of every entry to cancellation.
+    is shift-invariant instead of losing ~2*log2(abs(mean)/sd) bits of every entry to cancellation.
     ``mean_offset`` is the pooled mean relative to the anchor (see :func:`_anchored_mean_offset`),
     never the mean itself -- the whole point is that no quantity here carries the data's offset.
     """
@@ -1018,7 +1018,7 @@ def _anchored_pooled_covariance(
     # ``sum_x / count`` at data magnitude on the plain ML path, and the ONLY place the large magnitude
     # enters. The former combined test folded ``count * mean_ulp^2`` into the SAME threshold as
     # ``core``'s own scatter, so the ulp-scale floor had to be crossed by the spread as well as by
-    # cancellation noise: a covariance genuinely O(count * spread^2) below ``count * (4 eps |mean|)^2``
+    # cancellation noise: a covariance genuinely O(count * spread^2) below ``count * (4 eps abs(mean))^2``
     # per entry -- easily reached at mean ~1e15, where a millimeter-scale spread is still many grid
     # steps of real data -- read as the zero matrix even though nothing about it was noise.
     centroid_offset = a_sum / count if count > 0.0 else np.zeros_like(a_sum)
@@ -1073,7 +1073,7 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
     Alongside the declared raw moments ``(sum, sum2, count)`` this keeps a SHIFT-ANCHORED moment
     track, for the reason the univariate :class:`~mixle.stats.univariate.continuous.gaussian.
     GaussianAccumulator` keeps one: the covariance computed from raw reduced moments is the classic
-    cancellation-prone ``E[xx^T] - mu mu^T`` form, which loses ~2*log2(|mean|/sd) bits, so data with
+    cancellation-prone ``E[xx^T] - mu mu^T`` form, which loses ~2*log2(abs(mean)/sd) bits, so data with
     unit spread at offset 1e7 fits a visibly wrong correlation and data at offset 1e8 fits a matrix
     so far from positive-definite that ``_robust_cho_factor`` refuses it -- on data whose covariance
     a two-pass computation returns exactly (epoch seconds are ~1.7e9). Anchoring at the first value
@@ -1604,7 +1604,7 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             if anchored is not None:
                 # Same scatter, expanded about the data anchor instead of about zero: mathematically
                 # identical, but every term stays O(count * spread^2) rather than cancelling two
-                # numbers of size count*|mean|^2 (see _anchored_pooled_covariance). The centroid
+                # numbers of size count*abs(mean)^2 (see _anchored_pooled_covariance). The centroid
                 # offset IS the sample mean relative to the anchor, so this is the scatter about
                 # ``xbar`` with no offset-carrying term anywhere in it.
                 mean_offset = _anchored_mean_offset(anchored, count, None, None)
