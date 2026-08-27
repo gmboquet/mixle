@@ -296,7 +296,19 @@ class InfinityIsNotAFreePassTest(unittest.TestCase):
 
     def test_paired_comparison_no_longer_decides_for_the_improper_model(self):
         """The named harm vector: clarke_test preferred the unnormalized model on all 301 points
-        (p = 4.9e-91) because those helpers take plain arrays and cannot see density_semantics()."""
+        (p = 4.9e-91) because those helpers take plain arrays and cannot see density_semantics()).
+
+        clarke_test is a SIGN test: it counts how many points favor A, and with n=301 that makes
+        it extremely sensitive to a systematic same-direction floating-point bias between two
+        independently-fitted models -- exactly what two separate optimize() calls can produce
+        across BLAS implementations, even when both compute the same normalized density to many
+        significant figures (observed: passes on macOS/Accelerate, "favored": "A" on ubuntu/
+        OpenBLAS). The actual claim is numerical agreement, which is what
+        test_the_likelihood_inflation_is_gone_at_scale already asserts this way for the n=30 case;
+        assert it directly here too, and keep clarke_test only as a sanity check that the ORIGINAL
+        pathology (an overwhelming p-value in one consistent direction) is gone, at a threshold
+        far looser than 0.05.
+        """
         data = self.train + [float("inf")]
         auto = optimize(data, out=None)
         proper = optimize(
@@ -304,11 +316,12 @@ class InfinityIsNotAFreePassTest(unittest.TestCase):
             OptionalEstimator(GaussianEstimator(), missing_value=float("inf"), est_prob=True),
             out=None,
         )
-        result = clarke_test(
-            np.array([auto.log_density(x) for x in data]),
-            np.array([proper.log_density(x) for x in data]),
-        )
-        self.assertEqual(result["favored"], "tie")
+        auto_scores = np.array([auto.log_density(x) for x in data])
+        proper_scores = np.array([proper.log_density(x) for x in data])
+        self.assertAlmostEqual(float(auto_scores.sum()), float(proper_scores.sum()), places=9)
+        np.testing.assert_allclose(auto_scores, proper_scores, rtol=1e-9, atol=1e-9)
+        result = clarke_test(auto_scores, proper_scores)
+        self.assertGreater(result["p_value"], 1e-10, "clarke_test regressed toward the original p=4.9e-91 pathology")
 
     def test_both_signs_and_the_nested_case(self):
         data = self.train + [float("inf"), float("-inf")]
