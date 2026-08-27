@@ -37,7 +37,7 @@ import numpy as np
 import pytest
 
 import mixle
-from mixle.inference import clarke_test, optimize
+from mixle.inference import optimize
 from mixle.stats import GaussianEstimator, OptionalEstimator
 from mixle.stats.combinator.select import SelectDistribution
 from mixle.stats.compute.pdist import DensitySemantics
@@ -298,16 +298,22 @@ class InfinityIsNotAFreePassTest(unittest.TestCase):
         """The named harm vector: clarke_test preferred the unnormalized model on all 301 points
         (p = 4.9e-91) because those helpers take plain arrays and cannot see density_semantics()).
 
-        clarke_test is a SIGN test: it counts how many points favor A, and with n=301 that makes
-        it extremely sensitive to a systematic same-direction floating-point bias between two
-        independently-fitted models -- exactly what two separate optimize() calls can produce
-        across BLAS implementations, even when both compute the same normalized density to many
-        significant figures (observed: passes on macOS/Accelerate, "favored": "A" on ubuntu/
-        OpenBLAS). The actual claim is numerical agreement, which is what
-        test_the_likelihood_inflation_is_gone_at_scale already asserts this way for the n=30 case;
-        assert it directly here too, and keep clarke_test only as a sanity check that the ORIGINAL
-        pathology (an overwhelming p-value in one consistent direction) is gone, at a threshold
-        far looser than 0.05.
+        clarke_test is a SIGN test: it counts how many of 301 points favor A, which makes its
+        p-value a measure of DIRECTIONAL CONSISTENCY, not magnitude. Two independently-fitted
+        models computed via separate optimize() calls virtually always carry a consistent
+        ulp-level bias in one direction (BLAS operation ordering is deterministic, just not
+        identical across implementations), so at n=301 the sign test reports an astronomically
+        small p-value REGARDLESS of whether the actual numerical agreement is meaningful --
+        measured on this exact pair on ubuntu/OpenBLAS: p=3.6e-12 with the log-density arrays
+        agreeing to 1e-9 relative, a difference many orders of magnitude below anything a sign
+        test can distinguish from a real modeling difference. A p-value threshold on clarke_test
+        is therefore not a usable regression check here, at any threshold: the original pathology
+        (p=4.9e-91, a ~30+ nat systematic gap) and ordinary BLAS noise (p~1e-12, a <1e-9 relative
+        gap) are both "significant" by the same test, for entirely different reasons. The actual
+        claim -- that the fix closes the numerical gap, not that a sign test can no longer tell
+        the two models apart -- is what test_the_likelihood_inflation_is_gone_at_scale already
+        asserts the right way for the n=30 case; assert it directly here too, and drop clarke_test
+        from this test entirely rather than parametrize a threshold that cannot mean anything.
         """
         data = self.train + [float("inf")]
         auto = optimize(data, out=None)
@@ -320,8 +326,6 @@ class InfinityIsNotAFreePassTest(unittest.TestCase):
         proper_scores = np.array([proper.log_density(x) for x in data])
         self.assertAlmostEqual(float(auto_scores.sum()), float(proper_scores.sum()), places=9)
         np.testing.assert_allclose(auto_scores, proper_scores, rtol=1e-9, atol=1e-9)
-        result = clarke_test(auto_scores, proper_scores)
-        self.assertGreater(result["p_value"], 1e-10, "clarke_test regressed toward the original p=4.9e-91 pathology")
 
     def test_both_signs_and_the_nested_case(self):
         data = self.train + [float("inf"), float("-inf")]
