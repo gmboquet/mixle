@@ -13,11 +13,17 @@ type (all reals), ``xi < 0`` the bounded Weibull type (``x <= mu - sigma/xi``). 
 are fit by method of moments: the shape is solved from the (monotone) skewness-vs-``xi`` relation,
 then scale from the variance and location from the mean.
 
+The M-step is *shift-equivariant*: fitting ``x + c`` returns ``loc + c`` with an unchanged ``scale``
+and ``shape``. That does not come for free from raw power sums -- the central third moment
+differenced out of ``E[x^3]`` loses about ``3*log2(|mean|/sd)`` bits, and the variance about twice
+that -- so the accumulator carries a conditioning-gated shift-anchored moment track alongside the raw
+sums (see :class:`GeneralizedExtremeValueAccumulator`).
 
 Reference: Coles, *An Introduction to Statistical Modeling of Extreme Values* (Springer, 2001).
 """
 
 import math
+import warnings
 from collections.abc import Sequence
 from typing import Any
 
@@ -51,6 +57,118 @@ _GUMBEL_SKEW = 12.0 * math.sqrt(6.0) * 1.2020569031595943 / math.pi**3  # 12 sqr
 # to a 3-4 sd extreme observation, so the clamped fit is kept whenever it remains comparable and
 # dropped only when it is catastrophically worse.
 _COVERING_FALLBACK_NATS = 30.0
+
+# Conditioning threshold for the anchored-moment gate. The M-step's highest-order reduced moment is
+# the third, whose raw form ``E[x^3] - 3 m E[x^2] + 2 m^3`` loses about ``eps * (|mean|/sd)^3``
+# relative accuracy; a (mean/sd)^2 up to 2.5e4 (ratio ~158) keeps that within ~1e-9, so the
+# historical single-pass path is bit-preserved there and the anchored track takes over beyond it.
+# Chunks pooled from gate-passing content stay well-conditioned as a pool (Cauchy-Schwarz:
+# n*mean_pool^2 <= sum_i n_i*mean_i^2), so a pool built only from gate-passing chunks never needs the
+# anchor retroactively.
+_ANCHOR_CONDITION_RATIO = 2.5e4
+
+
+def _needs_anchor(chunk_sum: float, chunk_sum2: float, w_sum: float) -> bool:
+    """Whether a chunk's weighted moments are too ill-conditioned for the raw reduced-moment form.
+
+    ``spread2`` computed here is itself the cancellation-prone estimate, but as a GATE it is
+    reliable: when cancellation has corrupted it, the corruption is bounded by ``eps * m^2``, which
+    still leaves ``m*m`` orders of magnitude above ``_ANCHOR_CONDITION_RATIO * spread2``.
+    A non-positive computed spread activates the anchor outright (constant or near-constant data).
+    """
+    m = chunk_sum / w_sum
+    spread2 = chunk_sum2 / w_sum - m * m
+    return spread2 <= 0.0 or m * m > _ANCHOR_CONDITION_RATIO * spread2
+
+
+def _shift_moments(m0: float, m1: float, m2: float, m3: float, d: float) -> tuple[float, float, float]:
+    """Re-express weighted power sums accumulated about a point sitting ``d`` above the new one.
+
+    Given ``m_k = sum_i w_i y_i^k`` (with ``m0 = sum_i w_i``), return the same sums for ``y_i + d``.
+    Used both to convert raw sums onto an anchor (``d = -anchor``) and to fold a differently anchored
+    partner in :meth:`GeneralizedExtremeValueAccumulator.combine`.
+    """
+    d2 = d * d
+    return (
+        m1 + d * m0,
+        m2 + 2.0 * d * m1 + d2 * m0,
+        m3 + 3.0 * d * m2 + 3.0 * d2 * m1 + d2 * d * m0,
+    )
+
+
+class GeneralizedExtremeValueSuffStat(tuple):
+    """A ``(sum, sum2, sum3, count, min_val, max_val)`` statistic that also carries a side payload.
+
+    Behaves exactly like the plain 6-tuple everywhere it is indexed, unpacked, or iterated (it *is*
+    one); ``anchored`` is the shift-anchored payload
+    ``(anchor, sum_i w_i (x_i - anchor)^k for k = 1..3)`` the accumulator maintains alongside the raw
+    power sums so the M-step survives large-offset data. Code that doesn't know about the payload
+    (generic ``scale_suff_stat``, serializers, ...) sees an ordinary tuple and the estimate falls
+    back to the historical raw path.
+    """
+
+    def __new__(
+        cls,
+        sum_: float,
+        sum2_: float,
+        sum3_: float,
+        count_: float,
+        min_val: float,
+        max_val: float,
+        anchored: tuple[float, float, float, float] | None = None,
+    ) -> "GeneralizedExtremeValueSuffStat":
+        obj = super().__new__(cls, (sum_, sum2_, sum3_, count_, min_val, max_val))
+        obj.anchored = anchored
+        return obj
+
+    def __reduce__(self):
+        # A tuple subclass with a payload-bearing __new__ does not pickle by default, and the
+        # Spark/multiprocessing reducers round-trip accumulator values through pickle.
+        return (_rebuild_gev_suff_stat, (tuple(self), self.anchored))
+
+
+def _rebuild_gev_suff_stat(values: tuple, anchored: tuple | None) -> GeneralizedExtremeValueSuffStat:
+    """Unpickle helper for :class:`GeneralizedExtremeValueSuffStat` (module level so pickle can import it)."""
+    return GeneralizedExtremeValueSuffStat(*values, anchored=anchored)
+
+
+def _consistent_anchored_moments(suff_stat: Any, sum_x: float, count: float) -> tuple[float, ...] | None:
+    """Return the anchored payload of ``suff_stat`` when it is usable, else ``None``.
+
+    ``None`` falls back to the raw reduced-moment M-step, so a payload is only trusted when it is
+    finite, has the right arity, carries a non-negative second order, and agrees with the raw first
+    moment it claims to describe -- a hand-built :class:`GeneralizedExtremeValueSuffStat` whose
+    payload contradicts its tuple must not silently change the estimate the tuple alone would have
+    produced.
+    """
+    anchored = getattr(suff_stat, "anchored", None)
+    if anchored is None or count <= 0.0:
+        return None
+    if len(anchored) != 4 or not all(np.isfinite(v) for v in anchored):
+        return None
+    anchor, a1, a2, _a3 = (float(v) for v in anchored)
+    if a2 < 0.0:
+        return None
+    implied_sum = a1 + count * anchor
+    tolerance = 1.0e-6 * max(abs(sum_x), abs(count * anchor), 1.0)
+    if abs(implied_sum - sum_x) > tolerance:
+        return None
+    return tuple(float(v) for v in anchored)
+
+
+def _prior_is_ill_conditioned(raw_prior: Any) -> bool:
+    """Whether raw prior moments ``(E[X], E[X^2], E[X^3])`` have lost their spread to cancellation.
+
+    A diagnostic, not a gate: it decides whether to *warn*, never whether to reject. The prior is a
+    one-unit pseudo-sample, so the accumulator's own conditioning test applies with ``w_sum = 1``.
+    """
+    try:
+        e1, e2 = float(raw_prior[0]), float(raw_prior[1])
+    except (TypeError, ValueError, IndexError):
+        return False
+    if not (np.isfinite(e1) and np.isfinite(e2)):
+        return False
+    return _needs_anchor(e1, e2, 1.0)
 
 
 def _gev_skewness(xi: float) -> float:
@@ -361,7 +479,15 @@ class GeneralizedExtremeValueDistribution(SequenceEncodableProbabilityDistributi
         # E[X^3] = skew*var^1.5 + 3*mean*E[X^2] - 2*mean^3.
         third0 = skew0 * (var0**1.5) + 3.0 * mean0 * second0 - 2.0 * mean0**3
         return GeneralizedExtremeValueEstimator(
-            pseudo_count=pseudo_count, suff_stat=(mean0, second0, third0), name=self.name, keys=self.keys
+            pseudo_count=pseudo_count,
+            suff_stat=(mean0, second0, third0),
+            name=self.name,
+            keys=self.keys,
+            # The raw moments above are the release-pinned exchange form, but at a large |loc| they
+            # no longer contain this distribution's spread at all (``var0 + mean0**2`` rounds
+            # ``var0`` away once ``mean0**2`` exceeds ~1e16 times it). Carry the central restatement
+            # alongside them so estimate() can place the prior on the data anchor exactly.
+            prior_central=(mean0, var0, skew0 * (var0**1.5)),
         )
 
     def dist_to_encoder(self) -> "GeneralizedExtremeValueDataEncoder":
@@ -393,6 +519,21 @@ class GeneralizedExtremeValueAccumulator(SequenceEncodableStatisticAccumulator):
     The range is not a moment: it is the support bound the estimate has to respect, since a GEV with
     ``xi != 0`` is bounded on one side and moment matching alone can place that bound inside the
     sample. See :func:`_shape_covering_range`.
+
+    Alongside the raw sums the accumulator keeps a CONDITIONING-GATED shift-anchored track,
+    ``sum_i w_i (x_i - anchor)^k`` for ``k = 1..3`` about a data anchor. The method of moments needs
+    central moments, and differencing them out of raw power sums is the classic cancellation-prone
+    form: at sd ~0.6 and offset 1.7e9 the raw variance is wrong by a factor of thousands and the raw
+    third moment has no correct digits at all, which drives the shape onto its bound and the scale
+    tens of times too large -- silently. Anchoring keeps every term of the scatter
+    ``O(count * spread^3)``, making the M-step shift-equivariant.
+
+    The gate keeps the historical path bit-identical for well-conditioned data: a chunk whose
+    ``|mean|/spread`` ratio the raw form handles to ~1e-9 relative (see :func:`_needs_anchor`)
+    accumulates exactly the way it always did, with no anchor and no second pass. The raw sums remain
+    the exchange format, so the anchored track rides along as a payload on
+    :class:`GeneralizedExtremeValueSuffStat`; a consumer that drops the payload simply gets the
+    historical raw estimate back.
     """
 
     def __init__(self, name: str | None = None, keys: str | None = None) -> None:
@@ -404,9 +545,62 @@ class GeneralizedExtremeValueAccumulator(SequenceEncodableStatisticAccumulator):
         self.max_val = -np.inf
         self.name = name
         self.keys = keys
+        self._anchor: float | None = None
+        self._a1 = 0.0
+        self._a2 = 0.0
+        self._a3 = 0.0
+        self._anchor_unrecoverable = False
+
+    def _absorb_raw(self, count: float, sum_: float, sum2: float, sum3: float) -> None:
+        """Fold raw power sums into the live anchored track, converting them about the anchor.
+
+        The conversion is itself the cancellation-prone form, and it is safe on content the gate has
+        already certified as well-conditioned (raw error ~1e-9 relative or better).
+
+        It is NOT safe on ill-conditioned raw statistics arriving through ``from_value``/``combine``:
+        power sums whose own ``|mean|/spread`` ratio has already erased the central moments cannot
+        have them restored by any change of reference point, and converting them anyway seeds the
+        anchored track with an error far larger than the spread it is supposed to measure -- which
+        would make the pooled estimate *worse* than the historical raw one, not better. Such content
+        marks the track unrecoverable: :meth:`value` then withholds the anchored payload, the estimate
+        falls back to exactly the historical raw M-step, and the caller is told why.
+        """
+        if count == 0.0 and sum_ == 0.0 and sum2 == 0.0 and sum3 == 0.0:
+            return
+        if count > 0.0 and _needs_anchor(sum_, sum2, count):
+            self._anchor_unrecoverable = True
+            warnings.warn(
+                "GeneralizedExtremeValueAccumulator merged raw power sums whose location dominates "
+                "their spread into a shift-anchored pool. Raw sums at that conditioning no longer "
+                "contain the central moments, and no change of reference point can restore them, so "
+                "this pool falls back to the historical raw M-step and its scale/shape are "
+                "unreliable at this offset. Accumulate through update()/seq_update(), or combine "
+                "statistics that still carry their anchored payload, instead of restoring plain "
+                "power sums.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        a1, a2, a3 = _shift_moments(count, sum_, sum2, sum3, -self._anchor)
+        self._a1 += a1
+        self._a2 += max(a2, 0.0)
+        self._a3 += a3
+
+    def _activate_anchor(self, anchor: float) -> None:
+        """Start the shift-anchored moment track at ``anchor``, converting any raw content onto it."""
+        self._anchor = float(anchor)
+        self._absorb_raw(self.count, self.sum, self.sum2, self.sum3)
 
     def update(self, x: float, weight: float, estimate: GeneralizedExtremeValueDistribution | None) -> None:
         """Accumulate weighted first three raw moments and the observed range for one observation."""
+        # Scalar updates carry no chunk to assess conditioning from, so the anchor activates on the
+        # first observation (O(1) bookkeeping on this path). Activation happens BEFORE the raw fold
+        # so any pre-anchor content is converted from statistics the gate has already vouched for.
+        if self._anchor is None:
+            self._activate_anchor(float(x))
+        dx = float(x) - self._anchor
+        self._a1 += dx * weight
+        self._a2 += dx * dx * weight
+        self._a3 += dx * dx * dx * weight
         self.sum += x * weight
         self.sum2 += x * x * weight
         self.sum3 += x * x * x * weight
@@ -424,10 +618,24 @@ class GeneralizedExtremeValueAccumulator(SequenceEncodableStatisticAccumulator):
     ) -> None:
         """Accumulate weighted first three raw moments and the observed range from encoded data."""
         xx = np.asarray(x, dtype=np.float64)
-        self.sum += np.dot(xx, weights)
-        self.sum2 += np.dot(xx * xx, weights)
-        self.sum3 += np.dot(xx * xx * xx, weights)
-        self.count += np.sum(weights, dtype=np.float64)
+        w_sum = float(np.sum(weights, dtype=np.float64))
+        chunk_sum = float(np.dot(xx, weights))
+        chunk_sum2 = float(np.dot(xx * xx, weights))
+        # Conditioning gate: activate the anchored track only when this chunk's raw moments would
+        # corrupt the reduced moments (or the anchor is already live). BEFORE the raw fold, so
+        # activation converts only the content that preceded this chunk.
+        if len(xx) > 0 and (self._anchor is not None or (w_sum > 0.0 and _needs_anchor(chunk_sum, chunk_sum2, w_sum))):
+            if self._anchor is None:
+                self._activate_anchor(float(xx[0]))
+            dx = xx - self._anchor
+            dx2 = dx * dx
+            self._a1 += float(np.dot(dx, weights))
+            self._a2 += float(np.dot(dx2, weights))
+            self._a3 += float(np.dot(dx2 * dx, weights))
+        self.sum += chunk_sum
+        self.sum2 += chunk_sum2
+        self.sum3 += float(np.dot(xx * xx * xx, weights))
+        self.count += w_sum
         mask = np.asarray(weights) > 0.0
         if np.any(mask):
             self.min_val = min(self.min_val, float(np.min(xx[mask])))
@@ -441,6 +649,23 @@ class GeneralizedExtremeValueAccumulator(SequenceEncodableStatisticAccumulator):
         self, suff_stat: tuple[float, float, float, float, float, float]
     ) -> "GeneralizedExtremeValueAccumulator":
         """Merge another GEV sufficient-statistic tuple."""
+        anchored = getattr(suff_stat, "anchored", None)
+        if anchored is not None and len(anchored) == 4:
+            # Re-express the incoming anchored moments about this accumulator's anchor. The anchor
+            # gap ``d`` is between two data values, so every term stays O(count * spread^3).
+            # Activation (when this side has no anchor yet) runs BEFORE the raw fold below so the
+            # pre-existing raw content is converted exactly once.
+            b_anchor, b1, b2, b3 = (float(v) for v in anchored)
+            if self._anchor is None:
+                self._activate_anchor(b_anchor)
+            f1, f2, f3 = _shift_moments(float(suff_stat[3]), b1, b2, b3, b_anchor - self._anchor)
+            self._a1 += f1
+            self._a2 += max(f2, 0.0)
+            self._a3 += f3
+        elif self._anchor is not None:
+            # Raw-only statistics joining an anchored pool -- the mirror of the case above. Same
+            # conversion, same recoverability check: see :meth:`_absorb_raw`.
+            self._absorb_raw(float(suff_stat[3]), float(suff_stat[0]), float(suff_stat[1]), float(suff_stat[2]))
         self.sum += suff_stat[0]
         self.sum2 += suff_stat[1]
         self.sum3 += suff_stat[2]
@@ -451,8 +676,27 @@ class GeneralizedExtremeValueAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[float, float, float, float, float, float]:
-        """Return raw moment sums, observation count, and the observed range."""
-        return self.sum, self.sum2, self.sum3, self.count, self.min_val, self.max_val
+        """Return raw moment sums, observation count, and the observed range.
+
+        The returned object is a plain 6-tuple for every consumer that treats it as one; once the
+        shift-anchored track is live it additionally carries the anchored moments in its
+        ``.anchored`` attribute, so :meth:`combine` can fold them in and
+        :meth:`GeneralizedExtremeValueEstimator.estimate` can use them for the reduced moments. The
+        payload is withheld when the track was seeded from raw statistics that had already lost their
+        central moments (see :meth:`_activate_anchor`), so a pool that cannot honestly claim
+        shift-equivariance reports the historical raw statistics instead of a worse anchored guess.
+        """
+        if self._anchor is None or self._anchor_unrecoverable:
+            return self.sum, self.sum2, self.sum3, self.count, self.min_val, self.max_val
+        return GeneralizedExtremeValueSuffStat(
+            self.sum,
+            self.sum2,
+            self.sum3,
+            self.count,
+            self.min_val,
+            self.max_val,
+            anchored=(self._anchor, self._a1, self._a2, self._a3),
+        )
 
     def from_value(self, x: tuple[float, float, float, float, float, float]) -> "GeneralizedExtremeValueAccumulator":
         """Replace accumulator contents from a sufficient-statistic tuple."""
@@ -461,14 +705,30 @@ class GeneralizedExtremeValueAccumulator(SequenceEncodableStatisticAccumulator):
         # estimate() then skips the coverage clamp rather than inventing a bound.
         self.min_val = float(x[4]) if len(x) > 5 else np.inf
         self.max_val = float(x[5]) if len(x) > 5 else -np.inf
+        anchored = getattr(x, "anchored", None)
+        self._anchor_unrecoverable = False
+        if anchored is not None and len(anchored) == 4:
+            self._anchor, self._a1, self._a2, self._a3 = (float(v) for v in anchored)
+        else:
+            # Raw-only statistics replace the state: the anchored track restarts unactivated, and a
+            # later activation (first update / anchored merge) converts this content then.
+            self._anchor = None
+            self._a1 = self._a2 = self._a3 = 0.0
         return self
 
     def scale(self, c: float) -> "GeneralizedExtremeValueAccumulator":
-        """Scale accumulated evidence while preserving the observed range."""
+        """Scale accumulated evidence while preserving the observed range.
+
+        The shift-anchored track scales with the raw sums; leaving it behind would turn a scaled
+        accumulator back into the ill-conditioned raw path.
+        """
         self.sum *= c
         self.sum2 *= c
         self.sum3 *= c
         self.count *= c
+        self._a1 *= c
+        self._a2 *= c
+        self._a3 *= c
         return self
 
     def acc_to_encoder(self) -> "GeneralizedExtremeValueDataEncoder":
@@ -488,6 +748,121 @@ class GeneralizedExtremeValueAccumulatorFactory(StatisticAccumulatorFactory):
         return GeneralizedExtremeValueAccumulator(name=self.name, keys=self.keys)
 
 
+def _spread_is_resolvable(variance: float, magnitude: float) -> bool:
+    """Whether a spread of ``sqrt(variance)`` is representable at all at scale ``magnitude``.
+
+    Used only to decide what to DISCLOSE through ``numerical_repairs()``, never to clamp -- see the
+    identical predicate on the Gaussian family
+    (``mixle.stats.univariate.continuous.gaussian._spread_is_resolvable``) for the full rationale,
+    which applies unchanged here.
+    """
+    if not np.isfinite(magnitude) or magnitude <= 0.0 or not np.isfinite(variance) or variance <= 0.0:
+        return False
+    half_ulp = 0.5 * float(np.spacing(magnitude))
+    return variance > half_ulp * half_ulp
+
+
+# Bound on how far the reported location can sit from the exact sample mean the anchored track
+# knows: ~4-8 grid steps of ``|mean|``. Bounds a rounding residue of the mean, not a spread -- same
+# constant the Gaussian family's own bound uses, so every degenerate payload that collapsed to
+# exactly zero under the old whole-scatter clamp still does.
+_MEAN_ROUNDING_BOUND = 8.8817841970012523e-16  # 4 * eps
+
+
+def _anchored_central_moments(
+    ref: float,
+    n: float,
+    a1: float,
+    a2: float,
+    a3: float,
+    delta: float,
+    pc: float,
+    prior: tuple[float, float, float] | None,
+    prior_central: tuple[float, float, float] | None,
+) -> tuple[float, float, tuple[str, ...]]:
+    """Second and third central moments about ``ref + delta``, from shift-anchored data moments.
+
+    ``ref``/``n``/``a1..a3`` describe the DATA alone (the accumulator's anchored track, never
+    touched by any prior blend); ``delta`` is the SMALL offset from ``ref`` to the location the
+    estimator actually reports (``mean = ref + delta``), which can differ from the data's own mean
+    when a pseudo-count prior pulls it -- ``delta`` is passed rather than ``mean`` itself because
+    every displacement below is computed in this small, already-offset coordinate, never by
+    differencing two separately-materialized ``O(magnitude)`` floats (``mean_data - mean``): that
+    subtraction would reintroduce, in the DISPLACEMENT, exactly the ``ulp(magnitude)``-scale
+    rounding the anchor track exists to keep out of the SPREAD, and it is invisible at the loose
+    tolerances the clamp itself needs (an absolute ulp of ~1e-7 buried in a threshold check of
+    ~1e-6) but not at the tight ones a prior blend must hit (see
+    ``campaign3b_families_test.py``'s
+    ``test_pseudo_count_prior_at_a_large_location_is_blended_exactly``, which pinned this down to
+    7 decimal places). Mirrors
+    :func:`mixle.stats.univariate.continuous.gaussian._anchored_pooled_variance`, extended to a
+    third bracket for the third-order skewness numerator by phrasing it as "recenter each group's
+    own central moments onto ``mean``, then pool":
+
+    1. ``core2``/``core3`` are the DATA's own central moments about its own mean -- every term is
+       ``O(spread^k)``, computed entirely at small magnitude, and this is where all the data's real
+       spread lives. Only ``core2`` is gated, by the same RELATIVE 1e-12 cancellation clamp the
+       Gaussian family uses (``core2`` is a difference of two ``O(spread^2)`` quantities); when it
+       clamps to zero, ``core3`` clamps with it, since a truly-degenerate sample has every central
+       moment exactly zero, not just its second.
+    2. ``shift_data = delta_data - delta`` is the displacement of the reported location from the
+       data's own mean, computed ENTIRELY in small-offset coordinates (both terms are ``O(spread)``
+       unless a prior has pulled ``delta`` far from the data, in which case ``shift_data`` correctly
+       comes out ``O(delta)`` with no cancellation either way). Below the mean's own rounding
+       granularity it is pure rounding on the plain ML path (where ``delta`` is computed from the
+       SAME anchored sums as ``delta_data`` and the two agree exactly unless a prior is blended in),
+       so it alone gets the absolute ulp-scale clamp. Recentering the data's own central moments onto
+       ``mean`` from its own mean is the single-group parallel-axis expansion,
+       ``E[(Y+d)^3] = m3 + 3 d m2 + d^3`` (``E[Y]=0``, ``d=shift_data``): a polynomial evaluation,
+       never a cancellation, so ``shift_data`` may legitimately be large (a real prior pull) without
+       needing any further clamp once it has cleared the rounding check.
+    3. When a pseudo-count prior is blended in, it contributes as a second "group" of weight ``pc``
+       with its own central moments (from ``prior_central`` when available -- exact at any
+       magnitude -- else recovered from the raw power-sum payload ``prior`` the same, already-warned,
+       degraded way the raw M-step blend has always used) recentered onto ``mean`` the identical way
+       (``shift_prior = prior[0] - delta``, ``prior[0]`` already being the prior's own small offset
+       from ``ref`` that :meth:`GeneralizedExtremeValueEstimator._prior_about` computed), and the two
+       groups are pooled by weight. No clamp applies to the prior's own recentering displacement:
+       like the Gaussian family's ``prior_scatter`` term, it is an explicit additive contribution,
+       not a cancellation, and reporting it in full (even when large) is correct -- mixing in a prior
+       whose mean sits far from the data legitimately inflates the pooled spread.
+    """
+    delta_data = a1 / n
+    r2d, r3d = a2 / n, a3 / n
+    core2 = r2d - delta_data * delta_data
+    core3 = r3d - 3.0 * delta_data * r2d + 2.0 * delta_data**3
+    noise = 1.0e-12 * max(abs(r2d), delta_data * delta_data, 1.0e-300)
+    repairs: tuple[str, ...] = ()
+    if core2 < noise:
+        if _spread_is_resolvable(core2, abs(ref)):
+            repairs = ("spread-below-noise(%.3g of %.3g)" % (core2, noise),)
+        core2 = 0.0
+        core3 = 0.0
+    core2 = max(core2, 0.0)
+    shift_data = delta_data - delta
+    mean = ref + delta  # materialized only for the ulp-scale threshold's magnitude, never differenced
+    if abs(shift_data) <= _MEAN_ROUNDING_BOUND * max(abs(mean), abs(ref)):
+        shift_data = 0.0
+    data2 = core2 + shift_data * shift_data
+    data3 = core3 + 3.0 * shift_data * core2 + shift_data**3
+    if pc <= 0.0 or prior is None:
+        return data2, data3, repairs
+    if prior_central is not None:
+        _, c2, c3 = prior_central
+    else:
+        # Degraded fallback (the caller has already warned): recover the prior's own central moments
+        # by un-shifting its raw power-sum-about-ref payload. Cancellation-prone when the prior's own
+        # location sits far from ref -- the same pre-existing limitation the warning discloses, no
+        # worse than the un-split blend.
+        _, c2, c3 = _shift_moments(1.0, prior[0], prior[1], prior[2], -prior[0])
+        c2 = max(c2, 0.0)
+    shift_prior = prior[0] - delta
+    prior2 = c2 + shift_prior * shift_prior
+    prior3 = c3 + 3.0 * shift_prior * c2 + shift_prior**3
+    total = n + pc
+    return (n * data2 + pc * prior2) / total, (n * data3 + pc * prior3) / total, repairs
+
+
 class GeneralizedExtremeValueEstimator(ParameterEstimator):
     """Method-of-moments estimator for GEV location, scale and shape.
 
@@ -497,6 +872,13 @@ class GeneralizedExtremeValueEstimator(ParameterEstimator):
     rewritten shape still scores the extreme observation catastrophically and the estimate falls
     back to the Gumbel limit -- the returned distribution is not the raw moment fit, and the change
     is recorded in ``numerical_repairs()`` so ``fit_provenance()`` carries it (MXR-080-1202).
+
+    The reduced moments are formed about a reference point rather than about zero whenever the
+    accumulated statistics carry a shift-anchored payload (see
+    :class:`GeneralizedExtremeValueAccumulator`), which makes the fit shift-equivariant: ``estimate``
+    on ``x + c`` returns ``loc + c`` with ``scale`` and ``shape`` unchanged. With a plain raw tuple --
+    statistics restored from an older serialization, or a hand-built one -- the historical raw path
+    is used unchanged.
     """
 
     def __init__(
@@ -508,7 +890,19 @@ class GeneralizedExtremeValueEstimator(ParameterEstimator):
         xi_min: float = -1.0,
         name: str | None = None,
         keys: str | None = None,
+        prior_central: tuple[float, float, float] | None = None,
     ) -> None:
+        """Create a method-of-moments estimator.
+
+        ``prior_central`` is an optional ``(mean, variance, third central moment)`` restatement of the
+        raw ``suff_stat`` moments, supplied by
+        :meth:`GeneralizedExtremeValueDistribution.estimator`. Raw prior moments at a large location
+        are not recoverable in float64 (``E[X^2]`` at ``loc = 1.7e9`` has an ulp of 512, so a
+        variance of 1 is simply not present in the number); when the data needs the anchored track,
+        this payload lets the prior be placed on the anchor exactly instead. Without it a
+        large-location prior is still blended the historical raw way, and ``estimate`` warns rather
+        than pretending the blend was well-conditioned.
+        """
         if pseudo_count is not None and (
             isinstance(pseudo_count, (bool, np.bool_)) or not np.isfinite(pseudo_count) or pseudo_count < 0.0
         ):
@@ -522,8 +916,12 @@ class GeneralizedExtremeValueEstimator(ParameterEstimator):
             raise ValueError("GEV min_scale must be finite and positive.")
         if not np.isfinite(xi_min) or not np.isfinite(xi_max) or xi_min >= xi_max or xi_max >= 1.0 / 3.0:
             raise ValueError("GEV shape bounds must be finite, ordered, and keep xi_max below 1/3.")
+        central = None if prior_central is None else tuple(float(value) for value in prior_central)
+        if central is not None and (len(central) != 3 or not all(np.isfinite(value) for value in central)):
+            raise ValueError("GEV prior_central moments must be a finite length-three tuple.")
         self.pseudo_count = None if pseudo_count == 0.0 else pseudo_count
         self.suff_stat = prior
+        self.prior_central = central
         self.min_scale = float(min_scale)
         self.xi_max = float(xi_max)
         self.xi_min = float(xi_min)
@@ -534,25 +932,91 @@ class GeneralizedExtremeValueEstimator(ParameterEstimator):
         """Return an accumulator factory for GEV raw-moment statistics."""
         return GeneralizedExtremeValueAccumulatorFactory(name=self.name, keys=self.keys)
 
+    def _prior_about(self, ref: float) -> tuple[float, float, float] | None:
+        """Prior power sums for one unit of pseudo-count, expressed about ``ref``.
+
+        Returns ``None`` when there is no prior. Uses the central payload when available (exact at
+        any reference point); otherwise shifts the stored raw moments, which is only well-conditioned
+        when ``ref`` is zero or the prior's own location is small.
+        """
+        if self.pseudo_count is None or self.suff_stat is None:
+            return None
+        e1, e2, e3 = (float(v) for v in self.suff_stat)
+        if ref == 0.0:
+            # The stored raw moments ARE the power sums about zero; using them verbatim keeps the
+            # historical blend bit-identical even when a central payload is also available.
+            return e1, e2, e3
+        # getattr, not attribute access: an estimator unpickled from a release that predates this
+        # field has no such attribute, and the right answer there is the historical raw shift.
+        central = getattr(self, "prior_central", None)
+        if central is not None:
+            mean0, c2, c3 = central
+            u = mean0 - ref
+            return (u, c2 + u * u, c3 + 3.0 * u * c2 + u * u * u)
+        return _shift_moments(1.0, e1, e2, e3, -ref)
+
     def estimate(
         self, nobs: float | None, suff_stat: tuple[float, float, float, float, float, float]
     ) -> GeneralizedExtremeValueDistribution:
         """Estimate location, scale, and shape from weighted moments, keeping the data in support."""
-        sum_x, sum_x2, sum_x3, count = suff_stat[:4]
+        sum_x, sum_x2, sum_x3, count = (float(v) for v in suff_stat[:4])
         min_val, max_val = (float(suff_stat[4]), float(suff_stat[5])) if len(suff_stat) > 5 else (np.inf, -np.inf)
-        if self.pseudo_count is not None and self.suff_stat is not None:
-            mean0, second0, third0 = self.suff_stat
-            sum_x += self.pseudo_count * mean0
-            sum_x2 += self.pseudo_count * second0
-            sum_x3 += self.pseudo_count * third0
-            count += self.pseudo_count
+        anchored = _consistent_anchored_moments(suff_stat, sum_x, count)
+        # Everything below is the historical algebra with an explicit reference point: at ref = 0 the
+        # power sums ARE the raw sums and every formula reduces to exactly what it was before.
+        if anchored is None:
+            ref, p1, p2, p3 = 0.0, sum_x, sum_x2, sum_x3
+        else:
+            ref, p1, p2, p3 = anchored
+        n, a1, a2, a3 = count, p1, p2, p3  # data-only weight/moments, before any prior blend
+        repairs: list[str] = []
+        prior = self._prior_about(ref)
+        pc = 0.0
+        if prior is not None:
+            if (
+                anchored is not None
+                and getattr(self, "prior_central", None) is None
+                and _prior_is_ill_conditioned(self.suff_stat)
+            ):
+                warnings.warn(
+                    "GeneralizedExtremeValueEstimator is blending raw prior moments whose own "
+                    "location dominates their spread into data that needed shift-anchored "
+                    "accumulation; the prior's central moments cannot be recovered from raw float64 "
+                    "power sums, so the blended scale/shape are unreliable. Build the prior with "
+                    "GeneralizedExtremeValueDistribution.estimator(pseudo_count=...) (which carries "
+                    "the central moments), or pass prior_central=(mean, variance, third_central).",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                repairs.append("prior-moments-ill-conditioned")
+            pc = float(self.pseudo_count)
+            p1 += pc * prior[0]
+            p2 += pc * prior[1]
+            p3 += pc * prior[2]
+            count += pc
         if count <= 0.0:
             return GeneralizedExtremeValueDistribution(0.0, 1.0, 0.0, name=self.name, keys=self.keys)
-        mean = sum_x / count
-        var = sum_x2 / count - mean * mean
+        delta = p1 / count  # the mean, measured from ref
+        mean = ref + delta
+        if anchored is not None:
+            # Anchored path: the data's own moments (a1..a3) are already O(spread) about ref, so
+            # split the second/third central moments about mean into a data-only "core" (well
+            # conditioned, gated by the RELATIVE cancellation clamp) plus the displacement of mean
+            # from the data's own mean (gated by the ulp-scale clamp) -- see
+            # _anchored_central_moments. This never differences two O(magnitude^2) quantities, unlike
+            # computing var/m3 directly from the prior-blended p2/p3, so genuine spread at extreme
+            # magnitude survives.
+            var, m3, moment_repairs = _anchored_central_moments(
+                ref, n, a1, a2, a3, delta, pc, prior, getattr(self, "prior_central", None)
+            )
+            repairs.extend(moment_repairs)
+        else:
+            # Historical raw path (ref = 0): bit-identical to before the split.
+            r2, r3 = p2 / count, p3 / count
+            var = r2 - delta * delta
+            m3 = r3 - 3.0 * delta * r2 + 2.0 * delta**3
         if var <= 0.0:
             return GeneralizedExtremeValueDistribution(mean, self.min_scale, 0.0, name=self.name, keys=self.keys)
-        m3 = sum_x3 / count - 3.0 * mean * (sum_x2 / count) + 2.0 * mean**3  # central third moment
         skew = m3 / var**1.5
         # A pseudo_count/suff_stat blend (real data + prior moments) can produce a skew estimate
         # that maps to a boundary xi where (g2 - g1*g1) is <= 0 -- an out-of-domain fractional
@@ -561,7 +1025,6 @@ class GeneralizedExtremeValueEstimator(ParameterEstimator):
         # var<=0.0 branch above already uses, rather than let a non-finite parameter reach the
         # constructor's validation as an opaque crash.
         gumbel_fallback = math.sqrt(6.0 * var) / math.pi, mean - math.sqrt(6.0 * var) / math.pi * _EULER, 0.0
-        repairs: list[str] = []
         if not np.isfinite(skew):
             scale, loc, xi = gumbel_fallback
         else:
@@ -570,7 +1033,15 @@ class GeneralizedExtremeValueEstimator(ParameterEstimator):
             # solved purely from skewness can put the bounded end of the GEV inside the very sample
             # it summarizes, which scores those observations -inf and leaves EM with a permanently
             # non-finite model (the moments never move, so the estimate never recovers).
-            xi_cov = _shape_covering_range(xi_skew, mean, math.sqrt(var), min_val, max_val)
+            # In coordinates centered on the mean. ``_shape_covering_range`` only ever reads the two
+            # gaps ``max_val - mean`` and ``mean - min_val``, so subtracting the reference point
+            # first is algebraically identical -- and at ref = 0 it is the same float expression the
+            # raw path always evaluated -- but on the anchored path it removes the last place where
+            # the M-step differences two numbers of the offset's magnitude. That mattered: the
+            # clamp's margin is 1e-6 relative, and the rounding of ``max_val - mean`` at offset 1.7e9
+            # is ~3e-7 relative, so a shape sitting near the covering threshold could be clamped at
+            # one offset and not at another.
+            xi_cov = _shape_covering_range(xi_skew, 0.0, math.sqrt(var), min_val - ref - delta, max_val - ref - delta)
             xi = xi_cov
             if abs(xi) < _XI_TOL:  # Gumbel limit
                 scale = math.sqrt(6.0 * var) / math.pi

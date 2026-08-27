@@ -303,3 +303,19 @@ class IgnoredDataEncoder(DataSequenceEncoder):
         """Encode observations with the wrapped distribution's encoder."""
         enc_data = self.encoder.seq_encode(x)
         return enc_data
+
+    def row_count(self, x: Any) -> int:
+        """Return the wrapped encoder's row count for a payload this wrapper produced.
+
+        ``seq_encode`` returns the child payload verbatim, so the child encoder is the only
+        authority on that layout. Without this delegation the abstract default had to *guess*
+        the leading count from the payload's shape, and for every child whose encoding is not
+        a single aligned block it guessed nothing and raised ``NotImplementedError`` naming
+        this class -- which killed the frozen/identifier column path outright (a pandas
+        datetime column, an identifier string column, any ``pd.NA``-bearing column: each
+        encodes to a categorical ``(indices, levels)`` pair whose two members have different
+        lengths whenever the level count differs from the row count). The crash surfaced from
+        ``seq_encode``'s row-conservation check, so it took down ``optimize``/``Model.fit`` for
+        the exact tables the frozen-column stand-in exists to support.
+        """
+        return self.encoder.row_count(x)

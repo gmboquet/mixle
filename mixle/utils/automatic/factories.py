@@ -130,6 +130,51 @@ def _expanded_weighted_values(values: dict[Any, float], cap: int = 200_000) -> n
     return np.repeat(np.asarray(keys, dtype=float), counts)
 
 
+def _anchored_moments(items: Sequence[tuple[float, float]]) -> tuple[float, float | None, float | None]:
+    """Weighted ``(total, mean, variance)`` from ``(value, weight)`` pairs, computed shift-invariantly.
+
+    ``sum(w*k*k)/W - mean**2`` is the textbook cancelling form. On data whose magnitude dwarfs its
+    spread -- epoch timestamps in s/ms/us, instrument baselines, prices quoted against a large
+    offset -- it loses roughly ``2*log2(|mean|/sd)`` bits, so at 1e9 it returns noise and at 1e12 it
+    returns a negative number. The scalar Gaussian accumulator was already fixed to expand its
+    scatter about a data anchor (see ``_anchored_pooled_variance`` in
+    ``mixle.stats.univariate.continuous.gaussian``), but the auto-inference factories kept the
+    cancelling form for the prior they seed, so the repaired defect survived in the one-argument
+    entry point that :func:`mixle.inference.optimize` documents.
+
+    Anchoring at an observed value makes every term ``O(W * spread**2)`` and the result invariant
+    under a shift of the data. A constant column needs no special case: every deviation from an
+    anchor that is itself one of the values is exactly zero, so the variance comes out exactly 0.0
+    and the caller recognizes the column as constant. The only clamp is relative -- a residue below
+    1e-12 of the largest term is cross-term rounding, not spread. Deliberately NO absolute
+    ``eps * |mean|`` floor: at 1e15 that threshold is 0.89, which reads a real ``N(1e15, 1)`` sample
+    (scatter 436 against a threshold of 395) as constant on some seeds and not on others.
+
+    Returns ``(0.0, None, None)`` when no pair carries weight; the variance is never negative.
+    """
+    total = 0.0
+    anchor: float | None = None
+    for key, weight in items:
+        if anchor is None:
+            anchor = key
+        total += weight
+    if anchor is None or total <= 0.0:
+        return 0.0, None, None
+    shifted_sum = 0.0
+    shifted_sum2 = 0.0
+    for key, weight in items:
+        delta = key - anchor
+        shifted_sum += delta * weight
+        shifted_sum2 += delta * delta * weight
+    offset = shifted_sum / total
+    mean = anchor + offset
+    scatter = shifted_sum2 - total * offset * offset
+    noise_scale = max(abs(shifted_sum2), total * offset * offset, 1.0e-300)
+    if not math.isfinite(scatter) or scatter < 1.0e-12 * noise_scale:
+        scatter = 0.0
+    return total, mean, scatter / total
+
+
 # The conjugate prior families are reached through the ``mixle.stats`` package
 # namespace (an allowed high-level dependency) rather than importing concrete
 # distribution submodules here, keeping this builder free of concrete-class
@@ -475,27 +520,26 @@ def get_gaussian_estimator(
     _validate_mass_map(vdict, name="vdict")
 
     if emp_suff_stat:
-        ss_0 = 0.0
-        ss_1 = 0.0
-        ss_2 = 0.0
-        for k, v in vdict.items():
-            if math.isfinite(k):
-                ss_0 += v
-                ss_1 += k * v
-                ss_2 += k * k * v
+        # Shift-invariant moments: the cancelling ``E[x^2] - E[x]^2`` form used to seed this prior
+        # returned noise at an offset of 1e9 and a negative number at 1e12, which then took the
+        # degenerate branch below. See :func:`_anchored_moments`.
+        ss_0, ss_1, ss_2 = _anchored_moments([(float(k), float(v)) for k, v in vdict.items() if math.isfinite(k)])
         # ss_0 is 0 when vdict is empty or every key was non-finite -- no data to estimate mean/variance
         # from, so fall back the same way the emp_suff_stat=False branch does below.
         if ss_0 > 0.0:
-            ss_1 = ss_1 / ss_0
-            ss_2 = (ss_2 / ss_0) - ss_1 * ss_1
-            # A constant field has exactly zero empirical spread, and the sum-of-squares form can
-            # cancel to a small negative value even when it does not. Either way there is no scale to
-            # seed a prior from, and the estimator is right to refuse a non-positive prior variance --
-            # profiling a constant column crashed there rather than reporting the column as constant.
-            # Fall back the same way the no-data branch below does, keeping the prior pair coherent
-            # instead of handing over a degenerate one.
+            # A constant field has exactly zero empirical spread, so there is no scale to seed a
+            # prior from and the estimator is right to refuse a non-positive prior variance. The
+            # former fallback -- one pseudo-observation at (1e-6, 1e-6) -- is not "no information":
+            # it is an observation at the ORIGIN, so it dragged the fitted mean toward zero by
+            # n/(n+1) and inflated the variance by the squared distance from the data to zero. On
+            # [300.0]*10 that returned mean 272.73 / variance 7438 for a column whose MLE is
+            # (300, 0), with provenance still reporting a converged MLE fit and no repairs.
+            # ``pseudo_count`` paired with ``suff_stat=(None, None)`` is the estimator's documented
+            # spelling for "no pseudo-observations": it takes the plain maximum-likelihood moment
+            # and applies -- and DISCLOSES through numerical_repairs() -- its own variance floor,
+            # which is exactly what the explicit-prototype path already did for this data.
             if not math.isfinite(ss_2) or ss_2 <= 0.0:
-                ss_1, ss_2 = (1.0e-6, 1.0e-6) if pseudo_count is not None else (None, None)
+                ss_1, ss_2 = None, None
         elif pseudo_count is not None:
             ss_1, ss_2 = 1.0e-6, 1.0e-6
         else:
@@ -526,29 +570,25 @@ def get_lognormal_estimator(
     _validate_pseudo_count(pseudo_count)
     _validate_mass_map(vdict, name="vdict")
     if emp_suff_stat:
-        ss_0 = 0.0
-        ss_1 = 0.0
-        ss_2 = 0.0
-        for k, v in vdict.items():
-            if math.isfinite(k) and k > 0.0:
-                lk = math.log(k)
-                ss_0 += v
-                ss_1 += lk * v
-                ss_2 += lk * lk * v
+        # Same shift-invariant moments as the Gaussian factory, over log-values: log(1e12 + z) is
+        # 27.6 +/- 1e-12, so the cancelling form loses the spread there exactly as it does on the
+        # raw scale. See :func:`_anchored_moments`.
+        ss_0, ss_1, ss_2 = _anchored_moments(
+            [(math.log(float(k)), float(v)) for k, v in vdict.items() if math.isfinite(k) and k > 0.0]
+        )
         # ss_0 is 0 when vdict is empty or every key was non-positive/non-finite (log-normal needs
         # strictly positive values) -- no data to estimate mean/variance from, fall back like the
         # emp_suff_stat=False branch does below rather than dividing by zero.
         if ss_0 > 0.0:
-            ss_1 = ss_1 / ss_0
-            ss_2 = (ss_2 / ss_0) - ss_1 * ss_1
-            # A constant field has exactly zero empirical spread, and the sum-of-squares form can
-            # cancel to a small negative value even when it does not. Either way there is no scale to
-            # seed a prior from, and the estimator is right to refuse a non-positive prior variance --
-            # profiling a constant column crashed there rather than reporting the column as constant.
-            # Fall back the same way the no-data branch below does, keeping the prior pair coherent
-            # instead of handing over a degenerate one.
+            # A constant field has exactly zero empirical spread, so there is no scale to seed a
+            # prior from and the estimator is right to refuse a non-positive prior variance. Handing
+            # over a pseudo-observation at (1e-6, 1e-6) instead is an observation at log-value ~0,
+            # i.e. at x = 1, which biases the fit toward 1 by n/(n+1) with nothing disclosed;
+            # ``suff_stat=(None, None)`` is the estimator's spelling for "no pseudo-observations",
+            # under which it takes the plain MLE and reports its variance floor through
+            # numerical_repairs(). Same repair as the Gaussian factory above.
             if not math.isfinite(ss_2) or ss_2 <= 0.0:
-                ss_1, ss_2 = (1.0e-6, 1.0e-6) if pseudo_count is not None else (None, None)
+                ss_1, ss_2 = None, None
         elif pseudo_count is not None:
             ss_1, ss_2 = 1.0e-6, 1.0e-6
         else:

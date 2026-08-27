@@ -414,8 +414,20 @@ def _data_records_for_encoding(data: Any, fields: Any, estimator: Any, model: An
         # optimize(series_with_missing) failed for every Optional-wrapped auto estimator while
         # get_estimator(series) had happily accepted the same input (campaign wave 2). Iterating a
         # Series yields its VALUES (never the index), preserving both missing spellings.
+        # pd.NA must mean missing on the ENCODE side too, not only in profiling: optimize() infers
+        # the estimator through get_estimator/normalize_input but encodes through this function, and
+        # OptionalDataEncoder identifies missing rows by sentinel identity -- _same_sentinel(pd.NA,
+        # None) is False -- so a profiler that said "missing" and an encoder still seeing pd.NA
+        # would disagree about the same row (campaign three, T2-1).
+        from mixle.data.sources.pandas_source import normalize_pandas_missing
+
         if type(data).__name__ == "Series" and type(data).__module__.startswith("pandas"):
-            return list(data)
+            return [normalize_pandas_missing(value) for value in data]
+        if hasattr(data, "__iter__") and not isinstance(data, (str, bytes)):
+            try:
+                return [normalize_pandas_missing(value) for value in data]
+            except TypeError:
+                return data
         return data
     from mixle.data.sources.pandas_source import dataframe_records
 

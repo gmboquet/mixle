@@ -1,7 +1,7 @@
 Large-Module Audit
 ==================
 
-Twenty-nine modules in ``mixle`` exceed 1,500 lines. Size alone is not a defect, and this audit is **not** a
+Thirty-one modules in ``mixle`` exceed 1,500 lines. Size alone is not a defect, and this audit is **not** a
 mandate to split them. Its purpose (worklist A1.7) is to record, for each large module, what it owns, the
 state it carries, the optional dependencies it touches, its hot paths, its serialization hooks, and where a
 *safe* extraction boundary lies — so that a future change can be scoped without a blind refactor.
@@ -165,6 +165,31 @@ encoder are the only clean seams; the distribution/estimator pair is a single nu
     * **Serialization:** ``dist_to_encoder`` / ``seq_encode``.
     * **Extraction boundary:** leave as-is. The lag handling threads through encode, score and update
       together; separating it would split one contract across two modules.
+
+``mixle/stats/multivariate/multivariate_gaussian.py`` (1,893)
+    * **Responsibilities:** full-covariance Gaussian six-type contract, the covariance ridge and its
+      repair disclosure, the robust Cholesky self-heal, the opt-in conditioning receipt, and the
+      conditioning-gated shift-anchored moment track.
+    * **Stateful globals:** ``_LAST_REPAIR`` (a one-slot channel from ``_robust_cho_factor`` to the
+      constructor, drained immediately).
+    * **Optional imports:** ``scipy.linalg`` (required at this layer), ``scipy.stats`` lazily for
+      cdf/quantile.
+    * **Hot paths:** ``seq_log_density``, ``seq_update``, ``_robust_cho_factor``,
+      ``_anchored_pooled_covariance``, ``backend_stacked_sufficient_statistics``.
+    * **Serialization:** ``__pysp_getstate__``/``__pysp_setstate__`` (parameters only; derived caches
+      recomputed), ``dist_to_encoder``/``seq_encode``, and ``MultivariateGaussianSuffStat.__reduce__``.
+    * **Extraction boundary:** the anchored-moment helpers (``_needs_anchor``,
+      ``_consistent_anchored_moments``, ``_anchored_mean_offset``, ``_anchored_pooled_covariance``)
+      are the one clean seam, shared in spirit with the diagonal and univariate Gaussian families.
+
+``mixle/stats/multivariate/diagonal_gaussian.py`` (1,514)
+    * **Responsibilities:** diagonal-covariance Gaussian six-type contract, per-coordinate variance
+      floor and its repair disclosure, and the same conditioning-gated shift-anchored moment track.
+    * **Stateful globals:** none.
+    * **Optional imports:** ``scipy.stats`` lazily for cdf/quantile.
+    * **Hot paths:** ``seq_log_density``, ``seq_update``, ``_anchored_pooled_variances``.
+    * **Serialization:** ``dist_to_encoder``/``seq_encode`` and ``DiagonalGaussianSuffStat.__reduce__``.
+    * **Extraction boundary:** the anchored-moment helpers, jointly with the full-covariance module's.
 
 ``mixle/stats/multivariate/integer_multinomial.py`` (1,576)
     * **Responsibilities:** integer-keyed multinomial over a bounded support.

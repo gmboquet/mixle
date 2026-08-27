@@ -6501,6 +6501,30 @@
         "return_annotation": "None"
       }
     },
+    "mixle.stats.univariate.continuous.gaussian.GaussianAccumulator.scale": {
+      "kind": "class-method",
+      "signature": {
+        "parameters": [
+          {
+            "annotation": null,
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "self"
+          },
+          {
+            "annotation": "float",
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "c"
+          }
+        ],
+        "return_annotation": "'GaussianAccumulator'"
+      }
+    },
     "mixle.stats.univariate.continuous.gaussian.GaussianAccumulator.seq_initialize": {
       "kind": "class-method",
       "signature": {

@@ -93,6 +93,36 @@ roughly where likelihood/AIC comparisons start to move at realistic sample sizes
 never a guard: crossing it records a repair string; it never rejects or alters the fit."""
 
 
+# Conditioning threshold for the shift-anchored moment gate, and the same constant the univariate
+# GaussianAccumulator uses (mixle.stats.univariate.continuous.gaussian._ANCHOR_CONDITION_RATIO):
+# the raw ``E[xx^T] - mu mu^T`` covariance loses about ``eps * (mean/sd)^2`` relative accuracy, so a
+# (mean/sd)^2 up to 4e6 (ratio ~2000) keeps the raw form within ~1e-9 relative error and the
+# historical single-pass statistics are bit-preserved there. Beyond it the anchored track takes over.
+_ANCHOR_CONDITION_RATIO = 4.0e6
+
+_ANCHOR_MEAN_ULP = 8.8817841970012523e-16
+"""4 * eps -- the granularity of recomputing a mean at a given magnitude. A scatter below
+``count * (_ANCHOR_MEAN_ULP * |mean|)^2`` is the mean's own rounding, not data (see
+``_anchored_pooled_covariance``)."""
+
+
+def _needs_anchor(chunk_sum: np.ndarray, chunk_sum2_diag: np.ndarray, w_sum: float) -> bool:
+    """Whether a chunk's weighted moments are too ill-conditioned for the raw covariance form.
+
+    The per-coordinate version of the univariate gate: the offset that destroys a covariance is the
+    same offset in every entry it touches, and it shows up first in that coordinate's own variance,
+    so testing the diagonal tests the matrix. ``spread2`` computed here is itself the
+    cancellation-prone estimate, but as a GATE it is reliable: when cancellation has corrupted it,
+    the corruption is bounded by ``eps * m^2``, which still leaves ``m*m`` orders of magnitude above
+    ``_ANCHOR_CONDITION_RATIO * spread2``. A non-positive computed spread activates the anchor
+    outright (constant or near-constant data in that coordinate).
+    """
+    m = chunk_sum / w_sum
+    spread2 = chunk_sum2_diag / w_sum - m * m
+    m2 = m * m
+    return bool(np.any(spread2 <= 0.0) or np.any(m2 > _ANCHOR_CONDITION_RATIO * spread2))
+
+
 def _raw_covariance_is_factorable(covar: np.ndarray) -> bool:
     """Whether the PRE-ridge covariance has full numerical rank.
 
@@ -864,8 +894,195 @@ class MultivariateGaussianSampler(DistributionSampler):
         return self.rng.multivariate_normal(mean=self.dist.mu, cov=self.dist.covar, size=size)
 
 
+class MultivariateGaussianSuffStat(tuple):
+    """A ``(sum, sum_outer, count)`` sufficient statistic that also carries shift-anchored moments.
+
+    Behaves exactly like the plain 3-tuple everywhere it is indexed, unpacked, or iterated (it *is*
+    one), so generic consumers -- ``scale_suff_stat``, the declared ``StatisticSpec`` reader, engine
+    kernels, ``_assert_suff_close`` -- see nothing new. ``anchored`` is extra payload:
+    ``(anchor, sum_i w_i*(x_i - anchor), sum_i w_i*(x_i - anchor)(x_i - anchor)^T)``, which
+    :meth:`MultivariateGaussianAccumulator.combine` folds in and
+    :meth:`MultivariateGaussianEstimator.estimate` uses to compute a shift-invariant covariance.
+    The raw moments stay the exchange format -- ``(sum, sum2, count)`` is the declared statistic
+    tuple -- so the anchored track rides along beside them rather than replacing them. Mirrors
+    :class:`mixle.stats.univariate.continuous.gaussian.GaussianSuffStat`.
+    """
+
+    def __new__(cls, sum_: np.ndarray, sum2_: np.ndarray, count_: float, anchored: tuple | None = None):
+        obj = super().__new__(cls, (sum_, sum2_, count_))
+        obj.anchored = anchored
+        return obj
+
+    def __reduce__(self):
+        # A tuple subclass with a payload-bearing __new__ does not pickle by default, and the
+        # Spark/multiprocessing reducers round-trip accumulator values through pickle.
+        return (_rebuild_mvn_suff_stat, (tuple(self), self.anchored))
+
+
+def _rebuild_mvn_suff_stat(values: tuple, anchored: tuple | None) -> "MultivariateGaussianSuffStat":
+    """Unpickle helper for :class:`MultivariateGaussianSuffStat` (module-level so pickle can import it)."""
+    return MultivariateGaussianSuffStat(values[0], values[1], values[2], anchored=anchored)
+
+
+def _consistent_anchored_moments(
+    suff_stat: Any, sum_x: np.ndarray | None, count: float, dim: int | None
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Return the anchored moment payload of ``suff_stat`` when it is usable, else ``None``.
+
+    ``None`` falls back to the raw reduced-moment M-step, so a payload is only trusted when it is
+    shaped right, finite, symmetric with a non-negative diagonal, and agrees with the raw first
+    moment it claims to describe -- a hand-built :class:`MultivariateGaussianSuffStat` whose payload
+    contradicts its tuple must not silently change the estimate the tuple alone would have produced.
+    """
+    anchored = getattr(suff_stat, "anchored", None)
+    if anchored is None or sum_x is None or count <= 0.0 or dim is None:
+        return None
+    try:
+        anchor, a_sum, a_sum2 = anchored
+        anchor = np.asarray(anchor, dtype=float).reshape(-1)
+        a_sum = np.asarray(a_sum, dtype=float).reshape(-1)
+        a_sum2 = np.asarray(a_sum2, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if anchor.shape != (dim,) or a_sum.shape != (dim,) or a_sum2.shape != (dim, dim):
+        return None
+    if not (np.isfinite(anchor).all() and np.isfinite(a_sum).all() and np.isfinite(a_sum2).all()):
+        return None
+    if np.any(np.diag(a_sum2) < 0.0):
+        return None
+    scale = max(float(np.max(np.abs(a_sum2))), 1.0)
+    if np.max(np.abs(a_sum2 - a_sum2.T), initial=0.0) > 1.0e-6 * scale:
+        return None
+    implied_sum = a_sum + count * anchor
+    tolerance = 1.0e-6 * np.maximum.reduce(
+        (np.abs(sum_x), np.abs(count * anchor), np.ones_like(anchor)),
+    )
+    if np.any(np.abs(implied_sum - sum_x) > tolerance):
+        return None
+    return anchor, a_sum, 0.5 * (a_sum2 + a_sum2.T)
+
+
+def _anchored_mean_offset(
+    anchored: tuple[np.ndarray, np.ndarray, np.ndarray],
+    count: float,
+    pseudo_count: float | None,
+    prior_mean: np.ndarray | None,
+) -> np.ndarray:
+    """The pooled mean MINUS the anchor, computed entirely in offset space.
+
+    Same estimator as ``(sum_x + pc*prior_mu) / (count + pc)`` -- ``a_sum`` is ``sum_x - count*anchor``
+    -- but every term is O(count * spread) instead of O(count * |mean|), so the result does not
+    inherit the ~5-ulp-of-the-offset error that summing 1e3 values near 1.7e9 puts into ``sum_x``.
+    That error is harmless in the mean itself and NOT harmless in the covariance: the scatter's
+    sensitivity to the mean is second order, so a mean off by ``e`` inflates every variance by
+    ``e^2`` -- 5e-12 relative on a unit-scale variance at offset 1.7e9, an order of magnitude above
+    what float64 makes unavoidable. Keeping the mean in offset space removes it.
+    """
+    _, a_sum, _ = anchored
+    if pseudo_count not in (None, 0.0) and prior_mean is not None:
+        prior_offset = np.asarray(prior_mean, dtype=float) - anchored[0]
+        return (a_sum + pseudo_count * prior_offset) / (count + pseudo_count)
+    return a_sum / count
+
+
+def _anchored_pooled_covariance(
+    anchored: tuple[np.ndarray, np.ndarray, np.ndarray],
+    count: float,
+    mean_offset: np.ndarray,
+    pseudo_count: float | None,
+    prior_mean: np.ndarray | None,
+    prior_covar: np.ndarray | None,
+) -> np.ndarray:
+    """:func:`pooled_gaussian_covariance` computed from shift-anchored moments.
+
+    Same pooling contract as the raw-moment form (see
+    :func:`mixle.stats.multivariate._vector_contracts.pooled_gaussian_covariance`), but the observed
+    scatter is expanded about the data anchor, so every term is O(count * spread^2) and the result
+    is shift-invariant instead of losing ~2*log2(|mean|/sd) bits of every entry to cancellation.
+    ``mean_offset`` is the pooled mean relative to the anchor (see :func:`_anchored_mean_offset`),
+    never the mean itself -- the whole point is that no quantity here carries the data's offset.
+    """
+    anchor, a_sum, a_sum2 = anchored
+    # Expand about the anchored CENTROID (``a_sum/count``) and then shift to ``mean_offset``, not
+    # about the anchor directly. Algebraically identical, but this splits the scatter into two PSD
+    # pieces -- the minimum scatter, plus ``count * outer(mean - centroid, mean - centroid)`` --
+    # instead of differencing terms that are each O(count * spread^2). Without a mean pseudo-count
+    # the shift term is exactly zero.
+    #
+    # The two pieces are CLAMPED separately, which is what lets the noise clamp stay off the data
+    # (mirrors the univariate ``_anchored_pooled_variance`` and the diagonal
+    # ``_anchored_pooled_variances`` split). ``core`` is the scatter about the sample's OWN mean:
+    # every term is O(count * spread^2), computed entirely at spread scale, and it carries all of the
+    # data. ``count * outer(gap, gap)`` is the displacement of the mean actually REPORTED
+    # (``mean_offset``) from that sample mean -- genuine under a pseudo-count prior, pure rounding of
+    # ``sum_x / count`` at data magnitude on the plain ML path, and the ONLY place the large magnitude
+    # enters. The former combined test folded ``count * mean_ulp^2`` into the SAME threshold as
+    # ``core``'s own scatter, so the ulp-scale floor had to be crossed by the spread as well as by
+    # cancellation noise: a covariance genuinely O(count * spread^2) below ``count * (4 eps |mean|)^2``
+    # per entry -- easily reached at mean ~1e15, where a millimeter-scale spread is still many grid
+    # steps of real data -- read as the zero matrix even though nothing about it was noise.
+    centroid_offset = a_sum / count if count > 0.0 else np.zeros_like(a_sum)
+    cross = np.outer(centroid_offset, a_sum)
+    core = a_sum2 - cross
+    core = 0.5 * (core + core.T)
+    # Mathematically PSD; only last-ulp rounding of O(count * spread^2) terms can perturb it -- and a
+    # degenerate component's scatter must come out EXACTLY zero on every algebraically equivalent
+    # path, or the scale-relative ridge/floor reads the +O(eps) residue as a genuine spread and two
+    # equivalent fits disagree (the accumulator/reweighted-seq_update invariant catches that). The
+    # test is on the whole matrix, not per entry: zeroing individual entries of a matrix that does
+    # carry scale could destroy its symmetry/PSD-ness, while an all-sub-noise matrix is the zero
+    # matrix, which is PSD. This bound is RELATIVE to the terms differenced -- ``a_sum2`` and
+    # ``cross`` -- with no ulp-scale term mixed in, which is what makes it safe to leave as a single
+    # whole-matrix test: it scales with the data instead of competing with an absolute floor set by
+    # the mean's magnitude. Same clamp, same rationale, as the univariate ``_anchored_pooled_variance``.
+    noise_scale = max(
+        float(np.max(np.abs(a_sum2), initial=0.0)),
+        float(np.max(np.abs(cross), initial=0.0)),
+        1.0e-300,
+    )
+    if float(np.max(np.abs(core), initial=0.0)) < 1.0e-12 * noise_scale:
+        core = np.zeros_like(core)
+    # Displacement of the mean actually reported from the sample mean, per coordinate. Below a
+    # coordinate's own rounding granularity it is not a displacement at all, just which order the
+    # large-magnitude sum was accumulated in, and squaring it would turn that into variance. Zeroing
+    # individual coordinates of ``gap`` -- rather than the combined scatter matrix, or ``core`` above
+    # -- is safe here specifically BECAUSE this piece only ever appears as ``outer(gap, gap)``: the
+    # outer product of any real vector (a partially-zeroed one included) is PSD and symmetric on its
+    # own, so a per-coordinate zero cannot produce the asymmetric/indefinite residue a per-entry zero
+    # of a general matrix like ``core`` could.
+    gap = mean_offset - centroid_offset
+    mean_ulp = _ANCHOR_MEAN_ULP * np.maximum(np.abs(anchor + mean_offset), np.abs(anchor))
+    gap = np.where(np.abs(gap) <= mean_ulp, 0.0, gap)
+    observed_scatter = core + count * np.outer(gap, gap)
+    if pseudo_count not in (None, 0.0) and prior_covar is not None:
+        if prior_mean is None:
+            offset = 0.0
+        else:
+            prior_gap = (np.asarray(prior_mean, dtype=float) - anchor) - mean_offset
+            offset = np.outer(prior_gap, prior_gap)
+        prior_scatter = pseudo_count * (prior_covar + offset)
+        return (observed_scatter + prior_scatter) / (count + pseudo_count)
+    if count == 0.0:
+        return observed_scatter
+    return observed_scatter / count
+
+
 class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
-    """Accumulator for multivariate Gaussian sufficient statistics."""
+    """Accumulator for multivariate Gaussian sufficient statistics.
+
+    Alongside the declared raw moments ``(sum, sum2, count)`` this keeps a SHIFT-ANCHORED moment
+    track, for the reason the univariate :class:`~mixle.stats.univariate.continuous.gaussian.
+    GaussianAccumulator` keeps one: the covariance computed from raw reduced moments is the classic
+    cancellation-prone ``E[xx^T] - mu mu^T`` form, which loses ~2*log2(|mean|/sd) bits, so data with
+    unit spread at offset 1e7 fits a visibly wrong correlation and data at offset 1e8 fits a matrix
+    so far from positive-definite that ``_robust_cho_factor`` refuses it -- on data whose covariance
+    a two-pass computation returns exactly (epoch seconds are ~1.7e9). Anchoring at the first value
+    seen keeps every term of the scatter O(count * spread^2), making the M-step covariance
+    shift-invariant. The track is CONDITIONING-GATED (see :func:`_needs_anchor`): a chunk the raw
+    form handles to ~1e-9 relative error accumulates exactly the historical single-pass way --
+    bit-identical statistics, no second pass -- and the anchor activates only when a chunk (or a
+    scalar ``update``) would corrupt the covariance.
+    """
 
     def __init__(self, dim: int | None = None, keys: str | None = None, name: str | None = None) -> None:
         """Create an accumulator for weighted first and second moments.
@@ -897,6 +1114,31 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             self.sum = None
             self.sum2 = None
 
+        # Shift-anchored moments, kept alongside the raw (sum, sum2) when the data needs them; see
+        # the class docstring. ``None`` means the track has never activated, which is the ordinary
+        # well-conditioned case and the state in which ``value()`` returns the historical plain tuple.
+        self._anchor: np.ndarray | None = None
+        self._anchored_sum: np.ndarray | None = None
+        self._anchored_sum2: np.ndarray | None = None
+
+    def _activate_anchor(self, anchor: np.ndarray) -> None:
+        """Start the shift-anchored moment track at ``anchor``.
+
+        Any content already accumulated raw-only is converted about the new anchor. The conversion
+        is the cancellation-prone form, but it is only ever applied to content that accumulated
+        WITHOUT activating the gate -- i.e. content the gate certified as well-conditioned -- or to
+        pre-existing raw statistics restored through ``from_value``/``combine``, where the
+        conversion is no less accurate than the raw-only estimate those statistics supported before.
+        """
+        a = np.asarray(anchor, dtype=float).reshape(-1).copy()
+        self._anchor = a
+        self._anchored_sum = vec.zeros(self.dim)
+        self._anchored_sum2 = vec.zeros((self.dim, self.dim))
+        if self.sum is not None and (self.count != 0.0 or np.any(self.sum != 0.0) or np.any(self.sum2 != 0.0)):
+            self._anchored_sum += self.sum - a * self.count
+            scatter = self.sum2 - np.outer(a, self.sum) - np.outer(self.sum, a) + self.count * np.outer(a, a)
+            self._anchored_sum2 += 0.5 * (scatter + scatter.T)
+
     def update(self, x: np.ndarray, weight: float, estimate: MultivariateGaussianDistribution | None) -> None:
         """Update sufficient statistics with a single weighted observation.
 
@@ -922,6 +1164,15 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         ):
             raise ValueError("multivariate Gaussian accumulator estimate must have the configured dimension")
         checked_weight = observation_weight(weight, label="multivariate Gaussian observation weight")
+        # Scalar updates carry no chunk to assess conditioning from, so the anchor activates on the
+        # first observation (an O(d^2) bookkeeping track on a path that is already O(d^2)).
+        # Activation happens BEFORE the raw fold so any pre-anchor content is converted from
+        # statistics the conditioning gate has already vouched for.
+        if self._anchor is None:
+            self._activate_anchor(checked)
+        dx = checked - self._anchor
+        self._anchored_sum += dx * checked_weight
+        self._anchored_sum2 += vec.outer(dx, dx * checked_weight)
         x_weight = checked * checked_weight
         self.sum += x_weight
         self.sum2 += vec.outer(checked, x_weight)
@@ -971,12 +1222,30 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         ):
             raise ValueError("multivariate Gaussian accumulator estimate must have the configured dimension")
         x_weight = np.multiply(checked.T, checked_weights)
-        self.count += checked_weights.sum()
-        self.sum += x_weight.sum(axis=1)
+        w_sum = float(checked_weights.sum())
+        chunk_sum = x_weight.sum(axis=1)
         # the weighted second moment sum_i w_i x_i x_i^T is (x.T * w) @ x -- a single BLAS gemm.
         # np.einsum runs the naive C loop here (no BLAS), which dominated MVN EM at ~76% of fit time
         # (20-36x slower than matmul on this contraction); the plain matmul is exact and multithreaded.
-        self.sum2 += x_weight @ checked
+        chunk_sum2 = x_weight @ checked
+        # Conditioning gate: activate the anchored track only when this chunk's raw moments would
+        # corrupt the covariance (or the anchor is already live). BEFORE the raw fold, so activation
+        # converts only pre-chunk content -- content the gate has already passed as well-conditioned.
+        # The chunk's own moments are the ones just computed for the fold, so gating costs a
+        # d-length test, not a second pass over the data.
+        if len(checked) > 0 and (
+            self._anchor is not None or (w_sum > 0.0 and _needs_anchor(chunk_sum, np.diag(chunk_sum2), w_sum))
+        ):
+            if self._anchor is None:
+                self._activate_anchor(checked[0])
+            dx = checked - self._anchor
+            wdx = dx * checked_weights[:, None]
+            self._anchored_sum += wdx.sum(axis=0)
+            scatter = wdx.T @ dx
+            self._anchored_sum2 += 0.5 * (scatter + scatter.T)
+        self.count += w_sum
+        self.sum += chunk_sum
+        self.sum2 += chunk_sum2
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Vectorized initialization of the accumulator. Calls seq_update().
@@ -1008,27 +1277,65 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             self.dim,
             diagonal=False,
         )
-        if sum_x is not None and self.sum is not None:
-            self.sum += sum_x
-            self.sum2 += sum_xx
-            self.count += count
-        elif sum_x is not None and self.sum is None:
+        if sum_x is None:
+            return self
+        if self.sum is None:
             # copy on adopt: value() hands out the LIVE arrays, so adopting the caller's reference
             # makes every later in-place += here mutate the DONOR accumulator too (chunk combines
-            # and keyed pooling both hit this -- caught by the keyed-protocol sweep)
+            # and keyed pooling both hit this -- caught by the keyed-protocol sweep). Zeroing and
+            # folding below is that copy, and it also gives the anchored merge a live dim to work in.
             self.dim = inferred_dim
-            self.sum = sum_x.copy()
-            self.sum2 = sum_xx.copy()
-            self.count = count
+            self.sum = vec.zeros(inferred_dim)
+            self.sum2 = vec.zeros((inferred_dim, inferred_dim))
+            self.count = 0.0
+        anchored = _consistent_anchored_moments(suff_stat, sum_x, count, inferred_dim)
+        if anchored is not None:
+            # Chan's parallel-merge: re-express the incoming anchored moments about this
+            # accumulator's anchor. The anchor gap ``d`` is between two data values, so every term
+            # stays O(count * spread^2) -- no large-offset cancellation is reintroduced. Activation
+            # (when this side has no anchor yet) runs BEFORE the raw fold below so it converts only
+            # this side's pre-existing content.
+            b_anchor, b_asum, b_asum2 = anchored
+            if self._anchor is None:
+                self._activate_anchor(b_anchor)
+            gap = b_anchor - self._anchor
+            cross = np.outer(gap, b_asum)
+            self._anchored_sum += b_asum + count * gap
+            self._anchored_sum2 += b_asum2 + cross + cross.T + count * np.outer(gap, gap)
+        elif self._anchor is not None and (count != 0.0 or np.any(sum_x != 0.0) or np.any(sum_xx != 0.0)):
+            # Raw-only statistics (an engine kernel, a hand-built tuple, a gate-passing peer)
+            # joining an anchored pool: convert about our anchor. See _activate_anchor for why the
+            # cancellation-prone conversion is acceptable exactly here.
+            a = self._anchor
+            self._anchored_sum += sum_x - a * count
+            scatter = sum_xx - np.outer(a, sum_x) - np.outer(sum_x, a) + count * np.outer(a, a)
+            self._anchored_sum2 += 0.5 * (scatter + scatter.T)
+
+        self.sum += sum_x
+        self.sum2 += sum_xx
+        self.count += count
 
         return self
 
     def value(self) -> tuple[np.ndarray, np.ndarray, float]:
-        """Return ``(sum, sum_outer, count)`` sufficient statistics."""
-        return (
-            None if self.sum is None else self.sum.copy(),
-            None if self.sum2 is None else self.sum2.copy(),
+        """Return ``(sum, sum_outer, count)`` sufficient statistics.
+
+        Once the shift-anchored moment track is live the returned value is a
+        :class:`MultivariateGaussianSuffStat` -- a drop-in 3-tuple (indexing/unpacking/iteration all
+        behave identically) that additionally carries those moments in its ``anchored`` attribute,
+        so :meth:`combine` can fold them in and :meth:`MultivariateGaussianEstimator.estimate` can
+        compute a shift-invariant covariance. Well-conditioned data never activates the track and
+        gets the historical plain tuple.
+        """
+        sum_copy = None if self.sum is None else self.sum.copy()
+        sum2_copy = None if self.sum2 is None else self.sum2.copy()
+        if self._anchor is None:
+            return (sum_copy, sum2_copy, self.count)
+        return MultivariateGaussianSuffStat(
+            sum_copy,
+            sum2_copy,
             self.count,
+            anchored=(self._anchor.copy(), self._anchored_sum.copy(), self._anchored_sum2.copy()),
         )
 
     def from_value(self, x: tuple[np.ndarray, np.ndarray, float]) -> "MultivariateGaussianAccumulator":
@@ -1047,6 +1354,37 @@ class MultivariateGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             self.dim,
             diagonal=False,
         )
+        anchored = _consistent_anchored_moments(x, self.sum, self.count, self.dim)
+        if anchored is not None:
+            self._anchor, self._anchored_sum, self._anchored_sum2 = (
+                anchored[0].copy(),
+                anchored[1].copy(),
+                anchored[2].copy(),
+            )
+        else:
+            # Raw-only statistics replace the state: the anchored track restarts unactivated, and a
+            # later activation (first update / anchored merge) converts this content then.
+            self._anchor = None
+            self._anchored_sum = None
+            self._anchored_sum2 = None
+        return self
+
+    def scale(self, c: float) -> "MultivariateGaussianAccumulator":
+        """Scale the accumulated statistics in-place by ``c``, anchored track included.
+
+        The structural default routes through ``from_value(scale_suff_stat(self.value(), c))``,
+        which rebuilds from a PLAIN tuple and would therefore drop the anchored payload -- turning a
+        scaled large-offset accumulator back into a cancellation-prone one. Scaling every weight by
+        ``c`` scales both anchored moments by ``c`` and leaves the anchor (a data value) alone.
+        """
+        factor = float(c)
+        if self.sum is not None:
+            self.sum = self.sum * factor
+            self.sum2 = self.sum2 * factor
+            self.count = self.count * factor
+        if self._anchor is not None:
+            self._anchored_sum = self._anchored_sum * factor
+            self._anchored_sum2 = self._anchored_sum2 * factor
         return self
 
     def acc_to_encoder(self) -> "MultivariateGaussianDataEncoder":
@@ -1105,6 +1443,17 @@ class MultivariateGaussianEstimator(ParameterEstimator):
     per-coordinate ridge on a full-rank fit), or the raw covariance was not positive-definite on
     its own and the ridge is what makes it factorable -- the rank-deficient case this ridge exists
     for. Pass ``ridge=0.0`` to recover the exact MLE up to the ``min_covar`` absolute jitter floor.
+
+    The fit is SHIFT-EQUIVARIANT: ``fit(x + c)`` returns the covariance of ``x + c`` to within a few
+    ulps for any constant ``c`` the data can carry, epoch seconds (~1.7e9) included. That is not
+    free from the declared ``(sum, sum2, count)`` statistics -- their covariance is the
+    cancellation-prone ``E[xx^T] - mu mu^T``, which at offset 1e7 fitted a visibly wrong correlation
+    and at 1e8 a matrix so far from positive-definite that the constructor refused it -- so
+    :class:`MultivariateGaussianAccumulator` carries a conditioning-gated shift-anchored moment
+    track and this estimator reads it. Statistics that arrive already reduced and WITHOUT that track
+    (an engine kernel's stacked moments, a hand-built tuple) cannot be corrected here and take the
+    historical path; when they are too ill-conditioned for it, ``estimate`` warns rather than
+    returning a covariance it cannot stand behind.
     """
 
     def __init__(
@@ -1232,7 +1581,9 @@ class MultivariateGaussianEstimator(ParameterEstimator):
         return 0.0
 
     def _estimate_conjugate(
-        self, suff_stat: tuple[np.ndarray, np.ndarray, float]
+        self,
+        suff_stat: tuple[np.ndarray, np.ndarray, float],
+        anchored: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
     ) -> "MultivariateGaussianDistribution":
         """Closed-form NormalWishart conjugate posterior update returning the joint MAP estimate."""
         xsum, outer_sum, count = suff_stat
@@ -1242,11 +1593,29 @@ class MultivariateGaussianEstimator(ParameterEstimator):
 
         kappa_n = kappa0 + count
         nu_n = nu0 + count
-        m_n = (kappa0 * m0 + xsum) / kappa_n
+        if anchored is not None:
+            # Offset space again: identical estimator, but the anchored first moment carries the
+            # spread rather than the offset, so the posterior mean keeps the digits ``xsum`` lost.
+            m_n = anchored[0] + (kappa0 * (m0 - anchored[0]) + anchored[1]) / kappa_n
+        else:
+            m_n = (kappa0 * m0 + xsum) / kappa_n
 
         if count > 0:
-            xbar = xsum / count
-            scatter = outer_sum - count * np.outer(xbar, xbar)
+            if anchored is not None:
+                # Same scatter, expanded about the data anchor instead of about zero: mathematically
+                # identical, but every term stays O(count * spread^2) rather than cancelling two
+                # numbers of size count*|mean|^2 (see _anchored_pooled_covariance). The centroid
+                # offset IS the sample mean relative to the anchor, so this is the scatter about
+                # ``xbar`` with no offset-carrying term anywhere in it.
+                mean_offset = _anchored_mean_offset(anchored, count, None, None)
+                # ``xbar`` is recomputed in offset space for the same reason: ``dmu`` below is an
+                # O(spread) difference of two O(1e9) numbers, so it inherits every digit ``xsum``
+                # lost, and it enters the posterior scale quadratically.
+                xbar = anchored[0] + mean_offset
+                scatter = count * _anchored_pooled_covariance(anchored, count, mean_offset, None, None, None)
+            else:
+                xbar = xsum / count
+                scatter = outer_sum - count * np.outer(xbar, xbar)
             dmu = xbar - m0
             w_n_inv = np.linalg.inv(w0) + scatter + (kappa0 * count / kappa_n) * np.outer(dmu, dmu)
         else:
@@ -1301,9 +1670,10 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             sum_x = vec.zeros(self.dim)
             sum_xx = vec.zeros((self.dim, self.dim))
             inferred_dim = self.dim
+        anchored = _consistent_anchored_moments(suff_stat, sum_x, count, inferred_dim)
         checked_stat = (sum_x, sum_xx, count)
         if self.has_conj_prior:
-            return self._estimate_conjugate(checked_stat)
+            return self._estimate_conjugate(checked_stat, anchored)
 
         nobs = count
         pc1, pc2 = self.pseudo_count
@@ -1328,21 +1698,39 @@ class MultivariateGaussianEstimator(ParameterEstimator):
         # mean "no pseudo-observations" and fall through to the plain maximum-likelihood mean.
         # This mirrors the univariate contract in gaussian.py -- without the prior_mu guard the
         # branch below evaluates ``pc1 * None`` and raises TypeError.
-        if pc1 not in (None, 0.0) and self.prior_mu is not None:
-            mu = (sum_x + pc1 * self.prior_mu) / (nobs + pc1)
+        #
+        # When the accumulator carried shift-anchored moments, BOTH the mean and the covariance are
+        # computed in offset space: the same two estimators, but with no term carrying the data's
+        # offset, so neither loses digits to cancellation. Raw-only producers keep the historical
+        # path -- and are told when that path cannot be trusted, rather than being handed a silently
+        # wrong covariance.
+        if anchored is not None:
+            mean_offset = _anchored_mean_offset(anchored, nobs, pc1, self.prior_mu)
+            mu = anchored[0] + mean_offset
+            raw_covar = _anchored_pooled_covariance(
+                anchored,
+                nobs,
+                mean_offset,
+                pc2,
+                self.prior_mu,
+                self.prior_covar,
+            )
         else:
-            mu = sum_x / nobs
-
-        raw_covar = pooled_gaussian_covariance(
-            sum_x,
-            sum_xx,
-            nobs,
-            mu,
-            pc2,
-            self.prior_mu,
-            self.prior_covar,
-            diagonal=False,
-        )
+            if pc1 not in (None, 0.0) and self.prior_mu is not None:
+                mu = (sum_x + pc1 * self.prior_mu) / (nobs + pc1)
+            else:
+                mu = sum_x / nobs
+            self._warn_if_uncorrectable(sum_x, sum_xx, nobs)
+            raw_covar = pooled_gaussian_covariance(
+                sum_x,
+                sum_xx,
+                nobs,
+                mu,
+                pc2,
+                self.prior_mu,
+                self.prior_covar,
+                diagonal=False,
+            )
 
         covar, ridge_eps, smallest_raw, raw_factorable = self._regularized_covar_and_ridge(raw_covar)
 
@@ -1356,6 +1744,49 @@ class MultivariateGaussianEstimator(ParameterEstimator):
         _record_covariance_ridge(dist, ridge_eps, smallest_raw, raw_factorable)
         self._attach_conditioning_receipt(dist, raw_covar)
         return dist
+
+    @staticmethod
+    def _warn_if_uncorrectable(sum_x: np.ndarray, sum_xx: np.ndarray, count: float) -> None:
+        """Warn when raw-only statistics are too ill-conditioned for the covariance they imply.
+
+        The anchored track fixes the estimator's OWN accumulation. Statistics that arrive already
+        reduced and without an anchor -- an engine/GPU kernel's stacked moments, a hand-built tuple,
+        a legacy artifact -- cannot be corrected here: the information cancellation destroyed is not
+        in them any more. Before this, that case returned a covariance up to 100% wrong with an
+        empty ``numerical_repairs()`` and a ``track_conditioning`` receipt computed from the already
+        corrupted scatter, i.e. certifying it healthy (T1-F1). It is now named.
+
+        Deliberately NOT a raise: these statistics are the declared exchange format, the raw M-step
+        is what the library has always done with them, and a fit that is imprecise is not a fit that
+        must be refused. Deliberately NOT the full ``_needs_anchor`` gate either -- that gate also
+        fires on a non-positive computed spread, which is the ordinary degenerate/single-point EM
+        component the ridge exists for and already discloses. Only the genuine large-offset
+        cancellation regime warns.
+        """
+        if count <= 0.0 or sum_x is None or sum_xx is None:
+            return
+        m = sum_x / count
+        spread2 = np.diag(sum_xx) / count - m * m
+        risky = (spread2 > 0.0) & (m * m > _ANCHOR_CONDITION_RATIO * spread2)
+        if not np.any(risky):
+            return
+        import warnings
+
+        worst = int(np.argmax(np.where(risky, m * m / np.where(spread2 > 0.0, spread2, 1.0), -np.inf)))
+        warnings.warn(
+            "multivariate Gaussian sufficient statistics arrived without shift-anchored moments and "
+            "are too ill-conditioned for the raw E[xx^T] - mu mu^T covariance: coordinate %d has "
+            "mean^2/variance %.3g, so the fitted covariance loses roughly %.0f%% of its significant "
+            "digits to cancellation. Accumulate through MultivariateGaussianAccumulator (which "
+            "anchors automatically), or center the data before fitting."
+            % (
+                worst,
+                float(m[worst] * m[worst] / spread2[worst]),
+                min(100.0, 100.0 * np.log10(float(m[worst] * m[worst] / spread2[worst])) / 16.0),
+            ),
+            RuntimeWarning,
+            stacklevel=3,
+        )
 
     def _attach_conditioning_receipt(self, dist: "MultivariateGaussianDistribution", raw_covar: np.ndarray) -> None:
         """Opt-in: compute and attach a numerics-conditioning receipt to ``dist`` (see ``__init__``)."""

@@ -70,6 +70,45 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 
 ### Fixed
 
+- A third candidate campaign (four black-box tester sessions plus two clean-install reproduction
+  replays against candidate `dcec5e29`, every blocking/major claim adversarially re-verified;
+  D-0202) found and fixed the following.
+  - The shift-anchored moment repair that made the univariate Gaussian exact at extreme data
+    offsets had not been propagated to its siblings, and auto-inference -- `optimize(data)` with
+    no estimator, the flagship path -- reaches them on ordinary data (epoch timestamps, prices in
+    minor units, coordinates). `MultivariateGaussianEstimator` and `DiagonalGaussianEstimator` now
+    carry the same conditioning-gated anchored track: a diagonal fit that silently returned a
+    variance thousands of times too large at offset 1.7e9 now agrees with exact arithmetic to
+    3e-14 relative error. `GeneralizedGaussianEstimator`, `GeneralizedExtremeValueEstimator`, and
+    `LogisticEstimator` (whose M-steps go through higher-order or iterative moments rather than a
+    single variance) received the same repair. The fused numba scoring kernel for diagonal
+    Gaussians, reachable only through an explicit low-level engine registration, still used the
+    uncentered form after the Python scorer was repaired -- it now agrees with the Python path to
+    the bit at every magnitude tested, and is incidentally about 9% faster. The univariate clamp
+    that separates genuine spread from cancellation noise was itself too aggressive at extreme
+    magnitude (it read real data as constant above roughly mean 1e15); the scatter is now split
+    into a data-carrying term and a rounding term, each clamped on its own footing, propagated to
+    every family that gained an anchored track this release.
+  - `pd.NA` in numeric data was silently modeled as a categorical value (unlike `NaN` in the same
+    position, which fit correctly), so any unseen number then scored `-inf`; pandas extension
+    dtypes (`Float64`/`Int64`/`boolean`/`string`) carrying `pd.NA` crashed `optimize()`/
+    `Model.fit()`/`propose(fit=True)` with an internal protocol error. Both are fixed at the two
+    choke points every auto-inference container shape passes through: family selection now treats
+    `pd.NA` as missing exactly like `NaN`, and the encode path is normalized to match, so a
+    profiler that says "missing" and an encoder can no longer disagree about the same row.
+  - The default `optimize()`/`fit()` initialization starved closed-form sequence fits
+    (`MarkovChainEstimator`) on small datasets with a misdirecting error; a row with no outgoing
+    transitions is now filled uniformly and the choice is disclosed through
+    `numerical_repairs()`. The Bernoulli boundary clamp was applied but undisclosed; it is now
+    reported the same way the Gaussian variance floor is.
+  - A hand-transcribed identity line in the tester handout named a tree hash that existed nowhere,
+    caught independently by two testers and a replay. The handout is no longer hand-authored:
+    every identity value is read from the built artifacts, and `scripts/verify_candidate_handout.py`
+    recomputes and cross-checks all of them (brief, checksum file, attestation) before a candidate
+    is ever shown to a tester.
+
+### Fixed
+
 - A second maintainer-executed candidate campaign (four black-box tester sessions plus two
   clean-install reproduction replays against candidate `c9eb9d2e`, every blocking/major claim
   adversarially re-verified and the self-rated minors independently re-rated; D-0201) found and

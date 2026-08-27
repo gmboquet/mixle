@@ -41,6 +41,17 @@ class Detector:
     factory: Callable[..., Any]  # (vdict, pseudo_count, emp_suff_stat, use_bstats) -> ParameterEstimator
     cdf: Callable[[Any], Any] | None = None  # (arr) -> ndarray of F(x) for the PIT, or None
     n_params: int = 2
+    # Whether ``score`` stays accurate on a sample sitting far from the origin relative to its own
+    # spread (an epoch timestamp column, a price series quoted against a large base). A family
+    # parameterized as a ratio to zero writes its log-density with terms of size shape*log|x| that
+    # cancel down to an O(1) answer; evaluated naively there, the code length that comes back is
+    # float64 rounding residue, and a residue above the 0.02 bits/obs selection margin decides the
+    # recommendation. The profiler therefore drops such candidates at that conditioning (see
+    # ``_origin_anchored_scores_unmeasurable``) unless they say here that their score is computed in
+    # a form that survives it. Location-scale families need not set this: they are recognized
+    # automatically, because their own support gate also accepts the data with its mean removed.
+    # False by default, which is the safe reading of a scorer whose arithmetic is unknown.
+    offset_stable: bool = False
 
 
 _REGISTRY = MappingProxyType(
@@ -68,6 +79,8 @@ def _validate(detector: Detector) -> None:
         raise TypeError("detector cdf must be callable or None")
     if isinstance(detector.n_params, bool) or not isinstance(detector.n_params, int) or detector.n_params < 0:
         raise ValueError("detector n_params must be a non-negative integer")
+    if not isinstance(detector.offset_stable, bool):
+        raise TypeError("detector offset_stable must be a bool")
 
 
 def _mutable_snapshot() -> dict[str, dict[str, Detector]]:

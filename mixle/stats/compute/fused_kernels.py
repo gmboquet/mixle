@@ -24,8 +24,30 @@ into typed columns, and estimation is
 
 The kernel E-step produces the same sufficient-statistic structures as the
 legacy accumulators, so the existing estimator M-steps (pseudo-counts
-included) are reused unchanged, and results agree with the legacy seq path to
-floating-point tolerance.
+included) are reused unchanged.
+
+Agreement with the legacy seq path, precisely:
+
+* SCORING agrees to a few ulp at any data magnitude. Every Gaussian-family row
+  kernel evaluates the CENTERED quadratic form ``-(x-mu)^2/(2*covar)``, the same
+  form the ``seq_log_density`` implementations use, rather than the natural-
+  parameter expansion whose three ``O(|x|^2/covar)`` terms cancel away the whole
+  answer on offset data.
+* The E-step emits the HISTORICAL RAW moments ``(sum w*x, sum w*x^2, sum w)``.
+  It does not reproduce the shift-anchored moment track the Python accumulators
+  (``GaussianAccumulator``, ``DiagonalGaussianAccumulator``, ...) now carry,
+  because the anchor has to be a DATA value chosen at encode time and the
+  columnar encoding does not yet carry one. On data whose ``mean^2/variance`` is
+  large the fitted VARIANCE therefore loses digits to cancellation exactly as the
+  pre-anchor accumulators did (the fitted MEAN is a same-sign sum and is
+  unaffected). Measured at offset 1.7e9 on unit-variance data: the diagonal
+  M-step returns ``covar ~ 4.8e3`` and the univariate M-step ``sigma2 ~ 2.9e10``,
+  against a true variance of ~1.0. ``DiagonalGaussianEstimator`` detects the
+  missing anchored payload and emits a ``RuntimeWarning`` naming the conditioning
+  and the remedy first; ``GaussianEstimator`` currently does NOT, so the scalar
+  case is silent. Until an encode-time anchor lands, center the data (or
+  accumulate through the Python accumulators) when fitting at large offsets on
+  this path. Scoring is unaffected and stays exact at every magnitude.
 
 Supported distributions: Gaussian, LogGaussian, Gamma, Categorical,
 IntegerCategorical, Bernoulli, StudentT, Logistic, Weibull, Rayleigh,
@@ -417,15 +439,26 @@ def _binomial_acc(i, k, w, params, cols, stats):
 
 @numba.njit(inline="always", cache=True)
 def _diag_gaussian_ld(i, k, params, cols):
-    # vector leaf: cols[0] is the flattened (n*d) observation matrix
-    ca, cb, cc = params
-    d = ca.shape[1]
+    # vector leaf: cols[0] is the flattened (n*d) observation matrix.
+    #
+    # CENTERED, not expanded. The historical form evaluated the natural-parameter expansion
+    # ``x*x*ca + x*cb + cc``, three terms of size O(|x|^2/covar) summing to an O(1) answer, so on
+    # offset data every significant digit cancels: at |x| ~ 1.7e9 with unit variance it returned
+    # round-number garbage (measured: +512.0 per row where the true log-density was -4.57), which
+    # is not merely imprecise but the wrong SIGN for a density that cannot exceed ``log_c``.
+    # ``x - mu`` is exact for operands of the same magnitude, so the centered form is accurate at
+    # every offset and agrees with DiagonalGaussianDistribution.seq_log_density -- which was itself
+    # repaired to the centered form -- to a few ulp. It is also cheaper per element (one subtract
+    # and two multiplies against three multiplies), so the fused path loses nothing: no branch, no
+    # extra memory traffic, same O(1) arithmetic per coordinate.
+    mu, ca, logc = params
+    d = mu.shape[1]
     off = i * d
-    rv = cc[k]
+    rv = 0.0
     for j in range(d):
-        x = cols[0][off + j]
-        rv += x * x * ca[k, j] + x * cb[k, j]
-    return rv
+        diff = cols[0][off + j] - mu[k, j]
+        rv += diff * diff * ca[k, j]
+    return rv + logc[k]
 
 
 @numba.njit(inline="always", cache=True)
@@ -883,10 +916,15 @@ class _DiagGaussianB(_LeafBuilder):
             raise ValueError("DiagonalGaussian components must share the same dimension.")
 
     def params(self, dists):
+        # (mu, ca, log_c) for the CENTERED kernel form -- see _diag_gaussian_ld. ``ca`` is exactly
+        # the ``-0.5/covar`` the centered form contracts the squared deviations against (the same
+        # coefficient DiagonalGaussianDistribution.seq_log_density uses), so the expanded ``cb``/
+        # ``cc`` coefficients are no longer read by this kernel. Layout (2-D, 2-D, 1-D float64) is
+        # unchanged, so nothing downstream sees a different params signature.
+        mu = np.array([d.mu for d in dists], dtype=np.float64)
         ca = np.array([d.ca for d in dists], dtype=np.float64)
-        cb = np.array([d.cb for d in dists], dtype=np.float64)
-        cc = np.array([d.cc for d in dists], dtype=np.float64)
-        return ca, cb, cc
+        logc = np.array([d.log_c for d in dists], dtype=np.float64)
+        return mu, ca, logc
 
     def new_sink(self):
         buf = []
@@ -900,7 +938,13 @@ class _DiagGaussianB(_LeafBuilder):
         return np.zeros((K, self.dim)), np.zeros((K, self.dim)), np.zeros(K)
 
     def stats_to_ss(self, stats, k):
-        # legacy DiagonalGaussianAccumulator.value(): (sum, sum2, count)
+        # legacy DiagonalGaussianAccumulator.value(): (sum, sum2, count).
+        #
+        # Raw moments only -- no shift-anchored payload, unlike DiagonalGaussianAccumulator.value().
+        # DiagonalGaussianEstimator therefore takes its historical raw ``E[x^2]-mu^2`` branch, which
+        # WARNS with the conditioning and a remedy before returning a degraded variance (it does not
+        # silently accept it). Scoring is exact at any magnitude (see _diag_gaussian_ld); this is the
+        # remaining magnitude limit on the fused path and it is documented in the module docstring.
         return stats[0][k].copy(), stats[1][k].copy(), stats[2][k]
 
 

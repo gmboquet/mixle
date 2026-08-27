@@ -146,16 +146,31 @@ def _scaled_variance_floor(unfloored: float, mu: float, min_covar: float, absolu
     return floor if 0.0 < floor < np.inf else min_covar
 
 
-def _record_variance_floor(dist: Any, unfloored: float, floored: float, floor: float) -> Any:
+def _record_variance_floor(
+    dist: Any,
+    unfloored: float,
+    floored: float,
+    floor: float,
+    notes: tuple[str, ...] = (),
+) -> Any:
     """Note on ``dist`` when the variance floor actually bound, so a fit can report it.
 
     The floor exists so a degenerate component cannot produce a zero variance and an infinite density.
     When it binds, though, the returned variance is not the one the data implied, and a caller reading
     only the parameters cannot tell (MXR-080-1202). Recording the repair is free on the ordinary path,
     where the floor does not bind and nothing is set.
+
+    ``notes`` carries repairs made EARLIER in the M-step -- currently the sub-resolution spread clamp
+    in :func:`_anchored_pooled_variance` -- and is recorded ahead of the floor note, because it is
+    what explains an ``unfloored`` of zero. They accumulate rather than overwrite: "the variance was
+    floored" and "the scatter it was floored from was itself clamped" are two different facts and a
+    caller auditing the fit needs both.
     """
+    repairs = tuple(notes)
     if floored > unfloored:
-        dist._numerical_repairs = ("variance-floored(%.3g -> %.3g)" % (unfloored, floor),)
+        repairs += ("variance-floored(%.3g -> %.3g)" % (unfloored, floor),)
+    if repairs:
+        dist._numerical_repairs = repairs
     return dist
 
 
@@ -860,6 +875,31 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
 
         return self
 
+    def scale(self, c: float) -> "GaussianAccumulator":
+        """Scale the accumulated statistics in place by ``c``, anchored track included.
+
+        The structural default round-trips through ``value()`` and ``from_value()``, and
+        ``scale_suff_stat`` rebuilds the payload as a PLAIN tuple -- which drops the ``anchored``
+        attribute, so ``from_value`` sees raw-only statistics and restarts the track unactivated.
+        The scaled accumulator then estimates through the cancellation-prone raw form and undoes the
+        whole shift-anchored repair: measured on sd-0.5 data at mean 1e15, ``seq_update`` then
+        ``scale(0.37)`` fitted sigma2 = 1e+22 where the same weights passed to ``seq_update``
+        directly fitted 0.24625. Scaling every weight by ``c`` is reachable from ordinary use --
+        HMM/LDA/hierarchical-mixture child accumulators and streaming EM's batch mixing all do it.
+
+        Uniform weight scaling is exactly linear in both anchored moments and leaves the anchor
+        (a data value, not a statistic) alone, so the track scales as the raw moments do.
+        """
+        anchor = self._anchor
+        anchored_sum = self._anchored_sum
+        anchored_sum2 = self._anchored_sum2
+        super().scale(c)
+        if anchor is not None:
+            self._anchor = anchor
+            self._anchored_sum = anchored_sum * c
+            self._anchored_sum2 = anchored_sum2 * c
+        return self
+
     def error_bound(self) -> dict[str, float] | None:
         """Return historical round-off diagnostics for ``sum``/``sum2``.
 
@@ -989,6 +1029,37 @@ def _consistent_anchored_moments(suff_stat: Any, sum_x: float, count: float) -> 
     return float(anchor), float(a_sum), float(a_sum2)
 
 
+def _spread_is_resolvable(variance: float, magnitude: float) -> bool:
+    """Whether a spread of ``sqrt(variance)`` is representable at all at scale ``magnitude``.
+
+    float64 values near ``magnitude`` lie on a grid of spacing ``u = ulp(magnitude)``, so deviations
+    from the mean below about ``u/2`` cannot be carried by any sample there -- an apparent spread
+    that small is arithmetic residue, not data. Deviations at or above it can be, and ARE: sd 0.5 at
+    mean 1e15 is four grid steps of perfectly real spread.
+
+    This is only ever asked to decide what to DISCLOSE, never to clamp. As a clamp the same
+    inequality would be fail-closed overreach, because it is scale-correct but not weight-correct: a
+    weighted variance carries the responsibilities as well as the data, and an EM component holding a
+    point with responsibility 1e-9 has a legitimate weighted variance ~1e-9 times the squared spread,
+    far under any grid step. Used as a predicate on an already-computed number it cannot refuse
+    anything -- it only separates "the spread was unresolvable here" from "the spread was resolvable
+    and we still reported zero", which is the part a caller needs told.
+    """
+    if not np.isfinite(magnitude) or magnitude <= 0.0 or not np.isfinite(variance) or variance <= 0.0:
+        return False
+    half_ulp = 0.5 * float(np.spacing(magnitude))
+    return variance > half_ulp * half_ulp
+
+
+# Bound on how far the M-step mean, recomputed as ``sum_x / count`` from the RAW moments, can sit
+# from the exact sample mean the anchored track knows: ~4-8 grid steps of ``|mean|`` (float64 ulp
+# spacing is between ``eps*|m|/2`` and ``eps*|m|``). It bounds a rounding residue of the mean, not a
+# spread, so a multiple of the ulp is the right shape here -- and it is deliberately the same
+# constant the previous whole-scatter clamp used, so every degenerate payload that collapsed to
+# exactly zero before still does.
+_MEAN_ROUNDING_BOUND = 8.8817841970012523e-16  # 4 * eps
+
+
 def _anchored_pooled_variance(
     anchor: float,
     a_sum: float,
@@ -998,7 +1069,7 @@ def _anchored_pooled_variance(
     pseudo_count: float | None,
     prior_mean: float | None,
     prior_variance: float | None,
-) -> float:
+) -> tuple[float, tuple[str, ...]]:
     """:func:`pooled_scalar_variance` computed from shift-anchored moments.
 
     Same pooling contract as the raw-moment form (see
@@ -1006,32 +1077,70 @@ def _anchored_pooled_variance(
     observed scatter about ``mean`` is expanded about the data anchor, so every term is
     O(count * spread^2) and the result is shift-invariant instead of losing
     ~2*log2(|mean|/sd) bits to cancellation.
+
+    Returns the variance and any repairs to disclose through ``numerical_repairs()``.
+
+    The scatter is SPLIT rather than accumulated in one sum, which is what lets the noise clamp stay
+    off the data. Writing ``mu_a = a_sum/count`` for the sample mean in anchor-relative coordinates,
+
+        scatter(mean) = [a_sum2 - a_sum * mu_a] + count * (mean - anchor - mu_a)**2
+
+    and the two brackets have completely different error characters. The first is the scatter about
+    the sample's OWN mean: both terms are O(count * spread^2), computed entirely at small magnitude,
+    and it carries all the data. The second is the displacement of the mean actually reported from
+    that sample mean -- genuine when a pseudo-count prior pulls the mean, but on the plain
+    maximum-likelihood path pure rounding of ``sum_x / count`` at data magnitude, and the ONLY place
+    the large magnitude enters. Clamping the rounding term alone leaves the data untouched; the old
+    single-sum form could only clamp the total, so its ulp-scale threshold had to be crossed by the
+    spread as well, and any spread below ~``4 eps |mean|`` per observation was read as constant.
     """
-    delta = mean - anchor
-    observed_scatter = a_sum2 - 2.0 * delta * a_sum + count * delta * delta
-    # Mathematically >= 0; only last-ulp rounding of O(count * spread^2) terms can undershoot --
-    # or overshoot: a degenerate component's scatter must come out EXACTLY zero on every
-    # algebraically equivalent path, or the scale-relative floor reads the +O(eps) residue as a
-    # genuine spread and two equivalent fits disagree (same clamp, same rationale, as the raw
-    # form in _gaussian_contracts.pooled_scalar_variance).
-    noise_scale = max(abs(a_sum2), abs(2.0 * delta * a_sum), count * delta * delta, 1.0e-300)
-    # Two distinct noise sources. Cross-term cancellation is bounded by 1e-12 of the largest term.
-    # But on constant data the ONLY nonzero term can be count*delta^2 with delta = mean - anchor a
-    # single ulp of recomputing the mean -- platform-dependent (observed: exactly 0 under
-    # Accelerate, 1 ulp under OpenBLAS), and equal to noise_scale itself, so the relative test
-    # cannot see it. A spread below the mean's own rounding granularity is not data: no float64
-    # sample at this magnitude can genuinely carry sd < ~4 eps |mean|.
-    mean_ulp = 8.8817841970012523e-16 * max(abs(mean), abs(anchor))  # 4 * eps
-    if observed_scatter < max(1.0e-12 * noise_scale, count * mean_ulp * mean_ulp):
+    if count <= 0.0:
         observed_scatter = 0.0
-    observed_scatter = max(observed_scatter, 0.0)
+        repairs: tuple[str, ...] = ()
+    else:
+        anchored_mean = a_sum / count
+        # Scatter about the sample's own mean -- the whole of the data, computed at spread scale.
+        core = a_sum2 - a_sum * anchored_mean
+        # Mathematically >= 0; only last-ulp rounding of the two O(count * spread^2) terms can
+        # undershoot -- or overshoot: a degenerate component's scatter must come out EXACTLY zero on
+        # every algebraically equivalent path, or the scale-relative variance floor reads the
+        # +O(eps) residue as a genuine spread and two equivalent fits disagree (same clamp, same
+        # rationale, as the raw form in _gaussian_contracts.pooled_scalar_variance).
+        #
+        # This bound is RELATIVE to the terms differenced, which is what makes it safe here: both
+        # terms are weighted the same way, so it scales with the responsibilities instead of
+        # competing with them, and it no longer has to be crossed by the spread. The representational
+        # limit is not imposed as a second threshold -- it does not need to be. Data whose spread the
+        # grid cannot carry lands with ``a_sum2`` and ``a_sum`` EXACTLY zero (every observation
+        # rounded to the same float), so this form reports exactly zero for it on its own, from the
+        # data rather than from a threshold.
+        noise_scale = max(abs(a_sum2), abs(a_sum * anchored_mean), 1.0e-300)
+        repairs = ()
+        if core < 1.0e-12 * noise_scale:
+            # Reporting zero for something whose apparent scatter was positive is a repair, not a
+            # measurement -- but only worth saying when the spread it stood for was one this
+            # magnitude could have represented. A positive residue below the grid step is the
+            # arithmetic the clamp exists to absorb (a single-observation component lands at
+            # +-1 ulp of zero depending on the multiply order); calling that a repair would put a
+            # platform-dependent note on ordinary degenerate components.
+            if _spread_is_resolvable(core / count, max(abs(mean), abs(anchor))):
+                repairs = ("spread-below-noise(%.3g of %.3g)" % (core / count, noise_scale / count),)
+            core = 0.0
+        core = max(core, 0.0)
+        # Displacement of the reported mean from the sample mean. Below the mean's own rounding
+        # granularity it is not a displacement at all, just which order the large-magnitude sum was
+        # accumulated in, and squaring it would turn that into variance.
+        shift = (mean - anchor) - anchored_mean
+        if abs(shift) <= _MEAN_ROUNDING_BOUND * max(abs(mean), abs(anchor)):
+            shift = 0.0
+        observed_scatter = core + count * shift * shift
     if pseudo_count not in (None, 0.0) and prior_variance is not None:
         offset = 0.0 if prior_mean is None else (prior_mean - mean) ** 2
         prior_scatter = pseudo_count * (prior_variance + offset)
-        return (observed_scatter + prior_scatter) / (count + pseudo_count)
+        return (observed_scatter + prior_scatter) / (count + pseudo_count), repairs
     if count == 0.0:
-        return 0.0
-    return observed_scatter / count
+        return 0.0, repairs
+    return observed_scatter / count, repairs
 
 
 class GaussianEstimator(ParameterEstimator):
@@ -1230,8 +1339,9 @@ class GaussianEstimator(ParameterEstimator):
         # The mean is a plain same-sign sum and is computed from the raw moments unchanged; only
         # the variance loses to cancellation, so only its scatter switches to the anchored form
         # when the accumulator carried one (raw-only producers keep the historical path).
+        notes: tuple[str, ...] = ()
         if anchored is not None:
-            sigma2 = _anchored_pooled_variance(
+            sigma2, notes = _anchored_pooled_variance(
                 anchored[0],
                 anchored[1],
                 anchored[2],
@@ -1259,7 +1369,7 @@ class GaussianEstimator(ParameterEstimator):
         sigma2 = max(sigma2, floor)
 
         rv = GaussianDistribution(mu, sigma2, name=self.name, keys=self.keys, prior=self.prior)
-        return _record_variance_floor(rv, unfloored, sigma2, floor)
+        return _record_variance_floor(rv, unfloored, sigma2, floor, notes)
 
 
 class GaussianDataEncoder(DataSequenceEncoder):

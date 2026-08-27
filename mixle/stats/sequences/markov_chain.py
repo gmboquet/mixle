@@ -237,6 +237,41 @@ def _validate_markov_statistics(
     )
 
 
+_UNIFORM_ROW_REPAIR_LIMIT = 5
+
+
+def _plain_state(state: Any) -> Any:
+    """Return the plain Python value behind a numpy scalar state, for readable messages.
+
+    The encoder carries states in an object array, so a state read back out is typically an
+    ``np.str_``/``np.int64`` whose repr (``np.str_('a')``) names numpy rather than the user's data.
+    """
+    return state.item() if isinstance(state, np.generic) else state
+
+
+def _describe_states(states: Sequence[Any]) -> str:
+    """Render at most ``_UNIFORM_ROW_REPAIR_LIMIT`` states, then a count of the rest."""
+    shown = ", ".join(repr(_plain_state(state)) for state in states[:_UNIFORM_ROW_REPAIR_LIMIT])
+    extra = len(states) - _UNIFORM_ROW_REPAIR_LIMIT
+    return shown if extra <= 0 else "%s and %d more" % (shown, extra)
+
+
+def _record_uniform_rows(dist: "MarkovChainDistribution", states: Sequence[Any]) -> "MarkovChainDistribution":
+    """Note on ``dist`` which transition rows were filled uniform for want of evidence.
+
+    The fill itself is exact -- a state no observation ever leaves contributes no factor to the data
+    log-likelihood, so every row there attains the maximum and the MLE is non-unique rather than
+    undefined -- but the returned row is still not one the data chose. That is precisely what
+    ``numerical_repairs()`` exists to report (MXR-080-1202, mirroring ``_record_variance_floor`` in
+    mixle.stats.univariate.continuous.gaussian), so a caller reading only the transition map can
+    tell the difference. Recording is free on the ordinary path, where every row has evidence and
+    nothing is set.
+    """
+    if states:
+        dist._numerical_repairs = ("markov-row-uniform(no outgoing transitions: %s)" % _describe_states(states),)
+    return dist
+
+
 def _validate_effective_nobs(nobs: float | None, statistics: MarkovChainStatistics) -> None:
     if nobs is None:
         return
@@ -508,6 +543,12 @@ class MarkovChainDistribution(SequenceEncodableProbabilityDistribution):
             name=payload[3],
             prior=payload[4],
         )
+        # Rebuilding from the tables loses anything not carried by the constructor, and the repair
+        # log is exactly that: a copy of a model whose transition row was filled uniform must not
+        # report itself untouched (optimize()'s track_best returns a deepcopy of the best-seen model).
+        repairs = self.numerical_repairs()
+        if repairs:
+            copied._numerical_repairs = repairs
         memo[id(self)] = copied
         return copied
 
@@ -2377,6 +2418,12 @@ class MarkovChainEstimator(ParameterEstimator):
         Maximum likelihood estimates for initial state probabilities, transition probabilities, and the length
         distribution are obtained directly from aggregated data in 'suff_stat'.
 
+        A state with no outgoing transition evidence gets a uniform transition row. That row appears in
+        no likelihood factor, so it is one of the (many) exact maximizers rather than a guess, but it is
+        not a row the data chose: every such state is reported through
+        ``MarkovChainDistribution.numerical_repairs()`` on the returned model, as
+        ``markov-row-uniform(no outgoing transitions: ...)``.
+
         Arg suff_stat is a Tuple of length three containing,
             suff_stat[0] (Dict[T, float]): Maps initial state values to their aggregated counts.
             suff_stat[1] (Dict[T, Dict[T, List[float]]]): Maps state to state transition counts.
@@ -2399,24 +2446,52 @@ class MarkovChainEstimator(ParameterEstimator):
         init_counts = np.asarray(checked.initial_counts, dtype=float)
         initial_total = float(np.sum(init_counts))
         if initial_total <= 0.0:
-            raise ValueError("Markov MLE requires positive initial-state evidence or a declared prior.")
+            raise ValueError(
+                "Markov MLE requires positive initial-state evidence: no observation started in any of the %d "
+                "states %s. Supply data, a pseudo_count, or a prior."
+                % (len(checked.states), _describe_states(checked.states))
+            )
         init_prob_map = {state: float(init_counts[index] / initial_total) for index, state in enumerate(checked.states)}
 
+        uniform = 1.0 / len(checked.states)
         trans_map = {}
+        unobserved_rows = []
         for index, state in enumerate(checked.states):
             row = np.asarray(checked.transition_counts[index], dtype=float)
             total = float(np.sum(row))
             if total <= 0.0:
-                raise ValueError(
-                    "Markov MLE row %r requires transition evidence, pseudo-count smoothing, or a prior." % (state,)
-                )
+                # No observation ever leaves this state, so this row appears in NO likelihood factor:
+                # every row here attains the maximum and the MLE is non-unique, not undefined. The
+                # old fail-closed raise ("requires transition evidence, pseudo-count smoothing, or a
+                # prior") therefore refused legitimate input, and named remedies that change the
+                # statistical answer for a row the answer does not depend on. Worse, the states it
+                # refused are routinely manufactured by the library itself rather than by the user:
+                # optimize()/fit() seed EM from a hard 0/1 Bernoulli subsample (init_p, default 0.1),
+                # so a five-sequence dataset with abundant evidence for every row failed 10/10 seeds
+                # under the defaults, and a Markov leaf inside a mixture failed whenever a
+                # component's responsibilities emptied a row. Both cases are the audited
+                # fail-closed-guard-overreach pattern: the guard was locally right about the counts
+                # it saw and wrong about the fit.
+                #
+                # Fill uniform -- the maximally noncommittal choice, and exactly what the sibling
+                # IntegerMarkovChainEstimator.estimate in this package already does for a prefix row
+                # with no evidence -- and DISCLOSE it through numerical_repairs() below, so a row the
+                # data did not choose is never silently indistinguishable from one it did. EM then
+                # re-estimates from the full sample on its first M-step, so the fit converges to the
+                # exact closed-form MLE instead of failing.
+                trans_map[state] = dict.fromkeys(checked.states, uniform)
+                unobserved_rows.append(state)
+                continue
             trans_map[state] = {
                 next_state: float(row[next_index] / total) for next_index, next_state in enumerate(checked.states)
             }
 
         len_dist = self.len_estimator.estimate(checked.length_nobs, checked.length)
 
-        return MarkovChainDistribution(init_prob_map, trans_map, len_dist=len_dist, name=self.name)
+        return _record_uniform_rows(
+            MarkovChainDistribution(init_prob_map, trans_map, len_dist=len_dist, name=self.name),
+            unobserved_rows,
+        )
 
     def estimate1(self, nobs: float | None, suff_stat: MarkovChainStatistics) -> "MarkovChainDistribution":
         """Estimate MarkovChainDistribution from aggregated sufficient statistics from observed data.

@@ -32,6 +32,31 @@ def _fisher_mean_var(dist):
     return p, p * (1.0 - p)
 
 
+#: Distance the estimator keeps between a fitted ``p`` and the open interval's endpoints.
+_P_BOUNDARY = 1.0e-12
+
+
+def _record_boundary_clamp(dist: "BernoulliDistribution", unclamped: float, clamped: float) -> "BernoulliDistribution":
+    """Note on ``dist`` when the ``p`` boundary clamp actually bound, so a fit can report it.
+
+    The clamp exists because :class:`BernoulliDistribution` is defined on the OPEN interval (0, 1):
+    an all-success or all-failure sample has MLE exactly 1 or 0, which the constructor rejects. What
+    it returns instead is not the parameter the data implied, and a caller reading only ``p`` cannot
+    tell -- the same reason the Gaussian variance floor is recorded (MXR-080-1202; see
+    ``_record_variance_floor`` in mixle.stats.univariate.continuous.gaussian). It also matters
+    numerically: at the clamp, ``P(unobserved outcome)`` is 1e-12 rather than 0, so ``log_density``
+    of the unseen outcome is about -27.6 instead of ``-inf``.
+
+    Recording is free on the ordinary path: when the clamp does not bind, ``np.clip`` returns the
+    value unchanged, nothing is set, and ``numerical_repairs()`` stays empty.
+    """
+    if not math.isfinite(unclamped) or clamped == unclamped:
+        return dist
+    edge = "1 - 1e-12" if clamped > 0.5 else "1e-12"
+    dist._numerical_repairs = ("bernoulli-p-clamped(%.3g -> %s)" % (unclamped, edge),)
+    return dist
+
+
 class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
     """Bernoulli distribution over {False, True} with success probability p."""
 
@@ -446,7 +471,15 @@ class BernoulliEstimator(ParameterEstimator):
         return BernoulliDistribution(p, name=self.name, keys=self.keys, prior=BetaDistribution(new_a, new_b))
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float]) -> BernoulliDistribution:
-        """Estimate the Bernoulli success probability from weighted counts."""
+        """Estimate the Bernoulli success probability from weighted counts.
+
+        The distribution is defined on the open interval (0, 1), so a sample that is all successes or
+        all failures -- whose maximum-likelihood ``p`` is exactly 1 or 0 -- is clamped ``_P_BOUNDARY``
+        (1e-12) away from the endpoint. When that clamp binds it is reported on the returned model
+        through :meth:`~mixle.stats.compute.pdist.ProbabilityDistribution.numerical_repairs` as
+        ``bernoulli-p-clamped(...)``, and so through ``fit_provenance().repairs``; an ordinary fit
+        whose ``p`` is already interior records nothing.
+        """
         if self.has_conj_prior:
             return self._estimate_conjugate(suff_stat)
         count, psum = suff_stat
@@ -454,9 +487,9 @@ class BernoulliEstimator(ParameterEstimator):
             prior_p = 0.5 if self.suff_stat is None else self.suff_stat
             psum += self.pseudo_count * prior_p
             count += self.pseudo_count
-        p = psum / count if count > 0.0 else 0.5
-        p = float(np.clip(p, 1.0e-12, 1.0 - 1.0e-12))
-        return BernoulliDistribution(p, name=self.name, keys=self.keys)
+        unclamped = psum / count if count > 0.0 else 0.5
+        p = float(np.clip(unclamped, _P_BOUNDARY, 1.0 - _P_BOUNDARY))
+        return _record_boundary_clamp(BernoulliDistribution(p, name=self.name, keys=self.keys), unclamped, p)
 
 
 class BernoulliDataEncoder(DataSequenceEncoder):

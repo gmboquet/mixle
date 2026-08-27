@@ -702,6 +702,50 @@ def _looks_multimodal(arr: np.ndarray) -> bool:
     return (skew * skew + 1.0) / denom > 0.6
 
 
+_FLOAT64_EPS = 2.220446049250313e-16
+# Largest ``shape * log-magnitude`` an origin-anchored family's log-density may carry before float64
+# stops being able to tell its code length from the next candidate's. Set at the selection margin
+# itself: a rounding error of that size can decide the recommendation, which is precisely the
+# failure this bounds.
+_ORIGIN_ANCHORED_MAX_CONDITION = (0.02 * math.log(2.0)) / _FLOAT64_EPS
+
+
+def _origin_anchored_scores_unmeasurable(arr: np.ndarray) -> bool:
+    """Whether a positive-support family's code length on ``arr`` would be float64 rounding noise.
+
+    A family parameterized as a ratio to zero -- gamma, log-normal, inverse-gamma, Weibull,
+    inverse-Gaussian, Rayleigh -- writes its log-density with terms of size ``shape * log|x|`` and
+    ``lgamma(shape)`` that cancel down to an O(1) answer. Fitted to a sample sitting far from the
+    origin relative to its own spread, the shape it needs is about ``(mean/sd)**2``, so those terms
+    run to 1e13 nats and higher: what comes back is the rounding residue, and a residue larger than
+    the 0.02 bits/obs selection margin decides the recommendation. Measured on this tree, plain
+    ``N(1e7, 1)`` drew a gamma "win" of 0.03 bits over the Gaussian and a 200-row ramp at 1.7e9 drew
+    an inverse-gamma one, each yielding a fit whose spread was 10x-30x the data's with nothing
+    reported as repaired.
+
+    What this also declines, said plainly: genuinely gamma / log-normal / Weibull data whose
+    coefficient of variation is below about 1e-6. Such a sample is a Gaussian to every digit float64
+    carries -- every one of these families converges to the Gaussian as its shape grows -- and the
+    shape it would need (>1e12) is past the cap the library's own Gamma and InverseGamma
+    distributions enforce, so the family could not represent the answer even if it were selected.
+    The location-scale candidates (Gaussian, Student-t, mixture, and any detector that also accepts
+    the centered data) subtract the location before they do anything else and are never affected, so
+    the data is still typed -- by the families that can still be scored.
+    """
+    if arr.size == 0:
+        return False
+    mean = float(arr.mean())
+    sd = float(arr.std())
+    if not (sd > 0.0) or not (mean > 0.0) or not math.isfinite(mean) or not math.isfinite(sd):
+        return False
+    shape = (mean / sd) ** 2
+    if not math.isfinite(shape):
+        return True
+    # Both ``shape * log|x|`` and ``lgamma(shape) ~ shape * log(shape)`` appear; charge the larger.
+    magnitude = abs(math.log(mean)) + math.log1p(shape) + 1.0
+    return shape * magnitude > _ORIGIN_ANCHORED_MAX_CONDITION
+
+
 def _numeric_candidate_bics(arr: np.ndarray, nobs: int) -> dict[str, float]:
     """Return per-candidate BIC code lengths for numeric data (support-typed).
 
@@ -709,16 +753,23 @@ def _numeric_candidate_bics(arr: np.ndarray, nobs: int) -> dict[str, float]:
     the data looks multimodal (it overfits unimodal samples otherwise); log-normal and gamma are
     added only for strictly-positive support. Used by both the marginal profiler and
     ``get_estimator`` so the candidate set and selection stay consistent.
+
+    Origin-anchored families are additionally dropped when their code length on this data would be
+    float64 rounding noise -- see :func:`_origin_anchored_scores_unmeasurable`. A detector declares
+    which kind it is through its own support gate: one that still applies to the data with its mean
+    removed reads only the location and the spread, so its score is unaffected.
     """
     candidates: dict[str, float | None] = {
         "gaussian": _gaussian_bic_bits(float(arr.var()), nobs),
         "student_t": _student_t_bic_bits(arr, nobs),
     }
+    unmeasurable = _origin_anchored_scores_unmeasurable(arr)
+    centered = arr - float(arr.mean()) if unmeasurable else None
     # The 2-component mixture is added only for plausibly-multimodal data with enough distinct
     # values that its components cannot collapse onto a few points (which would overfit wildly).
     if arr.size and np.unique(arr).size >= 12 and _looks_multimodal(arr):
         candidates["mixture"] = _mixture_bic_bits(arr, nobs)
-    if arr.size and np.all(arr > 0.0):
+    if arr.size and np.all(arr > 0.0) and not unmeasurable:
         candidates["lognormal"] = _lognormal_bic_bits(arr, nobs)
         candidates["gamma"] = _gamma_bic_bits(arr, nobs)
     # registered continuous detectors (additive -- a richer family only wins if its BIC beats the builtins).
@@ -736,6 +787,14 @@ def _numeric_candidate_bics(arr: np.ndarray, nobs: int) -> dict[str, float]:
             # otherwise it overfits a few repeated points (a 2-param tail family on 2-3 distinct values, a
             # 3-param shape family on a dozen). The builtins stay ungated as the safe defaults.
             if n_distinct < (15 if d.n_params >= 3 else 10):
+                continue
+            # Two ways to be exempt. The detector's own support gate says which kind it is: a
+            # location-scale family accepts the centered copy too, because it reads only location
+            # and spread. An origin-anchored family refuses the centered copy -- its values are no
+            # longer positive -- and is dropped unless it declares that its score is computed in a
+            # form that survives the offset (``offset_stable``, which the Pareto sets). Only at a
+            # conditioning where the naive form cannot be computed at all.
+            if unmeasurable and not getattr(d, "offset_stable", False) and not d.applies(centered):
                 continue
             candidates[d.name] = d.score(arr, nobs)
     return _clean_scores(candidates)
@@ -2234,23 +2293,37 @@ class DatumNode:
         return get_ignored_estimator(use_bstats=use_bstats)
 
     def _integer_moments(self):
-        ss_0 = 0.0
-        ss_1 = 0.0
-        ss_2 = 0.0
+        """Weighted ``(count, mean, variance, min, max, width)`` over the integer support.
+
+        The moments are taken about ``min_val`` rather than about zero. ``sum(w*k*k)/W - mean**2``
+        needs ``k*k`` to be representable, and an epoch timestamp squares to ~3e18 -- past the
+        2**53 where float64 stops counting -- so the spread of a perfectly ordinary column came out
+        wrong by thousands at second resolution and collapsed to exactly 0.0 at millisecond
+        resolution. Integer differences from ``min_val`` are exact in Python before they reach
+        float, and their squares stay O(range**2), so the variance is the data's own and is
+        invariant under a shift of the column. ``_integer_values_look_poisson_like`` reads this
+        variance to type the field, so the arithmetic is a family-selection input, not a diagnostic.
+        """
         min_val = None
         max_val = None
+        ss_0 = 0.0
         for k, v in self.vdict.items():
             kk = int(k)
-            vv = float(v)
-            ss_0 += vv
-            ss_1 += kk * vv
-            ss_2 += kk * kk * vv
+            ss_0 += float(v)
             min_val = kk if min_val is None else min(min_val, kk)
             max_val = kk if max_val is None else max(max_val, kk)
         if ss_0 <= 0.0:
             return 0.0, 0.0, 0.0, 0, 0, 0
-        mean = ss_1 / ss_0
-        var = max(0.0, ss_2 / ss_0 - mean * mean)
+        ss_1 = 0.0
+        ss_2 = 0.0
+        for k, v in self.vdict.items():
+            d = int(k) - min_val
+            vv = float(v)
+            ss_1 += d * vv
+            ss_2 += float(d * d) * vv
+        offset = ss_1 / ss_0
+        mean = min_val + offset
+        var = max(0.0, ss_2 / ss_0 - offset * offset)
         width = int(max_val - min_val + 1)
         return ss_0, mean, var, min_val, max_val, width
 
@@ -2588,7 +2661,15 @@ def normalize_input(data, *, rdd_cap: int = 200000):
     # numeric records (the common case) freeze to themselves, so the original object is handed back.
     if isinstance(data, np.ndarray):
         return data  # numeric/structured array: nothing to freeze, and iterating it would rebox
-    frozen = [_freeze_observation(value) for value in data]
+    # pandas has two spellings of "missing" and uses them interchangeably: NaN, and the pd.NA
+    # singleton that its nullable extension dtypes produce. NaN reached the numeric path correctly
+    # while pd.NA -- an opaque object to numpy -- was profiled as a CATEGORICAL VALUE, so a numeric
+    # column with one pd.NA fit as a categorical and scored every unseen number -inf, silently
+    # (campaign three, T2-1). This is the single choke point every auto-inference container shape
+    # passes through; the encode side is normalized to match in _data_records_for_encoding.
+    from mixle.data.sources.pandas_source import normalize_pandas_missing
+
+    frozen = [_freeze_observation(normalize_pandas_missing(value)) for value in data]
     if isinstance(data, (list, tuple)) and len(frozen) == len(data):
         if all(new_value is old_value for new_value, old_value in zip(frozen, data, strict=True)):
             return data

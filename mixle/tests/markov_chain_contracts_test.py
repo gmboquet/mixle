@@ -134,8 +134,17 @@ class MarkovChainContractsTest(unittest.TestCase):
 
         acc = estimator.accumulator_factory().make()
         acc.update(["a"], 1.0, None)
-        with self.assertRaisesRegex(ValueError, "transition evidence"):
-            estimator.estimate(1.0, acc.value())
+        # This used to pin a refusal for a state with no outgoing transitions. That refusal was
+        # wrong: a row no observation ever leaves appears in no likelihood factor, so its MLE is
+        # non-unique, not undefined -- and the refusal also caught rows that optimize()'s own
+        # init_p subsample manufactures, starving closed-form fits (campaign three, T1-F3). The
+        # evidence-free row is now filled uniformly and the choice is DISCLOSED.
+        unsmoothed = estimator.estimate(1.0, acc.value())
+        self.assertTrue(all(np.isclose(sum(row.values()), 1.0) for row in unsmoothed.transition_map.values()))
+        self.assertEqual(
+            unsmoothed.numerical_repairs(),
+            ("markov-row-uniform(no outgoing transitions: 'a', 'b')",),
+        )
         fitted = MarkovChainEstimator(levels=("a", "b"), pseudo_count=1.0).estimate(
             1.0,
             acc.value(),
