@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/collection_hygiene_test.py -p no:randomly -q -m \"\" -n 0",
   "date": "2026-08-22",
-  "evidence_digest": "30d06b80fbab719e3cd51da2240a166e795a629200c808bbb97186803a8d23d1",
+  "evidence_digest": "705117b443422e8a37aaa322f8f887d9afad637d8e6cb5aae9436fa09fb2e293",
   "gate": "Collection hygiene and optional imports",
   "note": "Both halves of the row measured. The base-install half comes from `scripts/import_sweep.py` run by the clean wheel venv built in this session -> 'swept 809 public modules from .../cleanwheel/lib/python3.12/site-packages/mixle/__init__.py; all public modules import cleanly from the clean install' with only numpy and scipy present. The row's trailing 'final supported matrix must still pass' is not closed: the hosted core lanes on this tip are failing on runner cancellation (see the tier-tiers gate note).",
   "result": "3 passed in 4.31s (exit 0); hosted 'smoke / collection-light' = completed/success on 483add7c; clean base install (mixle 0.8.0 + numpy 2.5.2 + scipy 1.18.1 only) imports 809/809 public modules"

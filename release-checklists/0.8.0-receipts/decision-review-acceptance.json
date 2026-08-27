@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONPATH=$PWD python scripts/verify_decision_reviews.py release-checklists/0.8.0-decisions.md; echo EXIT=$?; PYTHONPATH=$PWD python -c \"import sys,pathlib;sys.path.insert(0,'scripts');import verify_decision_reviews as v;t=pathlib.Path('release-checklists/0.8.0-decisions.md').read_text();print('entries=%d unresolved=%d'%(len(v._ENTRY.findall(t)),len(v.unresolved_reviews(t))))\"",
   "date": "2026-08-22",
-  "evidence_digest": "30d06b80fbab719e3cd51da2240a166e795a629200c808bbb97186803a8d23d1",
+  "evidence_digest": "705117b443422e8a37aaa322f8f887d9afad637d8e6cb5aae9436fa09fb2e293",
   "gate": "Decision review acceptance",
   "note": "Re-measured at the current tip. Independently re-measured 2026-08-22 by an adversarial auditor and a second opinion; the auditor further checked that unresolved=0 is not an artifact of the ^## (D-[0-9]{4}) regex skipping malformed entries: every D-#### heading is unique and matched. The load-bearing number, unresolved=0, holds at both commits.",
   "result": "exit 0, silent, over 195 D-#### entries with 0 unresolved (193/0 at 483add7c before D-0194 and D-0195 were recorded)"
