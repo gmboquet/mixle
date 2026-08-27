@@ -107,6 +107,45 @@ def _checked_location(value: Any) -> float:
 _DERIVED_FROM_VARIANCE = frozenset({"log_const", "const"})
 
 
+_VARIANCE_FLOOR_RATIO = 1.0e-8
+"""Default M-step variance floor, expressed relative to the squared scale the fit itself carries.
+
+As an ABSOLUTE constant the floor also refused legitimate small-scale fits: 10 uV of noise recorded in
+volts has variance 8.8e-11, which the old ``1e-8`` clamp widened 114x, so the SAME data in volts and
+in microvolts disagreed. A maximum-likelihood fit of a location-scale family has to satisfy
+``fit(c*x) == c**2 * fit(x)``; an absolute floor cannot. Relative to the fit's own scale the safeguard
+is equivariant, and at unit scale it is numerically the historical ``1e-8``, so well-scaled fits are
+unchanged. Callers wanting a fixed regularizer pass ``min_covar`` explicitly and still get one."""
+
+
+def _scaled_variance_floor(unfloored: float, mu: float, min_covar: float, absolute: bool) -> float:
+    """Effective M-step variance floor for a fit with variance ``unfloored`` and mean ``mu``.
+
+    ``absolute`` means ``min_covar`` was configured explicitly: that caller asked for a fixed floor and
+    gets exactly it (``mixle.task`` regularizes its Gaussians that way). Otherwise the floor is
+    relative to the scale the fit already carries, so the safeguard is scale-equivariant: a
+    maximum-likelihood fit of a location-scale family must satisfy ``fit(c*x) == c**2 * fit(x)``, and
+    an absolute floor cannot -- it refused legitimate small-scale fits and made the same measurement
+    disagree with itself across a unit change.
+
+    The scale reference is ``unfloored + mu**2``, and the SUM matters. Keying it on the variance alone
+    when positive and on ``mu**2`` otherwise is homogeneous and equivariant but DISCONTINUOUS at zero:
+    a component whose variance lands at ``+1e-30`` on one code path and at ``0.0`` or ``-1e-30`` on
+    another -- routine for a single-observation component, where the two differ only by cancellation
+    order -- would take floors that differ by many orders of magnitude, so two arithmetically
+    equivalent fits stop agreeing. That is exactly what the accumulator/reweighted-seq_update
+    invariant caught. The sum is continuous in the variance, still homogeneous of degree two in the
+    data scale, and still never materially widens a spread the data implied: it binds only below
+    ``~1e-8 * mu**2``. The absolute floor stays the last resort for data carrying no magnitude either
+    (all-zero observations) or a magnitude no variance can represent.
+    """
+    if absolute:
+        return min_covar
+    scale2 = unfloored if unfloored > 0.0 else mu * mu
+    floor = _VARIANCE_FLOOR_RATIO * scale2
+    return floor if 0.0 < floor < np.inf else min_covar
+
+
 def _record_variance_floor(dist: Any, unfloored: float, floored: float, floor: float) -> Any:
     """Note on ``dist`` when the variance floor actually bound, so a fit can report it.
 
@@ -970,7 +1009,14 @@ def _anchored_pooled_variance(
     """
     delta = mean - anchor
     observed_scatter = a_sum2 - 2.0 * delta * a_sum + count * delta * delta
-    # Mathematically >= 0; only last-ulp rounding of O(count * spread^2) terms can undershoot.
+    # Mathematically >= 0; only last-ulp rounding of O(count * spread^2) terms can undershoot --
+    # or overshoot: a degenerate component's scatter must come out EXACTLY zero on every
+    # algebraically equivalent path, or the scale-relative floor reads the +O(eps) residue as a
+    # genuine spread and two equivalent fits disagree (same clamp, same rationale, as the raw
+    # form in _gaussian_contracts.pooled_scalar_variance).
+    noise_scale = max(abs(a_sum2), abs(2.0 * delta * a_sum), count * delta * delta, 1.0e-300)
+    if observed_scatter < 1.0e-12 * noise_scale:
+        observed_scatter = 0.0
     observed_scatter = max(observed_scatter, 0.0)
     if pseudo_count not in (None, 0.0) and prior_variance is not None:
         offset = 0.0 if prior_mean is None else (prior_mean - mean) ** 2
@@ -1007,8 +1053,13 @@ class GaussianEstimator(ParameterEstimator):
                 MAP estimate and carrying the posterior forward as the fitted model's prior) instead
                 of the maximum-likelihood / pseudo-count update.
             min_covar (Optional[float]): Absolute variance floor applied in the MLE M-step. ``None``
-                (default) uses a tiny positive ``1e-8`` floor. Explicit values must be finite and
-                positive, so callers cannot accidentally disable the safeguard.
+                (default) applies a SCALE-RELATIVE safeguard instead -- ``1e-8`` times the squared
+                scale the fit itself carries (see ``_VARIANCE_FLOOR_RATIO``). That equals the
+                historical absolute ``1e-8`` on unit-scale data, never overwrites a positive variance
+                the data implied, and keeps the fit equivariant under a change of units. An explicit
+                value is honored exactly as given, for callers that want a fixed regularizer; it must
+                be finite and positive, so the safeguard cannot be disabled. A floor that actually
+                binds is reported through ``numerical_repairs()``.
             compensated (bool): Opt-in Kahan-compensated accumulation with a running numerics-error
                 estimate for the accumulators this estimator makes; see
                 :class:`GaussianAccumulator`. ``False`` by default (no overhead).
@@ -1032,6 +1083,10 @@ class GaussianEstimator(ParameterEstimator):
             suff_stat,
             configured_floor,
         )
+        # An explicitly requested floor is an absolute one; the default is scale-relative. Kept
+        # separate from ``min_covar`` because that value is still the absolute last resort (and is
+        # read by ppl lowering), so it cannot itself carry the "was this asked for?" distinction.
+        self._absolute_min_covar = min_covar is not None
         self.keys = keys
         self.name = name
         self.prior = prior
@@ -1039,6 +1094,42 @@ class GaussianEstimator(ParameterEstimator):
         if not isinstance(compensated, bool):
             raise TypeError("Gaussian compensated must be a bool")
         self.compensated = compensated
+
+    def __pysp_getstate__(self) -> dict:
+        """Constructor-owned state only.
+
+        ``_absolute_min_covar`` is derived from whether ``min_covar`` was supplied, and the
+        configured ``self.min_covar`` float alone cannot carry that bit: round-tripping it through
+        the constructor would turn every default (scale-relative) floor into an explicitly-requested
+        absolute one, silently changing M-step semantics after a reload. Serialize ``min_covar`` as
+        the constructor saw it -- None when the scale-relative default is in force -- and let
+        ``__init__`` re-derive the rest.
+        """
+        return {
+            "pseudo_count": self.pseudo_count,
+            "suff_stat": self.suff_stat,
+            "name": self.name,
+            "keys": self.keys,
+            "prior": self.prior,
+            "min_covar": self.min_covar if self._absolute_min_covar else None,
+            "compensated": self.compensated,
+        }
+
+    def __pysp_setstate__(self, state: dict) -> None:
+        """Rebuild from constructor-owned state, re-deriving everything ``__init__`` computes."""
+        required = {"pseudo_count", "suff_stat", "name", "keys", "prior", "min_covar", "compensated"}
+        missing = required - set(state)
+        if missing:
+            raise ValueError("GaussianEstimator state is missing %s" % ", ".join(sorted(missing)))
+        self.__init__(
+            pseudo_count=state["pseudo_count"],
+            suff_stat=state["suff_stat"],
+            name=state["name"],
+            keys=state["keys"],
+            prior=state["prior"],
+            min_covar=state["min_covar"],
+            compensated=state["compensated"],
+        )
 
     def accumulator_factory(self) -> "GaussianAccumulatorFactory":
         """Return GaussianAccumulatorFactory with name and keys passed."""
@@ -1089,10 +1180,11 @@ class GaussianEstimator(ParameterEstimator):
 
         denom = new_a - 0.5
         unfloored = new_b / denom if denom > 0.0 else self.min_covar
-        new_sigma2 = max(unfloored, self.min_covar)  # match the MLE-path variance floor
+        floor = _scaled_variance_floor(unfloored, new_mu, self.min_covar, self._absolute_min_covar)
+        new_sigma2 = max(unfloored, floor)  # match the MLE-path variance floor
         new_prior = NormalGammaDistribution(new_mu, new_n, new_a, new_b)
         rv = GaussianDistribution(new_mu, new_sigma2, name=self.name, keys=self.keys, prior=new_prior)
-        return _record_variance_floor(rv, unfloored, new_sigma2, self.min_covar)
+        return _record_variance_floor(rv, unfloored, new_sigma2, floor)
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float, float]) -> "GaussianDistribution":
         """Estimate a Gaussian distribution from aggregated sufficient statistics.
@@ -1156,10 +1248,11 @@ class GaussianEstimator(ParameterEstimator):
             sigma2 = prior_variance
 
         unfloored = sigma2
-        sigma2 = max(sigma2, self.min_covar)
+        floor = _scaled_variance_floor(sigma2, mu, self.min_covar, self._absolute_min_covar)
+        sigma2 = max(sigma2, floor)
 
         rv = GaussianDistribution(mu, sigma2, name=self.name, keys=self.keys, prior=self.prior)
-        return _record_variance_floor(rv, unfloored, sigma2, self.min_covar)
+        return _record_variance_floor(rv, unfloored, sigma2, floor)
 
 
 class GaussianDataEncoder(DataSequenceEncoder):

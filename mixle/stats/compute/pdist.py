@@ -110,10 +110,26 @@ class FitProvenance:
         iterations: iterations actually run (not the cap).
         max_iterations: the cap that was in force.
         converged: True only if the objective gain fell below ``delta`` before the cap. False means the
-            run stopped at ``max_iterations`` with the gain still above it -- an unconverged fit.
+            run stopped without the gain ever falling below ``delta`` -- either at the
+            ``max_iterations`` cap with the objective still improving, or earlier
+            (``iterations < max_iterations``) because the family's next update failed the monotone
+            acceptance gate. In that second case more iterations would not help; the initialization
+            (``init_p``, ``rng``) is what determines the returned parameters. Like ``iterations``
+            and ``objective_gain`` this describes the RUN, not the returned model: under
+            validation-based best-model selection the returned model may be an earlier iterate than
+            the step that converged (its value is ``final_objective``; the trajectory's is
+            ``last_accepted_objective``).
         delta: the convergence threshold, or ``None`` when the caller asked for a fixed iteration count.
-        final_objective: the objective value of the returned model.
+        final_objective: the objective value of the model this receipt is attached to -- the model the
+            fit actually returned. When selection returns an earlier iterate than the trajectory's
+            last accepted step (validation-based best-model selection, or ``monotone=False``), this
+            is that returned iterate's value; the trajectory's own last value is then
+            ``last_accepted_objective``.
         objective_gain: the last accepted improvement; compare against ``delta``.
+        last_accepted_objective: the objective value of the trajectory's LAST accepted step, recorded
+            by loops that may return a different (better) iterate. Equal to ``final_objective`` for a
+            monotone run that returned its last step; ``None`` when the loop recorded no separate
+            trajectory value (the returned model is the last accepted step by construction).
         n_observations: rows the fit consumed.
         repairs: numerical repairs applied during the fit, e.g. ``("min_covar-clamped",)``. Empty means
             none were recorded -- by a fit that records them.
@@ -132,6 +148,9 @@ class FitProvenance:
     n_observations: int | None = None
     repairs: tuple[str, ...] = ()
     seed: int | None = None
+    # Appended after ``seed`` (not next to ``final_objective``) so existing positional
+    # constructions of the earlier fields keep their meaning.
+    last_accepted_objective: float | None = None
 
     def __post_init__(self) -> None:
         """Reject a receipt that describes a fit that cannot have happened.
@@ -165,7 +184,7 @@ class FitProvenance:
             raise ValueError("FitProvenance cannot report convergence after zero iterations")
         # Optional measurements were checked for VALUE but not for TYPE, so a receipt could carry a
         # string or a list where a number belongs and only fail much later, if at all (MXR-080-1190/1202).
-        for field_name in ("delta", "final_objective", "objective_gain"):
+        for field_name in ("delta", "final_objective", "objective_gain", "last_accepted_objective"):
             measured = getattr(self, field_name)
             if measured is None:
                 continue
@@ -190,7 +209,7 @@ class FitProvenance:
         # are not strict JSON (the library emits `allow_nan=False`, MXR-080-1762), and a receipt that
         # cannot serialize is a receipt that gets dropped. `None` -- "not a finite measurement" -- is
         # both true and portable, and keeps the in-memory and round-tripped records identical.
-        for field_name in ("final_objective", "objective_gain"):
+        for field_name in ("final_objective", "objective_gain", "last_accepted_objective"):
             measured = getattr(self, field_name)
             if measured is not None and not math.isfinite(float(measured)):
                 object.__setattr__(self, field_name, None)
@@ -261,6 +280,7 @@ class FitProvenance:
             n_observations=value.get("n_observations"),
             repairs=tuple(value.get("repairs", ())),
             seed=value.get("seed"),
+            last_accepted_objective=value.get("last_accepted_objective"),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -275,6 +295,7 @@ class FitProvenance:
             "delta": self.delta,
             "final_objective": self.final_objective,
             "objective_gain": self.objective_gain,
+            "last_accepted_objective": self.last_accepted_objective,
             "n_observations": self.n_observations,
             "repairs": list(self.repairs),
             "seed": self.seed,

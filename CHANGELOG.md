@@ -70,6 +70,51 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 
 ### Fixed
 
+- A second maintainer-executed candidate campaign (four black-box tester sessions plus two
+  clean-install reproduction replays against candidate `c9eb9d2e`, every blocking/major claim
+  adversarially re-verified and the self-rated minors independently re-rated; D-0201) found and
+  fixed the following.
+  - `optimize(data)` with no estimator silently switched to a sequence model on tables with any
+    uneven-width row -- a short row, an extra field from an unquoted comma, or a blank line at EOF
+    -- memorizing every float as a categorical atom and scoring every training row identically. A
+    majority-width table with minority ragged rows now refuses with the offending row index (the
+    same diagnosis `propose()` already gave); genuinely variable-length sequence data still fits,
+    and the ambiguous middle ground states the reading it took.
+  - `mixle.reproduction.wheel_provenance()`'s `verified` key was a hardcoded `True`; it now runs
+    the wheel's RECORD self-consistency check, returns `verified: not problems` with the problems
+    named, and accepts optional `expected_commit=`/`expected_content_sha256=` bindings. Its
+    docstring states exactly what is and is not verified.
+  - `Model.deploy()` claimed "the common pure-model path never needs an unsafe pickle load" while
+    the Bernoulli-set, Thurstone, and Spearman ranking families silently deployed as pickle. All
+    three now have real JSON codecs (round-trip bit-identical), any remaining fallback is disclosed
+    in the return value, a warning, and the manifest, and the manifest now records producer
+    identity and checks its format-version tag on load.
+  - The Gaussian variance floor is scale-relative (unit-equivariant) instead of absolute, with
+    sub-noise cancellation residues clamped so algebraically equivalent fits agree exactly;
+    materially binding floors and covariance ridges -- including exactly-zero eigenvalue lifts and
+    heterogeneous-unit inflation -- are reported through `numerical_repairs()`.
+  - Mixture/HMM EM: unrecognised `init=` values are refused naming the accepted ones; the default
+    initialization reaches the correct fit on ordinary data inside the default budget; a stalled
+    rank-deficient multivariate fit and an iteration-capped latent fit are disclosed instead of
+    returned silently; `FitProvenance.final_objective` now describes the RETURNED model.
+  - `glm()`: `weights=` semantics are now stated and consistent across likelihood, dispersion and
+    standard errors; dummy-coded perfect separation is detected (not just the continuous form);
+    `robust=` accepts `'HC1'|'HC2'|'HC3'` validated against statsmodels; `n <= p` fits route
+    through the reduced-rank path instead of refusing everything.
+  - A pandas DataFrame passed to `optimize()` honors `structure='auto'` instead of silently
+    bypassing it; a pandas Series with missing values fits through the Optional path; NaN and
+    None mean the same missingness at auto-inference; high-cardinality identifier columns get a
+    usable per-column error; `backend=""` is refused instead of silently running locally.
+  - `describe()` on the `Model` facade and on estimators returns real descriptions instead of "no
+    catalogued capability detected"; `Model.posterior()` works on HMMs; deploy error paths name
+    paths and remedies; the LogGaussian/LogNormal naming is aliased in both dialects with the
+    parameterization mapping documented in both.
+  - Build provenance: the wheel and sdist no longer share one `source_content_sha256` key name for
+    two different file populations -- each record names the population its digest covers, and an
+    env-var release wheel carries the sdist cross-check digest forward.
+
+### Fixed
+
 - A maintainer-executed release-candidate test campaign (five sessions on public data the maintainer
   did not design, every finding independently re-measured; D-0200) found and fixed the following.
   `glm()` computed the coefficient covariance as a pseudo-inverse of the normal-equations matrix,

@@ -1090,6 +1090,217 @@ class MixtureSampler(DistributionSampler):
         return scatter_component_draws(comp_state, self.comp_samplers, int(size))
 
 
+MIXTURE_INIT_STRATEGIES = ("dirichlet", "kmeans++")
+"""The closed set of ``init=`` strategies the mixture EM accumulator implements.
+
+``"kmeans++"`` (the default) seeds near-hard responsibilities from k-means++ centers when the
+encoded data yields a numeric feature matrix, and falls back to ``"dirichlet"`` when it does not.
+``"dirichlet"`` draws sparse random responsibilities for every observation.
+"""
+
+_INIT_SPELLING_HINTS = {
+    # Alphanumeric-normalized near misses -> the name this module uses. The reference library a
+    # practitioner is most likely carrying habits over from spells the same two ideas differently:
+    # sklearn.cluster.KMeans(init="k-means++") and GaussianMixture(init_params="kmeans") both mean
+    # "kmeans++" here, and GaussianMixture(init_params="random") is the random-responsibility init,
+    # which is what "dirichlet" spells here.
+    "kmeans": "kmeans++",
+    "kmeansplusplus": "kmeans++",
+    "random": "dirichlet",
+    "dirichlet": "dirichlet",
+}
+
+
+def _init_spelling_hint(value: Any) -> str:
+    """Return a ``; did you mean ...`` clause when ``value`` is a recognisable misspelling."""
+    if not isinstance(value, str):
+        return ""
+    normalized = "".join(ch for ch in value.lower() if ch.isalnum())
+    suggestion = _INIT_SPELLING_HINTS.get(normalized)
+    return '; did you mean "%s"?' % suggestion if suggestion is not None else ""
+
+
+def _validated_mixture_init(value: Any, label: str) -> str:
+    """Return ``value`` as one of :data:`MIXTURE_INIT_STRATEGIES`, or raise naming the accepted set.
+
+    ``init`` selects an algorithm, and there is no defensible fit for one this module does not
+    implement, so an unrecognised name is refused rather than absorbed. Absorbing it ran the
+    ``"dirichlet"`` path under another name: a caller who spelled the option the way scikit-learn
+    spells it got the fit they were trying to avoid, and passing such a value alongside
+    ``robust=True`` disarmed that path's own ``"kmeans++"`` default with no signal anywhere. The
+    accepted set has only ever held these two names -- ``MixtureEstimator`` (and, through it, every
+    accumulator/factory in this family) is the only producer -- so no state the library itself
+    creates is rejected here.
+    """
+    if isinstance(value, str) and value in MIXTURE_INIT_STRATEGIES:
+        return value
+    raise ValueError(
+        "%s: init must be one of %r, got %r%s" % (label, MIXTURE_INIT_STRATEGIES, value, _init_spelling_hint(value))
+    )
+
+
+def _validated_component_estimators(estimators: Any, label: str) -> Sequence[ParameterEstimator]:
+    """Validate ``estimators`` at the mixture-constructor boundary, naming what a mistake was.
+
+    The three likely mistakes each used to surface as a bare error from library internals (T4-9):
+    a single estimator instead of a sequence raised ``TypeError: object of type 'GaussianEstimator'
+    has no len()`` here; an empty sequence constructed fine and then raised ``IndexError: list index
+    out of range`` deep in the first E-step (or ``ZeroDivisionError`` at construction under
+    ``robust=True``); and a non-estimator element raised ``AttributeError`` from
+    ``accumulator_factory()``. Nothing the library itself builds is refused: every internal caller
+    passes a non-empty list of estimators, and the element probe is the ``accumulator_factory``
+    attribute EM itself requires -- an object without one never survived the E-step anyway.
+    """
+    if isinstance(estimators, str) or not hasattr(estimators, "__len__"):
+        if hasattr(estimators, "accumulator_factory"):
+            raise TypeError(
+                "%s: estimators must be a sequence of component estimators, got a single %s; "
+                "wrap it in a list: %s([estimator])" % (label, type(estimators).__name__, label)
+            )
+        raise TypeError(
+            "%s: estimators must be a sequence of component estimators (one per mixture "
+            "component), got %s" % (label, type(estimators).__name__)
+        )
+    if len(estimators) == 0:
+        raise ValueError("%s: estimators is empty -- a mixture needs at least one component estimator" % label)
+    for i, est in enumerate(estimators):
+        if not hasattr(est, "accumulator_factory"):
+            raise TypeError(
+                "%s: estimators[%d] must be a component estimator (an object providing "
+                "accumulator_factory(), e.g. GaussianEstimator()), got %s" % (label, i, type(est).__name__)
+            )
+    return estimators
+
+
+def _validated_mixture_keys(keys: Any, label: str) -> Any:
+    """Validate the ``keys`` pair at the mixture-constructor boundary.
+
+    A mixture has two keyable statistic sites -- the weights and the pooled component payloads --
+    so ``keys`` is a 2-entry pair, unlike the single string leaf estimators take. A single string
+    used to be absorbed by indexing: ``keys="k"`` raised a bare ``IndexError: string index out of
+    range`` when the accumulator asked for ``keys[1]``, and a 2-character string was silently split
+    into two 1-character keys (``keys="wc"`` shared weights under ``"w"`` and components under
+    ``"c"``), which is worse than an error (T4-9). ``None`` is accepted as "no sharing at all" --
+    the meaning it visibly asks for. Every internal caller already passes a 2-entry tuple or list,
+    which is returned unchanged.
+    """
+    if keys is None:
+        return (None, None)
+    if isinstance(keys, (tuple, list)) and len(keys) == 2 and all(k is None or isinstance(k, str) for k in keys):
+        return keys
+    if isinstance(keys, str):
+        raise TypeError(
+            "%s: keys must be a (weights_key, components_key) pair, got the single string %r; "
+            "pass (%r, None) to share only the mixture weights, (None, %r) to share only the "
+            "component statistics, or (%r, %r) to share both" % (label, keys, keys, keys, keys, keys)
+        )
+    raise TypeError(
+        "%s: keys must be a (weights_key, components_key) pair of str-or-None entries, got %r" % (label, keys)
+    )
+
+
+def _validated_fixed_weights(fixed_weights: Any, num_components: int, label: str) -> np.ndarray | None:
+    """Validate ``fixed_weights`` against the component count at the constructor boundary.
+
+    Without this, a wrong-length vector constructed fine and failed only at the end of the first
+    EM iteration, and a non-numeric value failed there with a message that never named the argument
+    (T4-9). Weights are checked -- through a float view -- for shape, finiteness, non-negativity,
+    and positive total mass, values for which no mixture density exists; they are deliberately NOT
+    renormalized (``estimate`` uses them exactly as given, matching every internal caller), and
+    what is stored is ``np.asarray(fixed_weights)`` with its dtype preserved, byte-identical to
+    what this constructor stored before validation existed, so serialized 0.7-era estimator
+    artifacts (whose canonical state is compared against a fresh construction on load) keep
+    loading.
+    """
+    if fixed_weights is None:
+        return None
+    try:
+        w = np.asarray(fixed_weights, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            "%s: fixed_weights must be a numeric vector of %d mixture weights, got %r"
+            % (label, num_components, fixed_weights)
+        ) from exc
+    if w.ndim != 1 or w.shape[0] != num_components:
+        raise ValueError(
+            "%s: fixed_weights must hold exactly %d weights (one per component estimator), "
+            "got shape %s" % (label, num_components, w.shape)
+        )
+    if not np.isfinite(w).all() or np.any(w < 0.0):
+        raise ValueError("%s: fixed_weights must be finite and non-negative, got %s" % (label, w))
+    if not w.sum() > 0.0:
+        raise ValueError("%s: fixed_weights must have positive total mass, got %s" % (label, w))
+    return np.asarray(fixed_weights)
+
+
+def _validated_weight_scalar(value: Any, name: str, label: str, nonnegative: bool = False) -> Any:
+    """Validate a scalar weight-path argument (``pseudo_count``, ``w_min``) at the boundary.
+
+    A non-numeric value used to construct fine and only fail mid-M-step with a bare operand
+    ``TypeError`` (T4-9); a negative ``pseudo_count`` silently subtracted mass from every
+    component's count, which can drive fitted weights negative -- no defensible fit exists for
+    either. Anything ``float()`` accepts (ints, numpy scalars, numeric strings) is computed with
+    rather than refused; bools are rejected as the near-certain mistakes they are, matching
+    ``finite_scalar`` in the vector families. A value that already IS a real number is returned
+    unchanged -- an int stored as an int is the canonical state 0.7-era serialized estimators
+    carry, and the load path refuses an artifact whose state a fresh construction would rewrite.
+    """
+    if isinstance(value, (bool, np.bool_)) or np.ndim(value) != 0:
+        raise TypeError("%s: %s must be a real scalar, got %r" % (label, name, value))
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("%s: %s must be a real scalar, got %r" % (label, name, value)) from exc
+    if not np.isfinite(result):
+        raise ValueError("%s: %s must be finite, got %r" % (label, name, value))
+    if nonnegative and result < 0.0:
+        raise ValueError("%s: %s must be non-negative, got %r" % (label, name, value))
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return value
+    return result
+
+
+def _validated_weight_counts(suff_stat: Any, num_components: int, label: str) -> Any:
+    """Validate the ``suff_stat`` prior component-count vector at the constructor boundary.
+
+    A wrong-length list used to fail mid-M-step with ``TypeError: can't multiply sequence by
+    non-int of type 'float'`` -- and a TUPLE alongside an integer ``pseudo_count`` was silently
+    REPEATED by sequence multiplication instead of scaled (T4-9). Representations that were
+    already sound downstream -- a numeric ndarray of per-component counts, or a single scalar,
+    which broadcasts to a uniform prior count -- are stored exactly as passed, keeping 0.7-era
+    serialized artifacts loadable under the canonical-state check; any other container is
+    converted to a float ndarray so the M-step's arithmetic operates on values, never on
+    containers.
+    """
+    if suff_stat is None:
+        return None
+    if isinstance(suff_stat, np.ndarray) and (
+        np.issubdtype(suff_stat.dtype, np.floating) or np.issubdtype(suff_stat.dtype, np.integer)
+    ):
+        counts = suff_stat
+        store: Any = suff_stat
+    elif not isinstance(suff_stat, (bool, np.bool_)) and isinstance(suff_stat, (int, float, np.integer, np.floating)):
+        counts = np.asarray(suff_stat, dtype=float)
+        store = suff_stat
+    else:
+        try:
+            counts = np.asarray(suff_stat, dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                "%s: suff_stat must be a numeric component-count vector of length %d (or a single "
+                "scalar), got %r" % (label, num_components, suff_stat)
+            ) from exc
+        store = counts
+    if counts.ndim not in (0, 1) or (counts.ndim == 1 and counts.shape[0] != num_components):
+        raise ValueError(
+            "%s: suff_stat must hold exactly %d component counts (one per component estimator) "
+            "or a single scalar, got shape %s" % (label, num_components, counts.shape)
+        )
+    if not np.all(np.isfinite(counts)) or np.any(counts < 0.0):
+        raise ValueError("%s: suff_stat counts must be finite and non-negative, got %r" % (label, suff_stat))
+    return store
+
+
 class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
     """EM accumulator for mixture weights and component sufficient statistics."""
 
@@ -1098,7 +1309,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         accumulators: Sequence[SequenceEncodableStatisticAccumulator],
         keys: tuple[str | None, str | None] = (None, None),
         name: str | None = None,
-        init: str = "dirichlet",
+        init: str = "kmeans++",
     ) -> None:
         """Create an EM accumulator for mixture responsibilities.
 
@@ -1107,9 +1318,11 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             keys: Optional shared-statistic keys for mixture weights and
                 component payloads.
             name: Optional diagnostic name.
-            init: Initialization strategy. ``"dirichlet"`` draws random
-                responsibilities; ``"kmeans++"`` uses numeric encoded features
-                when possible and falls back to ``"dirichlet"`` otherwise.
+            init: Initialization strategy, one of
+                :data:`MIXTURE_INIT_STRATEGIES`. ``"kmeans++"`` (the default)
+                uses numeric encoded features when possible and falls back to
+                ``"dirichlet"`` otherwise; ``"dirichlet"`` draws random
+                responsibilities. Any other value is rejected.
 
         Attributes:
             comp_counts: Accumulated expected component counts.
@@ -1122,7 +1335,7 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         self.weight_key = keys[0]
         self.comp_key = keys[1]
         self.name = name
-        self.init = init
+        self.init = _validated_mixture_init(init, "MixtureAccumulator()")
         # Data log-likelihood accumulated as a byproduct of the E-step (the posterior normalizer),
         # only when _track_ll is enabled. Used by the fused-EM fast path in
         # optimize(reuse_estep_ll=True); not part of value(). Off by default so the standard path
@@ -1225,9 +1438,13 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
     def initialize(self, x: T, weight: float, rng: np.random.RandomState) -> None:
         """Initialize component sufficient statistics from one observation.
 
-        The default initialization draws a responsibility vector from a
-        Dirichlet distribution and delegates responsibility-weighted
-        initialization to every component accumulator.
+        This path draws a responsibility vector from a Dirichlet distribution
+        and delegates responsibility-weighted initialization to every component
+        accumulator. It does so for every ``init`` strategy: k-means++ seeding
+        needs the whole batch to place its centers, and this method sees one
+        observation at a time. The scalar and vectorized initializations
+        therefore agree only under ``init="dirichlet"``; use
+        :meth:`seq_initialize` to get the configured strategy.
 
         Args:
             x: Raw observation.
@@ -1547,7 +1764,7 @@ class MixtureAccumulatorFactory(StatisticAccumulatorFactory):
         factories: Sequence[StatisticAccumulatorFactory],
         keys: tuple[str | None, str | None] = (None, None),
         name: str | None = None,
-        init: str = "dirichlet",
+        init: str = "kmeans++",
     ) -> None:
         """Create a factory for mixture EM accumulators.
 
@@ -1555,12 +1772,13 @@ class MixtureAccumulatorFactory(StatisticAccumulatorFactory):
             factories: Component accumulator factories.
             keys: Optional shared-statistic keys for weights and components.
             name: Optional diagnostic name.
-            init: Initialization strategy passed to ``MixtureAccumulator``.
+            init: Initialization strategy passed to ``MixtureAccumulator``,
+                one of :data:`MIXTURE_INIT_STRATEGIES`.
         """
         self.factories = factories
         self.keys = keys
         self.name = name
-        self.init = init
+        self.init = _validated_mixture_init(init, "MixtureAccumulatorFactory()")
 
     def make(self) -> MixtureAccumulator:
         """Return a fresh mixture accumulator with fresh component accumulators."""
@@ -1600,29 +1818,52 @@ class MixtureEstimator(ParameterEstimator):
             w_min: Plain-MLE weight floor. When positive, fitted weights are
                 clamped and renormalized so a component cannot be frozen at
                 exact zero in later EM iterations.
-            robust: Enable the robust default path: k-means++ initialization
-                where applicable plus a small data-independent weight floor.
-            init: Initialization strategy for the accumulator. ``None`` selects
-                ``"kmeans++"`` in robust mode and ``"dirichlet"`` otherwise. The ``"dirichlet"``
-                default draws per-observation responsibilities from a deliberately degenerate
-                Dirichlet (``alpha = 1/K**2``) -- sparse random assignments, the standard
-                responsibility init. Because random subsets of a large dataset share its pooled
-                moments, every component still starts near the global law as ``n`` grows; for
-                well-separated location families prefer ``init="kmeans++"`` (or ``robust=True`` /
-                :func:`~mixle.inference.best_of` restarts) when a single default fit must separate.
+            robust: Enable the robust default path: a small data-independent
+                weight floor on top of the ordinary k-means++ initialization.
+            init: Initialization strategy for the accumulator, one of
+                :data:`MIXTURE_INIT_STRATEGIES`; ``None`` selects the default ``"kmeans++"``.
+                Any other value is rejected. ``"kmeans++"`` seeds near-hard responsibilities from
+                k-means++ centers whenever the encoded data yields a numeric feature matrix, and
+                falls back to ``"dirichlet"`` when it does not. ``"dirichlet"`` draws
+                per-observation responsibilities from a deliberately degenerate Dirichlet
+                (``alpha = 1/K**2``) -- sparse random assignments, the classical responsibility
+                init. It is no longer the default because random subsets of a large dataset share
+                its pooled moments, so every component starts near the *global* law as ``n`` grows:
+                on a well-separated location family the components then sit on top of each other in
+                the empty middle and EM has no gradient to pull them apart, which returns a
+                one-cluster answer for visibly multi-cluster data. Pass ``init="dirichlet"`` for
+                the classical start, and see :func:`~mixle.inference.best_of` for restarts.
         """
+        # Boundary validation (T4-9): each likely construction mistake used to surface as a bare
+        # IndexError/TypeError/AttributeError/ZeroDivisionError from library internals, at
+        # construction or -- worse -- only deep inside the first EM iteration. ``label`` is the
+        # dynamic class name so GaussianMixtureEstimator (which forwards here) names itself.
+        label = type(self).__name__
+        estimators = _validated_component_estimators(estimators, label)
         self.num_components = len(estimators)
         self.estimators = estimators
-        self.pseudo_count = pseudo_count
-        self.suff_stat = suff_stat
-        self.keys = keys
+        self.pseudo_count = (
+            None
+            if pseudo_count is None
+            else _validated_weight_scalar(pseudo_count, "pseudo_count", label, nonnegative=True)
+        )
+        self.suff_stat = _validated_weight_counts(suff_stat, self.num_components, label)
+        self.keys = _validated_mixture_keys(keys, label)
         self.name = name
-        self.fixed_weights = np.asarray(fixed_weights) if fixed_weights is not None else None
+        self.fixed_weights = _validated_fixed_weights(fixed_weights, self.num_components, label)
         self.robust = require_exact_bool(robust, "robust")
-        # In robust mode default to k-means++ init and a tiny data-independent weight floor.
+        # k-means++ is the default start for every mode, not just the robust one: the Dirichlet
+        # responsibility draw starts every component at the pooled law, which on a separated
+        # location family leaves EM with nothing to pull the components apart -- it converges,
+        # quietly, to a single cluster sitting in the empty middle. k-means++ falls back to the
+        # Dirichlet draw whenever the encoded data has no numeric feature matrix, so families it
+        # cannot seed are unaffected. robust=True adds the tiny data-independent weight floor.
         if init is None:
-            init = "kmeans++" if self.robust else "dirichlet"
-        self.init = init
+            init = "kmeans++"
+        self.init = _validated_mixture_init(init, "%s()" % label)
+        # w_min may be negative on purpose (any value <= 0 means "no weight floor"), so only its
+        # scalar-ness is validated: a non-numeric value used to raise a bare comparison TypeError.
+        w_min = _validated_weight_scalar(w_min, "w_min", label)
         if w_min <= 0.0 and self.robust:
             w_min = 1.0e-4 / self.num_components
         self.w_min = float(w_min)

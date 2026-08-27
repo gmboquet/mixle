@@ -4,6 +4,36 @@
 ``MVN(dim)``, … — each returns a :class:`~mixle.ppl.core.RandomVariable` in a registered family (the
 registrations live in :mod:`mixle.ppl._lowering`). A parameter slot accepts a concrete value, the token
 ``free`` (estimate it), or another ``RandomVariable``. Extracted from ``mixle/ppl/__init__.py``.
+
+Parameterization map (T2-05) — this dialect uses the *conventional* textbook parameterizations,
+and for a few families the core catalog (:mod:`mixle.dist` / :mod:`mixle.stats`) parameterizes
+differently. Carrying argument values across the two surfaces without converting silently changes
+the model for exactly these families (every other shared family agrees argument-for-argument;
+the set below was established by densities-equal probing, not by reading names):
+
+==============  ================================  =====================================  =========================
+family          this dialect                      core catalog class                     conversion (dialect->core)
+==============  ================================  =====================================  =========================
+Normal          ``Normal(mean, sd)``              ``GaussianDistribution(mu, sigma2)``   ``sigma2 = sd**2``
+LogNormal       ``LogNormal(mu, sigma)``          ``LogGaussianDistribution(mu,          ``sigma2 = sigma**2``
+                                                  sigma2)``
+EMG             ``EMG(mu, sigma, rate)``          ``ExponentiallyModifiedGaussian-       ``sigma2 = sigma**2``
+                                                  Distribution(mu, sigma2, lam)``        (``lam = rate``)
+Gamma           ``Gamma(shape, rate)``            ``GammaDistribution(k, theta)``        ``theta = 1 / rate``
+Exponential     ``Exponential(rate)``             ``ExponentialDistribution(beta)``      ``beta = 1 / rate``
+Binomial        ``Binomial(n, p)``                ``BinomialDistribution(p, n)``         same meanings, positional
+                                                                                         order swapped
+==============  ================================  =====================================  =========================
+
+Conversion example::
+
+    from mixle.ppl import Normal
+    from mixle.dist import GaussianDistribution
+    Normal(0.0, 2.0)               # dialect: sd = 2.0
+    GaussianDistribution(0.0, 4.0) # catalog: sigma2 = 2.0**2 -- the SAME distribution
+
+Naming note (T2-06): the log-normal family is ``LogNormal`` here and ``LogGaussian`` in the core
+catalog; :func:`LogGaussian` below and ``mixle.dist.LogNormalDistribution`` bridge the two names.
 """
 
 from __future__ import annotations
@@ -78,6 +108,10 @@ def Normal(mean: Any, sd: Any, *, name: str | None = None, keys: str | None = No
     The user-facing scale is ``sd``. Lowering converts it to the variance
     parameter used by ``GaussianDistribution`` while fitted artifacts should
     remain interpretable in the constructor's scale parameterization.
+
+    Core-catalog mapping: ``Normal(mean, sd)`` is ``GaussianDistribution(mu=mean, sigma2=sd**2)``
+    -- the catalog's second argument is the VARIANCE, not the standard deviation (see the
+    module-level parameterization map).
     """
     return RandomVariable._sample("Normal", (mean, sd), name=name, keys=keys)
 
@@ -90,14 +124,18 @@ def Poisson(rate: Any, *, name: str | None = None, keys: str | None = None) -> R
 def Gamma(shape: Any, rate: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
     """Symbolic Gamma distribution parameterized by shape and rate.
 
-    The underlying stats family uses scale ``theta``; lowering maps
-    ``rate`` to ``theta = 1 / rate``.
+    Core-catalog mapping: the catalog's ``GammaDistribution(k, theta)`` uses SCALE ``theta``;
+    lowering maps ``rate`` to ``theta = 1 / rate`` (see the module-level parameterization map).
     """
     return RandomVariable._sample("Gamma", (shape, rate), name=name, keys=keys)
 
 
 def Exponential(rate: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
-    """Symbolic exponential distribution parameterized by event rate."""
+    """Symbolic exponential distribution parameterized by event rate.
+
+    Core-catalog mapping: the catalog's ``ExponentialDistribution(beta)`` uses the MEAN/scale
+    ``beta = 1 / rate`` (see the module-level parameterization map).
+    """
     return RandomVariable._sample("Exponential", (rate,), name=name, keys=keys)
 
 
@@ -147,15 +185,29 @@ def StudentT(df: Any, loc: Any, scale: Any, *, name: str | None = None, keys: st
 
 
 def LogNormal(mu: Any, sigma: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
-    """Symbolic log-normal distribution where ``log(X)`` is normal."""
+    """Symbolic log-normal distribution where ``log(X)`` is normal.
+
+    Naming: this family is called **LogGaussian** in the core catalog
+    (``mixle.dist.LogGaussianDistribution``, alias ``mixle.dist.LogNormalDistribution``);
+    :func:`LogGaussian` is this constructor's same-object alias, so either name works on either
+    surface (T2-06). Core-catalog mapping: ``sigma`` here is the log-space STANDARD DEVIATION;
+    the catalog class takes the log-space variance ``sigma2 = sigma**2`` (T2-05).
+    """
     return RandomVariable._sample("LogNormal", (mu, sigma), name=name, keys=keys)
+
+
+# T2-06: same-object alias under the core catalog's spelling, so a search for "LogGaussian" in the
+# ppl dialect finds the family exactly as a search for "LogNormal" does in the catalog.
+LogGaussian = LogNormal
 
 
 def EMG(mu: Any, sigma: Any, rate: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
     """Exponentially-modified Gaussian: ``X = Normal(mu, sigma) + Exponential(rate)`` (right-skewed).
 
     Lowers to ``ExponentiallyModifiedGaussianDistribution(mu, sigma**2, lam=rate)``; ``rate`` is the
-    exponential component's rate (its mean is ``1/rate``). The MLE is iterative with no closed form,
+    exponential component's rate (its mean is ``1/rate``). Note the catalog class takes the VARIANCE
+    ``sigma2 = sigma**2`` where this constructor takes the standard deviation ``sigma`` (see the
+    module-level parameterization map). The MLE is iterative with no closed form,
     so ``EMG(free, free, free).fit(data)`` uses a consistent method-of-moments estimate."""
     return RandomVariable._sample("EMG", (mu, sigma, rate), name=name, keys=keys)
 
@@ -305,7 +357,12 @@ def Pareto(scale: Any, shape: Any, *, name: str | None = None, keys: str | None 
 
 
 def Binomial(n: Any, p: Any, *, name: str | None = None, keys: str | None = None) -> RandomVariable:
-    """Symbolic binomial distribution with ``n`` trials and success probability ``p``."""
+    """Symbolic binomial distribution with ``n`` trials and success probability ``p``.
+
+    Core-catalog mapping: the catalog's ``BinomialDistribution(p, n)`` takes the SAME two
+    parameters in the opposite positional order (see the module-level parameterization map);
+    keyword arguments are safe on both surfaces.
+    """
     n = _exact_dimension(n, "Binomial n", allow_zero=True)
     return RandomVariable._sample("Binomial", (n, p), name=name, keys=keys)
 

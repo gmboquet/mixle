@@ -2359,11 +2359,42 @@ def load_models(x: str):
     return from_json(x)
 
 
-def dump_models(x) -> str:
-    """Serialize a stats model or collection of models to safe strict JSON."""
-    from mixle.utils.serialization import to_json
+def dump_models(x, *, verify: bool = True) -> str:
+    """Serialize a stats model or collection of models to safe strict JSON.
 
-    return to_json(x)
+    The JSON is read back through :func:`load_models` before it is returned, and a failure is
+    raised here rather than handed to whoever later tries to load it. Encoding on its own does not
+    establish that: the encoder accepts any registered class's ``__dict__``, while the decoder also
+    requires that state to reconstruct through the class's own constructor. Families whose
+    estimator pins a fit annotation onto the fitted object, and families whose state names a
+    parameter differently from the constructor's, encode cleanly and then refuse to load -- so
+    without this check ``dump_models`` returns text that ``load_models`` cannot read, and the bill
+    arrives in another process on another day.
+
+    Pass ``verify=False`` for text wanted to inspect rather than to reload; the JSON is byte-identical
+    either way and only the read back is skipped. It is the way to get at the parameters of a model
+    whose family has no working decoder yet, since the written state is complete even when the
+    reader refuses it.
+    """
+    from mixle.utils.serialization import SerializationError, to_json
+
+    text = to_json(x)
+    if verify:
+        # Trusted, because this text was encoded from a live object in this process a statement
+        # ago -- the trust gate guards artifacts of unknown origin, not our own model. Probing
+        # untrusted would report anything holding an embedded torch module as unreadable when in
+        # fact load_models reads it back fine inside the caller's own trusted_deserialization().
+        from mixle.lifecycle import json_read_back_failure
+
+        failure = json_read_back_failure(text)
+        if failure is not None:
+            raise SerializationError(
+                f"dump_models produced JSON that load_models cannot read back ({failure}). "
+                "Refusing to return a write-only serialization: the model is still in memory here, "
+                "and would not be recoverable from this text later. Pickle it instead, or pass "
+                "verify=False if the JSON is wanted only to inspect the fitted parameters."
+            )
+    return text
 
 
 # Vectorized sequence-driver API — implementations live in mixle.stats.compute.sequence so the

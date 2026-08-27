@@ -115,6 +115,15 @@ def pooled_scalar_variance(
     scale = max(abs(sum_xx), abs(2.0 * mean * sum_x), abs(count * mean * mean), 1.0)
     if observed_scatter < -1.0e-12 * scale:
         raise ValueError("Gaussian sufficient statistics imply a negative centered second moment")
+    if observed_scatter < 1.0e-12 * scale:
+        # Below the cancellation-noise bound of the terms just subtracted, a positive residue is
+        # arithmetic, not data: a single-observation component lands at exactly 0.0 on one code
+        # path and at +O(eps * scale) on an algebraically equivalent one, and the scale-relative
+        # variance floor then treats the residue as a genuine (absurdly small) spread -- two
+        # equivalent fits disagreed by ~9 nats per row (campaign wave). The tolerance mirrors the
+        # negative-scatter check above: what would be forgiven as rounding below zero is equally
+        # rounding above it.
+        observed_scatter = 0.0
     observed_scatter = max(observed_scatter, 0.0)
     if pseudo_count not in (None, 0.0) and prior_variance is not None:
         offset = 0.0 if prior_mean is None else (prior_mean - mean) ** 2

@@ -327,8 +327,69 @@ def installed_content_provenance() -> dict[str, Any]:
     }
 
 
-def wheel_provenance(path: Path) -> dict[str, Any]:
-    """Verify a Mixle wheel, its installed version identity, and embedded source provenance."""
+def _expected_hex(value: str, *, length: int, parameter: str) -> str:
+    """Normalize a caller-supplied expected digest; refuse only what could never match.
+
+    Case and surrounding whitespace are presentation, not identity -- a digest pasted in
+    uppercase names the same bytes -- so both are normalized rather than refused (legitimate
+    input must not be rejected). Anything that is not hex of the right length after that can
+    never equal a shape-valid provenance field, and reporting it as a provenance "mismatch"
+    would present the caller's typo as evidence of tampering; it is a ValueError instead.
+    """
+    text = value.strip().lower()
+    if len(text) != length or any(character not in "0123456789abcdef" for character in text):
+        raise ValueError(f"{parameter} must be a {length}-character hexadecimal digest")
+    return text
+
+
+def wheel_provenance(
+    path: Path,
+    *,
+    expected_commit: str | None = None,
+    expected_content_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Verify a Mixle wheel's identity, RECORD self-consistency, and provenance record shape.
+
+    VERIFIED, fail-closed. A wheel that cannot be identified at all raises ``ValueError``
+    (unreadable archive, wrong METADATA/provenance member count, name/version differing from
+    the installed distribution, ill-shaped or dirty provenance record). Every check past
+    identification lands in the returned ``problems`` list instead, and any entry makes
+    ``verified`` False -- a tampered-but-identifiable wheel gets a receipt naming the
+    tampering rather than no receipt:
+
+    * RECORD self-consistency: every hashed RECORD claim is recomputed from the archived
+      member it names, every member must be claimed, duplicate and root-escaping names are
+      refused, and exactly one unhashed self-referencing RECORD row is allowed. This is
+      ``_wheel_record_hashes``, the same check ``subject_binding`` builds on.
+    * ``expected_commit=`` / ``expected_content_sha256=``, when given, are compared against
+      the record's ``source_commit`` / ``source_content_sha256`` (case-insensitively).
+
+    NOT verified, stated so this record cannot be presented as more than it is:
+
+    * Provenance field VALUES are shape-validated only: a well-formed but false
+      ``source_commit``/``source_tree``/``source_content_sha256`` -- 40 zeros is a valid
+      shape -- passes unless the caller supplies the matching ``expected_*`` argument.
+    * RECORD self-consistency proves the archive matches its own manifest, not that the
+      manifest is the released one: a wheel rebuilt with an internally consistent RECORD,
+      including an extra module listed with a correct hash, still self-verifies here.
+      Binding to the bytes that actually execute is ``subject_binding``'s job, and
+      ``build_receipt`` ANDs the two verdicts.
+    * The reported wheel ``sha256`` is an identity for external comparison, not a check.
+
+    ``source_content_sha256`` is one key name over two populations (T3-05). The digest
+    covers whatever tree the build ran from, and the sibling fields
+    ``source_content_file_count`` / ``source_content_universe`` declare that population: a
+    wheel built from a git checkout -- and an sdist's embedded copy of this record -- digest
+    the full checkout (~2,000 files), while a wheel built from an unpacked sdist digests
+    only the packaged subset (~800 files). Two records disagreeing on this key while their
+    file counts differ is therefore a POPULATION difference, not tampering. The
+    cross-artifact check is the sdist record's ``sdist_content_sha256``: the digest of the
+    packaged subset, present in every sdist-embedded record (and carried into wheels whose
+    record was adopted through the sdist, beside ``source_content_carried_through_sdist``),
+    which equals the ``source_content_sha256`` a wheel built from that sdist derives for
+    itself. ``expected_content_sha256`` is compared against THIS record's declared
+    population, so draw the expectation from the same universe the record names.
+    """
     if not path.is_file() or path.suffix != ".whl":
         raise ValueError("reproduction artifact must be an existing .whl file")
     digest, size = _sha256_file(path)
@@ -381,6 +442,26 @@ def wheel_provenance(path: Path) -> dict[str, Any]:
         raise ValueError("wheel build provenance has invalid or missing source_content_universe")
     if provenance.get("source_dirty") is not False:
         raise ValueError("release reproduction requires a wheel built from a clean source candidate")
+    # T3-06: ``verified`` was a hardcoded literal True -- the function hashed the wheel only to
+    # REPORT a digest and could not fail for altered member bytes, a member deleted from the
+    # RECORD, or a smuggled unlisted member, while the module docstring said "fail-closed". The
+    # RECORD self-consistency check that subject_binding already builds on runs here too, so this
+    # record's verdict reflects the archive it describes. Failures are collected, not raised: past
+    # identification, a receipt naming the tampering is strictly more useful than a traceback.
+    problems: list[str] = []
+    record_hashed_entry_count: int | None = None
+    try:
+        record_hashed_entry_count = len(_wheel_record_hashes(path))
+    except Exception as exc:  # noqa: BLE001 -- untrusted archive, same boundary as subject_binding
+        problems.append(f"wheel RECORD self-consistency failed: {type(exc).__name__}: {exc}")
+    if expected_commit is not None:
+        expected = _expected_hex(expected_commit, length=40, parameter="expected_commit")
+        if provenance["source_commit"] != expected:
+            problems.append(f"source_commit is {provenance['source_commit']}, expected {expected}")
+    if expected_content_sha256 is not None:
+        expected = _expected_hex(expected_content_sha256, length=64, parameter="expected_content_sha256")
+        if provenance["source_content_sha256"] != expected:
+            problems.append(f"source_content_sha256 is {provenance['source_content_sha256']}, expected {expected}")
     return {
         "artifact": "mixle.wheel_provenance/v1",
         "filename": path.name,
@@ -388,7 +469,11 @@ def wheel_provenance(path: Path) -> dict[str, Any]:
         "size_bytes": size,
         "version": installed_version,
         "build": provenance,
-        "verified": True,
+        # None when the RECORD itself failed, so a reader can tell "no entries verified" from
+        # "the count happened to be zero" (the latter is itself refused by _wheel_record_hashes).
+        "record_hashed_entry_count": record_hashed_entry_count,
+        "problems": problems,
+        "verified": not problems,
     }
 
 

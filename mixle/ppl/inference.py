@@ -2165,6 +2165,60 @@ def sample_fit(rv: RandomVariable, data, **kw) -> RandomVariable:
     return fitted
 
 
+# Constrained-space floor for the MAP boundary retry, as a fraction of the data scale. A
+# positive-support slot floored here squares to the 1e-8 scale-relative VARIANCE floor the
+# closed-form Gaussian M-step applies (``_scaled_variance_floor``), so the repaired MAP answer for
+# a fixed-mean Normal on constant data lands on exactly the value the all-free EM sibling reports.
+_MAP_SCALE_FLOOR_RATIO = 1.0e-4
+
+
+def _map_data_scale(data) -> float:
+    """Magnitude carried by scalar observations, for the MAP boundary-retry floor.
+
+    Mirrors the closed-form estimators' scale-relative safeguard: the floor must shrink with the
+    data so a legitimately tiny-scale fit is never widened. Non-scalar or magnitude-free data fall
+    back to unit scale (matching the estimators' absolute last-resort floor).
+    """
+    try:
+        arr = np.asarray(data, dtype=float).ravel()
+    except (TypeError, ValueError):
+        return 1.0
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return 1.0
+    scale = max(abs(float(finite.mean())), float(finite.std()))
+    return scale if scale > 0.0 else 1.0
+
+
+def _map_boundary_floor_retry(neg, u0, slots, data, minimize, options):
+    """Re-run an analytic-gradient MAP whose log-target went non-finite, flooring positive slots.
+
+    On degenerate data the likelihood can be unbounded at the edge of the parameter space -- the
+    canonical case is a fixed-mean ``Normal(c, free)`` fit on data constant at ``c``, where the free
+    sd's MLE is the ``sigma -> 0`` boundary and the log-likelihood diverges to ``+inf``, so L-BFGS
+    walks ``log sigma`` into an underflow and the autograd target turns non-finite. The closed-form
+    sibling estimators accept exactly this input and answer with a scale-relative variance floor
+    plus a ``numerical_repairs()`` receipt; raising here was fail-closed guard overreach (T4-5).
+    Retry inside a box that keeps every positive-support coordinate at or above the same
+    scale-relative floor, and report which floors actually bind so the caller can disclose the
+    repair. A fit whose optimum is interior never reaches this path: the first, unbounded run only
+    raises when the target degenerates, so no previously-working answer changes.
+    """
+    floor = _MAP_SCALE_FLOOR_RATIO * _map_data_scale(data)
+    log_floor = math.log(floor)
+    bounds = [(log_floor, None) if s.support == "positive" else (None, None) for s in slots]
+    u_start = np.asarray([max(u, log_floor) if s.support == "positive" else u for u, s in zip(u0, slots)], dtype=float)
+    res = minimize(neg, u_start, jac=True, method="L-BFGS-B", bounds=bounds, options=options)
+    repairs = tuple(
+        # The receipt reports the constrained-space value the floor pinned, sibling to the
+        # closed-form estimators' "variance-floored(...)" strings.
+        f"scale-floored({s.name or f'arg{s.index}'} -> {floor:.3g})"
+        for k, s in enumerate(slots)
+        if s.support == "positive" and res.x[k] <= log_floor + 1.0e-9
+    )
+    return res, repairs
+
+
 def map_fit(
     rv: RandomVariable,
     data,
@@ -2280,17 +2334,27 @@ def map_fit(
             v, gr = g.value_and_grad(u)
             return -v, -gr
 
-        res = minimize(
-            neg,
-            u0,
-            jac=True,
-            method="L-BFGS-B",
-            options={"maxiter": max_iter, "ftol": tol, "gtol": tol},
-        )
+        options = {"maxiter": max_iter, "ftol": tol, "gtol": tol}
+        repairs: tuple[str, ...] = ()
+        try:
+            res = minimize(neg, u0, jac=True, method="L-BFGS-B", options=options)
+        except FloatingPointError:
+            # The target degenerated mid-optimization. When a positive-support (scale-like) slot is
+            # present this is the boundary-collapse the closed-form estimators repair with a
+            # scale-relative floor (fixed-mean Normal on constant data, T4-5): retry floored and
+            # disclose. Without such a slot there is nothing repairable -- surface the original error.
+            if not any(s.support == "positive" for s in g.slots):
+                raise
+            res, repairs = _map_boundary_floor_retry(neg, u0, g.slots, data, minimize, options)
         if not bool(res.success) or not np.isfinite(res.fun) or not np.all(np.isfinite(res.x)):
             raise RuntimeError(f"MAP optimization failed: {res.message}")
         vals, _ = g.unpack(res.x)
-        return RandomVariable._bound(g.build(vals), name=rv._name)
+        dist = g.build(vals)
+        if repairs:
+            # Same disclosure channel the closed-form M-steps use: a caller reading only the
+            # parameters cannot tell a floored fit from a data-implied one (MXR-080-1202).
+            object.__setattr__(dist, "_numerical_repairs", tuple(getattr(dist, "_numerical_repairs", ())) + repairs)
+        return RandomVariable._bound(dist, name=rv._name)
 
     # derivative-free path (no Torch, an unsupported family, or a constrained / penalized region)
     log_target, slots, fam, build, unpack, (dmean, dstd) = _build_target(

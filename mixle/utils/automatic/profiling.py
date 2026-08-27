@@ -8,22 +8,25 @@ estimator via DatumNode. Estimator builders are imported from .factories.
 import math
 import numbers
 from collections import defaultdict
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence, Sized
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
 from mixle.stats.compute.pdist import (
+    ContractError,
     ParameterEstimator,
 )
 
 from .factories import (
     AMBIGUOUS_SCORE_GAP_BITS,
+    AMBIGUOUS_TABLE_MIN_SHARE,
     EMBEDDING_MIN_DIM,
     ID_DISTINCT_FRACTION,
     ID_MIN_COUNT,
     INT_ID_RANGE_MULTIPLIER,
+    MALFORMED_TABLE_MIN_SHARE,
     MAX_INT_CATEGORICAL_DISTINCT,
     MAX_INT_CATEGORICAL_FRACTION,
     POISSON_DISPERSION_MAX,
@@ -31,6 +34,7 @@ from .factories import (
     VALIDATION_ALPHA,
     VALIDATION_VARIANCE_FLOOR,
     _dense_integer_support,
+    _get_identifier_estimator,
     _has_torch,
     _integer_range,
     get_categorical_estimator,
@@ -1781,6 +1785,12 @@ def analyze_structure(
     )
 
     warnings = ["pairwise hints are unconditional; latent mixture/state/topic structure can explain or hide them"]
+    # analyze_structure is the diagnostic surface, so a malformed table is REPORTED here rather than
+    # refused the way get_estimator refuses it -- the whole point of asking for a profile is to see
+    # what the data looks like, including that one row does not fit the shape the rest establish.
+    ragged_diagnosis = diagnose_ragged_rows(rows)
+    if ragged_diagnosis is not None:
+        warnings.append(ragged_diagnosis.note())
     vec_dim = root._fixed_numeric_vector_dim()
     mat_shape = root._fixed_numeric_matrix_shape()
     if modality == "embedding":
@@ -2143,18 +2153,32 @@ class DatumNode:
 
     def _leaf_estimator(self, pseudo_count, emp_suff_stat, use_bstats, recommendation: str | None = None):
         if self.obj_count > 0 or len(self.vdict) == 0:
+            if len(self.vdict) > 0:
+                # A scalar type the profiler does not recognize -- datetime64/Timestamp being the
+                # everyday case, e.g. read_csv(parse_dates=...) -- is frozen, not modeled, but the
+                # frozen stand-in must still score the actual rows finitely. The bare ignored
+                # estimator's point mass at None gave every real value -inf, so a table carrying a
+                # timestamp column died in EM/DPM with the same useless non-finite-objective error
+                # that identifier string columns used to (campaign T2-09a).
+                return _get_identifier_estimator(self.vdict, use_bstats=use_bstats)
             return get_ignored_estimator(use_bstats=use_bstats)
         if self.bool_count > 0 and (self.int_count > 0 or self.float_count > 0):
-            return get_ignored_estimator(use_bstats=use_bstats)
+            # A bool/numeric mix is ambiguous between a flag and a measurement, so it stays frozen
+            # rather than guessed at -- with the same finite-scoring stand-in as above, for the same
+            # reason. (vdict has already merged True with 1/1.0 -- Python hashes them equal -- and
+            # the frozen empirical categorical simply inherits that.)
+            return _get_identifier_estimator(self.vdict, use_bstats=use_bstats)
 
         if self.str_count > 0:
-            # identifier-like fields (nearly all values distinct) carry no
-            # density information; ignore them instead of fitting a
-            # one-bucket-per-row categorical
+            # identifier-like fields (nearly all values distinct) carry no density information;
+            # freeze them instead of fitting a one-bucket-per-row categorical. The frozen factor
+            # must still score real rows finitely -- the bare ignored estimator's point mass at
+            # None scored every actual identifier at -inf, so any EM/DPM fit over data containing
+            # an ID column died with a useless non-finite-objective error.
             if self.count >= ID_MIN_COUNT and len(self.vdict) >= ID_DISTINCT_FRACTION * self.count:
-                return get_ignored_estimator(use_bstats=use_bstats)
+                return _get_identifier_estimator(self.vdict, use_bstats=use_bstats)
             if recommendation == "ignored":
-                return get_ignored_estimator(use_bstats=use_bstats)
+                return _get_identifier_estimator(self.vdict, use_bstats=use_bstats)
             return get_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
 
         if self.bool_count > 0 and self.float_count == 0 and self.int_count == 0:
@@ -2191,7 +2215,9 @@ class DatumNode:
                 recommendation = inferred
             recommendation = inferred if recommendation is None else recommendation
             if recommendation == "ignored":
-                return get_ignored_estimator(use_bstats=use_bstats)
+                # Same repair as the string-identifier branch: an integer ID column is frozen,
+                # but the frozen factor still scores actual values finitely.
+                return _get_identifier_estimator(self.vdict, use_bstats=use_bstats)
             if recommendation == "integer_categorical":
                 return get_integer_categorical_estimator(self.vdict, pseudo_count, emp_suff_stat, use_bstats=use_bstats)
             if recommendation == "categorical":
@@ -2377,12 +2403,16 @@ class DatumNode:
         if self.none_count > 0:
             # Genuine optionality: the field is really absent. Fit the missingness rate so the
             # auto-built model stays generative -- the README quickstart ships a row with a
-            # missing value and then calls model.sampler().sample(5). The nan/inf sentinel
+            # missing value and then calls model.sampler().sample(5). Only the inf sentinel
             # wrappers below keep est_prob=False: they are representational, not optional.
             rv = get_optional_estimator(rv, None, use_bstats=use_bstats, est_prob=True)
 
         if self.nan_count > 0:
-            rv = get_optional_estimator(rv, math.nan, use_bstats=use_bstats)
+            # nan is the OTHER spelling of the same missingness -- a pandas float Series stores
+            # None as nan behind the caller's back -- so it takes the same fitted-rate, generative
+            # wrapper as None. With est_prob=False here, the two spellings of one dataset produced
+            # different models: the nan one read .p as 0.0 and refused to sample.
+            rv = get_optional_estimator(rv, math.nan, use_bstats=use_bstats, est_prob=True)
 
         # +-inf is tracked (pos_inf_count/neg_inf_count) but, unlike None/NaN, was never wrapped here --
         # the base estimator built above (e.g. GaussianEstimator, whose distribution requires finite
@@ -2584,6 +2614,228 @@ def _freeze_observation(value: Any) -> Any:
     return value
 
 
+@dataclass(frozen=True)
+class RaggedRowDiagnosis:
+    """What the arity evidence says about rows that do not all carry the same number of fields.
+
+    ``malformed`` is the verdict: True when one arity is so dominant that the odd rows are a defect
+    in a table (a lost or duplicated delimiter, a blank line), False when the majority is real but
+    not overwhelming, which is the genuinely ambiguous case that gets fitted AND disclosed.
+    """
+
+    modal_width: int
+    modal_count: int
+    row_count: int
+    row_index: int
+    row_width: int
+    malformed: bool
+
+    @property
+    def modal_share(self) -> float:
+        """Fraction of the rows carrying the dominant arity -- the evidence the verdict rests on."""
+        return self.modal_count / self.row_count
+
+    def _evidence(self) -> str:
+        # Exact counts rather than a percentage: one bad row in 2001 rounds to "100.0%", which reads
+        # as though nothing were wrong in the very message that says something is.
+        return "%d of %d rows have %d field(s), but row %d has %d" % (
+            self.modal_count,
+            self.row_count,
+            self.modal_width,
+            self.row_index,
+            self.row_width,
+        )
+
+    def _sequence_opt_out(self) -> str:
+        return (
+            "if these really are variable-length sequences, ask for that reading explicitly with "
+            "mixle.utils.automatic.get_estimator(data, ragged='sequence') and pass the result as the "
+            "estimator"
+        )
+
+    def contract_error(self) -> ContractError:
+        """The refusal for a malformed table, naming the offending row and the arity it must have."""
+        return ContractError(
+            "automatic structure inference (row %d)" % self.row_index,
+            "a row of %d field(s)" % self.modal_width,
+            "a row of %d field(s)" % self.row_width,
+            "%s, so this is a table with a malformed row rather than variable-length sequence data: "
+            "check row %d for a missing or extra field. Otherwise %s."
+            % (self._evidence(), self.row_index, self._sequence_opt_out()),
+        )
+
+    def note(self) -> str:
+        """One line naming the arity evidence, the reading taken, and the remedy for the other one."""
+        if self.malformed:
+            return (
+                "ragged rows: %s -- read as a table with a malformed row; check row %d for a missing "
+                "or extra field. Otherwise %s." % (self._evidence(), self.row_index, self._sequence_opt_out())
+            )
+        return (
+            "ragged rows: %s -- read as variable-length sequence data (an element model plus a length "
+            "model), NOT as a table with a malformed row. If it is a table, fix row %d, which has a "
+            "missing or extra field; if it is sequence data, %s to make the reading explicit."
+            % (self._evidence(), self.row_index, self._sequence_opt_out())
+        )
+
+
+def _positional_row_widths(rows: Sequence[Any]) -> list[int] | None:
+    """Per-row arity when every row is a positional container, else ``None``.
+
+    ``None`` means the arity question does not arise at all: scalars, mappings, sets, or a mix of
+    shapes, none of which the profiler reads as a table of positional fields. Only sized rows are
+    measured, so nothing here consumes a one-shot iterator that ``normalize_input`` left alone.
+    """
+    widths: list[int] = []
+    for row in rows:
+        if isinstance(row, tuple):
+            widths.append(len(row))
+        elif isinstance(row, (str, bytes)) or isinstance(row, Mapping) or isinstance(row, (set, frozenset)):
+            return None
+        elif isinstance(row, Iterable) and isinstance(row, Sized):
+            widths.append(len(row))
+        else:
+            return None
+    return widths
+
+
+def _reads_as_positional_table(node: "DatumNode") -> bool:
+    """Whether a node whose rows all share one arity takes one of the table readings.
+
+    Mirrors the structured branch of :meth:`DatumNode.get_estimator`: a positional composite, a
+    multivariate-Gaussian vector, or a keyed record. The ragged diagnosis asks this of the
+    majority-arity rows ALONE, because the only raggedness worth reporting is raggedness that changed
+    the reading. Data the profiler already reads as a sequence at a single arity -- homogeneous lists
+    such as all-string CSV rows -- gets the same sequence model either way and stays silent.
+    """
+    structured = node.tuple_count + node.seq_count + node.set_count + node.dict_count
+    if structured == 0 or node.count - node.none_count == 0:
+        return False
+    container_kinds = sum(u > 0 for u in (node.tuple_count, node.seq_count, node.set_count, node.dict_count))
+    if len(node.vdict) > 0 or node.obj_count > 0 or container_kinds > 1:
+        return False  # mixed scalars/containers: not modelable as anything, ragged or not
+    if node.set_count > 0:
+        return False
+    if node.dict_count > 0:
+        return True
+    if len(node.len_dict) != 1:
+        return False
+    if node.tuple_count > 0:
+        return True  # tuples are fixed-arity records
+    if node._fixed_numeric_vector_dim() is not None:
+        return True
+    return not node._children_homogeneous()
+
+
+def diagnose_ragged_rows(rows: Sequence[Any]) -> RaggedRowDiagnosis | None:
+    """Weigh the arity evidence for rows of differing width, or ``None`` when there is nothing to say.
+
+    ``None`` covers three distinct cases, all of which must stay silent: rows that are not positional
+    containers, rows that all share one arity, and rows whose arities are spread widely enough that
+    no single one is a majority -- the fingerprint of real variable-length data.
+    """
+    widths = _positional_row_widths(rows)
+    if widths is None or len(widths) < 2:
+        return None
+    counts: dict[int, int] = defaultdict(int)
+    for width in widths:
+        counts[width] += 1
+    if len(counts) == 1:
+        return None
+    # A tie cannot be a dominant arity in any case; breaking it toward the smaller width keeps the
+    # answer independent of the order the widths happened to be counted in.
+    modal_width, modal_count = max(counts.items(), key=lambda item: (item[1], -item[0]))
+    share = modal_count / len(widths)
+    if share < AMBIGUOUS_TABLE_MIN_SHARE:
+        return None
+    modal_rows = [row for row, width in zip(rows, widths, strict=True) if width == modal_width]
+    if not _reads_as_positional_table(DatumNode(data=modal_rows)):
+        return None
+    row_index = next(index for index, width in enumerate(widths) if width != modal_width)
+    return RaggedRowDiagnosis(
+        modal_width=modal_width,
+        modal_count=modal_count,
+        row_count=len(widths),
+        row_index=row_index,
+        row_width=widths[row_index],
+        malformed=share >= MALFORMED_TABLE_MIN_SHARE,
+    )
+
+
+def _apply_ragged_policy(rows: Sequence[Any], ragged: str) -> None:
+    """Refuse a malformed table, disclose an ambiguous one, and leave sequence data alone."""
+    if ragged not in {"auto", "sequence"}:
+        raise ValueError("ragged must be 'auto' or 'sequence'")
+    if ragged == "sequence":
+        return
+    diagnosis = diagnose_ragged_rows(rows)
+    if diagnosis is None:
+        return
+    if diagnosis.malformed:
+        raise diagnosis.contract_error()
+    import warnings
+
+    warnings.warn(diagnosis.note(), UserWarning, stacklevel=3)
+
+
+def _identifier_like_field(node: "DatumNode") -> bool:
+    """Whether a leaf's observed values trip the same identifier heuristics the estimator used."""
+    if node.str_count > 0:
+        return node.count >= ID_MIN_COUNT and len(node.vdict) >= ID_DISTINCT_FRACTION * node.count
+    if node.int_count > 0:
+        return node._integer_values_look_identifier_like()
+    if node.obj_count > 0:
+        # An unrecognized scalar type (a Timestamp column is the everyday case) with nearly every
+        # value distinct is an identifier in the same sense a distinct-string column is.
+        return node.count >= ID_MIN_COUNT and len(node.vdict) >= ID_DISTINCT_FRACTION * node.count
+    return False
+
+
+def _field_line(node: "DatumNode", label: str) -> str:
+    """One evidence line for a field nothing could be fitted to: kind, cardinality, and why."""
+    if node.str_count > 0:
+        kind = "string"
+    elif node.int_count > 0:
+        kind = "integer"
+    elif node.float_count > 0:
+        kind = "float"
+    elif node.obj_count > 0 and node.vdict:
+        # Name the concrete type, so a datetime column reads "Timestamp field" rather than the
+        # unhelpfully generic "unmodelable field".
+        kind = type(next(iter(node.vdict))).__name__
+    else:
+        kind = "unmodelable"
+    why = (
+        "identifier-like: nearly every value is distinct"
+        if _identifier_like_field(node)
+        else "not modelable by automatic profiling"
+    )
+    return "%s is a %s field with %d distinct value(s) in %d observation(s) (%s)" % (
+        label,
+        kind,
+        len(node.vdict),
+        node.count,
+        why,
+    )
+
+
+def _unmodelable_fields_report(node: "DatumNode") -> list[str]:
+    """Per-field evidence lines for data in which automatic typing found nothing to fit.
+
+    Called by :func:`~mixle.utils.automatic.factories.get_dpm_mixture` when every field resolved to
+    a frozen (Ignored) factor, so the refusal can name each column, its cardinality, and the reason
+    instead of failing with an unactionable global error.
+    """
+    if node.children:
+        return [_field_line(child, "field %d" % index) for index, child in enumerate(node.children)]
+    if node.dict_children:
+        return [
+            _field_line(child, "field %r" % (key,))
+            for key, child in sorted(node.dict_children.items(), key=lambda item: repr(item[0]))
+        ]
+    return [_field_line(node, "the data")]
+
+
 def get_estimator(
     data,
     pseudo_count: float | None = 1.0,
@@ -2591,11 +2843,22 @@ def get_estimator(
     use_bstats: bool = False,
     *,
     modality: str | None = None,
+    ragged: str = "auto",
 ):
-    """Profile ``data`` and return the automatically selected estimator."""
-    return DatumNode(data=normalize_input(data)).get_estimator(
-        pseudo_count, emp_suff_stat, use_bstats=use_bstats, modality=modality
-    )
+    """Profile ``data`` and return the automatically selected estimator.
+
+    ``ragged`` governs rows that do not all carry the same number of fields, a shape that is
+    genuinely ambiguous between a table with a malformed row and variable-length sequence data.
+    ``'auto'`` (the default) decides on the arity evidence: an overwhelmingly dominant arity means a
+    malformed table and raises :class:`~mixle.stats.compute.pdist.ContractError` naming the offending
+    row, a bare majority is fitted as a sequence with a warning saying so, and widely spread arities
+    are fitted as a sequence silently. ``'sequence'`` takes the sequence reading unconditionally and
+    without comment -- the escape hatch for variable-length data whose lengths happen to be nearly
+    constant.
+    """
+    rows = normalize_input(data)
+    _apply_ragged_policy(rows, ragged)
+    return DatumNode(data=rows).get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats, modality=modality)
 
 
 def get_prototype(
@@ -2607,6 +2870,7 @@ def get_prototype(
     emp_suff_stat: bool = True,
     use_bstats: bool = False,
     modality: str | None = None,
+    ragged: str = "auto",
 ):
     """Infer a model structure and return an initialized prototype distribution.
 
@@ -2627,6 +2891,6 @@ def get_prototype(
     from mixle.stats.compute.sequence import seq_encode, seq_initialize
 
     rows = normalize_input(data)
-    est = get_estimator(rows, pseudo_count, emp_suff_stat, use_bstats=use_bstats, modality=modality)
+    est = get_estimator(rows, pseudo_count, emp_suff_stat, use_bstats=use_bstats, modality=modality, ragged=ragged)
     enc = seq_encode(rows, estimator=est)
     return seq_initialize(enc_data=enc, estimator=est, rng=np.random.RandomState(seed), p=p)

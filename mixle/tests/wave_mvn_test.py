@@ -145,9 +145,14 @@ class GaussianMixtureTestCase(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(model.seq_log_density(enc))))
 
     def test_initialize_and_seq_initialize_agree(self):
+        # Scoped to init="dirichlet" because that is the only strategy under which the two paths
+        # CAN agree: k-means++ seeding needs the whole batch to place its centers, so the scalar
+        # initialize() -- which sees one observation at a time -- always draws Dirichlet
+        # responsibilities. The default is now "kmeans++", so an unscoped estimator here compares
+        # two different initialization algorithms; see campaign_em_test for the divergence.
         dist = make_dist()
         data = dist.sampler(seed=11).sample(size=20)
-        est = dist.estimator()
+        est = GaussianMixtureEstimator([c.estimator() for c in dist.components], init="dirichlet")
 
         acc_scalar = est.accumulator_factory().make()
         for u in data:

@@ -278,8 +278,10 @@
         "mixle.stats.rankings.plackett_luce.PlackettLucePartialEstimator",
         "mixle.stats.rankings.spearman_rho.SpearmanRankingDistribution",
         "mixle.stats.rankings.spearman_rho.SpearmanRankingEstimator",
+        "mixle.stats.rankings.spearman_rho.SpearmanRankingFitDiagnostics",
         "mixle.stats.rankings.thurstone.ThurstoneDistribution",
         "mixle.stats.rankings.thurstone.ThurstoneEstimator",
+        "mixle.stats.rankings.thurstone.ThurstoneFitDiagnostics",
         "mixle.stats.sequences.integer_markov_chain.IntegerMarkovChainDistribution",
         "mixle.stats.sequences.integer_markov_chain.IntegerMarkovChainEstimator",
         "mixle.stats.sequences.markov_chain.MarkovChainDistribution",
@@ -2298,7 +2300,7 @@
           "state_version": 1
         },
         "mixle.stats.rankings.spearman_rho.SpearmanRankingDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -2311,14 +2313,28 @@
           "state_fields": null,
           "state_version": 1
         },
-        "mixle.stats.rankings.thurstone.ThurstoneDistribution": {
+        "mixle.stats.rankings.spearman_rho.SpearmanRankingFitDiagnostics": {
           "codec": "constructor-validated",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
           "state_version": 1
         },
+        "mixle.stats.rankings.thurstone.ThurstoneDistribution": {
+          "codec": "class-owned",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
         "mixle.stats.rankings.thurstone.ThurstoneEstimator": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.rankings.thurstone.ThurstoneFitDiagnostics": {
           "codec": "constructor-validated",
           "migrations": [],
           "stability": "provisional",
@@ -2382,7 +2398,7 @@
           "state_version": 1
         },
         "mixle.stats.sets.bernoulli_set.BernoulliSetDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -2566,7 +2582,7 @@
           "state_version": 1
         },
         "mixle.stats.univariate.continuous.gaussian.GaussianEstimator": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -3324,8 +3340,10 @@
         "mixle.stats.rankings.plackett_luce.PlackettLucePartialEstimator",
         "mixle.stats.rankings.spearman_rho.SpearmanRankingDistribution",
         "mixle.stats.rankings.spearman_rho.SpearmanRankingEstimator",
+        "mixle.stats.rankings.spearman_rho.SpearmanRankingFitDiagnostics",
         "mixle.stats.rankings.thurstone.ThurstoneDistribution",
         "mixle.stats.rankings.thurstone.ThurstoneEstimator",
+        "mixle.stats.rankings.thurstone.ThurstoneFitDiagnostics",
         "mixle.stats.sequences.integer_markov_chain.IntegerMarkovChainDistribution",
         "mixle.stats.sequences.integer_markov_chain.IntegerMarkovChainEstimator",
         "mixle.stats.sequences.markov_chain.MarkovChainDistribution",
@@ -5443,7 +5461,7 @@
           "state_version": 1
         },
         "mixle.stats.rankings.spearman_rho.SpearmanRankingDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -5456,14 +5474,28 @@
           "state_fields": null,
           "state_version": 1
         },
-        "mixle.stats.rankings.thurstone.ThurstoneDistribution": {
+        "mixle.stats.rankings.spearman_rho.SpearmanRankingFitDiagnostics": {
           "codec": "constructor-validated",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
           "state_version": 1
         },
+        "mixle.stats.rankings.thurstone.ThurstoneDistribution": {
+          "codec": "class-owned",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
         "mixle.stats.rankings.thurstone.ThurstoneEstimator": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.rankings.thurstone.ThurstoneFitDiagnostics": {
           "codec": "constructor-validated",
           "migrations": [],
           "stability": "provisional",
@@ -5527,7 +5559,7 @@
           "state_version": 1
         },
         "mixle.stats.sets.bernoulli_set.BernoulliSetDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -5711,7 +5743,7 @@
           "state_version": 1
         },
         "mixle.stats.univariate.continuous.gaussian.GaussianEstimator": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,

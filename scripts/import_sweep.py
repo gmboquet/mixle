@@ -21,7 +21,9 @@ import mixle
 
 def main() -> int:
     if "site-packages" not in mixle.__file__ and "--allow-editable" not in sys.argv:
-        print(f"refusing to sweep a source/editable checkout (not a release artifact): {mixle.__file__}", file=sys.stderr)
+        print(
+            f"refusing to sweep a source/editable checkout (not a release artifact): {mixle.__file__}", file=sys.stderr
+        )
         return 2
     failures: list[str] = []
     swept = 0

@@ -8,6 +8,7 @@ distribution-specific likelihood math.
 from __future__ import annotations
 
 import copy
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -973,6 +974,16 @@ def _attach_run_em_provenance(
     )
 
 
+def _rejected_step_reason(result: EMStepResult, value: float, gain: float) -> str:
+    """Describe, for the stalled-run disclosure, why an EM step was not accepted."""
+    if not np.isfinite(value):
+        return "its first step scored a non-finite objective"
+    if not bool(result.accepted):
+        detail = (result.metadata or {}).get("rejected")
+        return "the strategy rejected its own first step" + (" (%s)" % detail if detail else "")
+    return "its first step decreased the objective by %.3g" % (-gain)
+
+
 def run_em(
     enc_data: Any,
     estimator: ParameterEstimator,
@@ -1000,6 +1011,9 @@ def run_em(
     (``model.fit_provenance()``): iterations actually run, whether the run converged on ``delta`` or
     stopped at the ``max_its`` cap (or on a rejected step), and the final objective. A run exiting on
     the cap reports ``converged=False``, so a truncated fit is distinguishable from a finished one.
+    A run whose very first step is rejected accepts nothing and returns ``initial_model`` unchanged;
+    that case additionally raises a ``UserWarning``, because the returned model is the
+    initialization rather than a fit and the receipt alone does not say so.
     """
     if max_iter is not None:
         max_its = max_iter
@@ -1011,6 +1025,8 @@ def run_em(
     old_value = objective(model)
     iterations = 0
     converged = False
+    accepted_steps = 0
+    stall_reason: str | None = None
     final_objective: float | None = float(old_value) if np.isfinite(old_value) else None
     objective_gain: float | None = None
     for _ in range(max(1, int(max_its))):
@@ -1030,7 +1046,10 @@ def run_em(
         if not accepted:
             transaction.restore()
             strategy_transaction.restore()
+            if accepted_steps == 0:
+                stall_reason = _rejected_step_reason(result, value, gain)
             break
+        accepted_steps += 1
         model = candidate
         last_good = model
         final_objective = float(value)
@@ -1039,6 +1058,20 @@ def run_em(
             converged = True
             break
         old_value = value
+    if stall_reason is not None:
+        # A run that accepts nothing returns `initial_model` byte-for-byte, and the receipt still
+        # reports the full observation count -- so a stalled run is otherwise indistinguishable from
+        # a fit, and the initialization (typically a random init_p subsample) reads as the answer.
+        # Warn rather than raise: the initialization is a legitimate object to hand back, and a warm
+        # start already at the fixed point can land here on float noise, which the magnitude shows.
+        warnings.warn(
+            "run_em() accepted no EM step -- %s -- so the returned model is the initial model "
+            "unchanged, not a fit of the data (fit_provenance() reports converged=False). Check "
+            "the initialization and the objective; pass monotone=False when the objective is a "
+            "surrogate that legitimately decreases before it improves." % stall_reason,
+            UserWarning,
+            stacklevel=2,
+        )
     return _attach_run_em_provenance(
         last_good,
         strategy=strategy,

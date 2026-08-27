@@ -4426,6 +4426,22 @@ class HiddenMarkovDataEncoder(DataSequenceEncoder):
             Tuple[None, rv_numba] if use_numba, else Tuple[rv, None].
 
         """
+        # Boundary validation shared by both encoder paths (campaign wave 2, T4-9). An HMM
+        # observation is a SEQUENCE of emissions; a flat list of scalars used to surface as a bare
+        # TypeError from len() deep inside encoding. ONLY the shape is validated here: an all-empty
+        # corpus must keep encoding, because a zero-atom fit is a designed no-evidence state --
+        # represent_learned_segment's contract tests pin exactly that -- and a first version of
+        # this guard that refused it broke those contracts (the guard-overreach class again, this
+        # time in the guard fixing T4-9).
+        rows = list(x)
+        for i, xx in enumerate(rows):
+            if not hasattr(xx, "__len__"):
+                raise TypeError(
+                    "HMM observations are sequences of emissions (a list of lists); row %d is a "
+                    "bare %s. Wrap each observation sequence in a list, e.g. [[x1, x2, ...], ...]."
+                    % (i, type(xx).__name__)
+                )
+        x = rows
         if not self.use_numba:
             return self._seq_encode(x)
 

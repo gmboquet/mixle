@@ -72,6 +72,13 @@ class ThurstoneFitDiagnostics:
     regularized: bool
     pseudo_count: float
 
+    # Estimation provenance rides on fitted distributions as a constructor argument, so it cannot
+    # be re-derived from parameters and must round-trip through the closed JSON registry. Not a
+    # distribution or estimator, so it opts in explicitly -- the same mechanism as other
+    # serializable value classes discovered by the mixle.stats registry walk. Unannotated on
+    # purpose: an annotated name would become a dataclass field.
+    __pysp_serializable__ = True
+
 
 def _checked_seed(value: Any) -> int:
     result = nonnegative_integer(value, label="seed")
@@ -160,6 +167,43 @@ class ThurstoneDistribution(SequenceEncodableProbabilityDistribution):
             distinct_rankings=len(self._ranking_counts),
             support_size=self._support_size,
             maximum_binomial_standard_error=0.5 / math.sqrt(self.n_mc),
+        )
+
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        """Return the constructor-owned state used by the safe JSON codec.
+
+        The approximation tables (``_approximation_draws``, ``_ranking_counts``, the normalizer
+        split) and ``approximation_diagnostics`` are all re-derived deterministically in
+        ``__init__`` from ``(mu, n_mc, seed, smoothing)``, so none of them is serialized: the
+        diagnostics record is derived provenance rather than a parameter, and shipping it would
+        require registering a class whose every field the constructor recomputes anyway.
+        ``fit_diagnostics`` is the one record that cannot be re-derived -- it documents how ``mu``
+        was estimated -- so it rides along as the constructor argument it is.
+        """
+        return {
+            "mu": self.mu,
+            "n_mc": self.n_mc,
+            "seed": self.seed,
+            "smoothing": self.smoothing,
+            "name": self.name,
+            "keys": self.keys,
+            "fit_diagnostics": self.fit_diagnostics,
+        }
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        """Rebuild from constructor-owned state, re-deriving the approximation tables."""
+        required = {"mu", "n_mc", "seed", "smoothing", "name", "keys"}
+        missing = required - set(state)
+        if missing:
+            raise ValueError("ThurstoneDistribution state is missing %s" % ", ".join(sorted(missing)))
+        self.__init__(
+            state["mu"],
+            name=state["name"],
+            keys=state["keys"],
+            n_mc=state["n_mc"],
+            seed=state["seed"],
+            smoothing=state["smoothing"],
+            fit_diagnostics=state.get("fit_diagnostics"),
         )
 
     def __str__(self) -> str:

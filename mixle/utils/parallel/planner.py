@@ -995,7 +995,18 @@ def encoded_data(
                 % ", ".join(conflicts)
             )
         return data
-    backend_name = str(backend or "local").lower()
+    if backend is None:
+        backend_name = "local"
+    else:
+        backend_name = str(backend).lower()
+        if not backend_name.strip():
+            # `backend or "local"` silently ran an empty string locally -- indistinguishable from a
+            # config variable that failed to resolve. Only None means "the default"; an explicit
+            # empty name is refused like any other unknown backend (campaign wave 2, T4-9).
+            raise ValueError(
+                "encoded-data backend must be a non-empty name (or None for the local default); "
+                "registered backends: %s" % ", ".join(available_encoded_data_backends())
+            )
     factory = _ENCODED_DATA_BACKENDS.get(backend_name)
     if factory is None:
         raise ValueError(

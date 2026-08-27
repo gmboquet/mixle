@@ -5,7 +5,9 @@ the PPL DSL in :mod:`mixle.ppl.regression`):
 
   * :func:`glm` -- exponential-family GLMs by iteratively reweighted least squares, with explicit
     family/link objects (Gaussian, Binomial, Poisson, Gamma, inverse-Gaussian, negative-binomial),
-    offsets, prior weights, and optional sandwich (robust) standard errors.
+    offsets, prior weights under a stated convention (``weight_type``: analytic precision weights
+    by default, frequency counts on request), and optional sandwich (robust) standard errors in
+    the HC0-HC3 leverage-corrected variants.
   * :func:`ridge_regression`, :func:`elastic_net` (and :func:`lasso`) -- L2 / L1 / mixed penalised
     linear regression; the elastic net is solved by coordinate descent.
   * :func:`robust_regression` -- Huber / Tukey M-estimation, down-weighting outliers via IRLS on a
@@ -103,16 +105,73 @@ def _response_support(family: Family, y: np.ndarray) -> None:
 class PerfectSeparationError(RuntimeError):
     """The binomial classes are perfectly separated (or perfectly predicted): no finite MLE exists.
 
-    Raised by :func:`glm` when IRLS drives fitted binomial probabilities to exactly 0 or 1 -- the
-    numerical signature of (quasi-)complete separation, where ``|coef|`` diverges and the working
-    weights vanish. A subclass of :class:`RuntimeError`, so pre-existing handlers keep working."""
+    Raised by :func:`glm` when IRLS runs the fitted binomial probabilities all the way onto 0 or 1
+    and can no longer take a step -- the terminal form of (quasi-)complete separation, where
+    ``|coef|`` diverges and the working weights vanish. A subclass of :class:`RuntimeError`, so
+    pre-existing handlers keep working.
+
+    Separation that stops the iteration just SHORT of that point is the same statistical condition
+    and is reported too, but as a ``UserWarning`` plus ``GLMResult.separated``, because there the
+    fit still carries a correct deviance / fitted / likelihood; only its Wald branch is undefined
+    and refuses. Which of the two a given data set produces is a numerical accident, so never read
+    the absence of this exception as evidence of no separation -- read ``separated``."""
+
+
+_SEPARATION_SCREEN = 1e-4
+
+
+def _binomial_separation(x: np.ndarray, y: np.ndarray) -> bool:
+    """Does some direction in the design space separate the binomial classes?
+
+    Separation -- complete or quasi-complete -- is exactly the condition under which no finite MLE
+    exists: some ``b`` has ``x_i'b >= 0`` wherever ``y_i = 1`` and ``<= 0`` wherever ``y_i = 0``,
+    strictly for at least one row, so the likelihood keeps rising as the coefficients run off along
+    ``b`` (Silvapulle 1981; solved as a linear feasibility program after Konis 2007).
+
+    It is deliberately a property of the DATA rather than of the iterate. Testing the fitted
+    probabilities instead ties the answer to how the predictors happen to be coded: a two-point
+    (dummy-coded) separated design stalls IRLS at ``min(mu) = 2.1e-11``, never exactly 0, so the
+    saturation check in :func:`_mean_support` never fires, while a continuously coded separation of
+    the SAME data saturates and does fire. Nor can a threshold repair that, because the measure
+    does not order the two states: a perfectly identifiable logistic fit with a true slope of 8
+    reaches ``min(mu) = 3.4e-11``, i.e. closer to the boundary than the separated design, so any
+    cutoff on ``mu`` or ``|eta|`` loose enough to catch the separated case also rejects a
+    legitimate one. The program answers the actual question and returns False for every
+    identifiable design, however extreme its fitted probabilities.
+
+    Rows with ``0 < y < 1`` (proportion responses) carry both classes, so they enter twice, in both
+    directions -- a separating direction has to be orthogonal to them.
+    """
+    scale = np.max(np.abs(x), axis=0)
+    scale[scale == 0.0] = 1.0
+    columns = x / scale  # one common column scale keeps the margin tolerance below meaningful
+    directed = columns * np.where(y >= 1.0, 1.0, -1.0)[:, None]
+    mixed = (y > 0.0) & (y < 1.0)
+    if np.any(mixed):
+        directed = np.vstack([directed, -columns[mixed]])
+    # separation depends only on the SET of directed rows, and the designs this matters most for
+    # (dummy / factor codings, the shape separation actually arrives in) collapse to a handful
+    directed = np.unique(directed, axis=0)
+    solution = optimize.linprog(
+        -directed.sum(axis=0),
+        A_ub=-directed,
+        b_ub=np.zeros(directed.shape[0]),
+        bounds=[(-1.0, 1.0)] * x.shape[1],
+        method="highs",
+    )
+    if not solution.success or solution.x is None:
+        # an unsolved feasibility program is not evidence of separation: stay silent rather than
+        # attach a statistical claim to a solver failure
+        return False
+    return bool(np.max(directed @ solution.x) > 1e-7)
 
 
 def _mean_support(family: Family, mu: np.ndarray) -> None:
     if family.name == "binomial":
-        # A monotone inverse link keeps mu inside [0, 1]; hitting the endpoints EXACTLY is the
-        # numerical signature of separation (diverging coefficients, vanishing working weights),
-        # not a solver defect -- so name the statistical condition, not the internal symptom.
+        # A monotone inverse link keeps mu inside [0, 1]; hitting the endpoints EXACTLY leaves IRLS
+        # with no finite step to take, and only separation gets it there -- so name the statistical
+        # condition, not the internal symptom. Separation that stalls just short of the endpoints
+        # is caught after convergence by _binomial_separation, which does not depend on the coding.
         pinned = (mu == 0.0) | (mu == 1.0)
         if np.any(pinned):
             raise PerfectSeparationError(
@@ -120,8 +179,11 @@ def _mean_support(family: Family, mu: np.ndarray) -> None:
                 f"y exactly on {int(np.count_nonzero(pinned))} of {mu.size} observations (fitted "
                 "probabilities reached exactly 0 or 1), so the coefficients diverge and no finite "
                 "maximum-likelihood estimate exists. Remove or coarsen the separating "
-                "predictor(s), or use penalized estimation (ridge_regression / elastic_net), "
-                "which stays finite under separation."
+                "predictor(s), pool sparse levels, or compare nested models by their deviance -- a "
+                "likelihood-ratio test stays valid under separation where the Wald test does not. "
+                "Note that ridge_regression / elastic_net are least-squares fits with no family "
+                "argument, so they give a penalized LINEAR PROBABILITY model here, not penalized "
+                "logistic regression."
             )
         if np.any((mu < 0) | (mu > 1)):
             raise RuntimeError("IRLS produced binomial means outside (0, 1)")
@@ -253,7 +315,11 @@ def _resolve_family(family: str | Family, theta: float) -> Family:
     if family == "negativebinomial":
         return _make_negbin(theta)
     if family not in _FAMILIES:
-        raise ValueError(f"unknown family '{family}'.")
+        # name the menu: a typo ('guassian') used to cost a source dive to find the valid names
+        raise ValueError(
+            f"unknown family '{family}'; expected one of "
+            f"{', '.join(sorted([*_FAMILIES, 'negativebinomial']))}, or a Family instance"
+        )
     return _FAMILIES[family]
 
 
@@ -266,16 +332,46 @@ class GLMResult:
 
     Attributes:
         coef: ``(p,)`` coefficient estimates.
-        se: ``(p,)`` standard errors (model-based, or robust if requested).
+        se: ``(p,)`` standard errors (model-based, or the robust variant named by ``cov_type``).
+            All NaN on a saturated dispersion-estimating fit -- see ``dispersion``.
+        cov_type: which estimator ``se`` / ``cov`` came from: ``"model"`` for ``phi (X'WX)^-1``,
+            or ``"HC0"`` | ``"HC1"`` | ``"HC2"`` | ``"HC3"`` for the sandwich variants (see
+            :func:`glm`'s ``robust`` argument). Recorded on the result for the same reason
+            ``weight_type`` is: the meaning of a headline output must be readable off the result.
         fitted: ``(n,)`` fitted means ``mu``.
         deviance: residual deviance.
-        dispersion: estimated/assumed dispersion ``phi`` -- the residual-df-corrected (Pearson)
+        dispersion: estimated/assumed dispersion ``phi`` -- the ``residual_df``-corrected (Pearson)
             estimate the standard errors use, NOT the value the log-likelihood is evaluated at.
+            NaN when a dispersion-estimating family is fit with ``residual_df <= 0`` (a SATURATED
+            fit -- as many estimated parameters as observations): the coefficients, fitted values
+            and deviance are still returned, but the dispersion, every standard error and the
+            likelihood are undefined there, announced by a ``UserWarning`` at fit time, and
+            ``z_values`` / ``p_values`` / ``aic`` / ``bic`` refuse with that reason.
+        residual_df: residual degrees of freedom, ``n - rank``, where ``n`` counts rows under
+            ``weight_type="analytic"`` and ``sum(weights)`` under ``weight_type="frequency"``.
+            This is the divisor of ``dispersion`` and the t reference ``p_values`` uses, so it is
+            where the weight convention shows up in the standard errors.
         log_likelihood: maximised log-likelihood, or ``None`` when the supplied
-            family/response does not define one. For dispersion-estimating families this is
+            family/response does not define one -- or when the fit is saturated (see
+            ``dispersion``), where the likelihood is unbounded in the dispersion and so has no
+            maximised value. For dispersion-estimating families this is
             evaluated at the family's own dispersion MLE (see ``_dispersion_mle``), which
             differs from ``dispersion`` by design: the covariance wants the df-corrected
-            estimate, the likelihood wants its maximiser.
+            estimate, the likelihood wants its maximiser. It is also computed under
+            ``weight_type``: analytic weights enter as per-observation precisions
+            (``Var = phi / w_i``), frequency weights as replicate counts.
+        ll_nobs: how many observations ``log_likelihood`` is a sum over -- the sample size ``bic``
+            penalises with. Row count for an analytic-weighted dispersion-estimating family;
+            ``sum(weights)`` whenever the likelihood is a weighted sum of per-unit densities (every
+            frequency-weighted fit, and every fixed-dispersion family, whose discrete densities
+            have no analytic-weight form). Pairing a likelihood over ``sum(w)`` units with a
+            ``log(rows)`` penalty is what made BIC agree with neither convention.
+        weight_type: the convention ``weights`` were read under; see :func:`glm`.
+        separated: True when the binomial design separates the classes, so at least one coefficient
+            has no finite maximum-likelihood estimate. ``deviance``, ``fitted`` and
+            ``log_likelihood`` are still correct (compare nested models by deviance), but ``coef``
+            and ``se`` along the separating direction record only where IRLS stopped, so
+            ``z_values`` / ``p_values`` refuse. Announced by a ``UserWarning`` at fit time.
         n_iter: IRLS iterations to convergence.
         converged: whether the IRLS convergence criterion was met. Public fits
             currently raise instead of returning this as false.
@@ -285,6 +381,14 @@ class GLMResult:
             by a ``UserWarning`` at fit time and makes ``z_values`` / ``p_values`` refuse.
         family / link: names.
         cov: ``(p, p)`` coefficient covariance.
+
+    Call forms: ``aic`` / ``bic`` are PROPERTIES (``fit.aic``, no parentheses) while ``z_values``
+    / ``p_values`` are METHODS (``fit.z_values()``). Both call forms are frozen for
+    compatibility -- changing either direction breaks every existing caller -- so the split is
+    stated here instead: mixing them up fails with ``TypeError: 'float' object is not callable``
+    (calling the property) or a bound-method object where an array was expected (reading the
+    method), and neither traceback names the actual mistake. All four refuse with a stated
+    reason (no likelihood, rank deficiency, separation, saturation) rather than return NaN.
     """
 
     coef: np.ndarray
@@ -304,6 +408,15 @@ class GLMResult:
     # the design has full rank (the pinv min-norm split otherwise fabricates smaller SEs)
     residual_df: int | None = None
     dispersion_estimated: bool = False
+    # the weight convention, and the sample size the reported likelihood actually spans -- BIC
+    # needs the latter explicitly, because it is not always the residual-df sample size
+    weight_type: str = "analytic"
+    ll_nobs: float | None = None
+    separated: bool = False
+    # which covariance estimator `se`/`cov` came from -- recorded for the same reason weight_type
+    # is: the meaning of a headline output must be readable off the result, not off a remembered
+    # call argument
+    cov_type: str = "model"
     _link: Link = field(repr=False, default=None)
 
     def predict(self, x: np.ndarray, *, offset: np.ndarray | None = None) -> np.ndarray:
@@ -331,19 +444,40 @@ class GLMResult:
         rank = self.rank if self.rank is not None else self.coef.size
         return int(rank + (1 if self.dispersion_estimated else 0))
 
+    def _no_likelihood_reason(self, criterion: str) -> str:
+        # log_likelihood is None for two different reasons, and the refusal must name the right
+        # one: "no defined likelihood" sent users of a saturated gaussian fit hunting through
+        # the family/response combination when the actual problem was too few observations
+        if self.dispersion_estimated and self.residual_df is not None and self.residual_df <= 0:
+            return (
+                f"{criterion} is unavailable: the fit is saturated (residual degrees of freedom "
+                "are 0), so its likelihood is unbounded in the dispersion and has no maximised "
+                "value. Add observations beyond the number of identifiable parameters."
+            )
+        return (
+            f"{criterion} is unavailable because this family/response combination defines no "
+            "likelihood (e.g. a binomial fit to proportion responses strictly between 0 and 1)"
+        )
+
     @property
     def aic(self) -> float:
         """Akaike information criterion: ``-2 ll + 2 k`` with ``k = rank + estimated dispersion``."""
         if self.log_likelihood is None:
-            raise ValueError("AIC is unavailable because this fit has no defined likelihood")
+            raise ValueError(self._no_likelihood_reason("AIC"))
         return float(-2.0 * self.log_likelihood + 2.0 * self._n_parameters)
 
     @property
     def bic(self) -> float:
-        """Bayesian information criterion over the positive-weight observations actually fit."""
+        """Bayesian information criterion over the observations the log-likelihood spans.
+
+        The penalty has to count the SAME observations the likelihood does (``ll_nobs``). Deriving
+        it from ``residual_df`` instead pairs a likelihood summed over ``sum(weights)`` replicates
+        with a ``log(rows)`` penalty on a frequency table, which is correct under neither weight
+        convention -- 107.7 where the two defensible answers were 116.5 and a likelihood of -3.5.
+        """
         if self.log_likelihood is None:
-            raise ValueError("BIC is unavailable because this fit has no defined likelihood")
-        n_effective = self.fitted.size if self.residual_df is None else self.residual_df + (self.rank or 0)
+            raise ValueError(self._no_likelihood_reason("BIC"))
+        n_effective = self.ll_nobs if self.ll_nobs else self.fitted.size
         return float(-2.0 * self.log_likelihood + np.log(n_effective) * self._n_parameters)
 
     def _require_identifiable(self) -> None:
@@ -357,8 +491,34 @@ class GLMResult:
             raise ValueError(
                 f"per-coefficient Wald inference is undefined: design rank {self.rank} < "
                 f"{self.coef.size} columns, so individual coefficients are not identified (the "
-                "reported minimum-norm split is arbitrary). Drop or combine collinear columns, "
-                "or test an estimable linear combination instead."
+                "reported minimum-norm split is arbitrary). Drop or combine collinear columns "
+                "(or supply more rows than columns), or test an estimable linear combination "
+                "instead."
+            )
+        # the same refusal for the same reason one step further out: under separation the
+        # coefficient itself has no finite maximiser, so coef/se record where the iteration
+        # stopped rather than an estimate and its sampling spread. The Wald statistic then
+        # collapses toward zero as the coefficient grows (Hauck--Donner), which is why the
+        # untreated fit reports "no effect" precisely where the data separate completely.
+        if self.separated:
+            raise ValueError(
+                "per-coefficient Wald inference is undefined under perfect separation: at least "
+                "one coefficient has no finite maximum-likelihood estimate, so its value and "
+                "standard error are artifacts of where IRLS stopped and its Wald p-value tends to "
+                "1 however strong the association is. Compare nested models by their deviance (a "
+                "likelihood-ratio test), or drop / coarsen / pool the separating predictor(s); "
+                "deviance, fitted and log_likelihood on this fit are unaffected."
+            )
+        # saturation: with residual_df <= 0 the estimated dispersion -- and with it every
+        # standard error -- does not exist, so there is no Wald statistic to form. Only
+        # dispersion-estimating families can get here; fixed-dispersion ones keep their
+        # (dispersion-free) standard errors at residual_df == 0.
+        if self.dispersion_estimated and self.residual_df is not None and self.residual_df <= 0:
+            raise ValueError(
+                "per-coefficient Wald inference is undefined on a saturated fit: residual "
+                "degrees of freedom are 0, so the dispersion -- and with it every standard "
+                "error -- cannot be estimated. Add observations beyond the number of "
+                "identifiable parameters, or drop columns."
             )
 
     def z_values(self) -> np.ndarray:
@@ -377,62 +537,98 @@ class GLMResult:
         return 2.0 * stats.norm.sf(z)
 
 
-def _dispersion_mle(family: Family, y: np.ndarray, mu: np.ndarray, weights: np.ndarray, phi_fallback: float) -> float:
+def _dispersion_mle(
+    family: Family,
+    y: np.ndarray,
+    mu: np.ndarray,
+    weights: np.ndarray,
+    phi_fallback: float,
+    *,
+    frequency: bool,
+) -> float:
     """The maximiser of this family's OWN log-likelihood over the dispersion, at fixed ``mu``.
 
-    Each estimate solves d/d(phi) of the weighted log-density sum ``_loglik`` evaluates -- so the
-    reported "maximised log-likelihood" really is evaluated at its maximum:
+    Each estimate solves d/d(phi) of exactly the log-density sum ``_loglik`` evaluates under the
+    same convention -- so the reported "maximised log-likelihood" really is evaluated at its
+    maximum. Arrays arrive already restricted to the positive-weight rows.
 
-    * gaussian: ``sum w (y - mu)^2 / sum w`` (the RSS form).
-    * inverse_gaussian: ``sum w (y - mu)^2 / (y mu^2) / sum w`` -- the mean unit deviance. The
+    The two conventions differ only in how many observations the sum spans. Under ``frequency`` a
+    row stands for ``w`` replicates, so the divisor is ``sum(w)``; under analytic weights it is one
+    observation of precision ``w``, so the divisor is the row count and the weights stay inside the
+    sum. With unit weights the two coincide, which is why an unweighted fit is untouched.
+
+    * gaussian: ``sum w (y - mu)^2`` over that divisor (the RSS form).
+    * inverse_gaussian: ``sum w (y - mu)^2 / (y mu^2)`` over it -- the mean unit deviance. The
       Pearson form divides by ``V(mu) = mu^3`` instead of ``y mu^2`` and does NOT maximise the IG
       density (measured 0.1 nats short on an 8-point fit).
-    * gamma: no closed form -- the shape ``nu = 1/phi`` solves ``log(nu) - digamma(nu) = c`` with
-      ``c`` the weighted mean of ``y/mu - log(y/mu) - 1`` (half the mean unit deviance);
-      ``log(nu) - digamma(nu)`` is strictly decreasing from +inf to 0, so the root is unique and
-      bracketed in log-space. A numerically perfect fit (``c ~ 0``) sends ``phi -> 0`` and the
-      likelihood to +inf; the covariance-phi fallback is returned there rather than a fake maximum.
+    * gamma: no closed form. Writing ``d_i = y_i/mu_i - log(y_i/mu_i) - 1`` (half the unit
+      deviance) and ``nu_i`` for the shape, the score is ``sum nu_i (log nu_i - digamma nu_i - d_i)
+      = 0``. Under frequency weights every observation shares ``nu = 1/phi``, leaving
+      ``log(nu) - digamma(nu) = mean(d)``; under analytic weights ``nu_i = w_i/phi`` differs per
+      observation, and clearing the ``1/phi`` leaves ``sum w_i (log nu_i - digamma nu_i) = sum w_i
+      d_i``. ``log(nu) - digamma(nu)`` falls strictly from +inf to 0, so both are strictly monotone
+      in ``phi`` with a unique root, bracketed in log-space. A numerically perfect fit (all
+      ``d_i ~ 0``) sends ``phi -> 0`` and the likelihood to +inf; the covariance-phi fallback is
+      returned there rather than a fake maximum.
     """
-    total_weight = float(np.sum(weights))
+    divisor = float(np.sum(weights)) if frequency else float(weights.size)
     if family.name == "gaussian":
-        return float(np.sum(weights * (y - mu) ** 2) / total_weight)
+        return float(np.sum(weights * (y - mu) ** 2) / divisor)
     if family.name == "inverse_gaussian":
-        return float(np.sum(weights * (y - mu) ** 2 / (y * mu**2)) / total_weight)
+        return float(np.sum(weights * (y - mu) ** 2 / (y * mu**2)) / divisor)
     if family.name == "gamma":
-        c = float(np.sum(weights * (y / mu - np.log(y / mu) - 1.0)) / total_weight)
-        if not np.isfinite(c) or c <= 1e-12:
+        deficit = float(np.sum(weights * (y / mu - np.log(y / mu) - 1.0)))
+        if not np.isfinite(deficit) or deficit <= 1e-12 * divisor:
             return phi_fallback
-        from scipy.optimize import brentq
+        if frequency:
 
-        def gap(log_nu: float) -> float:
-            return log_nu - float(special.digamma(np.exp(log_nu))) - c
+            def gap(log_nu: float) -> float:
+                return log_nu - float(special.digamma(np.exp(log_nu))) - deficit / divisor
 
-        log_nu_hat = brentq(gap, -30.0, 30.0, xtol=1e-12)
-        return float(np.exp(-log_nu_hat))
+            return float(np.exp(-optimize.brentq(gap, -30.0, 30.0, xtol=1e-12)))
+
+        def analytic_gap(log_phi: float) -> float:
+            # phi * (score = sum nu_i (log nu_i - digamma nu_i - d_i)) with nu_i = w_i / phi, so
+            # the leading factor is w_i and the data enter only through the phi-free deficit
+            shape = weights * np.exp(-log_phi)
+            return float(np.sum(weights * (np.log(shape) - special.digamma(shape)))) - deficit
+
+        return float(np.exp(optimize.brentq(analytic_gap, -30.0, 30.0, xtol=1e-12)))
     return phi_fallback
 
 
-def _loglik(family: Family, y: np.ndarray, mu: np.ndarray, phi: float, weights: np.ndarray) -> float | None:
+def _loglik(
+    family: Family, y: np.ndarray, mu: np.ndarray, phi: float, weights: np.ndarray, *, frequency: bool
+) -> float | None:
+    """Log-likelihood under the stated weight convention, over the positive-weight rows.
+
+    Discrete families have no analytic-weight density -- there is no exponential-dispersion form of
+    a Poisson or Bernoulli observation "measured with precision w" -- so their weighted likelihood
+    is ``sum w log f`` under both conventions, and the convention shows up only in the sample size
+    (``GLMResult.ll_nobs``). The dispersion-estimating families do distinguish: a frequency weight
+    replicates a log-density, an analytic weight divides that observation's dispersion.
+    """
     name = family.name
-    if name == "gaussian":
-        return float(np.sum(weights * stats.norm.logpdf(y, mu, np.sqrt(phi))))
-    if name == "poisson":
-        return float(np.sum(weights * stats.poisson.logpmf(y, mu)))
     if name == "binomial":
         if np.any((y != 0.0) & (y != 1.0)):
             return None
         m = _clip01(mu)
         return float(np.sum(weights * (y * np.log(m) + (1 - y) * np.log(1 - m))))
-    if name == "gamma":
-        shape = 1.0 / phi
-        return float(np.sum(weights * stats.gamma.logpdf(y, shape, scale=mu * phi)))
+    if name == "poisson":
+        return float(np.sum(weights * stats.poisson.logpmf(y, mu)))
     if name == "negativebinomial":
         theta = family.extra
         return float(np.sum(weights * stats.nbinom.logpmf(y, theta, theta / (theta + mu))))
-    if name == "inverse_gaussian":
-        log_density = -0.5 * (np.log(2.0 * np.pi * phi) + 3.0 * np.log(y) + (y - mu) ** 2 / (phi * y * mu**2))
-        return float(np.sum(weights * log_density))
-    return None
+    scale = phi if frequency else phi / weights
+    if name == "gaussian":
+        log_density = stats.norm.logpdf(y, mu, np.sqrt(scale))
+    elif name == "gamma":
+        log_density = stats.gamma.logpdf(y, 1.0 / scale, scale=mu * scale)
+    elif name == "inverse_gaussian":
+        log_density = -0.5 * (np.log(2.0 * np.pi * scale) + 3.0 * np.log(y) + (y - mu) ** 2 / (scale * y * mu**2))
+    else:
+        return None
+    return float(np.sum(weights * log_density)) if frequency else float(np.sum(log_density))
 
 
 def glm(
@@ -443,9 +639,10 @@ def glm(
     link: str | Link | None = None,
     offset: np.ndarray | None = None,
     weights: np.ndarray | None = None,
+    weight_type: str = "analytic",
     max_iter: int = 100,
     tol: float = 1e-8,
-    robust: bool = False,
+    robust: bool | str = False,
     theta: float = 1.0,
 ) -> GLMResult:
     """Fit a generalized linear model by iteratively reweighted least squares.
@@ -460,12 +657,64 @@ def glm(
             default to ``log`` -- their canonical ``inverse`` / ``inverse_squared`` links do not keep
             ``mu`` positive).
         offset: ``(n,)`` known additive term on the linear-predictor scale (e.g. ``log`` exposure).
-        weights: ``(n,)`` prior weights.
+        weights: ``(n,)`` non-negative prior weights, at least one positive. Zero-weight rows drop
+            out of the fit entirely. What a weight MEANS is set by ``weight_type`` -- the two
+            readings agree on the coefficients and on nothing else.
+        weight_type: the convention ``weights`` are read under.
+
+            * ``"analytic"`` (default; also called prior, precision or variance weights -- the
+              McCullagh--Nelder reading, and R's for ``glm``): row ``i`` is ONE observation measured
+              with precision ``w_i``, so ``Var(y_i) = phi V(mu_i) / w_i``. The sample size is the
+              number of rows: ``residual_df = rows - rank``, ``dispersion`` divides by that, and the
+              log-likelihood is that of ``n`` independent observations with dispersions ``phi/w_i``.
+              Where the dispersion is ESTIMATED, ``phi`` then absorbs the weights' scale, so
+              multiplying every weight by a constant leaves the whole fit unchanged --
+              coefficients, standard errors, log-likelihood, AIC and BIC alike -- and only the
+              relative precisions matter. (Not so where ``phi`` is fixed at 1: for binomial /
+              Poisson / negative-binomial the weight scale IS the amount of information, and
+              halving every weight widens the standard errors by ``sqrt(2)``.) Use this for
+              inverse-variance weighting, measurement precisions or sampling weights; fractional
+              weights are accepted.
+            * ``"frequency"``: ``w_i`` is a COUNT -- row ``i`` stands for ``w_i`` identical
+              observations -- so it must be a whole number. Every reported quantity then equals
+              what fitting the expanded ``sum(w)``-row data set gives: ``residual_df = sum(w) -
+              rank``, ``dispersion`` divides by that, ``robust`` standard errors replicate the
+              score, and AIC/BIC span ``sum(w)`` observations. Use it for aggregated frequency
+              tables -- survey cells, contingency tables, "distinct rows plus a count" extracts.
+
+            The gap is not cosmetic. On a 6-row table whose counts sum to 114, the same call gives
+            ``se = [0.369, 0.135]`` analytically and ``[0.070, 0.025]`` as frequencies -- a factor
+            ``sqrt((114 - 2) / (6 - 2)) = 5.29`` -- with p-values of 5e-04 against 6e-82. Fixed
+            dispersion families (binomial, Poisson, negative-binomial) return identical
+            coefficients AND standard errors either way, because ``phi`` is never estimated there;
+            only ``residual_df`` and the BIC sample size move. Their likelihood is ``sum w log f``
+            under both conventions (a discrete density has no analytic-weight form), so ``ll_nobs``
+            is ``sum(w)`` for them regardless -- see ``GLMResult.ll_nobs``.
         max_iter, tol: IRLS controls (convergence on the relative deviance change).
-        robust: if True report Huber--White (HC0) sandwich standard errors instead of
-            model-based ones. HC0 carries no finite-sample leverage correction, assumes
-            INDEPENDENT observations (it is not cluster-robust), and still requires the mean/link
-            to be correct; small-sample intervals lean narrow (audit G-7).
+        robust: which coefficient-covariance estimator to report (recorded on the result as
+            ``cov_type``). ``False`` -- the default -- is the model-based ``phi (X'WX)^-1``;
+            ``True`` or ``"HC0"`` is the Huber--White sandwich; ``"HC1"`` | ``"HC2"`` | ``"HC3"``
+            apply the standard finite-sample leverage corrections to the same
+            PSD-by-construction sandwich (MacKinnon--White 1985):
+
+            * HC0: the plain sandwich. No finite-sample correction, so on small or leveraged
+              designs it is biased LOW -- measured 16-51% below HC3 on a 12-point design with one
+              leveraged row, i.e. exactly where robust standard errors are reached for.
+              (``robust=True`` keeps meaning HC0 for compatibility.)
+            * HC1: HC0 scaled by ``n / (n - rank)`` -- the df correction Stata's ``robust``
+              applies. Fixes the average small-sample bias but ignores WHERE the leverage sits.
+            * HC2: per-observation scores scaled by ``1 / sqrt(1 - h_i)``; exactly unbiased under
+              homoskedasticity. Use when leverage is uneven but n is moderate.
+            * HC3: scores scaled by ``1 / (1 - h_i)`` (jackknife-like) -- the standard
+              recommendation for ``n <~ 50`` or clearly leveraged designs (Long--Ervin 2000);
+              the most conservative of the four.
+
+            All four assume INDEPENDENT observations (none is cluster-robust) and still require
+            the mean/link to be correct (audit G-7). ``h_i`` is the observation's leverage in the
+            converged working weighted regression; under ``weight_type="frequency"`` each
+            replicate carries its own leverage, so every estimator equals the expanded data set's.
+            HC1-3 are refused on a saturated fit (their corrections divide by zero there), and
+            HC2/HC3 on a unit-leverage observation (one fitted by itself alone).
         theta: the negative-binomial dispersion parameter (``family="negativebinomial"`` only;
             ignored otherwise). Not estimated from data -- pass the value appropriate to your data
             (e.g. from a prior fit or a method-of-moments estimate); the default ``1.0`` is a plain
@@ -478,6 +727,14 @@ def glm(
 
     Returns:
         A :class:`GLMResult`.
+
+    Raises:
+        PerfectSeparationError: a binomial fit whose fitted probabilities reached exactly 0 or 1,
+            leaving IRLS no finite step. Separation that stalls just short of that returns instead,
+            with ``GLMResult.separated`` set, a ``UserWarning``, and ``z_values`` / ``p_values``
+            refusing -- so treat ``separated``, not the absence of this exception, as the answer to
+            "were my classes separated?" (the exception fires on a continuously coded separation
+            and not on the dummy-coded form of the very same data).
     """
     X, y = _regression_data(x, y)
     n, p = X.shape
@@ -492,7 +749,10 @@ def glm(
     else:
         link_name = link or fam.default_link or fam.canonical
         if link_name not in _LINKS:
-            raise ValueError(f"unknown link '{link_name}'.")
+            # same precision as the family message: the menu is short, so print it
+            raise ValueError(
+                f"unknown link '{link_name}'; expected one of {', '.join(sorted(_LINKS))}, or a Link instance"
+            )
         lk = _LINKS[link_name]
     off = np.zeros(n) if offset is None else np.asarray(offset, dtype=float)
     w = np.ones(n) if weights is None else np.asarray(weights, dtype=float)
@@ -502,7 +762,32 @@ def glm(
         raise ValueError("weights must be a finite one-dimensional array aligned with y")
     if np.any(w < 0) or not np.any(w > 0):
         raise ValueError("weights must be non-negative with at least one positive value")
+    if weight_type not in {"analytic", "frequency"}:
+        raise ValueError("weight_type must be 'analytic' (precision weights) or 'frequency' (counts)")
+    frequency = weight_type == "frequency"
+    if frequency and np.any(w != np.floor(w)):
+        # a fractional count has no expanded data set to be equivalent to, and would leave
+        # residual_df non-integral; the analytic reading is what fractional weights mean
+        raise ValueError(
+            "weight_type='frequency' reads weights as observation COUNTS, so they must be whole "
+            "numbers; pass weight_type='analytic' for fractional precision / inverse-variance weights"
+        )
+    if isinstance(robust, str):
+        # strings used to be read as a truthy bool, so robust="HC3" SILENTLY computed HC0 --
+        # the named estimators must dispatch, and a name outside the menu must refuse
+        cov_estimator = robust.upper()
+        if cov_estimator not in {"HC0", "HC1", "HC2", "HC3"}:
+            raise ValueError(
+                "robust must be False (model-based covariance), True (HC0), or one of "
+                f"'HC0' | 'HC1' | 'HC2' | 'HC3'; got {robust!r}"
+            )
+    else:
+        # non-string truthiness keeps its historical meaning so robust=1 callers are untouched
+        cov_estimator = "HC0" if robust else None
     active = w > 0
+    # the sample size the residual df, dispersion and t reference are all taken over: rows under
+    # analytic weights (one observation apiece), replicates under frequency weights
+    n_units = float(np.sum(w)) if frequency else float(np.count_nonzero(active))
 
     # initialise mu in the interior of the family's support
     if fam.name == "binomial":
@@ -560,6 +845,31 @@ def glm(
     if not converged:
         raise RuntimeError(f"IRLS failed to converge in {max_iter} iterations")
 
+    separated = False
+    if fam.name == "binomial":
+        # Deviance convergence does NOT mean the coefficients converged: under separation the
+        # deviance flattens while beta keeps marching, and IRLS stops wherever tol happens to
+        # bite. Screen on how close the fit came to the boundary (widened for a loose tol, which
+        # stops the march earlier), then let the coding-independent feasibility program decide --
+        # the screen alone cannot, since identifiable fits reach the boundary just as closely.
+        boundary = np.minimum(mu[active], 1.0 - mu[active])
+        if boundary.size and float(np.min(boundary)) < max(_SEPARATION_SCREEN, float(np.sqrt(tol))):
+            separated = _binomial_separation(X[active], y[active])
+        if separated:
+            warnings.warn(
+                "perfect separation detected between the binomial classes: some direction in the "
+                f"design separates them ({int(np.count_nonzero(boundary < 1e-8))} of "
+                f"{int(boundary.size)} fitted probabilities are within 1e-8 of 0 or 1), so at "
+                "least one coefficient has no finite maximum-likelihood estimate and IRLS stopped "
+                "at an arbitrary point along it. coef and se there record only where it stopped, "
+                "so z_values / p_values refuse (their Wald p-value would tend to 1 however strong "
+                "the association is); deviance, fitted and log_likelihood are unaffected, so "
+                "compare nested models by their deviance instead. Drop, coarsen or pool the "
+                "separating predictor(s) to recover finite coefficients.",
+                UserWarning,
+                stacklevel=2,
+            )
+
     dmu = np.asarray(lk.mu_eta(eta), dtype=float)
     var = np.asarray(fam.variance(mu), dtype=float)
     wls_w = w * dmu**2 / var
@@ -582,7 +892,8 @@ def glm(
         # p_values refuse via _require_identifiable because rank < p.
         warnings.warn(
             f"the design is rank-deficient at working precision: effective rank {rank} < {p} "
-            "columns, so some predictors are exactly or nearly collinear. Coefficients are the "
+            "columns, so some predictors are exactly or nearly collinear (with fewer rows than "
+            "columns this is automatic). Coefficients are the "
             "minimum-norm least-squares representative and per-coefficient Wald inference "
             "(z_values / p_values) will refuse; drop, combine, or center/rescale the collinear "
             "columns to make individual coefficients identifiable.",
@@ -590,58 +901,134 @@ def glm(
             stacklevel=2,
         )
     dev = float(np.sum(w * fam.unit_deviance(y, mu)))
-    if fam.estimate_dispersion:
-        residual_df = int(np.count_nonzero(active)) - rank
-        if residual_df <= 0:
-            raise ValueError("dispersion is not identifiable without positive residual degrees of freedom")
+    residual_df = int(round(n_units)) - rank
+    # A dispersion-estimating family with residual_df <= 0 is SATURATED: the model interpolates
+    # the observations, so the dispersion (and with it every standard error and the maximised
+    # likelihood, which is unbounded as phi -> 0) genuinely cannot be computed -- but the
+    # coefficients, fitted values and deviance still can. Refusing the whole fit here (the old
+    # behavior) also refused those, while the sibling degeneracy (rank deficiency with
+    # residual_df > 0) already returns the computable part and refuses only inference; route
+    # saturation through the same disclose-and-refuse machinery instead of a blanket raise.
+    saturated = fam.estimate_dispersion and residual_df <= 0
+    if saturated:
+        phi = float("nan")
+        warnings.warn(
+            f"the {fam.name} fit is saturated: it estimates as many parameters (rank {rank}) as "
+            f"it has observations ({int(round(n_units))}), so residual degrees of freedom are 0 "
+            "and the dispersion cannot be estimated. Coefficients, fitted values and deviance "
+            "are returned; dispersion and standard errors are NaN (robust ones included: every "
+            "residual is numerically zero, so a sandwich would claim exact knowledge), the "
+            "log-likelihood is None (it is unbounded in the dispersion at an interpolating fit), "
+            "and z_values / p_values / aic / bic refuse. Add observations beyond the number of "
+            "identifiable parameters, or drop columns, to recover inference.",
+            UserWarning,
+            stacklevel=2,
+        )
+    elif fam.estimate_dispersion:
         phi = float(np.sum(w * (y - mu) ** 2 / var) / residual_df)
     else:
         phi = 1.0
-    if not np.isfinite(phi) or phi <= 0:
+    if not saturated and (not np.isfinite(phi) or phi <= 0):
         raise RuntimeError("fit produced an invalid dispersion estimate")
-    if robust:
-        # per-observation score x_i * w_i (y-mu) (dmu/deta) / V(mu); sandwich B (sum gg') B,
-        # formed as (S B)' (S B) so it is positive semidefinite BY CONSTRUCTION. The algebraically
-        # equal B (S'S) B loses PSD-ness to cancellation at cond(X)^2: OpenBLAS produced negative
-        # sandwich diagonals on a cond ~2e8 design (clipped to se = 0.0 -- a false claim of EXACT
-        # knowledge of coefficients the design cannot identify) where Accelerate stayed positive,
-        # so the same wheel reported different answers per platform (wave-3 CI).
-        score = X * (w * (y - mu) * dmu / var)[:, None]
-        half = score @ xtwx_inv
+    if saturated:
+        # no covariance of any kind is defined at an interpolating fit -- NaN, not 0 or a raise
+        cov = np.full((p, p), np.nan)
+    elif cov_estimator is not None:
+        # per-observation score x_i (y-mu) (dmu/deta) / V(mu) scaled by the weight; sandwich
+        # B (sum gg') B, formed as (S B)' (S B) so it is positive semidefinite BY CONSTRUCTION. The
+        # algebraically equal B (S'S) B loses PSD-ness to cancellation at cond(X)^2: OpenBLAS
+        # produced negative sandwich diagonals on a cond ~2e8 design (clipped to se = 0.0 -- a false
+        # claim of EXACT knowledge of coefficients the design cannot identify) where Accelerate
+        # stayed positive, so the same wheel reported different answers per platform (wave-3 CI).
+        # The weight enters the meat differently per convention, which is not a free choice: a
+        # frequency weight REPLICATES a score (meat sum w g g', matching the expanded data set),
+        # an analytic weight SCALES one (meat sum w^2 g g', HC0 for the weighted estimator).
+        if cov_estimator != "HC0" and residual_df <= 0:
+            # only reachable for fixed-dispersion families (dispersion-estimating ones took the
+            # saturated branch above): n/(n - rank) and 1/(1 - h) both divide by zero here, so
+            # no finite-sample-corrected answer exists -- HC0 and the model covariance still do
+            raise ValueError(
+                f"{cov_estimator} is undefined on a saturated fit (residual degrees of freedom "
+                "= 0): its finite-sample correction divides by zero. Use robust=True/'HC0' or "
+                "the model-based covariance, or add observations beyond the number of "
+                "identifiable parameters."
+            )
+        unit_score = X * ((y - mu) * dmu / var)[:, None]
+        row_scale = np.sqrt(w) if frequency else w
+        if cov_estimator in {"HC2", "HC3"}:
+            # h_i is the observation's leverage in the CONVERGED working weighted regression --
+            # the hat diagonal of sqrt(W_wls) X. An analytic-weighted row is one observation, so
+            # its leverage carries its full working weight; a frequency-weighted row stands for w
+            # replicates that each carry the per-replicate weight dmu^2/var, so the correction
+            # (like the meat) matches the expanded data set. Folding 1/(1-h)^k into the row scale
+            # keeps the (S B)'(S B) PSD-by-construction form.
+            q = np.sum((X @ xtwx_inv) * X, axis=1)
+            per_obs_weight = (dmu**2 / var) if frequency else wls_w
+            leverage = np.where(active, np.clip(per_obs_weight * q, 0.0, None), 0.0)
+            degenerate = leverage > 1.0 - 1e-10
+            if np.any(degenerate):
+                raise ValueError(
+                    f"{cov_estimator} is undefined here: {int(np.count_nonzero(degenerate))} "
+                    "observation(s) have leverage 1 in the working regression (each is fitted by "
+                    "itself alone, e.g. a dummy level with a single observation), so the "
+                    "1/(1 - h) leverage correction divides by zero. Pool the singleton level(s) "
+                    "or use 'HC0'/'HC1'."
+                )
+            row_scale = row_scale / (1.0 - leverage) ** (0.5 if cov_estimator == "HC2" else 1.0)
+        half = (row_scale[:, None] * unit_score) @ xtwx_inv
         cov = half.T @ half
+        if cov_estimator == "HC1":
+            # the df rescaling counts the same units residual_df does: rows under analytic
+            # weights, replicates under frequency weights
+            cov = cov * (n_units / (n_units - rank))
     else:
         cov = phi * xtwx_inv
-    if not np.all(np.isfinite(cov)):
+    if not saturated and not np.all(np.isfinite(cov)):
         raise RuntimeError("fit produced a non-finite covariance matrix")
     se = np.sqrt(np.clip(np.diag(cov), 0.0, None))
-    if fam.estimate_dispersion:
+    # zero-weight rows are absent from the fit, so they are absent from the likelihood too -- and
+    # under analytic weights their dispersion phi/0 is not even defined
+    y_fit, mu_fit, w_fit = y[active], mu[active], w[active]
+    if saturated:
+        # the profile likelihood of an interpolating fit rises without bound as phi -> 0: there
+        # is no maximised value to report, which is a different fact from "this family defines
+        # no likelihood" and is reported as such by aic / bic
+        ll = None
+    elif fam.estimate_dispersion:
         # audit G-2: "maximised log-likelihood" must be evaluated at the MLE of the dispersion,
         # not the residual-df-corrected phi used for the covariance -- the mixed convention
         # understated ll and, with the uncounted dispersion parameter, distorted AIC/BIC model
         # selection toward larger mean models. The MLE is FAMILY-SPECIFIC (the Pearson-form
         # sum (y-mu)^2/V(mu) / n maximises only the Gaussian likelihood; the first cut of this
         # fix used it for every family and the IG contract test caught the 0.1-nat gap).
-        phi_mle = _dispersion_mle(fam, y, mu, w, phi)
-        ll = _loglik(fam, y, mu, phi_mle, w)
+        phi_mle = _dispersion_mle(fam, y_fit, mu_fit, w_fit, phi, frequency=frequency)
+        ll = _loglik(fam, y_fit, mu_fit, phi_mle, w_fit, frequency=frequency)
     else:
-        ll = _loglik(fam, y, mu, phi, w)
+        ll = _loglik(fam, y_fit, mu_fit, phi, w_fit, frequency=frequency)
     if ll is not None and not np.isfinite(ll):
         raise RuntimeError("fit produced a non-finite log likelihood")
     return GLMResult(
-        beta,
-        se,
-        mu,
-        dev,
-        phi,
-        ll,
-        n_iter,
-        fam.name,
-        lk.name,
-        cov,
+        coef=beta,
+        se=se,
+        fitted=mu,
+        deviance=dev,
+        dispersion=phi,
+        log_likelihood=ll,
+        n_iter=n_iter,
+        family=fam.name,
+        link=lk.name,
+        cov=cov,
         converged=True,
         rank=rank,
-        residual_df=int(np.count_nonzero(active)) - rank,
+        residual_df=residual_df,
         dispersion_estimated=bool(fam.estimate_dispersion),
+        weight_type=weight_type,
+        # BIC must penalise the observations the LIKELIHOOD spans, which is the residual-df sample
+        # size only when the likelihood is per-row: a fixed-dispersion family's sum w log f counts
+        # sum(w) units whichever convention the standard errors follow
+        ll_nobs=n_units if fam.estimate_dispersion else float(np.sum(w)),
+        separated=separated,
+        cov_type="model" if cov_estimator is None else cov_estimator,
         _link=lk,
     )
 

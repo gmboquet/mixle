@@ -81,6 +81,9 @@ class ReproduceReceiptTest(unittest.TestCase):
             wheel = Path(directory) / "mixle-0.8.0-py3-none-any.whl"
 
             def write_wheel(source_dirty):
+                import base64
+                import hashlib
+
                 provenance = {
                     "artifact": "mixle.build_provenance/v1",
                     "source_commit": "a" * 40,
@@ -90,9 +93,25 @@ class ReproduceReceiptTest(unittest.TestCase):
                     "source_content_file_count": 3,
                     "source_content_universe": "pyproject.toml, setup.py, and mixle/**/*.{json,py,pyx}",
                 }
+                # Campaign 2, T3-06: this fixture used to ship NO RECORD at all and still
+                # verified -- possible only because ``verified`` was a hardcoded True. RECORD
+                # self-consistency is now part of wheel_provenance, so the clean-case fixture
+                # must be a real, internally consistent wheel for the dirty-case refusal to be
+                # the thing this test isolates.
+                members = {
+                    "mixle-0.8.0.dist-info/METADATA": b"Name: mixle\nVersion: 0.8.0\n",
+                    "mixle/_build_provenance.json": json.dumps(provenance).encode(),
+                }
+                record = "".join(
+                    "%s,sha256=%s,%d\n"
+                    % (name, base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip("="), len(data))
+                    for name, data in members.items()
+                )
+                record += "mixle-0.8.0.dist-info/RECORD,,\n"
                 with zipfile.ZipFile(wheel, "w") as archive:
-                    archive.writestr("mixle-0.8.0.dist-info/METADATA", "Name: mixle\nVersion: 0.8.0\n")
-                    archive.writestr("mixle/_build_provenance.json", json.dumps(provenance))
+                    for name, data in members.items():
+                        archive.writestr(name, data)
+                    archive.writestr("mixle-0.8.0.dist-info/RECORD", record)
 
             write_wheel(False)
             receipt = self.mod.wheel_provenance(wheel)
@@ -705,9 +724,27 @@ class SourceContentUniverseIsRequiredTest(unittest.TestCase):
         provenance.update(overrides)
         for key in [k for k, v in overrides.items() if v is None]:
             provenance.pop(key, None)
+        # Campaign 2, T3-06: RECORD self-consistency is now part of wheel_provenance (its
+        # ``verified`` used to be a hardcoded True, so this fixture verified with no RECORD).
+        # The population-field refusals this class isolates must fire on an otherwise
+        # internally consistent wheel, so a correct RECORD is written for the actual bytes.
+        import base64
+        import hashlib
+
+        members = {
+            "mixle-0.8.0.dist-info/METADATA": b"Name: mixle\nVersion: 0.8.0\n",
+            "mixle/_build_provenance.json": json.dumps(provenance).encode(),
+        }
+        record = "".join(
+            "%s,sha256=%s,%d\n"
+            % (name, base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip("="), len(data))
+            for name, data in members.items()
+        )
+        record += "mixle-0.8.0.dist-info/RECORD,,\n"
         with zipfile.ZipFile(wheel, "w") as archive:
-            archive.writestr("mixle-0.8.0.dist-info/METADATA", "Name: mixle\nVersion: 0.8.0\n")
-            archive.writestr("mixle/_build_provenance.json", json.dumps(provenance))
+            for name, data in members.items():
+                archive.writestr(name, data)
+            archive.writestr("mixle-0.8.0.dist-info/RECORD", record)
         return wheel
 
     def test_complete_record_verifies(self):

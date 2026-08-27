@@ -1,10 +1,13 @@
 """Release-wave-3 regressions for the multivariate Gaussian (B5, B6, and a mixture shape error).
 
-B5: the estimator's default covariance ridge ``eps = max(min_covar, ridge * trace/d)`` is scaled by
-the MEAN diagonal variance, so on heterogeneous-unit data it can inflate the smallest variances far
-beyond its nominal ~1e-6 relative size while nothing recorded the repair. It must now be disclosed
-in the estimator docstring and recorded through ``numerical_repairs()`` / ``fit_provenance()``
-whenever it binds materially -- and stay silent on the scale-homogeneous fits it was designed for.
+B5: the estimator's default covariance ridge ``eps = max(min_covar, ridge * trace/d)`` was scaled
+by the MEAN diagonal variance, so on heterogeneous-unit data it could inflate the smallest
+variances far beyond its nominal ~1e-6 relative size while nothing recorded the repair. Any
+materially binding regularizer must be disclosed in the estimator docstring and recorded through
+``numerical_repairs()`` / ``fit_provenance()`` -- and stay silent on fits it does not bind. (Since
+T1-05 the default ridge is priced per coordinate, ``eps_i = ridge * cov_ii``, so the DEFAULT no
+longer binds on heterogeneous units at all; the disclosure tests below pin the cases that still
+do: an explicit absolute ``min_covar``, and the rank-deficient rescue.)
 
 B6: the serialized state embedded scipy's raw ``cho_factor`` tuple, whose ``lower``-flag Python type
 and unused-triangle content are scipy-version implementation details (they changed at scipy 1.18).
@@ -88,9 +91,25 @@ class _EmulatedChoFactorConvention:
 class RidgeDisclosureTest(unittest.TestCase):
     """B5: a materially binding default ridge must be visible; a nominal one must stay silent."""
 
-    def test_material_ridge_is_recorded_in_repairs_and_provenance(self):
+    def test_default_ridge_no_longer_binds_on_heterogeneous_units(self):
+        # UPDATED for T1-05: this test used to pin the DEFECT half of B5 -- the trace-mean default
+        # ridge binding materially on heterogeneous-unit data (smallest variance inflated >1.5x) and
+        # being disclosed. The ridge is now priced per coordinate (eps_i = ridge * cov_ii), so on
+        # the same data the default is a uniform ~1e-6 relative perturbation: nothing binds, and
+        # there is nothing to disclose. The disclosure contract itself is pinned on the case that
+        # still binds, in the companion test below.
         data, x = _heterogeneous_data()
         model = mixle.inference.fit(data, MultivariateGaussianEstimator(dim=3), max_its=50, delta=None)
+        self.assertEqual(model.numerical_repairs(), ())
+        empirical = np.diag(np.cov(x.T, bias=True))
+        np.testing.assert_allclose(np.diag(np.asarray(model.covar)), empirical, rtol=1e-5)
+
+    def test_material_explicit_floor_is_recorded_in_repairs_and_provenance(self):
+        # The B5 disclosure contract on the same heterogeneous data: a regularizer that DOES bind
+        # materially (here an explicit absolute min_covar dominating the smallest variance) must be
+        # visible in numerical_repairs() and fit_provenance().
+        data, x = _heterogeneous_data()
+        model = mixle.inference.fit(data, MultivariateGaussianEstimator(dim=3, min_covar=10.0), max_its=50, delta=None)
         self.assertTrue(
             any(repair.startswith("covariance-ridged(") for repair in model.numerical_repairs()),
             model.numerical_repairs(),
@@ -98,7 +117,7 @@ class RidgeDisclosureTest(unittest.TestCase):
         provenance = model.fit_provenance()
         self.assertIsNotNone(provenance)
         self.assertTrue(any("covariance-ridged" in repair for repair in provenance.repairs), provenance.repairs)
-        # and the ridge really did bind: the smallest fitted variance exceeds the empirical one
+        # and the floor really did bind: the smallest fitted variance exceeds the empirical one
         empirical = np.diag(np.cov(x.T, bias=True))
         self.assertGreater(float(np.diag(np.asarray(model.covar)).min()), 1.5 * float(empirical.min()))
 
@@ -140,7 +159,9 @@ class RidgeDisclosureTest(unittest.TestCase):
         # regularization and its escape hatch must be discoverable there, not only in __init__.
         doc = MultivariateGaussianEstimator.__doc__
         self.assertIn("ridge", doc)
-        self.assertIn("trace", doc)
+        # UPDATED for T1-05: the pinned formula token was "trace" while the ridge was trace-scaled;
+        # the ridge is now per-coordinate, and the docstring must state the formula actually applied.
+        self.assertIn("ridge * cov_ii", doc)
         self.assertIn("ridge=0.0", doc)
         self.assertIn("numerical_repairs", doc)
         # the measured-false claim must be gone everywhere it appeared

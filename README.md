@@ -11,7 +11,7 @@
 [![docs](https://img.shields.io/badge/docs-gmboquet.github.io%2Fmixle-blue)](https://gmboquet.github.io/mixle/)
 
 **mixle fits models of real, messy data — numbers, text, categories, sequences, missing values — with
-one call.** Hand it raw data and it proposes and fits a model; hand it a structure and it fits that.
+one call.** Hand it raw data and it proposes a model — `propose(data, fit=True)` fits the winner too; hand it a structure and it fits that.
 
 One idea holds the library together: a classical distribution, a neural network, and a latent-variable
 model are **the same kind of object**. They nest inside each other freely, and a single `optimize(...)`
@@ -88,6 +88,9 @@ model = optimize(records, out=None)   # mixle works out the model and fits it (o
 model.log_density(records[0])    # score an observation
 model.sampler().sample(5)        # draw new ones
 ```
+
+To choose between candidate models, fit each with `mixle.ppl` and rank them with `mixle.ppl.compare`
+(AIC/BIC); `optimize`'s docstring documents the same route under "Model comparison".
 
 **Distill a slow, expensive model into a cheap one that knows when to defer.** Point `solve` at the
 function doing the job today — an LLM, an API, a rule — and it trains a small local model that answers
@@ -247,8 +250,8 @@ Normal(free * Field("x") + free * Field("z") + free, free).fit(
 ## Beyond the basics
 
 - **Automatic structure** — `mixle.propose(data)` picks a family per field, notices when fields depend
-  on each other, and fits a copula or vine when continuous columns are correlated — heavy joint tails
-  included.
+  on each other, and selects a copula or vine when continuous columns are correlated — heavy joint
+  tails included (pass `fit=True` to fit the winner).
 - **A deep catalog** — continuous, discrete, directional, and multivariate families; copulas and vines;
   permutations and graphs (Mallows, matchings, spanning trees, grammars); structured latent models
   (segmental / lookback / tree / quantized HMMs, LDA, PCFGs); and neural leaves — a Transformer LM,

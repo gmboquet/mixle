@@ -207,14 +207,17 @@ class GaussianMixtureAccumulator(MixtureAccumulator):
         accumulators: Component accumulators, typically one multivariate
             Gaussian accumulator per component.
         keys: Optional shared-statistic keys for weights and components.
+        init: Initialization strategy, one of
+            :data:`~mixle.stats.latent.mixture.MIXTURE_INIT_STRATEGIES`.
     """
 
     def __init__(
         self,
         accumulators: Sequence[SequenceEncodableStatisticAccumulator],
         keys: tuple[str | None, str | None] = (None, None),
+        init: str = "kmeans++",
     ) -> None:
-        super().__init__(accumulators, keys=keys)
+        super().__init__(accumulators, keys=keys, init=init)
 
     def acc_to_encoder(self) -> "GaussianMixtureDataEncoder":
         """Return an encoder compatible with the component accumulators."""
@@ -228,6 +231,8 @@ class GaussianMixtureEstimatorAccumulatorFactory(MixtureAccumulatorFactory):
         factories: Component accumulator factories.
         dim: Number of mixture components.
         keys: Optional shared-statistic keys for weights and components.
+        init: Initialization strategy, one of
+            :data:`~mixle.stats.latent.mixture.MIXTURE_INIT_STRATEGIES`.
     """
 
     def __init__(
@@ -235,13 +240,19 @@ class GaussianMixtureEstimatorAccumulatorFactory(MixtureAccumulatorFactory):
         factories: Sequence[StatisticAccumulatorFactory],
         dim: int,
         keys: tuple[str | None, str | None] = (None, None),
+        init: str = "kmeans++",
     ) -> None:
-        super().__init__(factories, keys=keys)
+        super().__init__(factories, keys=keys, init=init)
         self.dim = dim
 
     def make(self) -> "GaussianMixtureAccumulator":
         """Return a fresh Gaussian mixture accumulator."""
-        return GaussianMixtureAccumulator([self.factories[i].make() for i in range(self.dim)], self.keys)
+        # `init` has to travel with the factory: dropping it here pinned every GaussianMixture fit
+        # to the accumulator default, so an estimator configured with a different strategy (or with
+        # robust=True) silently got the default one.
+        return GaussianMixtureAccumulator(
+            [self.factories[i].make() for i in range(self.dim)], self.keys, init=self.init
+        )
 
 
 class GaussianMixtureEstimator(MixtureEstimator):
@@ -253,14 +264,24 @@ class GaussianMixtureEstimator(MixtureEstimator):
     :class:`GaussianMixtureDistribution`.
 
     Args:
-        estimators: Component estimators, typically multivariate Gaussian
-            estimators.
+        estimators: Component estimators whose fitted components carry a mean
+            vector and a covariance (``mu`` and ``covar``) -- typically
+            :class:`~mixle.stats.multivariate.multivariate_gaussian.MultivariateGaussianEstimator`
+            or :class:`~mixle.stats.multivariate.diagonal_gaussian.DiagonalGaussianEstimator`.
+            The univariate ``GaussianEstimator`` is refused at construction (its
+            fitted component has no covariance to pack); spell a univariate
+            Gaussian mixture ``MixtureEstimator([GaussianEstimator(), ...])``.
         name: Optional diagnostic name.
         conj_prior_params: Reserved compatibility slot.
         suff_stat: Optional prior component-count vector used with
             ``pseudo_count``.
         pseudo_count: Optional smoothing mass for mixture weights.
         keys: Optional shared-statistic keys for weights and components.
+        robust: Enable the robust weight floor, as on
+            :class:`~mixle.stats.latent.mixture.MixtureEstimator`.
+        init: Initialization strategy, one of
+            :data:`~mixle.stats.latent.mixture.MIXTURE_INIT_STRATEGIES`; ``None`` selects the
+            default ``"kmeans++"``.
     """
 
     def __init__(
@@ -271,14 +292,45 @@ class GaussianMixtureEstimator(MixtureEstimator):
         suff_stat: np.ndarray | None = None,
         pseudo_count: float | None = None,
         keys: tuple[str | None, str | None] = (None, None),
+        robust: bool = False,
+        init: str | None = None,
     ) -> None:
-        super().__init__(estimators, suff_stat=suff_stat, pseudo_count=pseudo_count, name=name, keys=keys)
+        super().__init__(
+            estimators,
+            suff_stat=suff_stat,
+            pseudo_count=pseudo_count,
+            name=name,
+            keys=keys,
+            robust=robust,
+            init=init,
+        )
+        # T4-9 boundary check for THE common first-attempt mistake: univariate GaussianEstimator
+        # components. They run a whole E-step fine and only die at the end of the first M-step with
+        # a bare ``AttributeError: 'GaussianDistribution' object has no attribute 'covar'`` from the
+        # (mu, covar) repack below. No legitimate use is refused: a scalar Gaussian component can
+        # never survive that repack, and a univariate Gaussian mixture is spelled
+        # ``MixtureEstimator([GaussianEstimator(), ...])``. Deliberately a blocklist of exactly this
+        # class -- duck-typed vector components (anything whose fitted distribution carries ``mu``
+        # and ``covar``, like DiagonalGaussianEstimator) must keep working, so unknown estimator
+        # types pass here and are checked against the actual repack contract in :meth:`estimate`.
+        from mixle.stats.univariate.continuous.gaussian import GaussianEstimator as _ScalarGaussian
+
+        for i, est in enumerate(self.estimators):
+            if isinstance(est, _ScalarGaussian):
+                raise TypeError(
+                    "GaussianMixtureEstimator: estimators[%d] is the univariate GaussianEstimator, "
+                    "whose fitted component has a scalar mean and variance, but "
+                    "GaussianMixtureEstimator packs vector components with a mean vector and a "
+                    "covariance matrix (e.g. MultivariateGaussianEstimator(dim=d) or "
+                    "DiagonalGaussianEstimator(dim=d)). For a mixture of univariate Gaussians use "
+                    "MixtureEstimator([GaussianEstimator(), ...]) instead." % i
+                )
         self.conj_prior_params = conj_prior_params
 
     def accumulator_factory(self) -> "GaussianMixtureEstimatorAccumulatorFactory":
         """Return a Gaussian mixture accumulator factory."""
         est_factories = [u.accumulator_factory() for u in self.estimators]
-        return GaussianMixtureEstimatorAccumulatorFactory(est_factories, self.num_components, self.keys)
+        return GaussianMixtureEstimatorAccumulatorFactory(est_factories, self.num_components, self.keys, init=self.init)
 
     @deprecated_alias("accumulator_factory", since="0.8.0", removed_in="0.10.0")
     def accumulatorFactory(self) -> "GaussianMixtureEstimatorAccumulatorFactory":
@@ -307,8 +359,26 @@ class GaussianMixtureEstimator(MixtureEstimator):
             Fitted Gaussian mixture distribution.
         """
         base = super().estimate(nobs, suff_stat)
-        mu = np.asarray([comp.mu for comp in base.components])
-        sig2 = np.asarray([comp.covar for comp in base.components])
+        try:
+            mu = np.asarray([comp.mu for comp in base.components])
+            sig2 = np.asarray([comp.covar for comp in base.components])
+        except AttributeError as exc:
+            # The repack contract is ``mu`` + ``covar`` on every fitted component. Any other
+            # component family (say, ExponentialEstimator) sails through EM and used to die right
+            # here as a bare AttributeError from library internals (T4-9). This is the one place
+            # the incompatibility is proven, so it is where non-Gaussian duck types are refused --
+            # the constructor blocks only the provably wrong univariate GaussianEstimator.
+            bad = next(
+                (c for c in base.components if not (hasattr(c, "mu") and hasattr(c, "covar"))),
+                base.components[0] if base.components else None,
+            )
+            raise TypeError(
+                "GaussianMixtureEstimator component estimators must fit Gaussian components with "
+                "a mean vector and a covariance (`mu` and `covar`), but a component fit produced "
+                "%s, which does not carry both; use MultivariateGaussianEstimator / "
+                "DiagonalGaussianEstimator components here, or MixtureEstimator for a mixture of "
+                "non-Gaussian components." % type(bad).__name__
+            ) from exc
         packed = GaussianMixtureDistribution(mu, sig2, base.w, name=self.name)
         # The repack builds a FRESH distribution from bare parameter arrays, which discarded the
         # component objects -- and with them any covariance-ridge/variance-floor repair records the

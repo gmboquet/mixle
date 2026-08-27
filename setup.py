@@ -86,6 +86,12 @@ def _provenance_payload(root: Path) -> dict:
     if len(source_tree) != 40 or any(character not in "0123456789abcdef" for character in source_tree):
         source_tree = _git_value(root, "HEAD^{tree}")
     files = _source_content_files(root)
+    # One key, two possible populations: a git checkout digests ~2,000 files, an unpacked sdist
+    # digests the ~800 it ships. The digests legitimately differ, and a reader diffing the wheel's
+    # record against the sdist's saw a "mismatch" that was only a population difference (campaign
+    # T3-05). The universe string now names WHICH population was hashed instead of describing both
+    # identically, so the records disambiguate themselves.
+    population = "the git checkout" if (root / ".git").exists() else "the sdist-packaged tree"
     return {
         "artifact": "mixle.build_provenance/v1",
         "source_commit": source_commit,
@@ -93,7 +99,7 @@ def _provenance_payload(root: Path) -> dict:
         "source_dirty": _source_dirty(root),
         "source_content_sha256": _source_content_digest(root),
         "source_content_file_count": len(files),
-        "source_content_universe": "pyproject.toml, setup.py, and mixle/**/*.{json,py,pyx} present in the build tree",
+        "source_content_universe": "pyproject.toml, setup.py, and mixle/**/*.{json,py,pyx} present in %s" % population,
     }
 
 
@@ -143,6 +149,18 @@ class ProvenanceBuildPy(build_py):
         super().run()
         root = Path(__file__).resolve().parent
         payload = _provenance_payload(root)
+        if payload["source_commit"] != "unknown":
+            # The release path: env vars named the commit, so the fresh payload wins -- but a wheel
+            # built from an unpacked sdist then DROPPED the sdist digest, leaving no cross-artifact
+            # check between the two records (campaign T3-05: sdist_content_sha256 is the one field
+            # whose value the sdist and its wheels share). When the shipped record still verifies
+            # against this exact tree, carry the sdist digest fields forward alongside the fresh
+            # identity; a tree that no longer matches gets nothing, same rule as adoption below.
+            shipped = _carried_provenance(root)
+            if shipped is not None:
+                for key in ("sdist_content_sha256", "sdist_content_file_count", "sdist_content_universe"):
+                    if key in shipped:
+                        payload[key] = shipped[key]
         if payload["source_commit"] == "unknown":
             # No git here. Either this is a tree unpacked from an sdist -- in which case the sdist
             # shipped the attestation from when it was built, and carrying it forward is what keeps
@@ -180,6 +198,9 @@ class ProvenanceSdist(sdist):
         # itself is excluded from the digest -- it is where the digest is about to be written.
         payload["sdist_content_sha256"] = _source_content_digest(Path(base_dir))
         payload["sdist_content_file_count"] = len(_source_content_files(Path(base_dir)))
+        payload["sdist_content_universe"] = (
+            "pyproject.toml, setup.py, and mixle/**/*.{json,py,pyx} shipped in this sdist"
+        )
         destination.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
 
 

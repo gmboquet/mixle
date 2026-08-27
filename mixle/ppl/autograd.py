@@ -57,7 +57,13 @@ def _validated_observations(data, *, missing: str, allow_marginalize: bool) -> t
         raise ValueError("observations contain NaN; pass missing='marginalize' to integrate missing rows out.")
     if not missing_rows.any():
         return arr.copy(), None
-    return np.where(missing_rows, 0.0, arr), (~missing_rows).astype(float)
+    # The sentinel replacing a marginalized NaN must keep EVERY family's prep finite, because a
+    # masked row is zeroed by weight only after the scorer runs and `-inf * 0` is NaN. 0.0 satisfied
+    # the polynomial preps but broke the logarithmic ones (Gamma/Weibull/Beta/LogNormal data terms
+    # take log(x), Beta additionally log1p(-x)); 0.5 is interior to every continuous support that a
+    # prep transforms, so all data terms stay finite. The value never reaches the likelihood: its
+    # row's weight is exactly zero.
+    return np.where(missing_rows, 0.5, arr), (~missing_rows).astype(float)
 
 
 # --- per-family Torch scorers ------------------------------------------------------
@@ -90,8 +96,12 @@ def _scorers():
     return {
         "Normal": (lambda x, t: (x,), lambda a, dt, x, e: G(x, a[0], a[1] ** 2, e)),
         "LogNormal": (
-            lambda x, t: (x,),
-            lambda a, dt, x, e: LogGaussianDistribution.backend_log_density_from_params(x, a[0], a[1] ** 2, e),
+            # The LogGaussian backend scores LOG-ENCODED data (its docstring: "on log-encoded
+            # data"), so prep must take log(x); feeding raw x made every autograd route (MAP, the
+            # samplers, VI) silently fit the Gaussian of the raw data, and mis-scored LogNormal
+            # PRIORS the same way (the prior path calls this prep on the parameter value).
+            lambda x, t: (t.log(x),),
+            lambda a, dt, x, e: LogGaussianDistribution.backend_log_density_from_params(dt[0], a[0], a[1] ** 2, e),
         ),
         "Exponential": (
             lambda x, t: (x,),

@@ -5,6 +5,7 @@ objects.
 
 """
 
+import warnings
 from collections.abc import Sequence
 from copy import deepcopy
 from functools import partial
@@ -152,7 +153,7 @@ def _reject_all_zero_observation_weights(data: Any, entry: str) -> None:
 
 
 # --- estimator coercion -----------------------------------------------------
-def _coerce_estimator(estimator: Any, data: Any) -> ParameterEstimator:
+def _coerce_estimator(estimator: Any, data: Any, fields: Any = None) -> ParameterEstimator:
     """Resolve the ``estimator`` argument to a concrete ``ParameterEstimator``.
 
     The fit verbs (``optimize`` / ``fit`` / ``best_of``) accept three spellings so a model's
@@ -186,6 +187,14 @@ def _coerce_estimator(estimator: Any, data: Any) -> ParameterEstimator:
             )
         from mixle.utils.automatic import get_estimator
 
+        if fields is not None:
+            # ``fields=`` selects the columns the encoder will actually fit, so inference must see
+            # those same records: inferring from the full table made ``get_estimator`` size the
+            # model to every column while the encoded rows carried only the selection, and the fit
+            # then failed with a row-shape ContractError blaming the user's data (campaign T2-09,
+            # the documented-workaround defect). ``fields is not None`` forces the same conversion
+            # here that ``_data_records_for_encoding`` applies at encode time, so the two agree.
+            data = _data_records_for_encoding(data, fields, None, None)
         return get_estimator(data)
     return estimator
 
@@ -400,6 +409,13 @@ def _dataframe_fields(fields: Any, estimator: Any, model: Any) -> Any:
 
 def _data_records_for_encoding(data: Any, fields: Any, estimator: Any, model: Any) -> Any:
     if not _dataframe_like(data) and fields is None:
+        # A pandas Series reaches the generic path (it has no .columns), but the family encoders
+        # take sequences, and OptionalDataEncoder in particular refuses the Series wholesale -- so
+        # optimize(series_with_missing) failed for every Optional-wrapped auto estimator while
+        # get_estimator(series) had happily accepted the same input (campaign wave 2). Iterating a
+        # Series yields its VALUES (never the index), preserving both missing spellings.
+        if type(data).__name__ == "Series" and type(data).__module__.startswith("pandas"):
+            return list(data)
         return data
     from mixle.data.sources.pandas_source import dataframe_records
 
@@ -624,6 +640,7 @@ def _record_fit_provenance(
                 delta=None if delta is None else float(delta),
                 final_objective=trace.final_objective,
                 objective_gain=trace.objective_gain,
+                last_accepted_objective=getattr(trace, "last_accepted_objective", None),
                 n_observations=_encoded_row_count(enc_data),
                 repairs=repairs,
                 seed=seed,
@@ -634,6 +651,38 @@ def _record_fit_provenance(
     return model
 
 
+def _warn_if_capped_unconverged(trace: "_FitTrace", max_its: int, delta: float | None) -> None:
+    """Disclose a convergence-seeking run that exhausted its iteration cap with the objective still moving.
+
+    A latent-variable fit truncated at ``optimize``'s default ``max_its=10`` used to present exactly like
+    a finished one unless the caller thought to read ``fit_provenance()`` (campaign T4-3); the flag was
+    computed and then never spoken. Scope, checked against legitimate inputs this must NOT annoy:
+
+    * ``delta=None`` is the documented "fixed iteration count" request -- a run that stops at its cap on
+      purpose. No note.
+    * surrogate-trained estimators run with the loop delta disabled, so their scheduled-budget fits are
+      likewise silent here.
+    * a run that stopped BELOW the cap on a rejected update (``iterations < max_its``) is a different
+      condition -- more iterations would not help -- and is described by ``FitProvenance.converged``'s
+      docstring rather than warned about, so an ordinary e.g. Weibull fit stays quiet.
+
+    What remains is a run the caller asked to iterate to a gain below ``delta`` that never got there:
+    warn once, with both remedies.
+    """
+    if delta is None or trace.converged or int(trace.iterations) < int(max_its):
+        return
+    gain = trace.objective_gain
+    gain_text = ("last objective gain %.3g" % gain) if gain is not None else "final gain unknown"
+    warnings.warn(
+        "optimize() stopped at the max_its cap (%d) before the objective settled (%s, delta=%g): the "
+        "returned model is an unconverged fit, and its fit_provenance() reports converged=False. "
+        "Raise max_its to fit to convergence, or pass delta=None to request a fixed iteration count "
+        "without this note." % (int(max_its), gain_text, float(delta)),
+        UserWarning,
+        stacklevel=3,
+    )
+
+
 class _FitTrace:
     """Mutable scratch the EM loop fills in so ``optimize`` can describe the run it just performed.
 
@@ -642,13 +691,17 @@ class _FitTrace:
     nothing to do with provenance.
     """
 
-    __slots__ = ("iterations", "converged", "final_objective", "objective_gain", "repairs")
+    __slots__ = ("iterations", "converged", "final_objective", "objective_gain", "last_accepted_objective", "repairs")
 
     def __init__(self) -> None:
         self.iterations = 0
         self.converged = False
         self.final_objective: float | None = None
         self.objective_gain: float | None = None
+        # The trajectory's last ACCEPTED objective value, recorded when best-seen selection may
+        # return an earlier iterate; the loop exit then rewrites final_objective to describe the
+        # model actually returned (the FitProvenance docstring's contract; campaign T4-8).
+        self.last_accepted_objective: float | None = None
         self.repairs: tuple[str, ...] = ()
 
 
@@ -720,6 +773,11 @@ def _em_loop(
     initial_is_selectable = current_is_finite and bool(np.isfinite(best_vll))
     best_model = model if initial_is_selectable else None
     best_state = MutableStateSnapshot.capture(model) if initial_is_selectable else None
+    # The TRAINING objective of best_model, kept alongside it so the receipt can describe the model
+    # actually returned. trace.final_objective tracks the trajectory's last accepted value, which
+    # under validation-based selection or monotone=False belongs to a model that is NOT returned
+    # (campaign T4-8); the exit below reconciles the two.
+    best_ll = old_ll if initial_is_selectable else None
 
     for i in range(int(max_its)):
         transaction = MutableStateSnapshot.capture(model, estimator)
@@ -761,6 +819,7 @@ def _em_loop(
                 best_vll = vll
                 best_model = nxt
                 best_state = MutableStateSnapshot.capture(best_model)
+                best_ll = ll
             elif not track_best:
                 best_vll = vll
 
@@ -788,6 +847,14 @@ def _em_loop(
         if best_model is None or best_state is None:
             raise ValueError("EM did not produce a model with a finite validation objective.")
         best_state.restore()
+        if trace is not None and best_ll is not None:
+            # FitProvenance.final_objective is documented as the value of the RETURNED model. The
+            # loop above tracked the trajectory's last accepted value; when selection returns an
+            # earlier iterate (validation selection, monotone=False) that value belongs to a model
+            # the caller never sees, so keep it under its own truthful name and let the receipt
+            # describe best_model, which is what is being returned (campaign T4-8).
+            trace.last_accepted_objective = trace.final_objective
+            trace.final_objective = float(best_ll)
         return best_model, best_vll
     return model, best_vll
 
@@ -822,6 +889,7 @@ def _fused_em_loop(
     has_v = enc_vdata is not None
     best_model = None
     best_score = None
+    best_train_ll = None  # training LL of best_model, so the receipt can describe the returned model
     prev_ll = None
     accepted_model = None
     nxt = None
@@ -850,6 +918,7 @@ def _fused_em_loop(
         if np.isfinite(score) and (best_score is None or score >= best_score):
             best_score = score
             best_model = model
+            best_train_ll = float(ll_model)
 
         converged = (delta is not None) and (prev_ll is not None) and (0.0 <= dll < delta)
         if out is not None and (converged or (print_iter and (i + 1) % print_iter == 0)):
@@ -883,12 +952,25 @@ def _fused_em_loop(
             if np.isfinite(score) and (best_score is None or score >= best_score):
                 best_score = score
                 best_model = nxt
+                best_train_ll = float(final_ll)
+            if trace is not None:
+                # The trajectory just advanced by one accepted step; without this a capped fused fit
+                # reported the value of the model one step BEHIND the one it returned (same defect
+                # class as T4-8: a receipt describing a model that was not returned).
+                trace.final_objective = float(final_ll)
+                if prev_ll is not None:
+                    trace.objective_gain = float(final_ll - prev_ll)
 
     if accepted_model is None:
         raise ValueError("fused EM did not produce a finite objective from its non-finite initial model.")
     if track_best and best_model is None:
         raise ValueError("fused EM did not produce a model with a finite validation objective.")
     chosen = best_model if track_best else accepted_model
+    if track_best and trace is not None and best_train_ll is not None:
+        # As in _em_loop: FitProvenance.final_objective must describe the RETURNED model; the
+        # trajectory's own last accepted value stays visible under its truthful name (T4-8).
+        trace.last_accepted_objective = trace.final_objective
+        trace.final_objective = float(best_train_ll)
     return chosen, (best_score if best_score is not None else 0.0)
 
 
@@ -1172,12 +1254,27 @@ def optimize(
             is used as-is; a distribution **prototype** (any ``ProbabilityDistribution``) is coerced to its
             matching estimator via ``proto.estimator()`` so you build the model shape only once; ``None``
             infers an estimator from raw ``data`` (``mixle.utils.automatic.get_estimator``).
+            Inferring from rows that do not all carry the same number of fields is ambiguous between a
+            table with a malformed row and variable-length sequence data, so it is decided on the arity
+            evidence rather than guessed: an overwhelmingly dominant arity raises ``ContractError``
+            naming the offending row, a bare majority is fitted as a sequence and warns that it did,
+            and widely spread arities are fitted as a sequence in silence. Pass
+            ``mixle.utils.automatic.get_estimator(data, ragged='sequence')`` as the ``estimator`` to
+            demand the sequence reading outright.
         max_its (int): Maximum number of EM iterations to be performed. Default value is 10 iterations.
         delta (Optional[float]): Stopping criteria for EM algorithm used if max_its is not set: Iterate until
             ``|old_loglikelihood - new_loglikelihood| < delta`` or iterations == max_its.
         init_estimator (Optional[ParameterEstimator]): ParameterEstimator to used to initialize EM algorithm parameters.
             If None, estimator is used. Must be consistent with estimator.
         init_p (float): Value in (0.0,1.0] for randomizing the proportion of data points used in initialization.
+            This is a statistical knob, not an execution detail: the initialization is the estimator's
+            answer on the drawn subsample, and for latent models and for families whose documented
+            update is approximate rather than an exact likelihood ascent (e.g. Weibull,
+            GeneralizedExtremeValue, WrappedCauchy) the accepted EM trajectory -- and therefore the
+            returned parameters -- depends on that start. In the extreme, such a family's very first
+            update can fail the monotone acceptance gate, and the fit then returns the initialization
+            itself (``fit_provenance()`` reports ``converged=False`` with ``iterations`` below the
+            cap). ``init_p=1.0`` initializes from the estimator's answer on all the data.
         rng (RandomState): RandomState used to set seed for initializing EM algorithm. ``None`` resolves to
             a FIXED seed, so the NumPy-driven parts of an un-seeded ``optimize``/``fit`` (initialization,
             EM, subsampling) are deterministic by default; pass your own RandomState when you WANT
@@ -1197,7 +1294,13 @@ def optimize(
         print_iter (int): Print the log-likelihood difference every print_iter iterations; the final converged
             iteration is always reported. Pass print_iter=0 to suppress the periodic lines (keeping only the
             converged line), or out=None to silence entirely.
-        num_chunks (int): Number of chunks for encoded data.
+        num_chunks (int): Number of chunks for encoded data. For exact-sufficient-statistic leaves the
+            chunk statistics combine exactly, so chunking changes only float summation order.
+            Chunking also changes WHICH rows the ``init_p`` initialization subsample draws, however,
+            so for the initialization-sensitive families described under ``init_p`` a different
+            ``num_chunks`` can change the fitted parameters, not just the execution plan -- measured
+            at the percent level on Weibull/GEV/WrappedCauchy fits. When varying it, compare
+            ``fit_provenance().final_objective`` (or hold the start fixed with ``init_p=1.0``).
         engine (Optional[Any]): Optional ComputeEngine for local kernel scoring/accumulation. Distributed engine
             placement is intentionally deferred to the orchestrator/planner layer.
         precision (Optional[Any]): Optional floating-point precision such as ``'float32'`` or ``np.float64``.
@@ -1277,8 +1380,11 @@ def optimize(
             with no estimator: the cross-field dependency graph is discovered
             (:func:`mixle.inference.learn_bayesian_network`) and returned when it beats the
             independent composite by BIC — otherwise (no edges, non-record data, or any failure)
-            the historical automatic-composite path proceeds untouched. ``'off'`` restores the
-            unconditional historical behavior. Only consulted when ``estimator`` is ``None`` and no
+            the historical automatic-composite path proceeds untouched. A pandas DataFrame is
+            converted to the same flat records first (honoring ``fields``), so a table gets the
+            same structure inference whether it arrives as a DataFrame or as a list of row tuples.
+            ``'off'`` restores the unconditional historical behavior. Only consulted when
+            ``estimator`` is ``None`` and no
             ``prev_estimate``/``init_estimator``/``strategy``/``enc_data`` is supplied.
         schedule (str): ``'full'`` (default) performs exact full-tree EM every round and automatically
             uses whole-model or component-level compiled kernels when the local model is eligible.
@@ -1308,8 +1414,22 @@ def optimize(
             (with the same validation) when the fit resolves to a non-fused path.
 
     Returns:
-        SequenceEncodableProbabilityDistribution corresponding to estimator when stopping criteria of EM algorithm
-            is met.
+        SequenceEncodableProbabilityDistribution: the fitted model. The run behind it ended in one of
+            three ways -- the objective gain fell below ``delta`` (a converged fit), the ``max_its``
+            cap was reached with the objective still improving (an unconverged fit; a ``UserWarning``
+            says so when ``delta`` is in force), or the family's next update failed the monotone
+            acceptance gate before the cap (no further progress is possible; see ``init_p``). The
+            receipt distinguishing them ships on the model: ``model.fit_provenance()`` reports
+            ``converged``, ``iterations``, ``final_objective`` (the returned model's objective
+            value), and any numerical ``repairs``.
+
+    **Model comparison.** A fitted core distribution intentionally carries no ``aic()``/``bic()`` --
+    the core cannot count free parameters exactly for every composed model. The supported paths:
+    per-observation log-densities (``model.log_density(x)``) feed the paired comparison tests
+    exported by :mod:`mixle.inference` (:func:`vuong_test`, :func:`clarke_test`,
+    :func:`paired_score_difference`, :func:`compare_elpd`), and the :mod:`mixle.ppl` surface fits
+    the same families with a recorded parameter dimension, giving ``m.aic(data)`` / ``m.bic(data)``
+    and best-first ranking via ``mixle.ppl.compare([m1, m2], data, by='bic')``.
 
     """
     _validate_optimize_controls(
@@ -1340,8 +1460,17 @@ def optimize(
         and init_estimator is None
         and strategy is None
     ):
+        structure_rows = data
+        if _dataframe_like(data):
+            # A DataFrame silently bypassed structure='auto': iterating a DataFrame yields its
+            # column NAMES, so _maybe_structured_model saw a few strings and declined, and the same
+            # table that routes to a dependence-aware model as a list of records fit as an
+            # independent composite instead -- silent and answer-changing (campaign T2-09b).
+            # Convert to exactly the flat records the encoding path fits, so both spellings of the
+            # same table share one structure inference.
+            structure_rows = _data_records_for_encoding(data, fields, None, None)
         structured, independent_composite = _maybe_structured_model(
-            data,
+            structure_rows,
             max_its,
             out,
             rng,
@@ -1355,26 +1484,33 @@ def optimize(
         # When the dependence candidates were scored and lost, the BIC gate already paid for a full
         # fit of the independent composite that this path would now refit identically -- reuse it,
         # but only when every knob it could not see is at the default that front-door fit used.
-        if independent_composite is not None and (
-            vdata is None
-            and enc_vdata is None
-            and out is None
-            and num_chunks == 1
-            and engine is None
-            and precision is None
-            and fields is None
-            and resources is None
-            and placement is None
-            and sub_chunks == 1
-            and chunk_size is None
-            and backend == "local"
-            and on_step is None
-            and schedule == "full"
-            and monotone is None
-            and track_best is None
+        # A converted DataFrame (structure_rows is not data) refits through the normal path: its
+        # composite candidate was fit on the converted records via get_estimator(records), and this
+        # close to release we do not bet the answer on that matching get_estimator(DataFrame).
+        if (
+            independent_composite is not None
+            and structure_rows is data
+            and (
+                vdata is None
+                and enc_vdata is None
+                and out is None
+                and num_chunks == 1
+                and engine is None
+                and precision is None
+                and fields is None
+                and resources is None
+                and placement is None
+                and sub_chunks == 1
+                and chunk_size is None
+                and backend == "local"
+                and on_step is None
+                and schedule == "full"
+                and monotone is None
+                and track_best is None
+            )
         ):
             return independent_composite
-    estimator = _coerce_estimator(estimator, data)
+    estimator = _coerce_estimator(estimator, data, fields=fields)
     if init_estimator is not None:
         init_estimator = _coerce_estimator(init_estimator, data)
     rng = RandomState(0) if rng is None else rng  # fixed default: the numpy side of an un-seeded fit is deterministic
@@ -1418,7 +1554,20 @@ def optimize(
 
         engine = engine_with_precision(engine, precision)
 
-    backend_name = str(backend or "local").lower()
+    if backend is None:
+        backend_name = "local"
+    else:
+        backend_name = str(backend).lower()
+        if not backend_name.strip():
+            # `backend or "local"` silently ran an empty string locally -- indistinguishable from
+            # a config variable that failed to resolve. Only None means "the default"; an explicit
+            # empty name is refused like any unknown backend (campaign wave 2, T4-9).
+            from mixle.utils.parallel.planner import available_encoded_data_backends
+
+            raise ValueError(
+                "optimize() backend must be a non-empty backend name (or None for the local "
+                "default); registered backends: %s" % ", ".join(available_encoded_data_backends())
+            )
     if data is None and enc_data is None and not (backend_name == "mpi" and root_only):
         raise ValueError(
             "optimize() received no observations: data and enc_data are both None. "
@@ -1573,6 +1722,7 @@ def optimize(
                 # Block EM stops on its own convergence test; it reports rounds, not a delta, so
                 # "converged" is "it stopped before the cap" rather than an asserted gain threshold.
                 block_trace.converged = bool(block_history) and len(block_history) < max_its
+                _warn_if_capped_unconverged(block_trace, max_its, delta)
                 return _record_fit_provenance(
                     best_model,
                     block_trace,
@@ -1653,6 +1803,7 @@ def optimize(
             trace=trace,
         )
 
+        _warn_if_capped_unconverged(trace, max_its, loop_delta)
         return _record_fit_provenance(
             best_model,
             trace,
@@ -1723,8 +1874,14 @@ def fit(
         and kwargs.get("prev_estimate") is None
         and kwargs.get("strategy") is None
     ):
+        structure_rows = data
+        if _dataframe_like(data):
+            # Same repair as optimize's front door (campaign T2-09b): a DataFrame iterates as its
+            # column names, which silently skipped structure inference for exactly the tabular data
+            # it exists for. Fit structure on the same flat records the encoding path will fit.
+            structure_rows = _data_records_for_encoding(data, kwargs.get("fields"), None, None)
         structured, independent_composite = _maybe_structured_model(
-            data,
+            structure_rows,
             max_its,
             kwargs.get("out"),
             kwargs.get("rng"),
@@ -1749,9 +1906,14 @@ def fit(
             "objective",
             "reuse_estep_ll",
         }
-        if independent_composite is not None and kwargs.get("out") is None and not (set(kwargs) - _threaded_or_inert):
+        if (
+            independent_composite is not None
+            and structure_rows is data  # a converted DataFrame refits via the normal path (see optimize)
+            and kwargs.get("out") is None
+            and not (set(kwargs) - _threaded_or_inert)
+        ):
             return independent_composite
-    estimator = _coerce_estimator(estimator, data)
+    estimator = _coerce_estimator(estimator, data, fields=kwargs.get("fields"))
     if init_estimator is not None:
         init_estimator = _coerce_estimator(init_estimator, data)
     if data is None and kwargs.get("enc_data") is None:

@@ -73,7 +73,7 @@
     {
       "path": "scripts/build_repro_bundle.py",
       "role": "bundle-closure",
-      "sha256": "903c193607af2802405e882fa986fed6c9517e9eab6cc60c2b35f7795cb22314"
+      "sha256": "f0811672893526a7b470493a3898f0b4b7ea0233d1a6ee5295234df926a2f31a"
     },
     {
       "path": "scripts/run_repro_entry.py",
@@ -179,7 +179,7 @@
           "chain intact: True"
         ],
         "format": "text",
-        "stdout_sha256": "e6c0a968fb483c533c7a5b7c5a5fdfe107cba118c1f1e83bf476ef71d7d4da72",
+        "stdout_sha256": "d1c0f7da932c277dccf7d24e1c5b02ca976dcc08f73200ecf46f0b11ba0612e1",
         "volatile": [
           {
             "pattern": "git / mixle  : (?:[0-9a-f]{7,40}|unknown) / ",

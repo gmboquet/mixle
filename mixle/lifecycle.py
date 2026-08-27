@@ -32,6 +32,7 @@ import os
 import pickle
 import tempfile
 import time
+import warnings
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,14 @@ def _write_text_atomically(path: Path, text: str) -> None:
     its format and its digest -- so it is written last and promoted in one step. A crash partway
     through leaves the previous manifest (or none), never a truncated one that resolves to the
     wrong file.
+
+    The promoted file carries the process-default permissions (``0o666`` masked by the umask --
+    ``0o644`` under the usual ``022``), exactly what ``open()`` gives every other artifact file.
+    ``mkstemp`` alone creates ``0o600`` temp files, so the rename used to leave the manifest
+    owner-only next to a world-readable ``model.json``: a serving process running as another user
+    could read the model but not the manifest that names it. Neither file is more sensitive than
+    the other -- the manifest describes the model -- so they deliberately share one policy, the
+    caller's umask (a ``077`` umask still yields a consistently private ``0o600`` pair).
     """
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     try:
@@ -64,11 +73,82 @@ def _write_text_atomically(path: Path, text: str) -> None:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
+        # os.umask can only be read by setting it; set-and-restore is the standard idiom. (Racy in
+        # a program mutating its umask concurrently -- worst case the manifest gets that thread's
+        # mask, which is still a policy the process asked for.)
+        umask = os.umask(0o022)
+        os.umask(umask)
+        os.chmod(tmp_name, 0o666 & ~umask)
         os.replace(tmp_name, path)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp_name)
         raise
+
+
+def json_read_back_failure(text: str) -> str | None:
+    """Why the JSON in ``text`` would fail to decode, or ``None`` when it reads back cleanly.
+
+    Encoding is not evidence of a round trip. ``to_serializable`` accepts any registered class's
+    ``__dict__``, while the decoder additionally requires that state to reconstruct through the
+    class's own constructor -- so a family whose estimator pins a fit annotation onto the fitted
+    object, or whose state names a parameter differently from the constructor's, encodes cleanly
+    and then refuses to load. The only honest test of "can this be read back" is to read it back,
+    against the exact text about to be written.
+
+    The decode runs inside ``trusted_deserialization`` on purpose. This payload was encoded from a
+    live object in this very process moments ago; the trust gate exists to stop an artifact that
+    arrived from somewhere else from executing code, and it has nothing to say about our own
+    in-memory model. Probing untrusted would report every model carrying an embedded torch module
+    as unreadable and demote a perfectly good JSON artifact to a pickle.
+    """
+    from mixle.utils.serialization import from_serializable, trusted_deserialization
+
+    try:
+        payload = json.loads(text)
+    except ValueError as exc:
+        return f"{type(exc).__name__}: {exc}"
+    try:
+        # Reconstruction re-runs constructor-time repairs (a covariance re-ridged, a boundary
+        # clamped). The caller already saw those at fit time, and they describe the model rather
+        # than the write, so re-emitting them here would be noise attributed to the wrong step.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with trusted_deserialization():
+                from_serializable(payload)
+    except Exception as exc:  # noqa: BLE001 - the question is "does it read back", not "how does it fail"
+        # Deliberately blind: whatever the reader raises here is exactly what it will raise later in
+        # a serving process, so every type of failure is equally disqualifying. Nothing is swallowed
+        # -- the caller reports this string in the manifest and in its warning.
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
+#: The one manifest schema this module writes and reads. Written into every manifest as
+#: ``mixle_artifact`` and CHECKED on load: an artifact stamped with a different schema tag is
+#: refused with its tag named, instead of being parsed as if it were this schema and failing
+#: somewhere misleading. Manifests without the tag predate it and load exactly as before.
+_ARTIFACT_TAG = "lifecycle.Model/v1"
+
+
+class DeployedArtifact(str):
+    """The artifact path :meth:`Model.deploy` returns, annotated with what was written there.
+
+    A plain ``str`` (every ``os.path`` / ``Path`` use keeps working), plus the two facts a caller
+    needs at the call site rather than by re-opening the manifest: ``format`` (``"json"`` or
+    ``"pickle"``) and ``format_fallback`` (``None`` for JSON; otherwise the sentence saying why
+    this artifact is a pickle and therefore costs its readers ``trust_code=True``). A deploy
+    pipeline can assert ``result.format == "json"`` to enforce a no-pickle policy in one line.
+    """
+
+    format: str
+    format_fallback: str | None
+
+    def __new__(cls, path: str, *, format: str, format_fallback: str | None) -> DeployedArtifact:
+        self = super().__new__(cls, path)
+        self.format = format
+        self.format_fallback = format_fallback
+        return self
 
 
 def _tabular_records(data: Any) -> list:
@@ -111,7 +191,17 @@ def _tabular_records(data: Any) -> list:
         if len(set(lengths.values())) > 1:
             raise ValueError(f"mapping-of-columns input needs equal-length columns, got lengths {lengths}")
         return columns[0] if len(columns) == 1 else [tuple(row) for row in zip(*columns, strict=True)]
-    return list(data)
+    try:
+        return list(data)
+    except TypeError as exc:
+        # A single observation (m.fit(0.5), m.evaluate(0.5)) died here as a bare
+        # "TypeError: 'float' object is not iterable" that named neither the expectation nor the
+        # verb that does take one observation.
+        raise ValueError(
+            f"data must be a collection of observation records (a list, array, DataFrame, "
+            f"DataSource, or mapping of columns); got a single {type(data).__name__}. To score one "
+            "observation use model(x); to fit or evaluate on it, wrap it in a list."
+        ) from exc
 
 
 def saddle_suspect(fitted: Any, data: Any, *, sample: int = 200, tol: float = 0.02) -> bool:
@@ -409,7 +499,15 @@ class Model:
 
     def _require_fitted(self) -> Any:
         if self.fitted is None:
-            raise RuntimeError("fit(data) first -- this Model has no fitted distribution yet")
+            # A frontier is set only by propose(), so the hint names the exact remedy for the model
+            # most likely to arrive here unfitted (propose() verifies candidates on a train/holdout
+            # split internally but returns the WINNER unfitted unless fit=True was passed).
+            hint = (
+                " (propose() returned this winner unfitted: call fit(data), or pass fit=True to propose)"
+                if self.frontier is not None
+                else ""
+            )
+            raise RuntimeError(f"fit(data) first -- this Model has no fitted distribution yet{hint}")
         return self.fitted
 
     def __call__(self, x: Any) -> float:
@@ -440,8 +538,34 @@ class Model:
         return self._require_fitted().enumerator()
 
     def posterior(self, x: Any) -> Any:
-        """Latent posterior for one observation (mixtures, HMMs, ...), where supported."""
-        return self._require_fitted().posterior(x)
+        """Latent posterior probabilities for one observation (mixtures, HMMs, ...), where supported.
+
+        A component-latent model (a mixture) answers with its own ``posterior``: the ``(k,)``
+        component probabilities for ``x``. A chain-latent model (an HMM), whose ``x`` is one
+        observation *sequence*, has no ``posterior`` method -- the module docstring's promise used
+        to die there as a bare ``AttributeError`` -- so it answers through ``latent_posterior``:
+        the ``(T, k)`` forward-backward smoothing marginals, one state distribution per timestep.
+        The richer chain-posterior object (Viterbi ``mode()``, FFBS ``sample()``, ``entropy()``)
+        stays available as ``model.fitted.latent_posterior(x)``.
+
+        A model with no latent state (a plain Gaussian) raises ``AttributeError`` naming the two
+        supported shapes instead of the bare delegation failure.
+        """
+        d = self._require_fitted()
+        if callable(getattr(d, "posterior", None)):
+            return d.posterior(x)
+        latent = getattr(d, "latent_posterior", None)
+        if callable(latent):
+            q = latent(x)
+            marginals = getattr(q, "marginals", None)
+            # Marginals, not the posterior object: posterior() answers with probabilities for every
+            # family (arrays in, arrays out), and the full object remains one attribute away.
+            return np.asarray(marginals()) if callable(marginals) else q
+        raise AttributeError(
+            f"posterior() needs a latent-variable model: one with posterior(x) (mixtures and other "
+            f"component-latent families) or latent_posterior(x) (HMMs and other chain-latent "
+            f"families). {type(d).__name__} has neither -- it models no latent state."
+        )
 
     # --- distill / deploy ------------------------------------------------------------------------
     def distill(self, teacher: Any = None, inputs: Any = None, **solve_kw: Any):
@@ -463,13 +587,28 @@ class Model:
 
         return solve(teacher, inputs, **solve_kw)
 
-    def deploy(self, path: str) -> str:
+    def deploy(self, path: str) -> DeployedArtifact:
         """Persist a durable artifact directory (model + manifest); :meth:`Model.load` restores it.
 
-        A registry-serializable model is written as safe, type-tagged JSON (``model.json``); a model the
-        serialization registry cannot represent (e.g. a torch-backed leaf) falls back to a pickle
-        (``model.pkl``). The ``format`` recorded in the manifest tells :meth:`Model.load` which to read, so
-        the common pure-model path never needs an unsafe pickle load.
+        A registry-serializable model is written as safe, type-tagged JSON (``model.json``); a model
+        the serialization registry cannot represent falls back to a pickle (``model.pkl``).
+        **"Pure statistical" does not guarantee "JSON":** besides the expected torch-backed leaves,
+        any base-install family the registry has no JSON form for takes the pickle path too (the
+        Bernoulli-set, Thurstone, and Spearman ranking families -- models :func:`propose` itself
+        selects for ordinary set-valued and ranking data -- deployed that way until their 0.8.0
+        codec repair; they now write JSON). Never assume the
+        format: read it from the returned path's ``format`` attribute (the return value is a
+        :class:`DeployedArtifact`, a plain ``str`` annotated with ``format`` and
+        ``format_fallback``), from the warning a fallback raises here, or from the manifest.
+
+        "Cannot represent" is decided by trying it, not by predicting it: the JSON is decoded again
+        before the artifact is accepted, so a model that encodes cleanly and then refuses to load --
+        the state whole families were in, deployed successfully and readable by nothing -- takes the
+        pickle path instead of becoming a write-only artifact. Any such fallback is disclosed three
+        ways rather than taken silently: a warning here, ``format_fallback`` in the manifest naming
+        the model and the exact read-back error, and a note on the model :meth:`load` returns. It
+        costs the reader a ``trust_code=True``, so it should be visible; if that is unacceptable for
+        a given family, the fix is a serialization hook on the family, not a quieter deploy.
 
         **This is a model export, not an evidence export.** The artifact carries the fitted
         distribution, ``notes``, and the fit record (``n``/``when``/``artifact_hash``) -- and nothing
@@ -489,8 +628,30 @@ class Model:
         """
         d = self._require_fitted()
         out = Path(path)
-        out.mkdir(parents=True, exist_ok=True)
-        fmt = self._write_model(out, d)
+        try:
+            out.mkdir(parents=True, exist_ok=True)
+        except FileExistsError as exc:
+            # exist_ok=True tolerates an existing DIRECTORY only; a plain file at the path used to
+            # surface as a bare "[Errno 17] File exists" naming neither the expectation nor a way out.
+            raise FileExistsError(
+                f"deploy path {str(out)!r} already exists as a plain file; deploy() writes an "
+                "artifact DIRECTORY (model file + manifest.json). Point it at a directory path, or "
+                "remove the file first."
+            ) from exc
+        except NotADirectoryError as exc:
+            raise NotADirectoryError(
+                f"deploy path {str(out)!r} has a plain file where a parent directory is needed "
+                f"({exc}); deploy() writes an artifact DIRECTORY. Point it somewhere a directory "
+                "can be created."
+            ) from exc
+        except OSError as exc:
+            # Same class re-raised (a PermissionError stays a PermissionError for callers matching
+            # on it), with the path and the remedy the bare errno message lacked.
+            raise type(exc)(
+                f"deploy() could not create the artifact directory {str(out)!r} "
+                f"({type(exc).__name__}: {exc}); pass a path where a writable directory can exist."
+            ) from exc
+        fmt, format_fallback = self._write_model(out, d)
         model_file = "model.json" if fmt == "json" else "model.pkl"
         # A redeploy that switches format used to leave the old generation's file in place, so the
         # directory held two models and only the manifest said which one was real -- and a manifest
@@ -507,30 +668,72 @@ class Model:
             )
             if present
         ]
+        import mixle  # function-scope: lifecycle is imported while mixle/__init__ is still executing
+
+        try:
+            from mixle.data.hashing import model_hash
+
+            # A content-level hash of what the model file DESERIALIZES to, distinct from
+            # model_sha256 (the file's bytes). load() recomputes it and warns on divergence, so a
+            # same-family model file swapped in with a recomputed byte digest no longer serves
+            # silently under this manifest's fit record (see load's trust-model note).
+            content_hash = model_hash(d)
+        except Exception:  # noqa: BLE001 - a model that cannot content-hash still deploys; it just goes uncross-checked
+            content_hash = None
         manifest = {
             "family": type(d).__name__,
             "created_at": time.time(),
+            # Producer identity: the version whose registry/codecs wrote this artifact. A load-time
+            # failure elsewhere can then name what produced the artifact instead of guessing.
+            "mixle_version": getattr(mixle, "__version__", "unknown"),
             "fit": self._fit_info,
             "notes": self.notes,
             "format": fmt,
+            "format_fallback": format_fallback,
             "model_file": model_file,
             "model_sha256": _sha256_file(out / model_file),
+            "model_content_hash": content_hash,
             "evidence_not_exported": evidence_not_exported,
-            "mixle_artifact": "lifecycle.Model/v1",
+            "mixle_artifact": _ARTIFACT_TAG,
         }
         _write_text_atomically(out / "manifest.json", json.dumps(manifest, indent=2, default=str))
-        return str(out)
+        if format_fallback is not None:
+            # Said once, here, while the caller is still at the keyboard and the model is still in
+            # memory: this artifact costs its readers something they did not ask for. Discovering
+            # that at load time means discovering it in a serving process, on another day, from an
+            # error that names no remedy.
+            warnings.warn(
+                f"Model.deploy({path!r}) wrote a pickle artifact rather than safe JSON because "
+                f"{format_fallback}. Model.load() will refuse it unless the caller passes "
+                "trust_code=True, since loading a pickle executes arbitrary code from the file. "
+                "The reason is recorded in the manifest's 'format_fallback'.",
+                stacklevel=2,
+            )
+        return DeployedArtifact(str(out), format=fmt, format_fallback=format_fallback)
 
     @staticmethod
-    def _write_model(out: Path, d: Any) -> str:
-        """Write ``d`` as safe JSON when the registry can represent it, else pickle. Returns the format used.
+    def _write_model(out: Path, d: Any) -> tuple[str, str | None]:
+        """Write ``d`` in the first format that actually round-trips. Returns ``(format, fallback_reason)``.
 
-        Only the registry's explicit "this type has no JSON form" answer (:class:`SerializationError`)
-        selects the pickle path. A blanket ``except Exception`` also caught encoder bugs, registry
-        initialization failures and JSON encoding faults, so an internal ``TypeError`` silently turned
-        an ordinary JSON-serializable Gaussian into an executable ``model.pkl`` -- a programming
-        failure quietly downgrading the artifact's security and portability contract. Those errors now
-        propagate.
+        Safe JSON is preferred and is used only when the JSON *reads back*; otherwise the artifact
+        falls back to pickle, and ``fallback_reason`` says in words why -- ``None`` means JSON was
+        used and nothing needs disclosing.
+
+        The two candidate formats are tried against different evidence, deliberately:
+
+        * **Encoding.** Only the registry's explicit "this type has no JSON form" answer
+          (:class:`SerializationError`) selects the pickle path. A blanket ``except Exception``
+          also caught encoder bugs, registry initialization failures and JSON encoding faults, so
+          an internal ``TypeError`` silently turned an ordinary JSON-serializable Gaussian into an
+          executable ``model.pkl`` -- a programming failure quietly downgrading the artifact's
+          security and portability contract. Those errors still propagate.
+        * **Decoding.** Encoding successfully proved only that the encoder accepted the object, and
+          that is a weaker claim than the one this artifact makes: whole families encoded cleanly
+          here and were then refused by :meth:`load`, so ``deploy`` reported success on artifacts
+          nothing could read. Whatever the read back raises, it is the same thing :meth:`load` will
+          raise later in another process, so any failure disqualifies JSON -- but it is recorded
+          verbatim rather than swallowed, which is what separates this from the blanket
+          ``except`` above.
         """
         from mixle.utils.serialization import (
             SerializationError,
@@ -541,12 +744,30 @@ class Model:
         ensure_pysp_serialization_registry()  # a registry that cannot initialize is not "needs pickle"
         try:
             payload = to_serializable(d)
-        except SerializationError:  # not registry-serializable (torch leaf, custom object): use pickle
+        except SerializationError as exc:  # no JSON form at all (torch leaf, custom object)
+            reason = f"the serialization registry has no JSON form for {type(d).__name__} ({exc})"
+        else:
+            text = json.dumps(payload)
+            failure = json_read_back_failure(text)
+            if failure is None:
+                (out / "model.json").write_text(text)
+                return "json", None
+            reason = (
+                f"{type(d).__name__} encodes to JSON that cannot be read back again ({failure}); "
+                "the JSON artifact would have been write-only"
+            )
+        try:
             with open(out / "model.pkl", "wb") as f:
                 pickle.dump(d, f)
-            return "pickle"
-        (out / "model.json").write_text(json.dumps(payload))
-        return "json"
+        except Exception as exc:
+            # Neither format works, so there is no artifact to write and no correct answer to
+            # compute. Report both halves: the pickle error alone would send the caller looking in
+            # the wrong place for a model whose real problem is the JSON path.
+            raise SerializationError(
+                f"cannot persist {type(d).__name__}: {reason}; and pickling it failed too "
+                f"({type(exc).__name__}: {exc}). This model cannot be deployed as an artifact."
+            ) from exc
+        return "pickle", reason
 
     @classmethod
     def load(cls, path: str, *, trust_code: bool = False) -> Model:
@@ -572,9 +793,21 @@ class Model:
 
         When the manifest records a ``model_sha256`` (every artifact written by this version does),
         the named model file is hashed and checked against it *before* anything is deserialized, so a
-        model file edited, truncated or swapped after deployment is refused rather than loaded. An
-        older manifest without that field is loaded unverified, exactly as before -- there is nothing
-        to check it against.
+        model file edited, truncated or swapped after deployment -- while the manifest stays intact
+        -- is refused rather than loaded. An older manifest without that field is loaded unverified,
+        exactly as before -- there is nothing to check it against.
+
+        **What these checks are, and are not.** All of them read the manifest itself as ground
+        truth: the digest binds the manifest to the model file's bytes, the ``family`` check binds
+        its self-description to what those bytes deserialize to, and the ``model_content_hash``
+        cross-check (when recorded) compares the deserialized model's content hash against the one
+        stamped at deploy time -- a mismatch there means the manifest's fit record and the model
+        being served may not come from the same deployment, and it is disclosed as a warning and a
+        note rather than a refusal (a content-hash recomputed by a different mixle version can
+        legitimately drift; refusing would brick valid artifacts). None of this *authenticates* the
+        manifest: a writer with write access to the artifact directory can rewrite the manifest and
+        model together. Integrity against that threat needs a signature kept outside the directory
+        (sign the artifact, or compare ``model_sha256`` against a digest recorded elsewhere).
 
         The restored :class:`Model` carries the fitted distribution, ``notes`` and the fit record.
         The certificate, calibration report and candidate frontier are not in the artifact at all
@@ -630,7 +863,31 @@ class Model:
                 f"{type(manifest).__name__}. Re-deploy the artifact; this manifest was not written "
                 "by Model.deploy()."
             )
+        tag = manifest.get("mixle_artifact")
+        if tag is not None and tag != _ARTIFACT_TAG:
+            # The manifest says, itself, that it follows some other schema (a task/solve artifact,
+            # or a later lifecycle schema revision). Reading it as this one would fail somewhere
+            # misleading -- or worse, succeed with reinterpreted fields. Manifests without the tag
+            # predate it and keep loading as before.
+            producer = manifest.get("mixle_version")
+            raise SerializationError(
+                f"{path!r} declares artifact schema {tag!r}, but this mixle reads {_ARTIFACT_TAG!r}. "
+                f"It was written by {'mixle ' + str(producer) if producer else 'a different producer'} "
+                "under a different schema; load it with the mixle version that wrote it, or "
+                "re-deploy the model with this one."
+            )
         fmt = manifest.get("format", "pickle")  # manifests predating the format field described pickle artifacts
+        if fmt not in ("json", "pickle"):
+            # Every unrecognized format value ("JSON", "json ", "msgpack") used to fall into the
+            # pickle branch, whose refusal misdescribed the artifact AND advised trust_code=True --
+            # enabling arbitrary-code execution as the remedy for a manifest typo. Name the actual
+            # value instead. deploy() only ever writes the two exact strings, so nothing this
+            # version produced is refused here.
+            raise SerializationError(
+                f"{path!r}: the manifest records format {fmt!r}, which this mixle does not read "
+                "(it reads 'json' and 'pickle'). The manifest was edited or written by a different "
+                "producer; fix its 'format' to name the model file's actual format, or re-deploy."
+            )
         model_file = str(manifest.get("model_file") or ("model.json" if fmt == "json" else "model.pkl"))
         if Path(model_file).name != model_file:
             raise SerializationError(f"manifest model_file {model_file!r} must be a plain file name")
@@ -723,6 +980,35 @@ class Model:
                 f"artifact export dropped: {', '.join(str(name) for name in missing)} "
                 "(deploy() persists the model, notes and fit record only)"
             )
+        fallback = manifest.get("format_fallback")
+        if fallback:
+            # Carries deploy()'s disclosure to whoever ends up holding the model, who is usually
+            # not whoever ran deploy() and never saw the warning.
+            m.notes.append(f"artifact written as {fmt} rather than safe JSON: {fallback}")
+        recorded_content_hash = manifest.get("model_content_hash")
+        if recorded_content_hash:
+            try:
+                from mixle.data.hashing import model_hash
+
+                actual_content_hash = model_hash(fitted)
+            except Exception:  # noqa: BLE001 - a model that cannot content-hash goes uncross-checked, like a pre-hash artifact
+                actual_content_hash = None
+            if actual_content_hash is not None and actual_content_hash != recorded_content_hash:
+                # Disclosed, not refused: the byte digest and family already passed, so this state
+                # is either a same-family model file swapped in alongside a rewritten manifest, or
+                # a content-hash algorithm drift across mixle versions. Only the first is an attack,
+                # and load cannot tell them apart -- refusing would brick legitimately migrated
+                # artifacts (fail-closed overreach), while silence re-creates the defect this check
+                # exists for. The docstring's trust-model note states exactly this.
+                note = (
+                    f"integrity note: the loaded model's content hash ({actual_content_hash[:16]}...) "
+                    f"does not match the manifest's model_content_hash ({str(recorded_content_hash)[:16]}...); "
+                    "the manifest's fit record may describe a different model than this artifact "
+                    "serves (a swapped model file, or a content-hash change between mixle versions). "
+                    "Re-deploy from the original model if in doubt."
+                )
+                m.notes.append(note)
+                warnings.warn(f"Model.load({path!r}): {note}", stacklevel=2)
         return m
 
     # --- the analysis verbs (delegate to the inference front doors) -------------------------------
@@ -872,6 +1158,11 @@ def propose(
     **recommend_kw: Any,
 ) -> Model:
     """Propose a model for ``data`` from a *verified frontier* of candidates and return the winner.
+
+    **The winner comes back UNFITTED unless ``fit=True`` is passed.** Candidate ranking fits every
+    candidate internally (on the training split, scored held-out), but what returns by default is
+    the winning *specification*: ``Model.fitted`` is ``None`` and the scoring verbs raise until
+    ``fit(data)`` runs. ``propose(data, fit=True)`` is the one-call propose-and-fit form.
 
     ``data`` is anything row-shaped: a list of records, a numpy array, a pandas ``DataFrame`` (one
     record per row across its columns -- never a model of the column names), a mapping of equal-length

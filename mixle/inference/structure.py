@@ -319,6 +319,17 @@ def fit_glm_edge(pairs: Sequence[tuple], family: str) -> GLMEdge:
     arr = np.asarray(pairs, dtype=float)
     p, c = arr[:, 0], arr[:, 1]
     result = glm(np.column_stack([np.ones_like(p), p]), c, family=family)
+    if not np.isfinite(result.dispersion):
+        # glm() now returns (with a warning) rather than raising when the dispersion is undefined,
+        # e.g. a gaussian edge fit on exactly two pairs -- zero residual degrees of freedom. An edge
+        # with NaN dispersion cannot be used: its sampler would emit NaN through normal(mu, sqrt(phi))
+        # silently. Structure learning wants the hard refusal here, at the edge, where the caller can
+        # drop or re-specify it.
+        raise ValueError(
+            "cannot fit a %s edge on %d pair(s): the dispersion is undefined (no residual degrees "
+            "of freedom). Provide more observations for this edge, or remove it from the candidate "
+            "structure." % (family, arr.shape[0])
+        )
     return GLMEdge(result.family, result.coef, result.link, result.dispersion)
 
 

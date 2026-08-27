@@ -434,6 +434,41 @@ class BernoulliSetDistribution(SequenceEncodableProbabilityDistribution):
             state[key] = MappingProxyType(dict(state[key]))
         self.__dict__.update(state)
 
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        """Return the constructor-owned state used by the safe JSON codec.
+
+        The pickle hooks above ship the whole ``__dict__`` with the read-only views flattened; the
+        safe JSON codec cannot take that route because ``mappingproxy`` has no JSON form at all
+        (the whole family silently deployed as pickle for exactly that reason) and the remaining
+        attributes (``log_dmap``, ``nlog_sum``, ``required``, the conjugate digamma caches) are
+        derived, not constructor parameters. Serialize only what ``__init__`` accepts -- each
+        proxied mapping flattened to a plain dict -- and let ``__pysp_setstate__`` re-derive the
+        rest, following the documented pattern in :mod:`mixle.stats.combinator.optional`.
+        """
+        return {
+            "pmap": dict(self.pmap),
+            "min_prob": self.min_prob,
+            "name": self.name,
+            "keys": self.keys,
+            "prior": self.prior,
+            "posteriors": self.get_posteriors(),
+        }
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        """Rebuild from constructor-owned state, re-deriving everything __init__ computes."""
+        required = {"pmap", "min_prob", "name", "keys"}
+        missing = required - set(state)
+        if missing:
+            raise ValueError("BernoulliSetDistribution state is missing %s" % ", ".join(sorted(missing)))
+        self.__init__(
+            state["pmap"],
+            min_prob=state["min_prob"],
+            name=state["name"],
+            keys=state["keys"],
+            prior=state.get("prior"),
+            posteriors=state.get("posteriors"),
+        )
+
     def __str__(self) -> str:
         """Return a constructor-style representation of the distribution."""
         s1 = repr(list(self.pmap.items()))

@@ -80,33 +80,73 @@ four orders of magnitude."""
 _LAST_REPAIR: list[str] = []
 
 _RIDGE_MATERIAL_RATIO = 1e-3
-"""Relative inflation of the smallest raw variance above which the M-step's default covariance ridge
-is recorded as a numerical repair on the fitted distribution. The ridge
-``eps = max(min_covar, ridge * trace/d)`` is designed as a ~1e-6 relative perturbation, and it is one
-when the coordinates share a scale. Its trace-MEAN coupling makes it scale-dependent, though: on
-heterogeneous-unit data the same default inflated the smallest variance of a 203x3 macro-style
-dataset by 2.1x and cost 25.3 log-likelihood units (B5). This threshold sits 1000x above the design
-point, so scale-homogeneous fits stay quiet, while a 0.1% variance inflation -- roughly where
-likelihood/AIC comparisons start to move at realistic sample sizes -- is reported. Reporting only,
+"""Relative inflation of the smallest raw variance above which the M-step's covariance ridge is
+recorded as a numerical repair on the fitted distribution. The ridge ``eps_i = ridge * cov_ii`` is a
+~1e-6 relative perturbation of every coordinate's own variance, so the DEFAULT configuration never
+crosses this threshold on a full-rank fit -- its trace-MEAN predecessor did (it inflated the
+smallest variance of a 203x3 heterogeneous-unit dataset 2.1x, costing 25.3 log-likelihood units, B5;
+and ~5 orders of magnitude at more extreme unit mismatches, T1-05). What still can cross it: an
+EXPLICITLY configured absolute ``min_covar`` floor dominating a small variance, and the fallback
+jitter manufactured for a coordinate with no scale of its own. The threshold sits 1000x above the
+~1e-6 design point, so those fire while ordinary fits stay quiet; a 0.1% variance inflation is
+roughly where likelihood/AIC comparisons start to move at realistic sample sizes. Reporting only,
 never a guard: crossing it records a repair string; it never rejects or alters the fit."""
 
 
-def _record_covariance_ridge(dist: Any, eps: float, smallest_raw_variance: float) -> Any:
+def _raw_covariance_is_factorable(covar: np.ndarray) -> bool:
+    """Whether the PRE-ridge covariance has full numerical rank.
+
+    The materiality test below is otherwise diagonal-based, and a rank-deficient covariance can have
+    a perfectly healthy diagonal: 2 to 4 points in ``d=5`` give a smallest eigenvalue around 1e-7
+    against a smallest diagonal entry around 1e-2, so the ridge manufactures every variance in the
+    empty directions while the diagonal ratio never moves (T1-04). Since the ridge's stated purpose is
+    to keep a singular empirical covariance factorable, "the raw matrix has no rank to spare" is
+    exactly the case it exists for.
+
+    Asking ``cho_factor`` outright is not that test: a scatter matrix that is singular in exact
+    arithmetic usually lands on tiny POSITIVE pivots, so ``potrf`` succeeds on it (measured: n=5 in
+    d=5, smallest eigenvalue 3e-16, factors fine). Shifting by the standard numerical-rank tolerance
+    first -- the same ``d * eps * largest`` that ``numpy.linalg.matrix_rank`` uses -- turns the
+    factorization into a rank test with a tolerance, at a fraction of an eigendecomposition's cost.
+    That cost matters: this runs once per M-step per component. Merely ill-conditioned (but
+    genuinely full-rank) input still factors, so an ordinary correlated fit stays silent.
+    """
+    d = covar.shape[0]
+    largest = float(np.diag(covar).max()) if d else 0.0
+    tol = d * float(np.finfo(float).eps) * largest
+    probe = covar - tol * np.eye(d) if tol > 0.0 else covar
+    try:
+        scipy.linalg.cho_factor(probe, check_finite=False)
+    except (scipy.linalg.LinAlgError, np.linalg.LinAlgError):
+        return False
+    return True
+
+
+def _record_covariance_ridge(dist: Any, eps: float, smallest_raw_variance: float, raw_factorable: bool = True) -> Any:
     """Note on ``dist`` when the M-step covariance ridge bound materially, so a fit can report it.
 
     The ridge exists so a singular empirical covariance (an EM component holding fewer than ``d``
-    points) stays factorizable. Because it is scaled by the MEAN diagonal variance, on
-    heterogeneous-unit data it can inflate the smallest variances far beyond its nominal ~1e-6
-    relative size, and a caller reading only the parameters cannot tell (B5). Mirrors the univariate
-    ``variance-floored(...)`` reporting in ``gaussian.py``; an ordinary scale-homogeneous fit stays
-    below ``_RIDGE_MATERIAL_RATIO`` and records nothing.
+    points) stays factorizable. Since T1-05 it is sized per coordinate (``eps_i = ridge * cov_ii``),
+    so the default configuration is a uniform ~1e-6 relative perturbation on any full-rank fit and
+    stays silent here; what remains material -- and is reported -- is an explicit absolute
+    ``min_covar`` floor dominating a small variance, a coordinate with no variance of its own
+    receiving manufactured jitter, and the rank-deficient rescue below. Mirrors the univariate
+    ``variance-floored(...)`` reporting in ``gaussian.py``. ``eps`` is the jitter applied at the
+    smallest-variance coordinate -- the one the ridge inflates most -- so the ratio in the note is
+    the worst relative inflation anywhere in the matrix.
+
+    ``raw_factorable`` is the rank half of the test: a ridge that lifted a rank-deficient covariance
+    into positive-definiteness is maximally binding whatever the diagonal says, and is reported
+    regardless of the ratio (see :func:`_raw_covariance_is_factorable`).
     """
-    if smallest_raw_variance > 0.0:
-        if eps <= _RIDGE_MATERIAL_RATIO * smallest_raw_variance:
-            return dist
-        note = "covariance-ridged(%.3g; %.3gx the smallest variance)" % (eps, eps / smallest_raw_variance)
-    else:
+    if smallest_raw_variance <= 0.0:
         note = "covariance-ridged(%.3g; onto a non-positive variance)" % eps
+    elif not raw_factorable:
+        note = "covariance-ridged(%.3g; onto a rank-deficient covariance)" % eps
+    elif eps <= _RIDGE_MATERIAL_RATIO * smallest_raw_variance:
+        return dist
+    else:
+        note = "covariance-ridged(%.3g; %.3gx the smallest variance)" % (eps, eps / smallest_raw_variance)
     dist._numerical_repairs = (note,) + tuple(getattr(dist, "_numerical_repairs", ()))
     return dist
 
@@ -1044,16 +1084,27 @@ class MultivariateGaussianEstimator(ParameterEstimator):
     """Estimator for multivariate Gaussian distributions.
 
     The fitted covariance is NOT the raw maximum-likelihood estimate unless ``ridge=0.0`` is
-    passed: by default the M-step regularizes the empirical covariance as ``cov + eps * I`` with
-    ``eps = max(min_covar, ridge * trace(cov) / d)`` (defaults ``min_covar=1e-8``, ``ridge=1e-6``)
-    so a singular empirical covariance -- e.g. an EM component holding fewer than ``d`` points --
-    remains factorizable. Because ``eps`` scales with the MEAN diagonal variance, the ridge is a
-    negligible ~1e-6 relative perturbation when the coordinates share a scale, but on unstandardized
-    data whose columns have heterogeneous units it can inflate the SMALLEST variances materially
-    (and with them the log-likelihood and AIC). A materially binding ridge is recorded on the fitted
-    distribution as a ``covariance-ridged(...)`` entry in ``numerical_repairs()`` -- and therefore in
-    ``fit_provenance().repairs`` -- see ``_RIDGE_MATERIAL_RATIO``. Pass ``ridge=0.0`` to recover the
-    exact MLE up to the ``min_covar`` absolute jitter floor.
+    passed: by default the M-step regularizes each diagonal entry of the empirical covariance as
+    ``cov_ii + eps_i`` with ``eps_i = ridge * cov_ii`` (default ``ridge=1e-6``) so a singular
+    empirical covariance -- e.g. an EM component holding fewer than ``d`` points -- remains
+    factorizable. Each ``eps_i`` is RELATIVE to its own coordinate's variance, so the ridge is a
+    negligible ~1e-6 relative perturbation whatever the units, per column: the fit is equivariant
+    under any per-coordinate change of units, and heterogeneous-unit data is no longer penalized
+    (the former trace-scaled ridge priced a microscale column's jitter off the macroscale columns,
+    inflating the smallest variances -- and with them the log-likelihood and AIC -- by up to ~5
+    orders of magnitude, T1-05). A coordinate with no positive variance of its own gets its jitter
+    from the mean of the coordinates that have one; the absolute ``min_covar`` (default ``1e-8``)
+    is the last resort for a covariance with no scale at all (all-zero diagonal, or ``ridge=0.0``)
+    and becomes a hard per-coordinate floor as soon as it is passed explicitly.
+
+    A materially binding ridge is recorded on the fitted distribution as a
+    ``covariance-ridged(...)`` entry in ``numerical_repairs()`` -- and therefore in
+    ``fit_provenance().repairs``. "Materially" means the jitter exceeded
+    ``_RIDGE_MATERIAL_RATIO`` of the smallest raw variance (an explicit ``min_covar`` dominating a
+    small variance, or manufactured jitter on a variance-free coordinate -- never the default
+    per-coordinate ridge on a full-rank fit), or the raw covariance was not positive-definite on
+    its own and the ridge is what makes it factorable -- the rank-deficient case this ridge exists
+    for. Pass ``ridge=0.0`` to recover the exact MLE up to the ``min_covar`` absolute jitter floor.
     """
 
     def __init__(
@@ -1083,15 +1134,21 @@ class MultivariateGaussianEstimator(ParameterEstimator):
                 MAP estimate and carrying the posterior forward as the fitted model's prior) instead
                 of the maximum-likelihood / pseudo-count update.
             min_covar (Optional[float]): Absolute diagonal ridge floor applied in the MLE M-step.
-                ``None`` (default) uses a tiny ``1e-8``.
+                ``None`` (default) uses a tiny ``1e-8`` as a LAST RESORT only -- it applies when
+                the relative ridge has no scale to work from (all-zero diagonal, or ``ridge=0.0``),
+                so a fit whose whole scale is below ``1e-8`` is no longer widened to it. Passing a
+                value explicitly restores the absolute floor as a hard per-coordinate lower bound
+                on ``eps_i``, for callers that want a fixed regularizer.
             ridge (Optional[float]): Relative ridge coefficient. ``None`` (default) uses ``1e-6``;
-                the covariance is regularized as ``cov + eps * I`` with
-                ``eps = max(min_covar, ridge * trace(cov) / d)`` so a singular empirical
-                covariance (a component holding fewer than ``d`` points) remains factorizable.
-                Non-finite statistics are rejected. The bias is ~``ridge`` relative when the
-                coordinates share a scale, but because ``eps`` is set by the MEAN diagonal
-                variance, heterogeneous-unit columns can have their smallest variances inflated
-                materially; when that happens the fitted distribution records a
+                each diagonal entry is regularized as ``cov_ii + eps_i`` with
+                ``eps_i = ridge * cov_ii`` so a singular empirical covariance (a component holding
+                fewer than ``d`` points) remains factorizable. Non-finite statistics are rejected.
+                The bias is ~``ridge`` relative per coordinate whatever its units; a coordinate
+                with no positive variance of its own gets its jitter from the mean of the
+                coordinates that have one. When the jitter materially inflates the smallest
+                variance -- an explicit ``min_covar`` dominating it, or a variance-free coordinate
+                receiving manufactured scale -- or when the raw covariance was rank-deficient and
+                the ridge is what makes it factorable, the fitted distribution records a
                 ``covariance-ridged(...)`` entry in ``numerical_repairs()``. Pass ``0.0`` for the
                 exact MLE (up to the ``min_covar`` floor).
             track_conditioning (bool): Opt-in numerics-conditioning receipt. When ``True``,
@@ -1141,6 +1198,10 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             label="multivariate Gaussian min_covar",
             positive=True,
         )
+        # An explicitly requested floor is absolute and keeps winning the max() below; the default
+        # is only the fallback for a covariance carrying no scale of its own. See
+        # ``_regularized_covar_and_ridge``.
+        self._absolute_min_covar = min_covar is not None
         self.ridge = finite_scalar(
             1.0e-6 if ridge is None else ridge,
             label="multivariate Gaussian ridge",
@@ -1251,7 +1312,7 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             d = inferred_dim
             mu = np.asarray(self.prior_mu, dtype=float) if self.prior_mu is not None else vec.zeros(d)
             raw_covar = np.asarray(self.prior_covar, dtype=float) if self.prior_covar is not None else np.eye(d)
-            covar, ridge_eps, smallest_raw = self._regularized_covar_and_ridge(raw_covar)
+            covar, ridge_eps, smallest_raw, raw_factorable = self._regularized_covar_and_ridge(raw_covar)
             dist = MultivariateGaussianDistribution(
                 mu,
                 covar,
@@ -1259,7 +1320,7 @@ class MultivariateGaussianEstimator(ParameterEstimator):
                 keys=self.keys,
                 prior=self.prior,
             )
-            _record_covariance_ridge(dist, ridge_eps, smallest_raw)
+            _record_covariance_ridge(dist, ridge_eps, smallest_raw, raw_factorable)
             self._attach_conditioning_receipt(dist, raw_covar)
             return dist
 
@@ -1283,7 +1344,7 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             diagonal=False,
         )
 
-        covar, ridge_eps, smallest_raw = self._regularized_covar_and_ridge(raw_covar)
+        covar, ridge_eps, smallest_raw, raw_factorable = self._regularized_covar_and_ridge(raw_covar)
 
         dist = MultivariateGaussianDistribution(
             mu,
@@ -1292,7 +1353,7 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             keys=self.keys,
             prior=self.prior,
         )
-        _record_covariance_ridge(dist, ridge_eps, smallest_raw)
+        _record_covariance_ridge(dist, ridge_eps, smallest_raw, raw_factorable)
         self._attach_conditioning_receipt(dist, raw_covar)
         return dist
 
@@ -1304,12 +1365,15 @@ class MultivariateGaussianEstimator(ParameterEstimator):
 
         dist.conditioning_receipt = conditioning_receipt(raw_covar, degenerate_ratio=self.degenerate_ratio)
 
-    def _regularized_covar_and_ridge(self, covar: np.ndarray) -> tuple[np.ndarray, float, float]:
-        """Apply the P1 covariance ridge and return ``(regularized, eps, smallest_raw_variance)``.
+    def _regularized_covar_and_ridge(self, covar: np.ndarray) -> tuple[np.ndarray, float, float, bool]:
+        """Apply the P1 covariance ridge and return ``(regularized, eps, smallest_raw, factorable)``.
 
-        The extra two values feed ``_record_covariance_ridge``: ``eps`` is what was added to every
-        diagonal entry and ``smallest_raw_variance`` is the pre-ridge diagonal minimum it is judged
-        against, so ``estimate`` can report a materially binding ridge without recomputing either.
+        The extra three values feed ``_record_covariance_ridge``: ``eps`` is the jitter added at the
+        smallest-variance coordinate (the ridge is per-coordinate, and that coordinate is the one it
+        inflates most, so this single scalar carries the worst relative inflation), ``smallest_raw``
+        is the pre-ridge diagonal minimum it is judged against, and ``factorable`` says whether the
+        raw covariance was positive-definite on its own, so ``estimate`` can report a materially
+        binding ridge without recomputing any of them.
         """
         covar = np.asarray(covar, dtype=float)
         if covar.shape != (self.dim or len(covar), self.dim or len(covar)):
@@ -1318,20 +1382,42 @@ class MultivariateGaussianEstimator(ParameterEstimator):
             raise ValueError("multivariate Gaussian covariance must contain only finite values")
         d = covar.shape[0]
         covar = 0.5 * (covar + covar.T)
-        trace = float(np.trace(covar))
-        eps = max(self.min_covar, self.ridge * trace / d if trace > 0.0 else 0.0)
-        return covar + eps * np.eye(d), eps, float(np.diag(covar).min())
+        diag = np.diag(covar).copy()
+        positive = diag[diag > 0.0]
+        # Per-coordinate relative ridge: eps_i = ridge * cov_ii perturbs every variance by the same
+        # ~ridge RELATIVE amount whatever its units. The former trace-mean scalar coupled the
+        # coordinates: on heterogeneous-unit data it inflated the smallest variance by up to ~5
+        # orders of magnitude, because a microscale column paid a jitter priced off the macroscale
+        # ones (T1-05). A coordinate with no positive variance of its own has no scale to price
+        # from, so it falls back to the mean of the coordinates that do -- the manufactured jitter
+        # for a degenerate direction, disclosed via _record_covariance_ridge.
+        fallback = self.ridge * float(np.mean(positive)) if positive.size else 0.0
+        eps_vec = np.where(diag > 0.0, self.ridge * diag, fallback)
+        # An explicitly configured min_covar is an absolute floor and still wins per coordinate.
+        # By DEFAULT it is only the last resort for a covariance carrying no scale at all (all-zero
+        # diagonal, or ridge=0.0), which is what keeps the fit unit-equivariant (T4-6).
+        if self._absolute_min_covar:
+            eps_vec = np.maximum(eps_vec, self.min_covar)
+        elif not np.any(eps_vec > 0.0):
+            eps_vec = np.full(d, self.min_covar)
+        if d:
+            smallest_raw = float(diag.min())
+            eps_report = float(eps_vec[int(np.argmin(diag))])
+        else:
+            smallest_raw = 0.0
+            eps_report = 0.0
+        return covar + np.diag(eps_vec), eps_report, smallest_raw, _raw_covariance_is_factorable(covar)
 
     def _regularize_covar(self, covar: np.ndarray) -> np.ndarray:
-        """P1 covariance ridge: cov <- cov + eps*I with eps = max(min_covar, ridge*trace/d).
+        """P1 covariance ridge: cov_ii <- cov_ii + eps_i with eps_i = ridge * cov_ii (see the class
+        docstring for how ``min_covar`` and degenerate coordinates participate).
 
         The sufficient-statistic validator rejects non-finite input before this point.
-        Symmetrization absorbs accumulation round-off. The bias is ~``ridge`` relative on
-        scale-homogeneous coordinates but scale-dependent in general; see the class docstring and
-        ``_record_covariance_ridge``, which reports a materially binding ridge through
-        ``numerical_repairs()``.
+        Symmetrization absorbs accumulation round-off. The bias is ~``ridge`` relative per
+        coordinate whatever the units; see the class docstring and ``_record_covariance_ridge``,
+        which reports a materially binding ridge through ``numerical_repairs()``.
         """
-        regularized, _eps, _smallest = self._regularized_covar_and_ridge(covar)
+        regularized, _eps, _smallest, _factorable = self._regularized_covar_and_ridge(covar)
         return regularized
 
 

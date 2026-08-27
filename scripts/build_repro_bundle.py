@@ -123,7 +123,11 @@ _ENTRIES = (
                     "placeholder": "git / mixle  : <commit> / ",
                 }
             ],
-            "stdout_sha256": "e6c0a968fb483c533c7a5b7c5a5fdfe107cba118c1f1e83bf476ef71d7d4da72",
+            # Repinned for the c9eb9d2e campaign fix waves: the EM default-initialization repair
+            # and FitProvenance.final_objective now describing the RETURNED model change the
+            # example's fitted values and its "final loglik" line. New digest measured twice,
+            # byte-identical, with every `contains` invariant still holding.
+            "stdout_sha256": "d1c0f7da932c277dccf7d24e1c5b02ca976dcc08f73200ecf46f0b11ba0612e1",
             "contains": [
                 "# lineage verified: True",
                 "drift on shifted batch: True",

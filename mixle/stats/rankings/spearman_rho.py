@@ -64,6 +64,13 @@ class SpearmanRankingFitDiagnostics:
     regularized: bool
     pseudo_count: float
 
+    # Estimation provenance rides on fitted distributions as a constructor argument, so it cannot
+    # be re-derived from parameters and must round-trip through the closed JSON registry. Not a
+    # distribution or estimator, so it opts in explicitly -- the same mechanism as other
+    # serializable value classes discovered by the mixle.stats registry walk. Unannotated on
+    # purpose: an annotated name would become a dataclass field.
+    __pysp_serializable__ = True
+
 
 def _validate_location(value: Any) -> np.ndarray:
     raw = np.asarray(value, dtype=np.float64)
@@ -288,6 +295,39 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
     def sigma(self) -> np.ndarray:
         """Return an ownership-safe copy of the canonical mean rank vector."""
         return self._sigma.copy()
+
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        """Return the constructor-owned state used by the safe JSON codec.
+
+        The raw ``__dict__`` stores the location under ``_sigma`` while the constructor takes
+        ``sigma``, so the generic constructor-validated decoder encoded this family cleanly and
+        then refused every read back (a write-only artifact). ``log_weights``, ``log_const``, and
+        ``dim`` are re-derived deterministically in ``__init__`` and must not be serialized;
+        ``fit_diagnostics`` is constructor-carried estimation provenance and rides along as is.
+        """
+        return {
+            "sigma": self._sigma,
+            "rho": self.rho,
+            "name": self.name,
+            "keys": self.keys,
+            "max_dim": self.max_dim,
+            "fit_diagnostics": self.fit_diagnostics,
+        }
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        """Rebuild from constructor-owned state, re-deriving the partition tables."""
+        required = {"sigma", "rho", "name", "keys", "max_dim"}
+        missing = required - set(state)
+        if missing:
+            raise ValueError("SpearmanRankingDistribution state is missing %s" % ", ".join(sorted(missing)))
+        self.__init__(
+            state["sigma"],
+            rho=state["rho"],
+            name=state["name"],
+            keys=state["keys"],
+            max_dim=state["max_dim"],
+            fit_diagnostics=state.get("fit_diagnostics"),
+        )
 
     def __str__(self) -> str:
         return "SpearmanRankingDistribution(sigma=%s, rho=%s, name=%s, keys=%s, max_dim=%s)" % (

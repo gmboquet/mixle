@@ -1282,6 +1282,7 @@
         "LDA",
         "Laplace",
         "LocalLevel",
+        "LogGaussian",
         "LogNormal",
         "LogSeries",
         "Logistic",

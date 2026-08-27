@@ -28,6 +28,15 @@ MAX_INT_CATEGORICAL_FRACTION = 0.05
 MAX_INT_CATEGORICAL_RANGE_MULTIPLIER = 4.0
 MAX_LENGTH_CATEGORICAL_DISTINCT = 25
 MAX_LENGTH_CATEGORICAL_FRACTION = 0.20
+# Row-arity heuristics. A rectangular table carrying one malformed row and genuine variable-length
+# sequence data arrive at the profiler as the same shape -- a positional container whose observed
+# arities differ -- so the reading has to be chosen from how those arities are distributed. One arity
+# holding at least MALFORMED_TABLE_MIN_SHARE of the rows is a table whose remaining rows lost or
+# gained a field; a majority short of that is genuinely ambiguous and is disclosed; below
+# AMBIGUOUS_TABLE_MIN_SHARE no arity is even a majority, which is what variable-length data looks
+# like, and it is read as a sequence exactly as it always has been.
+MALFORMED_TABLE_MIN_SHARE = 0.95
+AMBIGUOUS_TABLE_MIN_SHARE = 0.5
 INT_ID_RANGE_MULTIPLIER = 20.0
 POISSON_DISPERSION_MIN = 0.25
 POISSON_DISPERSION_MAX = 4.0
@@ -191,10 +200,13 @@ def get_optional_estimator(
     observations. With it true the missingness rate is fit from the data the profiler has already
     seen, the wrapper contributes log(p)/log(1-p) to the density, and the model can be sampled.
 
-    Only genuine optionality -- a field that is really absent, marked by ``None`` -- wants the rate.
-    The non-finite sentinels (``nan``, ``+/-inf``) use this wrapper as a REPRESENTATIONAL device so a
-    numeric field can carry a non-finite value; modelling how often that happens would change the
-    density of every such record, which is why they keep the transparent default.
+    Genuine missingness wants the rate, and at the automatic surface that is BOTH of its spellings:
+    ``None`` and ``nan``. They must mean the same model, because they are interchanged behind the
+    caller's back -- a pandas float Series silently stores ``None`` as ``nan`` -- so giving ``nan``
+    the transparent non-generative wrapper made the same data produce a different (and unsamplable)
+    model depending on the container it arrived in. The infinity sentinels (``+/-inf``) are
+    different: they are VALUES a numeric field can carry, not absences, so they use this wrapper as a
+    representational device and keep the transparent default.
     """
     return _estimator_provider(use_bstats).OptionalEstimator(est, missing_value=missing_value, est_prob=est_prob)
 
@@ -265,6 +277,30 @@ def get_set_estimator(
 def get_ignored_estimator(use_bstats: bool = False) -> "ParameterEstimator":
     """Return the estimator used for ignored or non-modelable fields."""
     return _estimator_provider(use_bstats).IgnoredEstimator()
+
+
+def _get_identifier_estimator(vdict: dict[Any, float], use_bstats: bool = False) -> "ParameterEstimator":
+    """Frozen, finite-scoring stand-in for a field automatic typing declines to model.
+
+    The callers cover an identifier-like column (nearly every value distinct), a scalar type the
+    profiler does not recognize (a datetime column being the everyday case), and an ambiguous
+    bool/numeric mix. Such a column carries no density information the profiler is willing to fit,
+    but it still appears in every row, so whatever stands in for it has to be able to SCORE a row.
+    The bare IgnoredEstimator
+    default -- a point mass at ``None`` -- assigns log-density ``-inf`` to every actual identifier,
+    which poisoned any downstream fit over data containing such a column (EM/DPM raised "EM did not
+    produce a finite objective" without naming the column). The child here is instead the empirical
+    categorical over the observed values, held fixed by the Ignored wrapper: finite on every row of
+    the data the model was inferred from, identical across mixture components (as a per-row constant
+    factor it cannot distort responsibilities), and samplable. An identifier NOT seen at profiling
+    time scores ``-inf`` -- deliberately the same finite-support behavior every other automatically
+    fitted categorical column has (``default_value=0``), rather than a new smoothed regime that only
+    identifier columns would get.
+    """
+    total = float(sum(vdict.values()))
+    provider = _estimator_provider(use_bstats)
+    child = provider.CategoricalDistribution(pmap={key: value / total for key, value in vdict.items()})
+    return provider.IgnoredEstimator(dist=child)
 
 
 def get_composite_estimator(ests: Sequence[ParameterEstimator], use_bstats: bool = False) -> "ParameterEstimator":
@@ -710,6 +746,12 @@ def get_dpm_mixture(
 
     Returns:
         DirichletProcessMixtureDistribution fit to the data.
+
+    Raises:
+        ValueError: If ``data`` is empty, or if automatic typing found no modelable field at all
+            (e.g. every column is identifier-like) -- the mixture would then score every
+            observation identically and "fit" nothing; the error names each field, its
+            cardinality, and the remedy.
     """
     import sys
 
@@ -742,6 +784,35 @@ def get_dpm_mixture(
         raise TypeError("out must be a writable stream or None")
 
     comp_ests = [get_estimator(rows, pseudo_count=pseudo_count, use_bstats=True) for _ in range(max_components)]
+    if _estimates_nothing(comp_ests[0]):
+        # Every field resolved to an Ignored (frozen) factor, so each stick would score every row
+        # identically and EM would return its initialization unchanged -- a "fit" of nothing.
+        # Refuse with the per-field evidence instead of letting that vacuous success stand.
+        from .profiling import DatumNode, _unmodelable_fields_report
+
+        raise ValueError(
+            "automatic typing found no modelable field, so a Dirichlet process mixture would score "
+            "every observation identically and fit nothing: %s. Drop identifier-like fields (or "
+            "replace them with modelable features) before fitting; if the values really are "
+            "categories, build the component estimator explicitly (e.g. with "
+            "mixle.utils.automatic.get_categorical_estimator) and fit it with "
+            "mixle.inference.estimation.fit." % "; ".join(_unmodelable_fields_report(DatumNode(data=rows)))
+        )
     est = provider.DirichletProcessMixtureEstimator(comp_ests)
 
     return fit(rows, est, max_its=max_its, delta=delta, rng=rng, print_iter=print_iter, out=out)
+
+
+def _estimates_nothing(est: "ParameterEstimator") -> bool:
+    """Whether an automatically-typed estimator carries no estimable statistic anywhere.
+
+    True exactly when every leaf is an Ignored (frozen) factor: the root itself, or a composite /
+    record whose every field is one. Optional wrappers, sequence estimators, and every concrete
+    family DO estimate something (a rate, a length model, parameters), so they stop the walk.
+    """
+    provider = _estimator_provider(False)
+    if isinstance(est, provider.IgnoredEstimator):
+        return True
+    if isinstance(est, (provider.CompositeEstimator, DictRecordEstimator)):
+        return all(_estimates_nothing(child) for child in est.estimators)
+    return False

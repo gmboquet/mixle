@@ -58,6 +58,35 @@ from mixle.utils.aliasing import MISSING, coalesce_alias
 from mixle.utils.special import digamma
 from mixle.utils.vector import owned_backend_parameter
 
+_FLOOR_MATERIAL_RATIO = 1.0e-3
+"""Relative inflation of the smallest raw variance above which the M-step's variance floor is
+recorded as a numerical repair. Same threshold, and the same reporting-only role, as the full
+covariance estimator's ``_RIDGE_MATERIAL_RATIO``: 1000x above the ~1e-6 design point, so a
+scale-homogeneous fit stays quiet while a 0.1% inflation -- roughly where likelihood/AIC comparisons
+start to move -- is reported. Crossing it records a string; it never rejects or alters the fit."""
+
+
+def _record_variance_floor(dist: Any, floor: float, raw_covar: np.ndarray) -> Any:
+    """Note on ``dist`` when the M-step variance floor lifted a coordinate, so a fit can report it.
+
+    This estimator floored silently: on 10 uV noise recorded in volts it returned variances inflated
+    114x with an empty ``numerical_repairs()`` and an empty ``fit_provenance().repairs``, while the
+    scalar and full-covariance estimators both recorded the same clamp (T4-6). A repair means the
+    parameters are not the ones the data implied, so it has to be visible on every surface that
+    applies one. An ordinary fit lifts nothing and records nothing.
+    """
+    smallest = float(np.min(raw_covar)) if raw_covar.size else 0.0
+    if smallest >= floor:
+        return dist
+    if smallest <= 0.0:
+        note = "variance-floored(%.3g; onto a non-positive variance)" % floor
+    elif (floor - smallest) <= _FLOOR_MATERIAL_RATIO * smallest:
+        return dist
+    else:
+        note = "variance-floored(%.3g; %.3gx the smallest variance)" % (floor, floor / smallest)
+    dist._numerical_repairs = (note,) + tuple(getattr(dist, "_numerical_repairs", ()))
+    return dist
+
 
 class DiagonalGaussianFisherView(FixedFisherView):
     """Fisher view over per-dimension first and second moments for a diagonal Gaussian."""
@@ -583,10 +612,17 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             self.sum2 = vec.zeros(self.dim)
         else:
             checked = vector_event(x, self.dim, label="diagonal Gaussian observation")
-        if estimate is not None and (
-            not isinstance(estimate, DiagonalGaussianDistribution) or estimate.dim != self.dim
-        ):
-            raise ValueError("diagonal Gaussian accumulator estimate must have the configured dimension")
+        # ``estimate`` is unused by this accumulator (see the Args note), so the only wiring
+        # mistake worth refusing is a DIMENSION mismatch. The former isinstance guard also refused
+        # an estimate the library itself produces: ``GaussianMixtureEstimator`` repacks every
+        # fitted component -- diagonal ones included -- as a ``MultivariateGaussianDistribution``,
+        # so diagonal components inside a Gaussian mixture died here on EM iteration two.
+        estimate_dim = getattr(estimate, "dim", None)
+        if estimate is not None and estimate_dim is not None and estimate_dim != self.dim:
+            raise ValueError(
+                "diagonal Gaussian accumulator estimate must have the configured dimension "
+                "(accumulator dim %d, estimate dim %r)" % (self.dim, estimate_dim)
+            )
         checked_weight = observation_weight(weight, label="diagonal Gaussian observation weight")
         x_weight = checked * checked_weight
         self.count += checked_weight
@@ -633,10 +669,15 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             len(checked),
             label="diagonal Gaussian observation weights",
         )
-        if estimate is not None and (
-            not isinstance(estimate, DiagonalGaussianDistribution) or estimate.dim != self.dim
-        ):
-            raise ValueError("diagonal Gaussian accumulator estimate must have the configured dimension")
+        # Dimension-only check, as in ``update`` above: ``estimate`` is unused here, and the former
+        # isinstance guard refused the ``MultivariateGaussianDistribution`` components that
+        # ``GaussianMixtureEstimator``'s repack legitimately hands back to diagonal accumulators.
+        estimate_dim = getattr(estimate, "dim", None)
+        if estimate is not None and estimate_dim is not None and estimate_dim != self.dim:
+            raise ValueError(
+                "diagonal Gaussian accumulator estimate must have the configured dimension "
+                "(accumulator dim %d, estimate dim %r)" % (self.dim, estimate_dim)
+            )
         x_weight = np.multiply(checked.T, checked_weights)
         self.count += checked_weights.sum()
         self.sum += x_weight.sum(axis=1)
@@ -770,11 +811,18 @@ class DiagonalGaussianEstimator(ParameterEstimator):
                 joint MAP estimate and carrying the posterior forward as the fitted model's prior) instead
                 of the maximum-likelihood / pseudo-count update.
             min_covar (Optional[float]): Absolute per-coordinate variance floor applied in the MLE M-step.
-                ``None`` (default) uses a tiny ``1e-8``. Invalid/non-finite reduced statistics are
+                ``None`` (default) uses a tiny ``1e-8`` as a FALLBACK only -- it applies when the
+                relative floor has no scale to work from (every coordinate variance non-positive, or
+                ``ridge=0.0``). Passing a value explicitly restores it as a hard lower bound, for
+                callers that want a fixed regularizer. Invalid/non-finite reduced statistics are
                 rejected rather than treated as numerical noise.
             ridge (Optional[float]): Relative variance floor coefficient. ``None`` (default) uses ``1e-6``;
-                each coordinate variance is floored at ``max(min_covar, ridge * mean(var))`` so the
-                safeguard is data-scaled. Bias is negligible at the defaults.
+                each coordinate variance is floored at ``ridge * mean(var)`` so the safeguard is
+                data-scaled and the fit is equivariant under a change of units. Bias is negligible at
+                the defaults when the coordinates share a scale; because the floor is set by the MEAN
+                variance, heterogeneous-unit columns can still have their smallest variances inflated
+                materially, and a floor that lifts a coordinate is recorded on the fitted distribution
+                as a ``variance-floored(...)`` entry in ``numerical_repairs()``.
 
         Attributes:
             name: Optional diagnostic name.
@@ -815,6 +863,24 @@ class DiagonalGaussianEstimator(ParameterEstimator):
             label="diagonal Gaussian ridge",
             nonnegative=True,
         )
+        # An explicitly requested floor is absolute and keeps winning the max() in
+        # ``_variance_floor``; the default is only the fallback for data carrying no scale of its own.
+        self._absolute_min_covar = min_covar is not None
+
+    def _variance_floor(self, covar: np.ndarray) -> float:
+        """Effective per-coordinate variance floor for the raw variances ``covar``.
+
+        Left as ``max(min_covar, ridge * mean(var))`` the absolute term also won on data whose whole
+        scale sits below it -- 10 uV of noise recorded in volts -- so the same data in volts and in
+        microvolts fitted different variances (T4-6). By default the absolute floor is now the
+        fallback for variances with no scale at all; an explicitly configured ``min_covar`` is still a
+        hard lower bound, which is how ``mixle.task`` regularizes its diagonal Gaussians.
+        """
+        positive = covar[covar > 0.0]
+        relative = self.ridge * float(np.mean(positive)) if positive.size else 0.0
+        if self._absolute_min_covar:
+            return max(self.min_covar, relative)
+        return relative if relative > 0.0 else self.min_covar
 
     def accumulator_factory(self) -> "DiagonalGaussianAccumulatorFactory":
         """Return an accumulator factory matching this estimator."""
@@ -864,17 +930,18 @@ class DiagonalGaussianEstimator(ParameterEstimator):
 
         denom = new_a - 0.5  # per-coordinate array
         safe_denom = np.where(denom > 0.0, denom, 1.0)
-        new_sigma2 = np.where(denom > 0.0, new_b / safe_denom, self.min_covar)
-        new_sigma2 = np.maximum(new_sigma2, self.min_covar)  # match the MLE-path variance floor
+        raw_sigma2 = np.where(denom > 0.0, new_b / safe_denom, self.min_covar)
+        floor = self._variance_floor(raw_sigma2)  # match the MLE-path variance floor
 
         new_prior = MultivariateNormalGammaDistribution(new_mu, new_n, new_a, new_b)
-        return DiagonalGaussianDistribution(
+        dist = DiagonalGaussianDistribution(
             new_mu,
-            new_sigma2,
+            np.maximum(raw_sigma2, floor),
             name=self.name,
             keys=self.keys,
             prior=new_prior,
         )
+        return _record_variance_floor(dist, floor, raw_sigma2)
 
     def estimate(
         self, nobs: float | None, suff_stat: tuple[np.ndarray, np.ndarray, float]
@@ -915,16 +982,16 @@ class DiagonalGaussianEstimator(ParameterEstimator):
         if nobs <= 0:
             d = inferred_dim
             mu = np.asarray(self.prior_mu, dtype=float) if self.prior_mu is not None else vec.zeros(d)
-            covar = np.asarray(self.prior_covar, dtype=float) if self.prior_covar is not None else np.ones(d)
-            floor = max(self.min_covar, self.ridge * float(np.mean(covar[covar > 0.0])) if np.any(covar > 0.0) else 0.0)
-            covar = np.maximum(covar, floor)
-            return DiagonalGaussianDistribution(
+            raw_covar = np.asarray(self.prior_covar, dtype=float) if self.prior_covar is not None else np.ones(d)
+            floor = self._variance_floor(raw_covar)
+            dist = DiagonalGaussianDistribution(
                 mu,
-                covar,
+                np.maximum(raw_covar, floor),
                 name=self.name,
                 keys=self.keys,
                 prior=self.prior,
             )
+            return _record_variance_floor(dist, floor, raw_covar)
 
         # A mean pseudo-count is only usable when its prior mean was supplied; unpaired counts
         # mean "no pseudo-observations" and fall through to the plain maximum-likelihood mean.
@@ -946,20 +1013,20 @@ class DiagonalGaussianEstimator(ParameterEstimator):
             diagonal=True,
         )
 
-        # P1 variance floor: clamp non-finite / non-positive coordinates and apply a
-        # data-scaled floor max(min_covar, ridge * mean(var)) so a component holding
-        # few points cannot produce zero/negative/NaN variances. Bias is negligible.
-        covar = np.asarray(covar, dtype=float)
-        floor = max(self.min_covar, self.ridge * float(np.mean(covar[covar > 0.0])) if np.any(covar > 0.0) else 0.0)
-        covar = np.maximum(covar, floor)
+        # P1 variance floor: clamp non-positive coordinates to a data-scaled floor (see
+        # ``_variance_floor``) so a component holding few points cannot produce zero or negative
+        # variances, and record the clamp when it actually lifted a coordinate.
+        raw_covar = np.asarray(covar, dtype=float)
+        floor = self._variance_floor(raw_covar)
 
-        return DiagonalGaussianDistribution(
+        dist = DiagonalGaussianDistribution(
             mu,
-            covar,
+            np.maximum(raw_covar, floor),
             name=self.name,
             keys=self.keys,
             prior=self.prior,
         )
+        return _record_variance_floor(dist, floor, raw_covar)
 
 
 class DiagonalGaussianDataEncoder(DataSequenceEncoder):

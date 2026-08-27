@@ -901,6 +901,28 @@ def describe(obj: Any) -> str:
     The one-call answer to "what can this do?": its category, the capabilities it has and notably
     lacks, the engines it runs on, and how to fit it. Works on any object; richest for distributions.
     """
+    # The Model facade intentionally hides log_density/sampler/estimator behind its own verbs
+    # (m(x), m.sample), so duck-typing below cannot see it -- and describe() is the entry point the
+    # top-level docstring routes newcomers through, so the FIRST object they hold (propose()'s
+    # return) must not come back "no catalogued capability detected". Model already knows how to
+    # explain itself. Function-scope import, mirroring lifecycle's own lazy import of this module.
+    from mixle.lifecycle import Model as _LifecycleModel
+
+    if isinstance(obj, _LifecycleModel):
+        return obj.explain()
+    # An estimator instance has the same dispatch gap: describe the family it estimates.
+    if (
+        not isinstance(obj, type)
+        and callable(getattr(obj, "estimate", None))
+        and callable(getattr(obj, "accumulator_factory", None))
+    ):
+        return (
+            "%s — an estimator: fit it with mixle.inference.fit(data, %s(...)) or optimize(data, ...); the fitted result is the distribution it estimates."
+            % (
+                type(obj).__name__,
+                type(obj).__name__,
+            )
+        )
     # A class (e.g. a model class) or any non-distribution object is described by its catalogued
     # capabilities only — the rich distribution view needs a live instance.
     is_instance = not isinstance(obj, type)

@@ -37,9 +37,7 @@ def build_manifest() -> dict:
     """Return the maturity manifest as a plain dict (public surface -> tier + human status)."""
     return {
         "artifact": "mixle.maturity_manifest/v2",
-        "stable_allowlist": sorted(
-            name for name, (tier, _) in MATURITY_REGISTRY.items() if tier is Maturity.STABLE
-        ),
+        "stable_allowlist": sorted(name for name, (tier, _) in MATURITY_REGISTRY.items() if tier is Maturity.STABLE),
         "surfaces": {
             name: {"maturity": maturity_of(name).value, "status": status_of(name)} for name in _public_surfaces()
         },
