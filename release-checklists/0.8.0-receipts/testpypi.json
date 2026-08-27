@@ -3,7 +3,7 @@
   "candidate_commit": "8c82acee792d8a6ed6e925f1c614ab4a20358628",
   "command": "gh api repos/gmboquet/mixle/environments/testpypi --jq '[.protection_rules[]|.type]' && gh api repos/gmboquet/mixle/environments/testpypi/deployment-branch-policies --jq .total_count && awk 'NR>=314 && NR<=386' .github/workflows/publish.yml | grep -nE 'environment:|id-token|gh-action-pypi-publish|repository-url' && awk 'NR>=387 && NR<=470' .github/workflows/publish.yml | grep -nE 'testpypi-rehearsal|candidate_commit|prepare_run|sums_sha256'",
   "date": "2026-08-23",
-  "evidence_digest": "b1546e3c6c3b38339ac8c743177c1a2930b73677c171889485e99d7657613f36",
+  "evidence_digest": "59e53b79d10fa169708a6251bf32931e42f54300070f61a2dd3e3785f120c326",
   "gate": "TestPyPI",
   "note": "Closed on capability, not on a record of execution (D-0198), because the previous demand was circular: verify-candidate runs --require-final for all 3 phases, so the rehearsal could not run until this row was final. The rehearsal remains mandatory and remains ordered before promote; publish.yml enforces it live against the tagged commit, which is strictly stronger than this receipt. NOT FIXED, reported: the production `pypi` environment has 0 protection rules and no branch policy -- testpypi is now the more protected of the two.",
   "result": "2 protection rules on the testpypi environment (required_reviewers with reviewer gmboquet, branch_policy) with 2 deployment refs (tag:v*, branch:release/0.8.0); job wired with id-token: write and pypa/gh-action-pypi-publish pinned to ba38be9e against https://test.pypi.org/legacy/; promote asserts 3 fields of testpypi-rehearsal.json (candidate_commit, prepare_run, sums_sha256) at publish.yml:415-433"

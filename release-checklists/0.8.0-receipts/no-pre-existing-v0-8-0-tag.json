@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && gh api \"repos/gmboquet/mixle/git/matching-refs/tags/v0.8.0\" && gh api \"repos/gmboquet/mixle/tags?per_page=100\" --jq '.[].name' && git tag -l | wc -l && git tag -l v0.8.0 | wc -l",
   "date": "2026-08-22",
-  "evidence_digest": "b1546e3c6c3b38339ac8c743177c1a2930b73677c171889485e99d7657613f36",
+  "evidence_digest": "59e53b79d10fa169708a6251bf32931e42f54300070f61a2dd3e3785f120c326",
   "gate": "No pre-existing `v0.8.0` tag",
   "note": "Live refs measured 2026-08-22, both remote and local - clean. Two things the owner should eyeball anyway: the local tag list contains a v1.0.0 and a backup-before-history-fix-2026-07-09 tag that do not exist on the remote, so local tag state has drifted from origin. Note matching-refs/tags/v0.8.0 is a prefix match, so it would also have caught v0.8.0rc1 etc.; nothing matched. Re-run immediately before tagging.",
   "result": "remote matching-refs for tags/v0.8.0 returned [] (0 matches); 4 remote tags exist (v0.7.0, v0.6.2, v0.6.1, v0.6.0); 12 local tags, 0 of which are v0.8.0"

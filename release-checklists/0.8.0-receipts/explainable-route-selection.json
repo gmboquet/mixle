@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/route_explainability_test.py -p no:randomly -q -m \"\" -n 0",
   "date": "2026-08-22",
-  "evidence_digest": "b1546e3c6c3b38339ac8c743177c1a2930b73677c171889485e99d7657613f36",
+  "evidence_digest": "59e53b79d10fa169708a6251bf32931e42f54300070f61a2dd3e3785f120c326",
   "gate": "Explainable route selection",
   "note": "The single skip is exactly the one the checklist describes, and its reason string is emitted rather than silently coerced: route_explainability_test.py:91 'route em unavailable in this environment: Normal: partial free (some args fixed) is a later slice; use all-free or all-fixed for now.' Route-receipt machinery lives in additional files (receipt_test.py, execution_receipt_contracts_test.py, routing_density_economics_receipts_test.py) that I did not run; this receipt covers the explainability half only.",
   "result": "10 passed, 1 skipped in 5.85s"

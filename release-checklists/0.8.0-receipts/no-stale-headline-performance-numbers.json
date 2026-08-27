@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONPATH=. python scripts/check_public_claims.py; echo \"claims_exit=$?\"; PYTHONPATH=. python -m pytest mixle/tests/release_claims_hygiene_test.py -p no:randomly -q -m \"\" -n 0",
   "date": "2026-08-22",
-  "evidence_digest": "b1546e3c6c3b38339ac8c743177c1a2930b73677c171889485e99d7657613f36",
+  "evidence_digest": "59e53b79d10fa169708a6251bf32931e42f54300070f61a2dd3e3785f120c326",
   "gate": "No stale headline performance numbers",
   "note": "ACTION FOR THE OWNER: the checklist row still says '**Currently failing \u2014 see the open item below**' with two unregistered claims in examples/engine_benchmark_example.py (line 10 'every engine', line 22 '~100x'). At this tip the gate PASSES with exit 0 \u2014 I read the example's docstring and neither phrase is present any more. The surface count has also moved: 853 measured now vs 861 in the evidence text. The evidence prose is stale in the pessimistic direction and should be rewritten before sign-off. The claim inventory covers CHANGELOG.md (confirmed registered), so the 'release notes' half is inside the gate.",
   "result": "validated 11 claims across 853 public surfaces, claims_exit=0; release_claims_hygiene_test 3 passed in 1.35s"

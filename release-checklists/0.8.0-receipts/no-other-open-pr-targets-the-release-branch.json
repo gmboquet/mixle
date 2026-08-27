@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && gh pr list --repo gmboquet/mixle --base release/0.8.0 --state open --json number --limit 100 --jq 'length' && gh pr list --repo gmboquet/mixle --state open --json number,baseRefName,headRefName --limit 100 --jq '.[] | \"#\\(.number) \\(.headRefName) -> \\(.baseRefName)\"'",
   "date": "2026-08-22",
-  "evidence_digest": "b1546e3c6c3b38339ac8c743177c1a2930b73677c171889485e99d7657613f36",
+  "evidence_digest": "59e53b79d10fa169708a6251bf32931e42f54300070f61a2dd3e3785f120c326",
   "gate": "No other open PR targets the release branch",
   "note": "Live GitHub state measured 2026-08-22. Strictly this measures 'zero' rather than 'exactly one intended release PR' - there is currently no open release PR at all, so when the owner opens it this must be re-run to confirm it is the only one. The 3 dependabot PRs target main and would also perturb the ancestry gate above if merged.",
   "result": "0 open PRs with base release/0.8.0; repo-wide 3 open PRs, all dependabot targeting main (#539 setup-python-7, #504 python-dependencies, #503 download-artifact-8)"

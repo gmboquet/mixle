@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "git archive 483add7cc321c934ded4fe70d1af34458196dc4c | tar -x -C $SC/src && cd $SC/src && python -m build --no-isolation --sdist --wheel --outdir $SC/dist && for a in mixle-0.8.0-py3-none-any.whl mixle-0.8.0.tar.gz; do python -m venv $SC/v_$a && $SC/v_$a/bin/pip install -q $SC/dist/$a && $SC/v_$a/bin/python -c \"import mixle,importlib.metadata as m;print(mixle.__version__, m.version('mixle'))\"; done",
   "date": "2026-08-22",
-  "evidence_digest": "b1546e3c6c3b38339ac8c743177c1a2930b73677c171889485e99d7657613f36",
+  "evidence_digest": "59e53b79d10fa169708a6251bf32931e42f54300070f61a2dd3e3785f120c326",
   "gate": "Version is the final candidate version",
   "note": "Fully re-measured today. Built from a pristine `git archive` export of 483add7c into scratch, so the repo was never touched (no dist/ or egg-info written into the worktree). Used --no-isolation, which is faithful here because .venv312 already carries exactly the pinned build requires (setuptools==83.0.0, wheel==0.47.0). Each artifact went into its own fresh venv.",
   "result": "pyproject.toml version = 0.8.0; build exit 0 producing mixle-0.8.0-py3-none-any.whl (5299546 B) and mixle-0.8.0.tar.gz (4781264 B); wheel venv reports import_version=0.8.0 dist_metadata_version=0.8.0; sdist venv reports import_version=0.8.0 dist_metadata_version=0.8.0 (both pip installs exit 0)"
