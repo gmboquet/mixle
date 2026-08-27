@@ -79,9 +79,12 @@ _ENTRIES = (
         "configuration": {"seed": "declared in script", "dataset": "synthetic"},
         "expected": {
             "format": "text",
-            "stdout_sha256": "58f8fc929cf2d72302f9f5b9aad5c551b7941ca66dda0b03e50e7f872f146229",
+            # Repinned for the dcec5e29 campaign fix waves: LogisticEstimator gained a shift-anchored
+            # moment track (this example fits it directly), the same repair the Gaussian family
+            # already carried. New digest measured twice, byte-identical.
+            "stdout_sha256": "c95df4d9049f3bd1922ca30ee5e9cd4dbeafd1b8f03af1714f19fbc2caaf7bf3",
             "contains": [
-                "fit : GaussianDistribution(1.5485975768849254, 4.020409881516533",
+                "fit : GaussianDistribution(1.5485975768849254, 4.020409881516532",
                 "fit : PoissonDistribution(4.027",
                 "fit : BernoulliDistribution(0.7004",
             ],

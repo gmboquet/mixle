@@ -2,12 +2,16 @@
 
 The tester brief states the candidate's identity -- source commit, source tree, and both artifact
 digests -- and testers are told to treat any mismatch as blocking. Those four values were
-hand-transcribed twice and were wrong twice: once carrying the PREVIOUS candidate's tree, once
-carrying a 40-hex tree hash whose tail was invented from a printed 8-character prefix. Both were
-caught by testers, which is the expensive way to catch them.
+hand-transcribed and wrong three times: once carrying the PREVIOUS candidate's tree, once carrying
+a 40-hex tree hash whose tail was invented from a printed 8-character prefix, and once -- found
+only after the first two fixes -- as the same stale commit sitting unnoticed in the Role B example
+commands (a git checkout target, a --source-digest flag), well past the identity block the first
+fix checked. The first two were caught by testers; the third was caught by hand, which is the same
+expensive way, just before anyone else had to.
 
 Nothing here should be typed by a human. This recomputes every identity value from the artifacts
-themselves and fails if the brief, the attestation, or the checksum file disagrees with them.
+themselves and fails if the brief -- ANYWHERE in it, not only its identity block -- the attestation,
+or the checksum file disagrees with them.
 
 Usage:
     python scripts/verify_candidate_handout.py <candidate-directory>
@@ -86,12 +90,19 @@ def verify(candidate: Path) -> list[str]:
         for label, value in truth.items():
             if value not in text:
                 problems.append(f"{brief.name} does not state the true {label} {value}")
-        # A hash in the identity block that names nothing real is the failure mode that shipped
-        # twice: a stale value from a previous candidate, or a real prefix with an invented tail.
-        head = text.split("## Role A")[0]
-        for stray in re.findall(r"\b[0-9a-f]{40,64}\b", head):
+        # A full-length hash naming nothing real is the failure mode that has shipped THREE times:
+        # a stale value from a previous candidate in the identity block, a real prefix with an
+        # invented tail, and -- found only by hand, after the first two fixes -- the SAME stale
+        # commit sitting unnoticed in the Role B example commands (a git checkout target, a
+        # --source-digest flag), well past the identity block those first two fixes checked. So
+        # this scans the WHOLE document: every full commit (40 hex) or digest (64 hex) anywhere
+        # must be either a true value or absent, full stop. A short prefix (e.g. an 8-char
+        # abbreviation naming a superseded candidate in prose, "## What changed since dcec5e29")
+        # is below this length floor and is not flagged -- only full-length values are ever wrong
+        # in a way that matters, because only a full value is ever copy-pasted into a command.
+        for stray in re.findall(r"\b[0-9a-f]{40,64}\b", text):
             if stray not in truth.values():
-                problems.append(f"{brief.name} identity block names {stray}, which is not this candidate")
+                problems.append(f"{brief.name} names {stray}, which is not this candidate")
 
     sums = candidate / "SHA256SUMS"
     if not sums.exists():
