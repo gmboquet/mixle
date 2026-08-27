@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "gh api --paginate --slurp repos/gmboquet/mixle/commits/$SHA/check-runs?per_page=100 > check-runs.json && python scripts/verify_required_checks.py --required .github/release-required-checks.txt --input check-runs.json --sha $SHA --repository gmboquet/mixle",
   "date": "2026-08-22",
-  "evidence_digest": "0fd7e27594dc428422fcf65ccff0dce0516bfda69b928acae2a7c16ad0416a07",
+  "evidence_digest": "dce0244ec90aa66b7428e41e58ed8d68e1379634039847ec53baabb5f2087f24",
   "gate": "Exact-tip hosted matrix",
   "note": "FIRST TIME THIS GATE HAS EVER BEEN SATISFIED. Two things had to be true at once and never were before. (1) The run must be a workflow_dispatch: `numerical / repeated-seed stress` and `hardware / MPI and torchrun` are gated `if: workflow_dispatch || schedule` (tests.yml:470, :503), so every push-triggered run skips them and can never satisfy this list. (2) `core / minimum versions` had to survive the runner, which took three attempts (D-0196). Every selected check run belongs to dispatch run 32549525054. The other check runs on this commit come from the push run that the concurrency group cancelled when the dispatch superseded it; the generator selects the latest run per name, so those do not contaminate the evidence. PUBLICATION NOTE: this is re-verified live by publish.yml against the tag, so a later commit does not silently inherit it.",
   "result": "exit 0 on 5cca9e96: all 24 required job-level names are completed/success, selected from 70 check runs on the commit (check_runs_sha256 7bd0c23f7d9867fc08668f0158bf70936d8ea9b9fac9f9273fad259cb89c276f)"

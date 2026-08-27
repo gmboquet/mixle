@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/model_selection_benchmark_test.py mixle/tests/propose_budget_test.py -p no:randomly -q -m \"\" -n 0",
   "date": "2026-08-22",
-  "evidence_digest": "0fd7e27594dc428422fcf65ccff0dce0516bfda69b928acae2a7c16ad0416a07",
+  "evidence_digest": "dce0244ec90aa66b7428e41e58ed8d68e1379634039847ec53baabb5f2087f24",
   "gate": "Held-out selection and bounded search",
   "note": "These are the two files the evidence text names ('model-selection benchmark and proposal-budget tests'). Both halves of the gate are covered: held-out selection by model_selection_benchmark_test.py, bounded search by propose_budget_test.py.",
   "result": "10 passed, 2 subtests passed in 5.33s"
