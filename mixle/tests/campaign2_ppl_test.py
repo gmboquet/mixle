@@ -27,6 +27,7 @@ documented on both surfaces, and is pinned here so the documentation cannot rot.
 import unittest
 
 import numpy as np
+import pytest
 
 import mixle.dist
 import mixle.ppl
@@ -36,6 +37,16 @@ from mixle.ppl.core import _FAMILIES, lower
 
 
 class FixedMeanScaleFitTest(unittest.TestCase):
+    """Pins the TORCH-route MAP repair. The derivative-free branch (no torch, or
+    constrained/penalized fits) deliberately keeps the old refusal -- bounding Nelder-Mead
+    would perturb simplex geometry for legitimate constrained fits (D-0201 recorded limit)
+    -- so these tests require torch rather than asserting behavior the fix does not claim.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        pytest.importorskip("torch")  # optional dep: base CI envs ship only numpy+scipy
+
     """T4-5: the MAP path accepts the degenerate scale fit the closed-form sibling accepts."""
 
     def test_fixed_mean_constant_data_fits_with_disclosed_floor(self):
@@ -85,6 +96,16 @@ class LogNormalAutogradTargetTest(unittest.TestCase):
 
 
 class MarginalizeSentinelTest(unittest.TestCase):
+    """Pins the TORCH-route MAP repair. The derivative-free branch (no torch, or
+    constrained/penalized fits) deliberately keeps the old refusal -- bounding Nelder-Mead
+    would perturb simplex geometry for legitimate constrained fits (D-0201 recorded limit)
+    -- so these tests require torch rather than asserting behavior the fix does not claim.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        pytest.importorskip("torch")  # optional dep: base CI envs ship only numpy+scipy
+
     """missing='marginalize' must integrate a NaN row out for log-prep families too."""
 
     def test_gamma_map_marginalize_equals_dropping_the_row(self):

@@ -21,6 +21,7 @@ import unittest
 import warnings
 
 import numpy as np
+import pytest
 
 import mixle.inference
 import mixle.ppl
@@ -176,7 +177,7 @@ class DataFrameStructureParityTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         try:
-            import pandas  # noqa: F401
+            pytest.importorskip("pandas")  # optional dep: base CI envs ship only numpy+scipy
         except ImportError:  # pragma: no cover - pandas is a test-env dependency
             raise unittest.SkipTest("pandas not installed")
         rng = np.random.default_rng(5)
@@ -186,7 +187,7 @@ class DataFrameStructureParityTest(unittest.TestCase):
         cls.records = [(str(a), float(b)) for a, b in zip(cls.x, cls.y)]
 
     def _frame(self):
-        import pandas as pd
+        pd = pytest.importorskip("pandas")  # optional dep: base CI envs ship only numpy+scipy
 
         return pd.DataFrame({"x": self.x, "y": self.y})
 
@@ -217,7 +218,7 @@ class DataFrameStructureParityTest(unittest.TestCase):
         # inference sized the model to every column while encoding emitted only the selection, and
         # the fit died with a row-shape ContractError blaming the user's rows (T2-09's
         # documented-workaround defect). Inference must see the same records encoding will fit.
-        import pandas as pd
+        pd = pytest.importorskip("pandas")  # optional dep: base CI envs ship only numpy+scipy
 
         frame = pd.DataFrame({"drop_me": [f"ID-{i}" for i in range(len(self.records))], "x": self.x, "y": self.y})
         model = optimize(frame, out=None, fields=["x", "y"], structure="off")
@@ -227,7 +228,7 @@ class DataFrameStructureParityTest(unittest.TestCase):
         self.assertTrue(np.isfinite(scalar_model.log_density(float(self.y[0]))))
 
     def test_fields_selection_works_from_the_fit_front_door_too(self):
-        import pandas as pd
+        pd = pytest.importorskip("pandas")  # optional dep: base CI envs ship only numpy+scipy
 
         from mixle.inference import fit
 

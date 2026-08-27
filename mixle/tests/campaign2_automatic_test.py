@@ -29,6 +29,7 @@ import math
 import unittest
 
 import numpy as np
+import pytest
 
 from mixle.stats.combinator.ignored import IgnoredEstimator
 from mixle.stats.univariate.discrete.categorical import CategoricalEstimator
@@ -117,7 +118,7 @@ class UnrecognizedScalarLeafFitsTest(unittest.TestCase):
     """
 
     def _timestamp_table(self, n=200):
-        import pandas as pd
+        pd = pytest.importorskip("pandas")  # optional dep: base CI envs ship only numpy+scipy
 
         start = pd.Timestamp("2026-01-01")
         return [(start + pd.Timedelta(hours=i), float((i * 37) % 100) / 7.0) for i in range(n)]
@@ -129,7 +130,7 @@ class UnrecognizedScalarLeafFitsTest(unittest.TestCase):
         self.assertTrue(np.isfinite(model.log_density(rows[0])))
 
     def test_datetime_prototype_scores_its_own_rows_and_samples_timestamps(self):
-        import pandas as pd
+        pd = pytest.importorskip("pandas")  # optional dep: base CI envs ship only numpy+scipy
 
         rows = self._timestamp_table()
         proto = get_prototype(rows)
@@ -215,7 +216,7 @@ class MissingSpellingsAgreeTest(unittest.TestCase):
         self.assertGreater(nan_share, 0.05)  # the fitted 20% rate really generates missing values
 
     def test_pandas_series_coercion_of_none_does_not_change_the_model(self):
-        import pandas as pd
+        pd = pytest.importorskip("pandas")  # optional dep: base CI envs ship only numpy+scipy
 
         as_list = _fit(self.BASE + [None, None])
         as_series = _fit(pd.Series(self.BASE + [None, None]))  # float dtype stores None as nan
