@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "gh api repos/gmboquet/mixle/compare/main...release/0.8.0 --jq '{status,ahead_by,behind_by,base_sha:.merge_base_commit.sha}' && gh api repos/gmboquet/mixle/git/ref/heads/main --jq .object.sha && git merge-base --is-ancestor $(git rev-parse origin/main) HEAD",
   "date": "2026-08-22",
-  "evidence_digest": "2ae020da35337142c475554b6ba916ef3af3c9fad60296458907bfe8f4bde2db",
+  "evidence_digest": "30d06b80fbab719e3cd51da2240a166e795a629200c808bbb97186803a8d23d1",
   "gate": "Release branch ancestry includes current `main`",
   "note": "Re-measured at the current tip. behind_by=0 is the load-bearing number: release/0.8.0 contains every commit on main. The auditor's addition: the receipt must fetch the main ref to evidence that the merge base IS main's tip -- comparing against a stale main would otherwise pass silently. CAVEAT: 3 open dependabot PRs target main (#539, #504, #503); merging any before tagging invalidates this row and it must be re-run.",
   "result": "status=ahead ahead_by=2094 behind_by=0, merge_base=c6cf935a which the ref API confirms is the current main tip; release/0.8.0 tip 5cca9e96; merge-base --is-ancestor exit 0"

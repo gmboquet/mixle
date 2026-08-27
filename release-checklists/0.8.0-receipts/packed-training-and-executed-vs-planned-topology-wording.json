@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/language_model_dense_fit_test.py mixle/tests/parallel_training_contracts_test.py mixle/tests/pilot_ladder_test.py -p no:randomly -q -m \"\" -n 0",
   "date": "2026-08-22",
-  "evidence_digest": "2ae020da35337142c475554b6ba916ef3af3c9fad60296458907bfe8f4bde2db",
+  "evidence_digest": "30d06b80fbab719e3cd51da2240a166e795a629200c808bbb97186803a8d23d1",
   "gate": "Packed training and executed-vs-planned topology wording",
   "note": "Three strands, all executed. Packed training: language_model_dense_fit_test.py pins the N9.3 claim structurally (dense path supervises every forwarded token exactly once, checked on a held-out stream). Executed-vs-planned topology: parallel_training_contracts_test.py includes test_every_rank_maps_to_one_unique_planned_coordinate, test_lightning_rejects_topology_mismatch_before_optional_import, test_step_receipt_rejects_impossible_measurements. Unsupported-axis rejection: pilot_ladder_test.py carries the two tests docs/training-at-scale.rst names by name for raising NotImplementedError instead of silently skipping. Also relevant: docs/training-at-scale.rst (245 lines) is a registered claim surface, and docs/frontier-integration-note.rst states TP+CP composition, pipeline and expert parallelism are capability errors on torch_native. I did not execute a real multi-rank TP/PP/CP/EP run \u2014 nothing here evidences behaviour at actual scale.",
   "result": "19 passed, 12 subtests passed in 2.75s"
