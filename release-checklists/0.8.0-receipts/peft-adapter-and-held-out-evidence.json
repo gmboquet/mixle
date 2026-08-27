@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd $TMP && PYTHONPATH=. python ./examples/peft_lora_grad_leaf.py",
   "date": "2026-08-22",
-  "evidence_digest": "ba3b74cc4df19b472f06c92d085873aea322220a7532bbec9bda45e21ae8757e",
+  "evidence_digest": "a6cb7fca110ec860440a5751fabc6aeef937488e009e9e201498d9dfd2e6cba8",
   "gate": "PEFT adapter and held-out evidence",
   "note": "LOCAL execution, not hosted CI -- and it is stronger than the checklist's 'static contract only' record: the real pinned checkpoint (peft-internal-testing/tiny-random-gpt2 @ 2f18a2874922d4cc4777cdf9fbf66cfa057a691a) actually loaded and trained, so every listed assertion (disjoint deterministic train/held-out corpora, snapshot of every trainable LoRA tensor, base exact, held-out likelihood improves) was executed, not just parsed. The focused smoke test also passed: mixle/tests/peft_lora_grad_leaf_smoke_test.py = 2 passed in 4.07s (test_only_the_lora_adapter_trains_on_a_real_checkpoint, test_adapter_includes_a_normalized_initial_token_law). CAVEAT for the owner: `grep -rn peft_lora_grad_leaf .github/workflows/*.yml` returned 0 hits, so there is no named hosted job for this gate at 483add7c; the test skips cleanly when offline, so a hosted runner without HF access would silently skip rather than fail.",
   "result": "exit 0; base weight drift 0.0; LoRA adapter tensors moved 10/10; held-out mean log-density -55.1743 -> -51.2216"
