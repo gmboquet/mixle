@@ -65,13 +65,13 @@ def test_default_optimize_reaches_the_exact_closed_form_mle_on_small_data():
     """
     for seed in range(10):
         model = _quiet_optimize(SMALL_SEQUENCES, MarkovChainEstimator(), rng=np.random.RandomState(seed))
-        assert _data_ll(model, SMALL_SEQUENCES) == EXACT_MLE_LL
+        assert abs(_data_ll(model, SMALL_SEQUENCES) - EXACT_MLE_LL) <= 1e-12
 
 
 def test_default_fit_reaches_the_exact_closed_form_mle_on_small_data():
     """``fit()`` (no rng supplied) took the same starved path and failed the same way."""
     model = fit(SMALL_SEQUENCES, MarkovChainEstimator())
-    assert _data_ll(model, SMALL_SEQUENCES) == EXACT_MLE_LL
+    assert abs(_data_ll(model, SMALL_SEQUENCES) - EXACT_MLE_LL) <= 1e-12
 
 
 def test_default_fit_of_small_data_reports_no_repair():

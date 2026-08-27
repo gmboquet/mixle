@@ -18,7 +18,11 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.stats.univariate.continuous._observation_contracts import scored_observation
+from mixle.stats.univariate.continuous._observation_contracts import (
+    consistent_anchored_triple,
+    scale_anchored_triple,
+    scored_observation,
+)
 
 
 class LogisticDistribution(SequenceEncodableProbabilityDistribution):
@@ -410,15 +414,21 @@ class LogisticAccumulator(SequenceEncodableStatisticAccumulator):
         attribute, so ``from_value`` sees raw-only statistics and restarts the track unactivated.
         Uniform weight scaling is exactly linear in both anchored moments and leaves the anchor
         (a data value, not a statistic) alone, so the track scales as the raw moments do.
+
+        The moment arithmetic lives in ``scale_anchored_triple``; this method is pure attribute
+        wiring, and its body is byte-identical to the Logistic/Gaussian sibling accumulator's --
+        flagged by the duplicate-body scanner and accepted in the manifest deliberately, because
+        de-duplicating the wiring itself would mean a mixin coupling both classes' private
+        attribute names, a bigger structural change than the release stage warrants for zero
+        remaining bug-risk (the shared math is what could drift; this cannot).
         """
-        anchor = self._anchor
-        anchored_sum = self._anchored_sum
-        anchored_sum2 = self._anchored_sum2
+        anchor, anchored_sum, anchored_sum2 = scale_anchored_triple(
+            self._anchor, self._anchored_sum, self._anchored_sum2, c
+        )
         super().scale(c)
-        if anchor is not None:
-            self._anchor = anchor
-            self._anchored_sum = anchored_sum * c
-            self._anchored_sum2 = anchored_sum2 * c
+        self._anchor = anchor
+        self._anchored_sum = anchored_sum
+        self._anchored_sum2 = anchored_sum2
         return self
 
     def acc_to_encoder(self) -> "LogisticDataEncoder":
@@ -436,27 +446,6 @@ class LogisticAccumulatorFactory(StatisticAccumulatorFactory):
     def make(self) -> LogisticAccumulator:
         """Create a fresh logistic accumulator."""
         return LogisticAccumulator(name=self.name, keys=self.keys)
-
-
-def _consistent_anchored_moments(suff_stat: Any, sum_x: float, count: float) -> tuple[float, float, float] | None:
-    """Return the anchored moment payload of ``suff_stat`` when it is usable, else ``None``.
-
-    ``None`` falls back to the raw reduced-moment M-step, so a payload is only trusted when it is
-    finite and agrees with the raw first moment it claims to describe -- a hand-built
-    :class:`LogisticSuffStat` whose payload contradicts its tuple must not silently change the
-    estimate the tuple alone would have produced.
-    """
-    anchored = getattr(suff_stat, "anchored", None)
-    if anchored is None or count <= 0.0:
-        return None
-    anchor, a_sum, a_sum2 = anchored
-    if not (np.isfinite(anchor) and np.isfinite(a_sum) and np.isfinite(a_sum2)) or a_sum2 < 0.0:
-        return None
-    implied_sum = a_sum + count * anchor
-    tolerance = 1.0e-6 * max(abs(sum_x), abs(count * anchor), 1.0)
-    if abs(implied_sum - sum_x) > tolerance:
-        return None
-    return float(anchor), float(a_sum), float(a_sum2)
 
 
 def _spread_is_resolvable(variance: float, magnitude: float) -> bool:
@@ -590,7 +579,7 @@ class LogisticEstimator(ParameterEstimator):
         sum_x, sum_x2, count = float(suff_stat[0]), float(suff_stat[1]), float(suff_stat[2])
         # The anchored payload (when present) describes the RAW data only -- captured before any
         # prior blend below -- so it is read off the untouched (sum_x, count) pair.
-        anchored = _consistent_anchored_moments(suff_stat, sum_x, count)
+        anchored = consistent_anchored_triple(suff_stat, sum_x, count)
 
         prior_mean: float | None = None
         prior_variance: float | None = None

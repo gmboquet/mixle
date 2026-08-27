@@ -67,14 +67,21 @@
     },
     {
       "locations": [
-        "mixle/stats/univariate/continuous/gaussian.py::GaussianDistribution.backend_stacked_sufficient_statistics@L407",
+        "mixle/stats/univariate/continuous/gaussian.py::GaussianAccumulator.scale@L882",
+        "mixle/stats/univariate/continuous/logistic.py::LogisticAccumulator.scale@L409"
+      ],
+      "stmts": 7
+    },
+    {
+      "locations": [
+        "mixle/stats/univariate/continuous/gaussian.py::GaussianDistribution.backend_stacked_sufficient_statistics@L465",
         "mixle/stats/univariate/continuous/log_gaussian.py::LogGaussianDistribution.backend_stacked_sufficient_statistics@L333"
       ],
       "stmts": 7
     },
     {
       "locations": [
-        "mixle/stats/univariate/continuous/gaussian.py::GaussianFisherView._model_fisher@L61",
+        "mixle/stats/univariate/continuous/gaussian.py::GaussianFisherView._model_fisher@L65",
         "mixle/stats/univariate/continuous/log_gaussian.py::LogGaussianFisherView._model_fisher@L62"
       ],
       "stmts": 12

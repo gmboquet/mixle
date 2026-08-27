@@ -74,3 +74,47 @@ def scored_observation(value: Any, *, label: str, allow_infinite: bool = False) 
     if not allow_infinite and math.isinf(result):
         raise UnscorableObservation(f"{label} rejects infinite observations.")
     return result
+
+
+def consistent_anchored_triple(suff_stat: Any, sum_x: float, count: float) -> tuple[float, float, float] | None:
+    """Return the ``(anchor, a_sum, a_sum2)`` payload of ``suff_stat`` when it is usable, else ``None``.
+
+    Shared by every scalar family whose shift-anchored moment track is a single first/second-moment
+    pair riding on the raw ``(sum, sum2, count)`` sufficient statistic -- currently the Gaussian and
+    Logistic families (the higher-order families, GeneralizedGaussian and GeneralizedExtremeValue,
+    carry more moments and are not this shape). Extracted after the duplicate-body scanner caught
+    the two copies drifting apart risk: this is exactly the sibling-bug class D-0200/D-0202 spent
+    three release waves closing, and a shared implementation means the next family that needs this
+    payload gets the fix for free instead of a third copy to keep in sync.
+
+    ``None`` falls back to the raw reduced-moment M-step, so a payload is only trusted when it is
+    finite and agrees with the raw first moment it claims to describe -- a hand-built SuffStat whose
+    payload contradicts its tuple must not silently change the estimate the tuple alone would have
+    produced.
+    """
+    anchored = getattr(suff_stat, "anchored", None)
+    if anchored is None or count <= 0.0:
+        return None
+    anchor, a_sum, a_sum2 = anchored
+    if not (np.isfinite(anchor) and np.isfinite(a_sum) and np.isfinite(a_sum2)) or a_sum2 < 0.0:
+        return None
+    implied_sum = a_sum + count * anchor
+    tolerance = 1.0e-6 * max(abs(sum_x), abs(count * anchor), 1.0)
+    if abs(implied_sum - sum_x) > tolerance:
+        return None
+    return float(anchor), float(a_sum), float(a_sum2)
+
+
+def scale_anchored_triple(
+    anchor: float | None, a_sum: float, a_sum2: float, c: float
+) -> tuple[float | None, float, float]:
+    """Scale an ``(anchor, a_sum, a_sum2)`` track by ``c``, the way uniform weight scaling requires.
+
+    Shared by every scalar family's ``scale()`` override for the reason
+    :func:`consistent_anchored_triple` gives. Uniform weight scaling is exactly linear in both
+    anchored moments and leaves the anchor -- a data value, not a statistic -- alone, so the track
+    scales as the raw moments do; an unset anchor (``None``) passes through unchanged.
+    """
+    if anchor is None:
+        return anchor, a_sum, a_sum2
+    return anchor, a_sum * c, a_sum2 * c
