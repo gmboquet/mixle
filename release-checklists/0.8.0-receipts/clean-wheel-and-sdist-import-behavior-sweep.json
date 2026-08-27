@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "gh api \"repos/gmboquet/mixle/commits/483add7c/check-runs?per_page=100\" --jq '.check_runs[]|select(.name==\"clean-wheel install + import sweep\")|\"\\(.status)/\\(.conclusion)\"'  [plus local replication, see note]",
   "date": "2026-08-22",
-  "evidence_digest": "a6cb7fca110ec860440a5751fabc6aeef937488e009e9e201498d9dfd2e6cba8",
+  "evidence_digest": "0fd7e27594dc428422fcf65ccff0dce0516bfda69b928acae2a7c16ad0416a07",
   "gate": "Clean wheel and sdist import/behavior sweep",
   "note": "Hosted job is genuine and green on the exact tip. I also replicated its steps locally end-to-end against the artifacts I built from `git archive 483add7c`: two fresh venvs (one wheel, one sdist), `pip check` -> 'No broken requirements found.' on both, `scripts/import_sweep.py` -> 'swept 809 public modules ... from site-packages' on both, then invariant_catalog + serialization_audit_contracts + serialization + smoke run from /private/tmp (outside the source tree, with a site-packages assertion) -> '34 passed, 1 skipped, 39 subtests passed' on both, then `verify_installed_schema_manifest.py --profile base` OK on both. Drift: the checklist says 808 public modules; the tip sweeps 809.",
   "result": "hosted: completed/success (1 job, id 96967302174); local replication: wheel env and sdist env each pip check clean, import_sweep 809 public modules each, behavior batch 34 passed / 1 skipped / 39 subtests each"

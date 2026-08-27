@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/readme_claims_test.py mixle/tests/readme_claims_hygiene_test.py mixle/tests/public_claim_inventory_test.py mixle/tests/release_claims_hygiene_test.py mixle/tests/readme_quickstart_runs_test.py mixle/tests/docs_version_aware_test.py -p no:randomly -q -m \"\" -n 0",
   "date": "2026-08-22",
-  "evidence_digest": "a6cb7fca110ec860440a5751fabc6aeef937488e009e9e201498d9dfd2e6cba8",
+  "evidence_digest": "0fd7e27594dc428422fcf65ccff0dce0516bfda69b928acae2a7c16ad0416a07",
   "gate": "README, quickstart, non-claims, versioned docs, claim ledger",
   "note": "The checklist text for this gate is STALE and understates it: it says '**Partly failing**' because a concurrent edit to examples/engine_benchmark_example.py introduced two unregistered claims and broke the claim gate plus two tests. At 483add7c that is no longer reproducible -- the claim gate exits 0 and all 36 claim/README/quickstart/versioned-docs tests pass. Surface count measured 853, not the recorded 861 (surface set drifted; claim count is unchanged at 11). Worktree has 2 unrelated uncommitted files (release-checklists/0.8.0-external-use-case-template.md, scripts/verify_release_checklist.py); neither is examples/engine_benchmark_example.py, so this is the committed state. Recommend downgrading the 'Partly failing' language on this row.",
   "result": "36 passed in 2.93s; scripts/check_public_claims.py exit 0, 'validated 11 claims across 853 public surfaces'"
