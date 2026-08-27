@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "find mixle -name '*.py' -not -path '*/tests/*' | xargs wc -l | sort -rn | head -9 && git rev-list --count --since=2026-07-01 HEAD -- <each file>",
   "date": "2026-08-22",
-  "evidence_digest": "59e53b79d10fa169708a6251bf32931e42f54300070f61a2dd3e3785f120c326",
+  "evidence_digest": "2ae020da35337142c475554b6ba916ef3af3c9fad60296458907bfe8f4bde2db",
   "gate": "Large stable modules audited without blind refactoring",
   "note": "HONEST LIMIT, and the row's own text already says it: this is a preparation-time narrative and no machine gate re-checks it (grep confirms 0 references to module size anywhere in scripts/ or manifests/). The commit counts evidence incremental change rather than wholesale rewriting -- the half of the claim that is measurable. They evidence nothing about the quality of the audit itself. Closed on that basis and not on more.",
   "result": "the 8 largest shipped modules (2,632-5,270 lines: hidden_markov 5270, temporal_graph_grammar 4424, ppl/inference 4050, structured_hmm 3320, ppl/core 3215, tree_hidden_markov_model 2954, markov_chain 2680, automatic/profiling 2632) took 13-39 targeted commits each since 2026-07-01, and 810 non-test modules exist in total"

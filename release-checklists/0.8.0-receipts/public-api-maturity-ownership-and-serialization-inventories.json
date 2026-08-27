@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python -m pytest mixle/tests/{public_api_manifest,maturity_manifest,maturity_registry,schema_manifest,stable_signature_manifest,drift,api_consistency,duplicate_body_scan,signature_docstring_sync,module_ownership}_test.py -p no:randomly -p no:cacheprovider -q -m \"\" -n 0",
   "date": "2026-08-22",
-  "evidence_digest": "59e53b79d10fa169708a6251bf32931e42f54300070f61a2dd3e3785f120c326",
+  "evidence_digest": "2ae020da35337142c475554b6ba916ef3af3c9fad60296458907bfe8f4bde2db",
   "gate": "Public API, maturity, ownership, and serialization inventories",
   "note": "Local run against the worktree at 483add7c. Checklist recorded 88 passed / 9 subtests for the same set; I added module_ownership_test.py (the ownership inventory this row names) which accounts for the 93. All four inventories the row names are versioned JSON under manifests/ with an 'artifact' identifier key. Two files are uncommitted-modified in this worktree (release-checklists/0.8.0-external-use-case-template.md, scripts/verify_release_checklist.py); neither is in the public surface nor read by these tests, so they do not contaminate this result.",
   "result": "93 passed, 9 subtests passed in 14.38s, no manifest drift against the current tree; all 4 canonical JSON files present under manifests/ (api_manifest.json 112226 B, maturity_manifest.json 5904 B, module_ownership.json 5388 B, serialization_schema_manifest.json 255048 B), each carrying an 'artifact' schema key"
