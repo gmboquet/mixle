@@ -1015,7 +1015,14 @@ def _anchored_pooled_variance(
     # genuine spread and two equivalent fits disagree (same clamp, same rationale, as the raw
     # form in _gaussian_contracts.pooled_scalar_variance).
     noise_scale = max(abs(a_sum2), abs(2.0 * delta * a_sum), count * delta * delta, 1.0e-300)
-    if observed_scatter < 1.0e-12 * noise_scale:
+    # Two distinct noise sources. Cross-term cancellation is bounded by 1e-12 of the largest term.
+    # But on constant data the ONLY nonzero term can be count*delta^2 with delta = mean - anchor a
+    # single ulp of recomputing the mean -- platform-dependent (observed: exactly 0 under
+    # Accelerate, 1 ulp under OpenBLAS), and equal to noise_scale itself, so the relative test
+    # cannot see it. A spread below the mean's own rounding granularity is not data: no float64
+    # sample at this magnitude can genuinely carry sd < ~4 eps |mean|.
+    mean_ulp = 8.8817841970012523e-16 * max(abs(mean), abs(anchor))  # 4 * eps
+    if observed_scatter < max(1.0e-12 * noise_scale, count * mean_ulp * mean_ulp):
         observed_scatter = 0.0
     observed_scatter = max(observed_scatter, 0.0)
     if pseudo_count not in (None, 0.0) and prior_variance is not None:

@@ -379,6 +379,15 @@ def mixture_barycenter_with_receipt(
         b_eq=marginal_mass,
         bounds=(0.0, None),
         method="highs",
+        # The conservation check below demands mass_tolerance (default 1e-9), but HiGHS's DEFAULT
+        # primal feasibility tolerance is 1e-7 -- the guard was stricter than the solve was asked
+        # to be, and whether it passed depended on the LP instance (a solution at 1.27e-8 marginal
+        # error, well inside the solver's own contract, was refused on one platform). Ask the
+        # solver for a tolerance a decade tighter than the guard, floored at HiGHS's 1e-10 minimum.
+        options={
+            "primal_feasibility_tolerance": max(1.0e-10, mass_tolerance / 10.0),
+            "dual_feasibility_tolerance": max(1.0e-10, mass_tolerance / 10.0),
+        },
     )
     if not solution.success or solution.x is None or not np.all(np.isfinite(solution.x)):
         raise RuntimeError(f"multi-marginal barycenter LP failed: {solution.message}")
