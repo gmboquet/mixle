@@ -1201,7 +1201,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
         Density for a sequence of length N is given by recursively evaluating the conditional density,
 
-            p_mat(x_mat(0),x_mat(1),....,x_mat(t)) = p_mat(x_mat(t)|x_mat(0),...,x_mat(t-1)) = p_mat(x_mat(t)|Z(t))*p_mat(Z(t)|Z(t-1))*p_mat(Z(t-1)|x_mat(0),....,x_mat(t-1))
+            ``p_mat(x_mat(0),x_mat(1),....,x_mat(t)) = p_mat(x_mat(t) given x_mat(0),...,x_mat(t-1)) = p_mat(x_mat(t) given Z(t)) * p_mat(Z(t) given Z(t-1)) * p_mat(Z(t-1) given x_mat(0),....,x_mat(t-1))``
 
         for t = 1,2,...,N-1. p_mat(Z(0)) is given by 'w', p_mat(x_mat(t)|Z(t)) is given by emission distribution 'topics' for
         t = 0,1,...,N-1.
@@ -1385,8 +1385,17 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
             max_len = len(idx_bands)
             num_seq = idx_mat.shape[0]
-            if num_seq == 0:
-                ll_ret = np.zeros(0, dtype=np.float64)
+            # ``max_len == 0`` is a batch in which EVERY sequence is empty: the encoder lays out one
+            # time band per step, so a zero-emission corpus has no bands at all and the forward pass
+            # below indexed ``idx_bands[0]`` straight into a bare ``IndexError: list index out of
+            # range`` from a file the caller has never opened (campaign4 T4-03). The answer is not
+            # undefined -- it is agreed on everywhere else in this class: ``log_density([])`` returns
+            # the length term alone, and this same vectorized pass already returns 0.0 for an empty
+            # sequence whenever a non-empty one shares the batch. An all-empty corpus is a designed
+            # no-evidence state here (``seq_encode`` keeps encoding it on purpose, and
+            # represent_learned_segment's contract tests pin that), so it must score, not raise.
+            if num_seq == 0 or max_len == 0:
+                ll_ret = np.zeros(num_seq, dtype=np.float64)
                 if self.len_dist is not None:
                     ll_ret += self.len_dist.seq_log_density(len_enc)
                 return ll_ret
@@ -3420,7 +3429,20 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
             max_len = len(idx_bands)
             num_seq = idx_mat.shape[0]
-            if num_seq == 0:
+            # The scoring counterpart of the guard in HiddenMarkovModelDistribution.seq_log_density
+            # (campaign4 T4-03): with every sequence empty the encoder emits no time bands, and the
+            # alpha pass below indexed ``idx_bands[0]``. Such a batch carries no emissions to
+            # attribute, no transition to count and no initial state to credit -- only its lengths --
+            # so the E-step contribution is exactly the length statistic, and the observed evidence
+            # it adds to the tracked objective is the length term alone (0.0 with no length model),
+            # matching what seq_log_density returns for the same batch.
+            if num_seq == 0 or max_len == 0:
+                if self._track_ll:
+                    empty_ll = np.zeros(num_seq, dtype=np.float64)
+                    empty_len_term = _length_term(estimate, len_enc, num_seq)
+                    if empty_len_term is not None:
+                        empty_ll = empty_ll + empty_len_term
+                    self._seq_ll += float(np.dot(weights, empty_ll))
                 if self.len_accumulator is not None:
                     self.len_accumulator.seq_update(len_enc, weights, estimate.len_dist)
                 return

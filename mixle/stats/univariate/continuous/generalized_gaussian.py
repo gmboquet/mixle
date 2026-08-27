@@ -4,7 +4,7 @@ A symmetric location-scale family with a tunable tail/peakedness shape ``beta`` 
 Laplace (``beta = 1``), Gaussian (``beta = 2``), and uniform (``beta -> inf``) laws. With location
 ``mu``, scale ``alpha > 0`` and shape ``beta > 0``,
 
-    ``f(x; mu, alpha, beta) = beta / (2 alpha Gamma(1/beta)) * exp(-(|x - mu| / alpha)^beta)``.
+    ``f(x; mu, alpha, beta) = beta / (2 alpha Gamma(1/beta)) * exp(-(abs(x - mu) / alpha)^beta)``.
 
 The normalizer is closed form (a Gamma function), so density/CDF/quantile/moments/entropy are all exact;
 it samples exactly via a Gamma draw with a random sign. Parameters are fit by the method of moments:
@@ -14,7 +14,7 @@ it samples exactly via a Gamma draw with a random sign. Parameters are fit by th
 
 The M-step is *shift-equivariant*: fitting ``x + c`` returns ``mu + c`` with an unchanged ``alpha``
 and ``beta``. That does not come for free from raw power sums -- the central fourth moment differenced
-out of ``E[x^4]`` loses about ``4*log2(|mean|/sd)`` bits -- so the accumulator carries a
+out of ``E[x^4]`` loses about ``4*log2(abs(mean)/sd)`` bits -- so the accumulator carries a
 conditioning-gated shift-anchored moment track alongside the raw sums (see
 :class:`GeneralizedGaussianAccumulator`).
 
@@ -43,6 +43,7 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.univariate.continuous._observation_contracts import (
     finite_observations,
     scored_observation,
+    warn_uncorrectable_raw_moments,
 )
 
 
@@ -240,7 +241,7 @@ class GeneralizedGaussianDistribution(SequenceEncodableProbabilityDistribution):
 
     @staticmethod
     def backend_log_density_from_params(x: Any, mu: Any, alpha: Any, beta: Any, engine: Any) -> Any:
-        """Engine-neutral generalized-Gaussian log-density: ``log_norm - (|x-mu|/alpha)**beta``."""
+        """Engine-neutral generalized-Gaussian log-density: ``log_norm - (abs(x-mu)/alpha)**beta``."""
         log_norm = (
             engine.log(beta) - engine.log(engine.asarray(2.0) * alpha) - engine.gammaln(engine.asarray(1.0) / beta)
         )
@@ -355,13 +356,13 @@ class GeneralizedGaussianAccumulator(SequenceEncodableStatisticAccumulator):
     Alongside the raw sums the accumulator keeps a CONDITIONING-GATED shift-anchored track,
     ``sum_i w_i (x_i - anchor)^k`` for ``k = 1..4`` about a data anchor. The method of moments needs
     central moments, and differencing them out of raw power sums is the classic cancellation-prone
-    form: the fourth reduced moment loses roughly ``4*log2(|mean|/sd)`` bits, so data with sd ~0.7 at
+    form: the fourth reduced moment loses roughly ``4*log2(abs(mean)/sd)`` bits, so data with sd ~0.7 at
     offset 1.7e9 has *no* correct digits left in ``m4`` and the fit collapses onto the shape bound
     with a scale two orders of magnitude too small -- silently. Anchoring keeps every term of the
     scatter ``O(count * spread^4)``, making the M-step shift-equivariant.
 
     The gate keeps the historical path bit-identical for well-conditioned data: a chunk whose
-    ``|mean|/spread`` ratio the raw form handles to ~1e-9 relative (see :func:`_needs_anchor`)
+    ``abs(mean)/spread`` ratio the raw form handles to ~1e-9 relative (see :func:`_needs_anchor`)
     accumulates exactly the way it always did, with no anchor and no second pass. The raw sums remain
     the exchange format, so the anchored track rides along as a payload on
     :class:`GeneralizedGaussianSuffStat`; a consumer that drops the payload simply gets the
@@ -390,7 +391,7 @@ class GeneralizedGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         already certified as well-conditioned (raw error ~1e-9 relative or better).
 
         It is NOT safe on ill-conditioned raw statistics arriving through ``from_value``/``combine``:
-        power sums whose own ``|mean|/spread`` ratio has already erased the central moments cannot
+        power sums whose own ``abs(mean)/spread`` ratio has already erased the central moments cannot
         have them restored by any change of reference point, and converting them anyway seeds the
         anchored track with an error far larger than the spread it is supposed to measure -- which
         would make the pooled estimate *worse* than the historical raw one, not better. Such content
@@ -771,6 +772,11 @@ class GeneralizedGaussianEstimator(ParameterEstimator):
         # Everything below is the historical algebra with an explicit reference point: at ref = 0 the
         # power sums ARE the raw sums and every formula reduces to exactly what it was before.
         if anchored is None:
+            # Raw-only statistics cannot be corrected here; before this the family was silent, and
+            # sd ~2 data at offset 1.7e9 handed in as the declared raw tuple returned alpha = 1e-6
+            # (the degenerate branch below) for a true 2.7127. The gate reads the second moment,
+            # which is where the loss shows up first; the fourth cannot survive it.
+            warn_uncorrectable_raw_moments(s1, s2, count, family="generalized Gaussian")
             ref, p1, p2, p3, p4 = 0.0, s1, s2, s3, s4
         else:
             ref, p1, p2, p3, p4 = anchored

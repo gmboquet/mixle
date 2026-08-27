@@ -6,6 +6,11 @@ that memorized every distinct value in the table. Nothing said so -- no warning,
 empty -- and the resulting model scored every one of the training rows with the SAME constant, so
 fit-then-score work (anomaly ranking, per-row scoring) came back constant instead of wrong-looking.
 
+(Campaign-four T4-01 changed the leaf that made those scores constant: a scalar node carrying both
+numbers and strings now fits a typed dispatch mixture rather than one categorical over every observed
+value. The sequence reading of a broken table is still the wrong reading and still reachable only on
+request; it is simply no longer degenerate. See ScoringIsNotConstantTest below.)
+
 The two readings are genuinely ambiguous, and variable-length sequence data is a supported input to the
 same call, so the fix is not "refuse ragged input". It is to decide on the arity evidence and say which
 reading was taken: a dominant arity means a table with a malformed row, spread-out arities mean sequence
@@ -206,12 +211,32 @@ class ScoringIsNotConstantTest(unittest.TestCase):
         self.assertGreater(len(scores), 1)
 
     def test_the_sequence_reading_of_a_broken_table_is_reachable_only_on_request(self):
-        # It is still a legal model -- the opt-out returns it -- but it is the degenerate one, so
-        # nobody may land on it without asking: every training row scores identically.
+        """UPDATED for campaign-four T4-01.
+
+        This test used to assert that every training row scored the SAME constant under the sequence
+        reading. That constant was not a property of the reading; it was a property of the leaf the
+        reading used to build. Merging a table's columns into one element type produces a scalar node
+        carrying both floats and strings, and until 0.8.0 such a node became a categorical over every
+        distinct observed value -- 600 measurements each seen once, so every row scored
+        ``log(1/1201)`` twice over. That leaf now fits a typed dispatch mixture (a Gaussian for the
+        measurements, a categorical for the arm labels), so the scores vary.
+
+        What this test exists to protect is the first half of its name, and it is unchanged and
+        checked below: the sequence reading is reachable ONLY on request. The default still refuses
+        the malformed table by name. The reading is still the wrong one -- it is type-blind, pooling
+        the measurement and the label into one element model -- it is simply no longer wrong by
+        memorization.
+        """
         rows = _table(n=600)
         bad = rows[:300] + [(9.9,)] + rows[300:]
+        with self.assertRaises(ContractError) as caught:
+            optimize(bad, out=None)
+        self.assertIn("row 300", caught.exception.path)
+
         model = optimize(bad, get_estimator(bad, ragged="sequence"), out=None)
-        self.assertEqual(len({model.log_density(row) for row in rows}), 1)
+        scores = [model.log_density(row) for row in rows]
+        self.assertTrue(all(np.isfinite(score) for score in scores))
+        self.assertGreater(len({round(score, 9) for score in scores}), 1)
 
 
 if __name__ == "__main__":

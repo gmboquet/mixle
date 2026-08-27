@@ -47,7 +47,9 @@ from mixle.stats.multivariate._vector_contracts import (
 from mixle.stats.multivariate._vector_contracts import (
     finite_scalar,
     marginal_indices,
+    needs_vector_anchor,
     student_t_moments,
+    warn_uncorrectable_vector_moments,
 )
 from mixle.stats.multivariate._vector_contracts import (
     matrix as matrix_parameter,
@@ -65,6 +67,76 @@ from mixle.utils.special import gammaln
 from mixle.utils.vector import cholesky_logdet, owned_backend_parameter
 
 _MIN_RIDGE = 1.0e-12
+
+
+class MultivariateStudentTSuffStat(tuple):
+    """A ``(count, sum_u, sum_ux, sum_uxx)`` statistic that also carries shift-anchored moments.
+
+    Behaves exactly like the plain 4-tuple everywhere it is indexed, unpacked, iterated or validated
+    by :func:`student_t_moments` (it *is* one); ``anchored`` is the extra payload
+    ``(anchor, sum_i w_i u_i (x_i - anchor), sum_i w_i u_i (x_i - anchor)(x_i - anchor)^T)``, the
+    same EM-reweighted moments expressed about a data anchor instead of about the origin. Code that
+    doesn't know about the payload sees an ordinary tuple and the estimate falls back to the
+    historical raw path.
+    """
+
+    def __new__(
+        cls,
+        count: float,
+        sum_u: float,
+        sum_ux: np.ndarray | None,
+        sum_uxx: np.ndarray | None,
+        anchored: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+    ):
+        obj = super().__new__(cls, (count, sum_u, sum_ux, sum_uxx))
+        obj.anchored = anchored
+        return obj
+
+    def __reduce__(self):
+        # A plain tuple subclass with a payload-bearing __new__ does not pickle by default; the
+        # Spark/mp reducers round-trip accumulator values through pickle, so keep the payload.
+        return (_rebuild_student_t_suff_stat, (tuple(self), self.anchored))
+
+
+def _rebuild_student_t_suff_stat(values: tuple, anchored: tuple | None) -> "MultivariateStudentTSuffStat":
+    """Unpickle helper for :class:`MultivariateStudentTSuffStat` (module-level so pickle can import it)."""
+    return MultivariateStudentTSuffStat(values[0], values[1], values[2], values[3], anchored=anchored)
+
+
+def _consistent_anchored_student_t(
+    suff_stat: Any,
+    sum_ux: np.ndarray | None,
+    sum_u: float,
+    dim: int | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Return the anchored payload of ``suff_stat`` when it is usable, else ``None``.
+
+    ``None`` falls back to the raw reduced-moment M-step, so a payload is only trusted when it is
+    shaped right, finite, and agrees with the raw first moment it claims to describe -- a hand-built
+    statistic whose payload contradicts its tuple must not silently change the estimate the tuple
+    alone would have produced.
+    """
+    anchored = getattr(suff_stat, "anchored", None)
+    if anchored is None or sum_ux is None or dim is None or not sum_u > 0.0:
+        return None
+    try:
+        anchor, a_ux, a_uxx = anchored
+        anchor = np.asarray(anchor, dtype=float).reshape(-1)
+        a_ux = np.asarray(a_ux, dtype=float).reshape(-1)
+        a_uxx = np.asarray(a_uxx, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if anchor.shape != (dim,) or a_ux.shape != (dim,) or a_uxx.shape != (dim, dim):
+        return None
+    if not (np.isfinite(anchor).all() and np.isfinite(a_ux).all() and np.isfinite(a_uxx).all()):
+        return None
+    implied = a_ux + sum_u * anchor
+    tolerance = 1.0e-6 * np.maximum.reduce(
+        (np.abs(sum_ux), np.abs(sum_u * anchor), np.ones_like(anchor)),
+    )
+    if np.any(np.abs(implied - sum_ux) > tolerance):
+        return None
+    return anchor, a_ux, 0.5 * (a_uxx + a_uxx.T)
 
 
 def _safe_inverse_and_logdet(shape: np.ndarray) -> tuple[np.ndarray, float]:
@@ -387,6 +459,17 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
 
     The reweighting u_i = (nu + p)/(nu + delta_i) is computed from the previous ``estimate``; with no
     estimate (initialization) every u_i = 1, which seeds the fit with the Gaussian moment statistics.
+
+    Alongside those raw moments the accumulator keeps a CONDITIONING-GATED shift-anchored track.
+    The M-step forms ``sum_uxx - mu sum_ux' - sum_ux mu' + sum_u mu mu'``, which loses
+    ~``2*log2(abs(mean)/sd)`` bits to cancellation, so sd ~2 data at the Unix-epoch offset fitted a
+    scale matrix collapsed to ~1e-6 (and a ValueError at 1e10) with no warning at all. Anchoring at
+    a data value keeps every term of the scatter ``O(sum_u * spread^2)``, which makes the scale
+    matrix shift-invariant. The track is gated: a chunk whose ``abs(mean)/spread`` ratio the raw
+    form handles to ~1e-9 relative error (see :func:`needs_vector_anchor`) accumulates exactly the
+    historical single-pass way -- bit-identical statistics, no second pass. The raw moments remain
+    the exchange format, so the anchored track rides along as a payload on
+    :class:`MultivariateStudentTSuffStat`.
     """
 
     def __init__(self, dof: float, dim: int | None = None, keys: str | None = None) -> None:
@@ -397,6 +480,9 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum_ux = np.zeros(dim) if dim is not None else None
         self.sum_uxx = np.zeros((dim, dim)) if dim is not None else None
         self.keys = keys
+        self._anchor: np.ndarray | None = None
+        self._anchored_ux: np.ndarray | None = None
+        self._anchored_uxx: np.ndarray | None = None
 
     def _ensure_dim(self, p: int) -> None:
         p = vector_dimension(p, label="multivariate Student-t dimension")
@@ -405,6 +491,49 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
         if self.sum_ux is None:
             self.sum_ux = np.zeros(self.dim)
             self.sum_uxx = np.zeros((self.dim, self.dim))
+
+    def _activate_anchor(self, anchor: np.ndarray) -> None:
+        """Start the shift-anchored moment track at ``anchor``.
+
+        Any content already accumulated raw-only is converted about the new anchor. The conversion
+        is the cancellation-prone form, but it is only ever applied to content that accumulated
+        WITHOUT activating the gate -- content the gate certified as well-conditioned -- or to
+        pre-existing raw statistics restored through ``from_value``/``combine``, where the
+        conversion is no less accurate than the raw-only estimate those statistics supported before.
+        """
+        a = np.asarray(anchor, dtype=float).reshape(-1).copy()
+        self._anchor = a
+        self._anchored_ux = np.zeros(self.dim)
+        self._anchored_uxx = np.zeros((self.dim, self.dim))
+        if self.sum_u != 0.0 or np.any(self.sum_ux != 0.0):
+            self._anchored_ux += self.sum_ux - a * self.sum_u
+            scatter = self.sum_uxx - np.outer(a, self.sum_ux) - np.outer(self.sum_ux, a) + self.sum_u * np.outer(a, a)
+            self._anchored_uxx += 0.5 * (scatter + scatter.T)
+
+    def _anchor_rows(self, rows: np.ndarray, wu: np.ndarray, chunk_ux: np.ndarray, chunk_uxx: np.ndarray) -> None:
+        """Fold reweighted rows into the anchored track when they need one. Call BEFORE the raw fold.
+
+        The chunk's own moments are the ones the caller already computed for the raw fold, so the
+        conditioning gate costs one test rather than a second pass over the data. The gate is
+        assessed on the LATENT-WEIGHTED totals, because those are the moments the M-step differences.
+        """
+        if len(rows) == 0:
+            return
+        # An accumulator restored from an EMPTY statistic keeps its dimension but has no moment
+        # arrays yet -- a starved EM component is a normal state, and the next update has to be able
+        # to grow it back. Both the anchored track and the raw fold below need the arrays, and
+        # without this both raised ``TypeError: unsupported operand type(s) for +: 'NoneType'``.
+        self._ensure_dim(rows.shape[1])
+        u_sum = float(np.sum(wu, dtype=np.float64))
+        if self._anchor is None and not needs_vector_anchor(chunk_ux, np.diag(chunk_uxx), u_sum):
+            return
+        if self._anchor is None:
+            self._activate_anchor(rows[0])
+        dx = rows - self._anchor
+        wdx = dx * wu[:, None]
+        self._anchored_ux += wdx.sum(axis=0)
+        scatter = wdx.T @ dx
+        self._anchored_uxx += 0.5 * (scatter + scatter.T)
 
     def _weight_for(self, diff: np.ndarray, estimate: MultivariateStudentTDistribution | None) -> float:
         if estimate is None:
@@ -430,6 +559,10 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
         checked_weight = observation_weight(weight, label="multivariate Student-t observation weight")
         u = self._weight_for(xx - estimate.mu, estimate) if estimate is not None else 1.0
         wu = checked_weight * u
+        # Scalar updates carry no chunk to assess conditioning from, so the anchor activates on the
+        # first observation -- a zero-cost O(1) bookkeeping track on this path. BEFORE the raw fold,
+        # so activation converts only content the gate has already vouched for.
+        self._anchor_rows(xx[None, :], np.asarray([wu], dtype=float), wu * xx, wu * np.outer(xx, xx))
         self.count += checked_weight
         self.sum_u += wu
         self.sum_ux += wu * xx
@@ -465,10 +598,14 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
             mahal = np.einsum("ij,jk,ik->i", diff, estimate.inv_shape, diff)
             u = (estimate.dof + estimate.dim) / (estimate.dof + mahal)
         wu = checked_weights * u
+        chunk_ux = checked.T @ wu
+        chunk_uxx = (checked * wu[:, None]).T @ checked
+        # Conditioning gate BEFORE the raw fold, so an activation converts only pre-chunk content.
+        self._anchor_rows(checked, wu, chunk_ux, chunk_uxx)
         self.count += float(np.sum(checked_weights, dtype=np.float64))
         self.sum_u += float(np.sum(wu, dtype=np.float64))
-        self.sum_ux += checked.T @ wu
-        self.sum_uxx += (checked * wu[:, None]).T @ checked
+        self.sum_ux += chunk_ux
+        self.sum_uxx += chunk_uxx
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize statistics from encoded vectors."""
@@ -479,19 +616,63 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
         count, sum_u, sum_ux, sum_uxx, inferred_dim = student_t_moments(suff_stat, self.dim)
         if sum_ux is not None:
             self._ensure_dim(inferred_dim)
+            self._absorb_anchored(suff_stat, sum_ux, sum_uxx, sum_u)
             self.sum_ux += sum_ux
             self.sum_uxx += sum_uxx
         self.count += count
         self.sum_u += sum_u
         return self
 
+    def _absorb_anchored(
+        self,
+        suff_stat: Any,
+        sum_ux: np.ndarray,
+        sum_uxx: np.ndarray,
+        sum_u: float,
+    ) -> None:
+        """Fold another statistic into the anchored track. Call BEFORE the raw fold.
+
+        An incoming payload merges by Chan's parallel form: re-express its moments about this
+        accumulator's anchor. The anchor gap is between two data values, so every term stays
+        ``O(sum_u * spread^2)`` and no large-offset cancellation is reintroduced. A raw-only
+        statistic joining an already-anchored pool converts about our anchor instead -- see
+        :meth:`_activate_anchor` for why that cancellation-prone conversion is acceptable here.
+        """
+        anchored = _consistent_anchored_student_t(suff_stat, sum_ux, sum_u, self.dim)
+        if anchored is not None:
+            b_anchor, b_ux, b_uxx = anchored
+            if self._anchor is None:
+                self._activate_anchor(b_anchor)
+            gap = b_anchor - self._anchor
+            cross = np.outer(gap, b_ux)
+            self._anchored_ux += b_ux + sum_u * gap
+            self._anchored_uxx += b_uxx + cross + cross.T + sum_u * np.outer(gap, gap)
+        elif self._anchor is not None and (sum_u != 0.0 or np.any(sum_ux != 0.0) or np.any(sum_uxx != 0.0)):
+            a = self._anchor
+            self._anchored_ux += sum_ux - a * sum_u
+            scatter = sum_uxx - np.outer(a, sum_ux) - np.outer(sum_ux, a) + sum_u * np.outer(a, a)
+            self._anchored_uxx += 0.5 * (scatter + scatter.T)
+
     def value(self) -> tuple[float, float, np.ndarray | None, np.ndarray | None]:
-        """Return count, latent-weight total, weighted sum, and weighted second moment."""
-        return (
+        """Return count, latent-weight total, weighted sum, and weighted second moment.
+
+        A plain 4-tuple for every consumer that treats it as one -- ``student_t_moments`` included;
+        once the shift-anchored track is live it is a :class:`MultivariateStudentTSuffStat` that
+        additionally carries those moments in its ``anchored`` attribute, so :meth:`combine` can
+        fold them in and :meth:`MultivariateStudentTEstimator.estimate` can form a shift-invariant
+        scale matrix.
+        """
+        raw = (
             self.count,
             self.sum_u,
             None if self.sum_ux is None else self.sum_ux.copy(),
             None if self.sum_uxx is None else self.sum_uxx.copy(),
+        )
+        if self._anchor is None:
+            return raw
+        return MultivariateStudentTSuffStat(
+            *raw,
+            anchored=(self._anchor.copy(), self._anchored_ux.copy(), self._anchored_uxx.copy()),
         )
 
     def from_value(
@@ -502,6 +683,38 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
             x,
             self.dim,
         )
+        anchored = _consistent_anchored_student_t(x, self.sum_ux, self.sum_u, self.dim)
+        if anchored is None:
+            # Raw-only statistics replace the state: the anchored track restarts unactivated, and a
+            # later activation (first update / anchored merge) converts this content then.
+            self._anchor = None
+            self._anchored_ux = None
+            self._anchored_uxx = None
+        else:
+            self._anchor, self._anchored_ux, self._anchored_uxx = (
+                anchored[0].copy(),
+                anchored[1].copy(),
+                anchored[2].copy(),
+            )
+        return self
+
+    def scale(self, c: float) -> "MultivariateStudentTAccumulator":
+        """Scale the accumulated statistics in place by ``c``, anchored track included.
+
+        The structural default round-trips through ``value()``/``from_value()``, and
+        ``scale_suff_stat`` rebuilds the payload as a PLAIN tuple -- which drops the anchored track
+        and undoes the repair. Scaling every weight by ``c`` scales both anchored moments by ``c``
+        and leaves the anchor (a data value, not a statistic) alone.
+        """
+        factor = float(c)
+        self.count *= factor
+        self.sum_u *= factor
+        if self.sum_ux is not None:
+            self.sum_ux = self.sum_ux * factor
+            self.sum_uxx = self.sum_uxx * factor
+        if self._anchor is not None:
+            self._anchored_ux = self._anchored_ux * factor
+            self._anchored_uxx = self._anchored_uxx * factor
         return self
 
     def acc_to_encoder(self) -> "MultivariateStudentTDataEncoder":
@@ -523,7 +736,27 @@ class MultivariateStudentTAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class MultivariateStudentTEstimator(ParameterEstimator):
-    """Fixed-dof EM estimator for the multivariate Student's t location and scale matrix."""
+    """Fixed-dof EM estimator for the multivariate Student's t location and scale matrix.
+
+    The scale matrix is formed from shift-anchored statistics whenever the accumulated sufficient
+    statistics carry that payload (see :class:`MultivariateStudentTAccumulator`), which makes the
+    fit SHIFT-EQUIVARIANT: estimating on ``x + c`` returns ``loc + c`` with the scale matrix
+    unchanged, for any constant ``c`` the data can carry -- epoch seconds (~1.7e9) and 2**31
+    included. With a plain raw tuple -- statistics the conditioning gate never needed to anchor, or
+    ones that arrived already reduced from an engine kernel or an older serialization -- the
+    historical raw path is used bit-identically, and ``estimate`` warns rather than returning a
+    scale matrix it cannot stand behind.
+
+    Residual limit, and it is representational rather than algorithmic. One M-step is
+    shift-equivariant to ~1e-15, but a full EM run is not exactly so: the latent reweighting
+    ``u_i = (nu + p)/(nu + delta_i)`` is a function of ``x_i - mu``, and ``mu`` is a float64 at the
+    data's own magnitude, so it can only be placed on that grid -- 1.2e-4 apart at offset 1e12.
+    Snapping the un-shifted fit's ``mu`` onto exactly that grid reproduces the shifted fit to
+    3e-14, which is what identifies the mechanism. The effect on the fitted scale matrix is bounded
+    by roughly ``ulp(abs(mu)) / spread`` per iteration: 4e-8 at epoch seconds, 1e-7 at 2**31, 7e-5
+    at 1e12. Every consumer of a fitted location faces the same granularity, so there is no more
+    precise answer to return; subtract a constant origin before fitting if a tighter one is needed.
+    """
 
     def __init__(
         self,
@@ -573,20 +806,35 @@ class MultivariateStudentTEstimator(ParameterEstimator):
         if self.dim is not None and inferred_dim != self.dim:
             raise ValueError("Student-t sufficient statistic dimension does not match estimator")
 
-        mu = sum_ux / sum_u
-        # Sigma = sum_i w_i u_i (x_i - mu)(x_i - mu)' / sum_i w_i
-        scatter = sum_uxx - np.outer(mu, sum_ux) - np.outer(sum_ux, mu) + sum_u * np.outer(mu, mu)
-        shape = scatter / count
-        shape = 0.5 * (shape + shape.T)
-        scale = (
-            max(
+        # Sigma = sum_i w_i u_i (x_i - mu)(x_i - mu)' / sum_i w_i.
+        #
+        # ``scale`` below is the magnitude of the terms this M-step actually differences, and the
+        # PSD guard's tolerance is relative to it. On the anchored path those terms are the
+        # anchor-relative ones, so the tolerance tracks the cancellation that is really possible
+        # rather than being inflated by the data's distance from the origin -- at offset 1.7e9 the
+        # raw-path tolerance was ~1e24 and waved through a scale matrix that had lost every digit.
+        anchored = _consistent_anchored_student_t(suff_stat, sum_ux, sum_u, inferred_dim)
+        if anchored is not None:
+            anchor, a_ux, a_uxx = anchored
+            offset = a_ux / sum_u
+            mu = anchor + offset
+            scatter = a_uxx - np.outer(a_ux, offset)
+            terms = (
+                float(np.linalg.norm(a_uxx, ord=2)),
+                float(np.linalg.norm(np.outer(a_ux, offset), ord=2)),
+            )
+        else:
+            warn_uncorrectable_vector_moments(sum_ux, np.diag(sum_uxx), sum_u, family="multivariate Student-t")
+            mu = sum_ux / sum_u
+            scatter = sum_uxx - np.outer(mu, sum_ux) - np.outer(sum_ux, mu) + sum_u * np.outer(mu, mu)
+            terms = (
                 float(np.linalg.norm(sum_uxx, ord=2)),
                 float(np.linalg.norm(np.outer(mu, sum_ux), ord=2)),
                 float(np.linalg.norm(sum_u * np.outer(mu, mu), ord=2)),
-                1.0,
             )
-            / count
-        )
+        shape = scatter / count
+        shape = 0.5 * (shape + shape.T)
+        scale = max(*terms, 1.0) / count
         minimum_eigenvalue = float(np.linalg.eigvalsh(shape)[0])
         if minimum_eigenvalue < -1.0e-6 * scale:
             raise ValueError("Student-t sufficient statistics imply a non-positive-semidefinite scale")

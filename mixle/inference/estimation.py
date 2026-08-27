@@ -419,10 +419,17 @@ def _data_records_for_encoding(data: Any, fields: Any, estimator: Any, model: An
         # OptionalDataEncoder identifies missing rows by sentinel identity -- _same_sentinel(pd.NA,
         # None) is False -- so a profiler that said "missing" and an encoder still seeing pd.NA
         # would disagree about the same row (campaign three, T2-1).
-        from mixle.data.sources.pandas_source import normalize_pandas_missing
+        from mixle.data.sources.pandas_source import column_records, normalize_pandas_missing
 
         if type(data).__name__ == "Series" and type(data).__module__.startswith("pandas"):
-            return [normalize_pandas_missing(value) for value in data]
+            # column_records re-derives the column's OWN missing-value convention (NaN for a
+            # numeric dtype, None otherwise) rather than normalizing pandas' sentinels value by
+            # value -- the same fix normalize_input's Series branch applies on the profiling side,
+            # so a model whose sentinel came from profiling meets records encoded the same way
+            # (campaign four, T2-02, the Series half; the two sides disagreeing raised
+            # ContractError on the whole batch, which is why this and the profiling change had to
+            # land together).
+            return column_records(data)
         if hasattr(data, "__iter__") and not isinstance(data, (str, bytes)):
             try:
                 return [normalize_pandas_missing(value) for value in data]
@@ -1259,6 +1266,34 @@ def optimize(
     ``model.numerical_repairs()``. A parameter prior switches the objective to penalized-LL / MAP, and a
     variational model to the ELBO -- see ``objective``.)
 
+    **Missing values.** With ``estimator=None`` (the default) auto-inference finds the gaps and wraps
+    the affected leaf for you: data carrying ``None``, ``NaN``, ``pd.NA`` or ``pd.NaT`` fits an
+    ``OptionalDistribution`` whose missingness rate is estimated alongside the base family. When you
+    build the estimator yourself, that wrapper is yours to add, and it must name the sentinel your
+    data actually carries -- the wrapper matches its ``missing_value`` by identity, so the ``None``
+    default does not accept ``NaN``::
+
+        optimize(rows, CompositeEstimator([OptionalEstimator(GaussianEstimator(),
+                                                             missing_value=float("nan")),
+                                           CategoricalEstimator()]))
+
+    ``NaN`` is the spelling float arrays and numeric pandas columns use, so
+    ``missing_value=float('nan')`` is the one that works for tabular numeric data;
+    ``missing_value=None`` (the default) is for records that carry ``None``.
+    :func:`mixle.stats.marginalized` is the same wrapper with no fitted rate, but it takes a
+    DISTRIBUTION rather than an estimator and its default sentinel is not ``NaN``, so ``NaN`` data
+    must spell out ``marginalized(dist, missing_value=float('nan'))``.
+
+    **DataFrames.** ``optimize`` and ``fit`` take a pandas DataFrame or Series directly; the
+    row-level stats API does not. ``mixle.stats.seq_encode`` consumes RECORDS and refuses a frame
+    ("expected a sequence of 2-tuples, got DataFrame") -- converting is the caller's job, in one
+    call: ``mixle.data.dataframe_records(df)`` for the records, or
+    ``mixle.data.seq_encode_dataframe(df, model=...)``, which is the frame-shaped counterpart of
+    ``seq_encode``. A frame's gaps are canonicalized on the way in by what each column HOLDS --
+    ``NaN`` for a column of numbers, ``None`` for anything else -- so ``df`` and
+    ``df.convert_dtypes()`` fit models carrying the same ``missing_value``, and each model scores
+    the other frame.
+
     Args:
         data (Optional[List[T]]): List of data type T containing observed data. Must be compatible with data type of
             estimator.
@@ -1275,7 +1310,7 @@ def optimize(
             demand the sequence reading outright.
         max_its (int): Maximum number of EM iterations to be performed. Default value is 10 iterations.
         delta (Optional[float]): Stopping criteria for EM algorithm used if max_its is not set: Iterate until
-            ``|old_loglikelihood - new_loglikelihood| < delta`` or iterations == max_its.
+            ``abs(old_loglikelihood - new_loglikelihood) < delta`` or iterations == max_its.
         init_estimator (Optional[ParameterEstimator]): ParameterEstimator to used to initialize EM algorithm parameters.
             If None, estimator is used. Must be consistent with estimator.
         init_p (float): Value in (0.0,1.0] for randomizing the proportion of data points used in initialization.
@@ -1990,7 +2025,7 @@ def best_of(
         trials (int): Integer number >= 1, of randomized initial conditions to perform EM algorithm for.
         max_its (int): Integer value >=1, sets the maximum number of iterations of EM to be performed as stopping criteria.
         init_p (float): Value in (0.0,1.0] for randomizing the proportion of data points used in initialization.
-        delta (float): Stopping criteria for EM when ``|old-log-likelihood - new-log-likelihood| < delta``.
+        delta (float): Stopping criteria for EM when ``abs(old-log-likelihood - new-log-likelihood) < delta``.
         rng (RandomState): RandomState for setting seed. An integer is coerced to ``RandomState(rng)``;
             ``None`` (default) resolves to the fixed default seed. Mutually exclusive with ``seed``.
         init_estimator (Optional[ParameterEstimator]): Optional ParameterEstimator used for fitting.

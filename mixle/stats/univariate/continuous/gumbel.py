@@ -30,10 +30,43 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.stats.univariate.continuous._observation_contracts import scored_observation
+from mixle.stats.univariate.continuous._observation_contracts import (
+    AnchoredMomentTrack,
+    anchored_pooled_variance,
+    consistent_anchored_triple,
+    scored_observation,
+    warn_uncorrectable_raw_moments,
+)
 
 _EULER_GAMMA = 0.5772156649015328606
 _PI_SQRT6 = math.pi / math.sqrt(6.0)
+
+
+class GumbelSuffStat(tuple):
+    """A ``(sum, sum2, count)`` sufficient statistic that also carries a shift-anchored side payload.
+
+    Behaves exactly like the plain 3-tuple everywhere it is indexed, unpacked, or iterated (it *is*
+    one); ``anchored`` is the shift-anchored moment payload
+    ``(anchor, sum_i w_i*(x_i - anchor), sum_i w_i*(x_i - anchor)^2)`` that :class:`GumbelAccumulator`
+    maintains alongside the raw moments so the M-step's variance survives large-offset data. Code
+    that doesn't know about the payload (generic ``scale_suff_stat``, engine kernels, ...) sees an
+    ordinary tuple and the estimate falls back to the historical raw path.
+    """
+
+    def __new__(cls, sum_: float, sum2_: float, count_: float, anchored: tuple[float, float, float] | None = None):
+        obj = super().__new__(cls, (sum_, sum2_, count_))
+        obj.anchored = anchored
+        return obj
+
+    def __reduce__(self):
+        # A plain tuple subclass with a payload-bearing __new__ does not pickle by default; the
+        # Spark/mp reducers round-trip accumulator values through pickle, so keep the payload.
+        return (_rebuild_gumbel_suff_stat, (tuple(self), self.anchored))
+
+
+def _rebuild_gumbel_suff_stat(values: tuple, anchored: tuple | None) -> "GumbelSuffStat":
+    """Unpickle helper for :class:`GumbelSuffStat` (module-level so pickle can import it)."""
+    return GumbelSuffStat(values[0], values[1], values[2], anchored=anchored)
 
 
 class GumbelDistribution(SequenceEncodableProbabilityDistribution):
@@ -232,18 +265,28 @@ class GumbelSampler(DistributionSampler):
         return self.rng.gumbel(self.dist.loc, self.dist.scale, size=size)
 
 
-class GumbelAccumulator(SequenceEncodableStatisticAccumulator):
-    """Accumulate weighted first and second moments for Gumbel estimation."""
+class GumbelAccumulator(AnchoredMomentTrack, SequenceEncodableStatisticAccumulator):
+    """Accumulate weighted first and second moments for Gumbel estimation.
+
+    Alongside the raw ``(sum, sum2, count)`` the accumulator keeps the conditioning-gated
+    shift-anchored moment track of :class:`AnchoredMomentTrack`: the naive ``E[x^2]-E[x]^2`` form
+    the moment inversion needs loses ~``2*log2(abs(mean)/sd)`` bits to cancellation, so Gumbel data
+    with sd ~2 fitted a scale 8.8x too large at offset 1.7e9 and collapsed onto ``min_scale`` at
+    2**31 -- silently, with an empty ``numerical_repairs()``. Well-conditioned data never activates
+    the track and accumulates bit-identically to the historical single-pass path.
+    """
 
     def __init__(self, keys: str | None = None) -> None:
         self.sum = 0.0
         self.sum2 = 0.0
         self.count = 0.0
         self.keys = keys
+        self._init_anchor()
 
     def update(self, x: float, weight: float, estimate: GumbelDistribution | None) -> None:
         """Accumulate weighted first and second moments for one observation."""
         xx = float(x)
+        self._anchor_scalar(xx, weight)
         self.sum += xx * weight
         self.sum2 += xx * xx * weight
         self.count += weight
@@ -254,9 +297,7 @@ class GumbelAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: GumbelDistribution | None) -> None:
         """Accumulate weighted first and second moments from encoded data."""
-        self.sum += np.dot(x, weights)
-        self.sum2 += np.dot(x * x, weights)
-        self.count += np.sum(weights, dtype=np.float64)
+        self._anchor_fold_chunk(x, weights)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize statistics from encoded observations."""
@@ -264,18 +305,37 @@ class GumbelAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "GumbelAccumulator":
         """Merge another Gumbel sufficient-statistic tuple."""
+        self._anchor_absorb(suff_stat)
         self.sum += suff_stat[0]
         self.sum2 += suff_stat[1]
         self.count += suff_stat[2]
         return self
 
     def value(self) -> tuple[float, float, float]:
-        """Return accumulated sum, second moment sum, and count."""
-        return self.sum, self.sum2, self.count
+        """Return accumulated sum, second moment sum, and count.
+
+        A plain 3-tuple for every consumer that treats it as one; once the shift-anchored moment
+        track is live it is a :class:`GumbelSuffStat` additionally carrying the anchored moments in
+        its ``.anchored`` attribute, so :meth:`combine` can fold them in and
+        :meth:`GumbelEstimator.estimate` can invert a shift-invariant variance.
+        """
+        anchored = self._anchor_payload()
+        if anchored is None:
+            return self.sum, self.sum2, self.count
+        return GumbelSuffStat(self.sum, self.sum2, self.count, anchored=anchored)
 
     def from_value(self, x: tuple[float, float, float]) -> "GumbelAccumulator":
         """Replace accumulator contents from a sufficient-statistic tuple."""
-        self.sum, self.sum2, self.count = x
+        self.sum, self.sum2, self.count = x[0], x[1], x[2]
+        self._anchor_restore(x)
+        return self
+
+    def scale(self, c: float) -> "GumbelAccumulator":
+        """Scale the accumulated statistics in place by ``c``, anchored track included."""
+        self._anchor_scale(c)
+        self.sum *= c
+        self.sum2 *= c
+        self.count *= c
         return self
 
     def acc_to_encoder(self) -> "GumbelDataEncoder":
@@ -299,6 +359,14 @@ class GumbelEstimator(ParameterEstimator):
 
     Inverts the Gumbel moments: ``beta = sqrt(6 * var) / pi`` and ``loc = mean - beta * gamma`` where
     gamma is the Euler-Mascheroni constant.
+
+    The variance moment is formed from shift-anchored statistics whenever the accumulated
+    sufficient statistics carry that payload (see :class:`GumbelAccumulator`), which makes the fit
+    SHIFT-EQUIVARIANT: estimating on ``x + c`` returns ``loc + c`` with ``scale`` unchanged, for any
+    constant ``c`` the data can carry -- epoch seconds (~1.7e9) and 2**31 included. With a plain raw
+    tuple -- statistics the conditioning gate never needed to anchor, or ones that arrived already
+    reduced from an engine kernel or an older serialization -- the historical raw path is used
+    bit-identically, and ``estimate`` warns rather than returning a scale it cannot stand behind.
     """
 
     def __init__(
@@ -321,23 +389,45 @@ class GumbelEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> GumbelDistribution:
         """Estimate location and scale from weighted moments."""
-        sum_x, sum_x2, count = suff_stat
-        if self.pseudo_count is not None and self.suff_stat is not None:
+        sum_x, sum_x2, count = float(suff_stat[0]), float(suff_stat[1]), float(suff_stat[2])
+        # The anchored payload (when present) describes the RAW data only -- captured before any
+        # prior blend below -- so it is read off the untouched (sum_x, count) pair.
+        anchored = consistent_anchored_triple(suff_stat, sum_x, count)
+        raw_count = count
+
+        prior_mean: float | None = None
+        prior_variance: float | None = None
+        pc = self.pseudo_count
+        if pc is not None and self.suff_stat is not None:
             loc0, scale0 = self.suff_stat
-            mean0 = loc0 + scale0 * _EULER_GAMMA
-            var0 = (math.pi * math.pi / 6.0) * scale0 * scale0
-            sum_x += self.pseudo_count * mean0
-            sum_x2 += self.pseudo_count * (var0 + mean0 * mean0)
-            count += self.pseudo_count
+            prior_mean = loc0 + scale0 * _EULER_GAMMA
+            prior_variance = (math.pi * math.pi / 6.0) * scale0 * scale0
+            sum_x += pc * prior_mean
+            sum_x2 += pc * (prior_variance + prior_mean * prior_mean)
+            count += pc
 
         if count <= 0.0:
             return GumbelDistribution(name=self.name, keys=self.keys)
 
         mean = sum_x / count
-        var = max(sum_x2 / count - mean * mean, 0.0)
-        scale = max(math.sqrt(var) / _PI_SQRT6, self.min_scale)
+        notes: tuple[str, ...] = ()
+        if anchored is not None:
+            # Only the variance loses to cancellation at large magnitude; the mean is a plain
+            # same-sign sum and is computed from the raw (possibly prior-blended) moments above,
+            # unchanged. The prior is folded into the variance separately, never through the
+            # anchored sums (which only ever describe the observed data).
+            var, notes = anchored_pooled_variance(
+                anchored[0], anchored[1], anchored[2], raw_count, mean, pc, prior_mean, prior_variance
+            )
+        else:
+            warn_uncorrectable_raw_moments(sum_x, sum_x2, count, family="Gumbel")
+            var = max(sum_x2 / count - mean * mean, 0.0)
+        scale = max(math.sqrt(max(var, 0.0)) / _PI_SQRT6, self.min_scale)
         loc = mean - scale * _EULER_GAMMA
-        return GumbelDistribution(loc=loc, scale=scale, name=self.name, keys=self.keys)
+        dist = GumbelDistribution(loc=loc, scale=scale, name=self.name, keys=self.keys)
+        if notes:
+            dist._numerical_repairs = notes
+        return dist
 
 
 class GumbelDataEncoder(DataSequenceEncoder):

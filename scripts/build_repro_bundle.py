@@ -79,10 +79,16 @@ _ENTRIES = (
         "configuration": {"seed": "declared in script", "dataset": "synthetic"},
         "expected": {
             "format": "text",
-            # Repinned for the dcec5e29 campaign fix waves: LogisticEstimator gained a shift-anchored
-            # moment track (this example fits it directly), the same repair the Gaussian family
-            # already carried. New digest measured twice, byte-identical.
-            "stdout_sha256": "c95df4d9049f3bd1922ca30ee5e9cd4dbeafd1b8f03af1714f19fbc2caaf7bf3",
+            # Repinned for the campaign-four shift-sweep wave: StudentTEstimator and
+            # LogGaussianEstimator gained the shift-anchored moment track (this example fits both
+            # directly), the same repair the Gaussian and Logistic families already carried. Two
+            # printed values move in their last two digits -- the Student-t scale
+            # 1.9519185926635496 -> 1.9519185926635638 and the log-Gaussian variance
+            # 0.2512756175947848 -> 0.25127561759478356, each ~6e-15 relative, because ``estimate()``
+            # drives the per-observation ``update`` path, where the anchor activates on the first
+            # observation by design (a scalar update carries no chunk to gate on). New digest
+            # measured three times, byte-identical.
+            "stdout_sha256": "3e54938bf429fccaed6673da4187cb1cde04b695f6dee0e88824288620cb93ef",
             "contains": [
                 "fit : GaussianDistribution(1.5485975768849254, 4.020409881516532",
                 "fit : PoissonDistribution(4.027",

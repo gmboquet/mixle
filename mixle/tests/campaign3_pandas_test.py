@@ -84,7 +84,12 @@ class PandasMissingSentinelTestCase(unittest.TestCase):
     def _pandas():
         return pytest.importorskip("pandas")  # pandas is an optional extra
 
-    def test_records_replace_pandas_na_with_none(self):
+    def test_records_replace_pandas_na_with_the_column_marker(self):
+        # UPDATED for campaign four, T2-02. This test used to assert ``records[1] is None``, i.e.
+        # that pd.NA always becomes None. That rule made the fitted missing_value a function of the
+        # caller's dtype backend (Float64 -> None, float64 -> NaN), and the two models then rejected
+        # each other's frames. pd.NA now becomes the marker the COLUMN's kind determines -- NaN for
+        # a numeric column, which is what the numpy-backed spelling of this same column produces.
         pd = self._pandas()
         from mixle.data import dataframe_records
 
@@ -92,8 +97,12 @@ class PandasMissingSentinelTestCase(unittest.TestCase):
 
         records = dataframe_records(df, fields="x")
 
-        self.assertIsNone(records[1])
+        self.assertTrue(np.isnan(records[1]))
         self.assertEqual([records[0], records[2]], [1.5, 2.5])
+        # The point of the change: the numpy-backed spelling of the same column agrees cell for cell.
+        nan_frame = pd.DataFrame({"x": np.array([1.5, np.nan, 2.5])})
+        self.assertEqual(dataframe_records(nan_frame, fields="x")[0::2], [1.5, 2.5])
+        self.assertTrue(np.isnan(dataframe_records(nan_frame, fields="x")[1]))
 
     def test_records_replace_pandas_nat_with_none(self):
         pd = self._pandas()
@@ -105,7 +114,10 @@ class PandasMissingSentinelTestCase(unittest.TestCase):
 
         self.assertIsNone(records[1])
 
-    def test_dict_and_tuple_rows_replace_pandas_na_with_none(self):
+    def test_dict_and_tuple_rows_replace_pandas_na_with_the_column_marker(self):
+        # UPDATED for campaign four, T2-02: the expected marker is now per column (NaN for the
+        # numeric field, None for the string field) rather than None for both. See
+        # ``test_records_replace_pandas_na_with_the_column_marker`` for why.
         pd = self._pandas()
         from mixle.data import dataframe_records
 
@@ -116,11 +128,15 @@ class PandasMissingSentinelTestCase(unittest.TestCase):
             }
         )
 
-        self.assertEqual(dataframe_records(df, fields=["x", "s"]), [(1.5, "a"), (None, None)])
-        self.assertEqual(
-            dataframe_records(df, fields=["x", "s"], as_dict=True),
-            [{"x": 1.5, "s": "a"}, {"x": None, "s": None}],
-        )
+        tuples = dataframe_records(df, fields=["x", "s"])
+        self.assertEqual(tuples[0], (1.5, "a"))
+        self.assertTrue(np.isnan(tuples[1][0]))
+        self.assertIsNone(tuples[1][1])
+
+        dicts = dataframe_records(df, fields=["x", "s"], as_dict=True)
+        self.assertEqual(dicts[0], {"x": 1.5, "s": "a"})
+        self.assertTrue(np.isnan(dicts[1]["x"]))
+        self.assertIsNone(dicts[1]["s"])
 
     def test_ordinary_records_are_untouched(self):
         pd = self._pandas()
@@ -154,12 +170,18 @@ class PandasMissingSentinelTestCase(unittest.TestCase):
 
     def test_missing_scan_is_skipped_for_columns_that_cannot_carry_a_sentinel(self):
         # The scan gate: a numpy float/int/bool column cannot hold pd.NA, so it is never walked.
-        from mixle.data.sources.pandas_source import _column_may_hold_missing
+        # UPDATED for campaign four, T2-02: the gate now takes the column's gap PLAN as well, since
+        # a numpy numeric column may also need skipping because its only possible gap (NaN) is
+        # already the marker that column canonicalizes to. Renamed with it.
+        from mixle.data.sources.pandas_source import _column_gap_plan, _column_may_hold_gap
 
-        self.assertFalse(_column_may_hold_missing(np.array([1.0, np.nan])))
-        self.assertFalse(_column_may_hold_missing(np.array([1, 2, 3])))
-        self.assertTrue(_column_may_hold_missing(np.array(["a", None], dtype=object)))
-        self.assertTrue(_column_may_hold_missing(object()))  # a duck-typed column fails open
+        def gate(column):
+            return _column_may_hold_gap(column, _column_gap_plan(column))
+
+        self.assertFalse(gate(np.array([1.0, np.nan])))
+        self.assertFalse(gate(np.array([1, 2, 3])))
+        self.assertTrue(gate(np.array(["a", None], dtype=object)))
+        self.assertTrue(gate(object()))  # a duck-typed column fails open
 
     def test_nullable_column_without_missing_values_round_trips(self):
         pd = self._pandas()
@@ -181,8 +203,13 @@ class PandasMissingSentinelTestCase(unittest.TestCase):
         # The defect: <NA> became an eighth category and every unseen number scored -inf.
         self.assertIsInstance(from_na, OptionalDistribution)
         self.assertTrue(np.isfinite(from_na.log_density(37.0)))
-        self.assertTrue(np.isfinite(from_na.log_density(None)))
+        # UPDATED for campaign four, T2-02: this line used to read ``log_density(None)``, because
+        # the nullable spelling used to fit ``missing_value=None`` while the NaN spelling fitted
+        # ``missing_value=nan``. That divergence WAS the defect; a numeric column's marker is now
+        # NaN whichever way pandas spelled the gap, so the two fits are interchangeable.
+        self.assertTrue(np.isfinite(from_na.log_density(float("nan"))))
         self.assertIs(type(from_na.dist), type(from_nan.dist))
+        self.assertEqual(repr(from_na.missing_value), repr(from_nan.missing_value))
         self.assertAlmostEqual(from_na.log_density(37.0), from_nan.log_density(37.0), places=12)
 
     def test_nullable_string_column_stays_categorical(self):
@@ -210,7 +237,10 @@ class PandasMissingSentinelTestCase(unittest.TestCase):
         self.assertIsInstance(model, OptionalDistribution)
         self.assertNotIsInstance(model.dist, IgnoredDistribution)
         self.assertTrue(np.isfinite(model.log_density(4)))
-        self.assertTrue(np.isfinite(model.log_density(None)))
+        # UPDATED for campaign four, T2-02: an Int64 column is a column of NUMBERS, so its gap now
+        # canonicalizes to NaN -- the marker the same column stored as float64 (pandas upcasts an
+        # int column with a gap) has always produced. This line used to read ``log_density(None)``.
+        self.assertTrue(np.isfinite(model.log_density(float("nan"))))
 
     def test_nullable_boolean_column_fits(self):
         pd = self._pandas()

@@ -30,7 +30,13 @@ from mixle.stats.univariate.continuous._gaussian_contracts import (
     scalar_estimator_configuration,
     scalar_gaussian_moments,
 )
-from mixle.stats.univariate.continuous._observation_contracts import scored_observation
+from mixle.stats.univariate.continuous._observation_contracts import (
+    AnchoredMomentTrack,
+    anchored_pooled_variance,
+    consistent_anchored_triple,
+    scored_observation,
+    warn_uncorrectable_raw_moments,
+)
 from mixle.utils.special import digamma
 
 
@@ -457,8 +463,72 @@ class LogGaussianSampler(DistributionSampler):
         return np.exp(self.rng.normal(loc=self.dist.mu, scale=np.sqrt(self.dist.sigma2), size=size))
 
 
-class LogGaussianAccumulator(SequenceEncodableStatisticAccumulator):
-    """Accumulate weighted log-scale moments for log-Gaussian estimation."""
+class LogGaussianSuffStat(tuple):
+    """A ``(log_sum, log_sum2, count, count2)`` statistic that also carries anchored log moments.
+
+    Behaves exactly like the plain 4-tuple everywhere it is indexed, unpacked, iterated or validated
+    by ``scalar_gaussian_moments`` (it *is* one); ``anchored`` is the shift-anchored moment payload
+    ``(anchor, sum_i w_i*(log x_i - anchor), sum_i w_i*(log x_i - anchor)^2)`` that
+    :class:`LogGaussianAccumulator` maintains alongside the raw log moments. Code that doesn't know
+    about the payload sees an ordinary tuple and the estimate falls back to the historical raw path.
+    """
+
+    def __new__(
+        cls,
+        log_sum: float,
+        log_sum2: float,
+        count: float,
+        count2: float,
+        anchored: tuple[float, float, float] | None = None,
+    ):
+        obj = super().__new__(cls, (log_sum, log_sum2, count, count2))
+        obj.anchored = anchored
+        return obj
+
+    def __reduce__(self):
+        # A plain tuple subclass with a payload-bearing __new__ does not pickle by default; the
+        # Spark/mp reducers round-trip accumulator values through pickle, so keep the payload.
+        return (_rebuild_log_gaussian_suff_stat, (tuple(self), self.anchored))
+
+
+def _rebuild_log_gaussian_suff_stat(values: tuple, anchored: tuple | None) -> "LogGaussianSuffStat":
+    """Unpickle helper for :class:`LogGaussianSuffStat` (module-level so pickle can import it)."""
+    return LogGaussianSuffStat(values[0], values[1], values[2], values[3], anchored=anchored)
+
+
+class LogGaussianAccumulator(AnchoredMomentTrack, SequenceEncodableStatisticAccumulator):
+    """Accumulate weighted log-scale moments for log-Gaussian estimation.
+
+    Alongside the raw log moments the accumulator keeps the conditioning-gated shift-anchored track
+    of :class:`AnchoredMomentTrack`. The log transform bounds ``abs(log x)`` at ~709, so this family
+    cannot reach the epoch-offset regime its siblings do -- but it reaches the same defect from the
+    other side, because a large multiplicative scale IS a large additive offset on ``log(x)``:
+    values around 1e6 with a 0.2% spread lost 1.4e-7 of the fitted ``sigma2``, and values around
+    1e20 with a 0.1% spread lost 7.1e-7, silently. Well-conditioned data never activates the track
+    and accumulates bit-identically to the historical single-pass path.
+
+    The mixin names the moments it differences ``sum``/``sum2``; for this family those are the LOG
+    moments, so the two aliases below tie them to ``log_sum``/``log_sum2``. Aliases rather than a
+    rename because ``(log_sum, log_sum2, count, count2)`` is the released attribute spelling.
+    """
+
+    @property
+    def sum(self) -> float:
+        """Alias of ``log_sum`` -- the first moment the anchored track and the M-step difference."""
+        return self.log_sum
+
+    @sum.setter
+    def sum(self, value: float) -> None:
+        self.log_sum = value
+
+    @property
+    def sum2(self) -> float:
+        """Alias of ``log_sum2`` -- the second moment the anchored track and the M-step difference."""
+        return self.log_sum2
+
+    @sum2.setter
+    def sum2(self, value: float) -> None:
+        self.log_sum2 = value
 
     def __init__(self, keys: str | None = None, name: str | None = None) -> None:
         """Create an accumulator for log-Gaussian sufficient statistics.
@@ -481,6 +551,7 @@ class LogGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.count2 = 0.0
         self.keys = keys
         self.name = name
+        self._init_anchor()
 
     def update(self, x: float, weight: float, estimate: Optional["LogGaussianDistribution"]) -> None:
         """Update sufficient statistics for LogGaussianAccumulator with one weighted observation.
@@ -495,9 +566,12 @@ class LogGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        x_weight = np.log(x) * weight
+        log_x = np.log(x)
+        x_weight = log_x * weight
+        # BEFORE the raw fold, so an activation only converts content the gate already vouched for.
+        self._anchor_scalar(float(log_x), weight)
         self.log_sum += x_weight
-        self.log_sum2 += np.log(x) * x_weight
+        self.log_sum2 += log_x * x_weight
         self.count += weight
         self.count2 += weight
 
@@ -544,11 +618,13 @@ class LogGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
-        self.log_sum += np.dot(x, weights)
-        self.log_sum2 += np.dot(x * x, weights)
-        w_sum = weights.sum()
-        self.count += w_sum
-        self.count2 += w_sum
+        # The encoded array is already on the log scale, so the anchored track and the raw fold see
+        # the same values; ``_anchor_fold_chunk`` runs the conditioning gate and then folds both,
+        # maintaining ``count``. This family carries a SECOND count for the variance's own weight
+        # total, which tracks the first one exactly, so it takes the same increment.
+        count_before = self.count
+        self._anchor_fold_chunk(x, weights)
+        self.count2 += self.count - count_before
 
     def combine(self, suff_stat: tuple[float, float, float, float]) -> "LogGaussianAccumulator":
         """Aggregates sufficient statistics with LogGaussianAccumulator member sufficient statistics.
@@ -566,6 +642,7 @@ class LogGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             GaussianAccumulator object.
 
         """
+        self._anchor_absorb(suff_stat)
         self.log_sum += suff_stat[0]
         self.log_sum2 += suff_stat[1]
         self.count += suff_stat[2]
@@ -574,8 +651,16 @@ class LogGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         return self
 
     def value(self) -> tuple[float, float, float, float]:
-        """Return sufficient statistics as ``(count, sum, sumsq, log_sum)``."""
-        return self.log_sum, self.log_sum2, self.count, self.count2
+        """Return sufficient statistics as ``(log_sum, log_sum2, count, count2)``.
+
+        A plain 4-tuple for every consumer that treats it as one; once the shift-anchored moment
+        track is live it is a :class:`LogGaussianSuffStat` additionally carrying the anchored log
+        moments in its ``anchored`` attribute.
+        """
+        anchored = self._anchor_payload()
+        if anchored is None:
+            return self.log_sum, self.log_sum2, self.count, self.count2
+        return LogGaussianSuffStat(self.log_sum, self.log_sum2, self.count, self.count2, anchored=anchored)
 
     def from_value(self, x: tuple[float, float, float, float]) -> "LogGaussianAccumulator":
         """Assigns sufficient statistics of LogGaussianAccumulator instance to x.
@@ -597,7 +682,23 @@ class LogGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         self.log_sum2 = x[1]
         self.count = x[2]
         self.count2 = x[3]
+        self._anchor_restore(x)
 
+        return self
+
+    def scale(self, c: float) -> "LogGaussianAccumulator":
+        """Scale the accumulated statistics in place by ``c``, anchored track included.
+
+        The structural default round-trips through ``value()``/``from_value()``, and
+        ``scale_suff_stat`` rebuilds the payload as a PLAIN tuple -- which drops the anchored track
+        and undoes the repair. Uniform weight scaling is exactly linear in both anchored moments and
+        leaves the anchor (a log-data value, not a statistic) alone.
+        """
+        self._anchor_scale(c)
+        self.log_sum *= c
+        self.log_sum2 *= c
+        self.count *= c
+        self.count2 *= c
         return self
 
     def acc_to_encoder(self) -> "LogGaussianDataEncoder":
@@ -628,7 +729,18 @@ class LogGaussianAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class LogGaussianEstimator(ParameterEstimator):
-    """Estimate log-Gaussian location and variance from accumulated log moments."""
+    """Estimate log-Gaussian location and variance from accumulated log moments.
+
+    The variance is formed from shift-anchored log moments whenever the accumulated statistics
+    carry that payload (see :class:`LogGaussianAccumulator`), which makes the fit SCALE-EQUIVARIANT:
+    estimating on ``a * x`` returns ``mu + log(a)`` with ``sigma2`` unchanged, for any positive
+    ``a`` the data can carry. A large multiplicative scale is a large additive offset on ``log(x)``,
+    which is the same cancellation the sibling location-scale families repaired; here it costs
+    ~1.4e-7 of ``sigma2`` on values around 1e6 with a 0.2% spread. With a plain raw tuple --
+    statistics the conditioning gate never needed to anchor, or ones that arrived already reduced
+    from an engine kernel or an older serialization -- the historical raw path is used
+    bit-identically, and ``estimate`` warns rather than returning a variance it cannot stand behind.
+    """
 
     def __init__(
         self,
@@ -683,7 +795,11 @@ class LogGaussianEstimator(ParameterEstimator):
             return float(self.prior.log_density((model.mu, 1.0 / model.sigma2)))
         return 0.0
 
-    def _estimate_conjugate(self, suff_stat: tuple[float, float, float, float]) -> "LogGaussianDistribution":
+    def _estimate_conjugate(
+        self,
+        suff_stat: tuple[float, float, float, float],
+        anchored: tuple[float, float, float] | None = None,
+    ) -> "LogGaussianDistribution":
         """Closed-form NormalGamma conjugate posterior update on log-scale statistics."""
         sum_x, sum_xx, count = scalar_gaussian_moments(suff_stat)
         nobs_loc1 = count
@@ -702,8 +818,14 @@ class LogGaussianEstimator(ParameterEstimator):
         # The scatter ``sum_xx - (sum_x)^2/n`` from reduced sufficient statistics is the classic
         # cancellation-prone form: on near-constant / large-offset data it can round slightly negative,
         # driving ``new_b`` (and hence the variance) negative. Floor it at 0 (the MLE path floors
-        # equivalently), matching the sibling GaussianEstimator._estimate_conjugate.
-        new_b0 = max(sum_xx - sample_mean2 * sum_xxx, 0.0)
+        # equivalently), matching the sibling GaussianEstimator._estimate_conjugate. When the
+        # accumulator's shift-anchored log moments are available, use the same scatter expanded
+        # about the anchor instead: mathematically the same quantity, but scale-invariant.
+        if anchored is not None and count > 0.0:
+            _, a_sum, a_sum2 = anchored
+            new_b0 = max(a_sum2 - a_sum * a_sum / count, 0.0)
+        else:
+            new_b0 = max(sum_xx - sample_mean2 * sum_xxx, 0.0)
         new_b1 = (old_lam * nobs_loc1 / new_n) * np.power(sample_mean1 - old_mu, 2)
         new_b = old_b + 0.5 * (new_b0 + new_b1)
 
@@ -721,8 +843,11 @@ class LogGaussianEstimator(ParameterEstimator):
         """
         log_x, log_x2, count = scalar_gaussian_moments(suff_stat)
         checked_stat = (log_x, log_x2, count, count)
+        # The anchored payload (when present) describes the observed log data only, so it is read
+        # off the untouched (log_x, count) pair before any prior blend below.
+        anchored = consistent_anchored_triple(suff_stat, log_x, count)
         if self.has_conj_prior:
-            return self._estimate_conjugate(checked_stat)
+            return self._estimate_conjugate(checked_stat, anchored)
 
         pc1, pc2 = self.pseudo_count
         prior_mean, prior_variance = self.suff_stat
@@ -737,20 +862,40 @@ class LogGaussianEstimator(ParameterEstimator):
         else:
             mu = 0.0
 
-        sigma2 = pooled_scalar_variance(
-            log_x,
-            log_x2,
-            count,
-            mu,
-            pc2,
-            prior_mean,
-            prior_variance,
-        )
+        # The location is a plain same-sign sum and is computed from the raw log moments unchanged;
+        # only the variance loses to cancellation, so only its scatter switches to the anchored form
+        # when the accumulator carried one (raw-only producers keep the historical path).
+        notes: tuple[str, ...] = ()
+        if anchored is not None:
+            sigma2, notes = anchored_pooled_variance(
+                anchored[0],
+                anchored[1],
+                anchored[2],
+                count,
+                mu,
+                pc2,
+                prior_mean,
+                prior_variance,
+            )
+        else:
+            warn_uncorrectable_raw_moments(log_x, log_x2, count, family="log-Gaussian log-scale")
+            sigma2 = pooled_scalar_variance(
+                log_x,
+                log_x2,
+                count,
+                mu,
+                pc2,
+                prior_mean,
+                prior_variance,
+            )
         if count == 0.0 and pc2 in (None, 0.0) and prior_variance is not None:
             sigma2 = prior_variance
 
         sigma2 = max(sigma2, self.min_covar)
-        return LogGaussianDistribution(mu, sigma2, name=self.name, keys=self.keys, prior=self.prior)
+        rv = LogGaussianDistribution(mu, sigma2, name=self.name, keys=self.keys, prior=self.prior)
+        if notes:
+            rv._numerical_repairs = notes
+        return rv
 
 
 class LogGaussianDataEncoder(DataSequenceEncoder):

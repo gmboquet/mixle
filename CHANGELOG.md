@@ -70,6 +70,51 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 
 ### Fixed
 
+- A fourth candidate campaign (four black-box tester sessions plus two clean-install reproduction
+  replays against candidate `468fbaf9`, every blocking/major claim adversarially re-verified, with
+  a regression watch across all three prior campaigns; D-0203) found and fixed the following.
+  - The shift-anchored moment repair had been propagated one family at a time, each time only to
+    the families a tester had just caught -- and twice, a family left as an accepted "stated limit"
+    (Gumbel, then StudentT) came back as a confirmed finding in the next campaign. This wave closes
+    the class by systematic audit instead: every location-scale family in
+    `mixle.stats.univariate.continuous` and `mixle.stats.multivariate`, and every family whose
+    M-step differences raw moments, was measured for shift-equivariance across eight offsets on a
+    dyadic grid (exact in float64), and every failure was repaired -- Gumbel, StudentT,
+    GeneralizedPareto, SkewNormal, ExponentiallyModifiedGaussian, Rician, Nakagami, and
+    `DiagonalGaussianEstimator`'s ridge policy (previously priced off the *mean* of all coordinates'
+    variances rather than each coordinate's own, inflating the smallest column by up to 3.2e17x on
+    heterogeneous-unit data). The five already-repaired families served as positive controls and
+    stayed exact throughout. Separately, raw (unanchored) statistics arriving through an engine
+    that stacks reduced moments directly -- reachable from the ordinary public API, not only from a
+    hand-built tuple -- cannot be corrected at the M-step; every family that accepts raw statistics
+    now WARNS in that case rather than returning a silently wrong fit, closing a gap where the
+    warning fired only when the raw variance happened to still be positive.
+  - Auto-inference's fail-open and fail-closed gaps: one non-numeric cell in an otherwise continuous
+    column silently demoted the whole column to a memorization table that scored `-inf` on unseen
+    values; `inf` in a numeric column was silently absorbed as a zero-cost missing sentinel; a
+    table column with 65+ distinct string values crashed because two independent column-typing
+    rules inside one public call disagreed; the documented `structure='auto'` fallback ("on any
+    failure, the historical path proceeds untouched") did not actually hold; an all-empty HMM
+    corpus -- a designed no-evidence state -- died on an unguarded index into an empty array; a
+    fitted model's missing-value sentinel depended on the input pandas dtype family, so a Series
+    built from a nullable-extension dtype could not be scored by a model fitted from a plain one
+    (and vice versa) -- fixed at the three call sites (auto-inference, encoding, and
+    `Model`/`propose`) that all need the same rule to stay consistent with each other.
+  - `GaussianEstimator`'s degenerate-data variance floor disagreed with its diagonal-covariance
+    sibling's by up to 18 orders of magnitude on identical zero-spread input; both conventions are
+    arbitrary regularizations of a quantity with no correct finite value (the true variance of a
+    point mass is 0), so this is now stated rather than silently resolved, with the `min_covar=`
+    escape hatch named for a caller who needs one specific value.
+  - `InverseGaussianEstimator`'s parameter clamp and its DiagonalGaussian sibling's total-loss gate
+    now disclose when they bind, matching every other family's `numerical_repairs()` contract.
+  - The interpreted fallback used when numba is not installed (including CI's core lane) called
+    Python's `math.exp`, which raises `OverflowError` past ~709 where numba's compiled kernels and
+    numpy both return `+inf`; a collapsed-scale fit scoring held-out data at extreme magnitude could
+    crash with an opaque `OverflowError` naming neither the family nor the remedy instead of the
+    same silently-large density every other environment already returns. It now uses `numpy.exp`.
+
+### Fixed
+
 - A third candidate campaign (four black-box tester sessions plus two clean-install reproduction
   replays against candidate `dcec5e29`, every blocking/major claim adversarially re-verified;
   D-0202) found and fixed the following.

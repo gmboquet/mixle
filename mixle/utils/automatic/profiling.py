@@ -54,6 +54,7 @@ from .factories import (
     get_sequence_estimator,
     get_set_estimator,
     get_student_t_estimator,
+    get_typed_mixture_estimator,
 )
 
 
@@ -1030,6 +1031,32 @@ def _recommended_integer_model(vdict: dict[Any, float]) -> tuple[str, dict[str, 
     return min(clean.items(), key=lambda u: (u[1], u[0]))[0], clean
 
 
+def _numeric_side_is_memorizing(numeric_vdict: dict[Any, float], has_float: bool) -> bool:
+    """Would the NUMBERS in a mixed number/string column be modeled as a table of observed values?
+
+    This is the gate on the typed dispatch mixture, and it is shared by the profile report and the
+    estimator builder so the two can never disagree about one column.
+
+    The harm the mixture repairs is specific: a merged categorical over every observed value scores
+    ``-inf`` at any number the numeric side's own model would have scored finitely. If the numeric
+    side is itself a categorical -- a handful of repeated small integers, an integer identifier
+    column -- there is no such number, the merged categorical is an equivalent and simpler model, and
+    splitting would only churn the shape of a column that is genuinely categorical. So: split only
+    when the numbers want a family with support past what was observed.
+
+    Floats always want one. mixle reads a Python float as a continuous measurement even when the
+    realized value is integral (see ``DatumNode._analyze_type``), so ``[2.0, 3.0] * 80`` on its own
+    fits a continuous family, and the mixed column must not disagree with the same column minus its
+    strings. Integers are asked the ordinary integer-model question instead.
+    """
+    if has_float:
+        return False
+    if not numeric_vdict:
+        return True
+    recommendation, _ = _recommended_integer_model(numeric_vdict)
+    return recommendation in ("categorical", "integer_categorical", "ignored")
+
+
 def _validation_split(
     values: Sequence[Any], validation_fraction: float, max_validation_rows: int, min_validation_count: int, seed: int
 ) -> tuple[list[Any], list[Any]] | None:
@@ -1385,8 +1412,8 @@ def _profile_series(path: tuple[Any, ...], role: str, values: Sequence[Any]) -> 
     )
     if nonfinite_count:
         notes.append(
-            "%d non-finite value(s) are represented as explicit optional outcomes, not fitted as numeric data"
-            % nonfinite_count
+            "%d non-finite value(s) are modeled as explicit optional outcomes carrying a fitted rate, "
+            "not fitted as numeric data" % nonfinite_count
         )
 
     if observed_count == 0:
@@ -1452,6 +1479,50 @@ def _profile_series(path: tuple[Any, ...], role: str, values: Sequence[Any]) -> 
         all(isinstance(u, (str, bytes, int, np.integer, bool, np.bool_)) for u in observed)
         and len({type(value) for value in observed}) > 1
     )
+
+    # A number/string mix is two disjoint types, not one unmodelable or one categorical column: the
+    # estimator builds a typed dispatch mixture (a family for the numbers, a categorical for the
+    # strings, weights from the observed type proportions). The recommendation reported here is
+    # load-bearing, not decorative -- 'ignored' is what makes _validate_field_profile skip predictive
+    # validation and _encode_for_pairwise refuse the column -- so it has to name what really happens.
+    # The type predicate is deliberately the one DatumNode._analyze_type uses to fill str_count /
+    # float_count / int_count rather than the looser numbers.Real: anything else (a Fraction, a
+    # Decimal, a datetime) lands in obj_count there and is frozen, and claiming a typed mixture for a
+    # column the estimator freezes would be the same kind of lie this repair exists to remove.
+    numeric_observed = [
+        u
+        for u in observed
+        if isinstance(u, (int, float, np.integer, np.floating)) and not isinstance(u, (bool, np.bool_))
+    ]
+    string_observed = [u for u in observed if isinstance(u, (str, bytes))]
+    if numeric_observed and string_observed and len(numeric_observed) + len(string_observed) == observed_count:
+        numeric_vdict: dict[Any, float] = defaultdict(int)
+        for u in numeric_observed:
+            numeric_vdict[u] += 1
+        has_float = any(isinstance(u, (float, np.floating)) for u in numeric_observed)
+        if not _numeric_side_is_memorizing(numeric_vdict, has_float):
+            return MarginalFieldProfile(
+                path,
+                role,
+                count,
+                missing,
+                missing_fraction,
+                observed_count,
+                "mixed_scalar",
+                "typed_mixture",
+                entropy_bits=entropy,
+                cardinality=cardinality,
+                unique_fraction=unique_fraction,
+                effective_cardinality=effective_cardinality,
+                is_constant=is_constant,
+                top_mass=top_mass,
+                notes=notes
+                + [
+                    "numeric and string values are modeled as a typed dispatch mixture "
+                    "(%d numeric, %d string); one stray non-numeric cell no longer retypes the column"
+                    % (len(numeric_observed), len(string_observed))
+                ],
+            )
 
     if all_str:
         recommendation = "categorical"
@@ -1615,6 +1686,9 @@ def _profile_series(path: tuple[Any, ...], role: str, values: Sequence[Any]) -> 
             notes=notes,
         )
 
+    # Everything that reaches here mixes a scalar type this profiler does not model -- a datetime, a
+    # Decimal, a Fraction -- into the column, which is what still makes it unmodelable. A plain
+    # number/string mix returned above as a typed mixture.
     return MarginalFieldProfile(
         path,
         role,
@@ -1630,7 +1704,7 @@ def _profile_series(path: tuple[Any, ...], role: str, values: Sequence[Any]) -> 
         effective_cardinality=effective_cardinality,
         is_constant=is_constant,
         top_mass=top_mass,
-        notes=["mixed scalar types are left unmodeled"],
+        notes=notes + ["mixed scalar types are left unmodeled"],
     )
 
 
@@ -2210,6 +2284,63 @@ class DatumNode:
         else:
             self.obj_count += v
 
+    def _scalar_type_view(self, *, numeric: bool) -> "DatumNode":
+        """Return a copy of this scalar leaf restricted to one side of a number/string type mix.
+
+        The copy keeps every structural field intact and only narrows the type evidence, so
+        :meth:`_leaf_estimator` run against it takes exactly the branch it would have taken had the
+        column contained only those values -- identifier detection, integer-model selection, the
+        BIC-scored continuous family choice, all of it. That is the point: the split must not become
+        a second, parallel set of typing rules that drifts from the real ones.
+
+        The missing/non-finite counters are cleared on both views because those wrappers are applied
+        once, outside, around the whole leaf (see :meth:`get_estimator`); leaving them set here would
+        wrap each branch a second time.
+        """
+        view = self.copy()
+        view.none_count = 0
+        view.nan_count = 0
+        view.pos_inf_count = 0
+        view.neg_inf_count = 0
+        if numeric:
+            view.vdict = defaultdict(
+                int,
+                {
+                    key: value
+                    for key, value in self.vdict.items()
+                    if isinstance(key, numbers.Real) and not isinstance(key, (bool, np.bool_))
+                },
+            )
+            view.str_count = 0
+            view.count = self.float_count + self.int_count
+        else:
+            view.vdict = defaultdict(
+                int, {key: value for key, value in self.vdict.items() if isinstance(key, (str, bytes))}
+            )
+            view.float_count = 0
+            view.int_count = 0
+            view.neg_count = 0
+            view.zero_count = 0
+            view.count = self.str_count
+        return view
+
+    def _typed_mixture_estimator(self, pseudo_count, emp_suff_stat, use_bstats, *, numeric_view=None):
+        """Build the number/string dispatch mixture for a mixed scalar leaf.
+
+        Neither branch inherits the field-level ``recommendation``: that recommendation was derived
+        from the mixed column as a whole (``'ignored'`` before this repair, ``'typed_mixture'`` now)
+        and says nothing about which family the numbers alone want, so each side re-derives its own
+        from its own values.
+        """
+        numeric_view = self._scalar_type_view(numeric=True) if numeric_view is None else numeric_view
+        string_view = self._scalar_type_view(numeric=False)
+        return get_typed_mixture_estimator(
+            string_view._leaf_estimator(pseudo_count, emp_suff_stat, use_bstats),
+            numeric_view._leaf_estimator(pseudo_count, emp_suff_stat, use_bstats),
+            use_bstats=use_bstats,
+            string_support=tuple(string_view.vdict),
+        )
+
     def _leaf_estimator(self, pseudo_count, emp_suff_stat, use_bstats, recommendation: str | None = None):
         if self.obj_count > 0 or len(self.vdict) == 0:
             if len(self.vdict) > 0:
@@ -2227,6 +2358,27 @@ class DatumNode:
             # reason. (vdict has already merged True with 1/1.0 -- Python hashes them equal -- and
             # the frozen empirical categorical simply inherits that.)
             return _get_identifier_estimator(self.vdict, use_bstats=use_bstats)
+
+        if self.str_count > 0 and self.bool_count == 0 and (self.float_count > 0 or self.int_count > 0):
+            # A scalar column carrying BOTH numbers and strings is two disjoint types, and until
+            # 0.8.0 the branch below retyped all of it as one categorical over the observed values.
+            # One stray "N/A" in 300 finite floats therefore produced a 301-level memorization table
+            # that scored the sample mean -- and every other value not literally in the training set
+            # -- at -inf, silently, with converged=True and repairs=(). Route by type instead: each
+            # side is fit by these same leaf rules on its own values and the branch weights are the
+            # observed type proportions.
+            #
+            # Deliberately NOT gated on which side is the MAJORITY: a stray number in a string column
+            # collapses just as wrongly as a stray string in a numeric one, and the string branch's
+            # density is unchanged either way (log(n_str/n) + log(count/n_str) == log(count/n),
+            # exactly in real arithmetic and to within a ULP in floating point).
+            # It IS gated on whether the numbers want a family with support past the observed values
+            # -- see _numeric_side_is_memorizing, shared with the profile report so the two readings
+            # of one column cannot diverge. ["low", 2, "high", 3] * 40 is a genuinely categorical
+            # column and stays one.
+            numeric_view = self._scalar_type_view(numeric=True)
+            if not _numeric_side_is_memorizing(numeric_view.vdict, self.float_count > 0):
+                return self._typed_mixture_estimator(pseudo_count, emp_suff_stat, use_bstats, numeric_view=numeric_view)
 
         if self.str_count > 0:
             # identifier-like fields (nearly all values distinct) carry no density information;
@@ -2363,7 +2515,32 @@ class DatumNode:
         path: tuple[Any, ...] = (),
         modality: str | None = None,
     ):
-        """Infer and return an estimator for the profiled observations."""
+        """Infer and return an estimator for the profiled observations.
+
+        **What happens to values that are not ordinary numbers.** This policy is not visible from
+        :func:`mixle.inference.optimize`, which is the entry point most callers reach it through, so
+        it is written out here.
+
+        * ``None`` and ``nan`` are the two spellings of ABSENT and mean one model: the leaf is
+          wrapped in an :class:`~mixle.stats.combinator.optional.OptionalDistribution` whose
+          missingness rate is fit from the data, so the model stays a normalized law and still
+          samples. (They must agree: a pandas float Series stores ``None`` as ``nan`` behind the
+          caller's back.)
+        * ``+inf`` and ``-inf`` are values rather than absences, and each sign present gets its own
+          fitted-rate wrapper -- an atom at the sentinel beside the base family, total mass one.
+          Through 0.7.x these used the transparent (``est_prob=False``) wrapper instead, which
+          scored the sentinel at ``log_density == 0.0``, probability one, on top of an unscaled base:
+          total mass 2.0, and every such row free in the objective.
+        * A scalar column carrying BOTH numbers and strings is modeled as a typed dispatch mixture
+          rather than retyped wholesale as a categorical over the observed values -- see
+          :func:`~mixle.utils.automatic.factories.get_typed_mixture_estimator`.
+        * A scalar type this profiler does not recognize (``datetime``, ``Decimal``, ...), an
+          ambiguous bool/number mix, and an identifier-like column are frozen: the empirical
+          categorical over the observed values, held fixed by
+          :class:`~mixle.stats.combinator.ignored.IgnoredDistribution`. A value not seen at
+          profiling time scores ``-inf`` there, the same finite-support behavior every automatically
+          fitted categorical has.
+        """
         if modality not in {None, "embedding", "image"}:
             raise ValueError("modality must be None, 'embedding', or 'image'")
         if modality == "embedding" and self._fixed_numeric_vector_dim() is None:
@@ -2476,8 +2653,7 @@ class DatumNode:
         if self.none_count > 0:
             # Genuine optionality: the field is really absent. Fit the missingness rate so the
             # auto-built model stays generative -- the README quickstart ships a row with a
-            # missing value and then calls model.sampler().sample(5). Only the inf sentinel
-            # wrappers below keep est_prob=False: they are representational, not optional.
+            # missing value and then calls model.sampler().sample(5).
             rv = get_optional_estimator(rv, None, use_bstats=use_bstats, est_prob=True)
 
         if self.nan_count > 0:
@@ -2487,17 +2663,22 @@ class DatumNode:
             # different models: the nan one read .p as 0.0 and refused to sample.
             rv = get_optional_estimator(rv, math.nan, use_bstats=use_bstats, est_prob=True)
 
-        # +-inf is tracked (pos_inf_count/neg_inf_count) but, unlike None/NaN, was never wrapped here --
-        # the base estimator built above (e.g. GaussianEstimator, whose distribution requires finite
-        # support) never sees these values (add_datum excludes them from vdict), so get_estimator()
-        # returned successfully while optimize() on the SAME unfiltered data crashed. Wrap each sign
-        # present the same way None/NaN already are, so a field containing infinities gets a genuinely
-        # fittable estimator instead of one that silently can't handle the data it was inferred from.
+        # +-inf gets the same fitted-rate wrapper, for a reason of its own rather than by analogy.
+        # Through 0.7.x these two calls passed est_prob=False, which makes the wrapper transparent:
+        # the fitted model then reported .p == 0.0 ("an infinity never occurs") while simultaneously
+        # scoring log_density(inf) == 0.0 (probability one), for total mass 2.0. Those rows cost
+        # exactly zero nats, so 300 finite draws plus one inf produced a final_objective
+        # bit-identical to the clean 300-point fit at n_observations=301, and the inflation grows
+        # without bound in the number of infinities -- a free likelihood gain against any proper
+        # competitor, invisible to vuong_test/clarke_test/compare_elpd because those consume plain
+        # arrays and never see density_semantics(). est_prob=True is the proper model of the same
+        # reading: an atom of mass p at the sentinel beside the base family scaled by 1-p, i.e. "a
+        # continuous measurement that comes out infinite p of the time", which integrates to one.
         if self.pos_inf_count > 0:
-            rv = get_optional_estimator(rv, math.inf, use_bstats=use_bstats)
+            rv = get_optional_estimator(rv, math.inf, use_bstats=use_bstats, est_prob=True)
 
         if self.neg_inf_count > 0:
-            rv = get_optional_estimator(rv, -math.inf, use_bstats=use_bstats)
+            rv = get_optional_estimator(rv, -math.inf, use_bstats=use_bstats, est_prob=True)
 
         return rv
 
@@ -2661,6 +2842,16 @@ def normalize_input(data, *, rdd_cap: int = 200000):
     # numeric records (the common case) freeze to themselves, so the original object is handed back.
     if isinstance(data, np.ndarray):
         return data  # numeric/structured array: nothing to freeze, and iterating it would rebox
+    # A bare Series has its own dtype-family missing-value convention (NaN for numeric dtypes,
+    # None for everything else -- see column_records), which the general per-value fallback below
+    # does NOT apply: it normalizes pandas' sentinels one at a time but does not re-derive the
+    # column's own convention, so the SAME data fits with a different missing_value depending on
+    # whether the Series came from a plain or nullable-extension dtype (campaign four, T2-02, the
+    # Series half). Route it through the same column-level rule a DataFrame's columns already get.
+    if type(data).__name__ == "Series" and type(data).__module__.startswith("pandas"):
+        from mixle.data.sources.pandas_source import column_records
+
+        data = column_records(data)
     # pandas has two spellings of "missing" and uses them interchangeably: NaN, and the pd.NA
     # singleton that its nullable extension dtypes produce. NaN reached the numeric path correctly
     # while pd.NA -- an opaque object to numpy -- was profiled as a CATEGORICAL VALUE, so a numeric

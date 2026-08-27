@@ -29,6 +29,7 @@ from mixle.inference.structure import (
     _density_transparent_optional,
     _field_estimator,
     _is_discrete,
+    _is_real_valued,
     _num_free_params,
 )
 
@@ -448,12 +449,20 @@ class _GLMFactor:
         discrete: dict[int, list[Any]],
         weights: np.ndarray | None = None,
         vec_dims: dict | None = None,
+        child_levels: Sequence[Any] | None = None,
     ):
+        """Fit the GLM edge. ``child_levels`` declares the child's support instead of reading it off
+        ``cols``, for a caller fitting on a SLICE: the class list IS the model's support here, so a level
+        that happened to be absent from the slice would be scored ``-inf`` -- impossible, not merely
+        unlikely -- the moment this component is asked about the whole dataset (campaign4 T2-01's class,
+        via :func:`_column_routing`). Levels present in the support but absent from ``cols`` simply carry
+        no observations; the multinomial ridge keeps their coefficients finite and their mass small.
+        """
         proto = cls(child, parents, discrete, "binomial", [], np.zeros(1), vec_dims=vec_dims)
         x = proto._design(cols)
         col = cols[child]
-        levels = sorted(set(col), key=repr)
-        is_count = all(isinstance(v, (int, np.integer)) and not isinstance(v, bool) and int(v) >= 0 for v in col)
+        levels = sorted(set(col), key=repr) if child_levels is None else list(child_levels)
+        is_count = all(isinstance(v, (int, np.integer)) and not isinstance(v, bool) and int(v) >= 0 for v in levels)
         if len(levels) == 2:
             from mixle.inference.glm import glm
 
@@ -850,8 +859,23 @@ def learn_mixture_bayesian_network(
     # a min_size > n and crash there instead of just falling back to "use every point available".
     min_size = min(n, max(10, n // (4 * n_components)))
 
+    # Every component is fitted on a SLICE but scored against the WHOLE dataset, so the per-field family
+    # has to be decided from the whole dataset. Detected per slice, a numeric column with a few gaps looks
+    # complete in whichever cluster happens to hold no gap, gets a plain Gaussian marginal, and then raises
+    # "GaussianDistribution observations contain N NaN entries" the moment that component scores the full
+    # data in the E-step -- a crash produced by the split, not by the data (the same routing-disagreement
+    # class as campaign4 T4-05/T2-01, one level up).
+    #
+    # ``sliced=True`` extends the same argument from the family to the fitted SUPPORT: a slice that
+    # holds no gap, or none of a rare level, otherwise fits a component that calls that value
+    # impossible, and a value impossible under every component at once stops the fit dead in
+    # ``responsibilities``. See :func:`_slice_safe_template`.
+    routing = _column_routing(_columns(data), sliced=True)
+
     def learn(subset: list[tuple], w: np.ndarray | None = None) -> HeterogeneousBayesianNetwork:
-        return learn_bayesian_network(subset, max_parents=max_parents, min_gain=min_gain, max_its=max_its, weights=w)
+        return learn_bayesian_network(
+            subset, max_parents=max_parents, min_gain=min_gain, max_its=max_its, weights=w, _routing=routing
+        )
 
     inits = [_kmeans_init(data, n_components, rng, numeric_only=True)]
     if restarts >= 2:
@@ -991,6 +1015,111 @@ def select_mixture_components(
 # --- structure search ---------------------------------------------------------------------------------------
 
 
+def _slice_safe_template(est: Any) -> Any:
+    """Return ``est`` regularized so a component fitted on a SLICE can still score the whole dataset.
+
+    Only the mixture learner asks for this, and only because of what it does: every component is fitted
+    on a slice of the records and then scored against **all** of them. An ``Optional`` gate whose slice
+    happened to hold no gap fits a missingness rate of exactly zero -- not "unlikely", *impossible* --
+    so ``log_density`` of a gap is ``-inf``, which is not a number EM can form a responsibility from.
+    When every component says that at once, :meth:`MixtureOfBayesianNetworks.responsibilities` refuses
+    the fit with "mixture assigns zero probability to observations at rows [...]": a fail-closed refusal
+    of ordinary data, decided by where the split happened to fall rather than by anything in the data.
+    Measured on a 60-row table with a few gaps in two numeric columns, the default hard EM refused 8 of
+    25 seeds. Soft EM refused none, because it fits every component on the whole dataset with
+    responsibilities and so is never surprised; making a slice-fitted component agree with soft EM is
+    the fix. This is :func:`_column_routing`'s own argument -- decide it on the whole dataset -- applied
+    to the fitted *rate* rather than the family (campaign4 T2-01).
+
+    The regularization is a Jeffreys ``(missing + 1/2) / (n + 1)`` rate: one pseudo-observation split
+    between the two outcomes. A component that did see gaps barely moves, none of them can reach zero,
+    and no free parameter is added.
+
+    Deliberately narrow. The *discrete* half of the same hazard -- a level absent from the slice -- is
+    not handled here, because it does not need to be: every categorical template the automatic detector
+    produces already declares its support over the whole column (``suff_stat``), and the one place that
+    re-derived a support from the slice was :meth:`_GLMFactor.fit`, which now takes ``child_levels``
+    from the shared routing. An estimator that has already been given a pseudo-count or a conjugate
+    prior is returned untouched: it has an answer for the unseen outcome, and overriding a caller's
+    deliberate prior would be the worse defect.
+    """
+    from mixle.stats.combinator.optional import OptionalEstimator
+
+    if isinstance(est, OptionalEstimator):
+        if not est.est_prob or est.pseudo_count is not None or getattr(est, "has_conj_prior", False):
+            return est
+        return OptionalEstimator(
+            estimator=est.estimator,
+            missing_value=est.missing_value,
+            est_prob=True,
+            pseudo_count=0.5,
+            name=est.name,
+            keys=est.keys,
+        )
+    return est
+
+
+def _column_routing(
+    cols: list[list[Any]], *, sliced: bool = False
+) -> tuple[dict[int, int], list[bool], list[bool], list[Any], dict[int, list[Any]]]:
+    """Decide, once per record layout, what family each field gets and which fields the DAG search may touch.
+
+    Returns ``(vec_dims, discrete, opaque, templates, levels)``.
+
+    A field is one of four things. A **vector** field (fixed-length numeric sequence, e.g. an embedding) is
+    neither discrete nor a scalar Gaussian -- it becomes a multivariate-Gaussian marginal / multivariate CLG
+    node, and its components splice into the design matrix when it is a parent in a cross-modal graph. A
+    **discrete** field keeps the automatic family (categorical/count). A **real** field gets a Gaussian
+    marginal, defined on all of R and so consistent with the CLG children, which lets a mixture component
+    score every point. Everything else is **opaque**.
+
+    Opaque is the category this function exists for. "Not vector and not discrete" was read as "a real
+    number" and handed a Gaussian template unconditionally. Two ordinary columns break that: a string field
+    with more than ``_is_discrete``'s 64 levels (city, SKU, user id, free-text label) and a numeric field
+    carrying missing values. Both died deep in gaussian.py -- "could not convert string to float:
+    'user-00000'" and "GaussianDistribution observations contain 24 NaN entries" -- from a template the
+    caller never chose, on data :func:`mixle.utils.automatic.get_estimator` models without complaint. That is
+    two routing systems inside one public call disagreeing: ``optimize(rows)`` tries this learner first and
+    falls back to ``get_estimator``, so the same column that fits as a categorical/ignored or
+    ``Optional``-wrapped leaf one way crashed the other (campaign4 T4-05, T2-01). The 64-level threshold is
+    not the defect and is unchanged; asking ``_is_discrete`` a question it does not answer was.
+
+    An opaque field is modeled by that same automatic routing and is kept out of the edge search, where a
+    design row (:func:`_design_row`) or a least-squares/GLM fit would need its value as a real. It is a
+    marginal, exactly as it is in the independent composite, so a BIC comparison between the two stays
+    like-for-like.
+
+    ``levels`` is the discrete support -- the level list per discrete field -- and travels with the rest
+    for the same reason the family does. A component that never saw a level does not merely lack a
+    probability for it, it declares it impossible: a one-hot design row silently loses a column, and a
+    multinomial GLM node returns ``-inf`` for a class outside its own level list. Deciding the support
+    once, on the whole dataset, makes every component agree on what values exist.
+
+    ``sliced=True`` additionally passes every template through :func:`_slice_safe_template`, for the one
+    caller that fits each component on a SLICE and scores it against the whole dataset. A single-fit
+    caller must not set it: on the whole dataset no value is ever unseen, so the regularization would
+    only perturb the fit it was asked for.
+    """
+    n_fields = len(cols)
+    import mixle.stats as st
+
+    vec_dims: dict[int, int] = {i: _vector_dim(cols[i]) for i in range(n_fields) if _is_vector_col(cols[i])}
+    discrete = [(i not in vec_dims and _is_discrete(c)) for i, c in enumerate(cols)]
+    real = [(i not in vec_dims and not discrete[i] and _is_real_valued(cols[i])) for i in range(n_fields)]
+    opaque = [(i not in vec_dims and not discrete[i] and not real[i]) for i in range(n_fields)]
+    templates = [
+        None if i in vec_dims else (st.GaussianEstimator() if real[i] else _field_estimator(cols[i]))
+        for i in range(n_fields)
+    ]
+    if sliced:
+        templates = [None if t is None else _slice_safe_template(t) for t in templates]
+    # key=repr (not bare comparison): a discrete column may carry a missing sentinel (``None``) beside
+    # str/int/bool levels, and ``None`` has no ``<`` against those types (TypeError). repr gives a total,
+    # deterministic order regardless of level type mix -- the same guard `_GLMFactor.fit` applies.
+    levels = {i: sorted(set(cols[i]), key=repr) for i in range(n_fields) if discrete[i]}
+    return vec_dims, discrete, opaque, templates, levels
+
+
 def learn_bayesian_network(
     data: Sequence[tuple],
     *,
@@ -998,6 +1127,7 @@ def learn_bayesian_network(
     min_gain: float = 0.0,
     max_its: int = 30,
     weights: Sequence[float] | None = None,
+    _routing: tuple[dict[int, int], list[bool], list[bool], list[Any], dict[int, list[Any]]] | None = None,
 ) -> HeterogeneousBayesianNetwork:
     """Discover a heterogeneous DAG for ``data`` and return the fitted network.
 
@@ -1006,6 +1136,14 @@ def learn_bayesian_network(
     one-hot discrete parents); discrete/count children condition on the joint config of their discrete parents,
     or become GLM nodes when a driver is continuous. With ``weights`` (soft-EM responsibilities), every factor
     fit and the BIC search itself are responsibility-weighted, with effective sample size ``sum(weights)``.
+
+    A field the conditional-linear-Gaussian machinery cannot read as a real number -- a string column with
+    more than 64 distinct values, or a numeric column carrying missing values -- is modeled by the same
+    automatic detector :func:`mixle.utils.automatic.get_estimator` uses (a categorical/ignored leaf, or an
+    ``Optional``-wrapped one) and takes no part in the edge search; every other field still gets the full
+    search. Such a column used to be handed a Gaussian template and crash inside the Gaussian encoder.
+    See :func:`_column_routing`, which makes that decision; ``_routing`` is a private hook letting a caller
+    that fits many components on SLICES of one dataset decide it once on the whole dataset instead.
     """
     data = list(data)
     cols = _columns(data)
@@ -1013,19 +1151,13 @@ def learn_bayesian_network(
     n = len(data)
     w = _validated_weights(weights, n)
     n_eff = float(n) if w is None else float(np.sum(w))
-    import mixle.stats as st
 
-    # a vector-valued field (fixed-length numeric sequence, e.g. an embedding) is neither discrete nor a
-    # scalar Gaussian -- it becomes a multivariate-Gaussian marginal / multivariate CLG node, and its
-    # components splice into the design matrix when it is a parent in a cross-modal graph.
-    vec_dims: dict[int, int] = {i: _vector_dim(cols[i]) for i in range(n_fields) if _is_vector_col(cols[i])}
-    discrete = [(i not in vec_dims and _is_discrete(c)) for i, c in enumerate(cols)]
-    # continuous fields get a Gaussian marginal (defined on all of R, consistent with the CLG children) so a
-    # mixture component can score every point; discrete fields keep the automatic family (categorical/count).
-    templates = [
-        None if i in vec_dims else (_field_estimator(cols[i]) if discrete[i] else st.GaussianEstimator())
-        for i in range(n_fields)
-    ]
+    vec_dims, discrete, opaque, templates, levels = _column_routing(cols) if _routing is None else _routing
+    if len(templates) != n_fields:
+        raise ValueError(
+            "learn_bayesian_network: the supplied column routing describes %d fields but the data has %d."
+            % (len(templates), n_fields)
+        )
     # SEARCH against the density-transparent form of an optional field, then refit the chosen
     # structure with these originals before returning. A fitted missingness rate makes the returned
     # model samplable -- which the network's own sampler and JSON round-trip require -- but during
@@ -1035,10 +1167,6 @@ def learn_bayesian_network(
     # workclass -> hours.per.week effect entirely; it recovers at a coefficient of 4.46 when the
     # rate is kept out of the search. See mixle.inference.structure._density_transparent_optional.
     search_templates = [None if t is None else _density_transparent_optional(t) for t in templates]
-    # key=repr (not bare comparison): a discrete column may carry a missing sentinel (``None``) beside
-    # str/int/bool levels, and ``None`` has no ``<`` against those types (TypeError). repr gives a total,
-    # deterministic order regardless of level type mix -- same guard `_GLMFactor.fit` already applies below.
-    levels = {i: sorted(set(cols[i]), key=repr) for i in range(n_fields) if discrete[i]}
 
     def _wsum(ll: np.ndarray) -> float:
         return float(np.sum(ll) if w is None else np.dot(w, ll))
@@ -1056,10 +1184,10 @@ def learn_bayesian_network(
     while True:
         best = (min_gain, -1, -1, None)  # (gain, child, parent, factor)
         for c in range(n_fields):
-            if len(parents[c]) >= max_parents:
+            if len(parents[c]) >= max_parents or opaque[c]:
                 continue
             for q in range(n_fields):
-                if q == c or q in parents[c] or _would_cycle(parents, q, c):
+                if q == c or opaque[q] or q in parents[c] or _would_cycle(parents, q, c):
                     continue
                 try:
                     cand = _fit_factor(
@@ -1133,7 +1261,9 @@ def _fit_factor(child, parents, cols, discrete, levels, template, max_its, weigh
     if discrete[child]:
         if len(disc) == len(parents):  # all-discrete parents: the exact per-config table
             return _DiscreteConditionalFactor.fit(child, parents, cols, template, max_its, weights)
-        return _GLMFactor.fit(child, parents, cols, disc, weights, vec_dims=vpar)  # a continuous/vector driver
+        # a continuous/vector driver. levels[child] is the declared support -- identical to the slice's
+        # own levels for a single fit, and the WHOLE dataset's when a mixture caller shares one routing.
+        return _GLMFactor.fit(child, parents, cols, disc, weights, vec_dims=vpar, child_levels=levels.get(child))
     return _LinearGaussianFactor.fit(child, parents, cols, disc, weights, vec_dims=vpar)
 
 

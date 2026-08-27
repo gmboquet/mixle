@@ -73,7 +73,7 @@
     {
       "path": "scripts/build_repro_bundle.py",
       "role": "bundle-closure",
-      "sha256": "b059945635278975a45518b216e8df76419a71c5050f2f22efe51e78a089b514"
+      "sha256": "100a5c6d78a096056dc285ead0d2221b1bb182700513f0378c62b0239cf8ac90"
     },
     {
       "path": "scripts/run_repro_entry.py",
@@ -119,7 +119,7 @@
           "fit : BernoulliDistribution(0.7004"
         ],
         "format": "text",
-        "stdout_sha256": "c95df4d9049f3bd1922ca30ee5e9cd4dbeafd1b8f03af1714f19fbc2caaf7bf3"
+        "stdout_sha256": "3e54938bf429fccaed6673da4187cb1cde04b695f6dee0e88824288620cb93ef"
       },
       "id": "gallery-univariate",
       "inputs": [

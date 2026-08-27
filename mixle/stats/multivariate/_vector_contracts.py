@@ -333,3 +333,106 @@ def student_t_moments(
     if sum_u == 0.0 and (np.any(sum_ux != 0.0) or np.any(sum_uxx != 0.0)):
         raise ValueError("zero Student-t latent weight requires zero weighted moments")
     return count, sum_u, sum_ux, sum_uxx, inferred_dim
+
+
+# --------------------------------------------------------------------------------------------
+# Shift-anchored moments for vector families whose M-step differences raw outer-product moments.
+#
+# The vector twin of ``mixle.stats.univariate.continuous._observation_contracts``. Four release
+# waves fixed this defect one family at a time and each wave a family recorded as an accepted limit
+# came back as a blocking finding, so the gate and the disclosure live here once rather than being
+# transcribed into the next family that needs them.
+# --------------------------------------------------------------------------------------------
+
+# Same constant, same rationale, as every scalar and matrix sibling: the raw ``E[xx^T] - mu mu^T``
+# form loses about ``eps * (mean/sd)^2`` relative accuracy, so a (mean/sd)^2 up to 4e6 (ratio ~2000)
+# keeps it within ~1e-9 relative error and the historical single-pass statistics are bit-preserved
+# there. Beyond it a shift-anchored track has to take over.
+VECTOR_ANCHOR_CONDITION_RATIO = 4.0e6
+
+
+def needs_vector_anchor(chunk_sum: np.ndarray, chunk_sum2_diag: np.ndarray, w_sum: float) -> bool:
+    """Whether a chunk's weighted moments are too ill-conditioned for the raw covariance form.
+
+    The per-coordinate version of the scalar gate: the offset that destroys a covariance is the same
+    offset in every entry it touches and shows up first in that coordinate's own variance, so
+    testing the diagonal tests the matrix. ``spread2`` computed here is itself the
+    cancellation-prone estimate, but as a GATE it is reliable -- when cancellation has corrupted it,
+    the corruption is bounded by ``eps * m^2``, which still leaves ``m*m`` orders of magnitude above
+    ``VECTOR_ANCHOR_CONDITION_RATIO * spread2``. A non-positive computed spread in any coordinate
+    activates the anchor outright (constant or near-constant data there).
+    """
+    if not w_sum > 0.0:
+        return False
+    m = np.asarray(chunk_sum, dtype=float) / w_sum
+    spread2 = np.asarray(chunk_sum2_diag, dtype=float) / w_sum - m * m
+    return bool(np.any(spread2 <= 0.0) or np.any(m * m > VECTOR_ANCHOR_CONDITION_RATIO * spread2))
+
+
+def warn_uncorrectable_vector_moments(
+    sum_x: np.ndarray | None,
+    sum_xx_diag: np.ndarray | None,
+    count: float,
+    *,
+    family: str,
+) -> None:
+    """Warn when raw-only vector statistics are too ill-conditioned for the covariance they imply.
+
+    An anchored track fixes an accumulator's OWN accumulation. Statistics that arrive already
+    reduced and without an anchor -- an engine/GPU kernel's stacked moments, a hand-built tuple, a
+    legacy artifact -- cannot be corrected: the information cancellation destroyed is not in them
+    any more. Naming it is the difference between an imprecise fit and a silently wrong one.
+
+    Deliberately NOT a raise: these statistics are the declared exchange format and the raw M-step
+    is what the library has always done with them.
+
+    TWO regimes have to speak, and only the first one used to -- see
+    :func:`mixle.stats.univariate.continuous._observation_contracts.warn_uncorrectable_raw_moments`
+    for the full argument, which is the same one coordinate-wise. Partial loss (a coordinate's
+    computed variance still positive but dominated by its squared mean) is gated by
+    :data:`VECTOR_ANCHOR_CONDITION_RATIO`. TOTAL loss -- cancellation has eaten a coordinate's
+    whole spread and the raw form computes a non-positive variance there -- was excluded because it
+    is also what an ordinary degenerate or single-point component looks like, and that exclusion
+    made the worst case the silent one. Both now warn; the total-loss message does not claim the
+    data was ill-conditioned, because from raw moments alone that is not knowable. A single
+    observation and all-zero coordinates stay quiet.
+    """
+    if count <= 0.0 or sum_x is None or sum_xx_diag is None:
+        return
+    mean = np.asarray(sum_x, dtype=float) / count
+    variance = np.asarray(sum_xx_diag, dtype=float) / count - mean * mean
+    ratio = np.where(variance > 0.0, mean * mean / np.where(variance > 0.0, variance, 1.0), 0.0)
+    worst = int(np.argmax(ratio))
+    if ratio[worst] > VECTOR_ANCHOR_CONDITION_RATIO:
+        import warnings
+
+        lost = min(100.0, 100.0 * float(np.log10(ratio[worst])) / 16.0)
+        warnings.warn(
+            "%s sufficient statistics arrived without shift-anchored moments and are too "
+            "ill-conditioned for the raw E[xx^T] - mu mu^T scatter: coordinate %d has mean^2/variance "
+            "%.3g, so the fitted scale matrix loses roughly %.0f%% of its significant digits to "
+            "cancellation. Accumulate through this family's own accumulator (which anchors "
+            "automatically), or subtract a constant origin from the data before fitting."
+            % (family, worst, float(ratio[worst]), lost),
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return
+    collapsed = np.flatnonzero((variance <= 0.0) & (mean != 0.0))
+    if count <= 1.0 or collapsed.size == 0:
+        return
+    import warnings
+
+    coordinate = int(collapsed[int(np.argmax(np.abs(mean[collapsed])))])
+    warnings.warn(
+        "%s sufficient statistics arrived without shift-anchored moments and imply a non-positive "
+        "E[xx^T] - mu mu^T variance in coordinate %d at mean %.6g, so the fitted scale matrix falls "
+        "onto this family's floor there. Raw moments at that magnitude cannot resolve a spread below "
+        "about %.3g, so this is either a genuinely degenerate coordinate or one whose spread "
+        "cancellation destroyed -- they are not distinguishable from these statistics. Accumulate "
+        "through this family's own accumulator (which anchors automatically), or subtract a constant "
+        "origin from the data before fitting."
+        % (family, coordinate, float(mean[coordinate]), 1.5e-8 * abs(float(mean[coordinate]))),
+        RuntimeWarning,
+        stacklevel=3,
+    )

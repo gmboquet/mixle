@@ -441,7 +441,10 @@ class InverseGaussianEstimator(ParameterEstimator):
             suff_stat (Optional[Tuple[float, float]]): Prior (mean, inverse-mean) targets for the
                 pseudo-count ridge.
             min_param (float): Lower clamp for the estimated mu and lam.
-            max_param (float): Upper clamp for the estimated lam.
+            max_param (float): Upper clamp for the estimated lam. ``lam`` scales with the data, so
+                ordinary durations recorded in nanoseconds rather than seconds reach the default
+                1e12 on their own; a fit that lands on either clamp records it through
+                ``numerical_repairs()`` rather than returning the clamped value silently.
             name (Optional[str]): Assign a name to the estimator.
             keys (Optional[str]): Assign keys for combining sufficient statistics.
 
@@ -472,11 +475,24 @@ class InverseGaussianEstimator(ParameterEstimator):
         mu = max(sum_x / count, self.min_param)
         # 1/lam = mean(1/x) - 1/mean(x); guard the harmonic gap against round-off.
         inv_lam = sum_inv / count - 1.0 / mu
+        repairs: tuple[str, ...] = ()
         if not np.isfinite(inv_lam) or inv_lam <= 0.0:
             lam = self.max_param
+            repairs = ("lam-unresolvable(harmonic gap %.3g -> %.6g)" % (float(inv_lam), lam),)
         else:
-            lam = min(max(1.0 / inv_lam, self.min_param), self.max_param)
-        return InverseGaussianDistribution(mu, lam, name=self.name, keys=self.keys)
+            unclamped = 1.0 / inv_lam
+            lam = min(max(unclamped, self.min_param), self.max_param)
+            if lam != unclamped:
+                # ``lam`` scales with the data, so ordinary durations in nanoseconds rather than
+                # seconds walk into ``max_param`` on their own: IG(mu=2e12, lam=3e12) fitted
+                # lam = 1e12, 3x too small, with an empty ``numerical_repairs()`` and no warning.
+                # The clamp is kept -- it is the documented parameter range -- but a clamp that is
+                # not disclosed is exactly the contract ``optimize`` promises it will disclose.
+                repairs = ("lam-clamped(%.6g -> %.6g)" % (unclamped, lam),)
+        rv = InverseGaussianDistribution(mu, lam, name=self.name, keys=self.keys)
+        if repairs:
+            rv._numerical_repairs = repairs
+        return rv
 
 
 class InverseGaussianDataEncoder(DataSequenceEncoder):

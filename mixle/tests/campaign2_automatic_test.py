@@ -14,8 +14,13 @@ error naming the field, its cardinality, and the remedy.
 T2-02: ``None`` and ``np.nan`` -- interchanged behind the caller's back by pandas float Series -- meant
 different models: ``None`` got a fitted missingness rate and a generative wrapper, ``nan`` a
 marginalized wrapper whose ``.p`` read 0.0 despite 20% of the data being missing, and whose sampler
-raised. Both spellings now take the fitted-rate generative wrapper; the infinity sentinels stay
-representational (they are values, not absences).
+raised. Both spellings now take the fitted-rate generative wrapper.
+
+Campaign-four T4-02 amendment: the infinity sentinels take the fitted-rate wrapper as well. They ARE
+values rather than absences, which is exactly the argument for fitting their rate -- the transparent
+wrapper claims ``.p == 0.0`` and simultaneously scores ``log_density(inf) == 0.0``, total mass 2.0.
+See ``test_infinity_gets_a_fitted_rate_too`` below and
+``mixle/tests/campaign4_failopen_test.py``.
 
 T2-09a addendum: the same -inf point-mass poison fired for every OTHER leaf the profiler freezes --
 a scalar type it does not recognize (datetime64/Timestamp, i.e. any ``read_csv(parse_dates=...)``
@@ -223,10 +228,26 @@ class MissingSpellingsAgreeTest(unittest.TestCase):
         self.assertAlmostEqual(as_series.p, as_list.p)
         self.assertAlmostEqual(as_series.log_density(2.0), as_list.log_density(2.0))
 
-    def test_infinity_stays_a_representational_value_not_a_missing_rate(self):
+    def test_infinity_gets_a_fitted_rate_too(self):
+        """UPDATED for campaign-four T4-02 (was test_infinity_stays_a_representational_value_...).
+
+        This test used to assert ``self.assertFalse(model.has_p)`` -- the transparent
+        ``est_prob=False`` wrapper -- on the reasoning that ``+/-inf`` is a value a numeric field can
+        carry rather than an absence. The reasoning is right and the conclusion did not follow. The
+        transparent wrapper does not model "a value that sometimes occurs": it reports ``.p == 0.0``
+        ("never occurs") while scoring ``log_density(inf) == 0.0`` (probability one), for total mass
+        2.0 and a sentinel row that costs zero nats -- an improper density that beats any proper
+        competitor on the same data for free. The fitted-rate wrapper IS the model of a value that
+        occurs at some rate, so that is what auto-inference now builds. Nothing about ``None``/``nan``
+        changed; the tests above still pin those.
+        """
         model = _fit(self.BASE + [math.inf, math.inf])
-        # +/-inf is a value a numeric field can carry, not an absence: no fitted rate.
-        self.assertFalse(model.has_p)
+        self.assertTrue(model.has_p)
+        self.assertAlmostEqual(model.p, 0.2)
+        self.assertAlmostEqual(model.log_density(math.inf), math.log(0.2))
+        # The base family is scaled by (1-p) instead of passed through unscaled, so the density is
+        # normalized: total mass 1, not 2.
+        self.assertAlmostEqual(model.log_density(2.0), model.dist.log_density(2.0) + math.log(0.8))
 
 
 if __name__ == "__main__":

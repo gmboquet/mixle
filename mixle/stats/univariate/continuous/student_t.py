@@ -19,10 +19,42 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.univariate.continuous._observation_contracts import (
+    AnchoredMomentTrack,
+    anchored_pooled_variance,
+    consistent_anchored_triple,
     finite_observations,
     scored_observation,
+    warn_uncorrectable_raw_moments,
 )
 from mixle.utils.special import gammaln
+
+
+class StudentTSuffStat(tuple):
+    """A ``(sum, sum2, count)`` sufficient statistic that also carries a shift-anchored side payload.
+
+    Behaves exactly like the plain 3-tuple everywhere it is indexed, unpacked, or iterated (it *is*
+    one); ``anchored`` is the shift-anchored moment payload
+    ``(anchor, sum_i w_i*(x_i - anchor), sum_i w_i*(x_i - anchor)^2)`` that
+    :class:`StudentTAccumulator` maintains alongside the raw moments so the M-step's variance
+    survives large-offset data. Code that doesn't know about the payload (generic
+    ``scale_suff_stat``, engine kernels, ...) sees an ordinary tuple and the estimate falls back to
+    the historical raw path.
+    """
+
+    def __new__(cls, sum_: float, sum2_: float, count_: float, anchored: tuple[float, float, float] | None = None):
+        obj = super().__new__(cls, (sum_, sum2_, count_))
+        obj.anchored = anchored
+        return obj
+
+    def __reduce__(self):
+        # A plain tuple subclass with a payload-bearing __new__ does not pickle by default; the
+        # Spark/mp reducers round-trip accumulator values through pickle, so keep the payload.
+        return (_rebuild_student_t_suff_stat, (tuple(self), self.anchored))
+
+
+def _rebuild_student_t_suff_stat(values: tuple, anchored: tuple | None) -> "StudentTSuffStat":
+    """Unpickle helper for :class:`StudentTSuffStat` (module-level so pickle can import it)."""
+    return StudentTSuffStat(values[0], values[1], values[2], anchored=anchored)
 
 
 class StudentTDistribution(SequenceEncodableProbabilityDistribution):
@@ -229,8 +261,17 @@ class StudentTSampler(DistributionSampler):
         return self.rng.standard_t(self.dist.df, size=size) * self.dist.scale + self.dist.loc
 
 
-class StudentTAccumulator(SequenceEncodableStatisticAccumulator):
-    """Accumulate weighted first and second moments for fixed-df t estimation."""
+class StudentTAccumulator(AnchoredMomentTrack, SequenceEncodableStatisticAccumulator):
+    """Accumulate weighted first and second moments for fixed-df t estimation.
+
+    Alongside the raw ``(sum, sum2, count)`` the accumulator keeps the conditioning-gated
+    shift-anchored moment track of :class:`AnchoredMomentTrack`: the naive ``E[x^2]-E[x]^2`` form
+    the moment M-step needs loses ~``2*log2(abs(mean)/sd)`` bits to cancellation, so sd ~2 data at
+    the Unix-epoch offset 1.7e9 collapsed the fitted scale onto ``min_scale`` -- 1.6e8x too small,
+    -86.6 nats per observation, reported with ``converged=True`` and an empty
+    ``numerical_repairs()``. Well-conditioned data never activates the track and accumulates
+    bit-identically to the historical single-pass path.
+    """
 
     def __init__(self, name: str | None = None, keys: str | None = None) -> None:
         self.sum = 0.0
@@ -238,9 +279,11 @@ class StudentTAccumulator(SequenceEncodableStatisticAccumulator):
         self.count = 0.0
         self.name = name
         self.keys = keys
+        self._init_anchor()
 
     def update(self, x: float, weight: float, estimate: StudentTDistribution | None) -> None:
         """Accumulate weighted first and second moments for one observation."""
+        self._anchor_scalar(float(x), weight)
         self.sum += x * weight
         self.sum2 += x * x * weight
         self.count += weight
@@ -251,9 +294,7 @@ class StudentTAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: StudentTDistribution | None) -> None:
         """Accumulate weighted first and second moments from encoded data."""
-        self.sum += np.dot(x, weights)
-        self.sum2 += np.dot(x * x, weights)
-        self.count += np.sum(weights, dtype=np.float64)
+        self._anchor_fold_chunk(x, weights)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize statistics from encoded observations."""
@@ -261,20 +302,39 @@ class StudentTAccumulator(SequenceEncodableStatisticAccumulator):
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "StudentTAccumulator":
         """Merge another Student-t sufficient-statistic tuple."""
+        self._anchor_absorb(suff_stat)
         self.sum += suff_stat[0]
         self.sum2 += suff_stat[1]
         self.count += suff_stat[2]
         return self
 
     def value(self) -> tuple[float, float, float]:
-        """Return accumulated sum, second moment sum, and count."""
-        return self.sum, self.sum2, self.count
+        """Return accumulated sum, second moment sum, and count.
+
+        A plain 3-tuple for every consumer that treats it as one; once the shift-anchored moment
+        track is live it is a :class:`StudentTSuffStat` additionally carrying the anchored moments
+        in its ``.anchored`` attribute, so :meth:`combine` can fold them in and
+        :meth:`StudentTEstimator.estimate` can compute a shift-invariant scale.
+        """
+        anchored = self._anchor_payload()
+        if anchored is None:
+            return self.sum, self.sum2, self.count
+        return StudentTSuffStat(self.sum, self.sum2, self.count, anchored=anchored)
 
     def from_value(self, x: tuple[float, float, float]) -> "StudentTAccumulator":
         """Replace accumulator contents from a sufficient-statistic tuple."""
         self.sum = x[0]
         self.sum2 = x[1]
         self.count = x[2]
+        self._anchor_restore(x)
+        return self
+
+    def scale(self, c: float) -> "StudentTAccumulator":
+        """Scale the accumulated statistics in place by ``c``, anchored track included."""
+        self._anchor_scale(c)
+        self.sum *= c
+        self.sum2 *= c
+        self.count *= c
         return self
 
     def acc_to_encoder(self) -> "StudentTDataEncoder":
@@ -301,6 +361,17 @@ class StudentTEstimator(ParameterEstimator):
     and uses weighted moments, while generic gradient optimizers such as
     ``mixle.inference.gradient_fit.fit_mle`` / ``fit_map`` can fit all three
     parameters through distribution-owned backend math.
+
+    The variance moment is formed from shift-anchored statistics whenever the accumulated
+    sufficient statistics carry that payload (see :class:`StudentTAccumulator`), which makes the fit
+    SHIFT-EQUIVARIANT: estimating on ``x + c`` returns ``loc + c`` with ``scale`` unchanged, for any
+    constant ``c`` the data can carry -- epoch seconds (~1.7e9) and 2**31 included. With a plain raw
+    tuple -- statistics the conditioning gate never needed to anchor, or ones that arrived already
+    reduced from an engine kernel or an older serialization -- the historical raw path is used
+    bit-identically, and ``estimate`` warns rather than returning a scale it cannot stand behind.
+
+    ``min_scale`` (default 1e-8) is an absolute floor on the returned ``scale``; it exists for
+    genuinely constant data, and a fit that lands on it is reporting no resolvable spread.
     """
 
     def __init__(
@@ -327,22 +398,45 @@ class StudentTEstimator(ParameterEstimator):
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> StudentTDistribution:
         """Estimate location and scale while keeping degrees of freedom fixed."""
-        sum_x, sum_x2, count = suff_stat
-        if self.pseudo_count is not None and self.suff_stat is not None:
-            loc0, scale0 = self.suff_stat
-            var0 = scale0 * scale0 * self.df / (self.df - 2.0)
-            sum_x += self.pseudo_count * loc0
-            sum_x2 += self.pseudo_count * (var0 + loc0 * loc0)
-            count += self.pseudo_count
+        sum_x, sum_x2, count = float(suff_stat[0]), float(suff_stat[1]), float(suff_stat[2])
+        # The anchored payload (when present) describes the RAW data only -- captured before any
+        # prior blend below -- so it is read off the untouched (sum_x, count) pair.
+        anchored = consistent_anchored_triple(suff_stat, sum_x, count)
+        raw_count = count
+
+        prior_mean: float | None = None
+        prior_variance: float | None = None
+        pc = self.pseudo_count
+        if pc is not None and self.suff_stat is not None:
+            prior_mean, scale0 = self.suff_stat
+            prior_variance = scale0 * scale0 * self.df / (self.df - 2.0)
+            sum_x += pc * prior_mean
+            sum_x2 += pc * (prior_variance + prior_mean * prior_mean)
+            count += pc
 
         if count <= 0.0:
             return StudentTDistribution(self.df, name=self.name, keys=self.keys)
 
         loc = sum_x / count
-        var = max(sum_x2 / count - loc * loc, self.min_scale * self.min_scale)
+        notes: tuple[str, ...] = ()
+        if anchored is not None:
+            # Only the variance loses to cancellation at large magnitude; the location is a plain
+            # same-sign sum and is computed from the raw (possibly prior-blended) moments above,
+            # unchanged. The prior is folded into the variance separately, never through the
+            # anchored sums (which only ever describe the observed data).
+            pooled, notes = anchored_pooled_variance(
+                anchored[0], anchored[1], anchored[2], raw_count, loc, pc, prior_mean, prior_variance
+            )
+            var = max(pooled, self.min_scale * self.min_scale)
+        else:
+            warn_uncorrectable_raw_moments(sum_x, sum_x2, count, family="Student-t")
+            var = max(sum_x2 / count - loc * loc, self.min_scale * self.min_scale)
         scale2 = var * (self.df - 2.0) / self.df
         scale = math.sqrt(max(scale2, self.min_scale * self.min_scale))
-        return StudentTDistribution(self.df, loc=loc, scale=scale, name=self.name, keys=self.keys)
+        dist = StudentTDistribution(self.df, loc=loc, scale=scale, name=self.name, keys=self.keys)
+        if notes:
+            dist._numerical_repairs = notes
+        return dist
 
 
 class StudentTDataEncoder(DataSequenceEncoder):

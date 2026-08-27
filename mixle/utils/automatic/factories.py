@@ -135,7 +135,7 @@ def _anchored_moments(items: Sequence[tuple[float, float]]) -> tuple[float, floa
 
     ``sum(w*k*k)/W - mean**2`` is the textbook cancelling form. On data whose magnitude dwarfs its
     spread -- epoch timestamps in s/ms/us, instrument baselines, prices quoted against a large
-    offset -- it loses roughly ``2*log2(|mean|/sd)`` bits, so at 1e9 it returns noise and at 1e12 it
+    offset -- it loses roughly ``2*log2(abs(mean)/sd)`` bits, so at 1e9 it returns noise and at 1e12 it
     returns a negative number. The scalar Gaussian accumulator was already fixed to expand its
     scatter about a data anchor (see ``_anchored_pooled_variance`` in
     ``mixle.stats.univariate.continuous.gaussian``), but the auto-inference factories kept the
@@ -147,7 +147,7 @@ def _anchored_moments(items: Sequence[tuple[float, float]]) -> tuple[float, floa
     anchor that is itself one of the values is exactly zero, so the variance comes out exactly 0.0
     and the caller recognizes the column as constant. The only clamp is relative -- a residue below
     1e-12 of the largest term is cross-term rounding, not spread. Deliberately NO absolute
-    ``eps * |mean|`` floor: at 1e15 that threshold is 0.89, which reads a real ``N(1e15, 1)`` sample
+    ``eps * abs(mean)`` floor: at 1e15 that threshold is 0.89, which reads a real ``N(1e15, 1)`` sample
     (scatter 436 against a threshold of 395) as constant on some seeds and not on others.
 
     Returns ``(0.0, None, None)`` when no pair carries weight; the variance is never negative.
@@ -249,11 +249,89 @@ def get_optional_estimator(
     ``None`` and ``nan``. They must mean the same model, because they are interchanged behind the
     caller's back -- a pandas float Series silently stores ``None`` as ``nan`` -- so giving ``nan``
     the transparent non-generative wrapper made the same data produce a different (and unsamplable)
-    model depending on the container it arrived in. The infinity sentinels (``+/-inf``) are
-    different: they are VALUES a numeric field can carry, not absences, so they use this wrapper as a
-    representational device and keep the transparent default.
+    model depending on the container it arrived in.
+
+    The infinity sentinels (``+/-inf``) take the fitted rate for the SAME reason, though by a
+    different argument. They are indeed values a numeric field can carry rather than absences, but
+    that is precisely why the fitted-rate wrapper is the correct model for them: it is an atom of
+    mass ``p`` at the sentinel beside the base family scaled by ``1-p``, which is exactly "this
+    column is a continuous measurement that comes out infinite ``p`` of the time" and integrates to
+    one. The transparent default asserts the opposite -- ``.p`` reads 0.0, "missingness never
+    happens", while ``log_density(inf)`` returns 0.0, probability one -- for total mass 2.0, an
+    improper density whose sentinel rows cost exactly zero nats. Auto-inference used the transparent
+    default here through 0.7.x, so a single overflow or a JSON ``1e999`` bought an unbounded free
+    gain in log-likelihood against any proper competitor on the same data, invisible to the paired
+    comparison tests in ``mixle.inference`` because those consume plain arrays and cannot see
+    ``density_semantics()``. Callers that genuinely want the marginalized factor -- inference
+    conditional on an externally modeled missingness mechanism -- still get it by passing
+    ``est_prob=False`` deliberately, which is what this argument is for.
     """
     return _estimator_provider(use_bstats).OptionalEstimator(est, missing_value=missing_value, est_prob=est_prob)
+
+
+def get_typed_mixture_estimator(
+    string_estimator: ParameterEstimator,
+    numeric_estimator: ParameterEstimator,
+    use_bstats: bool = False,
+    string_support: Sequence[Any] | None = None,
+) -> "ParameterEstimator":
+    """Dispatch mixture for a scalar column that carries both numbers and strings.
+
+    One dirty cell in a CSV -- a single ``"N/A"``, ``"NULL"``, ``"?"`` or ``""`` in an otherwise
+    continuous column -- is the most ordinary data-quality defect there is, and until 0.8.0 it
+    silently retyped the WHOLE column: 300 finite floats plus one ``"N/A"`` resolved to a
+    categorical over the 301 observed values (wrapped in ``IgnoredDistribution`` once the identifier
+    thresholds were crossed), a memorization table that scored every value it had not literally seen
+    -- the sample mean included -- at ``-inf``, with ``fit_provenance()`` reporting
+    ``converged=True`` and ``repairs=()``.
+
+    The honest reading of such a column is that it carries two disjoint types, so the honest model is
+    the one the library already has for disjoint types: a
+    :class:`~mixle.stats.combinator.select.SelectDistribution` dispatch mixture whose branch label is
+    the Python type, routed by the serializable
+    :class:`~mixle.stats.combinator.select.TypeDispatch`. The branch is OBSERVED, so nothing is
+    guessed and nothing is iterated: the weights are the two type proportions in closed form, each
+    child is fit on its own subset by the ordinary leaf rules, and the result is a normalized law
+    that samples.
+
+    Two properties make this a repair rather than a re-design. The string branch's density is
+    unchanged -- ``log(n_str/n) + log(count/n_str)`` is ``log(count/n)``, what the merged categorical
+    gave, exactly in real arithmetic and to within a ULP in floating point -- so nothing that scored
+    finitely before scores differently now. And on the case above the mixture reproduces the model
+    you get by spelling the dirty cell ``nan`` instead, digit for digit (mean 49.997748666666666,
+    variance 93.32376314029874, rate 0.0033222591362126247), which is the answer the library already
+    called correct.
+
+    ``string_support`` exists for one specific consequence of routing. A merged categorical is shown
+    every label in every mixture component -- ``CategoricalAccumulator`` records a label even at zero
+    weight -- but a ROUTED branch is only shown the rows that route to it, and a component that is
+    initialized with no string rows at all hands its string branch an empty count map. Under the
+    Bayesian path the symmetric ``DictDirichletDistribution(alpha)`` cannot widen that into anything
+    (its parameters are a scalar, so there is no support to fall back on) and estimation raises
+    "empty categorical fitting requires a prior with an explicit finite support" -- which is how
+    ``get_dpm_mixture`` met this repair. Naming the observed string labels in the prior gives the
+    empty branch the uniform over exactly those labels instead. The plain MLE path needs no
+    equivalent: ``get_categorical_estimator`` already carries the empirical map as ``suff_stat``, and
+    the empty case widens to a zero-count support over it.
+
+    Args:
+        string_estimator: Leaf estimator for the ``str``/``bytes`` values.
+        numeric_estimator: Leaf estimator for the (non-boolean) real values.
+        use_bstats: Build the Bayesian path for the wrapper's provider lookup.
+        string_support: Observed string labels, used only to pin the Bayesian branch's Dirichlet
+            support as described above. Ignored on the plain path and for a frozen (Ignored) branch,
+            which is never re-estimated and so never meets the empty-count case.
+
+    Returns:
+        A ``SelectEstimator`` that routes by type and estimates the branch weights.
+    """
+    provider = _estimator_provider(use_bstats)
+    if use_bstats and string_support and getattr(string_estimator, "has_conj_prior", False):
+        string_estimator.set_prior(
+            provider.DictDirichletDistribution({key: _BAYES_DIRICHLET_ALPHA for key in string_support})
+        )
+    router = provider.TypeDispatch([("str", "bytes"), ("real",)])
+    return provider.SelectEstimator([string_estimator, numeric_estimator], router, estimate_weights=True)
 
 
 def get_length_estimator(

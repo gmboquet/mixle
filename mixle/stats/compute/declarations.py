@@ -864,7 +864,15 @@ _NUMBA_INFIX_OPS = {
 
 _NUMBA_FUNC_OPS = {
     "log": "math.log",
-    "exp": "math.exp",
+    # numpy's exp, not the stdlib's: math.exp raises OverflowError past ~709, where numba's
+    # LLVM-compiled exp (and numpy's) follow IEEE-754 and return +inf. This fallback path exists
+    # to emulate what the numba-compiled kernel would compute when numba is not installed --
+    # CI's core lane is exactly that environment -- and a generated Gumbel/GEV/etc. kernel scoring
+    # a collapsed-scale fit (a raw-statistics fit the class docstring already documents as
+    # "wrong but no longer silent", campaign four C4S-02) can produce a standardized deviate large
+    # enough to overflow, which must return the same +inf a numba build would, not crash with an
+    # opaque math-module error naming neither the family nor the remedy.
+    "exp": "np.exp",
     "sqrt": "math.sqrt",
     "abs": "abs",
     "floor": "math.floor",

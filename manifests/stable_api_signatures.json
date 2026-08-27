@@ -7919,6 +7919,30 @@
         "return_annotation": "None"
       }
     },
+    "mixle.stats.univariate.continuous.log_gaussian.LogGaussianAccumulator.scale": {
+      "kind": "class-method",
+      "signature": {
+        "parameters": [
+          {
+            "annotation": null,
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "self"
+          },
+          {
+            "annotation": "float",
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "c"
+          }
+        ],
+        "return_annotation": "'LogGaussianAccumulator'"
+      }
+    },
     "mixle.stats.univariate.continuous.log_gaussian.LogGaussianAccumulator.seq_initialize": {
       "kind": "class-method",
       "signature": {
@@ -9090,6 +9114,55 @@
           }
         ],
         "return_annotation": "float | numpy.ndarray"
+      }
+    },
+    "mixle.stats.univariate.continuous.log_gaussian.LogGaussianSuffStat": {
+      "kind": "class-constructor",
+      "signature": {
+        "parameters": [
+          {
+            "annotation": "float",
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "log_sum"
+          },
+          {
+            "annotation": "float",
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "log_sum2"
+          },
+          {
+            "annotation": "float",
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "count"
+          },
+          {
+            "annotation": "float",
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "count2"
+          },
+          {
+            "annotation": "tuple[float, float, float] | None",
+            "default": {
+              "present": true,
+              "value": null
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "anchored"
+          }
+        ],
+        "return_annotation": null
       }
     },
     "mixle.stats.univariate.discrete.categorical.CategoricalAccumulator": {

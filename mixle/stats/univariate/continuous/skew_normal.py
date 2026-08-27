@@ -30,6 +30,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.univariate.continuous._observation_contracts import (
+    centered_batch_moments,
     finite_observations,
     scored_observation,
 )
@@ -181,7 +182,7 @@ class SkewNormalDistribution(SequenceEncodableProbabilityDistribution):
 
 
 class SkewNormalSampler(DistributionSampler):
-    """Draw observations as ``xi + omega (delta |Z0| + sqrt(1-delta^2) Z1)`` with ``Z0, Z1`` standard normal."""
+    """Draw observations as ``xi + omega (delta * abs(Z0) + sqrt(1-delta^2) Z1)`` with ``Z0, Z1`` standard normal."""
 
     def __init__(self, dist: SkewNormalDistribution, seed: int | None = None) -> None:
         self.rng = RandomState(seed)
@@ -203,7 +204,7 @@ class SkewNormalAccumulator(SequenceEncodableStatisticAccumulator):
     ``M2 = sum_i w_i (x_i - mean)^2`` and ``M3 = sum_i w_i (x_i - mean)^3`` are the
     weighted central moments. This is mathematically equivalent to the raw power sums
     ``(sum x, sum x^2, sum x^3)`` but avoids the catastrophic ``E[x^2] - E[x]^2``
-    cancellation when ``|mean|`` is large relative to the spread: each batch is centered
+    cancellation when ``abs(mean)`` is large relative to the spread: each batch is centered
     on its own mean *before* squaring/cubing, and batches merge through the
     Pébay/West parallel-moment formulas (exact for real weights). SkewNormal is a
     host-only leaf (no exponential-family / engine-resident path), so changing the
@@ -246,16 +247,18 @@ class SkewNormalAccumulator(SequenceEncodableStatisticAccumulator):
         self.update(x, weight, None)
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: SkewNormalDistribution | None) -> None:
-        """Accumulate weighted central moments from encoded observations."""
-        xx = np.asarray(x, dtype=np.float64)
-        ww = np.asarray(weights, dtype=np.float64)
-        c_b = float(np.sum(ww))
+        """Accumulate weighted central moments from encoded observations.
+
+        Centering the batch on its own mean removes the ``E[x^2]-E[x]^2`` cancellation, but a
+        SINGLE centering pass does not remove all of it: the computed ``mean`` carries the rounding
+        of a large-magnitude sum, and that residue enters the third moment linearly, which left the
+        fitted shape 1.1e-3 off at offset 1e12 and 5e-7 off at the Unix-epoch offset. The second
+        pass in :func:`centered_batch_moments` computes the residue at spread scale, where it is
+        exact, and makes the fit shift-equivariant.
+        """
+        c_b, mean_b, m2_b, m3_b = centered_batch_moments(x, weights)
         if c_b <= 0.0:
             return
-        mean_b = float(np.dot(xx, ww) / c_b)
-        dx = xx - mean_b  # center before squaring/cubing -> no cancellation
-        m2_b = float(np.dot(ww, dx * dx))
-        m3_b = float(np.dot(ww, dx * dx * dx))
         self._merge(c_b, mean_b, m2_b, m3_b)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
@@ -304,7 +307,14 @@ class SkewNormalAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class SkewNormalEstimator(ParameterEstimator):
-    """Method-of-moments estimator for skew-normal location, scale and shape."""
+    """Method-of-moments estimator for skew-normal location, scale and shape.
+
+    The fit is SHIFT-EQUIVARIANT: estimating on ``x + c`` returns ``loc + c`` with ``scale`` and
+    ``shape`` unchanged, for any constant ``c`` the data can carry -- epoch seconds (~1.7e9), 2**31
+    and 1e12 included. The moments come from :class:`SkewNormalAccumulator`, which centers each
+    batch twice for exactly this reason; a single centering pass left the fitted shape 1.1e-3 off
+    at 1e12, silently.
+    """
 
     def __init__(
         self,

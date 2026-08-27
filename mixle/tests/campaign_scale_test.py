@@ -133,7 +133,16 @@ class DiagonalFloorDisclosureTest(unittest.TestCase):
         # and the floor really did bind: the constant coordinate has a manufactured variance
         self.assertGreater(float(np.asarray(fitted.covar)[1]), 0.0)
 
-    def test_a_heterogeneous_unit_fit_reports_the_inflated_coordinate(self):
+    def test_a_heterogeneous_unit_fit_has_nothing_to_report(self):
+        # UPDATED (T1-03). This test used to assert the opposite: that this fit reports an inflated
+        # coordinate, because the floor was ``1e-6 * mean(var)`` ACROSS coordinates and so the
+        # smallest column here (variance 2.25, against a mean of 3.4e6) was lifted to 3.4 -- 1.5x
+        # too wide -- purely because another column was measured in bigger units. Disclosing that
+        # was the best available answer while the floor still bound; it is not an answer at all now
+        # that the floor is priced per coordinate. The floor no longer touches a coordinate that has
+        # a positive variance of its own, so the fit is the exact per-column MLE and there is
+        # nothing to disclose. The disclosure contract itself (T4-6) is still pinned by the sibling
+        # test above, on a constant column -- the case where a clamp genuinely still happens.
         rng = np.random.default_rng(42)
         x = np.column_stack(
             [
@@ -143,12 +152,8 @@ class DiagonalFloorDisclosureTest(unittest.TestCase):
             ]
         )
         fitted = optimize([tuple(v) for v in x], DiagonalGaussianEstimator(dim=3), max_its=30, delta=None)
-        self.assertTrue(
-            any("variance-floored" in r for r in fitted.numerical_repairs()),
-            fitted.numerical_repairs(),
-        )
-        empirical = np.var(x, axis=0)
-        self.assertGreater(float(np.asarray(fitted.covar).min()), float(empirical.min()))
+        self.assertEqual(fitted.numerical_repairs(), ())
+        np.testing.assert_allclose(np.asarray(fitted.covar), np.var(x, axis=0), rtol=1e-12)
 
     def test_a_scale_homogeneous_diagonal_fit_stays_silent(self):
         rng = np.random.default_rng(7)

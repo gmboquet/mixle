@@ -35,6 +35,7 @@ from mixle.stats.univariate.continuous._observation_contracts import (
     consistent_anchored_triple,
     scale_anchored_triple,
     scored_observation,
+    warn_uncorrectable_raw_moments,
 )
 from mixle.utils.special import digamma
 
@@ -660,7 +661,7 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
                 running numerics-error estimate (see :mod:`mixle.stats.compute.error_receipts`), read
                 back via :meth:`error_bound`. ``False`` (the default) is the plain float64
                 accumulation this class always used, plus an O(1)-per-chunk conditioning check
-                that activates the shift-anchored moment track only on data whose |mean|/spread
+                that activates the shift-anchored moment track only on data whose abs(mean)/spread
                 ratio would corrupt the raw variance -- well-conditioned data accumulates the
                 historical single-pass way with no measurable overhead.
 
@@ -1065,7 +1066,7 @@ def _anchored_pooled_variance(
     :func:`mixle.stats.univariate.continuous._gaussian_contracts.pooled_scalar_variance`), but the
     observed scatter about ``mean`` is expanded about the data anchor, so every term is
     O(count * spread^2) and the result is shift-invariant instead of losing
-    ~2*log2(|mean|/sd) bits to cancellation.
+    ~2*log2(abs(mean)/sd) bits to cancellation.
 
     Returns the variance and any repairs to disclose through ``numerical_repairs()``.
 
@@ -1081,7 +1082,7 @@ def _anchored_pooled_variance(
     maximum-likelihood path pure rounding of ``sum_x / count`` at data magnitude, and the ONLY place
     the large magnitude enters. Clamping the rounding term alone leaves the data untouched; the old
     single-sum form could only clamp the total, so its ulp-scale threshold had to be crossed by the
-    spread as well, and any spread below ~``4 eps |mean|`` per observation was read as constant.
+    spread as well, and any spread below ~``4 eps`` times abs(mean) per observation was read as constant.
     """
     if count <= 0.0:
         observed_scatter = 0.0
@@ -1133,7 +1134,29 @@ def _anchored_pooled_variance(
 
 
 class GaussianEstimator(ParameterEstimator):
-    """Estimate Gaussian mean and variance from accumulated sufficient statistics."""
+    """Estimate Gaussian mean and variance from accumulated sufficient statistics.
+
+    The variance is formed from shift-anchored statistics whenever the accumulated statistics carry
+    that payload (see :class:`GaussianAccumulator`), which makes the fit shift-equivariant at any
+    data offset. Statistics that arrive WITHOUT that payload cannot be corrected here -- the
+    information cancellation destroyed is not in them any more -- and that is a reachable state, not
+    a theoretical one: an engine kernel stacks the declared ``(sum, sum2, count, count2)`` moments
+    directly, so ``optimize(x + 1.7e9, GaussianEstimator(), engine=NUMPY_ENGINE)`` on sd ~2 data
+    returned a variance 7.9e9 times too large. ``estimate`` now WARNS in that case rather than
+    returning it silently; the remedy is to accumulate through :class:`GaussianAccumulator` (which
+    anchors automatically) or to subtract a constant origin from the data before fitting.
+
+    ON GENUINELY DEGENERATE (zero-spread) DATA the equivariance guarantee above does not apply, and
+    cannot: the true variance of a point mass is 0 and the true density is a Dirac delta, so the
+    floor returned is a convention, not a measurement, and no offset makes one convention more
+    correct than another. This estimator's convention is ``ratio * mu**2`` (scale-relative, so it
+    is a UV of noise on 10 uV data and 2.9e10 on data at the Unix epoch); its sibling
+    :class:`~mixle.stats.multivariate.diagonal_gaussian.DiagonalGaussianEstimator` uses a flat
+    ``1e-8`` regardless of magnitude -- the two disagree by up to 18 orders of magnitude on
+    identical degenerate input (T1-05, campaign four), and neither is "right". A caller that needs a
+    specific, fixed value on this exact input -- not just a safeguard against it -- should pass
+    ``min_covar=<value>`` explicitly, which both estimators honor exactly.
+    """
 
     def __init__(
         self,
@@ -1341,6 +1364,12 @@ class GaussianEstimator(ParameterEstimator):
                 prior_variance,
             )
         else:
+            # Raw-only statistics cannot be corrected here -- the information cancellation destroyed
+            # is not in them any more -- so the one thing owed to the caller is to say so. Before
+            # this the family was silent: sd ~2 data at offset 1.7e9, handed in as the declared raw
+            # tuple, returned sigma2 = 2.89e10 for a true 3.65 with no warning and no repair note,
+            # while every sibling that DOES warn had had the same hole in its total-loss branch.
+            warn_uncorrectable_raw_moments(sum_x, sum_xx, count, family="Gaussian")
             sigma2 = pooled_scalar_variance(
                 sum_x,
                 sum_xx,

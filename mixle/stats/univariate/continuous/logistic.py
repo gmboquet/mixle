@@ -22,6 +22,7 @@ from mixle.stats.univariate.continuous._observation_contracts import (
     consistent_anchored_triple,
     scale_anchored_triple,
     scored_observation,
+    warn_uncorrectable_raw_moments,
 )
 
 
@@ -612,6 +613,11 @@ class LogisticEstimator(ParameterEstimator):
                 anchored[0], anchored[1], anchored[2], count, loc, pc, prior_mean, prior_variance
             )
         else:
+            # Raw-only statistics cannot be corrected here; naming that is the difference between an
+            # imprecise fit and a silently wrong one. Before this the family was silent: sd ~2 data
+            # at offset 1.7e9, handed in as the declared raw tuple, returned scale = 1e-8 (the
+            # min_scale floor) for a true 1.0538 with no warning at all.
+            warn_uncorrectable_raw_moments(blended_sum_x, blended_sum_x2, blended_count, family="logistic")
             var = max(blended_sum_x2 / blended_count - loc * loc, 0.0)
 
         scale = math.sqrt(max(3.0 * var / (math.pi * math.pi), self.min_scale * self.min_scale))

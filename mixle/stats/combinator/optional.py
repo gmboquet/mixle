@@ -5,6 +5,29 @@ from a base distribution set by the user.
 
 The OptionalDistribution allows for potentially missing data. The value p (the probability of being missing)
 must be specified to sample from the distribution.
+
+**The two modes, and why only one of them is a law.** ``p`` is optional, and leaving it out does not
+mean "p is zero" -- it selects a different object:
+
+* ``p`` given -- a normalized mixture: mass ``p`` on the sentinel, the base family scaled by
+  ``1-p`` everywhere else. It integrates to one, ``density_semantics()`` reports ``EXACT``, and it
+  samples.
+* ``p is None`` -- the missing outcome is MARGINALIZED, i.e. ``log_density(sentinel)`` is ``0.0``
+  and the base density is passed through unscaled. This is a likelihood FACTOR conditioned on an
+  externally modeled missingness mechanism, not a law: its total mass is 1 (the base) + 1 (the
+  sentinel scored at probability one) = 2, sentinel rows cost exactly zero nats, and
+  ``density_semantics()`` reports ``LIKELIHOOD_FACTOR`` to say so. It cannot be sampled
+  (``NonGenerativeOptionalError``).
+
+Two consequences worth knowing before choosing. First, ``.p`` reads ``0.0`` in the marginalized mode
+-- ``has_p`` is the attribute that distinguishes "no rate was ever fitted" from "the rate was fitted
+and came out zero", and ``repr`` prints ``p=None`` for the former. Second, the free sentinel rows
+mean a marginalized model cannot be compared on likelihood against a proper one over the same data:
+it wins by construction, by ``-log(p)`` nats per sentinel row, and the paired comparison helpers in
+``mixle.inference`` (``vuong_test``, ``clarke_test``, ``compare_elpd``) take plain score arrays and
+so cannot see the flag that would have warned them. Auto-inference accordingly fits the rate for
+every sentinel it introduces (see :meth:`mixle.utils.automatic.DatumNode.get_estimator`); the
+marginalized mode is for callers who ask for it deliberately.
 """
 
 from __future__ import annotations
@@ -146,7 +169,9 @@ class OptionalDistribution(SequenceEncodableProbabilityDistribution):
 
         Attributes:
             dist (SequenceEncodableProbabilityDistribution): Base distribution.
-            p (float): Probability that dist has missing_value.
+            p (float): Probability that dist has missing_value. Reads 0.0 when ``p`` was not
+                supplied -- ``has_p``, not this, distinguishes "no rate was ever fitted" (the
+                marginalized likelihood factor) from "the rate was fitted and came out zero".
             has_p (bool): True if distribution has arg p passed.
             log_p (float): log of p.
             log_pn (float): log(1-p).

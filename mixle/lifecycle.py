@@ -186,11 +186,21 @@ def _tabular_records(data: Any) -> list:
                     f"column (got {type(column).__name__}); for row-shaped data pass a list of "
                     "records instead of a single mapping"
                 )
-            columns.append(list(column))
+            from mixle.data.sources.pandas_source import column_records
+
+            columns.append(column_records(column))
             lengths[name] = len(columns[-1])
         if len(set(lengths.values())) > 1:
             raise ValueError(f"mapping-of-columns input needs equal-length columns, got lengths {lengths}")
         return columns[0] if len(columns) == 1 else [tuple(row) for row in zip(*columns, strict=True)]
+    if type(data).__name__ == "Series" and type(data).__module__.startswith("pandas"):
+        # A bare Series carries pandas' own missing-value convention rather than the row-shaped
+        # sentinel Model.fit/evaluate/propose expect, and the generic list(data) fallthrough below
+        # does not normalize it, so a Model built from a Series meets the same dtype-dependent
+        # sentinel mismatch the auto-inference path had (campaign four, T2-02, the Series half).
+        from mixle.data.sources.pandas_source import column_records
+
+        return column_records(data)
     try:
         return list(data)
     except TypeError as exc:

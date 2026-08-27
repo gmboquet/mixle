@@ -47,6 +47,7 @@ from mixle.stats.multivariate._vector_contracts import (
     pooled_gaussian_covariance,
     pseudo_counts,
     require_pseudo_moments,
+    warn_uncorrectable_vector_moments,
 )
 from mixle.stats.multivariate._vector_contracts import (
     matrix as matrix_parameter,
@@ -1758,34 +1759,21 @@ class MultivariateGaussianEstimator(ParameterEstimator):
 
         Deliberately NOT a raise: these statistics are the declared exchange format, the raw M-step
         is what the library has always done with them, and a fit that is imprecise is not a fit that
-        must be refused. Deliberately NOT the full ``_needs_anchor`` gate either -- that gate also
-        fires on a non-positive computed spread, which is the ordinary degenerate/single-point EM
-        component the ridge exists for and already discloses. Only the genuine large-offset
-        cancellation regime warns.
-        """
-        if count <= 0.0 or sum_x is None or sum_xx is None:
-            return
-        m = sum_x / count
-        spread2 = np.diag(sum_xx) / count - m * m
-        risky = (spread2 > 0.0) & (m * m > _ANCHOR_CONDITION_RATIO * spread2)
-        if not np.any(risky):
-            return
-        import warnings
+        must be refused.
 
-        worst = int(np.argmax(np.where(risky, m * m / np.where(spread2 > 0.0, spread2, 1.0), -np.inf)))
-        warnings.warn(
-            "multivariate Gaussian sufficient statistics arrived without shift-anchored moments and "
-            "are too ill-conditioned for the raw E[xx^T] - mu mu^T covariance: coordinate %d has "
-            "mean^2/variance %.3g, so the fitted covariance loses roughly %.0f%% of its significant "
-            "digits to cancellation. Accumulate through MultivariateGaussianAccumulator (which "
-            "anchors automatically), or center the data before fitting."
-            % (
-                worst,
-                float(m[worst] * m[worst] / spread2[worst]),
-                min(100.0, 100.0 * np.log10(float(m[worst] * m[worst] / spread2[worst])) / 16.0),
-            ),
-            RuntimeWarning,
-            stacklevel=3,
+        The gate itself lives in :func:`~mixle.stats.multivariate._vector_contracts.warn_uncorrectable_vector_moments`
+        rather than here. It was transcribed into this class, into the diagonal family and into the
+        shared vector contract, and all three copies carried the same hole: the total-loss case (a
+        coordinate whose computed variance is non-positive because cancellation ate the whole
+        spread) was excluded as "the ordinary degenerate component", which made the WORST case the
+        silent one. Fixing three copies is how this defect class kept coming back, so this method is
+        now a thin call into the one implementation.
+        """
+        warn_uncorrectable_vector_moments(
+            sum_x,
+            None if sum_xx is None else np.diag(sum_xx),
+            count,
+            family="multivariate Gaussian",
         )
 
     def _attach_conditioning_receipt(self, dist: "MultivariateGaussianDistribution", raw_covar: np.ndarray) -> None:

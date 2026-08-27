@@ -29,6 +29,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import centered_batch_moments
 from mixle.utils.special import log_erfcx
 
 _MIN_EMG_PARAM = 1.0e-12
@@ -193,7 +194,7 @@ class ExponentiallyModifiedGaussianAccumulator(SequenceEncodableStatisticAccumul
         Stored as ``(count, mean, M2, M3)`` with ``M2 = sum_i w_i (x_i-mean)^2`` and
         ``M3 = sum_i w_i (x_i-mean)^3``. Centering each batch before squaring/cubing and
         merging via the Pébay parallel-moment recurrence avoids the ``E[x^2]-E[x]^2``
-        cancellation that destroyed the skewness (and hence ``tau``) for large-``|mean|`` data.
+        cancellation that destroyed the skewness (and hence ``tau``) for data with large ``abs(mean)``.
         EMG is a host-only leaf, so this representation change has no engine-swap implications.
 
         Attributes:
@@ -241,16 +242,18 @@ class ExponentiallyModifiedGaussianAccumulator(SequenceEncodableStatisticAccumul
     def seq_update(
         self, x: np.ndarray, weights: np.ndarray, estimate: ExponentiallyModifiedGaussianDistribution | None
     ) -> None:
-        """Update weighted central moments from encoded observations."""
-        xx = np.asarray(x, dtype=np.float64)
-        ww = np.asarray(weights, dtype=np.float64)
-        c_b = float(ww.sum())
+        """Update weighted central moments from encoded observations.
+
+        Centering the batch on its own mean removes the ``E[x^2]-E[x]^2`` cancellation, but a
+        SINGLE centering pass does not remove all of it: the computed ``mean`` carries the rounding
+        of a large-magnitude sum, and that residue enters the third moment linearly -- which is the
+        moment ``lam`` is inverted from, so the fitted rate drifted at large data offsets. The
+        second pass in :func:`centered_batch_moments` computes the residue at spread scale, where
+        it is exact, and makes the fit shift-equivariant.
+        """
+        c_b, mean_b, m2_b, m3_b = centered_batch_moments(x, weights)
         if c_b <= 0.0:
             return
-        mean_b = float(np.dot(xx, ww) / c_b)
-        dx = xx - mean_b  # center before squaring/cubing -> no cancellation
-        m2_b = float(np.dot(ww, dx * dx))
-        m3_b = float(np.dot(ww, dx * dx * dx))
         self._merge(c_b, mean_b, m2_b, m3_b)
 
     def combine(self, suff_stat: tuple[float, float, float, float]) -> "ExponentiallyModifiedGaussianAccumulator":
@@ -294,7 +297,14 @@ class ExponentiallyModifiedGaussianAccumulatorFactory(StatisticAccumulatorFactor
 
 
 class ExponentiallyModifiedGaussianEstimator(ParameterEstimator):
-    """Estimate EMG parameters from weighted central moments."""
+    """Estimate EMG parameters from weighted central moments.
+
+    The fit is SHIFT-EQUIVARIANT: estimating on ``x + c`` returns ``mu + c`` with ``sigma2`` and
+    ``lam`` unchanged, for any constant ``c`` the data can carry -- epoch seconds (~1.7e9), 2**31
+    and 1e12 included. The moments come from
+    :class:`ExponentiallyModifiedGaussianAccumulator`, which centers each batch twice for exactly
+    this reason; a single centering pass moved the fit by 1.3e-4 at 1e12, silently.
+    """
 
     def __init__(
         self,

@@ -45,6 +45,48 @@ def _is_discrete(column: Sequence[Any], *, max_levels: int = 64) -> bool:
     return True
 
 
+def _real_or_missing(value: Any) -> float:
+    """``value`` as a float for numeric use, or NaN when it is missing or not a finite real.
+
+    Strings, ``None``, NaN and the infinities all collapse to NaN here, so a caller can featurize a
+    column without first proving every entry is a number.
+    """
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        v = float(value)
+        return v if np.isfinite(v) else float("nan")
+    return float("nan")
+
+
+def _is_real_valued(column: Sequence[Any]) -> bool:
+    """True iff EVERY value is a finite real number.
+
+    ``not _is_discrete(column)`` was long read as "this column is a real number", and it is not: a
+    string column past ``_is_discrete``'s ``max_levels`` cap and a numeric column carrying missing
+    values both answer False to ``_is_discrete`` while being unusable by anything that needs
+    ``float(value)`` -- quantile binning, a linear-Gaussian design row, a Gaussian leaf. Both are
+    ordinary data (a city/SKU/id field; a column with gaps), and
+    :func:`mixle.utils.automatic.get_estimator` models both, so the numeric machinery must ask this
+    question instead of inferring a real from "not discrete" (campaign4 T4-05, T2-01).
+    """
+    return len(column) > 0 and all(np.isfinite(_real_or_missing(v)) for v in column)
+
+
+def _is_numeric_field(column: Sequence[Any]) -> bool:
+    """True iff every value is a real number or a missing marker (``None``/NaN/inf), with at least one real.
+
+    Weaker than :func:`_is_real_valued`: this is the column a *featurizer* can still use once the
+    gaps are imputed, where an exact fit cannot.
+    """
+    any_real = False
+    for v in column:
+        if v is None:
+            continue
+        if not isinstance(v, (int, float, np.integer, np.floating)):
+            return False
+        any_real = any_real or bool(np.isfinite(float(v)))
+    return any_real
+
+
 def _density_transparent_optional(est: Any) -> Any:
     """Return ``est`` with missingness-rate estimation off, for dependency SCORING only.
 
@@ -887,15 +929,25 @@ def learn_structure(
     n_fields = len(cols)
     templates = list(field_estimators) if field_estimators is not None else [_field_estimator(c) for c in cols]
     discrete = [_is_discrete(c, max_levels=max_levels) for c in cols]
+    # "not discrete" does NOT mean "a real number": a string column past ``max_levels`` and a numeric
+    # column with gaps both land here, and quantile-binning either one died on
+    # ``np.asarray(column, dtype=np.float64)`` -- "could not convert string to float" from a field the
+    # caller never asked to treat as a number (campaign4 T4-05). Such a field simply cannot key a
+    # conditional, so it is not a candidate PARENT; its own marginal and its eligibility as a child
+    # are untouched.
+    real = [(not discrete[p]) and _is_real_valued(cols[p]) for p in range(n_fields)]
+    parent_ok = [discrete[p] or real[p] for p in range(n_fields)]
 
     # a conditioning key per candidate parent: identity for a discrete field, a quantile bin for a continuous one
-    binners = [None if discrete[p] else _quantile_binner(cols[p], n_bins) for p in range(n_fields)]
+    binners = [_quantile_binner(cols[p], n_bins) if real[p] else None for p in range(n_fields)]
     keyed = [cols[p] if binners[p] is None else [binners[p](v) for v in cols[p]] for p in range(n_fields)]
 
     # a numeric parent + a real/count/binary child can use a linear-Gaussian or GLM REGRESSION edge (1 slope
     # param) instead of a coarse per-bin conditional; each edge takes whichever scores the higher DL gain.
     candidates: list[tuple[float, int, int, str]] = []
     for p in range(n_fields):
+        if not parent_ok[p]:
+            continue
         for c in range(n_fields):
             if c == p:
                 continue
@@ -981,10 +1033,21 @@ def _init_matrix(data: list[tuple], *, numeric_only: bool) -> np.ndarray:
             # encoding below only needs a total, deterministic order, not a semantically meaningful one.
             levels = sorted(set(c), key=repr)
             onehots.append(np.array([[1.0 if v == lv else 0.0 for lv in levels] for v in c]))
-        else:
-            arr = np.asarray(c, dtype=np.float64)
-            sd = arr.std() or 1.0
-            numerics.append(((arr - arr.mean()) / sd)[:, None])
+        elif _is_numeric_field(c):
+            # Gaps are imputed at the column mean (which standardizes to 0) rather than propagated:
+            # ``np.asarray(c, dtype=float).mean()`` over a column with one NaN is NaN, every feature
+            # is then NaN, every k-means distance is NaN, and ``argmin`` silently puts every record
+            # in cluster 0 -- a degenerate init reported as a real one.
+            arr = np.asarray([_real_or_missing(v) for v in c], dtype=np.float64)
+            finite = np.isfinite(arr)
+            mu = float(arr[finite].mean())
+            sd = float(arr[finite].std()) or 1.0
+            numerics.append(((np.where(finite, arr, mu) - mu) / sd)[:, None])
+        # A field that is neither discrete nor numeric -- a string column past _is_discrete's level
+        # cap, say -- carries no k-means feature: one-hotting hundreds of levels would swamp the
+        # distance, and ``np.asarray(c, dtype=np.float64)`` raised "could not convert string to
+        # float" here for a caller who only asked for a mixture (campaign4 T4-05). It is dropped
+        # from the init features; the field is still modeled by every component's own structure fit.
     blocks = numerics if (numeric_only and numerics) else (numerics + onehots)
     return np.hstack(blocks) if blocks else np.zeros((len(data), 1))
 

@@ -10,6 +10,7 @@ crash-on-empty-vdict and detectors' dropped-fit/pseudo_count, fixed separately):
    the actual estimator (correctly) drops the field entirely as unmodelable (mixed container kinds).
 """
 
+import math
 import unittest
 
 import numpy as np
@@ -72,7 +73,18 @@ class InfiniteFloatValueTest(unittest.TestCase):
     (none_count/nan_count), never wrapped the resulting estimator to account for them -- add_datum
     excludes non-finite floats from vdict, so get_estimator() returned a plain estimator (e.g.
     GaussianEstimator) that had never seen the infinities, and fitting that estimator on the SAME
-    unfiltered raw data then crashed (GaussianDistribution requires finite support)."""
+    unfiltered raw data then crashed (GaussianDistribution requires finite support).
+
+    UPDATED for campaign-four T4-02. The three mixed-data tests below used to assert
+    ``log_density(inf) == 0.0``, which is the transparent ``est_prob=False`` wrapper: probability ONE
+    on the sentinel, on top of an unscaled base, for total mass 2.0 and a sentinel row costing zero
+    nats. That is an improper density, and it is what those assertions were pinning. The wrapper now
+    fits the rate, so the sentinel scores ``log(p)`` and the base is scaled by ``log(1-p)``; the
+    assertions are rewritten to the normalized values. The property these tests exist for -- that
+    infinities do not crash ``optimize`` and do not vanish from the model -- is unchanged and still
+    checked. ``test_all_infinite_field_does_not_silently_disappear`` keeps its 0.0 because there
+    ``p`` really is 1.0.
+    """
 
     def test_mixed_finite_and_positive_infinity_does_not_crash_optimize(self):
         from mixle.inference.estimation import optimize
@@ -82,7 +94,8 @@ class InfiniteFloatValueTest(unittest.TestCase):
         self.assertEqual(type(est).__name__, "OptionalEstimator")  # not a bare GaussianEstimator
         model = optimize(data, out=None)
         self.assertTrue(np.isfinite(model.log_density(2.0)))
-        self.assertEqual(model.log_density(float("inf")), 0.0)
+        self.assertAlmostEqual(model.log_density(float("inf")), math.log(0.25))
+        self.assertAlmostEqual(model.log_density(2.0), model.dist.log_density(2.0) + math.log(0.75))
 
     def test_mixed_finite_and_negative_infinity_does_not_crash_optimize(self):
         from mixle.inference.estimation import optimize
@@ -90,7 +103,7 @@ class InfiniteFloatValueTest(unittest.TestCase):
         data = [1.0, 2.0, -float("inf"), 3.0]
         model = optimize(data, out=None)
         self.assertTrue(np.isfinite(model.log_density(2.0)))
-        self.assertEqual(model.log_density(-float("inf")), 0.0)
+        self.assertAlmostEqual(model.log_density(-float("inf")), math.log(0.25))
 
     def test_both_signs_of_infinity_present_are_both_handled(self):
         from mixle.inference.estimation import optimize
@@ -98,8 +111,9 @@ class InfiniteFloatValueTest(unittest.TestCase):
         data = [1.0, -float("inf"), 2.0, float("inf"), 3.0]
         model = optimize(data, out=None)
         self.assertTrue(np.isfinite(model.log_density(2.0)))
-        self.assertEqual(model.log_density(float("inf")), 0.0)
-        self.assertEqual(model.log_density(-float("inf")), 0.0)
+        # Nested wrappers: the outer sees 1 of 5 rows, the inner 1 of the remaining 4.
+        self.assertAlmostEqual(model.log_density(float("inf")), math.log(0.2))
+        self.assertAlmostEqual(model.log_density(-float("inf")), math.log(0.8) + math.log(0.25))
 
     def test_all_infinite_field_does_not_silently_disappear(self):
         from mixle.inference.estimation import optimize

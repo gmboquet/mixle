@@ -250,7 +250,7 @@ def _anchored_pooled_variances(
     return observed_scatter / count
 
 
-def _record_variance_floor(dist: Any, floor: float, raw_covar: np.ndarray) -> Any:
+def _record_variance_floor(dist: Any, floor: np.ndarray, raw_covar: np.ndarray) -> Any:
     """Note on ``dist`` when the M-step variance floor lifted a coordinate, so a fit can report it.
 
     This estimator floored silently: on 10 uV noise recorded in volts it returned variances inflated
@@ -258,16 +258,36 @@ def _record_variance_floor(dist: Any, floor: float, raw_covar: np.ndarray) -> An
     scalar and full-covariance estimators both recorded the same clamp (T4-6). A repair means the
     parameters are not the ones the data implied, so it has to be visible on every surface that
     applies one. An ordinary fit lifts nothing and records nothing.
+
+    ``floor`` is per coordinate (T1-03), so the judgement is per coordinate too: the note reports the
+    coordinate the floor inflated MOST in relative terms, which is the one a reader has to know
+    about. A coordinate with no positive variance of its own has an unbounded ratio and is always
+    reported -- manufactured jitter is never a maximum-likelihood answer -- while a positive variance
+    lifted by less than ``_FLOOR_MATERIAL_RATIO`` of itself stays quiet.
     """
-    smallest = float(np.min(raw_covar)) if raw_covar.size else 0.0
-    if smallest >= floor:
+    raw = np.asarray(raw_covar, dtype=float).reshape(-1)
+    if raw.size == 0:
         return dist
-    if smallest <= 0.0:
-        note = "variance-floored(%.3g; onto a non-positive variance)" % floor
-    elif (floor - smallest) <= _FLOOR_MATERIAL_RATIO * smallest:
+    eps = np.broadcast_to(np.asarray(floor, dtype=float).reshape(-1), raw.shape)
+    lifted = eps > raw
+    if not np.any(lifted):
         return dist
+    manufactured = lifted & ~(raw > 0.0)
+    if np.any(manufactured):
+        # No scale of its own: the widest manufactured jitter is the one worth naming.
+        widest = int(np.argmax(np.where(manufactured, eps, -np.inf)))
+        note = "variance-floored(%.3g; onto a non-positive variance)" % float(eps[widest])
     else:
-        note = "variance-floored(%.3g; %.3gx the smallest variance)" % (floor, floor / smallest)
+        material = lifted & ((eps - raw) > _FLOOR_MATERIAL_RATIO * raw)
+        if not np.any(material):
+            return dist
+        ratio = np.where(material, eps / np.where(raw > 0.0, raw, 1.0), -np.inf)
+        worst = int(np.argmax(ratio))
+        note = "variance-floored(%.3g; %.3gx the raw variance of coordinate %d)" % (
+            float(eps[worst]),
+            float(ratio[worst]),
+            worst,
+        )
     dist._numerical_repairs = (note,) + tuple(getattr(dist, "_numerical_repairs", ()))
     return dist
 
@@ -1128,9 +1148,9 @@ class DiagonalGaussianAccumulatorFactory(StatisticAccumulatorFactory):
 class DiagonalGaussianEstimator(ParameterEstimator):
     """Estimator for diagonal Gaussian distributions.
 
-    The fit is SHIFT-EQUIVARIANT: ``fit(x + c)`` returns the variances of ``x + c`` to within a few
-    ulps for any constant ``c`` the data can carry, epoch seconds (~1.7e9) included. That is not
-    free from the declared ``(sum, sum2, count)`` statistics -- their variance is the
+    The fit is SHIFT-EQUIVARIANT: ``fit(x + c)`` returns the variances of ``x + c`` to within about
+    ``1e-7`` relative for any constant ``c`` the data can carry, epoch seconds (~1.7e9) included.
+    That is not free from the declared ``(sum, sum2, count)`` statistics -- their variance is the
     cancellation-prone ``E[x^2] - mu^2``, which at offset 1e7 was tens of percent wrong and at 1.7e9
     thousands-fold wrong or collapsed onto the floor -- so
     :class:`DiagonalGaussianAccumulator` carries a conditioning-gated shift-anchored moment track
@@ -1138,6 +1158,40 @@ class DiagonalGaussianEstimator(ParameterEstimator):
     engine kernel's stacked moments, a hand-built tuple) cannot be corrected here and take the
     historical path; when they are too ill-conditioned for it, ``estimate`` warns rather than
     returning variances it cannot stand behind.
+
+    The ``1e-7`` is a measured relative bound, not a figure of speech, and the error is NOT uniform
+    across the offset range. Once the anchored track engages, the variances are exact to a few ulps
+    (~1e-14 relative, and unchanged from offset 1.7e9 to 1e10). The bound is set by the band just
+    BELOW the conditioning gate, where the raw ``E[x^2] - mu^2`` form is still in use because it is
+    accurate enough to be worth its single pass: at ``mean^2/variance`` just under the gate's ``4e6``
+    the worst case measured over seeds, sample sizes and scales is ``3.1e-8`` relative. An earlier
+    revision of this docstring promised "a few ulps" everywhere, which overstated that band by
+    roughly eight orders of magnitude (T1-07).
+
+    VARIANCE FLOOR. The fitted variances are the exact per-coordinate maximum-likelihood ones
+    whenever every coordinate has a positive variance of its own. The M-step floors each coordinate
+    at ``ridge * var_i`` (default ``ridge=1e-6``) -- RELATIVE to that coordinate's own variance, so
+    the safeguard is equivariant under any per-coordinate change of units and, sitting strictly below
+    the variance it guards, never binds on such a coordinate. It is not priced off ``mean(var)``
+    across coordinates: that coupled columns a diagonal covariance exists to keep independent, and
+    inflated the smallest variance of a plain probability/dollars/count table 3.03x (T1-03).
+
+    A coordinate with no positive variance of its own -- a constant column, an EM component holding a
+    single point -- still has to be lifted, because a zero variance is an infinite density. It gets
+    ``ridge * mean(var over the coordinates that have one)``, the same manufactured jitter the full
+    covariance estimator uses for a degenerate direction. The absolute ``min_covar`` (default
+    ``1e-8``) is the last resort when nothing carries a scale at all (every coordinate non-positive,
+    or ``ridge=0.0``), and becomes a hard per-coordinate lower bound as soon as it is passed
+    explicitly -- which is how ``mixle.task`` regularizes its diagonal Gaussians.
+
+    A floor that actually lifted a coordinate is recorded on the fitted distribution as a
+    ``variance-floored(...)`` entry in ``numerical_repairs()`` -- and therefore in
+    ``fit_provenance().repairs`` -- naming the coordinate and how far it moved. Manufactured jitter is
+    always reported; an explicit ``min_covar`` dominating a positive variance is reported once it
+    exceeds ``_FLOOR_MATERIAL_RATIO`` of it. An ordinary fit lifts nothing and records nothing.
+    Because the default floor never binds on a coordinate with its own variance, ``ridge=0.0`` is not
+    the route to the maximum-likelihood fit here -- it removes the only scale the degenerate-column
+    jitter can be priced from and hands those coordinates to the absolute ``min_covar`` instead.
     """
 
     def __init__(
@@ -1167,16 +1221,20 @@ class DiagonalGaussianEstimator(ParameterEstimator):
             min_covar (Optional[float]): Absolute per-coordinate variance floor applied in the MLE M-step.
                 ``None`` (default) uses a tiny ``1e-8`` as a FALLBACK only -- it applies when the
                 relative floor has no scale to work from (every coordinate variance non-positive, or
-                ``ridge=0.0``). Passing a value explicitly restores it as a hard lower bound, for
-                callers that want a fixed regularizer. Invalid/non-finite reduced statistics are
-                rejected rather than treated as numerical noise.
+                ``ridge=0.0``). Passing a value explicitly restores it as a hard per-coordinate lower
+                bound, for callers that want a fixed regularizer. Invalid/non-finite reduced
+                statistics are rejected rather than treated as numerical noise.
             ridge (Optional[float]): Relative variance floor coefficient. ``None`` (default) uses ``1e-6``;
-                each coordinate variance is floored at ``ridge * mean(var)`` so the safeguard is
-                data-scaled and the fit is equivariant under a change of units. Bias is negligible at
-                the defaults when the coordinates share a scale; because the floor is set by the MEAN
-                variance, heterogeneous-unit columns can still have their smallest variances inflated
-                materially, and a floor that lifts a coordinate is recorded on the fitted distribution
-                as a ``variance-floored(...)`` entry in ``numerical_repairs()``.
+                each coordinate variance is floored at ``ridge * var_i`` -- relative to that
+                coordinate's OWN variance, so the safeguard is equivariant under any per-coordinate
+                change of units and never binds on a coordinate that has a positive variance, which
+                is returned as the exact maximum-likelihood value. A coordinate with no positive
+                variance of its own has no scale to price from and gets ``ridge * mean(var)`` over
+                the coordinates that do -- manufactured jitter for a degenerate column, always
+                recorded on the fitted distribution as a ``variance-floored(...)`` entry in
+                ``numerical_repairs()``. Pricing every coordinate off ``mean(var)`` was the earlier
+                behaviour and inflated the smallest variance of heterogeneous-unit data by up to
+                3.2e17x (T1-03).
 
         Attributes:
             name: Optional diagnostic name.
@@ -1221,7 +1279,7 @@ class DiagonalGaussianEstimator(ParameterEstimator):
         # ``_variance_floor``; the default is only the fallback for data carrying no scale of its own.
         self._absolute_min_covar = min_covar is not None
 
-    def _variance_floor(self, covar: np.ndarray) -> float:
+    def _variance_floor(self, covar: np.ndarray) -> np.ndarray:
         """Effective per-coordinate variance floor for the raw variances ``covar``.
 
         Left as ``max(min_covar, ridge * mean(var))`` the absolute term also won on data whose whole
@@ -1229,12 +1287,37 @@ class DiagonalGaussianEstimator(ParameterEstimator):
         microvolts fitted different variances (T4-6). By default the absolute floor is now the
         fallback for variances with no scale at all; an explicitly configured ``min_covar`` is still a
         hard lower bound, which is how ``mixle.task`` regularizes its diagonal Gaussians.
+
+        The relative term is priced PER COORDINATE, ``ridge * var_i``, not off ``mean(var)`` across
+        coordinates (T1-03). A floor set by the mean couples coordinates that a diagonal covariance
+        exists to keep independent: on heterogeneous-unit data -- a probability, dollars, a count --
+        the smallest column paid a floor priced off the largest and came back 3.03x too wide at a
+        variance spread of only 9.1e6, and 3.2e17x too wide at 1e24, while the same data through
+        ``MultivariateGaussianEstimator`` (whose ridge was made per-coordinate for exactly this
+        reason, T1-05) returned the maximum-likelihood variances. Priced against its own coordinate
+        the relative floor sits strictly below the variance it guards whenever ``ridge < 1``, so on
+        every coordinate that has a positive variance of its own the fit is the exact per-coordinate
+        MLE and nothing is recorded.
+
+        A coordinate with NO positive variance of its own -- a constant column, a component holding
+        one point -- has no scale to price from, and still has to be lifted: the distribution's
+        parameters must stay positive and a zero variance is an infinite density. It falls back to
+        ``ridge * mean(var over the coordinates that do)``, the same manufactured jitter the full
+        covariance estimator uses for a degenerate direction, disclosed through
+        ``numerical_repairs()``. ``min_covar`` remains the last resort when nothing carries a scale
+        (every coordinate non-positive, or ``ridge=0.0``).
         """
-        positive = covar[covar > 0.0]
-        relative = self.ridge * float(np.mean(positive)) if positive.size else 0.0
+        covar = np.asarray(covar, dtype=float)
+        has_scale = covar > 0.0
+        positive = covar[has_scale]
+        # Jitter for coordinates with no scale of their own, priced off the ones that have one.
+        fallback = self.ridge * float(np.mean(positive)) if positive.size else 0.0
+        floor = np.where(has_scale, self.ridge * covar, fallback)
         if self._absolute_min_covar:
-            return max(self.min_covar, relative)
-        return relative if relative > 0.0 else self.min_covar
+            return np.maximum(floor, self.min_covar)
+        if not np.any(floor > 0.0):
+            return np.full(covar.shape, self.min_covar, dtype=float)
+        return floor
 
     @staticmethod
     def _warn_if_uncorrectable(sum_x: np.ndarray, sum_xx: np.ndarray, count: float) -> None:

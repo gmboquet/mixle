@@ -15,7 +15,7 @@ then scale from the variance and location from the mean.
 
 The M-step is *shift-equivariant*: fitting ``x + c`` returns ``loc + c`` with an unchanged ``scale``
 and ``shape``. That does not come for free from raw power sums -- the central third moment
-differenced out of ``E[x^3]`` loses about ``3*log2(|mean|/sd)`` bits, and the variance about twice
+differenced out of ``E[x^3]`` loses about ``3*log2(abs(mean)/sd)`` bits, and the variance about twice
 that -- so the accumulator carries a conditioning-gated shift-anchored moment track alongside the raw
 sums (see :class:`GeneralizedExtremeValueAccumulator`).
 
@@ -42,6 +42,7 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.univariate.continuous._observation_contracts import (
     finite_observations,
     scored_observation,
+    warn_uncorrectable_raw_moments,
 )
 
 _XI_TOL = 1.0e-8  # |xi| below this is treated as the Gumbel limit
@@ -199,10 +200,10 @@ def _endpoint_in_sds(xi: float) -> float:
     """Distance from the mean to the finite support endpoint, in standard deviations.
 
     Under moment matching the bounded end of a GEV sits a fixed number of standard deviations from
-    the mean, independent of location and scale: substituting ``sigma = sd |xi| / sqrt(g2 - g1^2)``
+    the mean, independent of location and scale: substituting ``sigma = sd * abs(xi) / sqrt(g2 - g1^2)``
     and ``mu = mean - sigma (g1 - 1)/xi`` into the endpoint ``mu - sigma/xi`` leaves
     ``mean +/- sd g1 / sqrt(g2 - g1^2)``. The value diverges as ``xi -> 0`` (Gumbel is unbounded)
-    and shrinks monotonically as ``|xi|`` grows -- which is exactly why an unconstrained
+    and shrinks monotonically as ``abs(xi)`` grows -- which is exactly why an unconstrained
     moment-matched shape can put the endpoint inside the sample it was fit on.
     """
     g1, g2 = _gamma(1.0 - xi), _gamma(1.0 - 2.0 * xi)
@@ -213,7 +214,7 @@ def _endpoint_in_sds(xi: float) -> float:
 
 
 def _shape_covering_range(xi: float, mean: float, sd: float, min_val: float, max_val: float) -> float:
-    """Shrink ``|xi|`` until the moment-matched support contains the observed range.
+    """Shrink ``abs(xi)`` until the moment-matched support contains the observed range.
 
     Method of moments matches mean, variance and skewness but says nothing about *support*: with
     ``xi < 0`` a GEV is bounded above, and a sample whose skew maps to, say, ``xi = -0.72`` gets an
@@ -224,7 +225,7 @@ def _shape_covering_range(xi: float, mean: float, sd: float, min_val: float, max
 
     Give up the third moment rather than the support: keep mean and variance matched exactly and
     move ``xi`` toward the Gumbel limit, which pushes the endpoint outward monotonically, until the
-    observed range is strictly inside it. ``|xi|`` is only ever reduced, so a shape whose support
+    observed range is strictly inside it. ``abs(xi)`` is only ever reduced, so a shape whose support
     already covers the data is returned untouched.
     """
     if abs(xi) < _XI_TOL or sd <= 0.0 or not (np.isfinite(min_val) and np.isfinite(max_val)):
@@ -362,7 +363,7 @@ class GeneralizedExtremeValueDistribution(SequenceEncodableProbabilityDistributi
 
     @staticmethod
     def backend_log_density_from_params(x: Any, loc: Any, scale: Any, shape: Any, engine: Any) -> Any:
-        """Engine-neutral GEV log-density; the ``|xi| < tol`` Gumbel limit is selected per element.
+        """Engine-neutral GEV log-density; the ``abs(xi) < tol`` Gumbel limit is selected per element.
 
         ``s^{-1/xi}`` is computed as ``exp(-log(s)/xi)`` so the whole expression stays on engine ops."""
         z = (x - loc) / scale
@@ -529,7 +530,7 @@ class GeneralizedExtremeValueAccumulator(SequenceEncodableStatisticAccumulator):
     ``O(count * spread^3)``, making the M-step shift-equivariant.
 
     The gate keeps the historical path bit-identical for well-conditioned data: a chunk whose
-    ``|mean|/spread`` ratio the raw form handles to ~1e-9 relative (see :func:`_needs_anchor`)
+    ``abs(mean)/spread`` ratio the raw form handles to ~1e-9 relative (see :func:`_needs_anchor`)
     accumulates exactly the way it always did, with no anchor and no second pass. The raw sums remain
     the exchange format, so the anchored track rides along as a payload on
     :class:`GeneralizedExtremeValueSuffStat`; a consumer that drops the payload simply gets the
@@ -558,7 +559,7 @@ class GeneralizedExtremeValueAccumulator(SequenceEncodableStatisticAccumulator):
         already certified as well-conditioned (raw error ~1e-9 relative or better).
 
         It is NOT safe on ill-conditioned raw statistics arriving through ``from_value``/``combine``:
-        power sums whose own ``|mean|/spread`` ratio has already erased the central moments cannot
+        power sums whose own ``abs(mean)/spread`` ratio has already erased the central moments cannot
         have them restored by any change of reference point, and converting them anyway seeds the
         anchored track with an error far larger than the spread it is supposed to measure -- which
         would make the pooled estimate *worse* than the historical raw one, not better. Such content
@@ -965,6 +966,11 @@ class GeneralizedExtremeValueEstimator(ParameterEstimator):
         # Everything below is the historical algebra with an explicit reference point: at ref = 0 the
         # power sums ARE the raw sums and every formula reduces to exactly what it was before.
         if anchored is None:
+            # Raw-only statistics cannot be corrected here; before this the family was silent, and
+            # sd ~2 data at offset 1.7e9 handed in as the declared raw tuple returned scale = 1e-12
+            # (the min_scale floor) for a true 1.4903. The gate reads the second moment, which is
+            # where the loss shows up first; a third-moment-only loss cannot occur without it.
+            warn_uncorrectable_raw_moments(sum_x, sum_x2, count, family="generalized extreme value")
             ref, p1, p2, p3 = 0.0, sum_x, sum_x2, sum_x3
         else:
             ref, p1, p2, p3 = anchored
