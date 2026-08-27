@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "PYTHONPATH=. python scripts/check_public_claims.py && python -c 'json.load(open(\"manifests/public_claims.json\"))'",
   "date": "2026-08-22",
-  "evidence_digest": "40d1ea9657aafd59b3e6d08d87425f14d2840e69d923ce4283f28129d9988a0d",
+  "evidence_digest": "142c20c91e166f058d255a4913711b706840429931f9e564b68fc5784fb4e15a",
   "gate": "External-model interoperability at realistic scale",
   "note": "DISPOSITION IS EXCLUSION, NOT COMPLETION -- flagged for the owner. The row's own text says the substantive evidence 'requires retained model/backend execution' and that 'no broad 0.8.0 claim is made without it'. That is the definition of an excluded scope, not a gate that was passed: nothing here was executed at scale and nothing should be read as if it were. The measurement establishes only the negative half -- that the shipped claim ledger makes no such claim, so there is no unbacked assertion to retract. If the owner prefers, this row should read EXCLUDED rather than DONE; the evidence is identical either way.",
   "result": "exit 0, validated 11 claims across 853 public surfaces; 0 of the 11 registered claims asserts external-model interoperability at realistic scale"

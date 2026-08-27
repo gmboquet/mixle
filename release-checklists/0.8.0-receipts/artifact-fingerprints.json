@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && for d in 678f5be8254a479f6735650cf0a4830d31c881d002497ea184a513d3d8235b2e b6fe808ee97c6f1522931e05734dcb92255ee3209e287b1861db8d25dacaadd4 cf8a5dedfb6f5e6b426bb9220823da346f54fa04a971f7cbab07d3bc0034214e 5ab809b94819237551c72981d1a0926a168915067b32ffe84cf276230658e448; do git grep -c \"$d\" -- .; done",
   "date": "2026-08-22",
-  "evidence_digest": "40d1ea9657aafd59b3e6d08d87425f14d2840e69d923ce4283f28129d9988a0d",
+  "evidence_digest": "142c20c91e166f058d255a4913711b706840429931f9e564b68fc5784fb4e15a",
   "gate": "Artifact fingerprints",
   "note": "The two 2026-07-21 digests sit under the heading 'Round-1 artifact digests, **stale and not to be reused**' (0.8.0.md line ~730) and the two 2026-08-04 digests under 'Rehearsal digests, **for reproducibility only \u2014 these are not candidate fingerprints**' (line 617). Neither pair is reused as a current fingerprint anywhere else in the repo. Independent corroboration that nothing here is a pre-computed answer: my own fresh double-build of 483add7c in this session produced entirely different digests (1d4c5ff1\u2026 / 312fbff0\u2026) from the recorded 2026-08-04 rehearsal pair (cf8a5ded\u2026 / 5ab809b9\u2026), because the epoch and host differ.",
   "result": "each of the 4 digests occurs exactly 1 time, all 4 only in release-checklists/0.8.0.md (0 occurrences anywhere else in the tracked tree)"
