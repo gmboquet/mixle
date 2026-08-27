@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/weighted_estimation_test.py mixle/tests/em_convergence_contract_test.py -p no:randomly -q -m \"\" -n 0",
   "date": "2026-08-22",
-  "evidence_digest": "dce0244ec90aa66b7428e41e58ed8d68e1379634039847ec53baabb5f2087f24",
+  "evidence_digest": "b1546e3c6c3b38339ac8c743177c1a2930b73677c171889485e99d7657613f36",
   "gate": "Weighted estimation and EM convergence receipts",
   "note": "Both files the evidence names ran and passed. Also re-ran inside the wider 31-test numerical batch (Stable-family gate above) with the same result, so the pass is not an artifact of running them in isolation.",
   "result": "18 passed, 28 subtests passed in 2.63s (exit 0)"
