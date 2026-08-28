@@ -70,6 +70,85 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 
 ### Fixed
 
+- A fifth candidate campaign (four black-box tester sessions plus two clean-install reproduction
+  replays against candidate `21df4e4a`, every blocking/major claim adversarially re-verified, with
+  a regression watch across all four prior campaigns; D-0205) returned NO-GO, 2 of 4, with every
+  filed blocking and major finding surviving independent re-verification -- unlike every prior
+  campaign, none were downgraded. Role B replayed clean: GO, 2 of 2, all eight reproduction runs
+  verified, identity independently confirmed by both replayers. Ten confirmed findings (four
+  blocking, six major) were fixed, and a second adversarial review of the fix diff itself (a
+  practice new this campaign) caught two further gaps in two of the fixes before they shipped.
+  - `GeneralizedParetoEstimator`'s EM loop crashed on realistic negative-shape (bounded-tail) data:
+    the single-shot fit could produce a self-inconsistent model whose implied support excluded its
+    own training data's max, and the next EM iteration's validation of that same data against that
+    model raised instead of converging (100% crash rate whenever the precondition occurred, ~15%
+    of realistic peaks-over-threshold draws at ordinary sample sizes). Fixed by tracking the
+    training data's max alongside the accumulated moments and flooring `scale` (never `shape`, the
+    moment-matched estimate) to keep the fit self-consistent, disclosed via `numerical_repairs()`.
+    The second-pass review found the fix's own accumulator-side relevance pre-check decided
+    whether to carry that max from RAW moments alone, invisible to a `pseudo_count` prior blended
+    in afterward -- a strong enough prior could still push the blended shape negative and
+    reintroduce the identical crash. Closed by threading whether the estimator carries a prior
+    through to the accumulator, which now always carries the max in that case rather than guessing
+    from data it cannot see the eventual blend from.
+  - A model auto-fit from a pandas nullable-extension (`pd.NA`) numeric column could not score or
+    re-encode even its own training data afterward (`TypeError` deep inside `float()` conversion);
+    the NaN-spelled equivalent worked. The wrapper's missing-value sentinel was normalized to
+    `None` regardless of which sentinel the source data actually carried.
+  - The "one dirty cell demotes a continuous column to a `-inf`-scoring memorization table" defect
+    class (previously closed for a float-typed column with a stray non-numeric cell) reopened for
+    the single most common real trigger: pandas coercing an entire numeric column to string dtype
+    once any one row fails float parsing. Auto-inference's column-typing now recognizes an
+    all-numeric-looking string column as continuous, the same as it already did for a float column
+    with one bad cell.
+  - `GammaEstimator`'s hard shape-parameter ceiling (used whenever data has near-zero coefficient
+    of variation) now discloses via `numerical_repairs()` when it binds, matching the meticulous
+    disclosure convention `GaussianEstimator`'s variance floor already followed.
+  - `propose()`'s verified frontier used to collapse entirely -- for the WHOLE joint model, not
+    just the offending field -- whenever any single field was identifier-like/high-cardinality or
+    an unrecognized dtype, on the reasoning that `CategoricalDistribution`'s documented
+    `default_value=0.0` legitimately scores an unseen held-out label at `-inf`. That field is now
+    excluded from just its own contribution to the aggregate held-out score, disclosed by name,
+    while the rest of the candidate is still verified and ranked. The second-pass review found
+    this rescue could itself misfire: it excused a field's `-inf` as an unseen label based only on
+    the leaf distribution's type, without checking that the `-inf` actually came from the leaf --
+    an `OptionalDistribution`-wrapped field fit with `p==0` (no missing rows in training, an
+    ordinary outcome) independently scores a genuinely MISSING held-out value at `-inf` too,
+    misdiagnosed as "unseen in training" and silently excused, masking a real missing-value
+    generalization failure. The rescue now only excuses a field when every `OptionalDistribution`
+    wrapper in its chain has `0 < p < 1`, the only condition under which that wrapper can never by
+    itself produce `-inf` and any `-inf` is unambiguously the leaf's.
+  - `numerical_repairs()` used to silently return empty after a `Model.deploy()`/`Model.load()`
+    round trip, even when a repair had genuinely occurred and the repaired value was still in
+    effect -- the documented disclosure mechanism for this exact release went silent on exactly
+    the artifacts it exists to describe. It now survives the round trip, mirroring the existing
+    `_fit_provenance` envelope treatment.
+  - README's second Quickstart example (`mixle.task.solve`) crashed with `ImportError` on the
+    documented base install, because its default student is a torch MLP and nothing in that part
+    of the README said so -- unlike the very next example, which is explicit about needing torch.
+    Now disclosed inline, matching that example's own convention.
+  - `ProbabilityDistribution.to_json()`/`from_json()` -- documented as a safe serialization route
+    -- silently produced a write-only artifact for at least `VonMisesDistribution`: `to_json()`
+    succeeded with no warning, and `from_json()` on the result failed in a later process. The
+    module-level `dump_models(verify=True)` already read-back-verifies and refuses for exactly
+    this case; `to_json()` now does the same.
+  - `TreeHiddenMarkovEstimator` silently fit a model with a NaN-poisoned level-transition parameter
+    when trained on a corpus that never reached some tree depth (a legitimate, ordinary training
+    shape), and that model then silently scored `nan` on an out-of-sample tree that DID reach that
+    depth later -- no warning at fit time, though a related guard already caught the same
+    corruption when a deeper tree shared the SAME fitting batch. The zero-evidence transition row
+    is no longer folded into the poisoned division at its source.
+  - `LDAEstimator`'s default alpha solver diverges to infinity for the large majority of realistic
+    small-to-moderate topic-modeling corpora, not just adversarial ones, and its
+    `LDAConvergenceError` message implied raising `max_alpha_iter` would help when it provably
+    cannot (the residual only shrinks because the divergent denominator grows). The message now
+    names the estimator's own working escape hatches instead of a remedy that cannot succeed;
+    the solver's divergence itself is a known, deliberately fail-closed design decision (D-0052)
+    left as recorded, not unilaterally reversed by this fix.
+  - Bookkeeping the fix wave itself invalidated: `mixle/lifecycle.py` crossed the large-module-audit
+    line threshold (a new audit entry was added, no behavior change), and a new auto-inference
+    dispatch type needed registering in both serialization-schema-manifest profiles.
+
 - A fourth candidate campaign (four black-box tester sessions plus two clean-install reproduction
   replays against candidate `468fbaf9`, every blocking/major claim adversarially re-verified, with
   a regression watch across all three prior campaigns; D-0203) found and fixed the following.
