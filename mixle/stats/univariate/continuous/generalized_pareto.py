@@ -510,41 +510,33 @@ class GeneralizedParetoAccumulator(AnchoredMomentTrack, SequenceEncodableStatist
         self.count += suff_stat[2]
         return self
 
-    def _max_x_relevant(self) -> bool:
-        """Whether the RAW moments even admit a shape<0 fit, so a max is worth carrying.
-
-        A cheap pre-check on the same (sum, sum2, count) moments the raw M-step path inverts --
-        deliberately ignoring both the anchored track (this only needs the SIGN of xi, which the
-        raw form gets right far below the precision the anchor exists for) and any pseudo-count
-        prior blend (unknown here; see :meth:`GeneralizedParetoEstimator.estimate`, which reads the
-        max off the untouched raw pair for the same reason). A positive-or-zero-shape fit has
-        infinite support and can never need the clamp, so ordinary heavy-tailed data -- the common
-        GPD case -- never carries the payload at all, exactly like the anchored track's own
-        conditioning gate.
-        """
-        if self.count <= 0.0:
-            return False
-        mean_x = self.sum / self.count
-        var = self.sum2 / self.count - mean_x * mean_x
-        m = mean_x - self.loc
-        if m <= 0.0 or var <= 0.0:
-            return False
-        return 0.5 * (1.0 - m * m / var) < -_XI_TOL
-
     def value(self) -> tuple[float, float, float]:
         """Return accumulated sum, second moment sum, and count.
 
         A plain 3-tuple for every consumer that treats it as one; once the shift-anchored moment
-        track is live, or a trustworthy observation max is known AND relevant, it is a
+        track is live, or a trustworthy observation max is known, it is a
         :class:`GeneralizedParetoSuffStat` additionally carrying the anchored moments in its
         ``.anchored`` attribute and/or the max in ``.max_x``, so :meth:`combine` can fold them in and
         :meth:`GeneralizedParetoEstimator.estimate` can invert threshold-invariant moments and keep a
         shape<0 fit's implied support consistent with the data (T1-01).
+
+        The max is carried whenever it is trustworthy (real observations, none tainted by a foreign
+        combine), regardless of whether the RAW moments alone look shape<0 -- an earlier version of
+        this method skipped carrying it for raw moments that implied shape>=0, reasoning that a
+        positive-or-zero-shape fit has infinite support and can never need the clamp. That reasoning
+        broke the moment a caller's :class:`GeneralizedParetoEstimator` carries a ``pseudo_count``
+        prior (a first-class, documented feature of this estimator): the prior blend, invisible to
+        this accumulator, can push the FINAL fitted shape negative even when the raw data alone
+        would not, reintroducing exactly the crash T1-01 exists to prevent -- silently, since the
+        max needed to clamp it had already been dropped here before ``estimate()`` ever saw the
+        prior. There is no way to predict from raw moments alone whether a prior an accumulator has
+        no visibility into will end up mattering, so the max is now always carried when trustworthy.
+        :meth:`GeneralizedParetoEstimator.estimate` still only USES it when its own after-blend
+        shape check (``xi < -_XI_TOL``) decides a clamp is actually needed, so the cost of carrying
+        it more often is just the payload wrapper, never a wrong fit.
         """
         anchored = self._anchor_payload()
         max_x = None if (self._max_tainted or not np.isfinite(self._max_x)) else self._max_x
-        if max_x is not None and not self._max_x_relevant():
-            max_x = None
         if anchored is None and max_x is None:
             return self.sum, self.sum2, self.count
         return GeneralizedParetoSuffStat(self.sum, self.sum2, self.count, anchored=anchored, max_x=max_x)

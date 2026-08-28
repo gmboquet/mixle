@@ -58,6 +58,31 @@ class GeneralizedParetoSelfInconsistentRefitTest(unittest.TestCase):
             m = fit(data, est, max_its=5)
         self.assertTrue(any("scale-floored-for-support" in note for note in m.numerical_repairs()))
 
+    def test_a_pseudo_count_prior_that_pushes_the_blended_shape_negative_does_not_crash(self):
+        # A gap an adversarial re-review found in the fix above: the accumulator used to decide
+        # whether to carry the observation max forward from the RAW moments alone, dropping it
+        # whenever raw data implied shape>=0 -- invisible to a pseudo_count prior blended in later
+        # by estimate(). Raw data here is ordinary and heavy-tailed (implied shape > 0 on its own),
+        # but a strong, tightly-bounded-tail prior blends the FINAL shape negative, reproducing the
+        # identical crash class T1-01 was written to eliminate, just reached through the prior
+        # instead of the raw data.
+        raw_dist = GeneralizedParetoDistribution(1.0, 0.5, loc=0.0)  # genuinely heavy-tailed (xi>0)
+        data = raw_dist.sampler(seed=3).sample(40).tolist()
+        raw_only_fit = estimate(data, GeneralizedParetoEstimator(loc=0.0))
+        self.assertGreater(raw_only_fit.shape, 0.0)  # raw data alone: no clamp would ever be needed
+
+        prior = GeneralizedParetoDistribution(1.0, -0.9, loc=0.0)
+        est = prior.estimator(pseudo_count=2000.0)
+
+        m1 = estimate(data, est)
+        self.assertLess(m1.shape, 0.0)  # the prior, not the data, drives shape negative
+        self.assertGreaterEqual(m1._upper(), max(data))
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            m2 = optimize(data, est, max_its=3)  # used to crash with the prior blend before this fix
+        self.assertGreaterEqual(m2._upper(), max(data))
+
     def test_ordinary_positive_shape_fit_is_unaffected(self):
         # A heavy-tailed (xi>0) fit has infinite support and can never trip the clamp; optimize()
         # must recover the generating parameters just as it did before this fix.
