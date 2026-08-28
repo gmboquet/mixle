@@ -55,6 +55,20 @@ Missing values
 Missing entries are handled per the family's missing-data contract (see :doc:`stability-and-missing-data`);
 caller-owned data is not rewritten in place to hide missing or non-finite values.
 
+``None``, ``NaN``, ``pd.NA``, and ``pd.NaT`` are the absence sentinels: a field carrying any of them
+fits an ``OptionalDistribution`` whose missingness rate is estimated alongside the base family.
+
+A native ``+inf``/``-inf``, by contrast, is a legitimate (if unusual) numeric *value*, not an
+absence -- but the automatic detector gives it the same generative-missingness treatment anyway
+(its own fitted-rate ``OptionalDistribution(..., missing_value=+/-inf)``, one wrapper per sign
+present) rather than rejecting it, so the auto-built model stays a proper normalized law instead of
+refusing to fit. This is auto-inference's own choice, not the family-level default: the *same*
+family, given explicitly (bypassing ``estimator=None``), follows the stricter contract above and
+rejects a non-finite observation outside its support (``GaussianDistribution requires support x in
+(-inf,inf)``). Because the two routes disagree, auto-inference's reclassification is disclosed
+rather than silent: ``get_estimator(data)`` (and therefore ``optimize(data)`` / ``fit(data)`` with
+``estimator=None``) raises a ``UserWarning`` naming the affected field(s) whenever this happens.
+
 Dependence between fields
 -------------------------
 

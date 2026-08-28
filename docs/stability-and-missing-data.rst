@@ -39,6 +39,16 @@ Use this rule when reviewing a new implementation: a route may reject
 non-finite data, marginalize it, or model missingness. It should not mutate the
 input buffer and pretend the observation was clean.
 
+**Auto-inference's documented exception.** ``optimize(data)`` / ``fit(data)`` with no estimator
+given (``estimator=None``) is not a family-level default route in this sense -- it is a detector
+that picks a family AND decides how to handle whatever the data contains. For a native ``+inf`` /
+``-inf`` value specifically, it chooses "model missingness" (a fitted-rate
+``OptionalDistribution(..., missing_value=+/-inf)``) over "reject", so a stray infinity does not
+abort an otherwise-ordinary auto-built fit. That choice does not get the free pass silent behavior
+would need: it is disclosed with a ``UserWarning`` naming the affected field (see
+:doc:`automatic-modeling-contract`), and it applies only to the no-estimator route -- the *same*
+family given explicitly still rejects the same observation per the outcome matrix below.
+
 Caller Data Ownership
 ---------------------
 

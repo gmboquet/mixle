@@ -3144,6 +3144,60 @@ def _unmodelable_fields_report(node: "DatumNode") -> list[str]:
     return [_field_line(node, "the data")]
 
 
+def _nonfinite_leaf_paths(node: "DatumNode", path: tuple[Any, ...] = ()) -> list[tuple[tuple[Any, ...], int, int]]:
+    """Depth-first ``(path, pos_inf_count, neg_inf_count)`` for every leaf carrying a native +-inf.
+
+    A structural node (tuple/sequence/set/dict) never accumulates its own ``pos_inf_count`` /
+    ``neg_inf_count`` -- only the scalar leaves that went through ``_analyze_type`` do -- so walking
+    every node and checking its own counters (rather than special-casing "is this a leaf") finds
+    exactly the fields :meth:`DatumNode.get_estimator` is about to wrap in a missingness sentinel.
+    """
+    found = []
+    if node.pos_inf_count > 0 or node.neg_inf_count > 0:
+        found.append((path, node.pos_inf_count, node.neg_inf_count))
+    for index, child in enumerate(node.children):
+        found.extend(_nonfinite_leaf_paths(child, path + (index,)))
+    for key, child in node.dict_children.items():
+        found.extend(_nonfinite_leaf_paths(child, path + ("key", key)))
+    return found
+
+
+def _warn_nonfinite_reclassified_as_missing(root: "DatumNode") -> None:
+    """Disclose that auto-inference is about to fit a field's native +-inf values as missingness.
+
+    :meth:`DatumNode.get_estimator` wraps any leaf carrying ``+inf``/``-inf`` in an
+    :class:`~mixle.stats.combinator.optional.OptionalDistribution` with a fitted rate -- the same
+    generative-missingness treatment ``None``/``NaN`` get, for the numerical-stability reason
+    explained on that method's own docstring. But that docstring is reached only by reading the
+    profiler; :func:`mixle.inference.optimize`'s "Missing values" section -- the documented contract
+    most callers actually read -- lists only ``None``/``NaN``/``pd.NA``/``pd.NaT`` as the sentinels
+    auto-inference (``estimator=None``) treats as gaps, and :doc:`/stability-and-missing-data` states
+    that default fitting routes reject non-finite observations rather than silently reclassifying
+    them -- which an *explicit* estimator does (``GaussianDistribution requires support x in
+    (-inf,inf)``). Auto-inference's own reclassification must therefore be disclosed rather than
+    silent, matching the convention already used for an ambiguous ragged table
+    (:func:`_apply_ragged_policy`) and for missing data disqualifying the joint/dependency vector
+    route (the "modality fingerprint" warning in :func:`analyze_structure`).
+    """
+    found = _nonfinite_leaf_paths(root)
+    if not found:
+        return
+    detail = "; ".join("%s (%d +inf, %d -inf)" % (format_path(path), pos, neg) for path, pos, neg in found)
+    import warnings
+
+    warnings.warn(
+        "auto-inference (estimator=None) found +inf/-inf value(s) in %s and is fitting them as a "
+        "missingness indicator (OptionalDistribution(..., missing_value=+/-inf) with a fitted rate) "
+        "rather than rejecting them -- deliberate (see DatumNode.get_estimator's docstring), but not "
+        "the None/NaN/pd.NA/pd.NaT missingness documented for optimize()/fit(). Pass an explicit "
+        "estimator (e.g. GaussianEstimator()) to reject non-finite values instead, or build the "
+        "wrapper yourself (OptionalEstimator(..., missing_value=math.inf)) to make the reclassification "
+        "explicit in your own code." % detail,
+        UserWarning,
+        stacklevel=3,
+    )
+
+
 def get_estimator(
     data,
     pseudo_count: float | None = 1.0,
@@ -3163,10 +3217,17 @@ def get_estimator(
     are fitted as a sequence silently. ``'sequence'`` takes the sequence reading unconditionally and
     without comment -- the escape hatch for variable-length data whose lengths happen to be nearly
     constant.
+
+    A field carrying a native ``+inf``/``-inf`` is fitted, not rejected -- wrapped as a missingness
+    sentinel with its own fitted rate, same as ``None``/``NaN`` -- and a ``UserWarning`` discloses it
+    (see :func:`_warn_nonfinite_reclassified_as_missing`); pass an explicit estimator instead to get
+    the reject-on-non-finite behavior documented for the family-level default route.
     """
     rows = normalize_input(data)
     _apply_ragged_policy(rows, ragged)
-    return DatumNode(data=rows).get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats, modality=modality)
+    root = DatumNode(data=rows)
+    _warn_nonfinite_reclassified_as_missing(root)
+    return root.get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats, modality=modality)
 
 
 def get_prototype(

@@ -1326,6 +1326,19 @@ def optimize(
     DISTRIBUTION rather than an estimator and its default sentinel is not ``NaN``, so ``NaN`` data
     must spell out ``marginalized(dist, missing_value=float('nan'))``.
 
+    A native ``+inf``/``-inf`` gets the same auto-inference treatment as the sentinels above --
+    fitted as its own ``OptionalDistribution(..., missing_value=math.inf)`` (one wrapper per sign
+    present) rather than rejected -- because an infinity is not itself a value most continuous
+    families can carry, so treating it as "a measurement that comes out infinite p of the time"
+    keeps the auto-built model a proper generative law instead of refusing to fit. This is
+    DIFFERENT from the ``None``/``NaN``/``pd.NA``/``pd.NaT`` case above: those are absences by
+    convention; an ``inf`` is a legitimate (if unusual) numeric value, so ``estimator=None``
+    raises a ``UserWarning`` naming the affected field(s) when it reclassifies one -- catch it with
+    ``warnings.catch_warnings()`` if your pipeline needs to notice. Passing an estimator explicitly
+    bypasses auto-inference and gets the family's own contract instead: a family whose support
+    excludes ``inf`` (e.g. ``GaussianEstimator``) raises ``ValueError`` rather than silently
+    wrapping it.
+
     **DataFrames.** ``optimize`` and ``fit`` take a pandas DataFrame or Series directly; the
     row-level stats API does not. ``mixle.stats.seq_encode`` consumes RECORDS and refuses a frame
     ("expected a sequence of 2-tuples, got DataFrame") -- converting is the caller's job, in one
