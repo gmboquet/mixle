@@ -714,7 +714,29 @@ class GammaEstimator(ParameterEstimator):
 
         # theta = mean / k, where the mean uses the count adjusted by pc1 (adj_lcnt
         # uses pc2 and is only valid for the log-mean).
-        return GammaDistribution(k, max(_MIN_GAMMA_SCALE, adj_mean / k), name=self.name, keys=self.keys)
+        rv = GammaDistribution(k, max(_MIN_GAMMA_SCALE, adj_mean / k), name=self.name, keys=self.keys)
+        if k >= _MAX_GAMMA_SHAPE:
+            # ``estimate_shape``'s bisection solver hard-clamps at ``_MAX_GAMMA_SHAPE`` whenever the
+            # data's coefficient of variation is near zero -- the MLE shape diverges as CV -> 0, and
+            # without a ceiling the solver would search forever for a k that does not exist in
+            # finite range. That is the same kind of safeguard as GaussianEstimator's variance floor
+            # (see _scaled_variance_floor / _record_variance_floor above), but unlike it went
+            # undisclosed: a caller reading only (k, theta) had no way to tell the fit hit a
+            # hard-coded wall rather than a converged estimate.
+            s = math.log(adj_mean) - adj_lmean
+            if np.isfinite(s) and s > 0.0:
+                # log(k) - digamma(k) ~ 1/(2k) for large k -- the same asymptotic the solver itself
+                # uses to seed its search interval (see ``hi`` below) -- so 1/(2*s) is the shape the
+                # moment equation is actually asking for; the solver just refuses to search past the
+                # ceiling to find it.
+                repairs = ("shape-ceiling-clamped(%.6g -> %.6g)" % (1.0 / (2.0 * s), _MAX_GAMMA_SHAPE),)
+            else:
+                # s <= 0 only from a near-zero-variance sample (Jensen's inequality makes s >= 0 for
+                # any non-degenerate data): there is no finite shape the moment equation asks for at
+                # all, not merely one outside the search range.
+                repairs = ("shape-unresolvable(cv gap %.3g -> %.6g)" % (s, _MAX_GAMMA_SHAPE),)
+            rv._numerical_repairs = repairs
+        return rv
 
     @staticmethod
     def estimate_shape(avg_sum: float, avg_sum_of_logs: float, threshold: float) -> float:
