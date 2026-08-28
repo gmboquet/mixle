@@ -94,7 +94,9 @@ To choose between candidate models, fit each with `mixle.ppl` and rank them with
 
 **Distill a slow, expensive model into a cheap one that knows when to defer.** Point `solve` at the
 function doing the job today — an LLM, an API, a rule — and it trains a small local model that answers
-the easy cases itself and escalates only the hard ones.
+the easy cases itself and escalates only the hard ones. The default student is a torch MLP, so this
+needs `pip install "mixle[torch]"`; pass `student="generative"` for a torch-free student instead (or
+use `distill_structured_from_labels` / `mixle.task.generative_text` directly for text).
 
 ```python
 from mixle.task import solve
