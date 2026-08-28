@@ -137,8 +137,13 @@ class OverreachIsScopedToParseableNumericTextTest(unittest.TestCase):
         vals = [round(float(x), 4) for x in np.random.RandomState(11).normal(50, 10, 300)]
         model = optimize(vals, out=None)
         self.assertEqual(type(model).__name__, "GaussianDistribution")
-        self.assertEqual(model.mu, 49.997748666666666)
-        self.assertEqual(model.sigma2, 93.32376314029874)
+        # assertAlmostEqual, not assertEqual: this pins that the fit is the SAME computation as
+        # before this fix, not one specific platform's summation order -- a hardcoded exact literal
+        # here (this test's original form) is a ULP-level cross-platform/numpy-version fragility,
+        # not a behavior guard; a real regression would miss this tolerance by many orders of
+        # magnitude, not the last bit.
+        self.assertAlmostEqual(model.mu, 49.997748666666666, places=9)
+        self.assertAlmostEqual(model.sigma2, 93.32376314029874, places=9)
 
     def test_genuinely_categorical_string_and_int_mix_is_untouched(self):
         data = ["low", 2, "high", 3] * 40
