@@ -129,14 +129,42 @@ class VerifyCandidateHandoutTest(unittest.TestCase):
             self.assertTrue(any(stale_commit in p for p in problems), problems)
 
     def test_a_short_prefix_naming_a_superseded_candidate_in_prose_is_not_flagged(self):
-        """A narrative mention like '## What changed since dcec5e29' (an 8-char abbreviation) is
-        below the full-hash length floor and must not false-positive -- only a full-length value
-        is ever actually pasted into a command."""
+        """A narrative mention like '## What changed since dcec5e29' (an 8-char abbreviation),
+        OUTSIDE any fenced code block, is never actually run and must not false-positive."""
         with TemporaryDirectory() as d:
             root = Path(d)
             _make_candidate(root)
             brief = root / "TESTER-BRIEF.md"
             brief.write_text(brief.read_text() + "\n## What changed since dcec5e29\n\nSome prose.\n")
+            self.assertEqual(verify_candidate_handout.verify(root), [])
+
+    def test_a_stale_short_hash_inside_a_role_b_command_is_caught(self):
+        """The fourth defect, found by an independent replayer, not by hand: a brief-generation
+        script substituted the full 40-hex commit everywhere but never carried the same
+        substitution to an ABBREVIATED (8-char) form it had itself written into a previous
+        candidate's Role B checkout command -- a short prefix is legitimate in prose (see the test
+        above) but not inside a fenced code block a tester is told to run verbatim."""
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            commit, tree, whl_sha, sdist_sha = _make_candidate(root)
+            brief = root / "TESTER-BRIEF.md"
+            stale_short = "d" * 8
+            text = brief.read_text()
+            text = text.replace(f"git checkout --detach {commit}", f"git checkout --detach {stale_short}", 1)
+            brief.write_text(text)
+            problems = verify_candidate_handout.verify(root)
+            self.assertTrue(any(stale_short in p for p in problems), problems)
+
+    def test_a_correct_short_prefix_inside_a_role_b_command_is_not_flagged(self):
+        """The candidate's OWN short prefix, if a brief legitimately uses one inside a command
+        (rather than the full hash this tool otherwise prefers), must not false-positive."""
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            commit, tree, whl_sha, sdist_sha = _make_candidate(root)
+            brief = root / "TESTER-BRIEF.md"
+            text = brief.read_text()
+            text = text.replace(f"git checkout --detach {commit}", f"git checkout --detach {commit[:8]}", 1)
+            brief.write_text(text)
             self.assertEqual(verify_candidate_handout.verify(root), [])
 
     def test_sha256sums_disagreeing_with_the_artifact_is_caught(self):
