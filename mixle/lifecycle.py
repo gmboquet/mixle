@@ -302,6 +302,10 @@ class Model:
         The ``delta`` stopping rule ends a converged fit long before the cap; a fit that does hit the
         cap without converging is disclosed in ``notes`` and in ``self._fit_info`` (``n_iter``,
         ``converged``, read from the model's :meth:`~mixle.stats.compute.pdist.FitProvenance` receipt).
+        Passing ``delta=None`` through ``**optimize_kw`` requests a fixed iteration count instead --
+        see :func:`mixle.inference.optimize`'s own ``delta`` docs for the caveat that a rejected
+        (non-improving) EM step still ends the loop early even then, which ``optimize`` discloses via
+        a ``UserWarning`` (not ``notes``) when it happens.
 
         A ``spec`` that is a prototype *distribution* also supplies the EM starting point: its
         parameter values are honored as the initialization (``optimize``'s bare prototype coercion

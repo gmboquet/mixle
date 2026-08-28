@@ -681,24 +681,55 @@ def _record_fit_provenance(
     return model
 
 
-def _warn_if_capped_unconverged(trace: "_FitTrace", max_its: int, delta: float | None) -> None:
-    """Disclose a convergence-seeking run that exhausted its iteration cap with the objective still moving.
+def _warn_if_capped_unconverged(
+    trace: "_FitTrace", max_its: int, delta: float | None, *, requested_delta: float | None
+) -> None:
+    """Disclose two distinct ways a fit can look "complete" without actually finishing its budget.
 
     A latent-variable fit truncated at ``optimize``'s default ``max_its=10`` used to present exactly like
     a finished one unless the caller thought to read ``fit_provenance()`` (campaign T4-3); the flag was
     computed and then never spoken. Scope, checked against legitimate inputs this must NOT annoy:
 
     * ``delta=None`` is the documented "fixed iteration count" request -- a run that stops at its cap on
-      purpose. No note.
+      purpose. No note (below this, the DIFFERENT ``requested_delta is None`` case is handled instead).
     * surrogate-trained estimators run with the loop delta disabled, so their scheduled-budget fits are
-      likewise silent here.
-    * a run that stopped BELOW the cap on a rejected update (``iterations < max_its``) is a different
-      condition -- more iterations would not help -- and is described by ``FitProvenance.converged``'s
-      docstring rather than warned about, so an ordinary e.g. Weibull fit stays quiet.
+      likewise silent here -- ``delta`` is the loop's own (possibly surrogate-forced) value, so this
+      case is scoped correctly by construction, unlike the case below which needs the caller's own value.
+    * a run that stopped BELOW the cap on a rejected update, with a caller-supplied ``delta`` in force
+      (``iterations < max_its`` and ``requested_delta is not None``), is a different condition -- more
+      iterations would not help -- and is described by ``FitProvenance.converged``'s docstring rather
+      than warned about, so an ordinary e.g. Weibull fit stays quiet.
 
-    What remains is a run the caller asked to iterate to a gain below ``delta`` that never got there:
-    warn once, with both remedies.
+    What remains from THAT scope is a run the caller asked to iterate to a gain below ``delta`` that
+    never got there: warn once, with both remedies.
+
+    Second, unrelated way a requested iteration budget goes unmet: ``requested_delta=None`` is
+    documented on ``optimize()``/``Model.fit`` as "run a fixed ``max_its`` iteration count" -- but
+    every loop this drives (the plain/fused EM loop's monotone acceptance gate, and block-EM's
+    rejection-livelock escape) still exits the moment a proposed step is rejected, regardless of
+    ``delta``. That is not a convergence signal -- nothing here claims a fixed point was reached --
+    it is the ordinary rejected-step exit, and with ``delta=None`` it previously vanished exactly like
+    the max_its-cap case above did before this function existed: no warning, and ``fit_provenance()``
+    distinguishes it from a full-budget run only if the caller thinks to compare ``iterations``
+    against ``max_iterations`` themselves (MXR-080-T3-02; the README's own ``production_example.py``
+    checkpointing walkthrough hits exactly this and silently checkpoints once instead of three times).
+    ``requested_delta`` is deliberately the caller's own ``delta=`` argument, not ``delta`` above (which
+    a surrogate estimator forces to ``None`` internally) -- so a surrogate fit whose loop delta was
+    forced off is never blamed on a ``delta=None`` the caller never actually passed.
     """
+    if requested_delta is None and int(trace.iterations) < int(max_its):
+        warnings.warn(
+            'optimize() was called with delta=None (documented as "a fixed iteration count": run '
+            "max_its=%d iterations) but only %d of them ran: a proposed update was rejected (a "
+            "non-improving or non-finite step), which still ends the loop even when delta=None. This "
+            "is not a converged fit -- more of the SAME update would not help, though a different "
+            "restart/initialization might -- and fit_provenance() reports iterations=%d, "
+            "max_iterations=%d, converged=False; compare the two to see the shortfall."
+            % (int(max_its), int(trace.iterations), int(trace.iterations), int(max_its)),
+            UserWarning,
+            stacklevel=3,
+        )
+        return
     if delta is None or trace.converged or int(trace.iterations) < int(max_its):
         return
     gain = trace.objective_gain
@@ -1322,6 +1353,13 @@ def optimize(
         max_its (int): Maximum number of EM iterations to be performed. Default value is 10 iterations.
         delta (Optional[float]): Stopping criteria for EM algorithm used if max_its is not set: Iterate until
             ``abs(old_loglikelihood - new_loglikelihood) < delta`` or iterations == max_its.
+            ``delta=None`` requests a fixed ``max_its`` iteration count by disabling this convergence
+            test -- but it does NOT disable the separate acceptance gate every iteration still passes
+            through (a proposed step that does not improve the objective, or produces a non-finite
+            one, is rejected and ends the loop regardless of ``delta``). That rejection can still cut
+            a ``delta=None`` run short of ``max_its``, from ordinary float noise near a fixed point; a
+            ``UserWarning`` discloses it when it happens (compare
+            ``fit_provenance().iterations`` against ``max_iterations`` to check yourself instead).
         init_estimator (Optional[ParameterEstimator]): ParameterEstimator to used to initialize EM algorithm parameters.
             If None, estimator is used. Must be consistent with estimator.
         init_p (float): Value in (0.0,1.0] for randomizing the proportion of data points used in initialization.
@@ -1780,7 +1818,7 @@ def optimize(
                 # Block EM stops on its own convergence test; it reports rounds, not a delta, so
                 # "converged" is "it stopped before the cap" rather than an asserted gain threshold.
                 block_trace.converged = bool(block_history) and len(block_history) < max_its
-                _warn_if_capped_unconverged(block_trace, max_its, delta)
+                _warn_if_capped_unconverged(block_trace, max_its, delta, requested_delta=delta)
                 return _record_fit_provenance(
                     best_model,
                     block_trace,
@@ -1861,7 +1899,7 @@ def optimize(
             trace=trace,
         )
 
-        _warn_if_capped_unconverged(trace, max_its, loop_delta)
+        _warn_if_capped_unconverged(trace, max_its, loop_delta, requested_delta=delta)
         return _record_fit_provenance(
             best_model,
             trace,

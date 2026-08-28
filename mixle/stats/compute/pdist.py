@@ -120,6 +120,10 @@ class FitProvenance:
             the step that converged (its value is ``final_objective``; the trajectory's is
             ``last_accepted_objective``).
         delta: the convergence threshold, or ``None`` when the caller asked for a fixed iteration count.
+            A fixed-count request (``delta=None``) can still see ``iterations < max_iterations``: the
+            monotone acceptance gate runs regardless of ``delta`` and a rejected step ends the loop
+            early exactly as it would with a real ``delta``. ``optimize()`` raises a ``UserWarning``
+            when that happens; compare ``iterations`` to ``max_iterations`` here to check yourself.
         final_objective: the objective value of the model this receipt is attached to -- the model the
             fit actually returned. When selection returns an earlier iterate than the trajectory's
             last accepted step (validation-based best-model selection, or ``monotone=False``), this
