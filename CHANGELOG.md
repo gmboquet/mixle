@@ -70,6 +70,83 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 
 ### Fixed
 
+- A sixth candidate campaign (four black-box tester sessions plus two clean-install reproduction
+  replays against candidate `9cf6b237`, every blocking/major claim adversarially re-verified, with
+  a regression watch across all five prior campaigns; D-0206) returned NO-GO, 2 of 4, with nine
+  confirmed-major findings, all independently reproduced. Two more defects were found and fixed
+  incidentally while investigating those nine (a `certify()` call raising unhandled `KeyError` for
+  every dict-shaped `propose(fit=True)` fit; a `LookbackHiddenMarkovModelEstimator` crash on a
+  zero-sequence corpus), and an adversarial review of the fix diff itself -- now a standing practice
+  -- caught one more gap before any of this shipped: the fix for one of the nine findings left a
+  sibling call site still passing stale data, reopening the exact crash it existed to close for any
+  schema mixing an identifier field with a sequence field. Role B replayed clean: GO, 2 of 2.
+  - `GeneralizedParetoEstimator`'s prior/support-consistency machinery (D-0205's own fix wave, and a
+    second-pass review of it, had already closed two related gaps) produced two MORE: reassigning
+    an estimator's `.loc` after building it with `dist.estimator(pseudo_count=...)` left the frozen
+    prior's absolute moments pointing at the old threshold, silently corrupting the blended fit; and
+    `combine()` with a foreign/plain-tuple partial (no tracked observation max) silently defeated
+    the prior-carrying support-consistency clamp entirely, reproducing the original crash class end
+    to end with no disclosure. `.loc` is now a property whose setter re-derives the prior's frozen
+    moments for the new threshold (the exceedance mean and variance are threshold-invariant, only
+    the absolute mean shifts); a foreign combine on a prior-carrying accumulator now discloses via
+    `numerical_repairs()` that support-consistency could not be verified, rather than silently
+    reverting to the pre-fix behavior.
+  - `propose()`'s unseen-label-rescue disclosure (already fixed twice for related misattribution
+    bugs) misnamed the excluded field -- and fabricated its held-out-row count -- whenever a
+    sequence/composite-decomposed field (which contributes more than one leaf) preceded the real
+    excluded field in column order. Fixed by correctly mapping top-level candidate children to
+    their field paths instead of assuming a 1:1 correspondence. The adversarial review then found
+    the SIBLING fix from campaign five (`_refresh_frozen_identifier_leaves`, the final-full-data-
+    refit crash guard) still used the OLD, leaf-level mapping at its own call site, so the length
+    check it depends on always failed and it silently no-opped the moment any multi-leaf field was
+    present -- reopening the exact "EM did not produce a finite objective" crash three separate
+    fixes across two campaigns were supposed to have closed. Now uses the same corrected mapping.
+  - `propose(fit=True)` still crashed with that same pre-fix error when the winning candidate was a
+    dict-shaped `RecordEstimator` rather than a tuple-shaped `CompositeEstimator`, because the
+    campaign-five fix only recognized the latter. Extended to also refresh a `RecordEstimator`'s
+    frozen leaves. Investigating this surfaced a second, unrelated crash: `certify()`'s data-
+    dependent verification indexed every row with a bare integer, which raises `KeyError` (not the
+    `IndexError`/`TypeError` it was built to tolerate) against a dict row -- so every dict-shaped
+    `propose(fit=True)` call's certificate silently failed regardless of whether anything was
+    actually wrong with the fit. Both fixed.
+  - `optimize(..., delta=None, max_its=N)` -- documented as requesting a fixed iteration count --
+    could silently run fewer than `N` iterations: a rejected/non-improving step (ordinary float
+    noise near a fixed point) still exited the loop early regardless of `delta`, undisclosed by
+    design. This is not theoretical: it changed the outcome of the README's own
+    `production_example.py` checkpointing walkthrough. Now disclosed via the same mechanism that
+    already reports a capped-unconverged fit, naming the shortfall explicitly rather than leaving it
+    indistinguishable from a full, honored iteration count.
+  - `LDAEstimator`'s alpha-divergence detector (previously fixed to name a working escape hatch
+    when the solver genuinely diverges) had a floating-point boundary gap: for several ordinary
+    topic counts, a genuinely-diverging solve landed just off the exact boundary the detector
+    checked and fell back to the pre-fix "needs more iterations" message, which the campaign
+    directly disproved by raising the iteration cap 200x with no effect. Widened the check with a
+    numerical tolerance sized to the actual floating-point noise observed, not so wide it could
+    misclassify a genuinely slow-but-convergent fit.
+  - The shared low-level `seq_initialize` utility (reachable directly via the documented
+    `seq_encode`/`seq_initialize`/`seq_estimate` pipeline, not just through `optimize()`) raised a
+    raw, undiagnosed `IndexError` on a truly empty corpus (zero sequences total) -- distinct from a
+    corpus of individually-empty sequences, which the D-0203/D-0204 fixes already handle. The
+    high-level `optimize([], ...)` already guarded this cleanly; the guard now reaches the low-level
+    entry point too. Investigating this surfaced a sibling crash specific to
+    `LookbackHiddenMarkovModelEstimator`: its own `seq_update`/`seq_posterior` computed a value from
+    the same zero-sequence corpus's per-sequence-length array and never used the result -- dead
+    code since introduction -- removed, closing an identical crash it was inadvertently causing.
+  - `optimize()`/`fit()`'s default auto-inference silently reclassified `+inf`/`-inf` in a numeric
+    column as a fitted "missingness" indicator, contradicting both `optimize()`'s own documented
+    list of missing-value sentinels (which does not include `inf`) and the stated contract that
+    default fitting routes reject non-finite observations rather than silently reinterpreting them.
+    Now disclosed via a warning at fit time, matching this codebase's established convention for
+    auto-inference decisions that could otherwise surprise a caller.
+  - Closed a fourth variant of the candidate-handout identity defect (three prior variants: D-0202,
+    D-0203): a brief-generation script substituted the full 40-hex source commit everywhere it
+    appeared, but never carried the same substitution to an 8-character ABBREVIATED commit a PRIOR
+    generation script had left inside Role B's `git checkout --detach` command -- caught by an
+    independent Role B replayer who followed the brief literally, not by the automated checker
+    (which deliberately does not flag short hashes, since they are ordinarily legitimate narrative
+    prose). The checker now also scans fenced code blocks specifically, where a short hash is
+    copy-pasted and run verbatim rather than merely read.
+
 - A fifth candidate campaign (four black-box tester sessions plus two clean-install reproduction
   replays against candidate `21df4e4a`, every blocking/major claim adversarially re-verified, with
   a regression watch across all four prior campaigns; D-0205) returned NO-GO, 2 of 4, with every
