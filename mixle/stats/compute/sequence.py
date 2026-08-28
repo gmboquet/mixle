@@ -548,18 +548,30 @@ def seq_initialize(
         # in memory at once, which is a real cost on the large inputs this path exists for, so the
         # repair is deferred to the end instead -- matching the iterable branch below.
         fallback: tuple[Any, ...] = ()
+        fallback_size = 0
         for sz, enc_x in enc_data:
-            if not fallback:
+            if not fallback and sz > 0:
+                # Track the first chunk that actually HAS a row to seed from -- not blindly the
+                # first chunk seen. A truly empty corpus (e.g. seq_encode([], ...)) still produces
+                # one chunk, but with a declared row count of 0; picking it as the fallback source
+                # indexed a zero-length seed_mask below (T4-02). Every chunk this loop visits before
+                # the corpus's first non-empty one is skipped instead, leaving fallback unset when
+                # none exists.
                 fallback = (enc_x,)
+                fallback_size = sz
             w = rng_w.binomial(n=1, p=p, size=sz).astype(dtype=np.float64)
             accumulator.seq_initialize(enc_x, w, rng)
             nobs += float(w.sum())  # count the kept (weight-1) observations, matching the RDD/non-seq paths
 
         if nobs == 0.0 and fallback:
-            # Nothing at all was selected. Seed the accumulator from the first chunk's leading row so
-            # the estimator downstream has something to fit, rather than an empty initialization that
-            # only some leaves tolerate.
-            seed_mask = np.zeros(int(enc_data[0][0]), dtype=np.float64)
+            # Nothing at all was selected. Seed the accumulator from the first non-empty chunk's
+            # leading row so the estimator downstream has something to fit, rather than an empty
+            # initialization that only some leaves tolerate. When the corpus is truly empty, no
+            # chunk ever satisfies `sz > 0` above, fallback stays (), and this block is skipped --
+            # nobs is left at 0.0 and falls through to the same legitimate zero-observations path
+            # already taken when enc_data itself has zero chunks (validated_initialized_observations
+            # documents 0.0 as a legitimate, non-error initialization count).
+            seed_mask = np.zeros(fallback_size, dtype=np.float64)
             seed_mask[0] = 1.0
             accumulator.seq_initialize(fallback[0], seed_mask, rng)
             nobs = 1.0
