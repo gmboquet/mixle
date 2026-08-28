@@ -970,8 +970,12 @@ def glm(
             # quadratic form suffers the same catastrophic cancellation X'WX itself was rejected
             # for, producing "leverage" outside [0, 1] (observed: max 4.11, sum 24.6 for a
             # rank-4 design, instead of every h_i in [0, 1] summing to exactly 4). diag(U U') is
-            # bounded in [0, 1] and sums to the rank by construction, at cond(X) precision.
-            hat_diag = np.sum(u * u, axis=1)
+            # bounded in [0, 1] and sums to the rank by construction, at cond(X) precision. U's
+            # insignificant columns (beyond `rank`) must be masked out exactly like xtwx_inv
+            # masks them via inv_sq_singular -- otherwise a rank-deficient design (collinear or
+            # duplicated columns, not just an ill-conditioned one) sums the hat diagonal to p
+            # instead of rank, reintroducing spurious leverage-near-1 false positives.
+            hat_diag = np.sum((u * significant[None, :]) ** 2, axis=1)
             if frequency:
                 # hat_diag is the leverage of the whole replicate-count row (weight w * dmu^2/var);
                 # dividing out w recovers the per-replicate figure described above
