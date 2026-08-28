@@ -1177,6 +1177,7 @@ def _unseen_label_rescue(
     cause -- an unexplained non-finite score must still fail the candidate outright, not be papered
     over.
     """
+    from mixle.stats.combinator.optional import OptionalDistribution
     from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
 
     dists = getattr(fitted, "dists", None)
@@ -1199,6 +1200,18 @@ def _unseen_label_rescue(
         leaf = dists[i]
         seen = 0
         while hasattr(leaf, "dist") and seen < 8:  # unwrap OptionalDistribution/IgnoredDistribution wrappers
+            if isinstance(leaf, OptionalDistribution) and not (np.isfinite(leaf.log_p) and np.isfinite(leaf.log_pn)):
+                # This wrapper's OWN score is -inf whenever a held-out row is missing and p==0 (or
+                # present and p==1) -- indistinguishable, from the aggregate score alone, from the
+                # leaf's unseen-label -inf this rescue exists to explain. An adversarial review
+                # caught this: a field fit with p==0 (no missing rows in the training split) that
+                # meets a genuinely MISSING held-out value scores -inf from THIS wrapper, not from
+                # any unseen categorical label, and the field is silently (and wrongly) excused as
+                # "unseen in training" -- masking a real missing-value generalization failure. Only
+                # when 0 < p < 1 can this wrapper never itself produce -inf, making any -inf here
+                # unambiguously the child's; otherwise refuse, matching the function's own rule that
+                # an unexplained non-finite score must fail the candidate outright.
+                return None
             leaf = leaf.dist
             seen += 1
         if not isinstance(leaf, CategoricalDistribution) or leaf.default_value != 0.0:
