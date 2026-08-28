@@ -474,10 +474,30 @@ class ProbabilityDistribution(FitProvenanceCarrier, ABC):
         return rv
 
     def to_json(self, **kwargs: Any) -> str:
-        """Serialize this distribution as safe strict JSON."""
-        from mixle.utils.serialization import to_json
+        """Serialize this distribution as safe strict JSON.
 
-        return to_json(self, **kwargs)
+        Read back through ``from_json`` before returning, the same check
+        :func:`mixle.stats.dump_models` (``verify=True``) performs: encoding alone only proves the
+        registry accepted this object's ``__dict__``, not that the state reconstructs through the
+        class's own constructor. A family whose estimator pins extra state onto the fitted object
+        (e.g. ``VonMisesDistribution``'s ``fit_metadata``) encodes cleanly and then refuses to load,
+        and without this check that failure would surface later, on a different object or in a
+        different process, instead of here where the object is still live and recoverable another
+        way (``to_dict()``, or pickling).
+        """
+        from mixle.lifecycle import json_read_back_failure
+        from mixle.utils.serialization import SerializationError, to_json
+
+        text = to_json(self, **kwargs)
+        failure = json_read_back_failure(text)
+        if failure is not None:
+            raise SerializationError(
+                f"to_json produced JSON that from_json cannot read back ({failure}). Refusing to "
+                "return a write-only serialization: this object is still available here, and would "
+                "not be recoverable from this text later. Use to_dict() to inspect the fitted "
+                "parameters, or pickle the object instead."
+            )
+        return text
 
     @classmethod
     def from_json(cls, text: str) -> "ProbabilityDistribution":
