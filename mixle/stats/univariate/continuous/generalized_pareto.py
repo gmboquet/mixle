@@ -47,31 +47,44 @@ _XI_TOL = 1.0e-8  # abs(xi) below this is treated as the exponential limit
 
 
 class GeneralizedParetoSuffStat(tuple):
-    """A ``(sum, sum2, count)`` sufficient statistic that also carries a shift-anchored side payload.
+    """A ``(sum, sum2, count)`` sufficient statistic that also carries two side payloads.
 
     Behaves exactly like the plain 3-tuple everywhere it is indexed, unpacked, or iterated (it *is*
     one); ``anchored`` is the shift-anchored moment payload
     ``(anchor, sum_i w_i*(x_i - anchor), sum_i w_i*(x_i - anchor)^2)`` that
     :class:`GeneralizedParetoAccumulator` maintains alongside the raw moments so the moment
-    inversion survives a threshold far from zero. Code that doesn't know about the payload (generic
-    ``scale_suff_stat``, engine kernels, ...) sees an ordinary tuple and the estimate falls back to
-    the historical raw path.
+    inversion survives a threshold far from zero. ``max_x`` is the largest observation actually
+    folded into these moments with positive weight (``None`` when no such max is known to be
+    trustworthy -- see :meth:`GeneralizedParetoAccumulator.combine`); :meth:`GeneralizedParetoEstimator.estimate`
+    uses it to keep a shape<0 fit's implied support consistent with the data it was fit from (T1-01).
+    Code that doesn't know about either payload (generic ``scale_suff_stat``, engine kernels, ...)
+    sees an ordinary tuple and the estimate falls back to the historical raw path.
     """
 
-    def __new__(cls, sum_: float, sum2_: float, count_: float, anchored: tuple[float, float, float] | None = None):
+    def __new__(
+        cls,
+        sum_: float,
+        sum2_: float,
+        count_: float,
+        anchored: tuple[float, float, float] | None = None,
+        max_x: float | None = None,
+    ):
         obj = super().__new__(cls, (sum_, sum2_, count_))
         obj.anchored = anchored
+        obj.max_x = max_x
         return obj
 
     def __reduce__(self):
         # A plain tuple subclass with a payload-bearing __new__ does not pickle by default; the
-        # Spark/mp reducers round-trip accumulator values through pickle, so keep the payload.
-        return (_rebuild_gpd_suff_stat, (tuple(self), self.anchored))
+        # Spark/mp reducers round-trip accumulator values through pickle, so keep both payloads.
+        return (_rebuild_gpd_suff_stat, (tuple(self), self.anchored, self.max_x))
 
 
-def _rebuild_gpd_suff_stat(values: tuple, anchored: tuple | None) -> "GeneralizedParetoSuffStat":
+def _rebuild_gpd_suff_stat(
+    values: tuple, anchored: tuple | None, max_x: float | None = None
+) -> "GeneralizedParetoSuffStat":
     """Unpickle helper for :class:`GeneralizedParetoSuffStat` (module-level so pickle can import it)."""
-    return GeneralizedParetoSuffStat(values[0], values[1], values[2], anchored=anchored)
+    return GeneralizedParetoSuffStat(values[0], values[1], values[2], anchored=anchored, max_x=max_x)
 
 
 class GeneralizedParetoPriorMoments(tuple):
@@ -148,6 +161,22 @@ def _prior_variance(suff_stat: Any, loc: float, xi_min: float) -> float:
             stacklevel=3,
         )
     return recovered
+
+
+def _consistent_gpd_max(suff_stat: Any, raw_count: float) -> float | None:
+    """The tracked observation max carried by ``suff_stat``, when it can be trusted, else ``None``.
+
+    Mirrors :func:`consistent_anchored_triple`'s trust rule for the sibling ``.anchored`` payload: a
+    ``max_x`` is only usable when finite and the statistic represents at least one real (raw, not
+    prior-pseudo) observation. A plain tuple, or an accumulator whose max was tainted by a
+    foreign/pre-payload merge (see :meth:`GeneralizedParetoAccumulator.combine`), carries no max, and
+    :meth:`GeneralizedParetoEstimator.estimate` falls back to never clamping -- the pre-T1-01 behavior
+    for that (rare) case.
+    """
+    max_x = getattr(suff_stat, "max_x", None)
+    if max_x is None or raw_count <= 0.0 or not np.isfinite(max_x):
+        return None
+    return float(max_x)
 
 
 def _gpd_observations(
@@ -411,24 +440,33 @@ class GeneralizedParetoAccumulator(AnchoredMomentTrack, SequenceEncodableStatist
         self.name = name
         self.keys = keys
         self._init_anchor()
+        # Largest observation folded in with positive weight -- see `GeneralizedParetoSuffStat`.
+        # `_max_tainted` marks the rare case where a combined-in partial carried real observations
+        # but no max payload (a foreign/pre-payload tuple): from that point the true max can no
+        # longer be vouched for, so `value()` reports `max_x=None` and the M-step falls back to its
+        # historical, unclamped behaviour rather than clamping against an undercounted max.
+        self._max_x = -math.inf
+        self._max_tainted = False
 
     def update(self, x: float, weight: float, estimate: GeneralizedParetoDistribution | None) -> None:
         """Accumulate weighted first and second moments for one observation."""
-        if estimate is None:
-            xx = finite_observation(
-                x,
-                label="generalized-Pareto observation",
-                minimum=self.loc,
-            )
-        else:
-            xx = float(
-                _gpd_observations(
-                    [x],
-                    loc=estimate.loc,
-                    scale=estimate.scale,
-                    shape=estimate.shape,
-                )[0]
-            )
+        # `estimate.scale`/`estimate.shape` are deliberately NOT forwarded to the observation
+        # validator here (contrast `GeneralizedParetoDataEncoder.seq_encode`, which validates an
+        # externally-supplied array against a FIXED distribution's support). This call re-accumulates
+        # the SAME training data through the CURRENT mid-EM model on every iteration, and for a
+        # shape<0 method-of-moments fit that model's implied upper endpoint (loc - scale/xi) can
+        # legitimately sit below the data's own max -- an ordinary, expected transient of MoM
+        # refinement (T1-01), not a data problem. The accumulated value never depends on scale/shape,
+        # so skipping that bound here does not change the resulting fit; only the structural
+        # `x >= loc` invariant, which does not change across iterations, is still enforced.
+        loc = estimate.loc if estimate is not None else self.loc
+        xx = finite_observation(
+            x,
+            label="generalized-Pareto observation",
+            minimum=loc,
+        )
+        if weight > 0.0:
+            self._max_x = max(self._max_x, xx)
         # BEFORE the raw fold, so an activation only converts content the gate already vouched for.
         self._anchor_scalar(xx, weight)
         self.sum += xx * weight
@@ -441,15 +479,16 @@ class GeneralizedParetoAccumulator(AnchoredMomentTrack, SequenceEncodableStatist
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: GeneralizedParetoDistribution | None) -> None:
         """Accumulate weighted first and second moments from encoded data."""
-        if estimate is None:
-            xx = _gpd_observations(x, loc=self.loc)
-        else:
-            xx = _gpd_observations(
-                x,
-                loc=estimate.loc,
-                scale=estimate.scale,
-                shape=estimate.shape,
-            )
+        # See `update()` above: `estimate.scale`/`estimate.shape` are deliberately not forwarded to
+        # the validator here -- this re-accumulates the SAME training data through the current
+        # mid-EM model, whose implied upper endpoint can legitimately (and transiently) sit below
+        # the data's own max for a shape<0 method-of-moments fit (T1-01). Only the fixed threshold
+        # `loc` is a real invariant of the data across iterations.
+        loc = estimate.loc if estimate is not None else self.loc
+        xx = _gpd_observations(x, loc=loc)
+        positive = weights > 0.0
+        if xx.size and np.any(positive):
+            self._max_x = max(self._max_x, float(np.max(xx[positive])))
         self._anchor_fold_chunk(xx, weights)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
@@ -459,28 +498,68 @@ class GeneralizedParetoAccumulator(AnchoredMomentTrack, SequenceEncodableStatist
     def combine(self, suff_stat: tuple[float, float, float]) -> "GeneralizedParetoAccumulator":
         """Merge another generalized-Pareto sufficient-statistic tuple."""
         self._anchor_absorb(suff_stat)
+        incoming_max = getattr(suff_stat, "max_x", None)
+        if incoming_max is not None and np.isfinite(incoming_max):
+            self._max_x = max(self._max_x, float(incoming_max))
+        elif suff_stat[2] > 0.0:
+            # Real observations arrived with no tracked max (a foreign/pre-payload tuple): this
+            # accumulator's own max can no longer be vouched for as the training data's true max.
+            self._max_tainted = True
         self.sum += suff_stat[0]
         self.sum2 += suff_stat[1]
         self.count += suff_stat[2]
         return self
 
+    def _max_x_relevant(self) -> bool:
+        """Whether the RAW moments even admit a shape<0 fit, so a max is worth carrying.
+
+        A cheap pre-check on the same (sum, sum2, count) moments the raw M-step path inverts --
+        deliberately ignoring both the anchored track (this only needs the SIGN of xi, which the
+        raw form gets right far below the precision the anchor exists for) and any pseudo-count
+        prior blend (unknown here; see :meth:`GeneralizedParetoEstimator.estimate`, which reads the
+        max off the untouched raw pair for the same reason). A positive-or-zero-shape fit has
+        infinite support and can never need the clamp, so ordinary heavy-tailed data -- the common
+        GPD case -- never carries the payload at all, exactly like the anchored track's own
+        conditioning gate.
+        """
+        if self.count <= 0.0:
+            return False
+        mean_x = self.sum / self.count
+        var = self.sum2 / self.count - mean_x * mean_x
+        m = mean_x - self.loc
+        if m <= 0.0 or var <= 0.0:
+            return False
+        return 0.5 * (1.0 - m * m / var) < -_XI_TOL
+
     def value(self) -> tuple[float, float, float]:
         """Return accumulated sum, second moment sum, and count.
 
         A plain 3-tuple for every consumer that treats it as one; once the shift-anchored moment
-        track is live it is a :class:`GeneralizedParetoSuffStat` additionally carrying the anchored
-        moments in its ``.anchored`` attribute, so :meth:`combine` can fold them in and
-        :meth:`GeneralizedParetoEstimator.estimate` can invert threshold-invariant moments.
+        track is live, or a trustworthy observation max is known AND relevant, it is a
+        :class:`GeneralizedParetoSuffStat` additionally carrying the anchored moments in its
+        ``.anchored`` attribute and/or the max in ``.max_x``, so :meth:`combine` can fold them in and
+        :meth:`GeneralizedParetoEstimator.estimate` can invert threshold-invariant moments and keep a
+        shape<0 fit's implied support consistent with the data (T1-01).
         """
         anchored = self._anchor_payload()
-        if anchored is None:
+        max_x = None if (self._max_tainted or not np.isfinite(self._max_x)) else self._max_x
+        if max_x is not None and not self._max_x_relevant():
+            max_x = None
+        if anchored is None and max_x is None:
             return self.sum, self.sum2, self.count
-        return GeneralizedParetoSuffStat(self.sum, self.sum2, self.count, anchored=anchored)
+        return GeneralizedParetoSuffStat(self.sum, self.sum2, self.count, anchored=anchored, max_x=max_x)
 
     def from_value(self, x: tuple[float, float, float]) -> "GeneralizedParetoAccumulator":
         """Replace accumulator contents from a sufficient-statistic tuple."""
         self.sum, self.sum2, self.count = float(x[0]), float(x[1]), float(x[2])
         self._anchor_restore(x)
+        incoming_max = getattr(x, "max_x", None)
+        if incoming_max is not None and np.isfinite(incoming_max):
+            self._max_x = float(incoming_max)
+            self._max_tainted = False
+        else:
+            self._max_x = -math.inf
+            self._max_tainted = self.count > 0.0
         return self
 
     def scale(self, c: float) -> "GeneralizedParetoAccumulator":
@@ -488,7 +567,9 @@ class GeneralizedParetoAccumulator(AnchoredMomentTrack, SequenceEncodableStatist
 
         The structural default round-trips through ``value()``/``from_value()`` and
         ``scale_suff_stat`` rebuilds a PLAIN tuple, which would drop the payload and undo the
-        repair; ``loc`` is a fixed threshold, not a statistic, and is left alone.
+        repair; ``loc`` is a fixed threshold, not a statistic, and is left alone. The tracked max is
+        likewise left alone: uniform weight scaling reweights the aggregate contribution of the same
+        observations, it does not change which values were actually observed.
         """
         self._anchor_scale(c)
         self.sum *= c
@@ -565,9 +646,12 @@ class GeneralizedParetoEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float]) -> GeneralizedParetoDistribution:
         """Estimate scale and shape from exceedance moments at the fixed location."""
         sum_x, sum_x2, count = float(suff_stat[0]), float(suff_stat[1]), float(suff_stat[2])
-        # The anchored payload (when present) describes the RAW data only -- captured before the
-        # prior blend below -- so it is read off the untouched (sum_x, count) pair.
+        # The anchored payload and the observation max (when present) both describe the RAW data
+        # only -- captured before the prior blend below -- so both are read off the untouched
+        # (sum_x, count) pair. The prior contributes a fictitious pseudo-sample with no observed
+        # max of its own, so it must never enter the support-consistency clamp below.
         anchored = consistent_anchored_triple(suff_stat, sum_x, count)
+        max_x = _consistent_gpd_max(suff_stat, count)
         raw_count = count
 
         prior_mean: float | None = None
@@ -613,6 +697,20 @@ class GeneralizedParetoEstimator(ParameterEstimator):
         xi = 0.5 * (1.0 - m * m / var)
         xi = min(max(xi, self.xi_min), self.xi_max)
         scale = max(m * (1.0 - xi), self.min_scale)
+        if max_x is not None and xi < -_XI_TOL:
+            # A shape<0 method-of-moments fit only matches the first two moments; unlike an MLE
+            # respecting the finite-support constraint, it has no mechanism to keep its implied
+            # upper endpoint (loc - scale/xi) at or above the data's own max. Left alone, every
+            # later use of this fit -- another EM iteration re-scoring the SAME training data, a
+            # held-out score, a caller's own log_density call -- sees -inf on the excluded points
+            # (T1-01: this is what made optimize()/fit() crash on data estimate() itself accepted).
+            # Raise scale (never xi, the moment-matched shape) to the smallest value that restores
+            # support consistency; a small relative margin absorbs the rounding
+            # ``loc - scale/xi`` picks back up on the way out.
+            required_scale = abs(xi) * (max_x - self.loc) * (1.0 + 1.0e-9)
+            if required_scale > scale:
+                notes = notes + ("scale-floored-for-support(%.6g -> %.6g)" % (scale, required_scale),)
+                scale = required_scale
         dist = GeneralizedParetoDistribution(scale, xi, loc=self.loc, name=self.name, keys=self.keys)
         if notes:
             dist._numerical_repairs = notes

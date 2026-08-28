@@ -140,8 +140,17 @@ class ContinuousObservationContractTest(unittest.TestCase):
             accumulator.update(0.5, 1.0, None)
         with self.assertRaises(ValueError):
             accumulator.seq_update(np.asarray([0.5]), np.ones(1), None)
+        # `accumulator.update(x, weight, estimate)`/`seq_update` re-accumulate the SAME training
+        # data through the CURRENT mid-EM model on every iteration, and a shape<0 method-of-moments
+        # fit's implied upper endpoint can legitimately sit below the data's own max -- an ordinary,
+        # expected transient of MoM refinement (T1-01), not a data problem. Re-validating that bound
+        # here made every next optimize()/fit() iteration crash on data estimate() itself accepted,
+        # so only the fixed threshold `loc` -- which never changes across iterations -- is enforced
+        # on this path; `encoder.seq_encode` above still enforces the full endpoint for genuinely
+        # external data scored against a fixed distribution.
+        accumulator.update(5.5, 1.0, distribution)  # above distribution's endpoint: no longer raises
         with self.assertRaises(ValueError):
-            accumulator.update(5.5, 1.0, distribution)
+            accumulator.update(0.5, 1.0, distribution)  # below loc: still raises
 
     def test_generalized_pareto_encoder_identity_includes_support(self):
         first = GeneralizedParetoDistribution(1.0, 0.0, loc=0.0).dist_to_encoder()
