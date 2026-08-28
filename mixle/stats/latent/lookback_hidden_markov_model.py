@@ -1118,7 +1118,10 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
 
         # transitions between consecutive positions within each sequence
         prev_mask = np.ones(tot_cnt, dtype=bool)
-        prev_mask[tz[1:] - 1] = False
+        # An all-empty corpus (every sequence length 0) makes tot_cnt 0, so tz[1:] - 1 is all -1 and
+        # there is no "last position" for it to name -- prev_mask is already empty and correct as-is.
+        if tot_cnt > 0:
+            prev_mask[tz[1:] - 1] = False
         prev_idx = np.flatnonzero(prev_mask)
         next_idx = prev_idx + 1
         seq_of_pos = np.repeat(np.arange(len(sz)), sz)

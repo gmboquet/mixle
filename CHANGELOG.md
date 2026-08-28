@@ -115,6 +115,18 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 
 ### Fixed
 
+- `LookbackHiddenMarkovModelEstimator` (`lag=0`) crashed fitting an all-empty corpus (every input
+  sequence length 0): `IndexError: index -1 is out of bounds for axis 0 with size 0` from
+  `seq_initialize`'s transition-adjacency mask, indexing an array with zero positions. D-0203 had
+  recorded this as "the same all-empty-corpus defect class as the now-fixed `hidden_markov.py`,"
+  found by an agent, not fixed; that undersold the scope -- the sibling's fix was in *scoring*
+  (`seq_log_density`), and its `seq_initialize` already tolerated an all-empty corpus without any
+  change. This is a distinct crash site, found and fixed before candidate `6203ec15`'s campaign
+  (D-0204). `lag > 0` is unaffected: it already raises a clear, designed `ValueError` for an empty
+  sequence at encode time, which is not this defect.
+
+### Fixed
+
 - A third candidate campaign (four black-box tester sessions plus two clean-install reproduction
   replays against candidate `dcec5e29`, every blocking/major claim adversarially re-verified;
   D-0202) found and fixed the following.
