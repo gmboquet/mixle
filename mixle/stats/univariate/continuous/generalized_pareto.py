@@ -57,8 +57,14 @@ class GeneralizedParetoSuffStat(tuple):
     folded into these moments with positive weight (``None`` when no such max is known to be
     trustworthy -- see :meth:`GeneralizedParetoAccumulator.combine`); :meth:`GeneralizedParetoEstimator.estimate`
     uses it to keep a shape<0 fit's implied support consistent with the data it was fit from (T1-01).
-    Code that doesn't know about either payload (generic ``scale_suff_stat``, engine kernels, ...)
-    sees an ordinary tuple and the estimate falls back to the historical raw path.
+    ``max_unverified`` disambiguates WHY ``max_x`` is ``None`` for a prior-carrying accumulator: it is
+    ``True`` when a foreign/pre-payload ``combine()`` left real observations with no tracked max, so
+    the T1-01 protection could not be applied though it is supposed to be unconditional there, versus
+    the ordinary ``False`` case where the max was never relevant to begin with. ``estimate`` reads it
+    to disclose that ambiguity via ``numerical_repairs()`` rather than silently falling back to the
+    pre-T1-01 unclamped behaviour (T1-02).
+    Code that doesn't know about any of these payloads (generic ``scale_suff_stat``, engine kernels,
+    ...) sees an ordinary tuple and the estimate falls back to the historical raw path.
     """
 
     def __new__(
@@ -68,23 +74,27 @@ class GeneralizedParetoSuffStat(tuple):
         count_: float,
         anchored: tuple[float, float, float] | None = None,
         max_x: float | None = None,
+        max_unverified: bool = False,
     ):
         obj = super().__new__(cls, (sum_, sum2_, count_))
         obj.anchored = anchored
         obj.max_x = max_x
+        obj.max_unverified = max_unverified
         return obj
 
     def __reduce__(self):
         # A plain tuple subclass with a payload-bearing __new__ does not pickle by default; the
-        # Spark/mp reducers round-trip accumulator values through pickle, so keep both payloads.
-        return (_rebuild_gpd_suff_stat, (tuple(self), self.anchored, self.max_x))
+        # Spark/mp reducers round-trip accumulator values through pickle, so keep every payload.
+        return (_rebuild_gpd_suff_stat, (tuple(self), self.anchored, self.max_x, self.max_unverified))
 
 
 def _rebuild_gpd_suff_stat(
-    values: tuple, anchored: tuple | None, max_x: float | None = None
+    values: tuple, anchored: tuple | None, max_x: float | None = None, max_unverified: bool = False
 ) -> "GeneralizedParetoSuffStat":
     """Unpickle helper for :class:`GeneralizedParetoSuffStat` (module-level so pickle can import it)."""
-    return GeneralizedParetoSuffStat(values[0], values[1], values[2], anchored=anchored, max_x=max_x)
+    return GeneralizedParetoSuffStat(
+        values[0], values[1], values[2], anchored=anchored, max_x=max_x, max_unverified=max_unverified
+    )
 
 
 class GeneralizedParetoPriorMoments(tuple):
@@ -171,12 +181,27 @@ def _consistent_gpd_max(suff_stat: Any, raw_count: float) -> float | None:
     prior-pseudo) observation. A plain tuple, or an accumulator whose max was tainted by a
     foreign/pre-payload merge (see :meth:`GeneralizedParetoAccumulator.combine`), carries no max, and
     :meth:`GeneralizedParetoEstimator.estimate` falls back to never clamping -- the pre-T1-01 behavior
-    for that (rare) case.
+    for that (rare) case, unless :func:`_gpd_max_unverified` says the ambiguity needs disclosing
+    (T1-02).
     """
     max_x = getattr(suff_stat, "max_x", None)
     if max_x is None or raw_count <= 0.0 or not np.isfinite(max_x):
         return None
     return float(max_x)
+
+
+def _gpd_max_unverified(suff_stat: Any) -> bool:
+    """Whether ``suff_stat``'s missing ``max_x`` is a disclosed ambiguity rather than "not relevant".
+
+    A prior-carrying accumulator's support-consistency protection (T1-01) is supposed to be
+    unconditional (see :meth:`GeneralizedParetoAccumulator._max_x_relevant`), but a foreign/pre-payload
+    ``combine()`` can still leave it with real observations and no trustworthy max (see
+    :meth:`GeneralizedParetoAccumulator.value`). ``True`` only in exactly that case, so
+    :meth:`GeneralizedParetoEstimator.estimate` can disclose the ambiguity via ``numerical_repairs()``
+    (T1-02) instead of conflating it with the ordinary, quiet "max was never relevant" case a plain
+    tuple or a no-prior accumulator's ``value()`` also reports as ``max_x=None``.
+    """
+    return bool(getattr(suff_stat, "max_unverified", False))
 
 
 def _gpd_observations(
@@ -555,14 +580,24 @@ class GeneralizedParetoAccumulator(AnchoredMomentTrack, SequenceEncodableStatist
         for a prior-carrying estimator (see :meth:`_max_x_relevant`); for one without a prior it is
         the same cheap raw-moment pre-check as before, so ordinary well-conditioned data still
         returns the historical plain tuple, byte for byte.
+
+        For a prior-carrying estimator that protection is supposed to be unconditional, but a foreign
+        (pre-payload) ``combine()`` can still leave real observations with no trustworthy max
+        (``self._max_tainted``); rather than silently degrade to the plain tuple that hides this from
+        ``estimate``, that case is still reported as a :class:`GeneralizedParetoSuffStat` with
+        ``max_x=None`` and ``max_unverified=True``, so ``estimate`` can disclose the ambiguity instead
+        of reproducing the T1-01 crash class with zero signal (T1-02).
         """
         anchored = self._anchor_payload()
         max_x = None if (self._max_tainted or not np.isfinite(self._max_x)) else self._max_x
         if max_x is not None and not self.has_prior and not self._max_x_relevant():
             max_x = None
-        if anchored is None and max_x is None:
+        max_unverified = self.has_prior and self._max_tainted and self.count > 0.0
+        if anchored is None and max_x is None and not max_unverified:
             return self.sum, self.sum2, self.count
-        return GeneralizedParetoSuffStat(self.sum, self.sum2, self.count, anchored=anchored, max_x=max_x)
+        return GeneralizedParetoSuffStat(
+            self.sum, self.sum2, self.count, anchored=anchored, max_x=max_x, max_unverified=max_unverified
+        )
 
     def from_value(self, x: tuple[float, float, float]) -> "GeneralizedParetoAccumulator":
         """Replace accumulator contents from a sufficient-statistic tuple."""
@@ -635,6 +670,12 @@ class GeneralizedParetoEstimator(ParameterEstimator):
     reconstruction is the prior's own encoding and is unaffected by the anchored track: a prior
     whose mean sits far from zero loses precision in the reconstructed variance, so express such a
     prior in threshold-relative coordinates.
+
+    ``loc`` is a property, not a bare attribute: reassigning it re-targets this SAME estimator at a
+    new threshold (the "threshold stability" / mean-residual-life re-thresholding workflow) and, when
+    a ``pseudo_count`` prior is configured, re-anchors its frozen ``(mean0, second0)`` moments to the
+    new origin so the prior keeps meaning what it meant when built instead of being silently
+    reinterpreted relative to the wrong ``loc`` (T1-01).
     """
 
     def __init__(
@@ -648,14 +689,50 @@ class GeneralizedParetoEstimator(ParameterEstimator):
         name: str | None = None,
         keys: str | None = None,
     ) -> None:
-        self.loc = float(loc)
+        self._loc = float(loc)
         self.pseudo_count = pseudo_count
         self.suff_stat = suff_stat
+        # The threshold `suff_stat`'s (mean, second_moment) prior pair is expressed relative to --
+        # always `self._loc` itself at construction, since `.estimator()` builds both together (T1-01).
+        self._prior_loc = self._loc
         self.min_scale = min_scale
         self.xi_max = xi_max  # method of moments needs a finite variance (xi < 1/2)
         self.xi_min = xi_min
         self.name = name
         self.keys = keys
+
+    @property
+    def loc(self) -> float:
+        """The fixed threshold ``mu`` observations are exceedances over."""
+        return self._loc
+
+    @loc.setter
+    def loc(self, value: float) -> None:
+        """Re-target this estimator at a new threshold, re-anchoring any frozen prior with it.
+
+        A natural "threshold stability" workflow (mean-residual-life re-thresholding) re-targets the
+        SAME estimator at a new ``loc`` in place. ``.estimator(pseudo_count=...)`` bakes the prior's
+        mean/second moment as ABSOLUTE values relative to the distribution's OWN ``loc`` at
+        construction time (see :meth:`GeneralizedParetoDistribution.estimator`); left untouched, a
+        later re-target would silently reinterpret those absolute moments relative to the wrong
+        origin, corrupting the blend with no diagnostic signal (T1-01).
+
+        The exceedance mean ``mean0 - loc`` and the variance are properties of the prior
+        DISTRIBUTION, not of ``loc``, so they are threshold-invariant; only the absolute mean shifts
+        by exactly the same amount the threshold does. Re-deriving the pair that way keeps the prior
+        meaning what it meant when built, at any new origin, without needing to remember more than
+        the origin it was last expressed relative to.
+        """
+        new_loc = float(value)
+        if not np.isfinite(new_loc):
+            raise ValueError("generalized-Pareto estimator threshold must be finite")
+        if self.pseudo_count is not None and self.suff_stat is not None:
+            variance = _prior_variance(self.suff_stat, self._prior_loc, self.xi_min)
+            mean0 = float(self.suff_stat[0]) + (new_loc - self._prior_loc)
+            second0 = variance + mean0 * mean0
+            self.suff_stat = GeneralizedParetoPriorMoments(mean0, second0, variance=variance)
+        self._prior_loc = new_loc
+        self._loc = new_loc
 
     def accumulator_factory(self) -> GeneralizedParetoAccumulatorFactory:
         """Return an accumulator factory for generalized-Pareto moments."""
@@ -671,6 +748,7 @@ class GeneralizedParetoEstimator(ParameterEstimator):
         # max of its own, so it must never enter the support-consistency clamp below.
         anchored = consistent_anchored_triple(suff_stat, sum_x, count)
         max_x = _consistent_gpd_max(suff_stat, count)
+        max_unverified = _gpd_max_unverified(suff_stat)
         raw_count = count
 
         prior_mean: float | None = None
@@ -730,6 +808,18 @@ class GeneralizedParetoEstimator(ParameterEstimator):
             if required_scale > scale:
                 notes = notes + ("scale-floored-for-support(%.6g -> %.6g)" % (scale, required_scale),)
                 scale = required_scale
+        elif max_x is None and max_unverified and xi < -_XI_TOL:
+            # T1-02: a prior-carrying accumulator's max is supposed to be unconditionally trustworthy
+            # (see `_max_x_relevant`), but a foreign/pre-payload `combine()` can still leave it with
+            # real observations and no tracked max. The clamp above can't run without a max to clamp
+            # against, so this fit's implied upper endpoint is left unverified against the data it was
+            # fit from -- the same silent gap T1-01 closed for the ordinary case, reached here through
+            # a merge instead of the moment blend. Disclose it rather than reproduce that silence.
+            notes = notes + (
+                "support-consistency-unverified(implied upper endpoint %.6g not checked against the "
+                "training data's true max: a foreign partial statistic was combined into this "
+                "prior-carrying accumulator without a tracked max)" % (self.loc - scale / xi),
+            )
         dist = GeneralizedParetoDistribution(scale, xi, loc=self.loc, name=self.name, keys=self.keys)
         if notes:
             dist._numerical_repairs = notes
