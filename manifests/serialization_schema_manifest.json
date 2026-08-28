@@ -375,7 +375,8 @@
         "mixle.stats.univariate.discrete.poisson.PoissonDistribution",
         "mixle.stats.univariate.discrete.poisson.PoissonEstimator",
         "mixle.stats.univariate.discrete.skellam.SkellamDistribution",
-        "mixle.stats.univariate.discrete.skellam.SkellamEstimator"
+        "mixle.stats.univariate.discrete.skellam.SkellamEstimator",
+        "mixle.utils.automatic.factories._NumericTextDispatch"
       ],
       "required_imports": [
         "numpy",
@@ -3047,6 +3048,13 @@
           "stability": "provisional",
           "state_fields": null,
           "state_version": 1
+        },
+        "mixle.utils.automatic.factories._NumericTextDispatch": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
         }
       }
     },
@@ -3437,7 +3445,8 @@
         "mixle.stats.univariate.discrete.poisson.PoissonDistribution",
         "mixle.stats.univariate.discrete.poisson.PoissonEstimator",
         "mixle.stats.univariate.discrete.skellam.SkellamDistribution",
-        "mixle.stats.univariate.discrete.skellam.SkellamEstimator"
+        "mixle.stats.univariate.discrete.skellam.SkellamEstimator",
+        "mixle.utils.automatic.factories._NumericTextDispatch"
       ],
       "required_imports": [
         "numpy",
@@ -6203,6 +6212,13 @@
           "state_version": 1
         },
         "mixle.stats.univariate.discrete.skellam.SkellamEstimator": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.utils.automatic.factories._NumericTextDispatch": {
           "codec": "constructor-validated",
           "migrations": [],
           "stability": "provisional",
