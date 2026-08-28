@@ -269,6 +269,29 @@ def normalize_pandas_missing(value: Any, marker: Any = None) -> Any:
     return _replace_missing(value, missing_types, marker)
 
 
+def flat_gap_marker(values: Any) -> Any:
+    """Return the marker a bare flat sequence of scalars should canonicalize its gaps to.
+
+    :func:`normalize_pandas_missing` cannot see past one value at a time, so it always defaults to
+    ``None`` -- correct for a genuinely mixed/non-numeric sequence, but wrong for a numeric one: a
+    plain Python list built from ``list(a_nullable_series)`` (``optimize()`` and the encode side
+    both fall back to exactly that per-value normalization once the data is no longer a Series or
+    DataFrame, so the column's own dtype has already been lost) then fits ``missing_value=None``
+    while the identical data still stored as a ``Series`` fits ``missing_value=nan`` via
+    :func:`column_records` -- and unlike the Series-vs-Series case (T2-02), a model built either
+    way ends up unable to score/re-encode the very ``pd.NA`` values it was fit from, because
+    ``pd.NA`` is only sentinel-equivalent to a ``NaN`` missing_value, never to ``None`` (T1-02).
+
+    This makes the same numeric-vs-not judgment :func:`_column_gap_plan` makes from a column's
+    ``dtype.kind``, but from the sequence's own present values instead, since there is no dtype
+    left to consult. A sequence whose present values are all numbers gets ``NaN``; anything else
+    (non-numeric present values, or nothing present to judge) gets ``None``, same as today.
+    """
+    if not _pandas_missing_types():
+        return None
+    return _NAN if _object_column_is_numeric(values) else None
+
+
 def _normalized_scalars(values: list[Any], plan: tuple[Any, bool, bool]) -> list[Any]:
     """Canonicalize the gaps of a single-field record list onto that column's marker."""
     marker, rewrite_nan, rewrite_none = plan

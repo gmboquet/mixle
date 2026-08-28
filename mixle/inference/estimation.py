@@ -419,7 +419,7 @@ def _data_records_for_encoding(data: Any, fields: Any, estimator: Any, model: An
         # OptionalDataEncoder identifies missing rows by sentinel identity -- _same_sentinel(pd.NA,
         # None) is False -- so a profiler that said "missing" and an encoder still seeing pd.NA
         # would disagree about the same row (campaign three, T2-1).
-        from mixle.data.sources.pandas_source import column_records, normalize_pandas_missing
+        from mixle.data.sources.pandas_source import column_records, flat_gap_marker, normalize_pandas_missing
 
         if type(data).__name__ == "Series" and type(data).__module__.startswith("pandas"):
             # column_records re-derives the column's OWN missing-value convention (NaN for a
@@ -432,7 +432,18 @@ def _data_records_for_encoding(data: Any, fields: Any, estimator: Any, model: An
             return column_records(data)
         if hasattr(data, "__iter__") and not isinstance(data, (str, bytes)):
             try:
-                return [normalize_pandas_missing(value) for value in data]
+                # A one-shot iterator (generator, map/filter/...) is exhausted by the marker scan
+                # below, so materialize it to a reusable list first -- mirrors normalize_input's own
+                # one-shot handling. A reusable sequence (list/tuple/ndarray) yields a fresh iterator
+                # and is left as-is.
+                values = list(data) if iter(data) is data else data
+                # flat_gap_marker makes the same numeric-vs-not call column_records makes for a
+                # Series, from the bare list's own present values, so a list built from
+                # list(a_nullable_series) -- which has already lost the Series' dtype by the time it
+                # reaches here -- fits the same missing_value=nan a Series of the same data would,
+                # instead of always defaulting to None (T1-02).
+                marker = flat_gap_marker(values)
+                return [normalize_pandas_missing(value, marker) for value in values]
             except TypeError:
                 return data
         return data

@@ -2858,9 +2858,19 @@ def normalize_input(data, *, rdd_cap: int = 200000):
     # column with one pd.NA fit as a categorical and scored every unseen number -inf, silently
     # (campaign three, T2-1). This is the single choke point every auto-inference container shape
     # passes through; the encode side is normalized to match in _data_records_for_encoding.
-    from mixle.data.sources.pandas_source import normalize_pandas_missing
+    #
+    # A bare list has already lost whatever dtype its Series/column source had (the branch above
+    # only catches a Series ITSELF, not `list(series)`), so `normalize_pandas_missing`'s per-value
+    # fallback cannot re-derive the numeric-vs-not convention column_records applies and defaults
+    # every pd.NA to None -- even for an all-float list. That fit an OptionalDistribution whose
+    # missing_value=None can never again recognize a raw pd.NA as missing (pd.NA is only sentinel-
+    # equivalent to NaN, not to None -- see optional._sentinel_key), so the model could not score or
+    # re-encode the very pd.NA-carrying data it was just fit from (T1-02). flat_gap_marker makes the
+    # same numeric-vs-not call column_records makes for a Series, from the list's own present values.
+    from mixle.data.sources.pandas_source import flat_gap_marker, normalize_pandas_missing
 
-    frozen = [_freeze_observation(normalize_pandas_missing(value)) for value in data]
+    marker = flat_gap_marker(data)
+    frozen = [_freeze_observation(normalize_pandas_missing(value, marker)) for value in data]
     if isinstance(data, (list, tuple)) and len(frozen) == len(data):
         if all(new_value is old_value for new_value, old_value in zip(frozen, data, strict=True)):
             return data

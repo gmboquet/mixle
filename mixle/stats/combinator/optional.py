@@ -32,6 +32,7 @@ marginalized mode is for callers who ask for it deliberately.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Sequence
 from typing import Any, TypeVar
 
@@ -68,9 +69,49 @@ class NonGenerativeOptionalError(TypeError):
     """Raised when a marginalized optional likelihood factor is used to generate data."""
 
 
+_PANDAS_NA_TYPE: type | None = None
+
+
+def _pandas_na_type() -> type | None:
+    """Return pandas' ``NA`` singleton type once pandas has been imported, else ``None``.
+
+    This module has no pandas dependency and must not import it -- mirrors
+    ``mixle.data.sources.pandas_source._pandas_missing_types``: read whatever pandas module the
+    CALLER already imported out of ``sys.modules``. If pandas was never imported no ``pd.NA``
+    value can exist in the caller's data, so there is nothing to detect. The type is cached once
+    found; while it is absent the check is a single dict lookup, so a later ``import pandas`` is
+    still picked up.
+    """
+    global _PANDAS_NA_TYPE
+    if _PANDAS_NA_TYPE is not None:
+        return _PANDAS_NA_TYPE
+    pandas = sys.modules.get("pandas")
+    if pandas is None:
+        return None
+    na = getattr(pandas, "NA", None)
+    if na is None:
+        return None
+    _PANDAS_NA_TYPE = type(na)
+    return _PANDAS_NA_TYPE
+
+
 def _sentinel_key(value: Any) -> Any:
-    """Return a typed, total key for missing-sentinel identity."""
+    """Return a typed, total key for missing-sentinel identity.
+
+    A float ``NaN`` and pandas' ``pd.NA`` singleton are folded into the SAME family key
+    (``("nan",)``). pandas spells "this numeric cell is missing" two ways depending on whether the
+    column's dtype backend is numpy (``NaN``) or a nullable extension (``Float64``/``Int64``/
+    ``boolean``, ``pd.NA``), and a wrapper auto-fit from one spelling must still recognize the
+    other as missing -- otherwise ``log_density``/``seq_encode`` hand an opaque ``NAType`` to the
+    base distribution's real numeric computation and it crashes in ``float(...)`` (T1-02: a model
+    auto-fit from a pd.NA-carrying column could not score or re-encode its own training data, even
+    though the NaN-spelled equivalent round-tripped fine). Any OTHER value type is unaffected: this
+    only widens the existing "any NaN matches any NaN" family to also admit ``pd.NA``.
+    """
     if isinstance(value, (float, np.floating)) and np.isnan(value):
+        return ("nan",)
+    na_type = _pandas_na_type()
+    if na_type is not None and type(value) is na_type:
         return ("nan",)
     try:
         return ("value", type(value), freeze(value))
