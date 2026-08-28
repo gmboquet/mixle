@@ -1155,6 +1155,40 @@ def _degenerate_likelihood_spike(fitted: Any, val: list, scores: np.ndarray) -> 
     )
 
 
+def _top_level_field_paths(rec: Any) -> list[str]:
+    """One path label per TOP-LEVEL field of ``rec.estimator``, matching the granularity of a
+    composite's ``dists`` -- NOT ``rec.fields``, which is LEAF-level and gives a sequence/composite
+    field (one top-level column) multiple entries (e.g. "$[0]['element']", "$[0]['length']" for one
+    sequence column).
+
+    ``_unseen_label_rescue`` names the excluded field by indexing ``field_paths`` with a top-level
+    ``dists`` index. Handing it ``rec.fields``' flat leaf list works only by coincidence, when every
+    field up to the culprit happens to own exactly one leaf; the moment an earlier column expands to
+    more than one leaf (any sequence/composite field), every later top-level index reads the wrong
+    leaf's name (T2-01, third occurrence). ``rec.profile.fields`` carries the same entries as
+    ``rec.fields``, index-aligned, but with the RAW tuple path (e.g. ``(0, "length")``) instead of
+    the pre-formatted string -- grouping those by the path prefix that ``DatumNode.get_estimator``
+    adds per top-level child (one positional element for tuple/list rows, ``("key", k)`` for dict
+    rows; see ``_extract_field_series``/``get_estimator`` in mixle/utils/automatic/profiling.py)
+    recovers exactly the one-entry-per-top-level-child list ``dists`` needs.
+    """
+    from mixle.utils.automatic.profiling import format_path
+
+    fields = rec.fields
+    profile = getattr(rec, "profile", None)
+    raw_paths = [getattr(f, "path", None) for f in profile.fields] if profile is not None else None
+    if raw_paths is None or len(raw_paths) != len(fields) or any(p is None for p in raw_paths):
+        return [c.path for c in fields]  # can't safely group -- fall back to the flat leaf list
+    groups: list[str] = []
+    prev_key: tuple[Any, ...] | None = None
+    for raw in raw_paths:
+        key = tuple(raw[:2]) if tuple(raw[:1]) == ("key",) else tuple(raw[:1])
+        if key != prev_key:
+            groups.append(format_path(key))
+            prev_key = key
+    return groups
+
+
 def _unseen_label_rescue(
     fitted: Any, enc: Any, scores: np.ndarray, field_paths: list[str]
 ) -> tuple[np.ndarray, str] | None:
@@ -1455,7 +1489,8 @@ def propose(
     frontier: list[dict[str, Any]] = []
     evaluated = 0
     budget_start = time.monotonic()
-    field_paths = [c.path for c in rec.fields]
+    field_paths = [c.path for c in rec.fields]  # LEAF-level; used for low-confidence-field reporting below
+    top_level_field_paths = _top_level_field_paths(rec)  # one per composite's `dists` index -- see docstring
     for candidate_index, (name, est) in enumerate(candidates):
         over_count = max_candidates is not None and evaluated >= max_candidates
         over_time = timeout is not None and (time.monotonic() - budget_start) > timeout
@@ -1475,7 +1510,7 @@ def propose(
                 )
             rescue_note = None
             if not np.isfinite(scores).all():
-                rescued = _unseen_label_rescue(fitted, enc, scores, field_paths)
+                rescued = _unseen_label_rescue(fitted, enc, scores, top_level_field_paths)
                 if rescued is None:
                     raise ValueError("candidate scorer returned a non-finite held-out log density")
                 scores, rescue_note = rescued
