@@ -1878,6 +1878,32 @@ class TreeHiddenMarkovAccumulatorFactory(StatisticAccumulatorFactory):
         )
 
 
+def _record_tree_uniform_rows(
+    dist: "TreeHiddenMarkovModelDistribution", bad_states: Sequence[int]
+) -> "TreeHiddenMarkovModelDistribution":
+    """Note on ``dist`` which transition rows were filled uniform for want of evidence.
+
+    Mirrors ``mixle.stats.sequences.markov_chain._record_uniform_rows`` (MXR-080-1202): a state no
+    training tree ever leaves contributes no factor to the tree likelihood, so a uniform row is one of
+    the (many) exact maximizers rather than a guess -- but it is still not a row the data chose.
+
+    Leaving such a row at all-zero instead (the previous behavior) is not just undisclosed, it is
+    actively unsound here: ``p_level`` (the per-level marginal state-occupancy vector used throughout
+    scoring, e.g. ``TreeHiddenMarkovModelDistribution.seq_log_density``) is the transition matrix raised
+    to successive powers against ``w``. A hard-zero row poisons every level reached only through that
+    state with an exact zero, and code that legitimately divides by ``p_level`` elsewhere (to remove a
+    prior state-occupancy factor baked into the upward message) then divides by zero -- silently, since
+    the corrupted level is typically deeper than anything in the training corpus and the NaN only
+    surfaces later, scoring an ordinary out-of-sample tree that happens to reach it (T4-01). A uniform
+    row keeps every state reachable with positive (if uninformed) probability at every level, so that
+    failure mode cannot occur; the actual fix is filling the row, this function only discloses it.
+    """
+    if bad_states:
+        shown = ", ".join(str(s) for s in bad_states)
+        dist._numerical_repairs = ("tree-hmm-row-uniform(no outgoing transitions from state(s): %s)" % shown,)
+    return dist
+
+
 class TreeHiddenMarkovEstimator(ParameterEstimator):
     """Estimator for the TreeHiddenMarkovModelDistribution from aggregated sufficient statistics."""
 
@@ -1931,9 +1957,14 @@ class TreeHiddenMarkovEstimator(ParameterEstimator):
         """Estimate a TreeHiddenMarkovModelDistribution from sufficient statistics (M-step).
 
         Initial state weights and transition rows are normalized counts, optionally smoothed with the
-        pseudo_count pair. Rows of the transition matrix with no observed transitions are left as zeros
-        when no pseudo-count is given. Topics and the length distribution are estimated from their
-        respective sufficient statistics.
+        pseudo_count pair. A transition row with no observed outgoing transitions -- e.g. every training
+        tree is shallow enough that this state is never seen with a child -- is filled uniform rather
+        than left at zero when no pseudo-count is given, so that ``p_level`` (the per-level marginal
+        state-occupancy vector derived from ``w`` and this matrix, used throughout scoring) stays
+        strictly positive at every level instead of going hard-zero and later poisoning log_density()
+        on a deeper out-of-sample tree with a silent NaN (T4-01). Every such row is disclosed through
+        ``numerical_repairs()`` on the returned distribution. Topics and the length distribution are
+        estimated from their respective sufficient statistics.
 
         Args:
             nobs (Optional[float]): Number of observations.
@@ -1975,6 +2006,7 @@ class TreeHiddenMarkovEstimator(ParameterEstimator):
             init_sum = init_counts.sum()
             w = np.full(num_states, 1.0 / num_states) if init_sum <= 0.0 else init_counts / init_sum
 
+        bad_states: list[int] = []
         if self.pseudo_count[1] is not None:
             p2 = self.pseudo_count[1] / float(num_states * num_states)
             transitions = trans_counts + p2
@@ -1986,13 +2018,17 @@ class TreeHiddenMarkovEstimator(ParameterEstimator):
 
             if np.any(bad_rows):
                 good_rows = ~bad_rows
-                transitions = np.zeros_like(trans_counts, dtype=np.float64)
-                transitions[good_rows, :] += trans_counts[good_rows, :] / row_sum[good_rows]
+                transitions = np.full_like(trans_counts, 1.0 / num_states, dtype=np.float64)
+                transitions[good_rows, :] = trans_counts[good_rows, :] / row_sum[good_rows]
+                bad_states = np.flatnonzero(bad_rows).tolist()
             else:
                 transitions = trans_counts / row_sum
 
-        return TreeHiddenMarkovModelDistribution(
-            topics=topics, w=w, transitions=transitions, len_dist=len_dist, name=self.name, use_numba=self.use_numba
+        return _record_tree_uniform_rows(
+            TreeHiddenMarkovModelDistribution(
+                topics=topics, w=w, transitions=transitions, len_dist=len_dist, name=self.name, use_numba=self.use_numba
+            ),
+            bad_states,
         )
 
 
