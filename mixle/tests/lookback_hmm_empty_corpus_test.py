@@ -119,5 +119,36 @@ class LookbackHmmEmptyCorpusTest(unittest.TestCase):
             seq_encode([[], [0, 1, 2]], estimator=est)
 
 
+class LookbackHmmZeroSequenceCorpusTest(unittest.TestCase):
+    """A corpus of ZERO sequences (data=[]) is a different degenerate shape than the all-empty-
+    sequences corpus above (data=[[],[],[]], 3 sequences each of length 0) -- found by an agent
+    while fixing campaign-six T4-02 (a sibling defect in the shared mixle.stats.compute.sequence
+    utility). seq_initialize already tolerated data=[]; seq_update did not: it computed
+    ``max_len = sz.max()`` and never read it (dead since introduction), and ``sz.max()`` raises
+    ``ValueError: zero-size array to reduction operation maximum which has no identity`` when
+    ``sz`` (one entry per sequence) is itself empty. The fix removes the dead computation, in both
+    seq_update and the identical pattern in seq_posterior -- a true no-op for every other input.
+    """
+
+    def test_zero_sequence_corpus_fits_and_scores_without_raising(self):
+        est = _lag0_estimator()
+        data = []
+        enc_data = seq_encode(data, estimator=est)
+        init_model = seq_initialize(enc_data, est, RandomState(1), p=1.0)
+        model = seq_estimate(enc_data, est, init_model)
+        self.assertIsInstance(model, mod.LookbackHiddenMarkovModelDistribution)
+        count, total_ll = seq_log_density_sum(enc_data, model)
+        self.assertEqual(count, 0)
+        self.assertEqual(total_ll, 0.0)
+
+    def test_zero_sequence_corpus_seq_posterior_returns_no_sequences(self):
+        est = _lag0_estimator()
+        enc_data = seq_encode([], estimator=est)
+        init_model = seq_initialize(enc_data, est, RandomState(1), p=1.0)
+        model = seq_estimate(enc_data, est, init_model)
+        posteriors = model.seq_posterior(enc_data[0][1])
+        self.assertEqual(posteriors, [])
+
+
 if __name__ == "__main__":
     unittest.main()

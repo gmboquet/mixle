@@ -708,7 +708,8 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
         pr_obs = np.zeros((tot_cnt, num_states), dtype=np.float64)
         weights = np.ones(seq_cnt, dtype=np.float64)
 
-        max_len = sz.max()
+        # See the identical removal (and its comment) in seq_update: `max_len` was never read, and
+        # `sz.max()` crashes on a zero-sequence corpus.
         tz = np.concatenate([[0], sz]).cumsum().astype(dtype=np.int32)
 
         init_pvec = self.w
@@ -1177,7 +1178,11 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
         num_states = estimate.num_states
         pr_obs = np.zeros((tot_cnt, num_states), dtype=np.float64)
 
-        max_len = sz.max()
+        # `max_len` was computed here but never read (dead since introduction) -- and `sz.max()`
+        # raises `ValueError: zero-size array to reduction operation maximum which has no
+        # identity` on a zero-sequence corpus (data=[], distinct from a corpus of individually-
+        # empty sequences like [[],[],[]], which seq_initialize already tolerates). Removing the
+        # dead computation is a true no-op for every other input and closes this crash.
         tz = np.concatenate([[0], sz]).cumsum().astype(dtype=np.int32)
 
         init_pvec = estimate.w
