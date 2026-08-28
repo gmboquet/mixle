@@ -1155,6 +1155,74 @@ def _degenerate_likelihood_spike(fitted: Any, val: list, scores: np.ndarray) -> 
     )
 
 
+def _unseen_label_rescue(
+    fitted: Any, enc: Any, scores: np.ndarray, field_paths: list[str]
+) -> tuple[np.ndarray, str] | None:
+    """Recover a field-decomposable candidate whose non-finite held-out score is fully explained by
+    CategoricalDistribution's documented ``default_value=0.0`` -inf-on-unseen-label behavior.
+
+    Without this, propose()'s scoring loop treats ANY non-finite entry anywhere in a candidate's
+    per-row score array as fatal for the WHOLE candidate -- so one identifier-like/high-cardinality
+    field (which legitimately meets held-out labels its training split never saw; see
+    ``CategoricalDistribution.__init__``'s ``default_value`` docstring) silently voids verification
+    for every OTHER, well-behaved field in the same joint model, collapsing the whole candidate to
+    "failed" and eventually the whole frontier to the unverified fallback.
+
+    When every field responsible for a non-finite row score is provably this documented, benign
+    cause -- not some other numerical problem this check would otherwise be catching -- this drops
+    just those fields' contribution from the AGGREGATE held-out score and returns the rest, so the
+    candidate can still be verified and ranked on the fields that DO score finitely. Returns
+    ``None`` (keep failing the candidate, as before) whenever the candidate isn't a
+    field-decomposable composite, or the non-finite scores are not fully explained by this specific
+    cause -- an unexplained non-finite score must still fail the candidate outright, not be papered
+    over.
+    """
+    from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
+
+    dists = getattr(fitted, "dists", None)
+    n = scores.shape[0]
+    if not dists or not isinstance(enc, (tuple, list)) or len(enc) != len(dists):
+        return None  # not a per-field composite (or arity mismatch) -- nothing to decompose
+    field_scores: list[np.ndarray] = []
+    for i, d in enumerate(dists):
+        try:
+            fs = np.asarray(d.seq_log_density(enc[i]), dtype=np.float64)
+        except Exception:  # noqa: BLE001 - can't decompose this field; the whole-candidate check still applies
+            return None
+        if fs.shape != (n,):
+            return None
+        field_scores.append(fs)
+    bad = [i for i, fs in enumerate(field_scores) if not np.isfinite(fs).all()]
+    if not bad:
+        return None  # the aggregate's non-finiteness isn't localized to any one field -- unexplained
+    for i in bad:
+        leaf = dists[i]
+        seen = 0
+        while hasattr(leaf, "dist") and seen < 8:  # unwrap OptionalDistribution/IgnoredDistribution wrappers
+            leaf = leaf.dist
+            seen += 1
+        if not isinstance(leaf, CategoricalDistribution) or leaf.default_value != 0.0:
+            return None  # not the documented unseen-label case -- don't paper over an unexplained failure
+    reduced = np.zeros(n, dtype=np.float64)
+    for i, fs in enumerate(field_scores):
+        if i not in bad:
+            reduced = reduced + fs
+    if not np.isfinite(reduced).all():
+        return None  # excluding the bad fields didn't fix it -- some other field is also non-finite
+    detail = "; ".join(
+        f"{field_paths[i] if i < len(field_paths) else f'field {i}'} "
+        f"({int(np.sum(~np.isfinite(field_scores[i])))}/{n} held-out rows carry a label unseen in training)"
+        for i in bad
+    )
+    note = (
+        f"excluded from this candidate's held-out verification score: {detail} -- "
+        "CategoricalDistribution's documented default_value=0.0 scores an unseen label at -inf; the "
+        "field is still part of the fitted model, it just doesn't count toward this candidate's "
+        "verified held-out density"
+    )
+    return reduced, note
+
+
 def propose(
     data: Any,
     *,
@@ -1197,6 +1265,15 @@ def propose(
     maximum) -- is rejected from the frontier with a note, and the win falls to the best
     non-degenerate candidate. The criterion is deterministic and never fires on a model without a
     scalar predictive CDF (see ``_degenerate_likelihood_spike``).
+
+    A joint (multi-field) candidate's held-out score is also guarded against one field wrongly
+    voiding every other, well-behaved field: when a field legitimately meets a held-out label its
+    training split never saw, ``CategoricalDistribution``'s documented ``default_value=0.0`` scores
+    that row at ``-inf`` (an identifier-like/high-cardinality field with a long tail is the common
+    real-world trigger). That field's contribution is excluded from the candidate's held-out score
+    -- not the whole candidate -- with a note naming the field and how many held-out rows it
+    affected (see ``_unseen_label_rescue``); an unexplained non-finite score still fails the
+    candidate outright.
 
     For scalar data the candidate universe follows the ELEMENT TYPE, and the choice is recorded in
     ``Model.notes``: integer-typed values are modeled by discrete families (categorical / Poisson /
@@ -1309,6 +1386,7 @@ def propose(
     frontier: list[dict[str, Any]] = []
     evaluated = 0
     budget_start = time.monotonic()
+    field_paths = [c.path for c in rec.fields]
     for candidate_index, (name, est) in enumerate(candidates):
         over_count = max_candidates is not None and evaluated >= max_candidates
         over_time = timeout is not None and (time.monotonic() - budget_start) > timeout
@@ -1326,8 +1404,12 @@ def propose(
                     f"candidate scorer returned shape {scores.shape}; expected one score for each "
                     f"of {len(val)} held-out records"
                 )
+            rescue_note = None
             if not np.isfinite(scores).all():
-                raise ValueError("candidate scorer returned a non-finite held-out log density")
+                rescued = _unseen_label_rescue(fitted, enc, scores, field_paths)
+                if rescued is None:
+                    raise ValueError("candidate scorer returned a non-finite held-out log density")
+                scores, rescue_note = rescued
             degenerate = _degenerate_likelihood_spike(fitted, val, scores)
             if degenerate is not None:
                 # A likelihood spike would WIN the mean-log-density ranking; record it as a failed
@@ -1343,6 +1425,8 @@ def propose(
                 "heldout_mean_log_density": score,
                 "candidate_index": candidate_index,
             }
+            if rescue_note is not None:
+                entry["partial_verification"] = rescue_note
             try:
                 from mixle.data.hashing import model_hash
 
@@ -1387,7 +1471,10 @@ def propose(
             return f"candidate {f['name']}: {f['skipped']}"
         if "error" in f:
             return f"candidate {f['name']}: failed ({f['error']})"
-        return f"candidate {f['name']}: held-out mean log-density {f['heldout_mean_log_density']:.3f}"
+        base = f"candidate {f['name']}: held-out mean log-density {f['heldout_mean_log_density']:.3f}"
+        if "partial_verification" in f:
+            base += f" [{f['partial_verification']}]"
+        return base
 
     notes += [_candidate_note(f) for f in frontier]
     if skipped_names:
