@@ -936,10 +936,20 @@ def verify_estimation_conditions(model: Any, data: Iterable[Any]) -> list[Verifi
             receipts.append(_receipt_for(block, block.candidate_guarantee, evidence, subject))
 
     if isinstance(getattr(model, "dists", None), (list, tuple)):
+        # RecordDistribution (mapping-keyed fields, e.g. a RecordEstimator winner from dict-shaped
+        # rows) also carries `.dists`, so it reaches this same branch as CompositeDistribution --
+        # but its rows are dicts keyed by `model.fields[index]`, not tuples indexed by `index`.
+        # `_walk` above names both kinds' blocks positionally (`field[{index}]`), so the naming
+        # here is unaffected; only how a value is READ from each row differs.
+        record_fields = getattr(model, "fields", None) if isinstance(rows[0], dict) else None
         for index, child in enumerate(model.dists):
             try:
-                values = [row[index] for row in rows]
-            except (IndexError, TypeError):
+                if record_fields is not None:
+                    key = record_fields[index]
+                    values = [row[key] for row in rows]
+                else:
+                    values = [row[index] for row in rows]
+            except (IndexError, TypeError, KeyError):
                 continue
             add_leaf(child, values, f"field[{index}]")
         return receipts
