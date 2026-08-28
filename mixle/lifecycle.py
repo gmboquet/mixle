@@ -1294,28 +1294,59 @@ def _refresh_frozen_identifier_leaves(estimator: Any, rows: list, field_paths: l
     every candidate's held-out score whenever it is the sole source of non-finiteness there), so
     widening it only after the winner is already chosen leaks nothing back into that choice.
 
-    Scoped to the shape this can be done safely for: a flat, per-field ``CompositeEstimator`` whose
-    child count matches ``field_paths`` (so position ``i`` unambiguously means ``rows[*][i]``).
-    Anything else -- including the "structured"/``None`` candidate, which already re-profiles fresh
-    against the full ``rows`` at fit time and never carries a stale leaf -- is returned unchanged,
-    matching this module's existing rule that an unexplained shape must not be papered over.
+    Scoped to the shapes this can be done safely for: a flat, per-field ``CompositeEstimator`` whose
+    child count matches ``field_paths`` (so position ``i`` unambiguously means ``rows[*][i]``), or its
+    dict-keyed equivalent, a flat ``RecordEstimator`` whose child count matches ``field_paths`` (so
+    child ``i`` unambiguously means ``rows[*][estimator.sources[i]]`` -- propose() builds a
+    RecordEstimator, not a CompositeEstimator, for dict-shaped rows; T3-01 caught this function
+    silently no-op'ing for that shape via the ``isinstance(estimator, CompositeEstimator)`` guard,
+    reproducing the exact crash this function exists to prevent whenever the winning candidate came
+    from dict rows). Anything else -- including the "structured"/``None`` candidate, which already
+    re-profiles fresh against the full ``rows`` at fit time and never carries a stale leaf -- is
+    returned unchanged, matching this module's existing rule that an unexplained shape must not be
+    papered over.
     """
     from mixle.stats.combinator.composite import CompositeEstimator
     from mixle.stats.combinator.ignored import IgnoredEstimator
+    from mixle.stats.combinator.record import RecordEstimator
     from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
     from mixle.utils.automatic.factories import _get_identifier_estimator
 
-    if not isinstance(estimator, CompositeEstimator) or len(estimator.estimators) != len(field_paths):
+    if isinstance(estimator, CompositeEstimator):
+        children = estimator.estimators
+        if len(children) != len(field_paths):
+            return estimator
+
+        def _value(row: Any, i: int) -> Any:
+            return row[i]
+
+        def _rebuild(refreshed: list[Any]) -> Any:
+            return CompositeEstimator(refreshed, keys=estimator.keys)
+
+    elif isinstance(estimator, RecordEstimator):
+        children = estimator.estimators
+        if len(children) != len(field_paths):
+            return estimator
+        sources = estimator.sources
+
+        def _value(row: Any, i: int) -> Any:
+            return row[sources[i]]
+
+        def _rebuild(refreshed: list[Any]) -> Any:
+            return RecordEstimator(tuple(zip(estimator.fields, estimator.sources)), refreshed)
+
+    else:
         return estimator
+
     try:
-        refreshed = list(estimator.estimators)
+        refreshed = list(children)
         changed = False
         for i, child in enumerate(refreshed):
             if not (isinstance(child, IgnoredEstimator) and isinstance(child.dist, CategoricalDistribution)):
                 continue
             vdict: dict[Any, float] = {}
             for row in rows:
-                value = row[i]
+                value = _value(row, i)
                 vdict[value] = vdict.get(value, 0.0) + 1.0
             if not vdict:
                 continue
@@ -1323,7 +1354,7 @@ def _refresh_frozen_identifier_leaves(estimator: Any, rows: list, field_paths: l
             changed = True
     except Exception:  # noqa: BLE001 - a shape this can't safely widen is left exactly as it was
         return estimator
-    return CompositeEstimator(refreshed, keys=estimator.keys) if changed else estimator
+    return _rebuild(refreshed) if changed else estimator
 
 
 def propose(
