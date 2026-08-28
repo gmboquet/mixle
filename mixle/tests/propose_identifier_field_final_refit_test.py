@@ -68,6 +68,38 @@ class ProposeIdentifierFieldFinalRefitTest(unittest.TestCase):
         novel_row = (50.0, "basic", True, "id_never_seen_anywhere")
         self.assertFalse(np.isfinite(m.fitted.log_density(novel_row)))
 
+    def test_an_identifier_field_alongside_a_multi_leaf_sequence_field_does_not_crash(self):
+        # An adversarial review of the fix that added `top_level_field_paths` (T2-01, third
+        # occurrence) found this call site was left passing the OLD leaf-level `field_paths` --
+        # correct only when every top-level field decomposes into exactly one leaf. A sequence
+        # field decomposes into TWO leaves (its element distribution and its length distribution),
+        # so `len(field_paths) != len(model.spec's top-level children)` the moment one is present
+        # alongside an identifier field, and the length check inside
+        # `_refresh_frozen_identifier_leaves` always failed, silently no-opping and reopening the
+        # exact crash this whole file exists to close.
+        rng = np.random.RandomState(0)
+        n = 300
+        amount = rng.normal(50, 10, size=n)
+        plan = rng.choice(["basic", "pro", "enterprise"], size=n)
+        ident = np.array([f"id_{i}" for i in range(n)])
+        rng.shuffle(ident)
+        # A short, fixed vocabulary shared by every row avoids an unrelated, separate limitation
+        # (a fixed-support element estimator refusing an out-of-range value at refit time) --
+        # this test targets the leaf-count mismatch alone, not that different defect class.
+        vocab = ["a", "b", "c"]
+        history = [[str(rng.choice(vocab)) for _ in range(int(rng.poisson(3)) + 1)] for _ in range(n)]
+        rows = [(float(amount[i]), str(plan[i]), str(ident[i]), history[i]) for i in range(n)]
+
+        m = mixle.propose(rows, fit=True)
+
+        self.assertIsNotNone(m.fitted)
+        self.assertEqual(m.evidence.get("certificate", {}).get("status"), "succeeded")
+        scores = [m.fitted.log_density(r) for r in rows]
+        self.assertTrue(
+            all(np.isfinite(s) for s in scores),
+            f"expected every row of the data the refit trained on to score finitely; got {scores}",
+        )
+
     def test_clean_data_without_a_frozen_field_is_unaffected(self):
         # No Ignored/identifier field at all: the refresh must never trigger, and the refit must
         # succeed exactly as it always did.

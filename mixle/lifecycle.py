@@ -1524,7 +1524,6 @@ def propose(
     frontier: list[dict[str, Any]] = []
     evaluated = 0
     budget_start = time.monotonic()
-    field_paths = [c.path for c in rec.fields]  # LEAF-level; used for low-confidence-field reporting below
     top_level_field_paths = _top_level_field_paths(rec)  # one per composite's `dists` index -- see docstring
     for candidate_index, (name, est) in enumerate(candidates):
         over_count = max_candidates is not None and evaluated >= max_candidates
@@ -1627,7 +1626,7 @@ def propose(
     m = Model(winner, notes=notes)
     m.frontier = frontier
     if fit:
-        m.spec = _refresh_frozen_identifier_leaves(m.spec, rows, field_paths)
+        m.spec = _refresh_frozen_identifier_leaves(m.spec, rows, top_level_field_paths)
         m.fit(rows, restarts=None, max_its=int(max_its), rng=np.random.RandomState(int(seed)))
         nothing_verified = unverified_fallback or (
             skipped_names and not any("heldout_mean_log_density" in f for f in frontier)
