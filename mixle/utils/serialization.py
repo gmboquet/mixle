@@ -714,6 +714,16 @@ def _encode_object(value: Any, active: set[int], memo: dict[int, str]) -> dict[s
         provenance = getattr(value, "_fit_provenance", None)
         if provenance is not None and hasattr(provenance, "as_dict"):
             envelope["fit_provenance"] = provenance.as_dict()
+        # numerical_repairs() is the same kind of "how this was produced" fact as fit_provenance, and
+        # it rides the envelope for the same reason: dropping it silently emptied numerical_repairs()
+        # on every persisted model that had actually been repaired, even though the repaired VALUE
+        # (e.g. a clamped p, a floored variance) survives in `state` correctly. That made the
+        # documented disclosure surface go silent on exactly the artifacts it exists to describe
+        # (T3-01), while the same names stayed reachable only indirectly via
+        # fit_provenance().repairs. A plain tuple of names, not an object with its own as_dict/from_dict.
+        repairs = getattr(value, "_numerical_repairs", None)
+        if repairs:
+            envelope["numerical_repairs"] = list(repairs)
         return envelope
     finally:
         _cycle_leave(obj_id, active)
@@ -781,7 +791,7 @@ def _constructor_decode(cls: type[Any], state: dict[str, Any], tid: str) -> Any:
 
 
 def _decode_object(payload: dict[str, Any], references: dict[str, Any], depth: int, budget: list[int]) -> Any:
-    _require_fields(payload, {TAG, "type", "state"}, {"id", "schema_version", "fit_provenance"})
+    _require_fields(payload, {TAG, "type", "state"}, {"id", "schema_version", "fit_provenance", "numerical_repairs"})
     ensure_pysp_serialization_registry()
     tid = payload["type"]
     if not isinstance(tid, str):
@@ -833,6 +843,7 @@ def _decode_object(payload: dict[str, Any], references: dict[str, Any], depth: i
     else:
         obj = _constructor_decode(cls, state, tid)
     _restore_fit_provenance(obj, payload)
+    _restore_numerical_repairs(obj, payload)
     if reference_id is not None:
         references[reference_id] = obj
     return obj
@@ -854,6 +865,21 @@ def _restore_fit_provenance(obj: Any, payload: dict[str, Any]) -> None:
         obj.with_fit_provenance(FitProvenance.from_dict(record))
     except (KeyError, TypeError, ValueError) as exc:
         raise SerializationError("serialized fit provenance is not a valid FitProvenance record") from exc
+
+
+def _restore_numerical_repairs(obj: Any, payload: dict[str, Any]) -> None:
+    """Reattach the envelope's repair disclosure names, re-validating them as untrusted input.
+
+    Symmetric with :func:`_restore_fit_provenance`: a payload with no ``numerical_repairs`` entry
+    simply leaves ``numerical_repairs()`` at ``()``, which is also the untouched-object default and
+    matches what a legacy artifact (encoded before this field existed) decodes to.
+    """
+    repairs = payload.get("numerical_repairs")
+    if repairs is None or not hasattr(obj, "numerical_repairs"):
+        return
+    if not isinstance(repairs, list) or not all(isinstance(entry, str) and entry.strip() for entry in repairs):
+        raise SerializationError("serialized numerical_repairs must be a list of non-blank repair names")
+    object.__setattr__(obj, "_numerical_repairs", tuple(repairs))
 
 
 def _encode_callable(value: Callable[..., Any]) -> dict[str, Any]:
