@@ -74,16 +74,27 @@ class LDAConvergenceError(RuntimeError):
 
     def __init__(self, diagnostics: LDAOptimizationDiagnostics):
         self.diagnostics = diagnostics
-        super().__init__(
-            "%s did not converge after %d/%d iterations (%s; residual=%g)"
-            % (
-                diagnostics.algorithm,
-                diagnostics.iterations,
-                diagnostics.max_iterations,
-                diagnostics.termination_reason,
-                diagnostics.final_residual,
-            )
+        message = "%s did not converge after %d/%d iterations (%s; residual=%g)" % (
+            diagnostics.algorithm,
+            diagnostics.iterations,
+            diagnostics.max_iterations,
+            diagnostics.termination_reason,
+            diagnostics.final_residual,
         )
+        if diagnostics.termination_reason == "alpha_diverging":
+            # This is not slow convergence -- alpha.sum() is provably unbounded for this corpus (see
+            # the divergence check in update_alpha()), so no iteration budget will ever satisfy
+            # alpha_threshold; the residual above only shrinks because it shares alpha's growing sum
+            # as its denominator. Name the two escape hatches that actually work instead of leaving
+            # the reader to conclude (wrongly) that raising max_alpha_iter is the fix.
+            message += (
+                ". alpha is diverging to infinity, not converging slowly: this corpus's mean "
+                "expected log-topic-proportions cannot be matched by any finite Dirichlet alpha, so "
+                "raising max_alpha_iter will not help. Pass fixed_alpha=<array> to LDAEstimator to "
+                "skip the alpha solve entirely, or loosen alpha_threshold (e.g. 1e-3) to accept a "
+                "softer convergence criterion."
+            )
+        super().__init__(message)
 
 
 def _positive_finite_threshold(value: Any, name: str) -> float:
@@ -1465,6 +1476,21 @@ def update_alpha(
     res = np.inf
     its_cnt = 0
     objective_trace = [_dirichlet_alpha_objective(alpha, mean_log_p)]
+
+    # For ANY finite positive alpha, Jensen's inequality gives E[log theta_k] < log(alpha_k /
+    # alpha.sum()) for every topic k (strict, since theta_k is a non-degenerate Beta marginal),
+    # and exponentiating and summing over k telescopes the right-hand side to exactly
+    # sum_k(alpha_k / alpha.sum()) == 1. So sum_k exp(mean_log_p_k) < 1 -- equivalently
+    # logsumexp(mean_log_p) < 0 -- is a *necessary* condition for mean_log_p to be the expected-log
+    # statistic of any finite-alpha Dirichlet at all. When the corpus's mean_log_p violates it (the
+    # posterior is concentrated enough that the target sits on or past that boundary), this fixed
+    # point is chasing a target no finite alpha can reach: alpha.sum() is mathematically guaranteed
+    # to grow without bound rather than plateau, however many iterations it is given. This is
+    # exactly the Dirichlet-MLE analogue of GammaEstimator's CV -> 0 shape-ceiling case (see
+    # estimate_shape() in stats/univariate/continuous/gamma.py): a genuinely unreachable moment
+    # target, not a slow-converging one.
+    alpha_target_unreachable = bool(logsumexp(mean_log_p) >= 0.0)
+
     while res > threshold and its_cnt < budget:
         alpha_old = alpha
         candidate = np.asarray(digammainv(mean_log_p + digamma(alpha.sum())), dtype=np.float64)
@@ -1497,12 +1523,20 @@ def update_alpha(
         res = float(np.abs(alpha - alpha_old).sum() / alpha.sum())
         its_cnt += 1
 
+    converged = res <= threshold
+    if converged:
+        termination_reason = "converged"
+    elif alpha_target_unreachable:
+        termination_reason = "alpha_diverging"
+    else:
+        termination_reason = "iteration_budget_exhausted"
+
     diagnostics = LDAOptimizationDiagnostics(
         algorithm="lda_alpha_fixed_point",
-        converged=res <= threshold,
+        converged=converged,
         iterations=its_cnt,
         max_iterations=budget,
-        termination_reason="converged" if res <= threshold else "iteration_budget_exhausted",
+        termination_reason=termination_reason,
         final_residual=res,
         objective_trace=tuple(objective_trace),
     )
