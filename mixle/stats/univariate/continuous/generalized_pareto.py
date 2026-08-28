@@ -39,6 +39,7 @@ from mixle.stats.univariate.continuous._observation_contracts import (
     consistent_anchored_triple,
     finite_observation,
     finite_observations,
+    needs_anchor,
     scored_observation,
     warn_uncorrectable_raw_moments,
 )
@@ -763,6 +764,10 @@ class GeneralizedParetoEstimator(ParameterEstimator):
             count += pc
         if count <= 0.0:
             return GeneralizedParetoDistribution(1.0, 0.0, loc=self.loc, name=self.name, keys=self.keys)
+        # Whether the raw (non-anchored) path below actually hit cancellation, as opposed to just
+        # being the historical well-conditioned path it always was for small-magnitude data (T4-01):
+        # only meaningful when that path is the one taken, so it stays False on the anchored branch.
+        raw_ill_conditioned = False
         if anchored is not None:
             # Offset space: ``anchor`` is a data value and ``anchor - loc`` is exact (Sterbenz --
             # the threshold is at or below every observation and within a factor of two of one), so
@@ -779,15 +784,39 @@ class GeneralizedParetoEstimator(ParameterEstimator):
                 anchored[0], anchored[1], anchored[2], raw_count, mean_x, pc, prior_mean, prior_variance
             )
         else:
-            warn_uncorrectable_raw_moments(sum_x, sum_x2, count, family="generalized-Pareto")
             notes = ()
             mean_x = sum_x / count
-            var = sum_x2 / count - mean_x * mean_x
             m = mean_x - self.loc  # exceedance mean
+            if raw_count <= 0.0 and prior_variance is not None:
+                # No real observations at all: `sum_x`/`sum_x2` are pure prior pseudo-moments
+                # (`pc*mean0`, `pc*second0`), so `sum_x2/count - mean_x**2` here reduces exactly to
+                # the raw-differencing reconstruction `_prior_variance` above already computed
+                # correctly (and cancellation-free, via the carried `.variance` payload when the
+                # prior was built by `.estimator(pseudo_count)`). Recomputing it by differencing
+                # throws that unused signal away and re-introduces the very threshold-magnitude
+                # cancellation `_prior_variance` exists to avoid (T1-01: at loc=1.7e9 this recovered
+                # shape=+0.499 from a true prior shape of -0.3 with zero raw observations). No warning
+                # either: the exact prior variance was used, so there is nothing uncorrectable here.
+                var = prior_variance
+            else:
+                warn_uncorrectable_raw_moments(sum_x, sum_x2, count, family="generalized-Pareto")
+                var = sum_x2 / count - mean_x * mean_x
+            raw_ill_conditioned = needs_anchor(sum_x, sum_x2, count)
         if m <= 0.0 or var <= 0.0:
             degenerate = GeneralizedParetoDistribution(
                 max(m, self.min_scale), 0.0, loc=self.loc, name=self.name, keys=self.keys
             )
+            if max_x is None and max_unverified and raw_ill_conditioned:
+                # T4-01: the same foreign-combine ambiguity `support-consistency-unverified` below
+                # discloses, but reached here because raw-moment cancellation ALSO collapsed the
+                # variance to non-positive before the shape<0 clamp ever got a chance to matter --
+                # an earlier, unrelated short-circuit must not silently swallow this disclosure.
+                notes = notes + (
+                    "support-consistency-unverified(raw sufficient statistics were too ill-conditioned "
+                    "for a reliable fit at this magnitude and collapsed to a degenerate result: a "
+                    "foreign partial statistic was combined into this prior-carrying accumulator "
+                    "without a tracked max, so this could not be corroborated)",
+                )
             if notes:
                 degenerate._numerical_repairs = notes
             return degenerate
@@ -808,17 +837,33 @@ class GeneralizedParetoEstimator(ParameterEstimator):
             if required_scale > scale:
                 notes = notes + ("scale-floored-for-support(%.6g -> %.6g)" % (scale, required_scale),)
                 scale = required_scale
-        elif max_x is None and max_unverified and xi < -_XI_TOL:
+        elif max_x is None and max_unverified and (xi < -_XI_TOL or raw_ill_conditioned):
             # T1-02: a prior-carrying accumulator's max is supposed to be unconditionally trustworthy
             # (see `_max_x_relevant`), but a foreign/pre-payload `combine()` can still leave it with
             # real observations and no tracked max. The clamp above can't run without a max to clamp
             # against, so this fit's implied upper endpoint is left unverified against the data it was
             # fit from -- the same silent gap T1-01 closed for the ordinary case, reached here through
             # a merge instead of the moment blend. Disclose it rather than reproduce that silence.
+            #
+            # T4-01: `xi < -_XI_TOL` alone missed the sibling case where the SAME foreign-combine
+            # cancellation instead pushed the fitted shape to the *positive* boundary (or anywhere
+            # non-negative) -- a result the ordinary "shape>=0 means infinite support, no clamp
+            # needed" reasoning silently trusted even though it came from raw moments too
+            # ill-conditioned to trust at all. `raw_ill_conditioned` catches that sibling without
+            # touching the ordinary, well-conditioned foreign-combine case (T1-02's own test), which
+            # never sets it.
+            if xi < -_XI_TOL:
+                detail = "implied upper endpoint %.6g not checked against the training data's true max" % (
+                    self.loc - scale / xi
+                )
+            else:
+                detail = (
+                    "raw sufficient statistics were also too ill-conditioned for a reliable fit at "
+                    "this magnitude (fitted shape=%.6g, scale=%.6g)" % (xi, scale)
+                )
             notes = notes + (
-                "support-consistency-unverified(implied upper endpoint %.6g not checked against the "
-                "training data's true max: a foreign partial statistic was combined into this "
-                "prior-carrying accumulator without a tracked max)" % (self.loc - scale / xi),
+                "support-consistency-unverified(%s: a foreign partial statistic was combined into "
+                "this prior-carrying accumulator without a tracked max)" % detail,
             )
         dist = GeneralizedParetoDistribution(scale, xi, loc=self.loc, name=self.name, keys=self.keys)
         if notes:
