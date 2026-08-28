@@ -1236,6 +1236,62 @@ def _unseen_label_rescue(
     return reduced, note
 
 
+def _refresh_frozen_identifier_leaves(estimator: Any, rows: list, field_paths: list[str]) -> Any:
+    """Rebuild a winning candidate's frozen (Ignored) leaves against ALL of ``rows``, not just train.
+
+    ``_get_identifier_estimator`` (mixle/utils/automatic/factories.py) freezes an identifier-like,
+    unrecognized-scalar-type, or ambiguous bool/numeric field to the empirical categorical observed
+    when the field was profiled -- deliberately finite on every value that profiling pass saw, -inf
+    on anything it didn't (the same finite-support convention every automatically fitted categorical
+    column gets; see that function's docstring). propose()'s candidates are profiled and fitted on
+    the TRAINING split only (STAT-RR18-01), so a frozen leaf's support only ever covers train's
+    values -- and the winning candidate's SAME estimator object is then reused, unchanged, for the
+    final full-data refit (``fit=True``). A fully-unique-per-row identifier column guarantees every
+    held-out row's value is absent from that frozen support, and ``IgnoredEstimator``'s accumulator
+    never re-estimates its child, so the refit's initial model -- and every later iteration, since
+    nothing about this field ever changes -- scores those rows at -inf forever. ``_em_loop`` then
+    raises "EM did not produce a finite objective from its non-finite initial model" on data the
+    frontier just finished verifying.
+
+    Rebuilding each frozen leaf's support from ``rows`` (train UNION held-out, exactly what the final
+    refit is about to run on) fixes this without touching the leaf's finite-support semantics or
+    reopening the STAT-RR18-01 leak: unlike a family/structure choice, a frozen leaf's support never
+    participates in candidate ranking (T2-01's ``_unseen_label_rescue`` already excludes it from
+    every candidate's held-out score whenever it is the sole source of non-finiteness there), so
+    widening it only after the winner is already chosen leaks nothing back into that choice.
+
+    Scoped to the shape this can be done safely for: a flat, per-field ``CompositeEstimator`` whose
+    child count matches ``field_paths`` (so position ``i`` unambiguously means ``rows[*][i]``).
+    Anything else -- including the "structured"/``None`` candidate, which already re-profiles fresh
+    against the full ``rows`` at fit time and never carries a stale leaf -- is returned unchanged,
+    matching this module's existing rule that an unexplained shape must not be papered over.
+    """
+    from mixle.stats.combinator.composite import CompositeEstimator
+    from mixle.stats.combinator.ignored import IgnoredEstimator
+    from mixle.stats.univariate.discrete.categorical import CategoricalDistribution
+    from mixle.utils.automatic.factories import _get_identifier_estimator
+
+    if not isinstance(estimator, CompositeEstimator) or len(estimator.estimators) != len(field_paths):
+        return estimator
+    try:
+        refreshed = list(estimator.estimators)
+        changed = False
+        for i, child in enumerate(refreshed):
+            if not (isinstance(child, IgnoredEstimator) and isinstance(child.dist, CategoricalDistribution)):
+                continue
+            vdict: dict[Any, float] = {}
+            for row in rows:
+                value = row[i]
+                vdict[value] = vdict.get(value, 0.0) + 1.0
+            if not vdict:
+                continue
+            refreshed[i] = _get_identifier_estimator(vdict)
+            changed = True
+    except Exception:  # noqa: BLE001 - a shape this can't safely widen is left exactly as it was
+        return estimator
+    return CompositeEstimator(refreshed, keys=estimator.keys) if changed else estimator
+
+
 def propose(
     data: Any,
     *,
@@ -1501,6 +1557,7 @@ def propose(
     m = Model(winner, notes=notes)
     m.frontier = frontier
     if fit:
+        m.spec = _refresh_frozen_identifier_leaves(m.spec, rows, field_paths)
         m.fit(rows, restarts=None, max_its=int(max_its), rng=np.random.RandomState(int(seed)))
         nothing_verified = unverified_fallback or (
             skipped_names and not any("heldout_mean_log_density" in f for f in frontier)
