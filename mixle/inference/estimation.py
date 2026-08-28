@@ -1339,6 +1339,28 @@ def optimize(
     excludes ``inf`` (e.g. ``GaussianEstimator``) raises ``ValueError`` rather than silently
     wrapping it.
 
+    **Identifier-like columns.** ``estimator=None`` auto-inference (via
+    ``mixle.utils.automatic.get_estimator``) also freezes a scalar column it cannot otherwise
+    type -- an unrecognized scalar type (``datetime``, ``Decimal``, ...), an ambiguous bool/number
+    mix, and an identifier-like/high-cardinality column (e.g. a user id, order id, or other
+    near-unique key) -- as the empirical categorical over the values observed at fit time, held
+    fixed by :class:`~mixle.stats.combinator.ignored.IgnoredDistribution`. A value not seen at fit
+    time then scores ``-inf`` there, the same finite-support behavior every automatically fitted
+    categorical has (``CategoricalDistribution``'s ``default_value`` docstring); this is silent at
+    fit time -- no warning, unlike the ``+inf``/``-inf`` reclassification above -- because freezing
+    is the correct, unsurprising answer for a column of this shape, not a defect being flagged. It
+    matters at SCORING time: a held-out or production row carrying a fresh identifier scores that
+    field at ``-inf``, and because log-densities sum, one such field silently drives the WHOLE
+    model's ``log_density``/``Model.evaluate()`` score to ``-inf`` even though every other field
+    scored normally (``Model.evaluate()`` warns rather than raising on this, precisely because it is
+    this documented, by-design behavior rather than a scoring bug -- see its docstring).
+    :func:`mixle.propose` fits the identical policy but additionally excludes just the affected
+    field(s) from a candidate's held-out verification score (with a note naming them, in
+    ``Model.notes``) rather than voiding the whole candidate -- ``optimize()`` itself does not do
+    this rescue, so an identifier-like field's presence is worth checking for explicitly (e.g. via
+    ``model.log_density`` per field, or ``mixle.utils.automatic.get_estimator(data)`` inspection)
+    before trusting a held-out score built on a model this call produced.
+
     **DataFrames.** ``optimize`` and ``fit`` take a pandas DataFrame or Series directly; the
     row-level stats API does not. ``mixle.stats.seq_encode`` consumes RECORDS and refuses a frame
     ("expected a sequence of 2-tuples, got DataFrame") -- converting is the caller's job, in one

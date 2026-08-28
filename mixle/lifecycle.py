@@ -529,7 +529,17 @@ class Model:
         return float(self._require_fitted().log_density(x))
 
     def evaluate(self, data: Any) -> dict[str, Any]:
-        """Held-out fit quality: total and mean log-density over ``data``."""
+        """Held-out fit quality: total and mean log-density over ``data``.
+
+        A ``-inf`` entry is not raised on the way ``NaN``/``+inf`` are (see below): it is not
+        necessarily a scoring bug. The common, DOCUMENTED cause is a field auto-inference froze as
+        an identifier-like/high-cardinality categorical (``mixle.utils.automatic.get_estimator``,
+        also reached through ``optimize(df)``'s ``estimator=None`` path) meeting, here, a label its
+        training split never saw -- ``CategoricalDistribution``'s documented ``default_value=0.0``
+        scores that at ``-inf`` by design. Silently averaging it into ``mean_log_density`` would
+        still hide the cause, so this warns (naming the affected rows) rather than staying quiet --
+        but does not raise, unlike ``NaN``/``+inf``, both of which are unconditionally scorer bugs.
+        """
         d = self._require_fitted()
         rows = _tabular_records(data)
         if not rows:
@@ -540,6 +550,23 @@ class Model:
             raise ValueError(f"scorer returned shape {ll.shape}; expected one score for each of {len(rows)} records")
         if np.isnan(ll).any() or np.isposinf(ll).any():
             raise ValueError("scorer returned NaN or positive-infinite log density")
+        if np.isneginf(ll).any():
+            bad = np.flatnonzero(np.isneginf(ll))
+            shown = ", ".join(str(i) for i in bad[:10].tolist())
+            more = f", +{len(bad) - 10} more" if len(bad) > 10 else ""
+            warnings.warn(
+                f"evaluate(): {len(bad)}/{len(rows)} held-out record(s) (rows {shown}{more}) scored "
+                "-inf log density, dragging mean_log_density/total_log_density to -inf. The common "
+                "documented cause: a field auto-inference froze as an identifier-like/high-"
+                "cardinality categorical (IgnoredDistribution(CategoricalDistribution(..., "
+                "default_value=0.0)), see mixle.utils.automatic.get_estimator) scores a label unseen "
+                "in training at -inf by design -- the field is still part of the fitted model, it "
+                "just cannot verify on a label it never trained on. Identify the culprit field(s) by "
+                "scoring each field's distribution separately, or refit with an explicit estimator "
+                "that does not freeze that field.",
+                UserWarning,
+                stacklevel=2,
+            )
         return {"n": len(rows), "mean_log_density": float(ll.mean()), "total_log_density": float(ll.sum())}
 
     def sample(self, size: int | None = None, *, seed: int | None = None) -> Any:

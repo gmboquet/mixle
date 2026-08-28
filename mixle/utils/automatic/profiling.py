@@ -2543,9 +2543,10 @@ class DatumNode:
     ):
         """Infer and return an estimator for the profiled observations.
 
-        **What happens to values that are not ordinary numbers.** This policy is not visible from
-        :func:`mixle.inference.optimize`, which is the entry point most callers reach it through, so
-        it is written out here.
+        **What happens to values that are not ordinary numbers.** :func:`mixle.inference.optimize`,
+        the entry point most callers reach this through, summarizes this policy in its own docstring
+        (see its "Identifier-like columns" and "Missing values" sections) and points back here for
+        the full detail, written out below.
 
         * ``None`` and ``nan`` are the two spellings of ABSENT and mean one model: the leaf is
           wrapped in an :class:`~mixle.stats.combinator.optional.OptionalDistribution` whose
@@ -3222,6 +3223,15 @@ def get_estimator(
     sentinel with its own fitted rate, same as ``None``/``NaN`` -- and a ``UserWarning`` discloses it
     (see :func:`_warn_nonfinite_reclassified_as_missing`); pass an explicit estimator instead to get
     the reject-on-non-finite behavior documented for the family-level default route.
+
+    An unrecognized scalar type, an ambiguous bool/number mix, and an identifier-like/high-
+    cardinality field are all frozen instead: the empirical categorical over the values observed
+    here, held fixed by :class:`~mixle.stats.combinator.ignored.IgnoredDistribution`. This is
+    silent (no warning) because it is the correct, unsurprising answer for a field of this shape --
+    but a value not seen here later scores ``-inf`` under it (``CategoricalDistribution``'s
+    documented ``default_value``), which is worth knowing before scoring held-out or production
+    data through the result; see :func:`DatumNode.get_estimator`'s docstring for the full policy and
+    :func:`mixle.inference.optimize`'s docstring for what this means for a fitted model's score.
     """
     rows = normalize_input(data)
     _apply_ragged_policy(rows, ragged)
