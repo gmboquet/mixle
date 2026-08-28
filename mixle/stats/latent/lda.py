@@ -51,6 +51,13 @@ from mixle.utils.vector import ImpossibleEvidenceError, row_choice
 E0 = TypeVar("E0")
 SS0 = TypeVar("SS0")
 
+# Absolute tolerance for update_alpha()'s alpha-non-existence boundary check
+# (logsumexp(mean_log_p) >= -_ALPHA_BOUNDARY_TOL). See the comment at its use for why this is
+# needed: the idealized boundary is exactly 0, but the E-step's floating-point mean_log_p lands a
+# few ULPs (~1e-16) to either side of it for a genuinely-degenerate corpus, and a bare ">= 0.0"
+# check is not robust to which side it lands on.
+_ALPHA_BOUNDARY_TOL = 1.0e-9
+
 # import mixle.c_ext
 
 
@@ -1489,7 +1496,22 @@ def update_alpha(
     # exactly the Dirichlet-MLE analogue of GammaEstimator's CV -> 0 shape-ceiling case (see
     # estimate_shape() in stats/univariate/continuous/gamma.py): a genuinely unreachable moment
     # target, not a slow-converging one.
-    alpha_target_unreachable = bool(logsumexp(mean_log_p) >= 0.0)
+    #
+    # The idealized boundary is logsumexp(mean_log_p) == 0 exactly (e.g. the symmetric
+    # mean_log_p = [-ln(K)] * K produced by a corpus with no distinguishing evidence at all).
+    # mean_log_p reaching this function has already passed through a full E-step (digamma calls,
+    # weighted averaging, possibly a pseudo-count blend), so at that exact boundary it carries a
+    # few ULPs of floating-point roundoff that land on either side of 0 depending on incidental
+    # details like the topic count -- a bare ">= 0.0" is not robust to that noise (see T4-01: on
+    # an all-empty-document corpus, k in {3, 5, 6} landed a few 1e-16-to-1e-17 below 0 and were
+    # misclassified as "iteration_budget_exhausted" while k in {2, 4, 8} landed at 0 or just above
+    # and were correctly classified as "alpha_diverging", even though all six are the same
+    # degenerate non-existence case). _ALPHA_BOUNDARY_TOL absorbs that roundoff -- it is many
+    # orders of magnitude larger than the observed noise (~1e-16) but many orders of magnitude
+    # smaller than the smallest margin an ordinary, genuinely-convergent corpus has from the
+    # boundary in practice (e.g. mean_log_p = [-1, -1] sits ~0.31 away in logsumexp terms), so it
+    # cannot swallow real convergent fits.
+    alpha_target_unreachable = bool(logsumexp(mean_log_p) >= -_ALPHA_BOUNDARY_TOL)
 
     while res > threshold and its_cnt < budget:
         alpha_old = alpha
