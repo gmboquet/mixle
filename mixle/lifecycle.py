@@ -637,7 +637,12 @@ class Model:
         any base-install family the registry has no JSON form for takes the pickle path too (the
         Bernoulli-set, Thurstone, and Spearman ranking families -- models :func:`propose` itself
         selects for ordinary set-valued and ranking data -- deployed that way until their 0.8.0
-        codec repair; they now write JSON). Never assume the
+        codec repair; they now write JSON). Two whole modules still fall back this way by design,
+        not regression: every family in :mod:`mixle.stats.directional` (VonMises, WrappedCauchy,
+        WrappedNormal, VonMisesFisher, Kent, Watson, Bingham, ProjectedNormal) and
+        :mod:`mixle.stats.matrix` (Wishart, InverseWishart, MatrixNormal, LKJ) lacks the
+        ``__pysp_setstate__`` hook a family needs to round-trip through JSON, so ``deploy``/``load``
+        always take the pickle path for them today, pending a future implementation. Never assume the
         format: read it from the returned path's ``format`` attribute (the return value is a
         :class:`DeployedArtifact`, a plain ``str`` annotated with ``format`` and
         ``format_fallback``), from the warning a fallback raises here, or from the manifest.
