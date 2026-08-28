@@ -879,7 +879,7 @@ def glm(
     # up to 8 orders of magnitude -- with rank reported full, converged=True, and no warning.
     # Factorizing sqrt(W)X keeps rank and cutoff decisions at cond(X); zero-weight rows enter
     # as zero rows, so this is still the effective rank among positive-weight observations.
-    _, singular, vt = np.linalg.svd(X * np.sqrt(wls_w)[:, None], full_matrices=False)
+    u, singular, vt = np.linalg.svd(X * np.sqrt(wls_w)[:, None], full_matrices=False)
     cutoff = np.finfo(float).eps * max(n, p) * (singular[0] if singular.size else 0.0)
     significant = singular > cutoff
     rank = int(np.count_nonzero(significant))
@@ -962,9 +962,24 @@ def glm(
             # replicates that each carry the per-replicate weight dmu^2/var, so the correction
             # (like the meat) matches the expanded data set. Folding 1/(1-h)^k into the row scale
             # keeps the (S B)'(S B) PSD-by-construction form.
-            q = np.sum((X @ xtwx_inv) * X, axis=1)
-            per_obs_weight = (dmu**2 / var) if frequency else wls_w
-            leverage = np.where(active, np.clip(per_obs_weight * q, 0.0, None), 0.0)
+            #
+            # audit B4 (again): the hat diagonal of sqrt(W_wls) X is diag(U U') where U is the
+            # left singular vectors already factored above -- read straight off U, never rebuilt
+            # via the quadratic form X @ xtwx_inv @ X.T. xtwx_inv is built from 1/singular**2,
+            # which spans ~cond(X)^2 for an ill-conditioned design; squaring back through it in a
+            # quadratic form suffers the same catastrophic cancellation X'WX itself was rejected
+            # for, producing "leverage" outside [0, 1] (observed: max 4.11, sum 24.6 for a
+            # rank-4 design, instead of every h_i in [0, 1] summing to exactly 4). diag(U U') is
+            # bounded in [0, 1] and sums to the rank by construction, at cond(X) precision.
+            hat_diag = np.sum(u * u, axis=1)
+            if frequency:
+                # hat_diag is the leverage of the whole replicate-count row (weight w * dmu^2/var);
+                # dividing out w recovers the per-replicate figure described above
+                per_replicate = np.zeros_like(hat_diag)
+                np.divide(hat_diag, w, out=per_replicate, where=active)
+                leverage = np.where(active, np.clip(per_replicate, 0.0, None), 0.0)
+            else:
+                leverage = np.where(active, np.clip(hat_diag, 0.0, None), 0.0)
             degenerate = leverage > 1.0 - 1e-10
             if np.any(degenerate):
                 raise ValueError(
