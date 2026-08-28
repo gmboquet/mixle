@@ -70,6 +70,41 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 
 ### Fixed
 
+- A seventh candidate campaign (four black-box tester sessions plus two clean-install reproduction
+  replays against candidate `938b9929`, every blocking/major claim adversarially re-verified, with a
+  regression watch across all six prior campaigns; D-0207) returned NO-GO, 1 of 4, with four
+  confirmed-blocking/major findings (a fifth filed major was independently re-verified and
+  downgraded to a documentation-completeness gap, not a functional defect -- the first campaign this
+  release where a verifier's own investigation reduced a filed severity). An adversarial review of
+  the fix wave's own diff -- the same standing practice D-0205/D-0206 established -- caught one more
+  regression before any candidate was built carrying it: the fix wave's own GLM leverage fix
+  reintroduced the exact defect class it was written to eliminate for rank-deficient (not merely
+  ill-conditioned) designs. Role B replayed clean: GO, 2 of 2.
+  - `GeneralizedParetoEstimator`'s prior/support-consistency machinery (now the site of six fixed
+    defects across four campaigns) produced two more gaps sharing one root cause: whenever the
+    shift-anchored track never activates -- zero raw observations, or a foreign-tuple `combine()` on
+    a prior-carrying accumulator -- the M-step falls back to raw-moment differencing at threshold
+    magnitude, either discarding an already-computed, cancellation-free `prior_variance` payload, or
+    bypassing the existing support-consistency-unverified disclosure via an earlier, unrelated
+    degenerate short-circuit.
+  - `glm(..., robust='HC2'/'HC3')`'s leverage computation reintroduced the exact squared-condition-
+    number instability a neighboring "audit B4" fix already avoids elsewhere in the same function,
+    producing leverage outside `[0, 1]` and a false-positive singleton-observation refusal at
+    realistic collinearity (~1e9), on a design with no dummy/discrete coding at all. Read straight
+    off the SVD's `U`; then a same-day adversarial review found THAT fix itself only correct for a
+    full-rank design -- for a genuinely rank-deficient design (collinear or duplicated columns) the
+    unmasked `U`-based leverage summed to the column count instead of the effective rank,
+    reintroducing the identical false-positive refusal it was written to eliminate. Fixed by masking
+    the leverage the same way the coefficient covariance already is.
+  - `optimize()`'s auto-inference freezes an identifier-like/high-cardinality column into a
+    categorical that scores `-inf` on an unseen value, undisclosed at `optimize()`'s own public
+    docstring (the policy existed only in an internal docstring that said as much) and unguarded by
+    `Model.evaluate()`'s non-finite check, which covered NaN/+inf but not -inf. Both now disclose.
+  - `to_json()`/`from_json()` cannot round-trip any family in `mixle.stats.directional` or
+    `mixle.stats.matrix` (12 families across two whole modules); `Model.deploy()`/`Model.load()`'s
+    pickle fallback already handles this correctly and discloses it three ways, so this was closed as
+    a documentation gap naming the affected modules, not a functional fix.
+
 - A sixth candidate campaign (four black-box tester sessions plus two clean-install reproduction
   replays against candidate `9cf6b237`, every blocking/major claim adversarially re-verified, with
   a regression watch across all five prior campaigns; D-0206) returned NO-GO, 2 of 4, with nine
