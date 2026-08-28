@@ -7,6 +7,7 @@ closed-form conjugate / MAP update.
 """
 
 import math
+import re
 from collections.abc import Sequence
 from numbers import Integral, Real
 from typing import Any, TypeVar
@@ -16,6 +17,7 @@ import numpy as np
 from mixle.stats.compute.pdist import (
     ParameterEstimator,
 )
+from mixle.utils.serialization import register_serializable_class
 
 T = TypeVar("T")
 
@@ -269,6 +271,80 @@ def get_optional_estimator(
     return _estimator_provider(use_bstats).OptionalEstimator(est, missing_value=missing_value, est_prob=est_prob)
 
 
+# A decimal-point- or exponent-bearing numeric literal: "46.8037", "-3.5", ".5", "5.", "1e10". A
+# bare digit string ("50", "02139") deliberately does NOT match -- see parse_numeric_text.
+_NUMERIC_TEXT_RE = re.compile(r"^[+-]?(\d+\.\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)$")
+
+
+def parse_numeric_text(value: str) -> float | None:
+    """Parse ``value`` as a decimal-point/exponent-bearing numeric literal, or return ``None``.
+
+    Deliberately narrower than ``float()`` in two ways. First, it excludes the ``"nan"``/``"inf"``/
+    ``"infinity"`` keyword spellings ``float()`` itself accepts, so a dirty marker spelled that way
+    keeps routing to the string branch instead of being silently reinterpreted as the nan/inf
+    sentinel here -- that decision belongs to the missing/infinite-value wrapping in
+    ``DatumNode.get_estimator``, not this parser. Second, it requires a decimal point or exponent, so
+    a bare digit string ("02139", an integer-coded column read as text) is left as a string rather
+    than folded into the integer-typing path: every continuous family already accepts a raw string
+    query via ``float(value)`` coercion (see
+    ``mixle.stats.univariate.continuous._observation_contracts.scored_observation``), but the
+    discrete/categorical families reached by the integer path are not proven to, and a bare digit
+    string is exactly the shape ("02139") where ``int()`` parsing would also silently drop a leading
+    zero. Every value this DOES parse is read the way mixle already reads a Python float literal --
+    a continuous measurement with support past what was observed, never a memorization table (see
+    ``_numeric_side_is_memorizing``) -- so routing it into the float branch needs no further
+    scrutiny.
+    """
+    text = value.strip()
+    if not text or not _NUMERIC_TEXT_RE.match(text):
+        return None
+    try:
+        return float(text)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+@register_serializable_class
+class _NumericTextDispatch:
+    """Choice function for the typed dispatch mixture: numeric-LOOKING text routes with the numbers.
+
+    A CSV/text column that mixes numeric-looking and genuinely non-numeric strings -- the shape
+    pandas produces once one cell in an otherwise-numeric column fails ``float()`` parsing, coercing
+    the WHOLE column to object/str dtype -- carries every value as a native ``str``. The plain
+    type-based :class:`~mixle.stats.combinator.select.TypeDispatch` used for a column that mixes
+    NATIVE float/str types (the T4-01 shape, e.g. a pandas float64 column with one NaN cell) cannot
+    tell these apart: every string routes to the string branch regardless of what it spells, so a
+    dirty text column reopened the exact -inf memorization failure T4-01 fixed, just one dtype layer
+    up. Routing by :func:`parse_numeric_text` instead of by native type is the same partition rule
+    ``DatumNode`` uses to count the column in the first place, so a column's fitted branch weights
+    and its routed queries -- training data or fresh, string or float -- can never disagree.
+    """
+
+    def __init__(self) -> None:
+        self.__mixle_select_routing_contract__ = "typed-partition:numeric-text"
+
+    def __call__(self, x: Any) -> int:
+        if isinstance(x, str):
+            return 1 if parse_numeric_text(x) is not None else 0
+        if isinstance(x, bytes):
+            return 0
+        if isinstance(x, Real):
+            return 1
+        raise ValueError(
+            "typed dispatch mixture: observation of type %r is neither a string/bytes value nor a "
+            "real number" % type(x).__name__
+        )
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _NumericTextDispatch)
+
+    def __hash__(self) -> int:
+        return hash(_NumericTextDispatch)
+
+    def __str__(self) -> str:
+        return "NumericTextDispatch()"
+
+
 def get_typed_mixture_estimator(
     string_estimator: ParameterEstimator,
     numeric_estimator: ParameterEstimator,
@@ -288,11 +364,13 @@ def get_typed_mixture_estimator(
     The honest reading of such a column is that it carries two disjoint types, so the honest model is
     the one the library already has for disjoint types: a
     :class:`~mixle.stats.combinator.select.SelectDistribution` dispatch mixture whose branch label is
-    the Python type, routed by the serializable
-    :class:`~mixle.stats.combinator.select.TypeDispatch`. The branch is OBSERVED, so nothing is
-    guessed and nothing is iterated: the weights are the two type proportions in closed form, each
-    child is fit on its own subset by the ordinary leaf rules, and the result is a normalized law
-    that samples.
+    OBSERVED -- nothing is guessed and nothing is iterated: the weights are the two branch
+    proportions in closed form, each child is fit on its own subset by the ordinary leaf rules, and
+    the result is a normalized law that samples. The branch is routed by :class:`_NumericTextDispatch`
+    rather than a bare :class:`~mixle.stats.combinator.select.TypeDispatch`, so a value that ARRIVES
+    as a string but READS as a number -- the shape a pandas column takes once one dirty cell coerces
+    the whole thing to object dtype -- still routes with the numbers rather than the strings; see
+    :func:`parse_numeric_text`.
 
     Two properties make this a repair rather than a re-design. The string branch's density is
     unchanged -- ``log(n_str/n) + log(count/n_str)`` is ``log(count/n)``, what the merged categorical
@@ -323,14 +401,15 @@ def get_typed_mixture_estimator(
             which is never re-estimated and so never meets the empty-count case.
 
     Returns:
-        A ``SelectEstimator`` that routes by type and estimates the branch weights.
+        A ``SelectEstimator`` that routes numeric-looking text with the numbers and estimates the
+        branch weights.
     """
     provider = _estimator_provider(use_bstats)
     if use_bstats and string_support and getattr(string_estimator, "has_conj_prior", False):
         string_estimator.set_prior(
             provider.DictDirichletDistribution({key: _BAYES_DIRICHLET_ALPHA for key in string_support})
         )
-    router = provider.TypeDispatch([("str", "bytes"), ("real",)])
+    router = _NumericTextDispatch()
     return provider.SelectEstimator([string_estimator, numeric_estimator], router, estimate_weights=True)
 
 

@@ -55,6 +55,7 @@ from .factories import (
     get_set_estimator,
     get_student_t_estimator,
     get_typed_mixture_estimator,
+    parse_numeric_text,
 )
 
 
@@ -1421,6 +1422,19 @@ def _profile_series(path: tuple[Any, ...], role: str, values: Sequence[Any]) -> 
             path, role, count, missing, missing_fraction, observed_count, "empty", "ignored", notes=notes
         )
 
+    # A string that reads as a number -- "46.8037", the shape a numeric CSV column takes once one
+    # dirty cell coerces the whole column to object/str dtype -- is retyped to the float it names
+    # before any kind/recommendation decision below, exactly as DatumNode.add_datum retypes it
+    # before deciding str_count vs float_count. Sharing the predicate (parse_numeric_text) is what
+    # keeps this report from claiming a different model than optimize() actually builds; see
+    # test_profile_reports_the_typed_mixture_instead_of_ignored (T4-01) and
+    # PandasObjectDtypeColumnTest.test_profile_names_the_column_correctly (T1-03).
+    retyped = []
+    for value in observed:
+        parsed = parse_numeric_text(value) if isinstance(value, str) else None
+        retyped.append(value if parsed is None else parsed)
+    observed = retyped
+
     has_bool = any(isinstance(value, (bool, np.bool_)) for value in observed)
     has_nonbool_number = any(
         isinstance(value, numbers.Real) and not isinstance(value, (bool, np.bool_)) for value in observed
@@ -2162,8 +2176,20 @@ class DatumNode:
         if x is None:
             self.none_count += 1
         elif isinstance(x, (str, bytes)):
-            self.vdict[x] += 1
-            self._analyze_type(x)
+            # A string that reads as a number -- "46.8037", the shape a numeric CSV column takes
+            # once one dirty cell coerces the whole column to object/str dtype -- is counted as the
+            # float it names rather than as the text itself. Left as a raw string, 300 genuinely
+            # numeric rows all typed str were indistinguishable from an identifier column (nearly
+            # every value distinct) and fit a frozen memorization table scoring every unseen value
+            # -inf, the exact T4-01 failure reopened one dtype layer up. See parse_numeric_text.
+            numeric_x = parse_numeric_text(x) if isinstance(x, str) else None
+            key = x if numeric_x is None else numeric_x
+            self._analyze_type(key)
+            # Mirrors the non-finite-float skip the generic scalar branch below applies to a NATIVE
+            # inf/-inf: a numeric-text overflow ("1e400" -> float('inf')) is counted via
+            # pos_inf_count/neg_inf_count above, not stored as an observed vdict value.
+            if not (isinstance(key, (float, np.floating)) and not math.isfinite(key)):
+                self.vdict[key] += 1
         elif isinstance(x, tuple):
             self.tuple_count += 1
             self.len_dict[len(x)] += 1
