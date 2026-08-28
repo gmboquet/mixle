@@ -120,9 +120,9 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
     when the solver genuinely diverges) had a floating-point boundary gap: for several ordinary
     topic counts, a genuinely-diverging solve landed just off the exact boundary the detector
     checked and fell back to the pre-fix "needs more iterations" message, which the campaign
-    directly disproved by raising the iteration cap 200x with no effect. Widened the check with a
-    numerical tolerance sized to the actual floating-point noise observed, not so wide it could
-    misclassify a genuinely slow-but-convergent fit.
+    directly disproved by raising the iteration cap two hundred times over with no effect.
+    Widened the check with a numerical tolerance sized to the actual floating-point noise
+    observed, not so wide it could misclassify a genuinely slow-but-convergent fit.
   - The shared low-level `seq_initialize` utility (reachable directly via the documented
     `seq_encode`/`seq_initialize`/`seq_estimate` pipeline, not just through `optimize()`) raised a
     raw, undiagnosed `IndexError` on a truly empty corpus (zero sequences total) -- distinct from a
