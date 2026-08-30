@@ -99,7 +99,7 @@ def _rebuild_gpd_suff_stat(
 
 
 class GeneralizedParetoPriorMoments(tuple):
-    """The ``(mean, second_moment)`` prior pair, carrying the variance it was built from.
+    """The ``(mean, second_moment)`` prior pair, carrying the variance and mean offset it was built from.
 
     This family is the only one of its siblings whose ``pseudo_count`` prior is encoded as RAW
     MOMENTS: Gumbel, Student-t and Logistic all take ``(loc, scale)`` parameters, from which the
@@ -109,24 +109,43 @@ class GeneralizedParetoPriorMoments(tuple):
     at a threshold of 1.7e9 recovers a variance of 0.0 from a true 10.4167, and at 1e8 recovers
     10.0 -- 4% low.
 
-    Keeping the documented pair AS the tuple and hanging the exact variance beside it fixes the
-    library's own :meth:`GeneralizedParetoDistribution.estimator` path without changing the shape
-    any caller passes: a plain 2-tuple still means exactly what it always meant.
+    ``mean`` has the same disease in the OTHER direction: it is ``loc`` plus an ``O(1)`` exceedance
+    offset, and forming that sum rounds the offset away to ``loc``'s own ULP once ``loc`` is large
+    enough -- a threshold of 1e17 already loses the entire offset, well before the variance's
+    cancellation (which destroys a SQUARED quantity, not an additive one) would even register.
+    ``mean_offset`` hangs the exact, loc-invariant ``mean - loc`` beside the pair for exactly this
+    reason: captured once while it is still precise (at construction, or carried forward UNCHANGED
+    across a ``loc`` retarget rather than re-derived by subtracting a large ``loc`` back out of an
+    already-rounded ``mean``), a consumer that needs the prior's exceedance mean reads it directly
+    instead of differencing.
+
+    Keeping the documented pair AS the tuple and hanging the exact variance and mean offset beside it
+    fixes the library's own :meth:`GeneralizedParetoDistribution.estimator` path without changing the
+    shape any caller passes: a plain 2-tuple still means exactly what it always meant.
     """
 
-    def __new__(cls, mean: float, second_moment: float, variance: float | None = None):
+    def __new__(
+        cls,
+        mean: float,
+        second_moment: float,
+        variance: float | None = None,
+        mean_offset: float | None = None,
+    ):
         obj = super().__new__(cls, (mean, second_moment))
         obj.variance = variance
+        obj.mean_offset = mean_offset
         return obj
 
     def __reduce__(self):
         # Estimators are pickled by the Spark/mp reducers, so the payload has to survive the trip.
-        return (_rebuild_gpd_prior_moments, (tuple(self), self.variance))
+        return (_rebuild_gpd_prior_moments, (tuple(self), self.variance, self.mean_offset))
 
 
-def _rebuild_gpd_prior_moments(values: tuple, variance: float | None) -> "GeneralizedParetoPriorMoments":
+def _rebuild_gpd_prior_moments(
+    values: tuple, variance: float | None, mean_offset: float | None = None
+) -> "GeneralizedParetoPriorMoments":
     """Unpickle helper for :class:`GeneralizedParetoPriorMoments` (module-level so pickle can import it)."""
-    return GeneralizedParetoPriorMoments(values[0], values[1], variance=variance)
+    return GeneralizedParetoPriorMoments(values[0], values[1], variance=variance, mean_offset=mean_offset)
 
 
 def _prior_variance(suff_stat: Any, loc: float, xi_min: float) -> float:
@@ -172,6 +191,44 @@ def _prior_variance(suff_stat: Any, loc: float, xi_min: float) -> float:
             stacklevel=3,
         )
     return recovered
+
+
+def _prior_variance_is_carried(suff_stat: Any) -> bool:
+    """Whether ``suff_stat`` already carries an exact, trustworthy variance -- ``_prior_variance``'s
+    fast path -- rather than one recoverable only through the cancellation-prone
+    ``second_moment - mean**2`` fallback.
+
+    Exists so a caller about to BUILD A NEW payload from this one's variance -- currently only the
+    ``loc`` setter's re-anchoring -- can tell whether it is forwarding a value it can vouch for or
+    merely the fallback's last-resort guess. Baking the latter into the new payload's ``.variance``
+    unconditionally would flip ``_prior_variance``'s fast path on for it too: every later call would
+    trust a number that was only ever a warned-about guess, silently curing the warning without the
+    underlying corruption having gone anywhere -- exactly the kind of gap D-0207/T1-01 closed for the
+    untouched-``loc`` case. A retarget must not reopen it by laundering the fallback into "carried".
+    """
+    carried = getattr(suff_stat, "variance", None)
+    return carried is not None and np.isfinite(carried) and carried >= 0.0
+
+
+def _prior_mean_offset(suff_stat: Any, loc: float) -> float:
+    """The prior's exceedance mean (``mean - loc``), exactly when ``suff_stat`` carries it.
+
+    Mirrors :func:`_prior_variance`'s carried-vs-derived split for the other half of the same
+    ``(mean, second_moment)`` pair, but with no plausibility floor to check: unlike recovering the
+    variance by differencing a squared quantity, a single subtraction of two loc-scale values that
+    are close together (``mean`` and ``loc``, or in practice ``mean`` and any data anchor near it) is
+    EXACT by Sterbenz's lemma -- the subtraction itself introduces no cancellation. The un-carried
+    fallback below is therefore always exactly as good as the raw pair currently allows; what it
+    cannot do is undo damage an earlier ``loc + offset`` addition already did by rounding the offset
+    away before this ever ran (see :class:`GeneralizedParetoPriorMoments`). A caller that is ABOUT TO
+    perform such an addition -- :meth:`GeneralizedParetoDistribution.estimator` computing
+    ``mean0 = self.mean()``, or the ``loc`` setter re-anchoring to a new threshold -- must capture the
+    offset (or carry one already captured) BEFORE the addition, not rely on recovering it here after.
+    """
+    carried = getattr(suff_stat, "mean_offset", None)
+    if carried is not None and np.isfinite(carried):
+        return float(carried)
+    return float(suff_stat[0]) - float(loc)
 
 
 def _consistent_gpd_max(suff_stat: Any, raw_count: float) -> float | None:
@@ -375,10 +432,20 @@ class GeneralizedParetoDistribution(SequenceEncodableProbabilityDistribution):
 
         return float(_sp.ppf(q, self.shape, loc=self.loc, scale=self.scale))
 
+    def _exceedance_mean(self) -> float:
+        """The mean's offset above ``loc`` -- ``scale/(1-xi)`` for xi < 1, else inf.
+
+        Exact and loc-invariant: unlike :meth:`mean`, this never adds to ``loc``, so it carries none
+        of the risk of the offset rounding away at extreme ``loc`` magnitude (see
+        :class:`GeneralizedParetoPriorMoments`). Callers that need the exceedance mean itself --
+        rather than ``mean()``'s absolute value -- should use this instead of ``mean() - loc``.
+        """
+        xi = self.shape
+        return float(self.scale / (1.0 - xi)) if xi < 1.0 else float("inf")
+
     def mean(self) -> float:
         """Mean loc + scale/(1-xi) for xi < 1, else inf."""
-        xi = self.shape
-        return float(self.loc + self.scale / (1.0 - xi)) if xi < 1.0 else float("inf")
+        return float(self.loc + self._exceedance_mean())
 
     def variance(self) -> float:
         """Variance scale^2 / ((1-xi)^2 (1-2xi)) for xi < 1/2, else inf."""
@@ -402,17 +469,20 @@ class GeneralizedParetoDistribution(SequenceEncodableProbabilityDistribution):
         # Convert this distribution's own (scale, shape) into the raw first two moments -- the
         # space estimate() accumulates in -- so pseudo_count can blend a prior pseudo-sample toward
         # them (mirrors GumbelEstimator / WeibullEstimator's suff_stat pattern).
-        mean0 = self.mean()
+        mean_offset0 = self._exceedance_mean()  # exact: scale/(1-xi), no dependence on loc
+        mean0 = self.loc + mean_offset0
         var0 = self.variance()
         second0 = var0 + mean0 * mean0
-        # The pair is still exactly ``(mean, second_moment)``; the variance rides beside it so that
-        # ``estimate`` never has to recover it by differencing at threshold magnitude, where it is
-        # destroyed (0.0 recovered from 10.4167 at a threshold of 1.7e9). See
+        # The pair is still exactly ``(mean, second_moment)``; the variance and mean offset ride
+        # beside it so that ``estimate`` never has to recover either by differencing/re-subtracting
+        # at threshold magnitude, where both are destroyed (variance: 0.0 recovered from 10.4167 at a
+        # threshold of 1.7e9; mean offset: rounded away to loc's own ULP from roughly loc=1e17
+        # upward, silently collapsing the fit to the pre-T1-01 degenerate default). See
         # :class:`GeneralizedParetoPriorMoments`.
         return GeneralizedParetoEstimator(
             loc=self.loc,
             pseudo_count=pseudo_count,
-            suff_stat=GeneralizedParetoPriorMoments(mean0, second0, variance=var0),
+            suff_stat=GeneralizedParetoPriorMoments(mean0, second0, variance=var0, mean_offset=mean_offset0),
             name=self.name,
             keys=self.keys,
         )
@@ -666,11 +736,13 @@ class GeneralizedParetoEstimator(ParameterEstimator):
     serialization -- the historical raw path is used bit-identically, and ``estimate`` warns rather
     than returning moments it cannot stand behind.
 
-    The ``pseudo_count`` prior is carried as the raw pair ``suff_stat = (mean0, second0)``, so its
-    variance is recovered by differencing (``second0 - mean0**2``) exactly as before. That
-    reconstruction is the prior's own encoding and is unaffected by the anchored track: a prior
-    whose mean sits far from zero loses precision in the reconstructed variance, so express such a
-    prior in threshold-relative coordinates.
+    The ``pseudo_count`` prior is carried as the raw pair ``suff_stat = (mean0, second0)``; a plain
+    2-tuple has its variance and exceedance-mean offset recovered by differencing (``second0 -
+    mean0**2`` and ``mean0 - loc`` respectively), which is the prior's own encoding and is unaffected
+    by the anchored track -- a prior whose mean sits far from zero loses precision in both
+    reconstructions, so express such a prior in threshold-relative coordinates, or build it with
+    :meth:`GeneralizedParetoDistribution.estimator`, which carries both exactly (see
+    :class:`GeneralizedParetoPriorMoments`).
 
     ``loc`` is a property, not a bare attribute: reassigning it re-targets this SAME estimator at a
     new threshold (the "threshold stability" / mean-residual-life re-thresholding workflow) and, when
@@ -723,15 +795,44 @@ class GeneralizedParetoEstimator(ParameterEstimator):
         by exactly the same amount the threshold does. Re-deriving the pair that way keeps the prior
         meaning what it meant when built, at any new origin, without needing to remember more than
         the origin it was last expressed relative to.
+
+        Two more failure modes hide in that re-derivation, both variants of the same
+        big-magnitude-plus-small-offset cancellation this mechanism exists to repair, and both fixed
+        here alongside the re-anchoring itself rather than papered over at the call site:
+
+        * The new pair's ``.variance`` must only be marked "carried"/trusted -- ``_prior_variance``'s
+          fast path -- when the value just computed actually IS exact. A manually-supplied plain
+          ``suff_stat`` tuple has no such guarantee: ``_prior_variance`` falls back to differencing
+          and may only be returning a warned-about last resort. Baking THAT into the new payload as
+          unconditionally trusted would permanently silence the warning on every later ``estimate()``
+          call without the underlying corruption having gone anywhere -- the fit stays exactly as
+          wrong as it was, only the diagnostic disappears. So the new payload only carries the
+          variance forward when :func:`_prior_variance_is_carried` says the source already could be
+          vouched for; otherwise it is left un-carried, so the next call keeps re-deriving (and, if
+          the pair still cannot support the variance it implies, keeps warning).
+        * The new absolute ``mean0`` is formed by adding the exceedance OFFSET to ``new_loc`` -- and
+          that addition is itself the mean's own cancellation hazard (see
+          :class:`GeneralizedParetoPriorMoments`), so the offset is captured via
+          :func:`_prior_mean_offset` (the exact carried payload when there is one, otherwise a single
+          Sterbenz-exact subtraction of the CURRENT pair, which is as precise as it can currently be)
+          and carried forward on the new payload UNCHANGED, rather than re-derived by subtracting a
+          large ``loc`` back out of an already-rounded ``mean`` on some future retarget.
         """
         new_loc = float(value)
         if not np.isfinite(new_loc):
             raise ValueError("generalized-Pareto estimator threshold must be finite")
         if self.pseudo_count is not None and self.suff_stat is not None:
+            variance_is_trusted = _prior_variance_is_carried(self.suff_stat)
             variance = _prior_variance(self.suff_stat, self._prior_loc, self.xi_min)
-            mean0 = float(self.suff_stat[0]) + (new_loc - self._prior_loc)
+            offset = _prior_mean_offset(self.suff_stat, self._prior_loc)
+            mean0 = new_loc + offset
             second0 = variance + mean0 * mean0
-            self.suff_stat = GeneralizedParetoPriorMoments(mean0, second0, variance=variance)
+            self.suff_stat = GeneralizedParetoPriorMoments(
+                mean0,
+                second0,
+                variance=(variance if variance_is_trusted else None),
+                mean_offset=offset,
+            )
         self._prior_loc = new_loc
         self._loc = new_loc
 
@@ -753,11 +854,18 @@ class GeneralizedParetoEstimator(ParameterEstimator):
         raw_count = count
 
         prior_mean: float | None = None
+        prior_offset: float | None = None
         prior_variance: float | None = None
         pc = self.pseudo_count
         if pc is not None and self.suff_stat is not None:
             mean0, second0 = self.suff_stat[0], self.suff_stat[1]
             prior_mean = float(mean0)
+            # The exceedance OFFSET (`mean0 - loc`), read from the exact carried payload when there
+            # is one instead of recomputed by subtracting `self.loc` back out of `prior_mean` here --
+            # at threshold magnitude that subtraction could only return whatever already survived
+            # `prior_mean`'s own construction, which is exactly what forming `loc + offset` (in
+            # `.estimator(pseudo_count)`, or an earlier `.loc` retarget) may already have rounded away.
+            prior_offset = _prior_mean_offset(self.suff_stat, self.loc)
             prior_variance = _prior_variance(self.suff_stat, self.loc, self.xi_min)
             sum_x += pc * mean0
             sum_x2 += pc * second0
@@ -775,30 +883,55 @@ class GeneralizedParetoEstimator(ParameterEstimator):
             # scale. Forming it as ``sum_x/count - loc`` instead carries the rounding of a
             # data-magnitude sum into a small difference, which is half of what this fix repairs;
             # the variance below is the other half.
+            anchor_offset = anchored[0] - self.loc  # exact (Sterbenz), same reasoning as `m` below
             offset = anchored[1] / raw_count
             if prior_mean is not None:
-                offset = (anchored[1] + pc * (prior_mean - anchored[0])) / count
+                # `prior_mean - anchored[0]` would difference two absolute, loc-scale values -- both
+                # only ever as precise as `prior_mean`'s OWN construction left them -- and reintroduce
+                # exactly the cancellation this mechanism exists to avoid. `prior_offset` and
+                # `anchor_offset` are each already exact at exceedance scale, so their difference is
+                # too: this is the SAME anchor-relative treatment the data's own moments get, applied
+                # to the prior's.
+                offset = (anchored[1] + pc * (prior_offset - anchor_offset)) / count
             mean_x = anchored[0] + offset
-            m = (anchored[0] - self.loc) + offset
+            m = anchor_offset + offset
+            prior_mean_for_variance = None
+            if prior_mean is not None:
+                # `anchored_pooled_variance` differences this against `mean_x` INTERNALLY to weigh the
+                # prior's own pull on the pooled variance. Passing the raw, absolute `prior_mean`
+                # would hand it two independently-rounded loc-scale values anchored at DIFFERENT bases
+                # (`self.loc` vs `anchored[0]`), which does not reliably re-difference back to the
+                # small quantity that matters -- the same cancellation class one level removed.
+                # Building it instead as a SINGLE addition onto the already-materialized `mean_x`,
+                # with the small, exact displacement below computed entirely from exceedance-scale
+                # quantities, keeps that internal subtraction exact up to the same sub-ULP floor
+                # `anchored_pooled_variance`'s own shift term already accepts.
+                displacement = (prior_offset - offset) - anchor_offset
+                prior_mean_for_variance = mean_x + displacement
             var, notes = anchored_pooled_variance(
-                anchored[0], anchored[1], anchored[2], raw_count, mean_x, pc, prior_mean, prior_variance
+                anchored[0], anchored[1], anchored[2], raw_count, mean_x, pc, prior_mean_for_variance, prior_variance
             )
         else:
             notes = ()
-            mean_x = sum_x / count
-            m = mean_x - self.loc  # exceedance mean
             if raw_count <= 0.0 and prior_variance is not None:
                 # No real observations at all: `sum_x`/`sum_x2` are pure prior pseudo-moments
-                # (`pc*mean0`, `pc*second0`), so `sum_x2/count - mean_x**2` here reduces exactly to
-                # the raw-differencing reconstruction `_prior_variance` above already computed
-                # correctly (and cancellation-free, via the carried `.variance` payload when the
-                # prior was built by `.estimator(pseudo_count)`). Recomputing it by differencing
-                # throws that unused signal away and re-introduces the very threshold-magnitude
-                # cancellation `_prior_variance` exists to avoid (T1-01: at loc=1.7e9 this recovered
-                # shape=+0.499 from a true prior shape of -0.3 with zero raw observations). No warning
-                # either: the exact prior variance was used, so there is nothing uncorrectable here.
+                # (`pc*mean0`, `pc*second0`), so BOTH `sum_x/count - self.loc` here AND the sibling
+                # `sum_x2/count - mean_x**2` below would reduce exactly to the raw-differencing
+                # reconstructions `_prior_mean_offset`/`_prior_variance` above already computed
+                # correctly (and cancellation-free, via the carried `.mean_offset`/`.variance`
+                # payloads when the prior was built by `.estimator(pseudo_count)`). Recomputing either
+                # by differencing throws that unused signal away and re-introduces the very
+                # threshold-magnitude cancellation those payloads exist to avoid (T1-01 fixed the
+                # variance half of this at loc=1.7e9; the mean half instead survives to roughly
+                # loc=1e12 before degrading and collapses completely from about loc=1e17, where
+                # `mean0`'s own construction already lost the offset before this method ever ran). No
+                # warning either: the exact prior moments were used, so there is nothing
+                # uncorrectable here.
+                m = prior_offset
                 var = prior_variance
             else:
+                mean_x = sum_x / count
+                m = mean_x - self.loc  # exceedance mean
                 warn_uncorrectable_raw_moments(sum_x, sum_x2, count, family="generalized-Pareto")
                 var = sum_x2 / count - mean_x * mean_x
             raw_ill_conditioned = needs_anchor(sum_x, sum_x2, count)
