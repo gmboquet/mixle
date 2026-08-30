@@ -405,9 +405,23 @@ class AnchoredMomentTrack:
         """Fold one weighted observation into the anchored track. Call BEFORE the raw fold.
 
         Scalar updates carry no chunk to assess conditioning from, so the anchor activates on the
-        first observation -- a zero-cost O(1) bookkeeping track on this path.
+        first observation THAT CARRIES POSITIVE WEIGHT -- a zero-cost O(1) bookkeeping track on
+        this path. A weight of exactly 0.0 (an EM component's responsibility for a point it does
+        not own, say -- ordinary usage of the ``update``/``seq_update`` calling convention, not
+        misuse) contributes nothing to either anchored moment no matter what the anchor is, so such
+        an observation must never be allowed to SET the anchor: a zero-weight observation at an
+        extreme magnitude would otherwise become the permanent reference point every later,
+        fully-weighted observation is differenced against, reintroducing exactly the cancellation
+        this track exists to avoid. Mirrors the ``if weight > 0.0`` gate already used for
+        max-tracking in ``GeneralizedParetoAccumulator.update``.
         """
         if self._anchor is None:
+            if weight <= 0.0:
+                # No anchor yet, and this observation cannot supply one: its own contribution to
+                # both anchored sums is exactly zero (weight times anything is zero), so there is
+                # nothing to fold here, and the anchor stays unset for a later, positively-weighted
+                # observation to activate correctly.
+                return
             self._activate_anchor(x)
         dx = x - self._anchor
         self._anchored_sum += dx * weight
@@ -434,7 +448,18 @@ class AnchoredMomentTrack:
         if self._anchor is None and not (w_sum > 0.0 and needs_anchor(chunk_sum, chunk_sum2, w_sum)):
             return
         if self._anchor is None:
-            self._activate_anchor(float(x[0]) if preferred_anchor is None else float(preferred_anchor))
+            if preferred_anchor is not None:
+                self._activate_anchor(float(preferred_anchor))
+            else:
+                # ``w_sum > 0.0`` is guaranteed by the branch above, so this chunk carries at least
+                # one positively-weighted element; anchor at the FIRST one of those rather than at
+                # x[0] positionally. Per-point EM responsibilities passed through seq_update
+                # routinely carry a weight of exactly 0.0 for a component's first point in a batch
+                # (mixle/stats/compute/stacked.py, torch_mixture.py) -- ordinary usage, not misuse --
+                # and an x[0] chosen without regard to its own weight would let that zero-weight
+                # point, at whatever magnitude it happens to carry, become the permanent anchor
+                # every later, real observation is differenced against.
+                self._activate_anchor(float(x[np.argmax(weights > 0.0)]))
         dx = x - self._anchor
         wdx = dx * weights
         self._anchored_sum += float(np.sum(wdx))

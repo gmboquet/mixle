@@ -309,14 +309,21 @@ class LogisticAccumulator(SequenceEncodableStatisticAccumulator):
     def update(self, x: float, weight: float, estimate: LogisticDistribution | None) -> None:
         """Accumulate weighted first and second moments for one observation."""
         # Scalar updates carry no chunk to assess conditioning from, so the anchor activates on the
-        # first observation (a zero-cost O(1) bookkeeping track on this path). Activation happens
+        # first observation THAT CARRIES POSITIVE WEIGHT (a zero-cost O(1) bookkeeping track on
+        # this path). A weight of exactly 0.0 -- an EM component's responsibility for a point it
+        # does not own, ordinary usage of this calling convention -- contributes nothing to either
+        # anchored moment regardless of the anchor, so it must never be allowed to SET the anchor:
+        # an extreme-magnitude zero-weight observation would otherwise become the permanent
+        # reference point every later, fully-weighted observation is differenced against,
+        # reintroducing exactly the cancellation this track exists to avoid. Activation happens
         # BEFORE the raw fold so any pre-anchor content is converted from statistics the
         # conditioning gate has already vouched for.
-        if self._anchor is None:
+        if self._anchor is None and weight > 0.0:
             self._activate_anchor(x)
-        dx = x - self._anchor
-        self._anchored_sum += dx * weight
-        self._anchored_sum2 += dx * dx * weight
+        if self._anchor is not None:
+            dx = x - self._anchor
+            self._anchored_sum += dx * weight
+            self._anchored_sum2 += dx * dx * weight
         self.sum += x * weight
         self.sum2 += x * x * weight
         self.count += weight
@@ -335,7 +342,13 @@ class LogisticAccumulator(SequenceEncodableStatisticAccumulator):
         # converts only pre-chunk content -- content the gate has already passed as well-conditioned.
         if len(x) > 0 and (self._anchor is not None or (w_sum > 0.0 and _needs_anchor(chunk_sum, chunk_sum2, w_sum))):
             if self._anchor is None:
-                self._activate_anchor(float(x[0]))
+                # w_sum > 0.0 is guaranteed by the branch above, so this chunk carries at least one
+                # positively-weighted element; anchor at the FIRST one of those rather than at x[0]
+                # positionally, so a zero-weight (or negative-weight) observation at any magnitude
+                # -- an EM responsibility of exactly 0.0 for the first point in a batch is ordinary
+                # usage, not misuse -- can never seed the anchor. See the identical gate in
+                # AnchoredMomentTrack._anchor_chunk.
+                self._activate_anchor(float(x[np.argmax(weights > 0.0)]))
             dx = x - self._anchor
             wdx = dx * weights
             self._anchored_sum += float(np.sum(wdx))
