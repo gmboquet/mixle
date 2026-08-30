@@ -427,16 +427,23 @@ class GeneralizedGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         """Accumulate weighted raw moments up to order four for one observation."""
         xv = float(x)
         # Scalar updates carry no chunk to assess conditioning from, so the anchor activates on the
-        # first observation (O(1) bookkeeping on this path). Activation happens BEFORE the raw fold
-        # so any pre-anchor content is converted from statistics the gate has already vouched for.
-        if self._anchor is None:
+        # first observation THAT CARRIES POSITIVE WEIGHT (O(1) bookkeeping on this path). A weight of
+        # exactly 0.0 -- an EM component's responsibility for a point it does not own, ordinary usage
+        # of this calling convention -- contributes nothing to any of the four anchored moments
+        # regardless of the anchor, so it must never be allowed to SET the anchor: an
+        # extreme-magnitude zero-weight observation would otherwise become the permanent reference
+        # point every later, fully-weighted observation is differenced against, reintroducing exactly
+        # the cancellation this track exists to avoid. Activation happens BEFORE the raw fold so any
+        # pre-anchor content is converted from statistics the gate has already vouched for.
+        if self._anchor is None and weight > 0.0:
             self._activate_anchor(xv)
-        dx = xv - self._anchor
-        dx2 = dx * dx
-        self._a1 += weight * dx
-        self._a2 += weight * dx2
-        self._a3 += weight * dx2 * dx
-        self._a4 += weight * dx2 * dx2
+        if self._anchor is not None:
+            dx = xv - self._anchor
+            dx2 = dx * dx
+            self._a1 += weight * dx
+            self._a2 += weight * dx2
+            self._a3 += weight * dx2 * dx
+            self._a4 += weight * dx2 * dx2
         self.count += weight
         self.s1 += weight * xv
         self.s2 += weight * xv**2
@@ -459,7 +466,13 @@ class GeneralizedGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         # activation converts only the content that preceded this chunk.
         if len(xv) > 0 and (self._anchor is not None or (w_sum > 0.0 and _needs_anchor(chunk_sum, chunk_sum2, w_sum))):
             if self._anchor is None:
-                self._activate_anchor(float(xv[0]))
+                # w_sum > 0.0 is guaranteed by the branch above, so this chunk carries at least one
+                # positively-weighted element; anchor at the FIRST one of those rather than at xv[0]
+                # positionally, so a zero-weight (or negative-weight) observation at any magnitude --
+                # an EM responsibility of exactly 0.0 for the first point in a batch is ordinary
+                # usage, not misuse -- can never seed the anchor. See the identical gate in
+                # AnchoredMomentTrack._anchor_chunk.
+                self._activate_anchor(float(xv[np.argmax(w > 0.0)]))
             dx = xv - self._anchor
             dx2 = dx * dx
             self._a1 += float(np.dot(w, dx))

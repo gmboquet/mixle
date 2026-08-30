@@ -528,7 +528,16 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
         if self._anchor is None and not needs_vector_anchor(chunk_ux, np.diag(chunk_uxx), u_sum):
             return
         if self._anchor is None:
-            self._activate_anchor(rows[0])
+            # ``needs_vector_anchor`` (above) returns False outright whenever u_sum <= 0.0, so
+            # reaching here with no anchor yet guarantees this chunk carries at least one row whose
+            # latent-reweighted ``wu`` is strictly positive; anchor at the FIRST such row rather than
+            # at rows[0] positionally. ``wu`` is ``checked_weight * u`` with ``u`` always > 0 (a
+            # positive ratio of positive quantities), so wu's sign tracks the caller-supplied weight
+            # exactly: a zero-weight row -- an EM responsibility of exactly 0.0 for a point a
+            # component does not own, ordinary usage of this calling convention, not misuse --
+            # contributes wu == 0.0 no matter its own magnitude, and must never be allowed to seed the
+            # anchor at that magnitude. See the identical gate in AnchoredMomentTrack._anchor_chunk.
+            self._activate_anchor(rows[np.argmax(wu > 0.0)])
         dx = rows - self._anchor
         wdx = dx * wu[:, None]
         self._anchored_ux += wdx.sum(axis=0)

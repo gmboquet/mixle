@@ -42,6 +42,20 @@ this file asserts exactly that. A weight of ``1e-300`` is, by contrast, still st
 per the specified fix it is legitimately allowed to seed the anchor (exactly like any other
 positive-weight leading observation) -- ``test_negligible_but_still_positive_weight_seeds_the_anchor``
 below pins that boundary explicitly, rather than treating ``1e-300`` as a second must-be-gated case.
+
+FOLLOW-UP (release 0.8.0, adversarial re-review of e9b43c6b): the same unguarded pattern was found
+independently duplicated, and still unfixed, in
+``mixle/stats/univariate/continuous/generalized_gaussian.py``'s ``GeneralizedGaussianAccumulator`` --
+its ``update()``/``seq_update()`` hand-roll their own anchor bookkeeping rather than mixing in
+``AnchoredMomentTrack``, and both reproduced the exact defect (directly executed against this
+checkout): a leading weight-0.0 extreme observation drove ``alpha`` off by ~2,000,000x and pinned
+``beta`` at the estimator's explicit degenerate-fallback value, and an accumulator that had received
+ONLY weight-0.0 calls -- every call ever made -- still incorrectly left its anchor activated instead
+of ``None`` (of every family covered by this module plus the vector families in
+``anchored_moment_track_weight_gating_multivariate_test.py``, this was the one exception at the time
+of this finding). ``GeneralizedGaussianAnchorWeightGatingTest`` below reuses the exact same shared
+test bodies -- its ``update``/``seq_update``/``value`` surface matches the mixin-based families
+exactly -- plus one extra case pinning the all-zero-weight-calls invariant specifically.
 """
 
 import unittest
@@ -53,6 +67,11 @@ from mixle.stats.univariate.continuous.generalized_pareto import (
     GeneralizedParetoAccumulator,
     GeneralizedParetoDistribution,
     GeneralizedParetoEstimator,
+)
+from mixle.stats.univariate.continuous.generalized_gaussian import (
+    GeneralizedGaussianAccumulator,
+    GeneralizedGaussianDistribution,
+    GeneralizedGaussianEstimator,
 )
 from mixle.stats.univariate.continuous.gumbel import GumbelAccumulator, GumbelDistribution, GumbelEstimator
 from mixle.stats.univariate.continuous.student_t import StudentTAccumulator, StudentTDistribution, StudentTEstimator
@@ -262,6 +281,40 @@ class StudentTAnchorWeightGatingTest(_AnchorWeightGatingCases, unittest.TestCase
 
     def fitted_params(self, dist):
         return (dist.loc, dist.scale)
+
+
+class GeneralizedGaussianAnchorWeightGatingTest(_AnchorWeightGatingCases, unittest.TestCase):
+    family_name = "GeneralizedGaussian"
+
+    def make_accumulator(self):
+        return GeneralizedGaussianAccumulator()
+
+    def make_estimator(self):
+        return GeneralizedGaussianEstimator()
+
+    def bulk_data(self):
+        true_dist = GeneralizedGaussianDistribution(mu=BULK_OFFSET, alpha=2.0, beta=1.5)
+        return np.asarray(true_dist.sampler(seed=self.seed).sample(self.n_bulk), dtype=np.float64)
+
+    def fitted_params(self, dist):
+        return (dist.mu, dist.alpha, dist.beta)
+
+    # GeneralizedGaussianAccumulator hand-rolls its own anchor bookkeeping (it does not mix in
+    # AnchoredMomentTrack), and unlike every other family in this module it was found to still
+    # incorrectly activate its anchor when EVERY call it ever received carried weight exactly 0.0 --
+    # there is no positively-weighted call anywhere in its history to correctly seed from, so the
+    # only correct state is an anchor that stays unset (None), left for a later, real observation.
+    def test_all_zero_weight_calls_never_activates_the_anchor(self):
+        bulk = self.bulk_data()
+        acc = self.make_accumulator()
+        for x in bulk:
+            acc.update(float(x), 0.0, None)
+        self.assertIsNone(acc._anchor)
+        # Same invariant on the seq_update()/chunk path: an entirely-zero-weight chunk carries
+        # w_sum == 0.0, which must never satisfy the conditioning gate either.
+        acc_seq = self.make_accumulator()
+        acc_seq.seq_update(bulk, np.zeros(len(bulk)), None)
+        self.assertIsNone(acc_seq._anchor)
 
 
 if __name__ == "__main__":

@@ -894,14 +894,21 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             )
         checked_weight = observation_weight(weight, label="diagonal Gaussian observation weight")
         # Scalar updates carry no chunk to assess conditioning from, so the anchor activates on the
-        # first observation (an O(d) bookkeeping track on a path that is already O(d)). Activation
-        # happens BEFORE the raw fold so any pre-anchor content is converted from statistics the
-        # conditioning gate has already vouched for.
-        if self._anchor is None:
+        # first observation THAT CARRIES POSITIVE WEIGHT (an O(d) bookkeeping track on a path that is
+        # already O(d)). A weight of exactly 0.0 -- an EM component's responsibility for a point it
+        # does not own, ordinary usage of this calling convention -- contributes nothing to either
+        # anchored moment regardless of the anchor, so it must never be allowed to SET the anchor: an
+        # extreme-magnitude zero-weight observation would otherwise become the permanent reference
+        # point every later, fully-weighted observation is differenced against, reintroducing exactly
+        # the cancellation this track exists to avoid. Activation happens BEFORE the raw fold so any
+        # pre-anchor content is converted from statistics the conditioning gate has already vouched
+        # for.
+        if self._anchor is None and checked_weight > 0.0:
             self._activate_anchor(checked)
-        dx = checked - self._anchor
-        self._anchored_sum += dx * checked_weight
-        self._anchored_sum2 += dx * dx * checked_weight
+        if self._anchor is not None:
+            dx = checked - self._anchor
+            self._anchored_sum += dx * checked_weight
+            self._anchored_sum2 += dx * dx * checked_weight
         x_weight = checked * checked_weight
         self.count += checked_weight
         self.sum += x_weight
@@ -970,7 +977,13 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             self._anchor is not None or (w_sum > 0.0 and _needs_anchor(chunk_sum, chunk_sum2, w_sum))
         ):
             if self._anchor is None:
-                self._activate_anchor(checked[0])
+                # w_sum > 0.0 is guaranteed by the branch above, so this chunk carries at least one
+                # positively-weighted row; anchor at the FIRST one of those rather than at checked[0]
+                # positionally, so a zero-weight (or negative-weight) observation at any magnitude --
+                # an EM responsibility of exactly 0.0 for the first point in a batch is ordinary
+                # usage, not misuse -- can never seed the anchor. See the identical gate in
+                # AnchoredMomentTrack._anchor_chunk.
+                self._activate_anchor(checked[np.argmax(checked_weights > 0.0)])
             dx = checked - self._anchor
             wdx = dx * checked_weights[:, None]
             self._anchored_sum += wdx.sum(axis=0)
