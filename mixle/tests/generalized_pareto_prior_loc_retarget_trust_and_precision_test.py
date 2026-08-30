@@ -59,6 +59,28 @@ satisfies it), silencing THAT warning too, collapsing silently to the pre-existi
 indistinguishable from zero at ``loc``'s own float64 resolution: every generalized-Pareto prior's
 mean is ``loc`` plus a STRICTLY POSITIVE exceedance amount, so such a reading is not one any valid
 prior produces.
+
+A further independent adversarial review of the GAP B fix (commit c40a5fe6) found GAP C: the
+``mean_offset`` warning GAP B added does not survive a SECOND ``.loc`` retarget, reproducing the exact
+"silent collapse, zero disclosure" failure GAP B's own commit message says it fixes. The variance half
+of this mechanism (Finding A above) already had the right discipline -- the ``loc`` setter checks
+``_prior_variance_is_carried()`` BEFORE re-deriving and only forwards the variance as trusted when the
+SOURCE already was -- but GAP B's own fix never gave ``mean_offset`` the analogous
+``_prior_mean_offset_is_carried()`` check: the setter unconditionally set ``mean_offset=offset``
+regardless of whether ``offset`` came from ``_prior_mean_offset``'s trusted "carried" fast path or from
+its GAP-B fallback path that had just emitted the implausibility warning. Once a collapsed offset was
+detected once and carried forward on a new payload, ``_prior_mean_offset``'s carried fast path returned
+it unconditionally on every subsequent call -- another ``.loc`` retarget, or a plain ``estimate()`` --
+with zero re-validation. In the pure-prior case this silently reproduced the degenerate default
+(shape=0.0, scale=min_scale) a second time with no warning; composed with a foreign-combine()'d real
+partial (see ``GeneralizedParetoForeignCombineTest``), it instead blended the permanently-"trusted",
+still-wrong offset with well-formed real data, producing a fit inside the ordinary parameter bounds --
+worse than the pure-prior case, since there is no safe degenerate placeholder hinting anything is
+wrong. Fixed the same way Finding A fixed the variance: ``_prior_mean_offset_is_carried()`` mirrors
+``_prior_variance_is_carried()``, and the ``loc`` setter checks it BEFORE re-deriving, forwarding
+``mean_offset`` as trusted only when the source already was -- otherwise the new payload is left
+un-carried, so every subsequent retarget or ``estimate()`` call keeps re-deriving (and, since the pair
+still cannot support a valid offset, keeps warning).
 """
 
 import unittest
@@ -391,6 +413,172 @@ class ManuallySuppliedPairExternallyCancelledMeanWarnsTest(unittest.TestCase):
             any("offset" in str(w.message).lower() for w in caught),
             "a comfortably-resolved offset must not trigger the new plausibility warning",
         )
+
+
+def _warned_about_offset(fn, *args, **kwargs):
+    """Whether one call raises an ``_prior_mean_offset`` implausibility ``RuntimeWarning``."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = fn(*args, **kwargs)
+    return result, any("offset" in str(w.message).lower() for w in caught)
+
+
+class PriorMeanOffsetTrustSurvivesRetargetTest(unittest.TestCase):
+    """GAP C: mirrors ``PriorVarianceTrustSurvivesRetargetTest`` (Finding A) above, but for
+    ``_prior_mean_offset``/``mean_offset`` -- the field GAP B added without giving it the same
+    trust-tracking discipline the variance already had. See the module docstring's GAP C entry.
+    """
+
+    BIG_LOC = 1.0e18
+    TRUE_OFFSET = 50.0
+
+    def _collapsed_pair_estimator(self, pseudo_count=50.0):
+        # Same construction as GAP B's own test: a manually-supplied plain 2-tuple whose mean0 was
+        # already collapsed to bit-identical with loc by an addition performed OUTSIDE this module.
+        mean0 = self.BIG_LOC + self.TRUE_OFFSET
+        self.assertEqual(mean0, self.BIG_LOC, "setup invariant: the addition must already have collapsed")
+        second0 = mean0 * mean0
+        return GeneralizedParetoEstimator(loc=self.BIG_LOC, pseudo_count=pseudo_count, suff_stat=(mean0, second0))
+
+    def test_double_retarget_of_a_collapsed_pair_warns_on_every_retarget_not_just_the_first(self):
+        # Exact repro from the adversarial review: first .estimate() and first .loc retarget both
+        # correctly warn (GAP B); the finding is that a SECOND retarget used to produce zero warnings.
+        est = self._collapsed_pair_estimator()
+
+        _, warned = _warned_about_offset(est.estimate, None, (0.0, 0.0, 0.0))
+        self.assertTrue(warned, "the first .estimate() must warn about the collapsed offset")
+
+        _, warned = _warned_about_offset(lambda: setattr(est, "loc", 2.0e18))
+        self.assertTrue(warned, "the first .loc retarget must warn")
+
+        # THE FIX: a second retarget of the SAME (still-untrustworthy) prior must warn again -- this
+        # is exactly where c40a5fe6's own mean_offset warning failed to survive, unlike its sibling
+        # variance warning (Finding A). Pre-fix this assertion fails: the setter had already baked
+        # the fallback's collapsed offset in as permanently "carried", so this second retarget read
+        # it back through the trusted fast path with zero re-validation.
+        _, warned = _warned_about_offset(lambda: setattr(est, "loc", 3.0e18))
+        self.assertTrue(warned, "a SECOND .loc retarget must still warn -- the pre-fix bug permanently silenced this")
+
+        # `_prior_mean_offset` is also consulted directly from `estimate()` (its own `prior_offset`
+        # line), independent of the setter -- a plain further call must keep warning too.
+        _, warned = _warned_about_offset(est.estimate, None, (0.0, 0.0, 0.0))
+        self.assertTrue(warned, "a plain .estimate() call after the second retarget must still warn")
+
+        # The collapse itself is still unrecoverable -- by construction the true offset is gone, so
+        # the pure-prior fit is still the safe degenerate default. The bug was the missing
+        # disclosure, not a recoverable numeric error; this test is about the warning surviving, not
+        # about resurrecting a number that was never there to recover (mirrors GAP B's own test).
+        fitted, _ = _warned_about_offset(est.estimate, None, (0.0, 0.0, 0.0))
+        self.assertEqual(fitted.shape, 0.0)
+        self.assertEqual(fitted.scale, est.min_scale)
+
+    def test_warning_survives_four_further_retargets_not_just_the_second(self):
+        # Belt-and-suspenders: the trust bit must not get laundered back in on a THIRD, FOURTH, ...
+        # retarget either -- confirms the fix is a genuine per-generation check, not an off-by-one
+        # patch that merely pushes the leak one retarget later.
+        est = self._collapsed_pair_estimator()
+        for generation, target_loc in enumerate((2.0e18, 3.0e18, 4.0e18, 5.0e18), start=1):
+            _, warned = _warned_about_offset(lambda loc=target_loc: setattr(est, "loc", loc))
+            self.assertTrue(warned, "retarget #%d of an untrustworthy pair must warn, not just the first" % generation)
+
+    def test_a_library_built_prior_still_never_warns_across_retargets(self):
+        # Regression guard mirroring Finding A's own control: a prior built via
+        # `.estimator(pseudo_count)` carries an EXACT mean_offset throughout (captured directly as
+        # `scale/(1-xi)`, no dependence on loc), at any loc -- retargeting it must not start
+        # spuriously warning just because the trust check now exists.
+        dist = GeneralizedParetoDistribution(scale=2.0, shape=-0.3, loc=0.0)
+        est = dist.estimator(pseudo_count=50.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            est.estimate(None, (0.0, 0.0, 0.0))
+            est.loc = self.BIG_LOC
+            est.estimate(None, (0.0, 0.0, 0.0))
+            est.loc = 2.0 * self.BIG_LOC
+            est.estimate(None, (0.0, 0.0, 0.0))
+            est.loc = 3.0
+            est.estimate(None, (0.0, 0.0, 0.0))
+
+
+class ForeignCombineThenDoubleRetargetDisclosureTest(unittest.TestCase):
+    """GAP C's harsher composition, from the same adversarial review: once real data has been
+    combined in via a foreign/plain-tuple partial (:class:`GeneralizedParetoForeignCombineTest`'s own
+    scenario, in ``generalized_pareto_prior_retarget_and_foreign_combine_test.py``), the collapsed-
+    offset silence does not just reproduce a red-flag degenerate default (as in the pure-prior case
+    above) -- it blends the corrupted, permanently-"trusted" offset with well-formed real data into a
+    fit that lands inside ordinary parameter bounds, with the offset-specific disclosure gone.
+
+    (The fit's ``max_unverified``/``support-consistency-unverified`` note is a SEPARATE, pre-existing
+    disclosure this same foreign-combine shape already triggers regardless of this fix -- present on
+    both sides of it, confirmed below -- so it is not by itself evidence the offset bug was disclosed;
+    the assertions here specifically target the offset warning, the one this fix adds.)
+    """
+
+    BIG_LOC = 1.0e18
+    TRUE_OFFSET = 50.0
+
+    def _setup(self, pseudo_count=50.0):
+        mean0 = self.BIG_LOC + self.TRUE_OFFSET
+        self.assertEqual(mean0, self.BIG_LOC, "setup invariant: the addition must already have collapsed")
+        second0 = mean0 * mean0
+        est = GeneralizedParetoEstimator(loc=self.BIG_LOC, pseudo_count=pseudo_count, suff_stat=(mean0, second0))
+        acc = est.accumulator_factory().make()
+        self.assertTrue(acc.has_prior)
+
+        # Real data, combined in via a foreign/plain-tuple partial (no `.max_x`/`.anchored` payload)
+        # -- the reviewer's "foreign-combine()'d" real data -- BEFORE either retarget, matching the
+        # report's ordering.
+        exceedances = [2000.0 + 100.0 * i for i in range(50)]
+        data = [self.BIG_LOC + e for e in exceedances]
+        foreign_tuple = (sum(data), sum(x * x for x in data), float(len(data)))
+        acc.combine(foreign_tuple)
+        self.assertTrue(acc._max_tainted, "setup invariant: this must be the foreign-combine max-tainted shape")
+        return est, acc, float(len(data))
+
+    def test_second_retarget_after_a_foreign_combine_still_discloses_the_offset(self):
+        est, acc, n = self._setup()
+
+        _, warned = _warned_about_offset(lambda: setattr(est, "loc", self.BIG_LOC + 100.0))
+        self.assertTrue(warned, "the first retarget must warn, same as the pure-prior case")
+
+        # THE FIX, in the harsher composition: pre-fix this second retarget was completely silent --
+        # zero warnings of any kind -- because the first retarget had already laundered the collapsed
+        # offset into "carried". The real data combined in beforehand does not itself affect the
+        # `.loc` setter at all (it only ever reads/writes `self.suff_stat`, the prior's own pair), so
+        # this is the same trust-bit leak as the pure-prior test, just with a foreign-combined
+        # accumulator sitting alongside it, as the reviewer's report combined them.
+        _, warned = _warned_about_offset(lambda: setattr(est, "loc", self.BIG_LOC + 200.0))
+        self.assertTrue(
+            warned,
+            "the second retarget must still disclose the collapsed offset even with real data already "
+            "combined into the accumulator -- pre-fix this was silent",
+        )
+
+        # And the composition the reviewer actually flagged as worse: fitting with the still-
+        # untrustworthy prior blended against the real data must also disclose the offset (`estimate`
+        # reads `_prior_mean_offset` directly too), rather than quietly returning an in-bounds fit
+        # with the offset-specific warning gone -- rather than the plainly-abnormal degenerate default
+        # the pure-prior case falls back to when there is no real data to mask the collapse.
+        suff_stat = acc.value()
+        fitted, estimate_warned_offset = _warned_about_offset(est.estimate, n, suff_stat)
+        self.assertTrue(
+            estimate_warned_offset,
+            "estimate() after the double retarget must disclose the still-untrustworthy prior offset, "
+            "not silently blend it into a fit with no offset-specific diagnostic at all",
+        )
+        # Sanity check on the "worse than the pure-prior case" framing: the fit is NOT the plainly-
+        # abnormal (min_scale, shape=0.0) degenerate default here -- confirming this composition
+        # really does land inside ordinary parameter bounds rather than tripping an obvious red flag.
+        self.assertNotEqual(fitted.scale, est.min_scale)
+
+    def test_max_taint_note_alone_is_not_evidence_of_offset_disclosure(self):
+        # Guards the class docstring's caveat: the `support-consistency-unverified` note from the
+        # foreign combine's own max-tainting fires on BOTH sides of this fix (it is unrelated to
+        # mean_offset trust-tracking), so it must not be mistaken for the fix having done anything.
+        est, acc, n = self._setup()
+        est.loc = self.BIG_LOC + 100.0
+        est.loc = self.BIG_LOC + 200.0
+        fitted = est.estimate(n, acc.value())
+        self.assertTrue(any("support-consistency-unverified" in note for note in fitted.numerical_repairs()))
 
 
 if __name__ == "__main__":

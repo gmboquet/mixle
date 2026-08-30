@@ -269,6 +269,27 @@ def _prior_mean_offset(suff_stat: Any, loc: float) -> float:
     return offset
 
 
+def _prior_mean_offset_is_carried(suff_stat: Any) -> bool:
+    """Whether ``suff_stat`` already carries an exact, trustworthy mean offset --
+    ``_prior_mean_offset``'s fast path -- rather than one recoverable only through the
+    implausibility-checked ``mean - loc`` fallback.
+
+    Mirrors :func:`_prior_variance_is_carried` for the sibling field of the same ``(mean,
+    second_moment)`` pair -- see that function's docstring for the shape of the argument. Exists so a
+    caller about to BUILD A NEW payload from this one's mean_offset -- currently only the ``loc``
+    setter's re-anchoring -- can tell whether it is forwarding a value it can vouch for or merely the
+    fallback's last-resort reading. Baking the latter into the new payload's ``.mean_offset``
+    unconditionally would flip ``_prior_mean_offset``'s fast path on for it too: every later call --
+    including a further ``loc`` retarget, or a plain ``estimate()`` -- would trust a number that was
+    only ever a warned-about implausible reading, silently curing the warning (and, downstream, the
+    ``_prior_variance`` floor that squares this same offset) without the underlying corruption having
+    gone anywhere. A retarget must not reopen that gap by laundering the fallback into "carried", the
+    same way :func:`_prior_variance_is_carried` already prevents it for the variance.
+    """
+    carried = getattr(suff_stat, "mean_offset", None)
+    return carried is not None and np.isfinite(carried)
+
+
 def _consistent_gpd_max(suff_stat: Any, raw_count: float) -> float | None:
     """The tracked observation max carried by ``suff_stat``, when it can be trusted, else ``None``.
 
@@ -852,9 +873,18 @@ class GeneralizedParetoEstimator(ParameterEstimator):
           that addition is itself the mean's own cancellation hazard (see
           :class:`GeneralizedParetoPriorMoments`), so the offset is captured via
           :func:`_prior_mean_offset` (the exact carried payload when there is one, otherwise a single
-          Sterbenz-exact subtraction of the CURRENT pair, which is as precise as it can currently be)
-          and carried forward on the new payload UNCHANGED, rather than re-derived by subtracting a
-          large ``loc`` back out of an already-rounded ``mean`` on some future retarget.
+          Sterbenz-exact subtraction of the CURRENT pair, which is as precise as it can currently be).
+          The same "only mark it carried when it actually is" discipline applies here too: the new
+          pair's ``.mean_offset`` is only marked trusted when :func:`_prior_mean_offset_is_carried`
+          says the source already could be vouched for. A manually-supplied plain ``suff_stat`` has no
+          such guarantee -- ``_prior_mean_offset`` may only be returning an implausibility-warned last
+          resort -- and baking THAT into the new payload as unconditionally trusted would permanently
+          silence the warning on every later ``.loc`` retarget or ``estimate()`` call without the
+          underlying corruption (a genuine offset already rounded away before this module ever saw
+          the pair) having gone anywhere. So an untrusted offset is left un-carried on the new payload,
+          the same way an untrusted variance is: the next call keeps re-deriving it from the
+          newly-formed pair (a Sterbenz-exact subtraction, same as here), and keeps warning for as
+          long as that pair still cannot support a valid offset.
         """
         new_loc = float(value)
         if not np.isfinite(new_loc):
@@ -862,6 +892,7 @@ class GeneralizedParetoEstimator(ParameterEstimator):
         if self.pseudo_count is not None and self.suff_stat is not None:
             variance_is_trusted = _prior_variance_is_carried(self.suff_stat)
             variance = _prior_variance(self.suff_stat, self._prior_loc, self.xi_min)
+            mean_offset_is_trusted = _prior_mean_offset_is_carried(self.suff_stat)
             offset = _prior_mean_offset(self.suff_stat, self._prior_loc)
             mean0 = new_loc + offset
             second0 = variance + mean0 * mean0
@@ -869,7 +900,7 @@ class GeneralizedParetoEstimator(ParameterEstimator):
                 mean0,
                 second0,
                 variance=(variance if variance_is_trusted else None),
-                mean_offset=offset,
+                mean_offset=(offset if mean_offset_is_trusted else None),
             )
         self._prior_loc = new_loc
         self._loc = new_loc
