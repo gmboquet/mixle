@@ -43,6 +43,31 @@ rejected. ``SetstateRejectsNonCanonicalTotalTest`` below reproduces that exact s
 follow-up fix: a dedicated equality check for the total, scoped to ``already_centered=True``, that
 rejects a bad total rather than silently accepting it or silently re-deriving it (re-deriving would
 reintroduce the very ULP drift this file's other tests exist to close).
+
+A second adversarial review, of that follow-up fix itself, found a further gap:
+``SetstateRejectsNonCanonicalTotalTest``'s new tolerance was ``1.0e-10 * max(1.0, max(abs(sigma)))``
+-- sized from the RESTORED, already-centered ``sigma``, which is always small (O(dim)) by
+construction. The cancellation error the tolerance actually needs to bound was produced once, by
+``__init__``'s ``raw - raw.mean() + (dim - 1) / 2.0`` shift, at the ORIGINAL object's construction
+time, and scales with the magnitude of the RAW, pre-centering input -- invisible by the time
+``__pysp_setstate__`` runs. Direct construction from a raw location vector whose entries share a
+large common offset (the module docstring's "possibly fractional mean rank vector" supports this
+directly) is a legitimate, unmodified ``__init__`` call whose one-time centering residual can
+exceed that tiny tolerance, and was falsely rejected on restore. Confirmed reproduction: ``dim=7``,
+``raw = arange(7) + 994987940.0788243`` constructs validly but used to raise ``ValueError`` on
+restore.
+
+Fixed by carrying the raw pre-centering magnitude forward through
+``__pysp_getstate__``/``__pysp_setstate__`` (``sigma_raw_scale`` in the serialized state) so restore
+sizes its tolerance from the same reference scale ``__init__`` itself used, rather than guessing
+from values that no longer carry that information -- capped at
+``_TRUSTED_SIGMA_RAW_SCALE_CEILING`` (2**31, ~2.147e9) so a corrupted or spoofed hint cannot
+rubber-stamp an arbitrary total and reopen the exact gap ``SetstateRejectsNonCanonicalTotalTest``
+closes (see the module comment above ``_TRUSTED_SIGMA_RAW_SCALE_CEILING`` in ``spearman_rho.py``
+for the full reasoning). ``SpearmanRestoreTrustedRawScaleTest`` below pins the reproduction, the
+empirically-verified "handled" range (common offsets through at least 1e11, across the dims an
+adversarial sweep exercised), and the residual "not handled" range beyond the ceiling that remains
+a documented, accepted limitation rather than a silent gap.
 """
 
 from __future__ import annotations
@@ -56,7 +81,12 @@ import numpy as np
 
 from mixle.data.hashing import model_hash
 from mixle.lifecycle import Model
-from mixle.stats.rankings.spearman_rho import SpearmanRankingDistribution, SpearmanRankingEstimator
+from mixle.stats.rankings.spearman_rho import (
+    _TRUSTED_SIGMA_RAW_SCALE_CEILING,
+    SpearmanRankingDistribution,
+    SpearmanRankingEstimator,
+    _validate_location,
+)
 
 _DIMS = range(2, 9)
 _SEEDS = range(15)
@@ -249,6 +279,253 @@ class SetstateRejectsNonCanonicalTotalTest(unittest.TestCase):
         restored = SpearmanRankingDistribution.__new__(SpearmanRankingDistribution)
         restored.__pysp_setstate__(state)  # must not raise
         self.assertTrue(np.array_equal(dist.sigma, restored.sigma))
+
+
+class SpearmanRestoreTrustedRawScaleTest(unittest.TestCase):
+    """Regression test for a MAJOR gap an adversarial review found in
+    ``SetstateRejectsNonCanonicalTotalTest``'s own fix (see this file's module docstring for the
+    full history): its tolerance was sized from the restored, already-centered ``sigma`` -- always
+    small, O(dim) -- rather than from the RAW, pre-centering magnitude ``__init__`` actually
+    centered away, which is invisible by the time ``__pysp_setstate__`` runs. Direct construction
+    from a raw location vector whose entries share a large common offset (the module docstring's
+    "possibly fractional mean rank vector") is a legitimate, unmodified ``__init__`` call whose
+    one-time centering residual can exceed a tolerance sized from the small centered values, and
+    was falsely rejected on restore.
+
+    Fixed by carrying the raw pre-centering magnitude forward through
+    ``__pysp_getstate__``/``__pysp_setstate__`` (``sigma_raw_scale``) so restore sizes its
+    tolerance from the same reference scale ``__init__`` used, capped at
+    ``_TRUSTED_SIGMA_RAW_SCALE_CEILING`` (2**31, ~2.147e9) so a corrupted or spoofed hint cannot
+    rubber-stamp an arbitrary total -- see ``spearman_rho.py``'s comment above that constant for
+    the full reasoning and the arithmetic behind the specific ceiling and safety-factor constants.
+
+    HANDLED, empirically verified (see this file's fix commit for the sweep methodology): OF THE
+    common offsets in the 1e9-1e11 range that constructed into a legitimate mean-rank vector in the
+    first place (not every random draw at these magnitudes does -- __init__'s own, unmodified
+    majorization check on the freshly-centered result can reject some, for reasons unrelated to
+    this fix), 100% then round-tripped through restore with zero false rejects, across dims 7,
+    10-14, and 18-22 (the dims an adversarial sweep exercised). NOT HANDLED, and not claimed to be:
+    offsets at 1e12 and beyond, where the false-reject rate on restore becomes nonzero and grows
+    with scale -- a documented, accepted residual limitation (see
+    ``SpearmanRankingDistribution``'s class docstring), not silently papered over: the original
+    magnitude is genuinely unrecoverable at restore time, and widening the cap further would start
+    silently admitting the same shifted-total corruption ``SetstateRejectsNonCanonicalTotalTest``
+    exists to catch.
+    """
+
+    def test_reviewer_reproduction_dim7_offset_994987940_now_round_trips(self):
+        # The confirmed false-reject repro: a valid, unmodified __init__ call that used to raise
+        # ValueError on restore.
+        dim = 7
+        raw = np.arange(dim, dtype=np.float64) + 994987940.0788243
+        dist = SpearmanRankingDistribution(raw, rho=0.6)
+        restored = SpearmanRankingDistribution.__new__(SpearmanRankingDistribution)
+        restored.__pysp_setstate__(dist.__pysp_getstate__())  # used to raise ValueError
+        self.assertTrue(np.array_equal(dist.sigma, restored.sigma))
+        self.assertEqual(model_hash(dist), model_hash(restored))
+
+    def test_reviewer_reproduction_round_trips_through_deploy_and_load(self):
+        # Same case, through the real artifact path (mirrors
+        # SpearmanDeployLoadIdempotentCenteringTest above): before this fix, __pysp_setstate__'s
+        # ValueError on Model.load() falls back to the untrusted-pickle path, which requires the
+        # caller to pass trust_code=True -- a real behavioral regression for validly-constructed
+        # input even though it fails safe. Confirm the safe JSON path now handles it directly, with
+        # no fallback and no integrity-note warning.
+        dim = 7
+        raw = np.arange(dim, dtype=np.float64) + 994987940.0788243
+        dist = SpearmanRankingDistribution(raw, rho=0.6)
+        model = Model(dist)
+        model.fitted = dist
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "spearman-large-common-offset")
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                model.deploy(out)
+                loaded = Model.load(out)
+            self.assertTrue(np.array_equal(dist.sigma, loaded.fitted.sigma))
+            self.assertEqual(model_hash(dist), model_hash(loaded.fitted))
+            self.assertFalse(any("integrity note" in note for note in loaded.notes), loaded.notes)
+            user_warnings = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
+            self.assertEqual(user_warnings, [])
+
+    def test_handled_range_offsets_through_1e11_round_trip_across_reviewer_dims(self):
+        # HANDLED range: the reviewer's exact dims at the three scale decades (1e9, 1e10, 1e11)
+        # empirically confirmed to round-trip with a 0% false-reject rate. Goes through
+        # _validate_location directly rather than the full SpearmanRankingDistribution constructor:
+        # the class's exact O(dim * 2**dim) partition computation (needed for log_density/sampling,
+        # irrelevant to the restore-time tolerance this test exercises) takes tens of seconds at
+        # dim=22 and would make this sweep prohibitively slow for what it is checking.
+        #
+        # A random raw offset at these magnitudes is not always itself a legitimate mean-rank
+        # vector once centered -- independent of this fix, __init__'s OWN (unmodified,
+        # already_centered=False) majorization check can reject some -- so each cell retries a
+        # bounded number of times to collect a handful of legitimately-constructible offsets rather
+        # than assuming every draw succeeds.
+        dims = (7, 10, 11, 12, 13, 14, 18, 19, 20, 21, 22)
+        scales = (1.0e9, 1.0e10, 1.0e11)
+        rng = np.random.RandomState(20260830)
+        checked = 0
+        for scale in scales:
+            for dim in dims:
+                constructed = 0
+                attempts = 0
+                while constructed < 5 and attempts < 100:
+                    attempts += 1
+                    offset = scale * float(rng.uniform(1.0, 2.0)) + float(rng.uniform(0.0, 1.0))
+                    raw = np.arange(dim, dtype=np.float64) + offset
+                    try:
+                        sigma, raw_scale = _validate_location(raw, already_centered=False)
+                    except ValueError:
+                        continue  # not a legitimate mean-rank vector at this draw; not our concern
+                    constructed += 1
+                    with self.subTest(dim=dim, scale=scale, offset=offset):
+                        restored_sigma, _ = _validate_location(
+                            sigma, already_centered=True, raw_scale_hint=raw_scale
+                        )
+                        self.assertTrue(np.array_equal(sigma, restored_sigma))
+                        checked += 1
+                self.assertGreater(
+                    constructed,
+                    0,
+                    f"could not legitimately construct any dim={dim} sigma near scale=1e"
+                    f"{np.log10(scale):.0f} in {attempts} attempts",
+                )
+        self.assertGreaterEqual(checked, len(dims) * len(scales) * 5)
+
+    def test_handled_range_round_trips_through_the_real_class_too(self):
+        # Same handled range and scales, but through the real class end to end (construct,
+        # getstate, setstate, sigma/model_hash equality) rather than _validate_location directly --
+        # restricted to dims cheap enough for the exact partition computation (<=14, well under a
+        # second each) to keep this fast; dims 18-22 are covered directly above. Retries per cell
+        # for the same reason as the sweep above: not every random draw is itself a legitimate
+        # mean-rank vector once centered, independent of this fix.
+        rng = np.random.RandomState(20260831)
+        checked = 0
+        for scale in (1.0e9, 1.0e10, 1.0e11):
+            for dim in (7, 10, 11, 12, 13, 14):
+                constructed = False
+                for _ in range(50):
+                    offset = scale * float(rng.uniform(1.0, 2.0)) + float(rng.uniform(0.0, 1.0))
+                    raw = np.arange(dim, dtype=np.float64) + offset
+                    try:
+                        dist = SpearmanRankingDistribution(raw, rho=0.5, max_dim=dim)
+                    except ValueError:
+                        continue
+                    constructed = True
+                    with self.subTest(dim=dim, scale=scale):
+                        restored = SpearmanRankingDistribution.__new__(SpearmanRankingDistribution)
+                        restored.__pysp_setstate__(dist.__pysp_getstate__())
+                        self.assertTrue(np.array_equal(dist.sigma, restored.sigma))
+                        self.assertEqual(model_hash(dist), model_hash(restored))
+                        checked += 1
+                    break
+                self.assertTrue(constructed, f"could not legitimately construct dim={dim} at scale={scale}")
+        self.assertGreaterEqual(checked, 18)
+
+    def test_residual_limitation_specific_offsets_beyond_ceiling_still_false_reject(self):
+        # NOT HANDLED, documented residual limitation: fixed, deterministic (dim, offset) pairs at
+        # ~1.7e15-7.1e15 -- well beyond _TRUSTED_SIGMA_RAW_SCALE_CEILING (2**31, ~2.147e9) -- whose
+        # legitimate cancellation residual exceeds even the capped tolerance. Each of these
+        # constructs validly (an unmodified, unaffected __init__ call) but still cannot be
+        # restored, exactly as documented in SpearmanRankingDistribution's class docstring and the
+        # module comment above _TRUSTED_SIGMA_RAW_SCALE_CEILING. This is not a leftover bug this
+        # fix failed to catch: it is the intentional, reasoned boundary of how far the tolerance is
+        # willing to widen before it would start risking silently admitting genuine corruption
+        # (see SetstateRejectsNonCanonicalTotalTest, unmodified above, for what that would reopen).
+        cases = (
+            (14, 1686774528057326.0),
+            (18, 5510083671818978.0),
+            (22, 7113069285858470.0),
+        )
+        for dim, offset in cases:
+            with self.subTest(dim=dim, offset=offset):
+                raw = np.arange(dim, dtype=np.float64) + offset
+                sigma, raw_scale = _validate_location(raw, already_centered=False)  # constructs fine
+                with self.assertRaisesRegex(ValueError, "already_centered"):
+                    _validate_location(sigma, already_centered=True, raw_scale_hint=raw_scale)
+
+    def test_residual_limitation_case_also_false_rejects_through_the_real_class(self):
+        # Same as above, spot-checked through the real class end to end (cheap at dim=14) rather
+        # than _validate_location alone, so the documented limitation is pinned on the actual
+        # public restore path and not just the internal helper.
+        dim = 14
+        offset = 1686774528057326.0
+        raw = np.arange(dim, dtype=np.float64) + offset
+        dist = SpearmanRankingDistribution(raw, rho=0.5, max_dim=dim)  # constructs fine
+        restored = SpearmanRankingDistribution.__new__(SpearmanRankingDistribution)
+        with self.assertRaisesRegex(ValueError, "already_centered"):
+            restored.__pysp_setstate__(dist.__pysp_getstate__())
+
+    def test_spoofed_raw_scale_hint_cannot_mask_a_small_shift_corruption(self):
+        # Defense-in-depth regression: sigma_raw_scale is untrusted input like every other state
+        # field (nothing binds it cryptographically to sigma), so a state that lies about it --
+        # claiming the maximum trusted ceiling -- must not be able to buy enough tolerance to admit
+        # a corrupted total that has nothing to do with a legitimate large-offset construction. This
+        # must keep failing exactly like SetstateRejectsNonCanonicalTotalTest's smallest case (a
+        # dim=2, shift=0.01 corruption) even in the worst case where the hint is also fabricated.
+        dim = 2
+        canonical = np.arange(dim, dtype=np.float64)
+        dist = SpearmanRankingDistribution(canonical, rho=1.0)
+        state = dist.__pysp_getstate__()
+        corrupted = state["sigma"] + 0.01
+        spoofed_state = dict(state, sigma=corrupted, sigma_raw_scale=2.0**31)
+        restored = SpearmanRankingDistribution.__new__(SpearmanRankingDistribution)
+        with self.assertRaisesRegex(ValueError, "already_centered"):
+            restored.__pysp_setstate__(spoofed_state)
+
+    def test_missing_sigma_raw_scale_falls_back_to_pre_fix_behavior(self):
+        # Backward/forward compatibility: sigma_raw_scale is optional, exactly like fit_diagnostics
+        # (state serialized before this field existed, or built by hand without it, must not hard
+        # fail). For an ordinary small-scale sigma this is a complete no-op --
+        # _validate_location's fallback estimate is exactly what it computed before this fix.
+        dim = 6
+        canonical = np.arange(dim, dtype=np.float64)
+        dist = SpearmanRankingDistribution(canonical, rho=0.4)
+        state = dict(dist.__pysp_getstate__())
+        del state["sigma_raw_scale"]
+        restored = SpearmanRankingDistribution.__new__(SpearmanRankingDistribution)
+        restored.__pysp_setstate__(state)  # must not raise
+        self.assertTrue(np.array_equal(dist.sigma, restored.sigma))
+
+    def test_missing_sigma_raw_scale_reproduces_the_original_false_reject_for_large_offsets(self):
+        # The flip side of the fallback above, stated explicitly rather than left implicit: for a
+        # state that predates this field, the reviewer's exact large-offset repro is NOT fixed --
+        # there is no information to recover it from. This is expected, not a gap this fix missed:
+        # the whole point of sigma_raw_scale is that the raw magnitude cannot be reconstructed from
+        # the restored, already-centered sigma alone.
+        dim = 7
+        raw = np.arange(dim, dtype=np.float64) + 994987940.0788243
+        dist = SpearmanRankingDistribution(raw, rho=0.6)
+        state = dict(dist.__pysp_getstate__())
+        del state["sigma_raw_scale"]
+        restored = SpearmanRankingDistribution.__new__(SpearmanRankingDistribution)
+        with self.assertRaisesRegex(ValueError, "already_centered"):
+            restored.__pysp_setstate__(state)
+
+    def test_sigma_raw_scale_is_exact_and_survives_repeated_round_trips_unclamped(self):
+        # The carried provenance value is the RAW magnitude itself (not pre-clamped to the trusted
+        # ceiling), so it round-trips exactly across any number of hops -- a future release could
+        # raise _TRUSTED_SIGMA_RAW_SCALE_CEILING and immediately benefit from state already on disk
+        # rather than having lossily discarded the extra precision on the first restore. Uses a
+        # fixed offset ABOVE the ceiling (unlike the reviewer's ~9.95e8 repro, which is comfortably
+        # below it) specifically so the clamp inside _validate_location's tolerance computation is
+        # actually exercised, while the value handed back by __pysp_getstate__ stays the true,
+        # uncapped one.
+        dim = 7
+        offset = 4081618133.2800913  # ~4.08e9, > 2**31; empirically confirmed to round-trip
+        raw = np.arange(dim, dtype=np.float64) + offset
+        dist = SpearmanRankingDistribution(raw, rho=0.6)
+        expected_raw_scale = float(np.max(np.abs(raw)))
+        self.assertEqual(dist._sigma_raw_scale, expected_raw_scale)
+        self.assertGreater(dist._sigma_raw_scale, _TRUSTED_SIGMA_RAW_SCALE_CEILING)
+
+        current = dist
+        for _ in range(3):
+            restored = SpearmanRankingDistribution.__new__(SpearmanRankingDistribution)
+            restored.__pysp_setstate__(current.__pysp_getstate__())
+            self.assertEqual(restored._sigma_raw_scale, expected_raw_scale)
+            self.assertTrue(np.array_equal(current.sigma, restored.sigma))
+            current = restored
 
 
 if __name__ == "__main__":

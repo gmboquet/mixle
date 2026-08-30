@@ -72,7 +72,51 @@ class SpearmanRankingFitDiagnostics:
     __pysp_serializable__ = True
 
 
-def _validate_location(value: Any, *, already_centered: bool = False) -> np.ndarray:
+# `_validate_location(..., already_centered=True)`'s total-sum check (below) needs a tolerance sized
+# to the cancellation error `__init__` could have produced when it first computed
+# `raw - raw.mean() + (dim - 1) / 2.0` -- and that error scales with the magnitude of the RAW,
+# PRE-CENTERING input, not with the small, O(dim) post-centering `sigma` the restore path actually
+# sees. An adversarial review of ec389d30 found that gap: a location vector built (a legitimate,
+# documented call -- see the module docstring's "possibly fractional mean rank vector") from raw
+# values sharing a large common offset -- e.g. a consensus rank vector some upstream step
+# accidentally contaminated with an id or a timestamp -- leaves a one-time centering residual that a
+# tolerance sized from the small centered values cannot see coming, and is falsely rejected on
+# restore even though `__init__` (unmodified by ec389d30) built it validly.
+#
+# `SpearmanRankingDistribution.__init__` / `__pysp_getstate__` carry the RAW pre-centering
+# magnitude forward as part of the serialized state (see `raw_scale_hint` below, and
+# `__pysp_getstate__` / `__pysp_setstate__`) so restore can size the tolerance from the same
+# reference scale `__init__` itself used, instead of guessing from values that no longer carry that
+# information. That carried number is untrusted input like every other state field -- nothing here
+# cryptographically binds it to `sigma` -- so it is capped at `_TRUSTED_SIGMA_RAW_SCALE_CEILING`
+# before use: a state claiming an implausibly large raw scale gets, at most, the tolerance that
+# ceiling implies, never an unbounded one that could rubber-stamp any total. The ceiling (2**31,
+# ~2.147e9, the range of a 32-bit integer -- a plausible size for an accidentally merged
+# id/timestamp/counter) was chosen, together with `_RESTORE_CANCELLATION_SAFETY_FACTOR` below, so
+# the widened tolerance stays well under the smallest corruption ec389d30's own regression test
+# (`SetstateRejectsNonCanonicalTotalTest`) requires this check to keep catching (a total-sum shift
+# of only 0.01, still comfortably caught with >5x margin at the ceiling). Above the ceiling, false
+# rejection of a legitimately-constructed `sigma` remains a known, accepted, documented limitation
+# (see this class's docstring and
+# `spearman_json_roundtrip_idempotent_centering_test.SpearmanRestoreTrustedRawScaleTest` for the
+# empirically-verified boundary): the original magnitude is genuinely unrecoverable at restore
+# time, and widening further would start silently admitting the same shifted-total corruption
+# ec389d30 exists to reject.
+_TRUSTED_SIGMA_RAW_SCALE_CEILING = 2.0**31
+
+# Chosen with >20x headroom over 384, the worst (cancellation residual) / (np.spacing(raw scale))
+# ratio found by an extensive randomized-plus-np.nextafter-walked sweep of dim 2..22 and raw scale
+# 1..1e18. Modeling the tolerance on `np.spacing` (the local ULP) rather than reusing this module's
+# pre-existing `1.0e-10 * scale` convention matters here: that convention is a generic "tiny
+# relative slack" calibrated for ordinary, already-small values, not a cancellation-error bound, and
+# at raw scale ~1e9 it already evaluates to ~0.1 -- bigger than the corruption this release must
+# still catch.
+_RESTORE_CANCELLATION_SAFETY_FACTOR = 8192
+
+
+def _validate_location(
+    value: Any, *, already_centered: bool = False, raw_scale_hint: float | None = None
+) -> tuple[np.ndarray, float]:
     raw = np.asarray(value, dtype=np.float64)
     if raw.ndim != 1 or raw.size < 2 or not np.all(np.isfinite(raw)):
         raise ValueError("sigma must be a finite one-dimensional vector with at least two entries.")
@@ -97,6 +141,19 @@ def _validate_location(value: Any, *, already_centered: bool = False) -> np.ndar
         sigma = np.array(raw - raw.mean() + (dim - 1) / 2.0, dtype=np.float64, copy=True)
     ordered = np.sort(sigma)
     tolerance = 1.0e-10 * max(1.0, float(np.max(np.abs(sigma))))
+    # A lenient, internal-only parse: `raw_scale_hint` only ever WIDENS a tolerance that would
+    # otherwise be based on `sigma` alone, so a missing/garbage/non-positive value simply forfeits
+    # that widening (falls back to pre-fix behavior below) rather than raising -- this field is not
+    # part of the public constructor contract, and a corrupted hint should not itself be why a
+    # restore whose actual `sigma` is fine gets rejected.
+    trusted_raw_scale_hint: float | None = None
+    if raw_scale_hint is not None:
+        try:
+            candidate = float(raw_scale_hint)
+        except (TypeError, ValueError):
+            candidate = None
+        if candidate is not None and math.isfinite(candidate) and candidate > 0.0:
+            trusted_raw_scale_hint = candidate
     if already_centered:
         # The shift skipped above is also the ONLY thing that ever forced sum(sigma) to the
         # canonical dim*(dim-1)/2 total: the loop below only lower-bounds each ascending prefix
@@ -107,6 +164,14 @@ def _validate_location(value: Any, *, already_centered: bool = False) -> np.ndar
         # below -- restore with a silently corrupted total instead of being rejected. Validate the
         # invariant instead of re-deriving it: re-shifting here would reintroduce exactly the
         # non-idempotent ULP drift this branch exists to avoid.
+        #
+        # `tolerance` above was sized from the restored (small, O(dim)) `sigma`, which is the wrong
+        # reference scale for the cancellation error this check needs to absorb -- see the module
+        # comment above `_TRUSTED_SIGMA_RAW_SCALE_CEILING`. Widen it (`max`: never narrow it) using
+        # the trusted, capped raw-construction-scale hint when the caller supplied a usable one.
+        if trusted_raw_scale_hint is not None:
+            capped_scale = min(max(1.0, trusted_raw_scale_hint), _TRUSTED_SIGMA_RAW_SCALE_CEILING)
+            tolerance = max(tolerance, _RESTORE_CANCELLATION_SAFETY_FACTOR * float(np.spacing(capped_scale)))
         expected_total = dim * (dim - 1) / 2.0
         if not math.isclose(float(sigma.sum()), expected_total, rel_tol=1.0e-10, abs_tol=tolerance):
             raise ValueError(
@@ -118,7 +183,20 @@ def _validate_location(value: Any, *, already_centered: bool = False) -> np.ndar
         if float(np.sum(ordered[:count])) < minimum - tolerance:
             raise ValueError("sigma must be a compatible mean rank vector in the permutation permutahedron.")
     sigma.setflags(write=False)
-    return sigma
+    if already_centered:
+        # Carry the hint forward UNCLAMPED so re-serializing a restored object preserves the full
+        # original provenance rather than a lossily-capped copy (a future release could raise
+        # _TRUSTED_SIGMA_RAW_SCALE_CEILING and immediately benefit from state already on disk).
+        # With no usable hint at all -- state serialized before this field existed, or built by
+        # hand without it, e.g. in a test -- fall back to the same small-`sigma`-derived estimate
+        # this function used before this fix: strictly less informative, but exactly today's
+        # behavior rather than a new regression for whoever left it out.
+        reported_raw_scale = (
+            trusted_raw_scale_hint if trusted_raw_scale_hint is not None else max(1.0, float(np.max(np.abs(sigma))))
+        )
+    else:
+        reported_raw_scale = max(1.0, float(np.max(np.abs(raw))))
+    return sigma, reported_raw_scale
 
 
 def _rank_vectors(orderings: np.ndarray) -> np.ndarray:
@@ -239,7 +317,19 @@ def _backend_rank_vectors(x: Any, dim: int, engine: Any) -> Any:
 
 
 class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
-    """Exact finite Spearman law over item orderings under a dimension budget."""
+    """Exact finite Spearman law over item orderings under a dimension budget.
+
+    Known limitation: direct construction from a raw location vector (this class's ``sigma``
+    argument -- see the module docstring's "possibly fractional mean rank vector") whose entries
+    share an extremely large common offset -- beyond ``_TRUSTED_SIGMA_RAW_SCALE_CEILING`` in
+    ``spearman_rho.py``, roughly the range of a 32-bit integer (~2.1e9) -- succeeds here, but the
+    one-time float64 cancellation ``__init__`` performs while centering it can leave a residual
+    that a later restore (``__pysp_setstate__``) cannot always distinguish from genuine state
+    corruption, and may then reject with a ``ValueError`` even though it was built validly. The
+    original, pre-centering magnitude is not recoverable from the restored, already-centered state,
+    so this is an accepted, documented limit rather than a bug to silently work around -- see the
+    comment above ``_validate_location`` in this module for the full reasoning and exact boundary.
+    """
 
     @classmethod
     def compute_capabilities(cls):
@@ -303,8 +393,17 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
         fit_diagnostics: SpearmanRankingFitDiagnostics | None = None,
         *,
         _sigma_already_centered: bool = False,
+        _sigma_raw_scale_hint: float | None = None,
     ) -> None:
-        self._sigma = _validate_location(sigma, already_centered=_sigma_already_centered)
+        # `_sigma_raw_scale_hint` is for __pysp_setstate__'s exclusive use, exactly like
+        # `_sigma_already_centered` above: it carries forward the pre-centering magnitude this
+        # object's ORIGINAL construction measured, so a restore can size
+        # `_validate_location`'s already_centered=True tolerance from the same reference scale
+        # that original call used, rather than guess from the (already small) restored `sigma`.
+        # See `_TRUSTED_SIGMA_RAW_SCALE_CEILING`'s comment above `_validate_location`.
+        self._sigma, self._sigma_raw_scale = _validate_location(
+            sigma, already_centered=_sigma_already_centered, raw_scale_hint=_sigma_raw_scale_hint
+        )
         self.dim = len(self._sigma)
         self.rho = finite_nonnegative(rho, label="rho")
         self.max_dim = positive_integer(max_dim, label="max_dim", minimum=2)
@@ -337,6 +436,14 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
         then refused every read back (a write-only artifact). ``log_weights``, ``log_const``, and
         ``dim`` are re-derived deterministically in ``__init__`` and must not be serialized;
         ``fit_diagnostics`` is constructor-carried estimation provenance and rides along as is.
+
+        ``sigma_raw_scale`` is not a distribution parameter either, but unlike ``log_weights``/
+        ``log_const`` it cannot be re-derived on restore: it is the magnitude of the RAW,
+        pre-centering vector ``__init__`` originally centered ``sigma`` from, needed so
+        ``__pysp_setstate__`` -> ``_validate_location(..., already_centered=True)`` can size its
+        total-sum check's tolerance correctly instead of guessing from the small, already-centered
+        ``sigma`` alone (see that function's module-level comment, and this class's docstring note
+        on very large common offsets).
         """
         return {
             "sigma": self._sigma,
@@ -345,6 +452,7 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
             "keys": self.keys,
             "max_dim": self.max_dim,
             "fit_diagnostics": self.fit_diagnostics,
+            "sigma_raw_scale": self._sigma_raw_scale,
         }
 
     def __pysp_setstate__(self, state: dict[str, Any]) -> None:
@@ -357,6 +465,11 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
         not bit-exact idempotent, and the mismatch is exactly the kind of silent divergence
         :func:`mixle.data.hashing.model_hash` is meant to catch, not produce -- see the identical
         fix on :class:`mixle.stats.rankings.thurstone.ThurstoneDistribution`.
+
+        ``sigma_raw_scale`` is optional -- like ``fit_diagnostics`` -- for state serialized before
+        this field existed, or built by hand without it (e.g. in a test): ``_validate_location``
+        falls back to its pre-fix behavior when it is absent, so omitting it is a loss of
+        precision in the restore-time tolerance, not a hard failure.
         """
         required = {"sigma", "rho", "name", "keys", "max_dim"}
         missing = required - set(state)
@@ -370,6 +483,7 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
             max_dim=state["max_dim"],
             fit_diagnostics=state.get("fit_diagnostics"),
             _sigma_already_centered=True,
+            _sigma_raw_scale_hint=state.get("sigma_raw_scale"),
         )
 
     def __str__(self) -> str:
