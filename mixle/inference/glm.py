@@ -1175,7 +1175,18 @@ def lasso(x: np.ndarray, y: np.ndarray, alpha: float = 1.0, **kw) -> PenalizedRe
 
 @dataclass
 class RegressionFit:
-    """Coefficients + fitted values from :func:`robust_regression` / :func:`quantile_regression`."""
+    """Coefficients + fitted values from :func:`robust_regression` / :func:`quantile_regression`.
+
+    Attributes:
+        degenerate_scale: set by :func:`robust_regression` when its IRLS scale estimate collapsed
+            to its hard floor with a non-trivial share of rows left at (near) zero weight -- at
+            least half the rows share (near enough) the same residual under this fit, the
+            estimator's own >50% breakdown point, not a transient numerical accident. ``coef``
+            there matches that majority tie and may be discarding a real minority signal entirely,
+            however ordinary ``converged=True`` looks; see :func:`robust_regression`. Announced by
+            a ``UserWarning`` at fit time. Always ``False`` for :func:`quantile_regression`, which
+            has no comparable scale estimate.
+    """
 
     coef: np.ndarray
     fitted: np.ndarray
@@ -1183,10 +1194,51 @@ class RegressionFit:
     n_iter: int
     converged: bool = True
     rank: int | None = None
+    degenerate_scale: bool = False
 
     def predict(self, x: np.ndarray) -> np.ndarray:
         """Predict fitted regression values for design rows."""
         return _prediction_design(x, self.coef.size) @ self.coef
+
+
+# audit R-1: median(|r - median(r)|) -- the numerator of the scale estimate in robust_regression's
+# IRLS loop below -- is EXACTLY zero whenever half or more of the rows share (near enough) the same
+# residual under the current fit, which floors the whole scale estimate at _ROBUST_SCALE_FLOOR.
+# That is a genuine, inherent limit of any MAD-scaled M-estimator (the classic >50% breakdown
+# point; ordinary zero-inflated or capped/rounded data reaches it easily, no adversarial
+# construction needed) and is not something a fix should try to overcome -- but every OTHER
+# degenerate branch this module recognizes (separation, saturation, rank deficiency,
+# non-convergence) already discloses its own failure, and this one previously did not: `tukey`
+# either hard-zeroed every row (tripping the crash below with no explanation of why) or settled at
+# a self-consistent fixed point that matches the majority tie and discards a real minority signal
+# with converged=True and no warning; `huber` lands at the same silent fixed point, just more
+# slowly, given enough iterations. The constants and helper below name that condition so every path
+# out of the loop can disclose it instead.
+_ROBUST_SCALE_FLOOR = 1e-8
+# a fitted weight this far below the "well-fit" ceiling (u=0 gives w=1 under both methods) reflects
+# a residual the floored scale has pushed out of range, not a considered judgment: at floor,
+# c * scale is ~1.3e-8 (huber) or ~4.7e-8 (tukey), so anything but a near-exact tie to the fit
+# clears that band
+_ROBUST_NEGLIGIBLE_WEIGHT = 1e-6
+# comfortably above single-row floating-point noise, comfortably below the ~30%+ minority
+# fractions ordinary zero-inflated / capped data produces once the condition below is even possible
+_ROBUST_DEGENERACY_FRACTION = 0.05
+
+
+def _robust_scale_degenerate(scale: float, w: np.ndarray) -> bool:
+    """Has robust_regression's IRLS scale collapsed to its floor with real rows discarded by it?
+
+    ``scale`` sits at :data:`_ROBUST_SCALE_FLOOR` exactly when at least half the current residuals
+    are tied (near enough) to their own median -- a real breakdown point, not a bug -- but a
+    collapsed scale is not YET a problem by itself: a genuinely perfect fit (every row's residual
+    near the same tiny value) collapses it too, harmlessly, leaving every weight near 1. What tells
+    the two apart is whether the floored scale has gone on to treat a non-trivial share of the
+    OTHER rows as outliers: that is the actual harm (a discarded minority signal, or -- at 100% --
+    the pre-existing "zero weight to every observation" crash), so it is required here too.
+    """
+    if scale > _ROBUST_SCALE_FLOOR:
+        return False
+    return bool(np.mean(w <= _ROBUST_NEGLIGIBLE_WEIGHT) >= _ROBUST_DEGENERACY_FRACTION)
 
 
 def robust_regression(
@@ -1203,6 +1255,23 @@ def robust_regression(
     Down-weights observations with large residuals so a few outliers cannot dominate the fit. ``huber``
     uses the Huber weight (tuning ``c = 1.345`` for 95% Gaussian efficiency); ``tukey`` uses the
     redescending Tukey biweight (``c = 4.685``), which rejects gross outliers entirely.
+
+    The scale estimate (median absolute residual deviation / 0.6745) is only ever as robust as any
+    MAD-based estimator is: past its own breakdown point -- half or more of the rows sharing (near
+    enough) the same residual under the current fit, an ordinary shape for zero-inflated or
+    capped/rounded data and not a contrived one -- it is exactly zero by construction and floors at
+    ``1e-8``. That is an inherent limit of this estimator family, not something iterating further
+    or switching ``method`` fixes: ``tukey``'s redescending weight then hard-zeros essentially
+    every row (raised below), and ``huber``'s never-quite-zero weight instead settles -- sometimes
+    only after many iterations -- on a near-zero-coefficient fit matching the majority tie that
+    reports ``converged=True``. Both are disclosed rather than left looking like an ordinary
+    converged fit: see ``RegressionFit.degenerate_scale`` and the ``UserWarning`` issued at fit
+    time.
+
+    Raises:
+        RuntimeError: every observation lands at zero weight (the message names the majority-tie
+            breakdown above when that is why), coefficients become non-finite, or IRLS does not
+            converge in ``max_iter`` iterations.
     """
     _solver_controls(max_iter, tol)
     X, y = _regression_data(x, y)
@@ -1216,15 +1285,30 @@ def robust_regression(
     n_iter = 0
     scale = 1.0
     converged = False
+    degenerate = False
     for n_iter in range(1, max_iter + 1):
         r = y - X @ beta
-        scale = max(np.median(np.abs(r - np.median(r))) / 0.6745, 1e-8)
+        scale = max(np.median(np.abs(r - np.median(r))) / 0.6745, _ROBUST_SCALE_FLOOR)
         u = r / scale
         if method == "huber":
             w = np.where(np.abs(u) <= c, 1.0, c / np.maximum(np.abs(u), 1e-12))
         elif method == "tukey":
             w = np.where(np.abs(u) <= c, (1.0 - (u / c) ** 2) ** 2, 0.0)
+        degenerate = _robust_scale_degenerate(scale, w)
         if not np.any(w > 0):
+            if degenerate:
+                raise RuntimeError(
+                    "robust regression assigned zero weight to every observation: the scale "
+                    f"estimate collapsed to its floor ({_ROBUST_SCALE_FLOOR:g}) because at least "
+                    "half the rows share (near enough) the same residual under the current fit -- "
+                    "an ordinary shape for zero-inflated or capped/rounded data, and past the "
+                    ">50% breakdown point any MAD-scaled M-estimator has by construction, not "
+                    f"something more iterations fix. method={method!r} hard-zeros every row here; "
+                    "method='huber' on the same data instead settles (sometimes only after many "
+                    "iterations) on a near-zero-coefficient fit reported as converged -- see "
+                    "RegressionFit.degenerate_scale. Consider a model built for excess zeros (e.g. "
+                    "zero-inflated or hurdle) instead."
+                )
             raise RuntimeError("robust regression assigned zero weight to every observation")
         XtW = X.T * w
         new = _solve_psd(XtW @ X, XtW @ y)
@@ -1236,8 +1320,39 @@ def robust_regression(
             break
         beta = new
     if not converged:
+        if degenerate:
+            raise RuntimeError(
+                f"robust regression failed to converge in {max_iter} iterations: the scale "
+                f"estimate is stuck at its floor ({_ROBUST_SCALE_FLOOR:g}) with a majority-tied "
+                "residual pattern (see RegressionFit.degenerate_scale / robust_regression's "
+                "docstring) -- more iterations are unlikely to help."
+            )
         raise RuntimeError(f"robust regression failed to converge in {max_iter} iterations")
-    return RegressionFit(beta, X @ beta, float(scale), n_iter, converged=True, rank=int(np.linalg.matrix_rank(X)))
+    if degenerate:
+        frac = float(np.mean(w <= _ROBUST_NEGLIGIBLE_WEIGHT))
+        warnings.warn(
+            f"robust_regression (method={method!r}) converged, but its scale estimate collapsed "
+            f"to the floor ({_ROBUST_SCALE_FLOOR:g}) and {frac:.0%} of rows carry (near) zero "
+            "weight: at least half the rows share (near enough) the same residual under this fit, "
+            "an ordinary shape for zero-inflated or capped/rounded data -- and past the >50% "
+            "breakdown point any MAD-scaled M-estimator has by construction. coef matches that "
+            "majority tie and may be discarding a real minority signal entirely; converged=True "
+            "here reflects a self-consistent fixed point, not evidence the fit recovered the true "
+            "relationship (also recorded as RegressionFit.degenerate_scale). Inspect the residuals "
+            "directly, or fit a model built for excess zeros (e.g. zero-inflated or hurdle) "
+            "instead.",
+            UserWarning,
+            stacklevel=2,
+        )
+    return RegressionFit(
+        beta,
+        X @ beta,
+        float(scale),
+        n_iter,
+        converged=True,
+        rank=int(np.linalg.matrix_rank(X)),
+        degenerate_scale=degenerate,
+    )
 
 
 def quantile_regression(
