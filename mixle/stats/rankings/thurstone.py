@@ -131,12 +131,28 @@ class ThurstoneDistribution(SequenceEncodableProbabilityDistribution):
         seed: int = 0,
         smoothing: float = 0.5,
         fit_diagnostics: ThurstoneFitDiagnostics | None = None,
+        *,
+        _mu_already_centered: bool = False,
     ) -> None:
         raw_mu = np.asarray(mu, dtype=np.float64)
         if raw_mu.ndim != 1 or raw_mu.size < 2 or not np.all(np.isfinite(raw_mu)):
             raise ValueError("mu must be a finite length-K vector with K >= 2.")
         self.dim = int(raw_mu.size)
-        centered = np.array(raw_mu - raw_mu.mean(), dtype=np.float64, copy=True)
+        if _mu_already_centered:
+            # __pysp_setstate__ (below) restores a `mu` that was already centered once, at the
+            # original object's construction time, before serialization -- centering a float64
+            # array a second time is not exactly idempotent (the residual mean left over from
+            # the first centering is generically a tiny nonzero value, e.g. -4.44e-17, not
+            # exactly 0.0), so re-centering here would shift one or more elements by 1-few ULP
+            # relative to the state being restored. That is invisible to log_density/sample but
+            # flips the raw bytes mixle.data.hashing.model_hash fingerprints, so a same-process,
+            # zero-tampering deploy()+load() round trip could raise a false-positive integrity
+            # warning. Restoring state means reproducing it exactly, not reapplying a
+            # transformation that was already applied -- this is for __pysp_setstate__'s
+            # exclusive use, never for ordinary construction.
+            centered = np.array(raw_mu, dtype=np.float64, copy=True)
+        else:
+            centered = np.array(raw_mu - raw_mu.mean(), dtype=np.float64, copy=True)
         centered.setflags(write=False)
         self.mu = centered
         self.n_mc = positive_integer(n_mc, label="n_mc")
@@ -191,7 +207,15 @@ class ThurstoneDistribution(SequenceEncodableProbabilityDistribution):
         }
 
     def __pysp_setstate__(self, state: dict[str, Any]) -> None:
-        """Rebuild from constructor-owned state, re-deriving the approximation tables."""
+        """Rebuild from constructor-owned state, re-deriving the approximation tables.
+
+        ``state["mu"]`` was already centered once, in ``__init__`` at the original object's
+        construction time, before ``__pysp_getstate__`` serialized it verbatim -- so this must
+        restore that exact array rather than centering it again (see ``_mu_already_centered`` on
+        ``__init__``). A second centering pass is not bit-exact idempotent, and the mismatch is
+        exactly the kind of silent divergence :func:`mixle.data.hashing.model_hash` is meant to
+        catch, not produce.
+        """
         required = {"mu", "n_mc", "seed", "smoothing", "name", "keys"}
         missing = required - set(state)
         if missing:
@@ -204,6 +228,7 @@ class ThurstoneDistribution(SequenceEncodableProbabilityDistribution):
             seed=state["seed"],
             smoothing=state["smoothing"],
             fit_diagnostics=state.get("fit_diagnostics"),
+            _mu_already_centered=True,
         )
 
     def __str__(self) -> str:

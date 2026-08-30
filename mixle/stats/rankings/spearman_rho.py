@@ -72,14 +72,29 @@ class SpearmanRankingFitDiagnostics:
     __pysp_serializable__ = True
 
 
-def _validate_location(value: Any) -> np.ndarray:
+def _validate_location(value: Any, *, already_centered: bool = False) -> np.ndarray:
     raw = np.asarray(value, dtype=np.float64)
     if raw.ndim != 1 or raw.size < 2 or not np.all(np.isfinite(raw)):
         raise ValueError("sigma must be a finite one-dimensional vector with at least two entries.")
     dim = len(raw)
-    # A common shift changes every assignment score by the same constant. Canonicalizing the
-    # location sum removes that non-identifiability before checking the permutahedron constraints.
-    sigma = np.array(raw - raw.mean() + (dim - 1) / 2.0, dtype=np.float64, copy=True)
+    if already_centered:
+        # __pysp_setstate__ (SpearmanRankingDistribution, below) restores a `sigma` that was
+        # already canonicalized once, at the original object's construction time, before
+        # serialization -- shifting a float64 array by its own (near-)mean a second time is not
+        # exactly idempotent (the residual left over from the first canonicalization is
+        # generically a tiny nonzero value, not exactly 0.0), so redoing it here could shift one
+        # or more elements by 1-few ULP relative to the state being restored. That is invisible
+        # to log_density/sampling but flips the raw bytes mixle.data.hashing.model_hash
+        # fingerprints. Restoring state means reproducing it exactly, not reapplying a
+        # transformation that was already applied -- this is for __pysp_setstate__'s exclusive
+        # use, never for ordinary construction. The permutahedron check below still runs, since
+        # it only reads `sigma` rather than re-deriving it.
+        sigma = np.array(raw, dtype=np.float64, copy=True)
+    else:
+        # A common shift changes every assignment score by the same constant. Canonicalizing the
+        # location sum removes that non-identifiability before checking the permutahedron
+        # constraints.
+        sigma = np.array(raw - raw.mean() + (dim - 1) / 2.0, dtype=np.float64, copy=True)
     ordered = np.sort(sigma)
     tolerance = 1.0e-10 * max(1.0, float(np.max(np.abs(sigma))))
     for count in range(1, dim):
@@ -270,8 +285,10 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
         keys: str | None = None,
         max_dim: int = _DEFAULT_MAX_DIM,
         fit_diagnostics: SpearmanRankingFitDiagnostics | None = None,
+        *,
+        _sigma_already_centered: bool = False,
     ) -> None:
-        self._sigma = _validate_location(sigma)
+        self._sigma = _validate_location(sigma, already_centered=_sigma_already_centered)
         self.dim = len(self._sigma)
         self.rho = finite_nonnegative(rho, label="rho")
         self.max_dim = positive_integer(max_dim, label="max_dim", minimum=2)
@@ -315,7 +332,16 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
         }
 
     def __pysp_setstate__(self, state: dict[str, Any]) -> None:
-        """Rebuild from constructor-owned state, re-deriving the partition tables."""
+        """Rebuild from constructor-owned state, re-deriving the partition tables.
+
+        ``state["sigma"]`` was already canonicalized once, in ``__init__`` at the original
+        object's construction time, before ``__pysp_getstate__`` serialized it verbatim -- so
+        this must restore that exact array rather than re-canonicalizing it (see
+        ``_sigma_already_centered`` on ``__init__`` / ``_validate_location``). A second pass is
+        not bit-exact idempotent, and the mismatch is exactly the kind of silent divergence
+        :func:`mixle.data.hashing.model_hash` is meant to catch, not produce -- see the identical
+        fix on :class:`mixle.stats.rankings.thurstone.ThurstoneDistribution`.
+        """
         required = {"sigma", "rho", "name", "keys", "max_dim"}
         missing = required - set(state)
         if missing:
@@ -327,6 +353,7 @@ class SpearmanRankingDistribution(SequenceEncodableProbabilityDistribution):
             keys=state["keys"],
             max_dim=state["max_dim"],
             fit_diagnostics=state.get("fit_diagnostics"),
+            _sigma_already_centered=True,
         )
 
     def __str__(self) -> str:
