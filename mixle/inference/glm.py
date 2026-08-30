@@ -1179,18 +1179,26 @@ class RegressionFit:
 
     Attributes:
         degenerate_scale: set by :func:`robust_regression` when it detects a sign of its own >50%
-            breakdown point -- EITHER at least half the current residuals tied (near enough) to a
-            collapsed IRLS scale with a real share of rows crushed to (near) zero weight by it, OR
-            at least half the raw response tied (near enough) to a single value regardless of the
-            fit's residuals (the shape a capped/censored measurement produces, which need not
-            collapse the scale at all; see the module comment above ``_robust_weight_collapse`` in
-            this file). Either way, this is not a transient numerical accident, and ``coef`` may
-            reflect that majority pattern rather than a fully recovered relationship, however
-            ordinary ``converged=True`` looks; see :func:`robust_regression`. This field, and the
-            ``UserWarning`` announcing it at fit time, name the observed CONDITION only -- neither
-            can establish whether a real minority signal was discarded or a genuine minority of
-            contamination was correctly rejected, which look identical from this pattern alone.
-            Always ``False`` for :func:`quantile_regression`, which has no comparable mechanism.
+            breakdown point -- EITHER the IRLS scale has collapsed (at or within a convergence step
+            of its numerical floor, or far below the raw response's own spread) with a real share
+            of rows assigned (near) zero weight as a result, OR at least ~44% of the raw response
+            is tied (near enough) to a single value regardless of the fit's residuals (the shape a
+            capped/censored/zero-inflated measurement produces, which need not collapse the scale
+            at all; see the module comment above ``_robust_weight_collapse`` in this file for the
+            full design and, just as importantly, what it still cannot see). Either signal firing
+            means this is not a transient numerical accident, and ``coef`` MAY reflect a majority
+            pattern rather than a fully recovered relationship -- but may equally reflect a fit
+            that is completely correct, with the flagged pattern arising because the majority
+            genuinely fits (near-)exactly; see :func:`robust_regression`. This field, and the
+            ``UserWarning`` announcing it at fit time, name the observed CONDITION only, never a
+            verdict: neither can establish whether a real minority signal was discarded or a
+            genuine minority of contamination was correctly rejected (both look identical from this
+            pattern alone), and -- a further, structural limitation, not merely an unresolved
+            ambiguity -- a majority and minority that follow two genuinely different relationships
+            (as opposed to sharing one tied value) is largely invisible to this mechanism in the
+            first place unless the majority's own fit is exceptionally tight; see the module comment
+            for exactly how far that reaches and where it stops. Always ``False`` for
+            :func:`quantile_regression`, which has no comparable mechanism.
     """
 
     coef: np.ndarray
@@ -1215,10 +1223,10 @@ class RegressionFit:
 # OTHER degenerate branch this module recognizes (separation, saturation, rank deficiency,
 # non-convergence) already discloses its own failure, and this one previously did not.
 #
-# audit R-2: an independent adversarial review of R-1's fix, by direct execution against it, found
-# real gaps in the two-part heuristic it shipped (scale bit-exactly AT _ROBUST_SCALE_FLOOR, AND
-# >=5% of weights near zero). Detection below is now three independent signals, not one combined
-# check:
+# audit R-2 (743a2185): an independent adversarial review of R-1's fix, by direct execution against
+# it, found real gaps in the two-part heuristic it shipped (scale bit-exactly AT _ROBUST_SCALE_FLOOR,
+# AND >=5% of weights near zero). Detection became three signals, not one combined check -- the first
+# two of which are unchanged by audit R-3 below and remain exactly as R-2 shipped them:
 #
 #  1. _robust_weight_collapse -- R-1's own idea, repaired. "Floored" is now a NEAR-floor band sized
 #     off the caller's OWN `tol` instead of bit-exact equality: `tol` and _ROBUST_SCALE_FLOOR happen
@@ -1230,10 +1238,11 @@ class RegressionFit:
 #     discarded in 60/60 seeds, but only 38/60 were flagged, because 22 converged with scale
 #     strictly above the floor (by 0.04-0.86 times `tol`, always under 1x). The crushed-weight
 #     fraction required also drops, from 5% to 1%: see _ROBUST_DEGENERACY_FRACTION for why that is
-#     safe rather than arbitrary.
-#  2. _robust_response_point_mass -- new, and fit-INDEPENDENT: read directly off the raw response
-#     before IRLS ever runs, rather than waiting for a converged fit's residuals to (maybe) show the
-#     same pattern. Two holes this closes that signal 1 cannot, by construction:
+#     safe rather than arbitrary. Audit R-3 below ADDS a second, relative way for the scale part of
+#     this check to fire; the crushed-weight part is untouched.
+#  2. _robust_response_point_mass -- new in R-2, and fit-INDEPENDENT: read directly off the raw
+#     response before IRLS ever runs, rather than waiting for a converged fit's residuals to (maybe)
+#     show the same pattern. Two holes this closes that signal 1 cannot, by construction:
 #       - A minority's crushed-weight fraction and its share of the raw data are not always the same
 #         number. A 1%-minority single-column reproduction crushes exactly 1.00% of rows (matching
 #         signal 1's own new threshold exactly), but the two-column version of the same 1% minority
@@ -1257,49 +1266,124 @@ class RegressionFit:
 #         to collapse all the way; a method that stopped at a partial, huber-like collapse would
 #         still slip past it regardless of threshold. The raw response, sitting 70% tied at the
 #         ceiling regardless of method or how far the fit collapsed, is the one signal both share.
-#  3. _robust_diverges_from_ols -- NOT a third detector. A natural-sounding idea for gap 3 was tried
-#     and rejected by direct execution: flag whenever the robust fit lands far from a plain
-#     (unweighted) least-squares fit on the same data. Measuring it on fixtures already in this file
-#     shows why it fails, in two different ways at once. It is not even stable within one breakdown:
-#     on the 70%-censored design above, OLS disagrees with the (partially collapsed) huber fit by
-#     only 14-22%, comfortably BELOW the ~76-77% disagreement this module already exists to produce
-#     ON PURPOSE (RobustQuantileTest.test_robust_ignores_outliers's 8%-outlier design, correctly
-#     rejected) -- so thresholding on "large disagreement" would flag the healthy case and miss this
-#     one. Yet on the SAME 70%-censored data, method='tukey' (the fully-collapsed version noted under
-#     signal 2 above) disagrees by 47-73% -- 3-5x higher than huber's reading of an equally broken
-#     fit, for a reason (which `method` the caller passed) that has nothing to do with whether
-#     anything is actually wrong. And at heavier censoring it fails the other way: the 96%-capped
-#     design (also in this file's own tests) disagrees with OLS by only 1.2-2.3%, under EITHER
-#     method -- statistically indistinguishable from the 0.9-2.5% disagreement measured on the
-#     benign heteroskedastic fixture below, where nothing is being discarded at all. No threshold on
-#     this quantity separates any of those four figures in the direction that would matter. It earns
-#     a place here only in the opposite, narrower role: a SUPPRESSOR of signal 1 alone -- and it is
-#     safe to let it suppress signal 1 at all ONLY because signal 2 is never subject to it. The
-#     96%-capped design above is in fact flagged exclusively through signal 2 in this implementation
-#     (its own disagreement is small enough that signal 3 suppresses signal 1's independent reading
-#     of that same fit); gating signal 2 by the same suppressor would silently un-flag it, using a
-#     divergence number that -- as just shown -- cannot tell that case apart from the benign one it
-#     exists to catch.
+#  3. (R-2 only; REMOVED by audit R-3 -- kept here as attributed history, not current behavior)
+#     _robust_diverges_from_ols was never a third detector: R-2 added it as a SUPPRESSOR of signal 1
+#     alone, to avoid warning on a benign heteroskedastic fit (a noiseless majority, a noisier
+#     minority of the SAME relationship) where signal 1's scale+weight condition is genuinely
+#     satisfied even though nothing is discarded. See audit R-3 immediately below for why this was
+#     removed rather than repaired.
 #
-# What this does NOT fix, and is not believed fixable from this data alone (stated here, and in
-# robust_regression's docstring, rather than left uncovered with no explanation): a response point
-# mass affecting LESS than half the rows -- e.g. a 30%-capped version of the design above, which
-# attenuates the fitted slope by roughly a fifth without tripping either signal -- is ordinary
-# estimation bias, not the >50% breakdown this module discloses elsewhere, and no fixed threshold
-# below 50% can catch it without also catching designs where a sub-50% minority is genuine,
-# correctly-rejected contamination (this module has no way to tell those apart from the weight or
-# response pattern alone). More fundamentally, the same blindness applies WITHIN the flagged region
-# too: nothing here -- the weight pattern, the response, or the OLS comparison -- can distinguish "a
-# real minority signal" from "a minority of contamination correctly discarded," because both leave
-# an identical fingerprint; the question is about what GENERATED the minority, which none of these
-# signals observe. Past the breakdown point, this module discloses the CONDITION it can actually see
-# (a majority tie, or a majority-shared response value) rather than a verdict on which case this is,
-# and the wording below says so rather than asserting the discarded-signal reading as fact.
+# audit R-3 (this commit): a second independent adversarial review of R-2's fix, again by direct
+# execution against the actual shipped code, found two further problems. This is a third design pass,
+# not a patch on the second -- one mechanism is removed outright rather than re-tuned:
+#
+#  GAP A (blocking) -- signal 3 (_robust_diverges_from_ols) is REMOVED entirely, not repaired, for
+#     two independently-confirmed reasons:
+#       - Structural blindness signal 3 made WORSE, not better. Every signal here reasons about a
+#         majority TIED to one value or one near-exact residual; NONE can see a majority following
+#         one real (e.g. sloped) relationship while a minority follows a genuinely different one --
+#         an entirely ordinary reason to reach for robust regression in the first place (pooling
+#         across instruments/conditions/regimes with different slopes), and qualitatively different
+#         from a value tie. Reproduced directly: a two-column design with a majority at slope 3 and
+#         noise sigma=0.05 and a minority at 2x-4x that slope, swept across minority fractions
+#         1%-95%, method='tukey' converges to the MAJORITY's relationship to within 1e-3 absolute
+#         error at every one of 12 tested (fraction, slope-ratio) combinations from 1% to 20%
+#         minority, discarding the minority's real, different relationship completely -- and
+#         degenerate_scale was False in all 12, because sigma=0.05 never comes close to flooring the
+#         scale (signal 1's scale condition never fires in the first place; signal 3 is not even
+#         reached). Signal 3 cannot help this half of the gap by construction -- it only ever
+#         suppresses signal 1, and signal 1 was never triggered here to suppress.
+#       - Worse: in the narrow window where signal 1's scale condition DOES fire on its own (majority
+#         noise small enough to floor the scale, e.g. sigma=1e-9), signal 3 actively suppresses that
+#         CORRECT detection at ordinary parameters. Reproduced directly on the same sloped-mixture
+#         design at sigma=1e-9: signal 1 alone fires in every one of 12 (fraction x slope-ratio x
+#         method) combinations tested, but signal 3's <10% OLS-agreement bar suppresses it at
+#         minority_frac=5%/slope_ratio=2x (OLS disagreement 4.81%, both methods) and
+#         minority_frac=10%/slope_ratio=2x (9.77%, both methods) -- ordinary fractions and a
+#         straight, not-subtle 2x slope difference -- turning a correct signal-1-alone detection back
+#         into silent, undisclosed complete discard. This is a direct regression relative to what
+#         signal 1 ALONE (R-2's own repair, minus R-2's own suppressor) would have caught.
+#     R-2's original motivation for signal 3 -- not warning on the benign heteroskedastic fixture,
+#     where signal 1's condition is genuinely satisfied but nothing was actually discarded -- is
+#     real, but is now addressed by HONEST WORDING instead of suppression: see
+#     _robust_breakdown_explanation below. Signal 1 firing states the observed weight/scale
+#     CONDITION; it never again asserts that a real minority signal was necessarily discarded, so a
+#     caller who already knows their majority is exactly (or near-exactly) correct by design is not
+#     given a false alarm, while a caller who does not expect this is told plainly what was observed
+#     and left to judge it -- rather than having the detection hidden from them either way.
+#
+#     Separately investigated per the same gap: whether signal 1's scale condition could be made
+#     scale-RELATIVE as well as absolute, to catch a sloped majority whose own noise is "very precise
+#     but not exactly exact" (sigma=1e-6, 1e-4 -- too big for the hardcoded 1e-8 floor's `tol`-sized
+#     band, however that band is sized, yet just as completely a discard of the minority). This DOES
+#     have a well-reasoned, validated answer for part of the gap: _robust_weight_collapse's scale
+#     check now ALSO fires when the scale is far smaller than the raw response's own robust spread
+#     (_response_robust_scale), not only when it is near the hardcoded absolute floor -- full
+#     reasoning, validation, and the part that remains OUT of reach even with this change, are at
+#     _ROBUST_RELATIVE_SCALE_FLOOR below.
+#
+#  GAP B (major) -- _RESPONSE_POINT_MASS_FRACTION's hard 50% cutoff does not track where fit quality
+#     for the shape signal 2 targets (a tied response value) actually degrades. My own sweep (not the
+#     reviewer's numbers re-quoted, re-run independently against this module's own two-column
+#     zero-inflated fixture family, method='huber', default max_iter=100, 200 seeds per point) found a
+#     smooth, roughly symmetric SEVERE-degradation band from response-tie-fraction ~44% through ~56%:
+#     mean/median relative coefficient error there ranges 0.36-0.90 (worse, in fact, at some points
+#     below 50% than just above it), and this band is not an artifact of one fixture's noise level or
+#     effect size -- re-run across noise sigma 0.02-1.0, n=600-6000, single- and two-column designs,
+#     and minority separations from 2 to 10 true SDs, EVERY configuration shows severe or unreliably
+#     bimodal error (median deceptively good in one low-noise case, but mean dragged to 0.21 by a
+#     catastrophic-failure tail) throughout that same band. At the exact 50% point itself: 51.0% of
+#     200 seeds are flagged, with corr(realized-tie-fraction, flagged) = 0.82 but corr(actual relative
+#     error, flagged) = only 0.34 -- confirming the reviewer's framing that at the exact cutoff,
+#     whether a given seed is flagged is driven mostly by which way its own finite-sample Bernoulli
+#     draw landed, not by how bad that seed's fit actually is. _RESPONSE_POINT_MASS_FRACTION is
+#     lowered to 0.44 (from 0.5) on that evidence: see its own comment below for why 0.44 specifically,
+#     and for the coin-flip-at-the-boundary caveat that moves with it rather than disappearing.
+#
+# What audit R-3 did NOT close, stated here plainly rather than left for a future review to
+# rediscover (see also robust_regression's own docstring and RegressionFit.degenerate_scale):
+#   - A sloped (or otherwise differently-related, non-tied) majority/minority mixture is closed only
+#     PARTIALLY by the new relative scale check. It fully covers method='tukey' at every majority
+#     noise level reproduced here (down to a relative scale ratio of ~1.5e-7). Under method='huber' it
+#     covers noise down to ~1e-6 but NOT ~1e-4: verified stable to 50,000 IRLS iterations (a genuine
+#     fixed point, not slow convergence), huber's soft down-weighting settles the minority's weight
+#     around 1e-5 to 1e-4 at that noise level -- functionally negligible for the fit's outcome (the
+#     recovered coefficients already match the majority to within 4e-6) but never crossing the FIXED
+#     _ROBUST_NEGLIGIBLE_WEIGHT bar (1e-6) this module uses for "crushed," so the crushed-weight
+#     fraction never reaches _ROBUST_DEGENERACY_FRACTION and the fit passes silently. Making that
+#     bar relative too was considered and deliberately left undone: it is a materially bigger, riskier
+#     change than the scale check alone, touching the one number this module's false-positive safety
+#     argument leans on most heavily (see _ROBUST_RELATIVE_SCALE_FLOOR below), and was not something
+#     this pass could validate with the same confidence in the time available.
+#   - A majority/minority split that differs ONLY in location -- no covariate for the response's own
+#     spread to track -- and forms TIGHT-but-not-exactly-tied clusters (as opposed to signal 2's
+#     literal repeated value) is not reliably caught by anything here. Confirmed directly: for an
+#     intercept-only design with a majority cluster at one mean and a minority cluster at another,
+#     both with noise sigma=1e-6, the relative check's own denominator (the raw response's robust
+#     spread) collapses to the SAME tiny scale as the fit's residuals, because there is no x-driven
+#     variability holding them apart -- the ratio sits at ~1.0, nowhere near collapsed, in every
+#     fraction tested (5%/10%/20% minority). Only an even smaller absolute noise (sigma=1e-9, small
+#     enough to hit the unchanged hardcoded floor directly) is caught, via the ORIGINAL absolute path.
+#   - As before R-3, and unchanged by it: nothing here -- the weight pattern, the response, or (now
+#     removed) an OLS comparison -- can distinguish "a real minority signal" from "a minority of
+#     contamination correctly discarded," because both leave an identical fingerprint; the question is
+#     about what GENERATED the majority/minority split, which none of these signals observe. Past
+#     whichever breakdown point applies, this module discloses the CONDITION it can actually see (a
+#     collapsed scale with crushed weights, or a majority-shared response value) rather than a verdict
+#     on which case this is, and the wording below says so rather than asserting the discarded-signal
+#     reading as fact.
+#   - As before R-3, and unchanged by it: a response point mass affecting LESS than the (now 44%,
+#     was 50%) cutoff is ordinary estimation bias, not disclosed, and any hard cutoff on a smooth,
+#     continuous underlying degradation curve has some neighborhood around it where realized-sample
+#     noise -- not the true underlying severity -- decides whether a given fit gets flagged. GAP B
+#     above moved that neighborhood and narrowed how much genuinely-severe territory sits on its
+#     wrong side; it did not, and structurally could not, eliminate it.
 _ROBUST_SCALE_FLOOR = 1e-8
 # a fitted weight this far below the "well-fit" ceiling (u=0 gives w=1 under both methods) reflects
 # a residual the floored scale has pushed out of range, not a considered judgment: at floor,
 # c * scale is ~1.3e-8 (huber) or ~4.7e-8 (tukey), so anything but a near-exact tie to the fit
-# clears that band
+# clears that band. Unchanged by audit R-3 (see its GAP A note above for why widening this instead of
+# the scale check was investigated and deliberately deferred, not silently skipped).
 _ROBUST_NEGLIGIBLE_WEIGHT = 1e-6
 # lowered from R-1's 5% (see audit R-2 above). Safe rather than arbitrary because false positives
 # here are prevented almost entirely by _robust_weight_collapse's near-floor requirement, not by
@@ -1308,7 +1392,14 @@ _ROBUST_NEGLIGIBLE_WEIGHT = 1e-6
 # design already used elsewhere in this test suite sits at scale ~0.32 under both methods -- tens of
 # millions of floors away), so this fraction's only remaining job is to rule out the ZERO-crushed
 # "genuinely perfect fit" case. 1% clears every reproduced minority down to the smallest tested with
-# room to spare (a single-column 1% minority crushes exactly 1.00% of rows).
+# room to spare (a single-column 1% minority crushes exactly 1.00% of rows). audit R-3 re-confirmed
+# this same protection holds with the new relative scale path active: a uniformly-tiny-noise, single-
+# relationship fit with NO true minority (sigma swept 1e-9 through 0.3, an O(1) response) never
+# crushes so much as one row's weight below this bar, at any of those noise levels -- IRLS's weight is
+# self-normalizing on the standardized residual `u = r / scale`, so a purely Gaussian residual pattern
+# essentially never produces |u| beyond the enormous multiple of `c` a near-zero weight requires,
+# regardless of how tiny the absolute scale itself is. This fraction, not _ROBUST_RELATIVE_SCALE_FLOOR,
+# is doing the real false-positive protection for the new relative path too.
 _ROBUST_DEGENERACY_FRACTION = 0.01
 # how far above _ROBUST_SCALE_FLOOR a converged scale can sit and still count as "collapsed", sized
 # off the caller's OWN convergence tolerance rather than a hardcoded constant (audit R-2, signal 1):
@@ -1318,42 +1409,108 @@ _ROBUST_DEGENERACY_FRACTION = 0.01
 # reproduction, every one of the 22 seeds R-1 missed had its converged scale under 1x of `tol` above
 # the floor; an 8x margin is kept for headroom that sample did not need but a different design might.
 _ROBUST_FLOOR_SLACK = 8.0
-# at least half of the raw response (near enough) sharing one value -- the same breakdown point as
-# the residual-tie condition above, just read directly off the data; see _robust_response_point_mass
-# and audit R-2 (signal 2). Confirmed to separate this file's severe capped/censored reproductions
-# (70%/96% capped, both flagged) from its mild ones (30%/4% capped, neither flagged, biasing the
-# slope under 30% relative) with wide margin either side of 50%.
-_RESPONSE_POINT_MASS_FRACTION = 0.5
+# audit R-3, GAP A: a SECOND, independent way for _robust_weight_collapse's scale check to fire --
+# the converged scale sits at or below this fraction of the raw response's own robust spread
+# (_response_robust_scale), regardless of how that compares to the hardcoded absolute floor above.
+# This is what lets signal 1 see a sloped majority/minority mixture whose majority noise is small but
+# not literally floor-sized (sigma=1e-6 to 1e-4 against an O(1) response, in the reproductions below),
+# which the absolute-only check could never reach at any slack multiple, because that noise never gets
+# near 1e-8 in the first place. Unit-invariant by construction (a ratio of two spreads in the
+# response's own units), unlike the absolute floor, which is only ever as meaningful as the caller's
+# choice of units for y.
+#
+# Chosen value (1e-3) and why it is not a delicate choice: false positives on ordinary, well-
+# conditioned continuous data are overwhelmingly prevented by _ROBUST_DEGENERACY_FRACTION's
+# crushed-weight requirement (see that constant's own comment), not by this one -- a uniformly-tiny-
+# noise, no-true-breakdown fit never crushes any row's weight regardless of noise scale, so this
+# constant only controls how far the relative-collapse SIGNAL reaches, not whether a healthy fit can
+# misfire. Verified directly at 1e-4, 1e-3, and 1e-2 alike: zero new false positives across every
+# scenario checked (8%-contamination, mild 30%/4% capping, the 35%-minority huber sweep, the 1%-5%
+# low-fraction sweep, and the uniform-tiny-noise probe above) at all three values. 1e-3 is chosen from
+# that safe range with margin on both sides: 2-3 orders of magnitude below the smallest ratio measured
+# on any benign fixture here (~0.0048 at 1% noise relative to an O(1) response, in the uniform-noise
+# probe), and 1-2 orders of magnitude above the target reproduction's ratios (~1.5e-7 to ~2.4e-5 for
+# majority noise 1e-6 to 1e-4 against an O(1) response, sloped two-column mixture, both methods).
+#
+# What this does NOT close (see the GAP A "what audit R-3 did NOT close" note in the module comment
+# above for the full account): method='huber' specifically, at majority noise around 1e-4 and coarser,
+# settles the minority's weight in the 1e-5-1e-4 range -- below "well-fit" but never below
+# _ROBUST_NEGLIGIBLE_WEIGHT (1e-6) -- so _ROBUST_DEGENERACY_FRACTION's crushed-weight count stays at
+# zero even once this relative scale condition is satisfied, and the fit still passes silently. Also
+# out of reach: an intercept-only (no-covariate) location-only majority/minority split with tight but
+# not exactly tied clusters, where the response's own spread collapses in step with the fit's residual
+# scale for the same reason the fit's scale does, leaving no separation for a ratio-based check to see.
+_ROBUST_RELATIVE_SCALE_FLOOR = 1e-3
+# at least this fraction of the raw response (near enough) sharing one value; see
+# _robust_response_point_mass and audit R-2 (signal 2). Originally 0.5, matching the >50% M-estimator
+# breakdown point in theory. Lowered to 0.44 by audit R-3 (GAP B in the module comment above): my own
+# sweep of this module's own two-column zero-inflated fixture family (noise 0.02-1.0, n=600-6000,
+# single- and two-column shapes, 2-10 true SD minority separations, 200 seeds per point) found mean/
+# median relative coefficient error already severe (roughly 0.35-0.90, comparable to or worse than the
+# cases this module already discloses) throughout a roughly symmetric band from ~44% through ~56%
+# response-tie-fraction, essentially independent of noise level or effect size -- i.e. this is a
+# property of the estimator's own breakdown dynamics near 50%, not of any one fixture's parameters.
+# 0.44 sits at the edge of, not deep inside, that band: below it (40-42% in the same sweep), error is
+# measurably and consistently better (roughly 0.06-0.27 depending on configuration) though not
+# uniformly excellent, so this is a real, evidence-based improvement over 0.5 rather than a claim that
+# 44% is itself a clean boundary. It also does not create new false positives on well-conditioned,
+# non-degenerate data: per _response_point_mass_fraction's own design, continuous, untied data
+# essentially never produces a 44%+ tie run by chance, so lowering this constant only pulls MORE of
+# the already-tied-response family (the shape this signal exists to catch) into disclosure -- it does
+# not newly catch anything without a real, near-exact response tie. What lowering this constant does
+# NOT do: eliminate the coin-flip-like uncertainty AT whatever cutoff is current. Measured directly at
+# the OLD 50% cutoff: 51% of 200 seeds were flagged, but whether a given seed was flagged correlated
+# strongly with its own realized tie-fraction (r=0.82, i.e. mostly which way that seed's Bernoulli
+# draw happened to land) and only weakly with its actual fit quality (r=0.34) -- a hard threshold on a
+# smooth, continuous degradation curve cannot avoid this at ANY value, and 0.44 is not an exception;
+# it only narrows how much clearly-severe territory sits on the wrong (undisclosed) side of the line.
+_RESPONSE_POINT_MASS_FRACTION = 0.44
 # ties within this fraction of the response's own range count as "the same value": generous enough
 # to survive any floating-point noise a real capping/rounding pipeline introduces, far too tight to
 # ever merge two genuinely distinct values from continuous data into a false point mass
 _RESPONSE_POINT_MASS_REL_TOL = 1e-9
-# below this relative disagreement with plain OLS, the robust fit is treated as not meaningfully
-# different from the unweighted answer and _robust_weight_collapse's reading is suppressed (audit
-# R-2, signal 3; never applied to signal 2 -- see the module comment for why that restriction is
-# load-bearing, not incidental). Set comfortably above the largest disagreement measured on the
-# benign heteroskedastic suppression fixture below (~2.5%), with wide margin to spare. Its precise
-# value matters only for that one fixture: every genuine collapse in this file's own tests that
-# signal 1 also happens to fire on is independently carried by signal 2 regardless of what signal 3
-# does with it (the 96%-capped design, for instance, disagrees with OLS by only ~1-2% -- statistically
-# indistinguishable from the benign fixture's own -- and is flagged anyway, through signal 2,
-# precisely because that comparison is not one this threshold is trusted to get right).
-_ROBUST_OLS_AGREEMENT_FRACTION = 0.10
 
 
-def _robust_weight_collapse(scale: float, w: np.ndarray, tol: float) -> bool:
-    """Has the IRLS scale collapsed to (near) its floor with a real share of rows crushed by it?
+def _response_robust_scale(y: np.ndarray) -> float:
+    """Robust (MAD-based) spread of the raw response, independent of any fit or IRLS iteration.
 
-    Signal 1 of audit R-2 (module comment above): a repair of R-1's original check, not a
-    replacement. "Collapsed" is now a band within :data:`_ROBUST_FLOOR_SLACK` multiples of ``tol``
-    above :data:`_ROBUST_SCALE_FLOOR`, rather than bit-exact equality to it, so a scale that IRLS's
-    OWN convergence check let stop just short of the floor is no longer read as healthy (the gap R-2
-    fixes). A near-floor scale is still not YET a problem by itself: a genuinely perfect fit (every
-    row's residual near the same tiny value) collapses it too, harmlessly, leaving every weight near
-    1. What tells the two apart is whether the near-floor scale has gone on to treat a real share of
-    the OTHER rows as outliers -- see :data:`_ROBUST_DEGENERACY_FRACTION`.
+    Used by :func:`_robust_weight_collapse` (audit R-3, GAP A) as the denominator of its relative
+    floor-band check -- see :data:`_ROBUST_RELATIVE_SCALE_FLOOR` for the full reasoning. Floored to a
+    tiny epsilon (not :data:`_ROBUST_SCALE_FLOOR`, which is a units-dependent constant for the
+    RESIDUAL scale, not a generic epsilon) purely to avoid division by exact zero when ``y`` itself
+    is majority-tied -- a case :func:`_robust_response_point_mass` already handles independently, so
+    this function returning a degenerate value there is harmless, never a silent miss.
     """
-    if scale > _ROBUST_SCALE_FLOOR + _ROBUST_FLOOR_SLACK * tol:
+    return max(float(np.median(np.abs(y - np.median(y)))) / 0.6745, 1e-12)
+
+
+def _robust_weight_collapse(scale: float, w: np.ndarray, tol: float, y_scale: float) -> bool:
+    """Has the IRLS scale collapsed -- in absolute or relative terms -- with a real share of rows
+    crushed by it?
+
+    Signal 1 of audit R-2 (module comment above), extended by audit R-3 (GAP A). Two independent
+    ways for "collapsed" to be true:
+
+      * absolute (R-2, unchanged): a band within :data:`_ROBUST_FLOOR_SLACK` multiples of ``tol``
+        above :data:`_ROBUST_SCALE_FLOOR`, rather than bit-exact equality to it, so a scale that
+        IRLS's OWN convergence check let stop just short of the floor is no longer read as healthy.
+      * relative (R-3, new): at or below :data:`_ROBUST_RELATIVE_SCALE_FLOOR` times ``y_scale`` (see
+        :func:`_response_robust_scale`) -- unit-invariant, and able to see a majority sub-population
+        whose own noise is small but not literally floor-sized (sigma around 1e-6 to 1e-4 against an
+        O(1) response, in this module's own reproductions), which the absolute check cannot reach at
+        any slack multiple because that noise never approaches the hardcoded 1e-8 in the first place.
+
+    Either way, a collapsed scale is still not YET a problem by itself: a genuinely perfect (or
+    near-perfect) fit -- every row's residual near the same tiny value, absolutely or relative to
+    the response's own scale -- collapses it too, harmlessly, leaving every weight near 1. What
+    tells the two apart is whether the collapsed scale has gone on to treat a real share of the
+    OTHER rows as outliers -- see :data:`_ROBUST_DEGENERACY_FRACTION`, whose own comment documents
+    why this fraction (not the scale check) is what actually protects ordinary, well-conditioned
+    data from a false positive here, for either the absolute or the relative path.
+    """
+    absolute_floor = scale <= _ROBUST_SCALE_FLOOR + _ROBUST_FLOOR_SLACK * tol
+    relative_floor = scale <= _ROBUST_RELATIVE_SCALE_FLOOR * y_scale
+    if not (absolute_floor or relative_floor):
         return False
     return bool(np.mean(w <= _ROBUST_NEGLIGIBLE_WEIGHT) >= _ROBUST_DEGENERACY_FRACTION)
 
@@ -1380,65 +1537,75 @@ def _response_point_mass_fraction(y: np.ndarray) -> float:
 
 
 def _robust_response_point_mass(y: np.ndarray) -> bool:
-    """Does at least half of the raw response share (near enough) the same value?
+    """Does at least :data:`_RESPONSE_POINT_MASS_FRACTION` of the raw response share (near enough)
+    the same value?
 
-    Signal 2 of audit R-2 (module comment above): fit-independent, computed once on ``y`` alone
-    before IRLS ever runs. See :func:`_response_point_mass_fraction` for the tie detector and the
-    module comment for why this catches a capped/censored breakdown that the weight/scale signal
-    (:func:`_robust_weight_collapse`) structurally cannot.
+    Signal 2 of audit R-2 (module comment above), threshold lowered by audit R-3 (GAP B) from 0.5 to
+    0.44 -- see :data:`_RESPONSE_POINT_MASS_FRACTION`'s own comment for the sweep that justifies the
+    new value. Fit-independent, computed once on ``y`` alone before IRLS ever runs. See
+    :func:`_response_point_mass_fraction` for the tie detector and the module comment for why this
+    catches a capped/censored breakdown that the weight/scale signal (:func:`_robust_weight_collapse`)
+    structurally cannot.
     """
     return _response_point_mass_fraction(y) >= _RESPONSE_POINT_MASS_FRACTION
 
 
-def _robust_diverges_from_ols(coef: np.ndarray, ols_coef: np.ndarray) -> bool:
-    """Does the robust fit sit meaningfully far from the plain (unweighted) least-squares fit?
+def _robust_breakdown_explanation(collapse: bool, point_mass: bool, point_mass_fraction: float, w: np.ndarray) -> str:
+    """Shared wording for the RuntimeError/UserWarning naming a majority-tied pattern.
 
-    Signal 3 of audit R-2 (module comment above) -- used ONLY to suppress
-    :func:`_robust_weight_collapse`, never to detect a breakdown on its own and never applied to
-    :func:`_robust_response_point_mass`; the module comment documents why both restrictions are
-    load-bearing rather than incidental. ``ols_coef`` is robust_regression's own IRLS starting point
-    (plain least squares), already computed once before the loop runs, so checking this costs one
-    subtraction and two vector norms, not a second solve.
+    Audit R-3 rewrite (module comment above, GAP A): states the observed CONDITION plainly and
+    NEVER asserts a verdict on what it means. The module comment documents why that verdict is not
+    something the weight pattern or the response can establish on their own -- a genuine minority
+    signal discarded, and a genuine minority of contamination correctly rejected, produce an
+    identical fingerprint; so, separately, does a majority that is simply exactly (or near-exactly)
+    correct, with nothing discarded at all (audit R-2's original "benign heteroskedastic" concern,
+    now resolved by this wording rather than by suppressing the signal -- see the module comment).
+    Only the signal(s) that actually fired are named, and the advice offered differs by which one:
+    a response-level tie (signal 2) supports naming the data SHAPE it typically comes from
+    (zero-inflation, capping, rounding) because that is read directly off ``y`` itself; a weight/
+    scale collapse alone (signal 1) does not license that same claim, so it gets more general
+    advice instead (compare against OLS, inspect which rows were down-weighted) plus an explicit
+    "if you already expect this, it's not news" out.
     """
-    scale_ref = max(float(np.linalg.norm(ols_coef)), float(np.linalg.norm(coef)), 1e-12)
-    return bool(np.linalg.norm(coef - ols_coef) / scale_ref > _ROBUST_OLS_AGREEMENT_FRACTION)
-
-
-def _robust_breakdown_explanation(collapse: bool, point_mass: bool, w: np.ndarray) -> str:
-    """Shared wording for the RuntimeError/UserWarning naming a majority-breakdown pattern.
-
-    States the observed CONDITION rather than asserting that a real minority signal was discarded:
-    the module comment above (audit R-2) documents why that specific conclusion is not something
-    the weight pattern, the response, or an OLS comparison can establish on their own -- a genuine
-    minority signal and a genuine minority of contamination correctly rejected can produce an
-    identical fingerprint. Only the signal(s) that actually fired are named, so this must be called
-    with ``collapse`` already resolved against :func:`_robust_diverges_from_ols` (i.e. the
-    "flagged", not the raw, weight-collapse reading) -- never cite a signal as a reason when it was
-    specifically judged not to indicate a problem.
-    """
-    parts = []
+    conditions = []
     if point_mass:
-        parts.append(
-            f"the response itself has at least {_RESPONSE_POINT_MASS_FRACTION:.0%} of rows sharing "
-            "(near enough) the same value -- the shape zero-inflated, capped/censored, or "
-            "rounded/floored measurements all produce"
+        conditions.append(
+            f"{point_mass_fraction:.0%} of the raw response values are (near enough) tied to the "
+            "same value -- the shape zero-inflated, capped/censored, or rounded/floored "
+            "measurements typically produce"
         )
     if collapse:
         frac = float(np.mean(w <= _ROBUST_NEGLIGIBLE_WEIGHT))
-        parts.append(
-            f"the IRLS scale estimate is at (or within a convergence step of) its floor "
-            f"({_ROBUST_SCALE_FLOOR:g}) with {frac:.0%} of rows carrying (near) zero weight"
+        conditions.append(
+            f"{frac:.0%} of observations were assigned (near) zero weight during robust fitting, "
+            "with the IRLS scale estimate that produced those weights collapsed -- at (or within a "
+            "convergence step of) its numerical floor, or far smaller than the response's own "
+            "spread"
         )
-    observed = " and ".join(parts) if parts else "a majority-tied residual pattern"
-    return (
-        f"{observed}. This is the shape of the estimator's own >50% breakdown point -- an ordinary "
-        "occurrence for zero-inflated, capped/censored, or heavily rounded/floored data, not a "
-        "contrived one -- past which a MAD-scaled M-estimator cannot distinguish a real minority "
-        "signal from a minority of contamination correctly rejected using this pattern alone; see "
-        "RegressionFit.degenerate_scale and robust_regression's docstring. Consider a model built "
-        "for the data's actual shape instead: zero-inflated or hurdle regression for excess zeros, "
-        "Tobit / censored regression for a capped or floored measurement."
+    observed = "; separately, ".join(conditions) if conditions else "a majority-tied pattern"
+    hedge = (
+        f"{observed}. This is the shape of the estimator's own >50% breakdown point: past it, a "
+        "MAD-scaled M-estimator cannot tell, from this pattern alone, a majority that is "
+        "legitimately exact or near-exact (nothing discarded) apart from a majority that has "
+        "overwhelmed and discarded a real, differently-behaved minority (coef reflects only the "
+        "majority) -- both produce this identical pattern. See RegressionFit.degenerate_scale and "
+        "robust_regression's docstring for what this disclosure can and cannot tell you."
     )
+    if point_mass:
+        advice = (
+            " If this response shape was not expected, consider a model built for it instead: "
+            "zero-inflated or hurdle regression for excess zeros, Tobit / censored regression for "
+            "a capped or floored measurement."
+        )
+    else:
+        advice = (
+            " If you did not expect this many observations to collapse this precisely onto one "
+            "fit, this is worth investigating before trusting coef -- e.g. compare against a plain "
+            "ordinary-least-squares fit, or inspect which rows were assigned near-zero weight; if "
+            "you already know your data has an exact or near-exact majority by design, this is "
+            "naming that shape, not flagging a new problem."
+        )
+    return f"{hedge}{advice}"
 
 
 def robust_regression(
@@ -1460,20 +1627,26 @@ def robust_regression(
     MAD-based estimator is: past its own breakdown point -- half or more of the rows sharing (near
     enough) the same residual under the current fit, an ordinary shape for zero-inflated or
     capped/rounded data and not a contrived one -- it is exactly zero by construction and floors at
-    ``1e-8``. That is an inherent limit of this estimator family, not something iterating further
-    or switching ``method`` fixes: ``tukey``'s redescending weight then hard-zeros essentially
-    every row (raised below), and ``huber``'s never-quite-zero weight instead settles -- sometimes
-    only after many iterations -- on a near-zero-coefficient fit matching the majority tie that
-    reports ``converged=True``. A capped or censored measurement breaks down the same way without
-    ever collapsing the scale estimate itself: a shared ceiling ties rows' raw responses together
-    but not their residuals once the fit carries any slope, so this is instead read directly off the
-    response (see the module comment above ``_robust_weight_collapse`` in this file for the full,
-    three-signal detection design and its own documented limits). All of these are disclosed rather
-    than left looking like an ordinary converged fit: see ``RegressionFit.degenerate_scale`` and the
-    ``UserWarning`` issued at fit time. What is NOT, and cannot be, disclosed: WHICH of "a real
-    minority signal" or "a minority of contamination correctly rejected" produced a flagged pattern
-    -- both leave the same fingerprint, so the warning names the observed condition, never a verdict
-    on which case it is.
+    ``1e-8`` (or, as of audit R-3, is treated the same way once it is merely far smaller than the
+    response's own spread, even without literally reaching that floor). That is an inherent limit of
+    this estimator family, not something iterating further or switching ``method`` fixes:
+    ``tukey``'s redescending weight then hard-zeros essentially every row (raised below), and
+    ``huber``'s never-quite-zero weight instead settles -- sometimes only after many iterations --
+    on a near-zero-coefficient fit matching the majority tie that reports ``converged=True``. A
+    capped or censored measurement breaks down the same way without ever collapsing the scale
+    estimate itself: a shared ceiling ties rows' raw responses together but not their residuals once
+    the fit carries any slope, so this is instead read directly off the response (see the module
+    comment above ``_robust_weight_collapse`` in this file for the full two-signal detection design,
+    including what audit R-3 closed and what it plainly did not: most notably, a majority and a
+    minority that follow two genuinely DIFFERENT relationships -- as opposed to sharing one tied
+    value -- is only ever PARTIALLY visible to this mechanism, and a location-only split with no
+    covariate to anchor the response's own spread is not visible to it at all). All of these are
+    disclosed rather than left looking like an ordinary converged fit: see
+    ``RegressionFit.degenerate_scale`` and the ``UserWarning`` issued at fit time. What is NOT, and
+    cannot be, disclosed: WHICH of "a real minority signal was discarded," "a minority of
+    contamination was correctly rejected," or "nothing was discarded at all, because the majority is
+    genuinely this exact" produced a flagged pattern -- all three leave the same fingerprint, so the
+    warning names the observed condition, never a verdict on which case it is.
 
     Raises:
         RuntimeError: every observation lands at zero weight (the message names the breakdown
@@ -1488,9 +1661,13 @@ def robust_regression(
         c = 1.345 if method == "huber" else 4.685
     if not np.isfinite(c) or c <= 0:
         raise ValueError("c must be finite and > 0")
-    ols_beta = np.linalg.lstsq(X, y, rcond=None)[0]  # also the IRLS starting point, reused below
+    ols_beta = np.linalg.lstsq(X, y, rcond=None)[0]  # the IRLS starting point
     beta = ols_beta
-    point_mass = _robust_response_point_mass(y)  # fit-independent; computed once (audit R-2)
+    # both fit-independent; computed once on y alone before IRLS ever runs (audit R-2; y_scale is
+    # new in audit R-3, GAP A -- see _response_robust_scale)
+    point_mass_fraction = _response_point_mass_fraction(y)
+    point_mass = point_mass_fraction >= _RESPONSE_POINT_MASS_FRACTION
+    y_scale = _response_robust_scale(y)
     n_iter = 0
     scale = 1.0
     converged = False
@@ -1504,16 +1681,16 @@ def robust_regression(
             w = np.where(np.abs(u) <= c, 1.0, c / np.maximum(np.abs(u), 1e-12))
         elif method == "tukey":
             w = np.where(np.abs(u) <= c, (1.0 - (u / c) ** 2) ** 2, 0.0)
-        # signal 3 only ever suppresses signal 1, and only when signal 1 actually fired -- `and`
-        # short-circuits, so the OLS comparison is skipped entirely on every ordinary, well-scaled
-        # iteration (audit R-2, module comment above _robust_weight_collapse)
-        collapse_flagged = _robust_weight_collapse(scale, w, tol) and _robust_diverges_from_ols(beta, ols_beta)
+        # audit R-3 (module comment, GAP A) removed the OLS-divergence suppressor that used to gate
+        # this: signal 1 now stands on its own, honestly WORDED rather than silenced when it fires
+        # on a fit that turns out to be fine -- see _robust_breakdown_explanation
+        collapse_flagged = _robust_weight_collapse(scale, w, tol, y_scale)
         degenerate = collapse_flagged or point_mass
         if not np.any(w > 0):
             if degenerate:
                 raise RuntimeError(
                     "robust regression assigned zero weight to every observation: "
-                    + _robust_breakdown_explanation(collapse_flagged, point_mass, w)
+                    + _robust_breakdown_explanation(collapse_flagged, point_mass, point_mass_fraction, w)
                 )
             raise RuntimeError("robust regression assigned zero weight to every observation")
         XtW = X.T * w
@@ -1529,17 +1706,17 @@ def robust_regression(
         if degenerate:
             raise RuntimeError(
                 f"robust regression failed to converge in {max_iter} iterations: "
-                + _robust_breakdown_explanation(collapse_flagged, point_mass, w)
+                + _robust_breakdown_explanation(collapse_flagged, point_mass, point_mass_fraction, w)
                 + " More iterations are unlikely to help."
             )
         raise RuntimeError(f"robust regression failed to converge in {max_iter} iterations")
     if degenerate:
         warnings.warn(
             f"robust_regression (method={method!r}) converged, but "
-            + _robust_breakdown_explanation(collapse_flagged, point_mass, w)
-            + " coef may reflect that pattern rather than a fully recovered relationship; "
-            "converged=True here reflects a self-consistent fixed point, not confirmation the fit "
-            "is correct (also recorded as RegressionFit.degenerate_scale).",
+            + _robust_breakdown_explanation(collapse_flagged, point_mass, point_mass_fraction, w)
+            + " converged=True here reflects a self-consistent fixed point, not confirmation of "
+            "whether coef is the fully correct answer or reflects only the majority pattern above "
+            "(also recorded as RegressionFit.degenerate_scale).",
             UserWarning,
             stacklevel=2,
         )
