@@ -97,6 +97,22 @@ def _validate_location(value: Any, *, already_centered: bool = False) -> np.ndar
         sigma = np.array(raw - raw.mean() + (dim - 1) / 2.0, dtype=np.float64, copy=True)
     ordered = np.sort(sigma)
     tolerance = 1.0e-10 * max(1.0, float(np.max(np.abs(sigma))))
+    if already_centered:
+        # The shift skipped above is also the ONLY thing that ever forced sum(sigma) to the
+        # canonical dim*(dim-1)/2 total: the loop below only lower-bounds each ascending prefix
+        # sum through `dim - 1` terms and never inspects the full sum, because for a freshly
+        # shifted `sigma` (the `else` branch above) that total is already exact by construction.
+        # Skipping the shift here without checking the invariant it used to guarantee would let a
+        # `sigma` shifted by any constant -- still ascending, so it clears every prefix-sum bound
+        # below -- restore with a silently corrupted total instead of being rejected. Validate the
+        # invariant instead of re-deriving it: re-shifting here would reintroduce exactly the
+        # non-idempotent ULP drift this branch exists to avoid.
+        expected_total = dim * (dim - 1) / 2.0
+        if not math.isclose(float(sigma.sum()), expected_total, rel_tol=1.0e-10, abs_tol=tolerance):
+            raise ValueError(
+                f"sigma must already satisfy sum(sigma) == dim*(dim-1)/2 when already_centered=True "
+                f"(got a total of {float(sigma.sum())!r} for dim={dim}, expected {expected_total!r})."
+            )
     for count in range(1, dim):
         minimum = count * (count - 1) / 2.0
         if float(np.sum(ordered[:count])) < minimum - tolerance:

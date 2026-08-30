@@ -31,6 +31,18 @@ it today. It is fixed anyway because it is the identical latent defect Thurstone
 change to how ``estimate()`` derives ``sigma`` (e.g. a tie-breaking or smoothing scheme that no
 longer lands on an exact integer permutation) could make it manifest silently, exactly as it did for
 Thurstone this release.
+
+An adversarial review of the fix above found it introduced a real regression, Spearman-specific
+(Thurstone's ``mu`` has no analogous constraint, so it is unaffected): skipping the shift on the
+``already_centered=True`` restore path also skipped the ONLY thing that ever enforced ``sigma``'s
+total-sum invariant, ``sum(sigma) == dim*(dim-1)/2``. The majorization loop in
+``_validate_location`` only lower-bounds ascending prefix sums through ``dim - 1`` terms and never
+inspects the full sum, so a ``sigma`` shifted by any constant -- still strictly ascending, so it
+clears every one of those bounds -- restored with a silently corrupted total instead of being
+rejected. ``SetstateRejectsNonCanonicalTotalTest`` below reproduces that exact scenario and pins the
+follow-up fix: a dedicated equality check for the total, scoped to ``already_centered=True``, that
+rejects a bad total rather than silently accepting it or silently re-deriving it (re-deriving would
+reintroduce the very ULP drift this file's other tests exist to close).
 """
 
 from __future__ import annotations
@@ -167,6 +179,76 @@ class EstimatorPathNeverManifestsTest(unittest.TestCase):
                     restored = SpearmanRankingDistribution.__new__(SpearmanRankingDistribution)
                     restored.__pysp_setstate__(dist.__pysp_getstate__())
                     self.assertTrue(np.array_equal(dist.sigma, restored.sigma))
+
+
+class SetstateRejectsNonCanonicalTotalTest(unittest.TestCase):
+    """Regression test for a real defect an adversarial review found in 25c18167 itself: skipping
+    the shift on the ``already_centered=True`` restore path also skipped the ONLY check that ever
+    enforced ``sigma``'s total-sum invariant (``sum(sigma) == dim*(dim-1)/2``). The majorization
+    loop in ``_validate_location`` only lower-bounds each ascending prefix sum through ``dim - 1``
+    terms and never inspects the full sum -- on the ordinary (non-restore) path that total is
+    already exact by construction, because it is exactly what the skipped shift computes. A
+    ``sigma`` shifted by a positive constant is still strictly ascending, so it clears every one of
+    those prefix-sum lower bounds, but its total is wrong: fed through ``__pysp_setstate__`` on the
+    code 25c18167 introduced, such a ``sigma`` silently kept the corrupted total instead of being
+    rejected. This pins the fix: a dedicated equality check for that invariant, scoped to the
+    ``already_centered=True`` path, that rejects rather than either silently accepting a bad total
+    or silently re-deriving one (re-shifting would reintroduce the ULP drift 25c18167 fixed).
+    """
+
+    def test_reviewer_scenario_shift_by_100_on_dim_5_is_rejected(self):
+        # The reviewer's exact repro: canonical sigma=[0,1,2,3,4] (dim=5, sum=10) shifted by +100
+        # to [100,101,102,103,104] (sum=510, still strictly ascending).
+        dim = 5
+        canonical = np.arange(dim, dtype=np.float64)
+        dist = SpearmanRankingDistribution(canonical, rho=0.7, name="judges", keys="k")
+        state = dist.__pysp_getstate__()
+        self.assertTrue(np.array_equal(state["sigma"], canonical))
+
+        corrupted = state["sigma"] + 100.0
+        self.assertTrue(np.all(np.diff(corrupted) > 0), "corrupted sigma must stay strictly ascending")
+        self.assertEqual(float(corrupted.sum()), 510.0)
+
+        restored = SpearmanRankingDistribution.__new__(SpearmanRankingDistribution)
+        with self.assertRaisesRegex(ValueError, "already_centered"):
+            restored.__pysp_setstate__(dict(state, sigma=corrupted))
+
+    def test_corrupted_sigma_clears_the_majorization_loop_on_its_own(self):
+        # Sanity check that the reviewer's scenario is really the gap the new check closes, and not
+        # something the pre-existing majorization loop already caught for an unrelated reason: every
+        # ascending prefix sum clears its lower bound even though the full total (510) is wrong.
+        dim = 5
+        corrupted = np.arange(dim, dtype=np.float64) + 100.0
+        ordered = np.sort(corrupted)
+        for count in range(1, dim):
+            minimum = count * (count - 1) / 2.0
+            self.assertGreaterEqual(float(np.sum(ordered[:count])), minimum)
+
+    def test_a_sweep_of_positive_constant_shifts_and_dims_is_rejected(self):
+        checked = 0
+        for dim in range(2, 9):
+            canonical = np.arange(dim, dtype=np.float64)
+            dist = SpearmanRankingDistribution(canonical, rho=1.0)
+            state = dist.__pysp_getstate__()
+            for shift in (0.01, 0.5, 1.0, 3.5, 100.0):
+                with self.subTest(dim=dim, shift=shift):
+                    corrupted = state["sigma"] + shift
+                    restored = SpearmanRankingDistribution.__new__(SpearmanRankingDistribution)
+                    with self.assertRaisesRegex(ValueError, "already_centered"):
+                        restored.__pysp_setstate__(dict(state, sigma=corrupted))
+                    checked += 1
+        self.assertGreater(checked, 30)
+
+    def test_legitimately_centered_sigma_still_restores_without_error(self):
+        # The fix must not become a false positive on the untampered path this file's other tests
+        # already sweep: a real, once-canonicalized sigma must keep restoring cleanly.
+        dim = 6
+        canonical = _fractional_mean_rank_sigma(dim, seed=3)
+        dist = SpearmanRankingDistribution(canonical, rho=0.4)
+        state = dist.__pysp_getstate__()
+        restored = SpearmanRankingDistribution.__new__(SpearmanRankingDistribution)
+        restored.__pysp_setstate__(state)  # must not raise
+        self.assertTrue(np.array_equal(dist.sigma, restored.sigma))
 
 
 if __name__ == "__main__":
