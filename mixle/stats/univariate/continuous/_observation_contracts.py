@@ -182,6 +182,8 @@ def anchored_pooled_variance(
     pseudo_count: float | None,
     prior_mean: float | None,
     prior_variance: float | None,
+    *,
+    prior_mean_offset: float | None = None,
 ) -> tuple[float, tuple[str, ...]]:
     """Population variance of ``x`` computed from shift-anchored moments, plus any repairs to disclose.
 
@@ -204,6 +206,20 @@ def anchored_pooled_variance(
     leaves the data untouched; a single combined sum could only clamp the total, so its ulp-scale
     threshold would have to be crossed by the spread as well, and any spread below
     ~``4 eps abs(mean)`` per observation would read as constant.
+
+    ``prior_mean_offset``, when given, is the caller's OWN exact ``prior_mean - mean`` (or an equally
+    precise negative), computed entirely at small/exceedance scale, and is squared directly in place
+    of differencing the absolute-valued ``prior_mean``/``mean`` below. It exists for a caller whose
+    ``mean`` and ``prior_mean`` are absolute values built by ADDING a small quantity onto a shared,
+    large-magnitude anchor (a peaks-over-threshold location, say): forming an absolute ``prior_mean``
+    just to hand this function something to difference is itself adding a small number to a huge one
+    -- exactly the cancellation this function exists to avoid -- and once that small quantity is
+    below the anchor's own ULP, the addition rounds it away before this function's internal
+    subtraction ever runs. No care taken in THIS function's own arithmetic can recover a value
+    already destroyed forming its input; only skipping that round trip can. A caller in that position
+    passes the exact small-scale displacement directly here instead (and may pass ``prior_mean=None``,
+    which then goes unused). Every other caller leaves this unset and gets the historical
+    ``(prior_mean - mean) ** 2`` behaviour, unchanged.
     """
     if count <= 0.0:
         observed_scatter = 0.0
@@ -234,7 +250,12 @@ def anchored_pooled_variance(
             shift = 0.0
         observed_scatter = core + count * shift * shift
     if pseudo_count not in (None, 0.0) and prior_variance is not None:
-        offset = 0.0 if prior_mean is None else (prior_mean - mean) ** 2
+        if prior_mean_offset is not None:
+            # Already exact at exceedance scale (see docstring); square it directly rather than
+            # re-deriving it by differencing two absolute values that may not have survived forming.
+            offset = prior_mean_offset * prior_mean_offset
+        else:
+            offset = 0.0 if prior_mean is None else (prior_mean - mean) ** 2
         prior_scatter = pseudo_count * (prior_variance + offset)
         return (observed_scatter + prior_scatter) / (count + pseudo_count), repairs
     if count == 0.0:

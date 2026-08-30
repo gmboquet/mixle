@@ -34,6 +34,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.univariate.continuous._observation_contracts import (
+    MEAN_ROUNDING_BOUND,
     AnchoredMomentTrack,
     anchored_pooled_variance,
     consistent_anchored_triple,
@@ -214,21 +215,58 @@ def _prior_mean_offset(suff_stat: Any, loc: float) -> float:
     """The prior's exceedance mean (``mean - loc``), exactly when ``suff_stat`` carries it.
 
     Mirrors :func:`_prior_variance`'s carried-vs-derived split for the other half of the same
-    ``(mean, second_moment)`` pair, but with no plausibility floor to check: unlike recovering the
-    variance by differencing a squared quantity, a single subtraction of two loc-scale values that
-    are close together (``mean`` and ``loc``, or in practice ``mean`` and any data anchor near it) is
-    EXACT by Sterbenz's lemma -- the subtraction itself introduces no cancellation. The un-carried
-    fallback below is therefore always exactly as good as the raw pair currently allows; what it
-    cannot do is undo damage an earlier ``loc + offset`` addition already did by rounding the offset
-    away before this ever ran (see :class:`GeneralizedParetoPriorMoments`). A caller that is ABOUT TO
-    perform such an addition -- :meth:`GeneralizedParetoDistribution.estimator` computing
-    ``mean0 = self.mean()``, or the ``loc`` setter re-anchoring to a new threshold -- must capture the
-    offset (or carry one already captured) BEFORE the addition, not rely on recovering it here after.
+    ``(mean, second_moment)`` pair. Unlike recovering the variance by differencing a squared
+    quantity, a single subtraction of two loc-scale values that are close together (``mean`` and
+    ``loc``, or in practice ``mean`` and any data anchor near it) is EXACT by Sterbenz's lemma -- the
+    subtraction ITSELF introduces no cancellation. The un-carried fallback below is therefore always
+    exactly as good as the raw pair currently allows; what it cannot do is undo damage an earlier
+    ``loc + offset`` addition already did by rounding the offset away before this ever ran (see
+    :class:`GeneralizedParetoPriorMoments`). A caller that is ABOUT TO perform such an addition --
+    :meth:`GeneralizedParetoDistribution.estimator` computing ``mean0 = self.mean()``, or the ``loc``
+    setter re-anchoring to a new threshold -- must capture the offset (or carry one already captured)
+    BEFORE the addition, not rely on recovering it here after.
+
+    That earlier addition need not happen inside this module at all: a caller can hand in a plain
+    ``(mean0, second0)`` tuple where ``mean0`` was already computed externally as ``loc +
+    true_offset``, at a ``loc`` large enough that the addition rounded ``true_offset`` away before
+    this module ever saw the pair -- ``mean0`` arrives already bit-identical (or close enough to be
+    indistinguishable) to ``loc``. This subtraction is exact given what it receives, but "exact" does
+    not mean "correct": it can only recover what survived the caller's own construction, and there is
+    no way to tell from ``mean0`` and ``loc`` alone whether a genuine offset was ever there to lose.
+    Unlike the variance there is no data-driven floor to compare the recovery against -- but every
+    generalized-Pareto prior's mean is ``loc`` plus a STRICTLY POSITIVE exceedance amount
+    (``scale/(1-xi)`` with ``scale > 0``), so a recovered offset that is exactly zero, or too small
+    for float64 to have resolved as distinct from zero at this ``loc``'s magnitude, is not a reading
+    any valid prior produces -- warn rather than silently returning it (which, left undisclosed, also
+    makes :func:`_prior_variance`'s own floor collapse to zero and go quiet in turn, since that floor
+    is built from this same offset squared).
     """
     carried = getattr(suff_stat, "mean_offset", None)
     if carried is not None and np.isfinite(carried):
         return float(carried)
-    return float(suff_stat[0]) - float(loc)
+    mean, loc = float(suff_stat[0]), float(loc)
+    offset = mean - loc
+    resolution = MEAN_ROUNDING_BOUND * abs(loc)
+    if abs(offset) <= resolution:
+        import warnings
+
+        warnings.warn(
+            "generalized-Pareto pseudo_count prior was supplied as the raw pair with mean=%.6g at "
+            "loc=%.6g; differencing them recovers an exceedance offset of only %.6g, and float64 "
+            "cannot resolve a displacement below about %.3g at this magnitude. Every generalized "
+            "Pareto prior has a strictly positive exceedance mean (scale/(1-xi) with scale > 0), so "
+            "this reading is not one this family can hold: most likely the true offset was already "
+            "rounded away by a `loc + offset` addition performed before this module ever saw the "
+            "pair -- its own construction, or an earlier retarget done by hand rather than through "
+            "the `.loc` setter -- rather than this being a genuinely zero-mean prior. Build the "
+            "prior with GeneralizedParetoDistribution(...).estimator(pseudo_count), which carries "
+            "the exact offset independent of loc, or supply mean0 already expressed with enough "
+            "headroom above loc to survive this magnitude."
+            % (mean, loc, offset, resolution),
+            RuntimeWarning,
+            stacklevel=3,
+        )
+    return offset
 
 
 def _consistent_gpd_max(suff_stat: Any, raw_count: float) -> float | None:
@@ -895,21 +933,34 @@ class GeneralizedParetoEstimator(ParameterEstimator):
                 offset = (anchored[1] + pc * (prior_offset - anchor_offset)) / count
             mean_x = anchored[0] + offset
             m = anchor_offset + offset
-            prior_mean_for_variance = None
+            prior_mean_offset_for_variance = None
             if prior_mean is not None:
-                # `anchored_pooled_variance` differences this against `mean_x` INTERNALLY to weigh the
-                # prior's own pull on the pooled variance. Passing the raw, absolute `prior_mean`
-                # would hand it two independently-rounded loc-scale values anchored at DIFFERENT bases
-                # (`self.loc` vs `anchored[0]`), which does not reliably re-difference back to the
-                # small quantity that matters -- the same cancellation class one level removed.
-                # Building it instead as a SINGLE addition onto the already-materialized `mean_x`,
-                # with the small, exact displacement below computed entirely from exceedance-scale
-                # quantities, keeps that internal subtraction exact up to the same sub-ULP floor
-                # `anchored_pooled_variance`'s own shift term already accepts.
+                # `anchored_pooled_variance` needs the prior's pull on the pooled variance as
+                # `(prior_mean - mean) ** 2`. Handing it two ABSOLUTE, loc-scale floats to difference
+                # internally -- even a carefully-built `prior_mean = mean_x + displacement` -- fails at
+                # extreme `loc`: forming that absolute float IS adding a small `displacement` onto the
+                # huge `mean_x`, the exact cancellation this whole mechanism exists to avoid, and once
+                # `displacement` is below `mean_x`'s own ULP the addition rounds it away -- silently,
+                # and not merely to the sub-ULP floor the shift term above accepts, since the WHOLE
+                # displacement can vanish rather than a few of its low bits (a prior review of this fix
+                # measured 50-100% relative error in the pooled variance from exactly this). `prior_offset`
+                # and `anchor_offset` are each already exact at exceedance scale, so `displacement` is
+                # too: it is threaded straight through as `prior_mean_offset` below, which lets
+                # `anchored_pooled_variance` square it directly and skip the lossy absolute-valued round
+                # trip entirely, rather than being folded into a `prior_mean_for_variance` absolute that
+                # the function would have to (and cannot reliably) re-difference back out.
                 displacement = (prior_offset - offset) - anchor_offset
-                prior_mean_for_variance = mean_x + displacement
+                prior_mean_offset_for_variance = displacement
             var, notes = anchored_pooled_variance(
-                anchored[0], anchored[1], anchored[2], raw_count, mean_x, pc, prior_mean_for_variance, prior_variance
+                anchored[0],
+                anchored[1],
+                anchored[2],
+                raw_count,
+                mean_x,
+                pc,
+                None,
+                prior_variance,
+                prior_mean_offset=prior_mean_offset_for_variance,
             )
         else:
             notes = ()

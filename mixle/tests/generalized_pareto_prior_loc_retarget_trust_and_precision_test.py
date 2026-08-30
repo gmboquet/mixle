@@ -28,6 +28,37 @@ offset (``mean - loc``) exactly, at construction (directly as ``scale/(1-xi)``, 
 UNCHANGED across any number of ``loc`` retargets, and having ``estimate()`` consume that preserved
 offset directly wherever it used to recompute ``mean_x - self.loc`` (or, in the anchored branch,
 ``prior_mean - anchor``) from an already-corrupted absolute value.
+
+An independent adversarial re-review of the Finding A/B fix above confirmed both are genuinely fixed
+for the specific mechanism they named, but found two further gaps in the same area:
+
+GAP A: Finding B only protected the PURE-PRIOR passthrough (zero real observations). The ANCHORED
+branch -- real data blended with the prior -- computes the prior's mean displacement from the pooled
+location (``displacement``) correctly, entirely at small/exceedance scale, but then (pre-fix) folded
+it into an ABSOLUTE, loc-scale ``prior_mean_for_variance = mean_x + displacement`` before handing it
+to the shared ``anchored_pooled_variance``, which differences it back out internally. Forming that
+absolute float is itself the disease this whole mechanism exists to cure -- adding a small
+``displacement`` onto the huge ``mean_x`` -- and once ``displacement`` is smaller than ``mean_x``'s
+own ULP the addition rounds it away, not to a negligible sub-ULP residue but potentially to nothing
+at all, corrupting the pooled variance's prior contribution by 50-100% in the case reproduced below.
+Fixed by threading ``displacement`` straight through to ``anchored_pooled_variance`` as a new
+``prior_mean_offset`` keyword, which squares it directly instead of re-deriving it by differencing
+two absolute values -- additive to the shared function's signature, so every other family that calls
+it (Nakagami, Student-t, Gumbel, log-Gaussian, Rician) is byte-for-byte unaffected.
+
+GAP B: ``_prior_mean_offset()`` (added by the Finding B fix) had no cancellation warning analogous to
+its sibling ``_prior_variance()``. A manually-supplied plain ``suff_stat`` 2-tuple -- "a first-class,
+still-supported encoding" per this module's own docstring -- can arrive with ``mean0`` ALREADY
+collapsed to bit-identical with ``loc``, because the CALLER computed ``mean0 = loc + true_offset``
+externally (outside this module) at a large ``loc`` before this module ever saw the pair.
+Differencing ``mean0 - loc`` is exact given what it receives, but "exact" here means "exactly 0.0",
+not "correct" -- and there was no diagnostic. It also happens to make ``_prior_variance()``'s own
+floor check degenerate (its floor is ``(mean - loc) ** 2 / ...``, so a zero displacement trivially
+satisfies it), silencing THAT warning too, collapsing silently to the pre-existing degenerate default
+(shape=0.0, scale=min_scale) with zero disclosure. Fixed by warning when the recovered offset is
+indistinguishable from zero at ``loc``'s own float64 resolution: every generalized-Pareto prior's
+mean is ``loc`` plus a STRICTLY POSITIVE exceedance amount, so such a reading is not one any valid
+prior produces.
 """
 
 import unittest
@@ -203,6 +234,163 @@ class PriorMeanPrecisionAcrossMagnitudeTest(unittest.TestCase):
         # The offset (2.5) must come through the retarget essentially exactly, independent of the
         # variance warning firing alongside it.
         self.assertAlmostEqual(float(est.suff_stat[0]), 2.5, places=6)
+
+
+class AnchoredBranchPriorMeanDisplacementCancellationTest(unittest.TestCase):
+    """GAP A: the ANCHORED branch (real data blended with the prior) still round-trips the prior's
+    mean displacement through an absolute, loc-scale intermediate. See the module docstring above.
+
+    The parameters below are not arbitrary: they thread a narrow numerical needle so the corruption
+    is detectable in the end-to-end fitted (scale, shape) at all, rather than being masked by either
+    of two OTHER, unrelated effects that dominate more "obvious" choices:
+
+    * If the real exceedances don't individually keep several ULPs of headroom over ``loc``'s own
+      ULP, the observations THEMSELVES lose precision being represented as ``loc + e`` -- a separate,
+      unavoidable float64 floor this test is not about.
+    * The prior's contribution to the pooled variance is ``pseudo_count * (prior_variance +
+      displacement**2)``, pooled alongside the real data's own ``observed_scatter`` (roughly
+      ``raw_count * exceedance_spread**2``). A real generalized Pareto's variance and mean are linked
+      (``variance = mean_offset**2 / (1 - 2*xi)``), so a prior whose mean sits close enough to the raw
+      sample's own mean for ``displacement`` to be small (needed for the corruption to bite --
+      ``displacement`` must be comparable to ``loc``'s ULP to be lost) inherits a variance on the same
+      huge order as that mean squared UNLESS ``xi`` is pushed very negative -- otherwise
+      ``observed_scatter`` swamps the prior's contribution entirely and the corruption, though total,
+      becomes numerically invisible in the final fit. This is presumably why ce2e6614's OWN test
+      exercising the anchored branch with a real observation
+      (``PriorMeanPrecisionAcrossMagnitudeTest.test_loc_setter_retarget_with_one_real_observation_stays_accurate``
+      above) did not catch this: its pseudo_count (2000) dominates its single real observation (1),
+      routing almost all of the prior/data mean gap into ``anchored_pooled_variance``'s already-
+      accepted ``shift`` term rather than into ``displacement``.
+
+    ``_prior_for_loc`` picks ``(scale, xi)`` to hit an exact ``(mean_offset, variance)`` target that
+    keeps both effects out of the way -- still an entirely ordinary, valid
+    ``GeneralizedParetoDistribution``, just an unusually thin-tailed one.
+    """
+
+    JITTER = 180.0
+    BASE_EXCEEDANCES = (
+        4.0, 9.0, 21.0, 13.0, 27.0, 6.0, 18.0, 11.0, 24.0, 8.0,
+        15.0, 19.0, 5.0, 22.0, 10.0, 17.0, 7.0, 25.0, 12.0, 20.0,
+    )
+    PSEUDO_COUNT = 35.0
+    MEAN_OFFSET_DELTA = 180.0  # how far the prior's exceedance mean sits from the raw sample's own
+
+    @classmethod
+    def _exceedances(cls):
+        return [b * cls.JITTER for b in cls.BASE_EXCEEDANCES]
+
+    @classmethod
+    def _prior_for_loc(cls, loc):
+        exceedances = cls._exceedances()
+        n = float(len(exceedances))
+        raw_mean = sum(exceedances) / n
+        mean_offset = raw_mean + cls.MEAN_OFFSET_DELTA
+        # Target variance comparable to (displacement)**2 at this pseudo_count/raw_count blend, NOT
+        # to mean_offset**2 -- see the class docstring's second bullet.
+        displacement_estimate = cls.MEAN_OFFSET_DELTA * n / (n + cls.PSEUDO_COUNT)
+        variance = 0.5 * displacement_estimate * displacement_estimate
+        xi = (1.0 - mean_offset * mean_offset / variance) / 2.0
+        scale = mean_offset * (1.0 - xi)
+        return GeneralizedParetoDistribution(scale=scale, shape=xi, loc=loc)
+
+    def _fit(self, loc):
+        dist = self._prior_for_loc(loc)
+        est = dist.estimator(pseudo_count=self.PSEUDO_COUNT)
+        acc = est.accumulator_factory().make()
+        for e in self._exceedances():
+            acc.update(loc + e, 1.0, None)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            fitted = est.estimate(float(len(self.BASE_EXCEEDANCES)) + self.PSEUDO_COUNT, acc.value())
+        self.assertEqual(caught, [], "this well-conditioned scenario should not itself warn")
+        return fitted
+
+    def test_anchored_branch_matches_loc_zero_baseline_at_extreme_loc(self):
+        # Threshold-equivariant baseline: the same data pattern (offsets from loc), fit at loc=0,
+        # where no term in this computation is anywhere near a precision cliff.
+        baseline = self._fit(0.0)
+        fitted = self._fit(1.0e18)
+
+        # Before the fix this drifts off the baseline by ~1.3% (scale) / ~1.4% (shape) at loc=1e18 --
+        # the prior's mean-displacement contribution to the pooled variance is rounded to exactly 0
+        # by the `mean_x + displacement` addition. After the fix both stay within a few tenths of a
+        # percent, matching the residual float64 floor for representing `raw_count` real observations
+        # at this magnitude (unrelated to this bug -- see the class docstring's first bullet).
+        rel_tol = 0.005
+        rel_scale = abs(fitted.scale - baseline.scale) / abs(baseline.scale)
+        rel_shape = abs(fitted.shape - baseline.shape) / abs(baseline.shape)
+        self.assertLess(rel_scale, rel_tol, msg="scale at loc=1e18 vs the loc=0 baseline (%.6g)" % rel_scale)
+        self.assertLess(rel_shape, rel_tol, msg="shape at loc=1e18 vs the loc=0 baseline (%.6g)" % rel_shape)
+
+
+class ManuallySuppliedPairExternallyCancelledMeanWarnsTest(unittest.TestCase):
+    """GAP B: a plain ``suff_stat`` 2-tuple whose ``mean0`` was already collapsed to bit-identical
+    with ``loc`` by an addition performed OUTSIDE this module must now be disclosed, not silently
+    returned as an offset of 0.0. See the module docstring above.
+    """
+
+    def test_externally_precomputed_mean0_that_collapsed_to_loc_now_warns(self):
+        big_loc = 1.0e18
+        true_offset = 50.0
+        # Simulates a caller who computed `mean0 = loc + true_offset` themselves, outside this
+        # module, before ever constructing the estimator -- exactly the scenario the finding
+        # describes. Asserted explicitly so this repro does not silently stop reproducing if float64
+        # semantics or the chosen constants ever change.
+        mean0 = big_loc + true_offset
+        self.assertEqual(mean0, big_loc, "setup invariant: the addition must already have collapsed")
+        second0 = mean0 * mean0
+        est = GeneralizedParetoEstimator(loc=big_loc, pseudo_count=50.0, suff_stat=(mean0, second0))
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            fitted = est.estimate(None, (0.0, 0.0, 0.0))  # zero real observations: pure-prior path
+
+        # Before the fix: zero warnings, silent collapse to the pre-T1-01 degenerate default.
+        self.assertTrue(
+            any("offset" in str(w.message).lower() for w in caught),
+            "a collapsed mean0 must now be disclosed instead of silently returned",
+        )
+        # The collapse itself still happens -- by construction mean0 is bit-identical to loc, so no
+        # reconstruction is possible after the fact. This test is about the disclosure, not recovery.
+        self.assertEqual(fitted.shape, 0.0)
+        self.assertEqual(fitted.scale, 1.0e-12)
+
+    def test_loc_setter_retarget_path_also_warns_on_a_collapsed_pair(self):
+        # _prior_mean_offset is also called from the `.loc` setter's re-anchoring, not just
+        # estimate() -- a collapsed pair must be disclosed there too.
+        source_loc = 1.0e18
+        mean0 = source_loc + 50.0
+        self.assertEqual(mean0, source_loc)
+        second0 = mean0 * mean0
+        est = GeneralizedParetoEstimator(loc=source_loc, pseudo_count=50.0, suff_stat=(mean0, second0))
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            est.loc = 2.0e18  # retarget to a different (still large) threshold
+
+        self.assertTrue(
+            any("offset" in str(w.message).lower() for w in caught),
+            "the .loc setter's re-anchoring must also disclose a collapsed offset",
+        )
+
+    def test_ordinary_well_resolved_offset_stays_quiet(self):
+        # Regression guard mirroring _prior_variance's own "stays deliberately quiet" guarantee: an
+        # offset that survives its own magnitude comfortably must not trigger the NEW warning (the
+        # pinned T1-01 scenario's own second_moment==mean0**2 still warns about the VARIANCE
+        # separately -- Finding A's own test above -- which is unrelated and must keep firing).
+        loc = 1_700_000_000.0  # epoch seconds -- the pinned T1-01 test's own magnitude
+        mean0 = loc + 2.5
+        second0 = mean0 * mean0
+        est = GeneralizedParetoEstimator(loc=loc, pseudo_count=50.0, suff_stat=(mean0, second0))
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            est.estimate(None, (0.0, 0.0, 0.0))
+
+        self.assertFalse(
+            any("offset" in str(w.message).lower() for w in caught),
+            "a comfortably-resolved offset must not trigger the new plausibility warning",
+        )
 
 
 if __name__ == "__main__":
