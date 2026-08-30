@@ -395,8 +395,21 @@ class SimulatedRank:
         self._go.set()
 
     def join(self, timeout: float = 5.0) -> StepResult | None:
-        if not self._done.wait(timeout=max(0.0, timeout)):
+        timeout = max(0.0, timeout)
+        deadline = time.monotonic() + timeout
+        if not self._done.wait(timeout=timeout):
             raise TimeoutError(f"rank {self.rank_id} did not finish before the step deadline")
+        # ``_done`` is set from INSIDE the worker thread's `finally` block, strictly before that thread
+        # actually returns and the interpreter marks it not-alive -- under heavy CPU contention that gap
+        # can widen enough for a caller who only waited on ``_done`` to see this rank's thread still
+        # ``is_alive()`` (e.g. ``start_step``'s "still has a step in flight" guard tripping on the very
+        # next step). Joining the real thread object closes that race: this method cannot return
+        # successfully while ``self._thread.is_alive()`` is still true.
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            if thread.is_alive():
+                raise TimeoutError(f"rank {self.rank_id} did not finish before the step deadline")
         if self._error is not None:
             raise RuntimeError(f"rank {self.rank_id} step {self._error!r} failed") from self._error
         return self._result
