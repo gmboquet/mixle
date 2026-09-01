@@ -158,6 +158,40 @@ GapOneLowMinorityFractionTest, GapTwoHuberSixtySeedSweepTest, and GapThreeCapped
 below are UNCHANGED from the R-2 redesign (signal 3 was never load-bearing for any of them) and are
 re-run here specifically to confirm audit R-3 -- the suppressor's removal, the new relative-scale
 check, and the lowered point-mass threshold -- does not regress any of them.
+
+---
+
+A third adversarial review, of the R-3 redesign, found one further MAJOR bug in signal 2
+(`_response_point_mass_fraction`) that predates R-3 (inherited from R-2, unchanged by R-3's own
+edits, but leaned on by R-3's own safety argument for lowering `_RESPONSE_POINT_MASS_FRACTION`) and
+confirmed one deferred limitation was safe to close after all:
+
+  * BUG (major): the tie tolerance used to be `max(1e-12, spread * _RESPONSE_POINT_MASS_REL_TOL)` --
+    a FIXED absolute floor whenever the response's own range was small enough (roughly <1e-3) for
+    that floor to bind. That floor does not scale with `n`, but the spacing between adjacent order
+    statistics of a dense continuous sample DOES shrink with `n` -- confirmed directly:
+    `y = N(10.0, 1e-9, 100_000)`, a perfectly-fit, non-degenerate design (coefficient error ~3e-12),
+    registered 94% "point mass" (2.5% of adjacent sorted values were exactly bit-identical from
+    ordinary float64 rounding collisions alone, nothing to do with any real repeated/capped/rounded
+    value) and fired a UserWarning falsely claiming a zero-inflated/capped/censored/rounded shape.
+    Fixed by anchoring the floor to the compared VALUES' own float64 resolution (a multiple of
+    `np.spacing`) rather than a fixed epsilon -- see `_RESPONSE_POINT_MASS_ULP_FLOOR_MULT`'s own
+    comment in glm.py for the full reasoning and the sweep confirming this does not weaken detection
+    of the genuine zero-inflated/capped fixtures this signal exists to catch.
+    ResponseTieToleranceDensityFalsePositiveTest reproduces the false positive and confirms it is
+    gone; the existing point-mass fixtures elsewhere in this file confirm nothing regressed.
+  * DEFERRAL CLOSED (was minor): R-3's module comment deliberately deferred widening
+    `_ROBUST_NEGLIGIBLE_WEIGHT` past its original 1e-6, calling it "a materially bigger, riskier
+    change ... not something this pass could validate with the same confidence in the time
+    available." This review tested the deferral directly rather than accepting it at face value:
+    widening to 1e-5 through 1e-3 produced ZERO new failures anywhere in this module's full
+    validated test suite, for a theoretically sound reason (huber's weight decays so slowly that even
+    a 1000x widening only requires the discarded minority's residual to reach ~1345 standard
+    deviations, astronomically implausible for real data, while tukey's own hard cutoff is
+    unaffected by this constant regardless of its value). Widened to 1e-4; huber now closes to
+    roughly the same majority-noise floor as tukey's relative-scale path.
+    test_relative_scale_check_now_covers_huber_too_at_1e4_majority_noise (renamed from
+    ...covers_tukey_but_not_huber...) now asserts BOTH methods are caught.
 """
 
 import unittest
@@ -695,16 +729,17 @@ class SlopedMajorityMinorityMixtureTest(unittest.TestCase):
                         f"minority_frac={minority_frac} slope_ratio={slope_ratio} method={method}",
                     )
 
-    def test_relative_scale_check_covers_tukey_but_not_huber_at_1e4_majority_noise(self):
-        # DOCUMENTED, HONEST LIMITATION (module comment above _robust_weight_collapse in glm.py):
-        # at a coarser majority noise (1e-4), tukey's hard redescending weight still crushes the
-        # minority below the negligible-weight bar and is correctly flagged; huber's soft weight
-        # settles the minority around 1e-5 to 1e-4 -- a genuine fixed point (confirmed stable to
-        # 50,000 IRLS iterations during development, not a slow-convergence artifact) that never
-        # crosses the FIXED _ROBUST_NEGLIGIBLE_WEIGHT bar (1e-6), so degenerate_scale stays False
-        # even though the coefficients already match the majority. Widening the negligible-weight
-        # bar itself was investigated and deliberately deferred as a bigger, riskier change than the
-        # scale check alone; this test pins the boundary down honestly rather than papering over it.
+    def test_relative_scale_check_now_covers_huber_too_at_1e4_majority_noise(self):
+        # FORMERLY a documented, honest limitation (module comment above _robust_weight_collapse in
+        # glm.py): at a coarser majority noise (1e-4), tukey's hard redescending weight always
+        # crushed the minority below the negligible-weight bar, but huber's soft weight only settled
+        # the minority around 1e-5 to 1e-4 -- a genuine fixed point (confirmed stable to 50,000 IRLS
+        # iterations, not a slow-convergence artifact) that never crossed the FIXED
+        # _ROBUST_NEGLIGIBLE_WEIGHT bar this module shipped with (1e-6). Audit R-4 tested the
+        # deferred "widen the bar" option directly (rather than accepting the deferral) and confirmed
+        # it closes this exact gap with zero new failures anywhere else in this suite (see
+        # _ROBUST_NEGLIGIBLE_WEIGHT's own comment in glm.py for the full validation) -- widened to
+        # 1e-4, so huber's ~1e-5-to-1e-4 minority weight here now clears the crushed-weight count too.
         for minority_frac, slope_ratio in ((0.05, 2.0), (0.10, 4.0)):
             with self.subTest(minority_frac=minority_frac, slope_ratio=slope_ratio):
                 X, y, beta_major, _ = _sloped_mixture_design(1, minority_frac, slope_ratio, majority_sigma=1e-4)
@@ -717,7 +752,7 @@ class SlopedMajorityMinorityMixtureTest(unittest.TestCase):
                 self.assertLess(np.max(np.abs(fit_tukey.coef - beta_major)), 1e-2)
                 self.assertLess(np.max(np.abs(fit_huber.coef - beta_major)), 1e-2)
                 self.assertTrue(fit_tukey.degenerate_scale, "tukey should be caught at 1e-4 majority noise")
-                self.assertFalse(fit_huber.degenerate_scale, "huber at 1e-4 majority noise is a documented gap")
+                self.assertTrue(fit_huber.degenerate_scale, "huber at 1e-4 majority noise is now closed (audit R-4)")
 
 
 def _two_col_zero_inflated_design_v2(seed: int, frac: float, n: int = 600) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -824,6 +859,74 @@ class ResponseTieFractionDegradationBandTest(unittest.TestCase):
         # that is exactly 44% tied at one value is (correctly) at the boundary, not below it.
         y = np.concatenate([np.zeros(44), np.arange(1, 57)])
         self.assertGreaterEqual(_response_point_mass_fraction(y), _RESPONSE_POINT_MASS_FRACTION)
+
+
+class ResponseTieToleranceDensityFalsePositiveTest(unittest.TestCase):
+    """Regression test for a MAJOR gap an adversarial review found in signal 2
+    (`_response_point_mass_fraction`): its tie tolerance's fixed absolute floor (1e-12) does not
+    scale with `n`, so at a small enough response scale and large enough `n`, adjacent sorted values
+    can land within (or exactly collide at, via ordinary float64 rounding) that floor purely from
+    sampling density -- with no real repeated/capped/censored/rounded value anywhere. See this
+    file's module docstring ("A third adversarial review...") and `_RESPONSE_POINT_MASS_ULP_FLOOR_MULT`'s
+    comment in glm.py for the full history and reasoning behind the fix (anchoring the floor to the
+    compared values' own float64 resolution instead of a fixed epsilon).
+    """
+
+    def test_dense_small_scale_intercept_only_design_is_not_flagged(self):
+        # The exact reviewer repro: a perfectly-fit, non-degenerate design that used to register 94%
+        # "point mass" purely from float64 rounding density.
+        y = np.random.RandomState(7).normal(10.0, 1e-9, 100_000)
+        X = np.ones((y.size, 1))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            fit = robust_regression(X, y, method="huber")
+        self.assertLess(abs(float(fit.coef[0]) - 10.0), 1e-6)
+        self.assertFalse(fit.degenerate_scale, "a perfect fit on dense, non-tied data must not be flagged")
+        self.assertEqual([w for w in caught if issubclass(w.category, UserWarning)], [])
+
+    def test_dense_small_scale_two_column_design_with_a_tiny_true_effect_is_not_flagged(self):
+        # Generalizes beyond intercept-only: a genuine regression with a real, tiny effect.
+        rng = np.random.RandomState(11)
+        n = 200_000
+        x1 = rng.normal(size=n)
+        true_beta = np.array([1e-10, 2e-10])
+        y = true_beta[0] + true_beta[1] * x1 + rng.normal(scale=1e-10, size=n)
+        X = np.column_stack([np.ones(n), x1])
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            fit = robust_regression(X, y, method="huber", max_iter=200)
+        self.assertLess(np.max(np.abs(fit.coef - true_beta)), 1e-11)
+        self.assertFalse(fit.degenerate_scale, "a correctly-recovered tiny effect must not be flagged")
+        self.assertEqual([w for w in caught if issubclass(w.category, UserWarning)], [])
+
+    def test_the_underlying_tie_fraction_stays_negligible_across_a_range_of_n(self):
+        # Direct check on the tie detector itself (no IRLS involved): the false positive was a
+        # function of n at fixed small scale, so sweep n to confirm the fix holds throughout, not
+        # just at the one reported size.
+        for n in (1_000, 10_000, 50_000, 100_000, 500_000):
+            with self.subTest(n=n):
+                y = np.random.RandomState(42).normal(5.0, 1e-8, n)
+                self.assertLess(_response_point_mass_fraction(y), 0.01)
+
+    def test_genuine_zero_inflation_and_capping_are_unaffected_by_the_fix(self):
+        # The fix must not weaken detection of the shapes signal 2 exists to catch.
+        rng = np.random.RandomState(5)
+        n = 2000
+        x1 = rng.normal(size=n)
+        y_zi = 2.0 + 3.0 * x1 + rng.normal(scale=0.3, size=n)
+        y_zi[rng.random(n) < 0.65] = 0.0
+        self.assertGreaterEqual(_response_point_mass_fraction(y_zi), 0.60)
+
+        rng2 = np.random.RandomState(0)
+        z = 20.0 + 6.0 * rng2.uniform(0, 10, n) + rng2.normal(0, 3, n)
+        y_capped = np.minimum(z, np.percentile(z, 30))
+        self.assertGreaterEqual(_response_point_mass_fraction(y_capped), 0.65)
+
+    def test_ordinary_continuous_data_at_normal_scale_is_unaffected_by_the_fix(self):
+        # A control confirming this is not simply a large-n artifact: at an ordinary absolute
+        # response scale, even very large n stays far from the point-mass threshold.
+        y = np.random.RandomState(1).normal(0.0, 1.0, 1_000_000)
+        self.assertLess(_response_point_mass_fraction(y), 0.001)
 
 
 if __name__ == "__main__":

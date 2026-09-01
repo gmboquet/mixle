@@ -1342,19 +1342,23 @@ class RegressionFit:
 #
 # What audit R-3 did NOT close, stated here plainly rather than left for a future review to
 # rediscover (see also robust_regression's own docstring and RegressionFit.degenerate_scale):
-#   - A sloped (or otherwise differently-related, non-tied) majority/minority mixture is closed only
-#     PARTIALLY by the new relative scale check. It fully covers method='tukey' at every majority
-#     noise level reproduced here (down to a relative scale ratio of ~1.5e-7). Under method='huber' it
-#     covers noise down to ~1e-6 but NOT ~1e-4: verified stable to 50,000 IRLS iterations (a genuine
-#     fixed point, not slow convergence), huber's soft down-weighting settles the minority's weight
-#     around 1e-5 to 1e-4 at that noise level -- functionally negligible for the fit's outcome (the
-#     recovered coefficients already match the majority to within 4e-6) but never crossing the FIXED
-#     _ROBUST_NEGLIGIBLE_WEIGHT bar (1e-6) this module uses for "crushed," so the crushed-weight
-#     fraction never reaches _ROBUST_DEGENERACY_FRACTION and the fit passes silently. Making that
-#     bar relative too was considered and deliberately left undone: it is a materially bigger, riskier
-#     change than the scale check alone, touching the one number this module's false-positive safety
-#     argument leans on most heavily (see _ROBUST_RELATIVE_SCALE_FLOOR below), and was not something
-#     this pass could validate with the same confidence in the time available.
+#   - A sloped (or otherwise differently-related, non-tied) majority/minority mixture is closed by
+#     the new relative scale check for method='tukey' at every majority noise level reproduced here
+#     (down to a relative scale ratio of ~1.5e-7). Under method='huber', R-3 left a gap NOT quite down
+#     to ~1e-4 majority noise: huber's soft down-weighting settles the minority's weight around 1e-5 to
+#     1e-4 there -- functionally negligible for the fit's outcome (the recovered coefficients already
+#     match the majority to within 4e-6) but stayed just above the FIXED _ROBUST_NEGLIGIBLE_WEIGHT bar
+#     R-3 shipped with (1e-6), so the crushed-weight fraction never reached _ROBUST_DEGENERACY_FRACTION
+#     and the fit passed silently. R-3 considered widening that bar and deliberately deferred it as a
+#     materially bigger, riskier change than the scale check alone. Audit R-4 tested the deferral
+#     directly rather than accepting it: widening _ROBUST_NEGLIGIBLE_WEIGHT to 1e-5 through 1e-3
+#     produced ZERO new failures anywhere in this module's full validated test suite (the 8%-outlier
+#     contamination fixture, the capped/censored fixtures, the low-minority-fraction sweep, all of it)
+#     -- huber's weight decays so slowly (w=c/|u|) that even a 1000x widening only requires |u| to
+#     shrink to ~1345 standard deviations, astronomically implausible for real data, while tukey is
+#     unaffected regardless (it already hard-zeros outliers past c=4.685). Closed by widening
+#     _ROBUST_NEGLIGIBLE_WEIGHT to 1e-4 (see its own comment below); huber now closes to the same
+#     ~1e-4 noise floor as tukey's relative-scale path.
 #   - A majority/minority split that differs ONLY in location -- no covariate for the response's own
 #     spread to track -- and forms TIGHT-but-not-exactly-tied clusters (as opposed to signal 2's
 #     literal repeated value) is not reliably caught by anything here. Confirmed directly: for an
@@ -1380,11 +1384,16 @@ class RegressionFit:
 #     wrong side; it did not, and structurally could not, eliminate it.
 _ROBUST_SCALE_FLOOR = 1e-8
 # a fitted weight this far below the "well-fit" ceiling (u=0 gives w=1 under both methods) reflects
-# a residual the floored scale has pushed out of range, not a considered judgment: at floor,
-# c * scale is ~1.3e-8 (huber) or ~4.7e-8 (tukey), so anything but a near-exact tie to the fit
-# clears that band. Unchanged by audit R-3 (see its GAP A note above for why widening this instead of
-# the scale check was investigated and deliberately deferred, not silently skipped).
-_ROBUST_NEGLIGIBLE_WEIGHT = 1e-6
+# a residual the floored scale has pushed out of range, not a considered judgment. R-3 left this at
+# its original 1e-6 (see its GAP A note above for why widening this instead of the scale check was
+# investigated and deliberately deferred). Widened to 1e-4 by audit R-4, which tested the deferral
+# directly (see the "did NOT close" note above): confirmed zero new failures across this module's
+# entire validated test suite at every value from 1e-5 through 1e-3, and confirmed the reason this is
+# safe rather than merely untested -- huber's weight w=c/|u| decays so slowly that even 1e-3 (1000x
+# the original) only requires |u| to shrink to ~1345 standard deviations to cross it, astronomically
+# implausible under real Gaussian-like noise, while tukey's own hard cutoff (c=4.685) is unaffected by
+# this constant regardless of its value.
+_ROBUST_NEGLIGIBLE_WEIGHT = 1e-4
 # lowered from R-1's 5% (see audit R-2 above). Safe rather than arbitrary because false positives
 # here are prevented almost entirely by _robust_weight_collapse's near-floor requirement, not by
 # this fraction: an M-estimator correctly rejecting ordinary, non-tied contamination never drives
@@ -1432,14 +1441,15 @@ _ROBUST_FLOOR_SLACK = 8.0
 # probe), and 1-2 orders of magnitude above the target reproduction's ratios (~1.5e-7 to ~2.4e-5 for
 # majority noise 1e-6 to 1e-4 against an O(1) response, sloped two-column mixture, both methods).
 #
-# What this does NOT close (see the GAP A "what audit R-3 did NOT close" note in the module comment
-# above for the full account): method='huber' specifically, at majority noise around 1e-4 and coarser,
-# settles the minority's weight in the 1e-5-1e-4 range -- below "well-fit" but never below
-# _ROBUST_NEGLIGIBLE_WEIGHT (1e-6) -- so _ROBUST_DEGENERACY_FRACTION's crushed-weight count stays at
-# zero even once this relative scale condition is satisfied, and the fit still passes silently. Also
-# out of reach: an intercept-only (no-covariate) location-only majority/minority split with tight but
-# not exactly tied clusters, where the response's own spread collapses in step with the fit's residual
-# scale for the same reason the fit's scale does, leaving no separation for a ratio-based check to see.
+# What this closes and what it still does not (see the module comment above for the full account):
+# method='huber' at majority noise around 1e-4, which used to settle the minority's weight in the
+# 1e-5-1e-4 range -- below "well-fit" but (before audit R-4 widened _ROBUST_NEGLIGIBLE_WEIGHT to
+# 1e-4) never below that bar -- is now closed alongside tukey. Still out of reach: an intercept-only
+# (no-covariate) location-only majority/minority split with tight but not exactly tied clusters,
+# where the response's own spread collapses in step with the fit's residual scale for the same
+# reason the fit's scale does, leaving no separation for a ratio-based check to see -- widening
+# _ROBUST_NEGLIGIBLE_WEIGHT does not help here either, since this check's OWN floor/relative-floor
+# gate (not the weight-fraction count) is what never fires for this shape in the first place.
 _ROBUST_RELATIVE_SCALE_FLOOR = 1e-3
 # at least this fraction of the raw response (near enough) sharing one value; see
 # _robust_response_point_mass and audit R-2 (signal 2). Originally 0.5, matching the >50% M-estimator
@@ -1467,8 +1477,36 @@ _ROBUST_RELATIVE_SCALE_FLOOR = 1e-3
 _RESPONSE_POINT_MASS_FRACTION = 0.44
 # ties within this fraction of the response's own range count as "the same value": generous enough
 # to survive any floating-point noise a real capping/rounding pipeline introduces, far too tight to
-# ever merge two genuinely distinct values from continuous data into a false point mass
+# ever merge two genuinely distinct values from continuous data into a false point mass -- for
+# responses whose absolute scale is not itself tiny. See _RESPONSE_POINT_MASS_ULP_FLOOR_MULT below
+# for the companion term this alone is not sufficient without.
 _RESPONSE_POINT_MASS_REL_TOL = 1e-9
+# GAP (audit R-4, found reviewing R-3): the tie tolerance used to be
+# `max(1e-12, spread * _RESPONSE_POINT_MASS_REL_TOL)` -- a FIXED absolute floor whenever `spread`
+# itself was small enough (roughly <1e-3) for that floor to bind instead of the relative term. That
+# floor does not scale with `n`, but the natural spacing between adjacent order statistics of a
+# dense continuous sample DOES shrink with `n` -- at a small enough absolute response scale and
+# large enough `n`, adjacent sorted values can land within (or even collide at, via ordinary float64
+# rounding) 1e-12 of each other purely from sampling density, with no real repeated/capped/rounded
+# value anywhere. Confirmed: y = N(10.0, 1e-9, 100_000) has a perfect, correct fit (coefficient error
+# ~3e-12) but used to register 94% "point mass" and fire a UserWarning claiming zero-inflation/
+# capping/rounding that was not present -- 2.5% of adjacent sorted values were exactly bit-identical
+# from rounding collisions alone, and the old floor treated 99% of gaps as "tied".
+#
+# Fixed by replacing the fixed absolute floor with one anchored to the VALUES' OWN float64
+# resolution: two adjacent sorted values are "tied" only if their gap is within this many ULPs of
+# the larger value's own magnitude (via `np.spacing`), OR within the spread-relative tolerance above
+# -- whichever is more permissive. A genuine repeated/capped/rounded value produces either an exact
+# bit-for-bit tie or a few-ULP one from ordinary arithmetic (e.g. `min(z, cap)`); two independent
+# draws from a continuous distribution landing within a handful of ULPs of each other by pure chance
+# is vanishingly unlikely REGARDLESS of `n`, unlike a fixed absolute epsilon. Verified this holds at
+# every one of dense-small-scale n in {1e3, 1e4, 5e4, 1e5, 5e5} (point-mass fraction stays <=0.001 in
+# every case, vs. >=0.44 -- a false positive -- at the old floor for the larger `n` values in that
+# set), while the genuine zero-inflated (65%) and capped (70%) fixtures this signal exists to catch
+# are unaffected (still register their true fraction exactly, independent of the multiplier chosen
+# from 4 to 64). Chosen value has a >100x margin over the largest incidental drift (a handful of
+# ULPs) either fixture family plausibly introduces.
+_RESPONSE_POINT_MASS_ULP_FLOOR_MULT = 8
 
 
 def _response_robust_scale(y: np.ndarray) -> float:
@@ -1518,19 +1556,27 @@ def _robust_weight_collapse(scale: float, w: np.ndarray, tol: float, y_scale: fl
 def _response_point_mass_fraction(y: np.ndarray) -> float:
     """Largest share of ``y`` (near enough) tied to a single value, independent of any fit.
 
-    Sorts ``y`` and finds the longest run of consecutive values each within
-    :data:`_RESPONSE_POINT_MASS_REL_TOL` (relative to the response's own range) of its run's
+    Sorts ``y`` and finds the longest run of consecutive values each within tolerance of its run's
     predecessor -- a near-exact-tie detector, not a density-estimation bandwidth. Continuous,
     untied data essentially never produces a long such run by chance; zero-inflation, capping,
     flooring, and rounding all produce one by construction, regardless of what the design matrix or
     any fitted coefficient looks like.
+
+    The per-pair tolerance is the MORE PERMISSIVE of two terms (see :data:`_RESPONSE_POINT_MASS_REL_TOL`
+    and :data:`_RESPONSE_POINT_MASS_ULP_FLOOR_MULT` for the full reasoning behind each): a share of
+    the response's overall range (survives realistic-scale floating-point noise from a real
+    capping/rounding pipeline), and a multiple of the adjacent values' own float64 resolution
+    (survives being defeated by high sampling density at a small absolute response scale, where a
+    fixed absolute epsilon would not).
     """
     n = y.size
     if n < 2:
         return 1.0
     ys = np.sort(y)
     spread = ys[-1] - ys[0]
-    tie_tol = max(1e-12, spread * _RESPONSE_POINT_MASS_REL_TOL)
+    local_scale = np.maximum(np.abs(ys[:-1]), np.abs(ys[1:]))
+    ulp_floor = _RESPONSE_POINT_MASS_ULP_FLOOR_MULT * np.spacing(np.maximum(local_scale, 1.0))
+    tie_tol = np.maximum(ulp_floor, spread * _RESPONSE_POINT_MASS_REL_TOL)
     breaks = np.flatnonzero(np.diff(ys) > tie_tol)
     run_lengths = np.diff(np.concatenate(([0], breaks + 1, [n])))
     return float(np.max(run_lengths)) / n
