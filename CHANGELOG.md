@@ -70,6 +70,46 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 
 ### Fixed
 
+- An eighth candidate campaign (four independent adversarial lenses -- numerical correctness,
+  disclosure/auto-inference honesty, serialization/lifecycle round-tripping, production-workflow
+  robustness -- replacing the anonymous tester panel used through D-0207, plus two clean-install
+  reproduction replays against candidate `31d8e1fd`; D-0208) filed eight findings, sent six to
+  independent verification as blocking or major, and all six survived. Role B replayed clean: GO, 2
+  of 2. Five of the six findings required one to three further adversarial-review rounds after the
+  first fix before they were actually correct -- the same ratchet pattern every campaign since
+  D-0203 has recorded, now an eighth consecutive occurrence.
+  - Shift-anchored moment tracking (`AnchoredMomentTrack`) picked its anchor from whichever
+    observation arrived first with no check on that observation's weight; a zero- or
+    negligible-weight observation at an extreme magnitude -- an ordinary outcome of per-point EM
+    responsibilities -- became a permanent, precision-destroying anchor across at least nine
+    families (GeneralizedPareto, Gumbel, StudentT, Gaussian, Logistic, GeneralizedExtremeValue,
+    Rician, Nakagami, LogGaussian). Now gated on `weight > 0.0`, matching the adjacent max-tracking
+    line in the same file.
+  - `GeneralizedParetoEstimator.loc`'s setter permanently silenced the prior-variance cancellation
+    warning after one retarget without fixing the underlying corruption, and the same prior-moments
+    mechanism lost the prior's mean to precision loss at nanosecond/microsecond epoch magnitudes --
+    now the site of six fixed defects across five campaigns.
+  - `ThurstoneDistribution.__pysp_setstate__` re-centered an already-centered `mu`, producing a
+    false "model may have been tampered" warning on 25-47% of realistically-fitted models on a
+    legitimate, untouched deploy+load cycle.
+  - `SimulatedRank.join()` could return before its worker thread was actually marked not-alive
+    under CPU contention, crashing an otherwise healthy `ElasticTrainingJob` with no ranks actually
+    down.
+  - `robust_regression(method='tukey')` silently discarded signal past its breakdown point with no
+    disclosure on zero-inflated/point-mass-majority data. The fix discloses every degenerate-fit
+    condition it can detect; the underlying >50% breakdown point of Tukey/Huber redescending
+    M-estimators remains a real, inherent property of that estimator class, not something any fix
+    can eliminate.
+  - Three further defects were found and fixed getting hosted CI green, unrelated to any of the
+    above: a local ruff/mypy version drift that had been masking real lint failures; a genuine
+    pre-existing NaN in `mixle/inference/block_em.py`'s responsibility-weighted gain
+    (`0 * (-inf - -inf)` is `nan` in IEEE 754 regardless of the zero multiplicand), surfaced only by
+    hosted CI's Linux/OpenBLAS trajectory; and a stale test ceiling in
+    `typed_local_mixture_test.py` that the anchor-weight-gating fix above had pushed past its old
+    bound -- notable because three separate adversarial review rounds earlier in this same campaign
+    read that test's own "known pre-existing flake" self-description and moved on without
+    re-measuring the actual value, and only hosted CI actually failing the test surfaced the gap.
+
 - A seventh candidate campaign (four black-box tester sessions plus two clean-install reproduction
   replays against candidate `938b9929`, every blocking/major claim adversarially re-verified, with a
   regression watch across all six prior campaigns; D-0207) returned NO-GO, 1 of 4, with four
