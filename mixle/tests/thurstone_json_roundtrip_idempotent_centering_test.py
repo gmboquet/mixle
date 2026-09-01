@@ -166,12 +166,8 @@ class ThurstoneDeployLoadIdempotentCenteringTest(unittest.TestCase):
                                 f"pseudo_count={pseudo_count!r})",
                             )
                             self.assertEqual(model_hash(dist), model_hash(loaded.fitted))
-                            self.assertFalse(
-                                any("integrity note" in note for note in loaded.notes), loaded.notes
-                            )
-                            user_warnings = [
-                                str(w.message) for w in caught if issubclass(w.category, UserWarning)
-                            ]
+                            self.assertFalse(any("integrity note" in note for note in loaded.notes), loaded.notes)
+                            user_warnings = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
                             self.assertEqual(user_warnings, [])
                             checked += 1
         self.assertGreater(checked, 100)

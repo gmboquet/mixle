@@ -261,8 +261,7 @@ def _prior_mean_offset(suff_stat: Any, loc: float) -> float:
             "the `.loc` setter -- rather than this being a genuinely zero-mean prior. Build the "
             "prior with GeneralizedParetoDistribution(...).estimator(pseudo_count), which carries "
             "the exact offset independent of loc, or supply mean0 already expressed with enough "
-            "headroom above loc to survive this magnitude."
-            % (mean, loc, offset, resolution),
+            "headroom above loc to survive this magnitude." % (mean, loc, offset, resolution),
             RuntimeWarning,
             stacklevel=3,
         )

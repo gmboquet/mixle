@@ -63,15 +63,15 @@ import unittest
 import numpy as np
 
 from mixle.stats.univariate.continuous.gaussian import GaussianAccumulator, GaussianDistribution, GaussianEstimator
-from mixle.stats.univariate.continuous.generalized_pareto import (
-    GeneralizedParetoAccumulator,
-    GeneralizedParetoDistribution,
-    GeneralizedParetoEstimator,
-)
 from mixle.stats.univariate.continuous.generalized_gaussian import (
     GeneralizedGaussianAccumulator,
     GeneralizedGaussianDistribution,
     GeneralizedGaussianEstimator,
+)
+from mixle.stats.univariate.continuous.generalized_pareto import (
+    GeneralizedParetoAccumulator,
+    GeneralizedParetoDistribution,
+    GeneralizedParetoEstimator,
 )
 from mixle.stats.univariate.continuous.gumbel import GumbelAccumulator, GumbelDistribution, GumbelEstimator
 from mixle.stats.univariate.continuous.student_t import StudentTAccumulator, StudentTDistribution, StudentTEstimator

@@ -291,8 +291,26 @@ class AnchoredBranchPriorMeanDisplacementCancellationTest(unittest.TestCase):
 
     JITTER = 180.0
     BASE_EXCEEDANCES = (
-        4.0, 9.0, 21.0, 13.0, 27.0, 6.0, 18.0, 11.0, 24.0, 8.0,
-        15.0, 19.0, 5.0, 22.0, 10.0, 17.0, 7.0, 25.0, 12.0, 20.0,
+        4.0,
+        9.0,
+        21.0,
+        13.0,
+        27.0,
+        6.0,
+        18.0,
+        11.0,
+        24.0,
+        8.0,
+        15.0,
+        19.0,
+        5.0,
+        22.0,
+        10.0,
+        17.0,
+        7.0,
+        25.0,
+        12.0,
+        20.0,
     )
     PSEUDO_COUNT = 35.0
     MEAN_OFFSET_DELTA = 180.0  # how far the prior's exceedance mean sits from the raw sample's own

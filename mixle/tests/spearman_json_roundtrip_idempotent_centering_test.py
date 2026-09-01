@@ -188,16 +188,11 @@ class SpearmanDeployLoadIdempotentCenteringTest(unittest.TestCase):
                                 loaded = Model.load(out)
                             self.assertTrue(
                                 np.array_equal(dist.sigma, loaded.fitted.sigma),
-                                f"sigma drifted across deploy()/load() (dim={dim!r} seed={seed!r} "
-                                f"rho={rho!r})",
+                                f"sigma drifted across deploy()/load() (dim={dim!r} seed={seed!r} rho={rho!r})",
                             )
                             self.assertEqual(model_hash(dist), model_hash(loaded.fitted))
-                            self.assertFalse(
-                                any("integrity note" in note for note in loaded.notes), loaded.notes
-                            )
-                            user_warnings = [
-                                str(w.message) for w in caught if issubclass(w.category, UserWarning)
-                            ]
+                            self.assertFalse(any("integrity note" in note for note in loaded.notes), loaded.notes)
+                            user_warnings = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
                             self.assertEqual(user_warnings, [])
                             checked += 1
         self.assertGreater(checked, 100)
@@ -391,9 +386,7 @@ class SpearmanRestoreTrustedRawScaleTest(unittest.TestCase):
                         continue  # not a legitimate mean-rank vector at this draw; not our concern
                     constructed += 1
                     with self.subTest(dim=dim, scale=scale, offset=offset):
-                        restored_sigma, _ = _validate_location(
-                            sigma, already_centered=True, raw_scale_hint=raw_scale
-                        )
+                        restored_sigma, _ = _validate_location(sigma, already_centered=True, raw_scale_hint=raw_scale)
                         self.assertTrue(np.array_equal(sigma, restored_sigma))
                         checked += 1
                 self.assertGreater(
