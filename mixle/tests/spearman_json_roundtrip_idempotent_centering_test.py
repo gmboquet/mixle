@@ -68,6 +68,18 @@ for the full reasoning). ``SpearmanRestoreTrustedRawScaleTest`` below pins the r
 empirically-verified "handled" range (common offsets through at least 1e11, across the dims an
 adversarial sweep exercised), and the residual "not handled" range beyond the ceiling that remains
 a documented, accepted limitation rather than a silent gap.
+
+A THIRD adversarial review, of that raw-scale-hint fix, found a further gap: the hint's parse
+(``candidate = float(raw_scale_hint)``) caught only ``(TypeError, ValueError)``, not
+``OverflowError`` -- raised instead of ``ValueError`` when ``raw_scale_hint`` is a Python ``int``
+too large for ``float()`` to represent. ``json.loads`` decodes an oversized JSON integer literal
+(no size limit) into exactly such an ``int``, so a corrupted or adversarial ``sigma_raw_scale``
+field reachable through ordinary deserialization crashed a restore whose actual ``sigma`` was
+completely legitimate -- directly contradicting this fix's own documented intent ("a corrupted hint
+should not itself be why a restore whose actual sigma is fine gets rejected"). Fixed by adding
+``OverflowError`` to the caught tuple, so it is treated exactly like every other unusable hint: the
+widening is forfeited, not crashed. ``SpearmanRestoreOverflowHintTest`` below pins this and a sweep
+of other adversarial hint values.
 """
 
 from __future__ import annotations
@@ -526,6 +538,64 @@ class SpearmanRestoreTrustedRawScaleTest(unittest.TestCase):
             self.assertEqual(restored._sigma_raw_scale, expected_raw_scale)
             self.assertTrue(np.array_equal(current.sigma, restored.sigma))
             current = restored
+
+
+class SpearmanRestoreOverflowHintTest(unittest.TestCase):
+    """Regression test for a MAJOR gap an adversarial review found in
+    ``SpearmanRestoreTrustedRawScaleTest``'s own fix: parsing ``raw_scale_hint`` via
+    ``float(raw_scale_hint)`` only caught ``(TypeError, ValueError)``, not the ``OverflowError`` a
+    too-large Python ``int`` raises -- reachable through ordinary JSON deserialization of a
+    corrupted ``sigma_raw_scale`` field, crashing a restore whose actual ``sigma`` was fine. See
+    this file's module docstring for the full history.
+    """
+
+    def _tampered_state(self, dim: int = 6, *, sigma_raw_scale) -> dict:
+        canonical = np.arange(dim, dtype=np.float64)
+        dist = SpearmanRankingDistribution(canonical, rho=0.4)
+        state = dict(dist.__pysp_getstate__())
+        state["sigma_raw_scale"] = sigma_raw_scale
+        return state
+
+    def _assert_restores_like_no_hint(self, *, sigma_raw_scale) -> None:
+        dim = 6
+        canonical = np.arange(dim, dtype=np.float64)
+        expected = SpearmanRankingDistribution(canonical, rho=0.4)
+        state = self._tampered_state(dim, sigma_raw_scale=sigma_raw_scale)
+        restored = SpearmanRankingDistribution.__new__(SpearmanRankingDistribution)
+        restored.__pysp_setstate__(state)
+        self.assertTrue(np.array_equal(expected.sigma, restored.sigma))
+
+    def test_an_oversized_positive_int_hint_does_not_crash_the_restore(self):
+        # The exact reviewer repro: sigma itself is untouched, only the hint is corrupted.
+        self._assert_restores_like_no_hint(sigma_raw_scale=10**400)
+
+    def test_an_oversized_negative_int_hint_does_not_crash_the_restore(self):
+        self._assert_restores_like_no_hint(sigma_raw_scale=-(10**400))
+
+    def test_infinity_hint_is_excluded_by_the_existing_finite_check(self):
+        self._assert_restores_like_no_hint(sigma_raw_scale=float("inf"))
+
+    def test_negative_infinity_hint_is_excluded_by_the_existing_finite_check(self):
+        self._assert_restores_like_no_hint(sigma_raw_scale=float("-inf"))
+
+    def test_a_nan_valued_string_hint_is_excluded_by_the_existing_finite_check(self):
+        self._assert_restores_like_no_hint(sigma_raw_scale="nan")
+
+    def test_an_ordinary_negative_hint_is_excluded_by_the_existing_positivity_check(self):
+        self._assert_restores_like_no_hint(sigma_raw_scale=-1e20)
+
+    def test_genuine_corruption_at_realistic_magnitude_is_still_rejected_despite_an_oversized_hint(self):
+        # The anti-spoofing property this whole mechanism exists for: an oversized hint must not
+        # smuggle a genuinely corrupted, realistic-magnitude sigma past the total-sum check.
+        dim = 6
+        canonical = np.arange(dim, dtype=np.float64)
+        shifted = canonical + 5.0  # still ascending, clears the majorization loop, wrong total
+        dist = SpearmanRankingDistribution(shifted, rho=0.4)  # __init__ re-canonicalizes on fresh build
+        state = dict(dist.__pysp_getstate__())
+        state["sigma"] = shifted  # reintroduce the corrupted (never-canonicalized) total
+        state["sigma_raw_scale"] = 10**400
+        with self.assertRaises(ValueError):
+            SpearmanRankingDistribution.__new__(SpearmanRankingDistribution).__pysp_setstate__(state)
 
 
 if __name__ == "__main__":

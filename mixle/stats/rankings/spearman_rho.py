@@ -93,9 +93,18 @@ class SpearmanRankingFitDiagnostics:
 # ceiling implies, never an unbounded one that could rubber-stamp any total. The ceiling (2**31,
 # ~2.147e9, the range of a 32-bit integer -- a plausible size for an accidentally merged
 # id/timestamp/counter) was chosen, together with `_RESTORE_CANCELLATION_SAFETY_FACTOR` below, so
-# the widened tolerance stays well under the smallest corruption ec389d30's own regression test
-# (`SetstateRejectsNonCanonicalTotalTest`) requires this check to keep catching (a total-sum shift
-# of only 0.01, still comfortably caught with >5x margin at the ceiling). Above the ceiling, false
+# the widened tolerance stays under the smallest corruption ec389d30's own regression test
+# (`SetstateRejectsNonCanonicalTotalTest`) requires this check to keep catching. At the ceiling the
+# widened tolerance on the TOTAL sum is a fixed `_RESTORE_CANCELLATION_SAFETY_FACTOR *
+# np.spacing(_TRUSTED_SIGMA_RAW_SCALE_CEILING)` == 0.00390625, independent of `dim` -- equivalently,
+# a UNIFORM per-element shift stays undetected only below `0.00390625 / dim` (e.g. ~0.00078 at
+# dim=5, ~0.00039 at dim=10: a smaller per-element budget at larger `dim`, since the same fixed
+# total-sum tolerance is divided across more terms). The regression suite's own pinned case (dim=2,
+# an 0.01 per-element shift, 0.02 total-sum corruption) is caught with only 5.12x margin -- a real
+# but genuinely tight margin, not the "comfortable" one this comment described before this note was
+# added; every corruption magnitude actually motivating this check (integer/timestamp/id-scale
+# contamination, not a hundredths-of-a-unit nudge) is still caught with much wider margin. Above the
+# ceiling, false
 # rejection of a legitimately-constructed `sigma` remains a known, accepted, documented limitation
 # (see this class's docstring and
 # `spearman_json_roundtrip_idempotent_centering_test.SpearmanRestoreTrustedRawScaleTest` for the
@@ -150,7 +159,11 @@ def _validate_location(
     if raw_scale_hint is not None:
         try:
             candidate = float(raw_scale_hint)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # `OverflowError`: a JSON integer literal has no size limit, so a corrupted or
+            # adversarial `sigma_raw_scale` field can decode to a Python int too large for
+            # `float()` -- this must forfeit the widening the same way a `TypeError`/`ValueError`
+            # hint does, not crash a restore whose actual `sigma` is otherwise fine.
             candidate = None
         if candidate is not None and math.isfinite(candidate) and candidate > 0.0:
             trusted_raw_scale_hint = candidate
