@@ -13,6 +13,7 @@ Acceptance criteria under test (see the ConditionalJIT track's D3 item):
 """
 
 import unittest
+import warnings
 from unittest import mock
 
 import numpy as np
@@ -23,6 +24,7 @@ from mixle.inference.block_em import (
     _constrained_block_weights,
     _incremental_candidate_log_density,
     _normalizer_max_abs_error,
+    _responsibility_weighted_gain,
     _select_active,
     run_block_em,
 )
@@ -127,6 +129,85 @@ class BlockEMMonotonicityTestCase(unittest.TestCase):
                 if h.assumptions is not None and h.assumptions.forced_cost <= 0.5 * h.assumptions.eligible_cost
             )
         )
+
+
+class ResponsibilityWeightedGainZeroWeightTest(unittest.TestCase):
+    """Regression test for a real defect hosted CI caught (this test's own sibling,
+    ``test_free_energy_is_monotone_round_to_round``, failed deterministically on Linux at
+    ``measured_q_gain`` containing a NaN -- reproducible locally only through this unit, not
+    through the full EM fixture, since it depends on a specific BLAS-trajectory-dependent
+    combination of a decoy component's responsibility and log-density that a 150-round EM run
+    reaches on Linux/OpenBLAS but not on macOS/Accelerate for the same seed).
+
+    ``_responsibility_weighted_gain`` computes ``sum(gamma_col * delta_col)`` for one mixture
+    component's Q-gain contribution. A row with EXACTLY zero responsibility for that component is
+    ordinary, not an edge case -- a far-off or fully-explained-elsewhere component legitimately has
+    zero (or numerically-underflowed-to-zero) responsibility at many rows, especially early in EM
+    or for a permanently-decoy component. That same row's log-density can independently be
+    ``-inf`` under BOTH the candidate and current model simultaneously (complete underflow on both
+    sides), making their difference ``-inf - -inf == nan``. The EM/information-theoretic
+    convention is that a zero-weighted term contributes exactly zero regardless of what it is
+    weighting -- IEEE-754 does not know that convention (``0.0 * nan == nan``), so a naive
+    ``gamma_col @ delta_col`` lets one indeterminate, zero-weighted row poison the whole sum.
+    """
+
+    def test_a_zero_weight_row_with_nan_delta_contributes_nothing(self):
+        # The exact mechanism: an -inf vs -inf log-density difference at a zero-responsibility row.
+        gamma_col = np.array([0.0, 0.5, 0.5])
+        candidate_col = np.array([-np.inf, 1.0, 2.0])
+        current_col = np.array([-np.inf, 0.5, 1.0])
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            delta_col = candidate_col - current_col
+        # The subtraction itself legitimately warns (an indeterminate form was computed) -- that is
+        # expected and not what this test is about; what matters is what happens to it next.
+        self.assertTrue(any("invalid value" in str(w.message) for w in caught))
+        self.assertTrue(np.isnan(delta_col[0]))
+
+        gain = _responsibility_weighted_gain(gamma_col, delta_col)
+        self.assertTrue(np.isfinite(gain))
+        self.assertAlmostEqual(gain, 0.5 * 0.5 + 0.5 * 1.0)
+
+    def test_a_zero_weight_row_with_nan_delta_does_not_emit_a_warning_of_its_own(self):
+        # np.where evaluates both branches, so a naive implementation could still warn on 0.0*nan
+        # even though the SELECTED result is correct -- confirm this implementation doesn't.
+        gamma_col = np.array([0.0, 0.5])
+        delta_col = np.array([np.nan, 1.0])
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            gain = _responsibility_weighted_gain(gamma_col, delta_col)
+        self.assertEqual(caught, [])
+        self.assertAlmostEqual(gain, 0.5)
+
+    def test_a_positive_weight_row_with_nan_delta_still_propagates_nan(self):
+        # This is intentional, not a gap: a NONZERO responsibility genuinely weighting an
+        # indeterminate delta has no principled zero to fall back to -- only an EXACTLY zero
+        # weight has a defined "contributes nothing" convention to invoke.
+        gamma_col = np.array([0.1, 0.5])
+        delta_col = np.array([np.nan, 1.0])
+        gain = _responsibility_weighted_gain(gamma_col, delta_col)
+        self.assertTrue(np.isnan(gain))
+
+    def test_matches_the_plain_dot_product_when_nothing_is_indeterminate(self):
+        # No-op on the ordinary path: must reproduce the original np.dot behavior to floating-point
+        # precision when there is nothing for the zero-weight guard to actually do. Not bit-for-bit
+        # -- np.sum(np.where(...)) and np.dot (BLAS) are free to accumulate in a different order.
+        rng = np.random.RandomState(0)
+        gamma_col = rng.uniform(0.0, 1.0, size=50)
+        delta_col = rng.normal(size=50)
+        self.assertAlmostEqual(
+            _responsibility_weighted_gain(gamma_col, delta_col), float(np.dot(gamma_col, delta_col)), places=12
+        )
+
+    def test_run_block_em_never_produces_a_non_finite_measured_q_gain(self):
+        # An end-to-end guard, run across many seeds, that the specific field hosted CI's failure
+        # named (BlockEMMonotonicityTestCase's own assertion) stays finite -- even though the exact
+        # CI-observed seed/platform combination isn't reproducible here (see class docstring), this
+        # at least confirms the fix doesn't depend on the unit test's synthetic inputs alone.
+        for seed in range(10):
+            start, estimator, enc = _make_problem(seed=seed, nobs=300)
+            _, history = run_block_em(enc, estimator, start, max_its=150, delta=1.0e-10, budget_fraction=0.5)
+            self.assertTrue(all(np.isfinite(h.measured_q_gain) for h in history), f"seed={seed}")
 
 
 class BlockEMMapTestCase(unittest.TestCase):

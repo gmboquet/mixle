@@ -425,6 +425,21 @@ def _normalizer_max_abs_error(candidate: np.ndarray, audited: np.ndarray) -> flo
     return float(np.max(np.abs(candidate[finite] - audited[finite]))) if np.any(finite) else 0.0
 
 
+def _responsibility_weighted_gain(gamma_col: np.ndarray, delta_col: np.ndarray) -> float:
+    """``sum(gamma_col * delta_col)``, treating an exactly-zero responsibility as contributing
+    exactly zero regardless of ``delta_col`` there -- the standard "0 * log(0) = 0" EM convention.
+
+    A row with zero responsibility for this component is numerically ordinary, not an edge case: a
+    far-off or fully-explained-elsewhere component legitimately has zero (or numerically
+    underflowed-to-zero) responsibility at many rows. Its own log-density can simultaneously be
+    ``-inf`` under BOTH the candidate and the current model at that same row (complete underflow on
+    both sides), making ``delta_col`` there ``-inf - -inf == nan``. A plain ``gamma_col @
+    delta_col`` would let that single indeterminate, zero-weighted row poison the entire sum via
+    IEEE-754's ``0 * nan == nan`` -- this masks such rows out before summing so they cannot.
+    """
+    return float(np.sum(np.where(gamma_col == 0.0, 0.0, gamma_col * delta_col)))
+
+
 def _select_active(
     eligible: list[int],
     scores: dict[int, float],
@@ -885,7 +900,9 @@ def run_block_em(
         emission_q_gain = 0.0
         active_weight_q_gain = 0.0
         for position, idx in enumerate(candidate_indices):
-            component_gain = float(np.dot(gamma_active[:, position], candidate_columns[:, position] - ll_mat[:, idx]))
+            component_gain = _responsibility_weighted_gain(
+                gamma_active[:, position], candidate_columns[:, position] - ll_mat[:, idx]
+            )
             emission_q_gain += component_gain
             count = float(active_counts[position])
             if count <= 0.0 or not np.isfinite(candidate.log_w[idx]) or not np.isfinite(model.log_w[idx]):
