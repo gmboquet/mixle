@@ -1,7 +1,7 @@
 Large-Module Audit
 ==================
 
-Thirty-two modules in ``mixle`` exceed 1,500 lines. Size alone is not a defect, and this audit is **not** a
+Thirty-three modules in ``mixle`` exceed 1,500 lines. Size alone is not a defect, and this audit is **not** a
 mandate to split them. Its purpose (worklist A1.7) is to record, for each large module, what it owns, the
 state it carries, the optional dependencies it touches, its hot paths, its serialization hooks, and where a
 *safe* extraction boundary lies — so that a future change can be scoped without a blind refactor.
@@ -299,6 +299,30 @@ Infrastructure and facade
     * **Extraction boundary:** the structure-proposal gate (``_maybe_structured_model``) and the
       EM-driver loops are separable seams; extract only to remove a demonstrated defect, per the
       audit's own rule.
+
+``mixle/inference/glm.py`` (1,853)
+    * **Responsibilities:** the GLM front door (``glm``) across the exponential-family link/family
+      set and its robust standard-error variants (HC0-HC3, with their leverage/rank diagnostics),
+      ``robust_regression`` (Huber/Tukey IRLS and its degenerate-fit breakdown disclosure), the
+      penalized-regression trio (``ridge_regression`` / ``elastic_net`` / ``lasso``), and
+      ``quantile_regression``.
+    * **Stateful globals:** none (module-level constants only -- the floors/tolerances/fractions
+      gating the HC2/HC3 leverage guard and the robust-regression breakdown disclosure; none
+      mutable).
+    * **Optional imports:** none.
+    * **Hot paths:** ``glm``'s IRLS loop and its HC2/HC3 leverage computation (rank-masking is
+      parity-sensitive -- see the campaign-eight/D-0208 fix to how it handles a rank-deficient
+      design); ``robust_regression``'s own IRLS loop and its breakdown-disclosure signals
+      (``_robust_weight_collapse`` / ``_robust_response_point_mass``, also D-0208).
+    * **Serialization:** none (``GLMResult`` / ``RegressionFit`` / ``PenalizedResult`` are plain,
+      non-round-tripped dataclasses).
+    * **Extraction boundary:** ``robust_regression`` and its breakdown-disclosure helpers
+      (``_response_robust_scale`` through ``_robust_breakdown_explanation``) are already a
+      self-contained seam from ``glm``, the penalized-regression trio, and ``quantile_regression``.
+      The file crossed 1,500 lines through three consecutive rounds of disclosure-heuristic repair
+      on that one function family (D-0208's own campaign-eight fix wave), not through unrelated
+      growth elsewhere -- extract only if that family needs an isolated test surface of its own, not
+      as a line-count exercise.
 
 ``mixle/stats/__init__.py`` (2,133)
     * **Responsibilities:** the ``mixle.stats`` facade — lazy ``__getattr__`` re-exports, capability
