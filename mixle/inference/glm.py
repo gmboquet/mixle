@@ -1382,6 +1382,37 @@ class RegressionFit:
 #     noise -- not the true underlying severity -- decides whether a given fit gets flagged. GAP B
 #     above moved that neighborhood and narrowed how much genuinely-severe territory sits on its
 #     wrong side; it did not, and structurally could not, eliminate it.
+#
+# GAP C (campaign nine, D-0209; major, not blocking -- see below): method='huber' can converge to an
+#     undisclosed, materially biased fit for a majority/minority mixture following two genuinely
+#     DIFFERENT relationships, at everyday noise (sigma 0.05-1.0), WITHOUT ever crushing any row's
+#     weight (mean(w<=_ROBUST_NEGLIGIBLE_WEIGHT)==0.0) or collapsing the scale toward either floor --
+#     signal 1 cannot fire because neither of its own preconditions is met, not because its threshold
+#     is set wrong. Root cause: huber's weight w=c/|u| decays so slowly that a real, systematically-
+#     downweighted minority never needs |u| large enough to push w near zero; it only needs the fit
+#     to settle where the minority's residuals are consistently larger than the majority's, which a
+#     stable IRLS fixed point can do while leaving every weight comfortably above 1e-4. An independent
+#     verifier's 720-combination sweep (seed x {0.15,0.25,0.35} minority fraction x {2x,3x} slope
+#     ratio x {0.05,0.1,0.3,1.0} sigma, method='huber') found this pattern in 300/720 (42%) overall --
+#     0/240 at 15% minority, roughly a quarter (only at the highest noise level) at 25%, and 120/120
+#     (100%, every seed, every noise level) at 35% minority for both slope ratios: at that fraction
+#     this is not a rare edge case, it is the norm. The filed reproduction's own default max_iter=100
+#     is not a reliable guard either: it raises RuntimeError for SOME instances of this exact shape
+#     (a real, if partial, protection), but raising max_iter past that point -- the natural response
+#     to a bare "failed to converge" message with no other guidance -- lets IRLS reach the same
+#     undisclosed biased fixed point instead (confirmed stable from max_iter=1000 through 1,000,000);
+#     the independent verifier further found the default itself does not raise at all for the exact
+#     filed example on a different BLAS/platform, converging silently there too, so "raise loudly by
+#     default, only unmasked by raising max_iter" is not a portable guarantee. method='tukey' avoids
+#     this specific shape only for a no-intercept, forced-through-origin design (the filed
+#     reproduction's own construction): on a standard intercept+slope design tukey converges to an
+#     equally silent, equally wrong fit on the identical data, so switching method is not a reliable
+#     workaround in general, only for that narrower geometry. No new signal here is fixed; this is
+#     recorded as a residual limitation rather than closed, because a detector that could see a
+#     downweighted-but-not-crushed minority would need to characterize the WEIGHT DISTRIBUTION's own
+#     shape (e.g. bimodality) rather than a threshold on how low it goes, which is a materially larger
+#     and riskier change than this module's four prior audit rounds each made, and is deliberately
+#     left to a dedicated future round rather than attempted under this fix wave's time budget.
 _ROBUST_SCALE_FLOOR = 1e-8
 # a fitted weight this far below the "well-fit" ceiling (u=0 gives w=1 under both methods) reflects
 # a residual the floored scale has pushed out of range, not a considered judgment. R-3 left this at
@@ -1693,6 +1724,17 @@ def robust_regression(
     contamination was correctly rejected," or "nothing was discarded at all, because the majority is
     genuinely this exact" produced a flagged pattern -- all three leave the same fingerprint, so the
     warning names the observed condition, never a verdict on which case it is.
+
+    A sharper, ``method='huber'``-specific gap (GAP C in the module comment, campaign nine, D-0209):
+    ``huber``'s weight never fully crushes, so a real minority following a different relationship can
+    be systematically down-weighted enough to bias ``coef`` toward the majority WITHOUT tripping
+    either disclosure signal at all -- confirmed common (up to 100% of seeds at a 35% minority
+    fraction, at everyday noise levels), not a rare edge case. Raising ``max_iter`` past a
+    ``RuntimeError("... failed to converge ...")`` is what usually exposes it: that default failure is
+    a real but incomplete guard, not a guarantee, so a non-convergence error under ``method='huber'``
+    is worth treating as a possible sign of exactly this shape rather than simply raising ``max_iter``
+    and moving on. Switching to ``method='tukey'`` is not a reliable workaround for this specific
+    shape either outside a no-intercept design.
 
     Raises:
         RuntimeError: every observation lands at zero weight (the message names the breakdown

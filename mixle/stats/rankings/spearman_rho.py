@@ -150,6 +150,19 @@ def _validate_location(
         sigma = np.array(raw - raw.mean() + (dim - 1) / 2.0, dtype=np.float64, copy=True)
     ordered = np.sort(sigma)
     tolerance = 1.0e-10 * max(1.0, float(np.max(np.abs(sigma))))
+    if not already_centered:
+        # The centering just above (`raw - raw.mean() + (dim - 1) / 2.0`) is the SAME
+        # cancellation-prone subtraction the already_centered=True branch's own tolerance-widening
+        # below exists to absorb (see `_TRUSTED_SIGMA_RAW_SCALE_CEILING`'s comment) -- and here the
+        # reference scale is directly and TRUSTEDLY known (`raw` itself, not an untrusted restored
+        # hint), so no ceiling is strictly required for safety, but the same validated one is reused
+        # for consistency rather than introducing a second, unvalidated bound (campaign nine,
+        # D-0209): ordinary construction from a legitimate mean-rank vector carrying a common offset
+        # of only ~4-5e5 -- three to four orders of magnitude below this ceiling -- was being
+        # rejected by the unwidened tolerance above, with an error message that gave no hint the
+        # true cause was this function's own floating-point cancellation rather than invalid input.
+        capped_raw_scale = min(max(1.0, float(np.max(np.abs(raw)))), _TRUSTED_SIGMA_RAW_SCALE_CEILING)
+        tolerance = max(tolerance, _RESTORE_CANCELLATION_SAFETY_FACTOR * float(np.spacing(capped_raw_scale)))
     # A lenient, internal-only parse: `raw_scale_hint` only ever WIDENS a tolerance that would
     # otherwise be based on `sigma` alone, so a missing/garbage/non-positive value simply forfeits
     # that widening (falls back to pre-fix behavior below) rather than raising -- this field is not
