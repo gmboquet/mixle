@@ -70,6 +70,37 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
 
 ### Fixed
 
+- A ninth candidate campaign against `441ec4b3` (D-0209) returned NO-GO on its very first pass, and
+  the resulting fix wave then required two further full adversarial review rounds against its own
+  diff before one confirmed zero new findings of the dominant recurring defect -- 7, then 12, then
+  17 confirmed findings, an *increasing* count across rounds for the first time this release.
+  - The dominant defect: computing `value*value` (or an outer product) *before* multiplying by
+    weight can overflow an ordinary finite value to `+inf`, and `0.0 * inf = nan` under IEEE 754 --
+    silently poisoning a whole reduction for every other, legitimately-weighted observation folded
+    alongside it. D-0208 had already fixed this in the shared `AnchoredMomentTrack` path across nine
+    families; this campaign found it recurring independently in plain (non-anchored) accumulator
+    paths, the generated/stacked-mixture acceleration path, and four hand-rolled per-family kernels
+    that never route through either mechanism -- more than 25 files across two full review rounds.
+  - The most architecturally significant fix: the stacked-mixture masking round 1 introduced zeroed
+    a row only when *no* component wanted it at all, so a row wanted by some but not all components
+    stayed unmasked, letting one component's nonzero weight silently poison a *different*,
+    genuinely zero-weight component's own reduction. Fixed by masking per `(row, component)` pair
+    rather than per row, in both the shared stacked-statistics machinery and the four hand-rolled
+    kernels that had reimplemented the same flaw independently.
+  - The GPD auto-inference detector's degeneracy gate went through three design iterations: an
+    initial magnitude-ratio check false-positived at ordinary timestamp magnitudes; its replacement
+    (the sample's own typical adjacent-value spacing) fixed that but was blind to a second,
+    independent cause of degeneracy -- boundary point mass, where multiple observations tied at the
+    fitted threshold drive the MLE to a nonsense corner regardless of magnitude. The detector now
+    refuses any genuinely-degenerate fit -- magnitude-, point-mass-, or near-Dirac-driven -- rather
+    than admitting some on the assumption a downstream safety net will catch them; that net only
+    protects the full inference pipeline, not a caller that queries this family directly.
+  - Five more `__pysp_serializable__` disclosure gaps, a `BradleyTerryDistribution` idempotent-
+    centering round-trip fix (replicating `ThurstoneDistribution`'s established precedent), a missing
+    histogram-kind branch in the stacked sufficient-statistics path, an undisclosed variance floor in
+    `LogGaussianEstimator`'s conjugate-prior path, and a stacked outer-product-before-weight gap in
+    `ProbabilisticPCAAccumulator` rounded out the 36 confirmed findings across all three rounds.
+
 - An eighth candidate campaign (four independent adversarial lenses -- numerical correctness,
   disclosure/auto-inference honesty, serialization/lifecycle round-tripping, production-workflow
   robustness -- replacing the anonymous tester panel used through D-0207, plus two clean-install
