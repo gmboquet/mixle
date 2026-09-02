@@ -33,6 +33,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import masked_chunk_second_moment
 from mixle.utils.vector import gammaln
 
 _MIN_TWEEDIE = 1.0e-12
@@ -388,18 +389,9 @@ class TweedieAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: TweedieDistribution | None) -> None:
         """Accumulate weighted count, sum, and second moment from encoded observations."""
-        xx = np.asarray(x, dtype=np.float64)
-        ww = np.asarray(weights, dtype=np.float64)
-        self.count += ww.sum()
-        self.sum += np.dot(xx, ww)
-        chunk_sum2 = np.dot(xx * xx, ww)
-        if not np.isfinite(chunk_sum2):
-            # A weight of exactly 0.0 must contribute exactly zero to chunk_sum2 regardless of xx's
-            # magnitude, but squaring xx BEFORE weighting can overflow for an ordinary finite xx,
-            # and inf * 0.0 is nan. Recomputed with xx masked to 0.0 wherever its own weight is
-            # exactly zero, only on this rare, already-broken path (campaign nine, D-0209).
-            safe_xx = np.where(ww != 0.0, xx, 0.0)
-            chunk_sum2 = np.dot(safe_xx * safe_xx, ww)
+        chunk_count, chunk_sum, chunk_sum2 = masked_chunk_second_moment(x, weights)
+        self.count += chunk_count
+        self.sum += chunk_sum
         self.sum2 += chunk_sum2
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:

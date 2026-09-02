@@ -1,4 +1,13 @@
-"""Shared fail-closed contracts for continuous observations."""
+"""Shared fail-closed contracts for continuous observations.
+
+Also home to a few dtype-agnostic chunk-reduction helpers (``masked_stacked_fourth_power_sums``,
+``masked_chunk_second_moment``) shared by scalar accumulators outside this package (e.g. the
+discrete ``skellam.py``) whose sufficient-statistic algebra is otherwise byte-identical to a
+continuous sibling's -- kept in exactly one place rather than duplicated, per Y4.5's sibling-bug
+gate (``scripts/scan_duplicate_bodies.py``): campaign nine (D-0209) fixed the same zero-weight
+overflow defect independently in each copy three separate times before that duplication itself
+became the finding.
+"""
 
 from __future__ import annotations
 
@@ -748,3 +757,46 @@ def centered_batch_moments(x: np.ndarray, weights: np.ndarray) -> tuple[float, f
     residual = float(np.dot(dx, ww) / w_sum)
     dx = dx - residual
     return w_sum, mean + residual, float(np.dot(ww, dx * dx)), float(np.dot(ww, dx * dx * dx))
+
+
+def masked_stacked_fourth_power_sums(x: Any, weights: Any, engine: Any) -> tuple[Any, Any, Any]:
+    """Return stacked ``(count, sum x^2, sum x^4)`` with per-component masking on non-finite overflow.
+
+    Shared by families whose stacked sufficient statistics are exactly these three power sums
+    (Nakagami, Rician) -- their difference lies entirely in how these SAME statistics convert to
+    distribution parameters, not in how the statistics themselves are computed. A component with
+    EXACTLY zero weight on a row must contribute exactly zero to that component's sums regardless
+    of ``x``'s magnitude at that row, but squaring (twice, for the fourth power) BEFORE weighting
+    can overflow for an ordinary finite value, and ``0.0 * inf = nan`` (campaign nine, D-0209).
+    Masked per ``(row, component)``, only on this rare, already-broken path: a full ``(n, k)``
+    masked copy costs no more than ``weights`` itself, so there is no need to isolate individual
+    bad rows the way a ``D``-dimensional vector/matrix-moment reduction must.
+    """
+    xx = engine.asarray(x)
+    ww = engine.asarray(weights)
+    x2 = xx * xx
+    x4 = x2 * x2
+    if isinstance(x4, np.ndarray) and isinstance(ww, np.ndarray) and not np.all(np.isfinite(x4)):
+        safe_x2 = np.where(ww != 0.0, x2[:, None], 0.0)
+        safe_x4 = np.where(ww != 0.0, x4[:, None], 0.0)
+        return engine.sum(ww, axis=0), np.sum(ww * safe_x2, axis=0), np.sum(ww * safe_x4, axis=0)
+    return engine.sum(ww, axis=0), engine.sum(ww * x2[:, None], axis=0), engine.sum(ww * x4[:, None], axis=0)
+
+
+def masked_chunk_second_moment(x: Any, weights: Any) -> tuple[float, float, float]:
+    """Return one chunk's ``(count, sum, sum2)``, immune to a zero-weight row's raw value overflowing.
+
+    Shared by scalar accumulators whose ``seq_update`` folds a chunk into exactly these three raw
+    power sums with no anchoring (Tweedie, Skellam). A weight of exactly ``0.0`` must contribute
+    exactly zero to ``sum2`` regardless of the paired value's magnitude, but squaring it BEFORE
+    weighting can overflow an ordinary finite value to ``inf``, and ``inf * 0.0 = nan`` (campaign
+    nine, D-0209). Recomputed with the value masked to ``0.0`` wherever its own weight is exactly
+    zero, only on this rare, already-broken path.
+    """
+    xx = np.asarray(x, dtype=np.float64)
+    ww = np.asarray(weights, dtype=np.float64)
+    chunk_sum2 = np.dot(xx * xx, ww)
+    if not np.isfinite(chunk_sum2):
+        safe_xx = np.where(ww != 0.0, xx, 0.0)
+        chunk_sum2 = np.dot(safe_xx * safe_xx, ww)
+    return float(ww.sum()), float(np.dot(xx, ww)), float(chunk_sum2)

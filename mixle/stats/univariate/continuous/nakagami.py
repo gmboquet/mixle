@@ -34,6 +34,7 @@ from mixle.stats.univariate.continuous._observation_contracts import (
     anchored_pooled_variance,
     consistent_anchored_triple,
     finite_observations,
+    masked_stacked_fourth_power_sums,
     scored_observation,
     warn_uncorrectable_raw_moments,
 )
@@ -178,25 +179,7 @@ class NakagamiDistribution(SequenceEncodableProbabilityDistribution):
         cls, x: np.ndarray, weights: Any, params: dict[str, Any], engine: Any
     ) -> tuple[Any, Any, Any]:
         """Stacked Nakagami power sums ``(count, sum x^2, sum x^4)`` using engine-resident arrays."""
-        xx = engine.asarray(x)
-        ww = engine.asarray(weights)
-        x2 = xx * xx
-        x4 = x2 * x2
-        if isinstance(x4, np.ndarray) and isinstance(ww, np.ndarray) and not np.all(np.isfinite(x4)):
-            # A component with EXACTLY zero weight on a row must contribute exactly zero to that
-            # component's sums regardless of xx's magnitude at that row, but squaring (twice, for
-            # the fourth power) BEFORE weighting can overflow for an ordinary finite xx, and
-            # 0.0 * inf = nan (campaign nine, D-0209). Masking xx once, shared across every
-            # component (the original fix here), cannot protect a zero-weight component from a row
-            # a DIFFERENT component wants -- a row wanted by some but not all components stayed
-            # unmasked, poisoning the zero-weight components' sums too (round-2 review, finding
-            # #8). Masked per (row, component) instead, only on this rare, already-broken path: a
-            # full (n, k) masked copy costs no more than ww itself, so there is no need to isolate
-            # individual bad rows the way the D-dimensional vector/matrix-moment path must.
-            safe_x2 = np.where(ww != 0.0, x2[:, None], 0.0)
-            safe_x4 = np.where(ww != 0.0, x4[:, None], 0.0)
-            return engine.sum(ww, axis=0), np.sum(ww * safe_x2, axis=0), np.sum(ww * safe_x4, axis=0)
-        return engine.sum(ww, axis=0), engine.sum(ww * x2[:, None], axis=0), engine.sum(ww * x4[:, None], axis=0)
+        return masked_stacked_fourth_power_sums(x, weights, engine)
 
     def cdf(self, x: float) -> float:
         """Cumulative distribution function P(X <= x) = P(m, m x^2 / omega) (0 for x <= 0)."""
