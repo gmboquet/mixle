@@ -439,16 +439,25 @@ class GeneralizedGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             self._activate_anchor(xv)
         if self._anchor is not None:
             dx = xv - self._anchor
-            dx2 = dx * dx
+            # A weight of exactly 0.0 must contribute exactly zero to any of the four anchored
+            # moments regardless of dx's magnitude, but squaring dx BEFORE weighting can overflow
+            # for an ordinary finite dx, and inf * 0.0 is nan. Masking dx to 0.0 here keeps a
+            # positively-weighted call bit-identical while making a zero-weight call's contribution
+            # exactly zero at any magnitude.
+            safe_dx = dx if weight != 0.0 else 0.0
+            safe_dx2 = safe_dx * safe_dx
             self._a1 += weight * dx
-            self._a2 += weight * dx2
-            self._a3 += weight * dx2 * dx
-            self._a4 += weight * dx2 * dx2
+            self._a2 += weight * safe_dx2
+            self._a3 += weight * safe_dx2 * safe_dx
+            self._a4 += weight * safe_dx2 * safe_dx2
         self.count += weight
+        # Same hazard as above for the raw moments: xv**2/3/4 can overflow before weight is ever
+        # applied, poisoning s2/s3/s4 for good once weight is exactly 0.0.
+        safe_xv = xv if weight != 0.0 else 0.0
         self.s1 += weight * xv
-        self.s2 += weight * xv**2
-        self.s3 += weight * xv**3
-        self.s4 += weight * xv**4
+        self.s2 += weight * safe_xv**2
+        self.s3 += weight * safe_xv**3
+        self.s4 += weight * safe_xv**4
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
         """Initialize statistics from one observation."""
@@ -460,7 +469,23 @@ class GeneralizedGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         w = np.asarray(weights, dtype=np.float64)
         w_sum = float(w.sum())
         chunk_sum = float(np.dot(w, xv))
-        chunk_sum2 = float(np.dot(w, xv**2))
+        xv2 = xv * xv
+        chunk_sum2 = float(np.dot(w, xv2))
+        chunk_sum3 = float(np.dot(w, xv2 * xv))
+        chunk_sum4 = float(np.dot(w, xv2 * xv2))
+        if not (np.isfinite(chunk_sum2) and np.isfinite(chunk_sum3) and np.isfinite(chunk_sum4)):
+            # A weight of exactly 0.0 must contribute exactly zero to the raw moments regardless of
+            # xv's magnitude, but squaring/cubing/etc. xv BEFORE weighting can overflow for an
+            # ordinary finite xv, and inf * 0.0 is nan -- silently poisoning the raw moments for
+            # every other, fully-weighted observation folded in the same chunk. Recomputed with xv
+            # masked to 0.0 wherever its own weight is exactly zero, only on this rare,
+            # already-broken path (checked via isfinite rather than masked unconditionally, to keep
+            # the ordinary path at its historical cost).
+            safe_xv = np.where(w != 0.0, xv, 0.0)
+            xv2 = safe_xv * safe_xv
+            chunk_sum2 = float(np.dot(w, xv2))
+            chunk_sum3 = float(np.dot(w, xv2 * safe_xv))
+            chunk_sum4 = float(np.dot(w, xv2 * xv2))
         # Conditioning gate: activate the anchored track only when this chunk's raw moments would
         # corrupt the reduced moments (or the anchor is already live). BEFORE the raw fold, so
         # activation converts only the content that preceded this chunk.
@@ -475,15 +500,26 @@ class GeneralizedGaussianAccumulator(SequenceEncodableStatisticAccumulator):
                 self._activate_anchor(float(xv[np.argmax(w > 0.0)]))
             dx = xv - self._anchor
             dx2 = dx * dx
-            self._a1 += float(np.dot(w, dx))
-            self._a2 += float(np.dot(w, dx2))
-            self._a3 += float(np.dot(w, dx2 * dx))
-            self._a4 += float(np.dot(w, dx2 * dx2))
+            a1 = float(np.dot(w, dx))
+            a2 = float(np.dot(w, dx2))
+            a3 = float(np.dot(w, dx2 * dx))
+            a4 = float(np.dot(w, dx2 * dx2))
+            if not (np.isfinite(a2) and np.isfinite(a3) and np.isfinite(a4)):
+                # Same hazard as chunk_sum2/3/4 above, applied to the anchor-relative deltas.
+                safe_dx = np.where(w != 0.0, dx, 0.0)
+                dx2 = safe_dx * safe_dx
+                a2 = float(np.dot(w, dx2))
+                a3 = float(np.dot(w, dx2 * safe_dx))
+                a4 = float(np.dot(w, dx2 * dx2))
+            self._a1 += a1
+            self._a2 += a2
+            self._a3 += a3
+            self._a4 += a4
         self.count += w_sum
         self.s1 += chunk_sum
         self.s2 += chunk_sum2
-        self.s3 += float(np.dot(w, xv**3))
-        self.s4 += float(np.dot(w, xv**4))
+        self.s3 += chunk_sum3
+        self.s4 += chunk_sum4
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize statistics from encoded observations."""

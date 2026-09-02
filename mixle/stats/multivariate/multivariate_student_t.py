@@ -568,14 +568,21 @@ class MultivariateStudentTAccumulator(SequenceEncodableStatisticAccumulator):
         checked_weight = observation_weight(weight, label="multivariate Student-t observation weight")
         u = self._weight_for(xx - estimate.mu, estimate) if estimate is not None else 1.0
         wu = checked_weight * u
+        # A weight of exactly 0.0 must contribute exactly zero regardless of xx's magnitude, but
+        # the outer product squares xx BEFORE weighting can be applied, and inf * 0.0 is nan --
+        # silently poisoning sum_uxx for good (campaign nine, D-0209). Masking xx to 0.0 here keeps
+        # a positively-weighted call bit-identical while making a zero-weight call's contribution
+        # exactly zero at any magnitude.
+        safe_xx = xx if wu != 0.0 else np.zeros_like(xx)
+        outer_xx = np.outer(safe_xx, safe_xx)
         # Scalar updates carry no chunk to assess conditioning from, so the anchor activates on the
         # first observation -- a zero-cost O(1) bookkeeping track on this path. BEFORE the raw fold,
         # so activation converts only content the gate has already vouched for.
-        self._anchor_rows(xx[None, :], np.asarray([wu], dtype=float), wu * xx, wu * np.outer(xx, xx))
+        self._anchor_rows(xx[None, :], np.asarray([wu], dtype=float), wu * xx, wu * outer_xx)
         self.count += checked_weight
         self.sum_u += wu
         self.sum_ux += wu * xx
-        self.sum_uxx += wu * np.outer(xx, xx)
+        self.sum_uxx += wu * outer_xx
 
     def initialize(self, x: Sequence[float] | np.ndarray, weight: float, rng: RandomState | None) -> None:
         """Initialize statistics from one vector observation."""

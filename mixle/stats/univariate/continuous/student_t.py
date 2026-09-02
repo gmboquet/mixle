@@ -284,8 +284,12 @@ class StudentTAccumulator(AnchoredMomentTrack, SequenceEncodableStatisticAccumul
     def update(self, x: float, weight: float, estimate: StudentTDistribution | None) -> None:
         """Accumulate weighted first and second moments for one observation."""
         self._anchor_scalar(float(x), weight)
+        # Same hazard _anchor_scalar's own docstring covers for the anchored track: squaring x
+        # BEFORE weighting can overflow for an ordinary finite x, and weight * inf is nan --
+        # silently poisoning self.sum2 for good once weight is exactly 0.0 (campaign nine, D-0209).
+        safe_x = x if weight != 0.0 else 0.0
         self.sum += x * weight
-        self.sum2 += x * x * weight
+        self.sum2 += safe_x * safe_x * weight
         self.count += weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
@@ -424,16 +428,25 @@ class StudentTEstimator(ParameterEstimator):
             # same-sign sum and is computed from the raw (possibly prior-blended) moments above,
             # unchanged. The prior is folded into the variance separately, never through the
             # anchored sums (which only ever describe the observed data).
-            pooled, notes = anchored_pooled_variance(
+            unfloored_var, notes = anchored_pooled_variance(
                 anchored[0], anchored[1], anchored[2], raw_count, loc, pc, prior_mean, prior_variance
             )
-            var = max(pooled, self.min_scale * self.min_scale)
         else:
             warn_uncorrectable_raw_moments(sum_x, sum_x2, count, family="Student-t")
-            var = max(sum_x2 / count - loc * loc, self.min_scale * self.min_scale)
+            unfloored_var = sum_x2 / count - loc * loc
+        var = max(unfloored_var, self.min_scale * self.min_scale)
         scale2 = var * (self.df - 2.0) / self.df
+        unfloored_scale2 = unfloored_var * (self.df - 2.0) / self.df
         scale = math.sqrt(max(scale2, self.min_scale * self.min_scale))
         dist = StudentTDistribution(self.df, loc=loc, scale=scale, name=self.name, keys=self.keys)
+        if unfloored_scale2 < self.min_scale * self.min_scale:
+            # The variance-implied scale collapsed to (or below) the family floor -- disclosed
+            # unconditionally, the same way GaussianEstimator's own variance floor discloses any
+            # time it binds. Previously silent here: peaks-over-threshold-style data at
+            # nanosecond-epoch magnitude anchors on statistics that round to a non-positive pooled
+            # variance exactly, and fit_provenance().converged reported True with nothing naming the
+            # collapse (campaign nine, D-0209).
+            notes = notes + ("scale-floored(%.6g -> %.6g)" % (math.sqrt(max(unfloored_scale2, 0.0)), scale),)
         if notes:
             dist._numerical_repairs = notes
         return dist

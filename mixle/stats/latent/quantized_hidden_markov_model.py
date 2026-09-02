@@ -95,6 +95,12 @@ class QuantizedHMMFitDiagnostics:
     schema_version: int = 1
     algorithm: str = "multistart_coordinate_ascent"
 
+    # Every QuantizedHiddenMarkovEstimator.estimate() fit attaches this unconditionally, so without
+    # this flag to_serializable()/to_json()/model_hash() raised an unhandled SerializationError for
+    # EVERY fitted instance of this family (campaign nine, D-0209). Unannotated on purpose: an
+    # annotated name would become a dataclass field.
+    __pysp_serializable__ = True
+
 
 class QuantizedHMMOptimizationError(RuntimeError):
     """Raised when the quantized coordinate or scalar optimization fails."""

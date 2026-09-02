@@ -117,6 +117,14 @@ class HierarchicalNormalFitDiagnostics:
     total_group_weight: float
     total_observation_weight: float
 
+    # Every fit through this module's own EM estimator attaches this unconditionally, so without
+    # this flag to_serializable()/to_json()/model_hash() raised an unhandled SerializationError for
+    # EVERY fitted instance of this family (campaign nine, D-0209) -- not registered anywhere else,
+    # unlike the sibling mechanism this mirrors (ThurstoneFitDiagnostics,
+    # SpearmanRankingFitDiagnostics). Unannotated on purpose: an annotated name would become a
+    # dataclass field.
+    __pysp_serializable__ = True
+
 
 class HierarchicalNormalDistribution(SequenceEncodableProbabilityDistribution):
     """Two-level normal hierarchy over groups: ``y[g,i] ~ N(theta[g], sigma^2)``, ``theta[g] ~ N(mu, tau^2)``.

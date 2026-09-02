@@ -444,7 +444,16 @@ class AnchoredMomentTrack:
                 # observation to activate correctly.
                 return
             self._activate_anchor(x)
-        dx = x - self._anchor
+        # A weight of exactly 0.0 must contribute exactly zero to both anchored sums regardless of
+        # x's value (the docstring above) -- including a non-finite x, e.g. log(0) = -inf at a
+        # log-transformed family's own domain boundary, not just an ordinary finite-but-extreme one
+        # (campaign nine, D-0209). Computing dx from x itself risks -inf * 0.0 = nan on the LINEAR
+        # term alone, before any squaring; squaring an ordinary finite-but-extreme dx risks the same
+        # on the squared term. Masking x to the anchor's own value when weight is exactly zero makes
+        # dx exactly 0.0 up front, closing both terms at once, while leaving a positively-weighted
+        # call's arithmetic bit-identical (safe_x equals x exactly there).
+        safe_x = x if weight != 0.0 else self._anchor
+        dx = safe_x - self._anchor
         self._anchored_sum += dx * weight
         self._anchored_sum2 += dx * dx * weight
 
@@ -498,6 +507,17 @@ class AnchoredMomentTrack:
         """
         chunk_sum = np.dot(x, weights)
         chunk_sum2 = np.dot(x * x, weights)
+        if not np.isfinite(chunk_sum2):
+            # A weight of exactly 0.0 must contribute exactly zero to chunk_sum2 regardless of x's
+            # magnitude, but squaring x BEFORE weighting can overflow to inf for an ordinary finite x
+            # once |x| exceeds ~1.34e154, and inf * 0.0 is nan -- silently poisoning the raw second
+            # moment for every other, fully-weighted observation folded in the same chunk. Recomputed
+            # with x masked to 0.0 wherever its own weight is exactly zero -- only on this rare,
+            # already-broken path (checked via isfinite rather than masked unconditionally, to keep
+            # the ordinary path at its historical cost; see numerics_error_receipts_test.py's
+            # disabled-path overhead pin).
+            safe_x = np.where(weights != 0.0, x, 0.0)
+            chunk_sum2 = np.dot(safe_x * safe_x, weights)
         w_sum = np.sum(weights, dtype=np.float64)
         self._anchor_chunk(x, weights, float(chunk_sum), float(chunk_sum2), float(w_sum))
         self.sum += chunk_sum
@@ -618,7 +638,13 @@ class SquaredPowerSumTrack(AnchoredMomentTrack):
 
     def update(self, x: float, weight: float, estimate: Any) -> None:
         """Accumulate weighted second and fourth power sums for one observation."""
-        x2 = finite_observation(x, label="%s observation" % self._OBSERVATION_LABEL, minimum=0.0) ** 2
+        x_raw = finite_observation(x, label="%s observation" % self._OBSERVATION_LABEL, minimum=0.0)
+        # A weight of exactly 0.0 must contribute exactly zero no matter x_raw's magnitude, but
+        # squaring twice (for the fourth power) BEFORE weighting can overflow for an ordinary finite
+        # x_raw, and weight * inf is nan. Masking x_raw to 0.0 here keeps a positively-weighted call
+        # bit-identical while making a zero-weight call's contribution exactly zero at any magnitude.
+        safe_x = x_raw if weight != 0.0 else 0.0
+        x2 = safe_x * safe_x
         self._anchor_scalar(float(x2), weight)  # BEFORE the raw fold, per AnchoredMomentTrack
         self.count += weight
         self.s2 += weight * x2
@@ -636,12 +662,27 @@ class SquaredPowerSumTrack(AnchoredMomentTrack):
         ``y``'s own moments, so ordinary data never activates the track and the raw fold below stays
         bit-identical to the historical single-pass path.
         """
-        x2 = finite_observations(x, label="%s observations" % self._OBSERVATION_LABEL, minimum=0.0) ** 2
+        x_raw = finite_observations(x, label="%s observations" % self._OBSERVATION_LABEL, minimum=0.0)
         w = np.asarray(weights, dtype=np.float64)
-        self._anchor_chunk(x2, w, float(np.dot(w, x2)), float(np.dot(w, x2 * x2)), float(w.sum()))
+        x2 = x_raw * x_raw
+        x4 = x2 * x2
+        sum_wx2 = np.dot(w, x2)
+        sum_wx4 = np.dot(w, x4)
+        if not (np.isfinite(sum_wx2) and np.isfinite(sum_wx4)):
+            # See SquaredPowerSumTrack.update: a zero-weight element's own magnitude can overflow
+            # either squaring, poisoning this chunk's dot-product reductions for every other
+            # element. Recomputed with x_raw masked to 0.0 wherever its own weight is exactly zero,
+            # only on this rare, already-broken path (checked via isfinite rather than masked
+            # unconditionally, to keep the ordinary path at its historical cost).
+            safe_x = np.where(w != 0.0, x_raw, 0.0)
+            x2 = safe_x * safe_x
+            x4 = x2 * x2
+            sum_wx2 = np.dot(w, x2)
+            sum_wx4 = np.dot(w, x4)
+        self._anchor_chunk(x2, w, float(sum_wx2), float(sum_wx4), float(w.sum()))
         self.count += float(w.sum())
-        self.s2 += float(np.dot(w, x2))
-        self.s4 += float(np.dot(w, x2 * x2))
+        self.s2 += float(sum_wx2)
+        self.s4 += float(sum_wx4)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: Any) -> None:
         """Initialize statistics from encoded observations."""

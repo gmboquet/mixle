@@ -335,7 +335,15 @@ class SkellamAccumulator(SequenceEncodableStatisticAccumulator):
         ww = np.asarray(weights, dtype=np.float64)
         self.count += ww.sum()
         self.sum += np.dot(xx, ww)
-        self.sum2 += np.dot(xx * xx, ww)
+        chunk_sum2 = np.dot(xx * xx, ww)
+        if not np.isfinite(chunk_sum2):
+            # A weight of exactly 0.0 must contribute exactly zero to chunk_sum2 regardless of xx's
+            # magnitude, but squaring xx BEFORE weighting can overflow for an ordinary finite xx,
+            # and inf * 0.0 is nan. Recomputed with xx masked to 0.0 wherever its own weight is
+            # exactly zero, only on this rare, already-broken path (campaign nine, D-0209).
+            safe_xx = np.where(ww != 0.0, xx, 0.0)
+            chunk_sum2 = np.dot(safe_xx * safe_xx, ww)
+        self.sum2 += chunk_sum2
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize statistics from encoded observations."""

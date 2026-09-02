@@ -607,12 +607,20 @@ class GeneralizedExtremeValueAccumulator(SequenceEncodableStatisticAccumulator):
             self._activate_anchor(float(x))
         if self._anchor is not None:
             dx = float(x) - self._anchor
+            # A weight of exactly 0.0 must contribute exactly zero regardless of dx's magnitude, but
+            # squaring/cubing dx BEFORE weighting can overflow for an ordinary finite dx, and
+            # inf * 0.0 is nan. Masking dx to 0.0 here keeps a positively-weighted call bit-identical
+            # while making a zero-weight call's contribution exactly zero at any magnitude.
+            safe_dx = dx if weight != 0.0 else 0.0
             self._a1 += dx * weight
-            self._a2 += dx * dx * weight
-            self._a3 += dx * dx * dx * weight
+            self._a2 += safe_dx * safe_dx * weight
+            self._a3 += safe_dx * safe_dx * safe_dx * weight
+        # Same hazard as above for the raw moments: squaring/cubing x BEFORE weighting can overflow,
+        # poisoning sum2/sum3 for good once weight is exactly 0.0.
+        safe_x = float(x) if weight != 0.0 else 0.0
         self.sum += x * weight
-        self.sum2 += x * x * weight
-        self.sum3 += x * x * x * weight
+        self.sum2 += safe_x * safe_x * weight
+        self.sum3 += safe_x * safe_x * safe_x * weight
         self.count += weight
         if weight > 0.0:
             self.min_val = min(self.min_val, float(x))
@@ -629,7 +637,21 @@ class GeneralizedExtremeValueAccumulator(SequenceEncodableStatisticAccumulator):
         xx = np.asarray(x, dtype=np.float64)
         w_sum = float(np.sum(weights, dtype=np.float64))
         chunk_sum = float(np.dot(xx, weights))
-        chunk_sum2 = float(np.dot(xx * xx, weights))
+        xx2 = xx * xx
+        chunk_sum2 = float(np.dot(xx2, weights))
+        chunk_sum3 = float(np.dot(xx2 * xx, weights))
+        if not (np.isfinite(chunk_sum2) and np.isfinite(chunk_sum3)):
+            # A weight of exactly 0.0 must contribute exactly zero to the raw moments regardless of
+            # xx's magnitude, but squaring/cubing xx BEFORE weighting can overflow for an ordinary
+            # finite xx, and inf * 0.0 is nan -- silently poisoning the raw moments for every other,
+            # fully-weighted observation folded in the same chunk. Recomputed with xx masked to 0.0
+            # wherever its own weight is exactly zero, only on this rare, already-broken path
+            # (checked via isfinite rather than masked unconditionally, to keep the ordinary path at
+            # its historical cost).
+            safe_xx = np.where(np.asarray(weights) != 0.0, xx, 0.0)
+            xx2 = safe_xx * safe_xx
+            chunk_sum2 = float(np.dot(xx2, weights))
+            chunk_sum3 = float(np.dot(xx2 * safe_xx, weights))
         # Conditioning gate: activate the anchored track only when this chunk's raw moments would
         # corrupt the reduced moments (or the anchor is already live). BEFORE the raw fold, so
         # activation converts only the content that preceded this chunk.
@@ -644,12 +666,21 @@ class GeneralizedExtremeValueAccumulator(SequenceEncodableStatisticAccumulator):
                 self._activate_anchor(float(xx[np.argmax(np.asarray(weights) > 0.0)]))
             dx = xx - self._anchor
             dx2 = dx * dx
-            self._a1 += float(np.dot(dx, weights))
-            self._a2 += float(np.dot(dx2, weights))
-            self._a3 += float(np.dot(dx2 * dx, weights))
+            a1 = float(np.dot(dx, weights))
+            a2 = float(np.dot(dx2, weights))
+            a3 = float(np.dot(dx2 * dx, weights))
+            if not (np.isfinite(a2) and np.isfinite(a3)):
+                # Same hazard as chunk_sum2/chunk_sum3 above, applied to the anchor-relative deltas.
+                safe_dx = np.where(np.asarray(weights) != 0.0, dx, 0.0)
+                dx2 = safe_dx * safe_dx
+                a2 = float(np.dot(dx2, weights))
+                a3 = float(np.dot(dx2 * safe_dx, weights))
+            self._a1 += a1
+            self._a2 += a2
+            self._a3 += a3
         self.sum += chunk_sum
         self.sum2 += chunk_sum2
-        self.sum3 += float(np.dot(xx * xx * xx, weights))
+        self.sum3 += chunk_sum3
         self.count += w_sum
         mask = np.asarray(weights) > 0.0
         if np.any(mask):

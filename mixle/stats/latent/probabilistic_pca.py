@@ -289,7 +289,13 @@ class ProbabilisticPCAAccumulator(SequenceEncodableStatisticAccumulator):
         weight = _finite_nonnegative_weight(weight, "ProbabilisticPCA accumulator weight")
         self.count += weight
         self.sum += weight * xx
-        self.sum2 += weight * np.outer(xx, xx)
+        # A weight of exactly 0.0 must contribute exactly zero regardless of xx's magnitude, but
+        # the outer product squares xx BEFORE weighting can be applied, and inf * 0.0 is nan --
+        # silently poisoning sum2 for good (campaign nine, D-0209). Masking xx to 0.0 here keeps a
+        # positively-weighted call bit-identical while making a zero-weight call's contribution
+        # exactly zero at any magnitude.
+        safe_xx = xx if weight != 0.0 else np.zeros_like(xx)
+        self.sum2 += weight * np.outer(safe_xx, safe_xx)
 
     def initialize(self, x: np.ndarray, weight: float, rng: RandomState | None) -> None:
         """Initialize the sufficient statistics with one weighted vector."""

@@ -773,6 +773,7 @@ def generated_sufficient_statistics(dist: Any, enc: Any, weights: Any, engine: A
             % (type(dist).__name__, len(row_stats), len(declaration.statistics))
         )
     ww = engine.asarray(weights)
+    row_stats = _mask_statistic_rows_with_no_weight(row_stats, ww)
     _validate_generated_statistic_rows(row_stats, declaration.statistics, ww)
     return tuple(
         _weighted_histogram(stat, ww, engine)
@@ -1123,6 +1124,7 @@ def generated_stacked_sufficient_statistics(
         weight_shape = tuple(getattr(ww, "shape", ()))
         if len(weight_shape) == 2:
             component_count = int(weight_shape[1])
+    row_stats = _mask_statistic_rows_with_no_weight(row_stats, ww)
     _validate_generated_statistic_rows(
         row_stats,
         declaration.statistics,
@@ -1130,7 +1132,10 @@ def generated_stacked_sufficient_statistics(
         component_count=component_count,
     )
     return tuple(
-        _weighted_component_sum(stat, spec, ww, engine) for spec, stat in zip(declaration.statistics, row_stats)
+        _weighted_stacked_histogram(stat, ww, engine)
+        if spec.kind == "histogram"
+        else _weighted_component_sum(stat, spec, ww, engine)
+        for spec, stat in zip(declaration.statistics, row_stats)
     )
 
 
@@ -1993,6 +1998,43 @@ def _astype(x: Any, dtype: Any) -> Any:
     return x.to(dtype)  # torch
 
 
+def _mask_statistic_rows_with_no_weight(row_stats: Sequence[Any], weights: Any) -> tuple[Any, ...]:
+    """Replace each numpy row-statistic's entries with 0.0 wherever NO weight column wants that row.
+
+    ``stats_fn`` computes every row's raw statistic (e.g. ``x*x``) unconditionally, before any
+    weight is applied -- an ordinary finite observation at extreme magnitude can overflow this
+    computation to +inf regardless of its own weight, and a weight of exactly 0.0 in every column
+    (single-distribution: the row's own weight; stacked: every component's weight) must still
+    contribute exactly zero to every downstream sum, matching ``AnchoredMomentTrack``'s identical
+    guarantee for the legacy accumulator path (``mixle/stats/univariate/continuous/
+    _observation_contracts.py``). Masked BEFORE validation (not just before summing) so a row no
+    weight wants cannot trip the finite/non-positive-infinity check either -- exactly the failure
+    ``generated_sufficient_statistics`` reproduced (campaign nine, D-0209). A row wanted by AT LEAST
+    one weight column keeps its real, unmasked value, so a genuine overflow on a row that matters is
+    still validated and still raised, never silently swallowed. Scoped to numpy arrays, matching
+    ``_validate_generated_statistic_rows``'s own existing numpy-specific finiteness check; other
+    engines are unaffected, exactly as that check already leaves them.
+    """
+    if not isinstance(weights, np.ndarray):
+        return tuple(row_stats)
+    if weights.ndim == 2:
+        row_wanted = np.any(weights != 0.0, axis=1)
+    elif weights.ndim == 1:
+        row_wanted = weights != 0.0
+    else:
+        return tuple(row_stats)
+    if row_wanted.all():
+        return tuple(row_stats)
+    masked = []
+    for stat in row_stats:
+        if isinstance(stat, np.ndarray) and stat.ndim >= 1 and stat.shape[0] == row_wanted.shape[0]:
+            broadcast_mask = row_wanted.reshape((row_wanted.shape[0],) + (1,) * (stat.ndim - 1))
+            masked.append(np.where(broadcast_mask, stat, 0.0))
+        else:
+            masked.append(stat)
+    return tuple(masked)
+
+
 def _validate_generated_statistic_rows(
     row_stats: Sequence[Any],
     specs: Sequence[StatisticSpec],
@@ -2030,6 +2072,59 @@ def _validate_generated_statistic_rows(
                 raise ValueError("generated statistic %d cannot contain NaN or positive infinity." % index)
 
 
+def _rescue_poisoned_component_matmul(w: np.ndarray, a_flat: np.ndarray, fast_out: np.ndarray) -> np.ndarray:
+    """Recompute a ``(K, D)`` component matmul so a component with EXACTLY zero weight on some row
+    is immune to that row's raw statistic being non-finite, at per-component granularity.
+
+    ``w.T @ a_flat`` is bit-identical to (and far cheaper than) a per-component broadcast EXCEPT
+    when some row's raw statistic is ``+-inf``: a component with zero weight on that row must
+    still contribute exactly ``0.0`` (``0 *`` anything, including infinity, is ``0`` for a
+    component that does not want the row), but IEEE754 gives ``0.0 * inf = nan`` instead, and a
+    single such term poisons the ENTIRE dot product for every OTHER row that component correctly
+    folds in (campaign nine, D-0209, round-2 review, findings #2/#7/#15).
+    :func:`_mask_statistic_rows_with_no_weight` already zeroes a row NO component wants at all,
+    and :func:`_validate_generated_statistic_rows` already raises for a ``+inf`` row wanted by at
+    least one component (mirroring the single-distribution sibling's own intentional loud failure
+    on a genuine overflow), so a non-finite value can only still reach here two ways: it is
+    ``-inf`` (a legitimate value elsewhere in this codebase, e.g. a log-domain boundary, that
+    validation deliberately does not reject), or it is ``+inf`` on a row every weighted-and-present
+    component is fine seeing as ``inf`` but a DIFFERENT, zero-weight component must not. Either
+    way this rescues only that gap: rows every component already handled correctly are excluded
+    from the correction below and left exactly as the fast matmul computed them.
+    """
+    bad_rows = np.any(~np.isfinite(a_flat), axis=1)
+    if not bad_rows.any():
+        return fast_out
+    good = ~bad_rows
+    out = np.matmul(w[good].T, a_flat[good])
+    for n0 in np.nonzero(bad_rows)[0]:
+        w_row = w[n0]
+        a_row = a_flat[n0]
+        # Mask the (possibly non-finite) value to 0.0 for a zero-weight component BEFORE
+        # multiplying, not just discard the product after -- otherwise numpy still computes the
+        # 0.0 * inf branch internally (np.where evaluates both arms) and raises a spurious
+        # RuntimeWarning even though the result is correct.
+        safe_a_row = np.where(w_row[:, None] != 0.0, a_row[None, :], 0.0)
+        out = out + w_row[:, None] * safe_a_row
+    return out
+
+
+def _rescue_poisoned_broadcast_sum(weights: np.ndarray, arr: np.ndarray, fast_out: np.ndarray) -> np.ndarray:
+    """Elementwise-broadcast analogue of :func:`_rescue_poisoned_component_matmul` for the
+    ``engine.sum(weights * arr, axis=0)`` reduction (a per-row scalar statistic broadcast across
+    components, or a statistic already shaped one column per component). Same gap, same rescue:
+    a component with zero weight on a non-finite row must contribute exactly ``0.0``, never
+    ``0.0 * inf = nan``.
+
+    Unlike the matmul rescue, this masks every row in one vectorized pass rather than looping over
+    only the non-finite ones: ``arr`` here has no ``D``-dimensional trailing axis (that is exactly
+    what routes a statistic to the matmul branch instead), so a full ``(n, k)`` masked copy costs
+    no more than ``weights`` itself already does -- there is no ``(N, K, D)`` blowup to avoid.
+    """
+    safe_arr = np.where(weights != 0.0, arr, 0.0)
+    return np.sum(weights * safe_arr, axis=0, dtype=fast_out.dtype)
+
+
 def _weighted_component_sum(stat: Any, spec: StatisticSpec, weights: Any, engine: Any) -> Any:
     # Accumulate the over-observations reduction in float64 (no-op for full-precision engines) so a
     # reduced-precision component fit does not drift on large N.
@@ -2050,13 +2145,21 @@ def _weighted_component_sum(stat: Any, spec: StatisticSpec, weights: Any, engine
         n_rows, k = shape[0], weights_shape[1]
         w = _astype(engine.asarray(weights), acc)
         a = _astype(engine.asarray(arr), acc)
-        out = engine.matmul(w.T, a.reshape(n_rows, -1))
+        a_flat = a.reshape(n_rows, -1)
+        out = engine.matmul(w.T, a_flat)
+        if isinstance(out, np.ndarray) and isinstance(w, np.ndarray) and not np.all(np.isfinite(out)):
+            out = _rescue_poisoned_component_matmul(w, a_flat, out)
         return out.reshape((k, *shape[1:]))
     elif len(shape) != 2 or shape != weights_shape:
         raise ValueError(
             "generated sufficient statistics must be row, row-component, or declared vector/matrix arrays."
         )
-    return engine.sum(weights * arr, axis=0, dtype=acc)
+    out = engine.sum(weights * arr, axis=0, dtype=acc)
+    if isinstance(out, np.ndarray) and isinstance(weights, np.ndarray) and not np.all(np.isfinite(out)):
+        out = _rescue_poisoned_broadcast_sum(
+            np.asarray(weights, dtype=out.dtype), np.asarray(arr, dtype=out.dtype), out
+        )
+    return out
 
 
 def _weighted_row_sum(stat: Any, spec: StatisticSpec, weights: Any, engine: Any) -> Any:
@@ -2114,6 +2217,56 @@ def _weighted_histogram(stat: Any, weights: Any, engine: Any) -> dict[int, float
     for k, w in zip(uniq.tolist(), wsum.tolist()):
         hist[int(k)] = w
     return hist
+
+
+def _weighted_stacked_histogram(stat: Any, weights: Any, engine: Any) -> tuple[dict[int, float], ...]:
+    """Fold per-row integer counts into ``K`` per-component weighted ``{value: weight}`` histograms.
+
+    The component-stacked analogue of :func:`_weighted_histogram`: a stacked route's ``weights``
+    carry one column per component (shape ``(n, k)``), so each component needs its OWN histogram
+    folded from its own weight column, not the single pooled histogram the non-stacked path
+    produces. Building each component's histogram directly from ``vals`` and its own weight
+    column (rather than routing through a row-collapsed intermediate) means a row wanted by some
+    but not all components already contributes exactly its own component's weighted count to
+    that component's histogram and exactly ``0.0`` to the others -- the per-row-only masking in
+    :func:`_mask_statistic_rows_with_no_weight` (campaign nine, D-0209, round-2 review) has
+    nothing to corrupt here, since a histogram-kind statistic is the observation's own raw count,
+    never a squared or outer-product term that could have overflowed before this fold runs.
+    """
+    raw_vals = np.asarray(engine.to_numpy(stat))
+    try:
+        vals = np.asarray(raw_vals, dtype=np.float64)
+        wts = np.asarray(engine.to_numpy(weights), dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("generated stacked histogram values and weights must be numeric.") from exc
+    if vals.ndim != 1:
+        raise ValueError("generated stacked histogram values must be one-dimensional.")
+    if wts.ndim != 2 or wts.shape[0] != vals.shape[0]:
+        raise ValueError("generated stacked histogram weights must be a row-component matrix.")
+    if np.any(~np.isfinite(vals)):
+        raise ValueError("generated histogram values must be finite.")
+    if np.any(vals != np.floor(vals)):
+        raise ValueError("generated histogram values must be exact integers.")
+    if np.any(vals < 0.0):
+        raise ValueError("generated histogram count values must be non-negative.")
+    if np.any(vals >= float(2**63)):
+        raise ValueError("generated histogram values exceed the int64 range.")
+    if np.any(~np.isfinite(wts)):
+        raise ValueError("generated histogram weights must be finite.")
+    if np.any(wts < 0.0):
+        raise ValueError("generated histogram weights must be non-negative.")
+
+    component_count = wts.shape[1]
+    if vals.size == 0:
+        return tuple({} for _ in range(component_count))
+    ints = vals.astype(np.int64)
+    uniq, inv = np.unique(ints, return_inverse=True)
+    histograms = []
+    for col in range(component_count):
+        wsum = np.zeros(uniq.shape[0], dtype=np.float64)
+        np.add.at(wsum, inv, wts[:, col])
+        histograms.append({int(u): float(w) for u, w in zip(uniq.tolist(), wsum.tolist())})
+    return tuple(histograms)
 
 
 def _host_legacy_value(value: Any, engine: Any) -> Any:

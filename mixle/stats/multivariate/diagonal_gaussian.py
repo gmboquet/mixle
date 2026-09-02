@@ -907,8 +907,15 @@ class DiagonalGaussianAccumulator(SequenceEncodableStatisticAccumulator):
             self._activate_anchor(checked)
         if self._anchor is not None:
             dx = checked - self._anchor
+            # A weight of exactly 0.0 must contribute exactly zero regardless of dx's magnitude,
+            # but squaring dx BEFORE weighting can overflow for an ordinary finite dx, and
+            # inf * 0.0 is nan -- silently poisoning that dimension's anchored second moment
+            # (campaign nine, D-0209). Masking dx to 0.0 here keeps a positively-weighted call
+            # bit-identical while making a zero-weight call's contribution exactly zero at any
+            # magnitude.
+            safe_dx = dx if checked_weight != 0.0 else np.zeros_like(dx)
             self._anchored_sum += dx * checked_weight
-            self._anchored_sum2 += dx * dx * checked_weight
+            self._anchored_sum2 += safe_dx * safe_dx * checked_weight
         x_weight = checked * checked_weight
         self.count += checked_weight
         self.sum += x_weight

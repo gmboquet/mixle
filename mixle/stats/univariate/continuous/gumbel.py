@@ -187,9 +187,27 @@ class GumbelDistribution(SequenceEncodableProbabilityDistribution):
         """Return stacked Gumbel sufficient statistics using engine-resident arrays."""
         xx = engine.asarray(x)
         ww = engine.asarray(weights)
+        xx2 = xx * xx
+        if isinstance(xx2, np.ndarray) and isinstance(ww, np.ndarray) and not np.all(np.isfinite(xx2)):
+            # A component with EXACTLY zero weight on a row must contribute exactly zero to that
+            # component's sum2 regardless of xx's magnitude at that row, but squaring xx BEFORE
+            # weighting can overflow for an ordinary finite xx, and 0.0 * inf = nan (campaign nine,
+            # D-0209). Masking xx once, shared across every component (the original fix here),
+            # cannot protect a zero-weight component from a row a DIFFERENT component wants -- a
+            # row wanted by some but not all components stayed unmasked, poisoning the
+            # zero-weight components' sums too (round-2 review, finding #8). Masked per
+            # (row, component) instead, only on this rare, already-broken path: a full (n, k)
+            # masked copy costs no more than ww itself, so there is no need to isolate individual
+            # bad rows the way the D-dimensional vector/matrix-moment path must.
+            safe_xx2 = np.where(ww != 0.0, xx2[:, None], 0.0)
+            return (
+                engine.sum(ww * xx[:, None], axis=0),
+                np.sum(ww * safe_xx2, axis=0),
+                engine.sum(ww, axis=0),
+            )
         return (
             engine.sum(ww * xx[:, None], axis=0),
-            engine.sum(ww * (xx * xx)[:, None], axis=0),
+            engine.sum(ww * xx2[:, None], axis=0),
             engine.sum(ww, axis=0),
         )
 
@@ -287,8 +305,12 @@ class GumbelAccumulator(AnchoredMomentTrack, SequenceEncodableStatisticAccumulat
         """Accumulate weighted first and second moments for one observation."""
         xx = float(x)
         self._anchor_scalar(xx, weight)
+        # Same hazard _anchor_scalar's own docstring covers for the anchored track: squaring xx
+        # BEFORE weighting can overflow for an ordinary finite xx, and weight * inf is nan --
+        # silently poisoning self.sum2 for good once weight is exactly 0.0 (campaign nine, D-0209).
+        safe_xx = xx if weight != 0.0 else 0.0
         self.sum += xx * weight
-        self.sum2 += xx * xx * weight
+        self.sum2 += safe_xx * safe_xx * weight
         self.count += weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
@@ -422,9 +444,18 @@ class GumbelEstimator(ParameterEstimator):
         else:
             warn_uncorrectable_raw_moments(sum_x, sum_x2, count, family="Gumbel")
             var = max(sum_x2 / count - mean * mean, 0.0)
-        scale = max(math.sqrt(max(var, 0.0)) / _PI_SQRT6, self.min_scale)
+        unfloored_scale = math.sqrt(max(var, 0.0)) / _PI_SQRT6
+        scale = max(unfloored_scale, self.min_scale)
         loc = mean - scale * _EULER_GAMMA
         dist = GumbelDistribution(loc=loc, scale=scale, name=self.name, keys=self.keys)
+        if scale > unfloored_scale:
+            # The variance-implied scale collapsed to (or below) the family floor -- disclosed
+            # unconditionally, the same way GaussianEstimator's own variance floor discloses any
+            # time it binds. Previously silent here: peaks-over-threshold-style data at
+            # nanosecond-epoch magnitude anchors on statistics that round to var=0.0 exactly, and
+            # fit_provenance().converged reported True with nothing naming the collapse (campaign
+            # nine, D-0209).
+            notes = notes + ("scale-floored(%.6g -> %.6g)" % (unfloored_scale, scale),)
         if notes:
             dist._numerical_repairs = notes
         return dist

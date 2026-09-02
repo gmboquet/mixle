@@ -57,17 +57,126 @@ def _fit(arr: np.ndarray):
     return float(fitted_loc), float(scale), float(shape)
 
 
+def _mle_matches_moments(moment_fit, mle_fit) -> bool:
+    """Whether the scipy MLE fit is broadly consistent with the cheap moment estimate.
+
+    ``_applies()``'s gate is based on ``_moment_fit``, a closed-form estimate that is NOT subject to
+    the same magnitude-driven precision collapse the scipy MLE call in ``_fit()`` can hit: for
+    peaks-over-threshold data at nanosecond-epoch magnitude, ``loc + exceedance`` computed in the
+    CALLER's own float64 arithmetic -- before this detector ever runs -- already rounds most or all
+    of the exceedance away (campaign nine, D-0209), so the moment estimate can report a plausible
+    ``xi`` while the MLE, working from the same already-quantized raw array, lands on a nonsensical
+    corner (scale near zero, shape far outside any plausible range). Neither estimator can recover
+    information the caller's own arithmetic already destroyed, so this does not try to fix the fit
+    itself -- it refuses to ADMIT a candidate whose two independent estimates disagree this badly,
+    the same way ``_applies()`` already refuses a candidate whose moment estimate alone looks wrong.
+    A genuine MLE refinement of a reasonable moment estimate stays within a few orders of magnitude
+    on scale and a few units on shape; the reproduced collapse is 20+ orders of magnitude off on
+    scale and 6+ units off on shape, nowhere close to this band.
+    """
+    if moment_fit is None or mle_fit is None:
+        return False
+    _, moment_scale, moment_xi = moment_fit
+    _, mle_scale, mle_xi = mle_fit
+    if not (math.isfinite(mle_scale) and math.isfinite(mle_xi)) or mle_scale <= 0.0:
+        return False
+    if mle_scale < moment_scale * 1e-6 or mle_scale > moment_scale * 1e6:
+        return False
+    return abs(mle_xi - moment_xi) <= 2.0
+
+
+def _typical_adjacent_gap(arr: np.ndarray) -> float:
+    """Median NONZERO gap between adjacent sorted values of ``arr``, or 0.0 if none exist.
+
+    A direct, empirical measurement of how finely ``arr`` actually resolves distinct values --
+    used by :func:`_magnitude_precision_is_suspect` in place of a statistical proxy (see that
+    function's docstring for why a proxy like the moment-estimated scale is unsound here).
+    """
+    if arr.size < 2:
+        return 0.0
+    gaps = np.diff(np.sort(arr))
+    gaps = gaps[gaps > 0.0]
+    return float(np.median(gaps)) if gaps.size else 0.0
+
+
+def _magnitude_precision_is_suspect(loc: float, typical_gap: float) -> bool:
+    """Whether ``loc``'s own float64 grid is coarse enough, relative to the DATA'S OWN typical
+    adjacent gap, that the scipy MLE call in ``_fit()`` plausibly hit the magnitude-driven collapse
+    ``_mle_matches_moments`` exists to catch (campaign nine, D-0209).
+
+    Deliberately compares against ``typical_gap`` -- the array's own measured spacing between
+    adjacent distinct values (:func:`_typical_adjacent_gap`) -- rather than the moment-estimated
+    scale an earlier version of this gate used. That earlier version compared ``half_ulp(loc)``
+    against ``moment_scale``, but ``moment_scale`` can be small at ANY magnitude for a near-Dirac /
+    heavily-tied sample (an ordinary, unrelated failure mode downstream's
+    ``_degenerate_likelihood_spike`` in ``mixle/lifecycle.py`` already handles correctly) -- and
+    since ``half_ulp(loc)`` grows with ``loc`` regardless of whether anything is actually being
+    destroyed, that ratio eventually crosses ANY fixed threshold purely from ``loc`` growing, giving
+    a false positive at ordinary real-world magnitudes (millisecond/microsecond-epoch timestamps,
+    large IDs) the gate's own pinned test had not swept a range of offsets for. ``typical_gap``
+    fixes this: an offset that has destroyed nothing leaves it unchanged (an integer-valued
+    near-Dirac sample stays exactly spaced by >= 1 up to loc ~1e15, measured directly, regardless of
+    how large ``loc`` is), while a genuinely magnitude-collapsed sample (peaks-over-threshold
+    exceedances at nanosecond-epoch scale) shows its adjacent gaps compressed down toward
+    ``half_ulp(loc)`` itself, since that is what the CALLER's own float64 addition can no longer
+    distinguish. Measured: the near-Dirac fixture's ratio stays below 0.0625 through loc=1e15 (only
+    reaching 1.0 -- total collapse, correctly caught -- at loc=1e18, an offset that magnitude alone
+    would ALSO have flagged for genuinely continuous data); the reproduced GPD collapse sits at 0.5
+    regardless of the exceedance scale tested (50, 300, 3000). The threshold below sits at the
+    geometric midpoint of that gap in log-space, comfortable margin either way.
+    """
+    if loc == 0.0:
+        # No offset at all: nothing for the caller's own arithmetic to have destroyed.
+        return False
+    if typical_gap <= 0.0:
+        # Every value in the sample is (near-enough) identical despite a nonzero offset -- cannot
+        # rule out magnitude as the cause, so err toward running the cross-check.
+        return True
+    return (0.5 * float(np.spacing(abs(loc)))) > 0.2 * typical_gap
+
+
+def _boundary_point_mass_is_suspect(arr: np.ndarray, loc: float) -> bool:
+    """Whether two or more observations sit at (or within a hair of) ``arr``'s own minimum ``loc``.
+
+    A SECOND, independent cause of MLE degeneracy alongside magnitude (campaign nine, D-0209,
+    round-2 review): the GPD density at ``x = loc`` is ``1/scale`` for ANY shape, so multiple
+    observations tied at the fitted threshold can drive ``scale -> 0`` and the likelihood to
+    ``+inf`` regardless of how well the sample's own magnitude is represented -- reproduces at
+    ``loc`` offsets from 0 through at least 1e16. This is invisible to
+    :func:`_magnitude_precision_is_suspect`: :func:`_typical_adjacent_gap` deliberately filters out
+    exact ties (zero gaps) to measure the SPARSE tail's own resolution, so a large point mass at the
+    threshold leaves it looking perfectly healthy. Checked separately here and ORed into the same
+    cross-check trigger in :func:`_applies`, rather than folded into the magnitude gate, because the
+    two causes are unrelated and conflating them risks re-breaking either one while fixing the other
+    -- exactly what happened switching from the round-1 to the round-2 magnitude gate.
+    """
+    if arr.size < 2:
+        return False
+    tolerance = 8.0 * float(np.spacing(abs(loc))) if loc != 0.0 else 0.0
+    return int(np.count_nonzero(arr - loc <= tolerance)) >= 2
+
+
 def _applies(arr: np.ndarray) -> bool:
     # Positive support (threshold exceedances / tails); exclude non-positive data outright.
     if arr.size < 16 or not np.all(np.isfinite(arr)) or not np.all(arr > 0.0):
         return False
-    fit = _moment_fit(arr)
-    if fit is None:
+    moment_fit = _moment_fit(arr)
+    if moment_fit is None:
         return False
-    _, _, xi = fit
+    loc, _, xi = moment_fit
     # Only fire on an unmistakably heavy (Pareto) tail. Exponential / gamma / Gaussian samples
     # produce xi near 0 (or negative) and are screened out here, so the candidate cannot steal them.
-    return xi >= _MIN_XI
+    if xi < _MIN_XI:
+        return False
+    suspect = _magnitude_precision_is_suspect(loc, _typical_adjacent_gap(arr)) or _boundary_point_mass_is_suspect(
+        arr, loc
+    )
+    if not suspect:
+        return True
+    # Cross-check the real fit before admitting this candidate: a downstream caller can query this
+    # family directly or restrict the candidate pool, bypassing the frontier competition that would
+    # otherwise usually let a better-scoring family replace a degenerate one.
+    return _mle_matches_moments(moment_fit, _fit(arr))
 
 
 def _score(arr: np.ndarray, nobs: int) -> float | None:

@@ -472,9 +472,27 @@ class GeneralizedParetoDistribution(SequenceEncodableProbabilityDistribution):
         """Stacked GPD moment sums ``(sum, sum2, count)`` using engine-resident arrays."""
         xx = engine.asarray(x)
         ww = engine.asarray(weights)
+        xx2 = xx * xx
+        if isinstance(xx2, np.ndarray) and isinstance(ww, np.ndarray) and not np.all(np.isfinite(xx2)):
+            # A component with EXACTLY zero weight on a row must contribute exactly zero to that
+            # component's sum2 regardless of xx's magnitude at that row, but squaring xx BEFORE
+            # weighting can overflow for an ordinary finite xx, and 0.0 * inf = nan (campaign nine,
+            # D-0209). Masking xx once, shared across every component (the original fix here),
+            # cannot protect a zero-weight component from a row a DIFFERENT component wants -- a
+            # row wanted by some but not all components stayed unmasked, poisoning the
+            # zero-weight components' sums too (round-2 review, finding #8). Masked per
+            # (row, component) instead, only on this rare, already-broken path: a full (n, k)
+            # masked copy costs no more than ww itself, so there is no need to isolate individual
+            # bad rows the way the D-dimensional vector/matrix-moment path must.
+            safe_xx2 = np.where(ww != 0.0, xx2[:, None], 0.0)
+            return (
+                engine.sum(ww * xx[:, None], axis=0),
+                np.sum(ww * safe_xx2, axis=0),
+                engine.sum(ww, axis=0),
+            )
         return (
             engine.sum(ww * xx[:, None], axis=0),
-            engine.sum(ww * (xx * xx)[:, None], axis=0),
+            engine.sum(ww * xx2[:, None], axis=0),
             engine.sum(ww, axis=0),
         )
 
@@ -631,8 +649,12 @@ class GeneralizedParetoAccumulator(AnchoredMomentTrack, SequenceEncodableStatist
             self._max_x = max(self._max_x, xx)
         # BEFORE the raw fold, so an activation only converts content the gate already vouched for.
         self._anchor_scalar(xx, weight)
+        # Same hazard _anchor_scalar's own docstring covers for the anchored track: squaring xx
+        # BEFORE weighting can overflow for an ordinary finite xx, and weight * inf is nan --
+        # silently poisoning self.sum2 for good once weight is exactly 0.0 (campaign nine, D-0209).
+        safe_xx = xx if weight != 0.0 else 0.0
         self.sum += xx * weight
-        self.sum2 += xx * xx * weight
+        self.sum2 += safe_xx * safe_xx * weight
         self.count += weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
@@ -1017,9 +1039,18 @@ class GeneralizedParetoEstimator(ParameterEstimator):
                 var = sum_x2 / count - mean_x * mean_x
             raw_ill_conditioned = needs_anchor(sum_x, sum_x2, count)
         if m <= 0.0 or var <= 0.0:
-            degenerate = GeneralizedParetoDistribution(
-                max(m, self.min_scale), 0.0, loc=self.loc, name=self.name, keys=self.keys
-            )
+            scale = max(m, self.min_scale)
+            degenerate = GeneralizedParetoDistribution(scale, 0.0, loc=self.loc, name=self.name, keys=self.keys)
+            # The M-step's own exceedance mean/variance came out non-positive, so this is a floor
+            # fallback rather than a genuine fit -- disclosed unconditionally here, the same way
+            # GaussianEstimator's _record_variance_floor discloses any time its own floor actually
+            # binds. Previously this branch disclosed only the narrower foreign-combine case below,
+            # leaving the general collapse silent -- including peaks-over-threshold data at
+            # nanosecond-epoch magnitude, where `loc + exceedance` computed in ordinary float64
+            # BEFORE this estimator ever sees it already rounds every exceedance away, so the
+            # anchored `(m, var)` this M-step receives are exactly `(0.0, 0.0)` (campaign nine,
+            # D-0209): `fit_provenance().converged` reported True and nothing named the collapse.
+            notes = notes + ("variance-floored(m=%.6g, var=%.6g -> scale=%.6g, shape=0)" % (m, var, scale),)
             if max_x is None and max_unverified and raw_ill_conditioned:
                 # T4-01: the same foreign-combine ambiguity `support-consistency-unverified` below
                 # discloses, but reached here because raw-moment cancellation ALSO collapsed the
@@ -1031,8 +1062,7 @@ class GeneralizedParetoEstimator(ParameterEstimator):
                     "foreign partial statistic was combined into this prior-carrying accumulator "
                     "without a tracked max, so this could not be corroborated)",
                 )
-            if notes:
-                degenerate._numerical_repairs = notes
+            degenerate._numerical_repairs = notes
             return degenerate
         xi = 0.5 * (1.0 - m * m / var)
         xi = min(max(xi, self.xi_min), self.xi_max)

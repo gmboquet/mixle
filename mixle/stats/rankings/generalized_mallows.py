@@ -87,6 +87,13 @@ class GeneralizedMallowsFitDiagnostics:
     regularized: bool
     pseudo_count: float
 
+    # Every GeneralizedMallowsEstimator.estimate() fit attaches this unconditionally, so without
+    # this flag to_serializable()/to_json()/model_hash() raised an unhandled SerializationError for
+    # EVERY fitted instance of this family (campaign nine, D-0209) -- not registered anywhere else,
+    # unlike the sibling mechanism this mirrors (ThurstoneFitDiagnostics, SpearmanRankingFitDiagnostics).
+    # Unannotated on purpose: an annotated name would become a dataclass field.
+    __pysp_serializable__ = True
+
 
 @dataclass(frozen=True)
 class GeneralizedMallowsComputationDiagnostics:
@@ -98,6 +105,12 @@ class GeneralizedMallowsComputationDiagnostics:
     sampler_exact: bool
     legacy_n_mc_ignored: int
     legacy_seed_ignored: int
+
+    # Every GeneralizedMallowsDistribution.__init__ attaches this unconditionally (not an optional
+    # constructor argument), so without this flag to_serializable()/to_json()/model_hash() raised an
+    # unhandled SerializationError for EVERY instance of this family, fitted or not (campaign nine,
+    # D-0209). Unannotated on purpose: an annotated name would become a dataclass field.
+    __pysp_serializable__ = True
 
 
 # --- metric-specific normalizer and expected distance --------------------------------------------

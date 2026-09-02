@@ -304,7 +304,11 @@ class HalfNormalAccumulator(SequenceEncodableStatisticAccumulator):
         if x < 0.0 or not np.isfinite(x):
             raise ValueError("HalfNormalDistribution has support x >= 0.")
         self.count += weight
-        self.sum2 += x * x * weight
+        # A weight of exactly 0.0 must contribute exactly zero regardless of x's magnitude, but
+        # squaring x BEFORE weighting can overflow for an ordinary finite x, and weight * inf is
+        # nan -- silently poisoning self.sum2 for good (campaign nine, D-0209).
+        safe_x = x if weight != 0.0 else 0.0
+        self.sum2 += safe_x * safe_x * weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
         """Initialize statistics from one observation."""
@@ -314,8 +318,15 @@ class HalfNormalAccumulator(SequenceEncodableStatisticAccumulator):
         self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: HalfNormalDistribution | None
     ) -> None:
         """Accumulate weighted squared observations from encoded data."""
-        _, sq_vals = x
-        self.sum2 += np.dot(sq_vals, weights)
+        raw_vals, sq_vals = x
+        chunk_sum2 = np.dot(sq_vals, weights)
+        if not np.isfinite(chunk_sum2):
+            # Same hazard as update(): sq_vals is squared unconditionally by the encoder, before
+            # weighting. Recomputed with raw_vals masked to 0.0 wherever its own weight is exactly
+            # zero, only on this rare, already-broken path.
+            safe_raw = np.where(np.asarray(weights) != 0.0, raw_vals, 0.0)
+            chunk_sum2 = np.dot(safe_raw * safe_raw, weights)
+        self.sum2 += chunk_sum2
         self.count += np.sum(weights, dtype=np.float64)
 
     def seq_initialize(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:

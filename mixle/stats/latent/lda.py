@@ -75,6 +75,13 @@ class LDAOptimizationDiagnostics:
     residual_trace: tuple[float, ...] = ()
     impossible_documents: tuple[int, ...] = ()
 
+    # Every LDAEstimator.estimate() fit (and LabeledLDAEstimator.estimate(), which reuses this
+    # same class) attaches this unconditionally, so without this flag
+    # to_serializable()/to_json()/model_hash() raised an unhandled SerializationError for EVERY
+    # fitted instance of either family (campaign nine, D-0209). Unannotated on purpose: an
+    # annotated name would become a dataclass field.
+    __pysp_serializable__ = True
+
 
 class LDAConvergenceError(RuntimeError):
     """Raised when an LDA inner optimization cannot meet its declared contract."""

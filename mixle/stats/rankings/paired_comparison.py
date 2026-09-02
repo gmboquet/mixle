@@ -66,6 +66,12 @@ class ThurstoneMostellerFitDiagnostics:
     regularized: bool
     pseudo_count: float
 
+    # Every ThurstoneMostellerEstimator.estimate() fit attaches this unconditionally, so without
+    # this flag to_serializable()/to_json()/model_hash() raised an unhandled SerializationError for
+    # EVERY fitted instance of this family (campaign nine, D-0209). Unannotated on purpose: an
+    # annotated name would become a dataclass field.
+    __pysp_serializable__ = True
+
 
 @dataclass(frozen=True)
 class TieModelFitDiagnostics:
@@ -83,6 +89,12 @@ class TieModelFitDiagnostics:
     graph_connected: bool
     regularized: bool
     pseudo_count: float
+
+    # Every DavidsonEstimator/RaoKupperEstimator.estimate() fit attaches this unconditionally, so
+    # without this flag to_serializable()/to_json()/model_hash() raised an unhandled
+    # SerializationError for EVERY fitted instance of either family (campaign nine, D-0209).
+    # Unannotated on purpose: an annotated name would become a dataclass field.
+    __pysp_serializable__ = True
 
 
 def _comparison_graph_connected(counts: np.ndarray) -> bool:

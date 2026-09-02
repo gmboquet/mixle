@@ -307,8 +307,14 @@ class WeibullAccumulator(SequenceEncodableStatisticAccumulator):
             raise ValueError("WeibullDistribution requires observations x >= 0.")
         if x == 0.0 and weight > 0.0:
             raise ValueError(_WEIBULL_ZERO_FIT_MESSAGE % 1)
+        # A weight of exactly 0.0 must contribute exactly zero regardless of x's magnitude, but
+        # squaring x BEFORE weighting can overflow for an ordinary finite x, and inf * 0.0 is nan --
+        # silently poisoning self.sum2 for good. Masking x to 0.0 here keeps a positively-weighted
+        # call bit-identical while making a zero-weight call's contribution exactly zero at any
+        # magnitude.
+        safe_x = x if weight != 0.0 else 0.0
         self.sum += x * weight
-        self.sum2 += x * x * weight
+        self.sum2 += safe_x * safe_x * weight
         self.count += weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
@@ -323,8 +329,18 @@ class WeibullAccumulator(SequenceEncodableStatisticAccumulator):
         zero_evidence = int(np.count_nonzero((xx == 0.0) & (np.asarray(weights) > 0.0)))
         if zero_evidence:
             raise ValueError(_WEIBULL_ZERO_FIT_MESSAGE % zero_evidence)
+        chunk_sum2 = np.dot(xx * xx, weights)
+        if not np.isfinite(chunk_sum2):
+            # Same hazard as WeibullAccumulator.update: squaring xx BEFORE weighting can overflow
+            # for an ordinary finite xx, and inf * 0.0 is nan -- silently poisoning self.sum2 for
+            # every other, fully-weighted observation folded in the same chunk. Recomputed with xx
+            # masked to 0.0 wherever its own weight is exactly zero, only on this rare,
+            # already-broken path (checked via isfinite rather than masked unconditionally, to keep
+            # the ordinary path at its historical cost).
+            safe_xx = np.where(np.asarray(weights) != 0.0, xx, 0.0)
+            chunk_sum2 = np.dot(safe_xx * safe_xx, weights)
         self.sum += np.dot(xx, weights)
-        self.sum2 += np.dot(xx * xx, weights)
+        self.sum2 += chunk_sum2
         self.count += np.sum(weights, dtype=np.float64)
 
     def seq_initialize(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:

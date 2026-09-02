@@ -322,10 +322,18 @@ class LogisticAccumulator(SequenceEncodableStatisticAccumulator):
             self._activate_anchor(x)
         if self._anchor is not None:
             dx = x - self._anchor
+            # A weight of exactly 0.0 must contribute exactly zero regardless of dx's magnitude, but
+            # squaring dx BEFORE weighting can overflow for an ordinary finite dx, and inf * 0.0 is
+            # nan. Masking dx to 0.0 here keeps a positively-weighted call bit-identical while making
+            # a zero-weight call's contribution exactly zero at any magnitude.
+            safe_dx = dx if weight != 0.0 else 0.0
             self._anchored_sum += dx * weight
-            self._anchored_sum2 += dx * dx * weight
+            self._anchored_sum2 += safe_dx * safe_dx * weight
+        # Same hazard as _anchored_sum2 above: x * x can overflow for an ordinary finite x before
+        # weight is ever applied, poisoning self.sum2 for good once weight is exactly 0.0.
+        safe_x = x if weight != 0.0 else 0.0
         self.sum += x * weight
-        self.sum2 += x * x * weight
+        self.sum2 += safe_x * safe_x * weight
         self.count += weight
 
     def initialize(self, x: float, weight: float, rng: RandomState | None) -> None:
@@ -336,6 +344,16 @@ class LogisticAccumulator(SequenceEncodableStatisticAccumulator):
         """Accumulate weighted first and second moments from encoded data."""
         chunk_sum = np.dot(x, weights)
         chunk_sum2 = np.dot(x * x, weights)
+        if not np.isfinite(chunk_sum2):
+            # A weight of exactly 0.0 must contribute exactly zero to chunk_sum2 regardless of x's
+            # magnitude, but squaring x BEFORE weighting can overflow for an ordinary finite x, and
+            # inf * 0.0 is nan -- silently poisoning the raw second moment for every other,
+            # fully-weighted observation folded in the same chunk. Recomputed with x masked to 0.0
+            # wherever its own weight is exactly zero, only on this rare, already-broken path
+            # (checked via isfinite rather than masked unconditionally, to keep the ordinary path at
+            # its historical cost).
+            safe_x = np.where(weights != 0.0, x, 0.0)
+            chunk_sum2 = np.dot(safe_x * safe_x, weights)
         w_sum = np.sum(weights, dtype=np.float64)
         # Conditioning gate: activate the anchored track only when this chunk's raw moments would
         # corrupt the variance (or the anchor is already live). BEFORE the raw fold, so activation
@@ -633,8 +651,16 @@ class LogisticEstimator(ParameterEstimator):
             warn_uncorrectable_raw_moments(blended_sum_x, blended_sum_x2, blended_count, family="logistic")
             var = max(blended_sum_x2 / blended_count - loc * loc, 0.0)
 
-        scale = math.sqrt(max(3.0 * var / (math.pi * math.pi), self.min_scale * self.min_scale))
+        unfloored_scale2 = 3.0 * var / (math.pi * math.pi)
+        scale = math.sqrt(max(unfloored_scale2, self.min_scale * self.min_scale))
         dist = LogisticDistribution(loc=loc, scale=scale, name=self.name, keys=self.keys)
+        if unfloored_scale2 < self.min_scale * self.min_scale:
+            # The variance-implied scale collapsed to (or below) the family floor -- disclosed
+            # unconditionally, the same way GaussianEstimator's own variance floor discloses any
+            # time it binds (campaign nine, D-0209; the same fix as GeneralizedPareto/Gumbel/
+            # Student-t, extended here since this family already carries the identical notes
+            # infrastructure).
+            notes = notes + ("scale-floored(%.6g -> %.6g)" % (math.sqrt(max(unfloored_scale2, 0.0)), scale),)
         if notes:
             dist._numerical_repairs = notes
         return dist

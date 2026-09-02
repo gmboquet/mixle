@@ -135,6 +135,14 @@ class BradleyTerryFitDiagnostics:
     regularized: bool
     pseudo_count: float
 
+    # Every BradleyTerryEstimator.estimate() fit attaches this unconditionally, so without this
+    # flag to_serializable()/to_json()/model_hash() raised an unhandled SerializationError for
+    # EVERY fitted instance of this family (campaign nine, D-0209) -- not registered anywhere else,
+    # unlike the sibling mechanism this mirrors (ThurstoneFitDiagnostics,
+    # SpearmanRankingFitDiagnostics). Unannotated on purpose: an annotated name would become a
+    # dataclass field.
+    __pysp_serializable__ = True
+
 
 class BradleyTerryDistribution(SequenceEncodableProbabilityDistribution):
     """Bradley-Terry paired-comparison model with centered log-worths ``log_w``."""
@@ -156,15 +164,30 @@ class BradleyTerryDistribution(SequenceEncodableProbabilityDistribution):
         name: str | None = None,
         keys: str | None = None,
         fit_diagnostics: BradleyTerryFitDiagnostics | None = None,
+        *,
+        _log_w_already_centered: bool = False,
     ) -> None:
         lw = np.asarray(log_w, dtype=float)
         if lw.ndim != 1 or lw.size < 2 or not np.all(np.isfinite(lw)):
             raise ValueError("log_w must be a finite length-K vector with K >= 2.")
-        centered_wide = lw.astype(np.longdouble) - np.mean(lw.astype(np.longdouble))
-        if np.all(np.abs(centered_wide) <= np.finfo(np.float64).max):
-            self.log_w = np.asarray(centered_wide, dtype=np.float64)
+        if _log_w_already_centered:
+            # __pysp_setstate__ (below) restores a log_w that was already centered once, at the
+            # original object's construction time, before serialization -- re-centering an
+            # already-centered array through the SAME longdouble computation is not exactly
+            # idempotent (the longdouble mean of an already-centered-then-float64-rounded array is
+            # not always exactly 0), so redoing it here can shift one or more entries by 1-few ULP
+            # relative to the state being restored (campaign nine, D-0209, round-2 review -- the
+            # same defect class Thurstone's own _mu_already_centered flag exists to close).
+            # Restoring state means reproducing it exactly, not reapplying a transformation that
+            # was already applied -- this is for __pysp_setstate__'s exclusive use, never for
+            # ordinary construction.
+            self.log_w = np.array(lw, dtype=np.float64, copy=True)
         else:
-            self.log_w = lw.copy()
+            centered_wide = lw.astype(np.longdouble) - np.mean(lw.astype(np.longdouble))
+            if np.all(np.abs(centered_wide) <= np.finfo(np.float64).max):
+                self.log_w = np.asarray(centered_wide, dtype=np.float64)
+            else:
+                self.log_w = lw.copy()
         self.log_w.setflags(write=False)
         self.dim = lw.size
         self.log_pairs = math.log(self.dim * (self.dim - 1) / 2.0)
@@ -173,6 +196,38 @@ class BradleyTerryDistribution(SequenceEncodableProbabilityDistribution):
         if fit_diagnostics is not None and not isinstance(fit_diagnostics, BradleyTerryFitDiagnostics):
             raise TypeError("fit_diagnostics must be a BradleyTerryFitDiagnostics record.")
         self.fit_diagnostics = fit_diagnostics
+
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        """Return the constructor-owned state used by the safe JSON codec."""
+        return {
+            "log_w": self.log_w,
+            "name": self.name,
+            "keys": self.keys,
+            "fit_diagnostics": self.fit_diagnostics,
+        }
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        """Rebuild from constructor-owned state without re-centering an already-centered log_w.
+
+        ``state["log_w"]`` was already centered once, in ``__init__`` at the original object's
+        construction time, before ``__pysp_getstate__`` serialized it verbatim -- so this must
+        restore that exact array rather than centering it again (see
+        ``_log_w_already_centered`` on ``__init__``). A second centering pass is not bit-exact
+        idempotent, and the mismatch is exactly the kind of silent divergence
+        :func:`mixle.data.hashing.model_hash` is meant to catch, not produce (campaign nine,
+        D-0209, round-2 review).
+        """
+        required = {"log_w", "name", "keys"}
+        missing = required - set(state)
+        if missing:
+            raise ValueError("BradleyTerryDistribution state is missing %s" % ", ".join(sorted(missing)))
+        self.__init__(
+            state["log_w"],
+            name=state["name"],
+            keys=state["keys"],
+            fit_diagnostics=state.get("fit_diagnostics"),
+            _log_w_already_centered=True,
+        )
 
     def __str__(self) -> str:
         return "BradleyTerryDistribution(%s, name=%s, keys=%s)" % (

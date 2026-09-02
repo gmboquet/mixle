@@ -88,6 +88,13 @@ class LowRankPermutationFitDiagnostics:
     pseudo_count: float
     marginal_algorithm: str = "exact_log_permanent"
 
+    # Every LowRankPermutationEstimator.estimate() fit attaches this unconditionally, so without
+    # this flag to_serializable()/to_json()/model_hash() raised an unhandled SerializationError for
+    # EVERY fitted instance of this family (campaign nine, D-0209) -- not registered anywhere else,
+    # unlike the sibling mechanism this mirrors (ThurstoneFitDiagnostics, SpearmanRankingFitDiagnostics).
+    # Unannotated on purpose: an annotated name would become a dataclass field.
+    __pysp_serializable__ = True
+
 
 @dataclass(frozen=True)
 class LowRankPermutationComputationDiagnostics:
@@ -100,6 +107,12 @@ class LowRankPermutationComputationDiagnostics:
     sampler_algorithm: str = "exact_conditional_permanent"
     sampler_exact: bool = True
     optional_relaxation: str = "sinkhorn_bethe_transport"
+
+    # Every LowRankPermutationDistribution.__init__ attaches this unconditionally (not an optional
+    # constructor argument), so without this flag to_serializable()/to_json()/model_hash() raised an
+    # unhandled SerializationError for EVERY instance of this family, fitted or not (campaign nine,
+    # D-0209). Unannotated on purpose: an annotated name would become a dataclass field.
+    __pysp_serializable__ = True
 
 
 class LowRankPermutationDistribution(SequenceEncodableProbabilityDistribution):

@@ -143,6 +143,7 @@
         "mixle.stats.latent.hidden_markov.HiddenMarkovModelDistribution",
         "mixle.stats.latent.hierarchical.HierarchicalNormalDistribution",
         "mixle.stats.latent.hierarchical.HierarchicalNormalEstimator",
+        "mixle.stats.latent.hierarchical.HierarchicalNormalFitDiagnostics",
         "mixle.stats.latent.hierarchical_mixture.HierarchicalMixtureDistribution",
         "mixle.stats.latent.hierarchical_mixture.HierarchicalMixtureEstimator",
         "mixle.stats.latent.hmm_determinize.DeterminizedSequenceDistribution",
@@ -158,6 +159,7 @@
         "mixle.stats.latent.labeled_lda.LabeledLDAEstimator",
         "mixle.stats.latent.lda.LDADistribution",
         "mixle.stats.latent.lda.LDAEstimator",
+        "mixle.stats.latent.lda.LDAOptimizationDiagnostics",
         "mixle.stats.latent.lookback_hidden_markov_model.LookbackHiddenMarkovModelDistribution",
         "mixle.stats.latent.lookback_hidden_markov_model.LookbackHiddenMarkovModelEstimator",
         "mixle.stats.latent.mixture.MixtureDistribution",
@@ -166,6 +168,7 @@
         "mixle.stats.latent.probabilistic_circuit.ProbabilisticCircuitEstimator",
         "mixle.stats.latent.probabilistic_pca.ProbabilisticPCADistribution",
         "mixle.stats.latent.probabilistic_pca.ProbabilisticPCAEstimator",
+        "mixle.stats.latent.quantized_hidden_markov_model.QuantizedHMMFitDiagnostics",
         "mixle.stats.latent.quantized_hidden_markov_model.QuantizedHiddenMarkovEstimator",
         "mixle.stats.latent.quantized_hidden_markov_model.QuantizedHiddenMarkovModelDistribution",
         "mixle.stats.latent.responsibility_attention.ResponsibilityAttentionDistribution",
@@ -254,24 +257,34 @@
         "mixle.stats.processes.temporal.PeriodicTimeEstimator",
         "mixle.stats.rankings.bradley_terry.BradleyTerryDistribution",
         "mixle.stats.rankings.bradley_terry.BradleyTerryEstimator",
+        "mixle.stats.rankings.bradley_terry.BradleyTerryFitDiagnostics",
         "mixle.stats.rankings.ewens.EwensDistribution",
         "mixle.stats.rankings.ewens.EwensEstimator",
+        "mixle.stats.rankings.generalized_mallows.GeneralizedMallowsComputationDiagnostics",
         "mixle.stats.rankings.generalized_mallows.GeneralizedMallowsDistribution",
         "mixle.stats.rankings.generalized_mallows.GeneralizedMallowsEstimator",
+        "mixle.stats.rankings.generalized_mallows.GeneralizedMallowsFitDiagnostics",
         "mixle.stats.rankings.generalized_mallows_model.GeneralizedMallowsModelDistribution",
         "mixle.stats.rankings.generalized_mallows_model.GeneralizedMallowsModelEstimator",
+        "mixle.stats.rankings.generalized_mallows_model.GeneralizedMallowsModelFitDiagnostics",
+        "mixle.stats.rankings.low_rank_permutation.LowRankPermutationComputationDiagnostics",
         "mixle.stats.rankings.low_rank_permutation.LowRankPermutationDistribution",
         "mixle.stats.rankings.low_rank_permutation.LowRankPermutationEstimator",
+        "mixle.stats.rankings.low_rank_permutation.LowRankPermutationFitDiagnostics",
         "mixle.stats.rankings.mallows.MallowsDistribution",
         "mixle.stats.rankings.mallows.MallowsEstimator",
+        "mixle.stats.rankings.mallows.MallowsFitDiagnostics",
         "mixle.stats.rankings.matching.MatchingDistribution",
         "mixle.stats.rankings.matching.MatchingEstimator",
+        "mixle.stats.rankings.matching.MatchingFitDiagnostics",
         "mixle.stats.rankings.paired_comparison.DavidsonDistribution",
         "mixle.stats.rankings.paired_comparison.DavidsonEstimator",
         "mixle.stats.rankings.paired_comparison.RaoKupperDistribution",
         "mixle.stats.rankings.paired_comparison.RaoKupperEstimator",
         "mixle.stats.rankings.paired_comparison.ThurstoneMostellerDistribution",
         "mixle.stats.rankings.paired_comparison.ThurstoneMostellerEstimator",
+        "mixle.stats.rankings.paired_comparison.ThurstoneMostellerFitDiagnostics",
+        "mixle.stats.rankings.paired_comparison.TieModelFitDiagnostics",
         "mixle.stats.rankings.paired_comparison._BaseTieDistribution",
         "mixle.stats.rankings.plackett_luce.PlackettLuceDistribution",
         "mixle.stats.rankings.plackett_luce.PlackettLuceEstimator",
@@ -1356,6 +1369,13 @@
           "state_fields": null,
           "state_version": 1
         },
+        "mixle.stats.latent.hierarchical.HierarchicalNormalFitDiagnostics": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
         "mixle.stats.latent.hierarchical_mixture.HierarchicalMixtureDistribution": {
           "codec": "constructor-validated",
           "migrations": [],
@@ -1461,6 +1481,13 @@
           "state_fields": null,
           "state_version": 1
         },
+        "mixle.stats.latent.lda.LDAOptimizationDiagnostics": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
         "mixle.stats.latent.lookback_hidden_markov_model.LookbackHiddenMarkovModelDistribution": {
           "codec": "constructor-validated",
           "migrations": [],
@@ -1524,6 +1551,13 @@
           "state_version": 1
         },
         "mixle.stats.latent.probabilistic_pca.ProbabilisticPCAEstimator": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.latent.quantized_hidden_markov_model.QuantizedHMMFitDiagnostics": {
           "codec": "constructor-validated",
           "migrations": [],
           "stability": "provisional",
@@ -2133,13 +2167,20 @@
           "state_version": 1
         },
         "mixle.stats.rankings.bradley_terry.BradleyTerryDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
           "state_version": 1
         },
         "mixle.stats.rankings.bradley_terry.BradleyTerryEstimator": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.rankings.bradley_terry.BradleyTerryFitDiagnostics": {
           "codec": "constructor-validated",
           "migrations": [],
           "stability": "provisional",
@@ -2160,6 +2201,13 @@
           "state_fields": null,
           "state_version": 1
         },
+        "mixle.stats.rankings.generalized_mallows.GeneralizedMallowsComputationDiagnostics": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
         "mixle.stats.rankings.generalized_mallows.GeneralizedMallowsDistribution": {
           "codec": "constructor-validated",
           "migrations": [],
@@ -2168,6 +2216,13 @@
           "state_version": 1
         },
         "mixle.stats.rankings.generalized_mallows.GeneralizedMallowsEstimator": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.rankings.generalized_mallows.GeneralizedMallowsFitDiagnostics": {
           "codec": "constructor-validated",
           "migrations": [],
           "stability": "provisional",
@@ -2188,6 +2243,20 @@
           "state_fields": null,
           "state_version": 1
         },
+        "mixle.stats.rankings.generalized_mallows_model.GeneralizedMallowsModelFitDiagnostics": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.rankings.low_rank_permutation.LowRankPermutationComputationDiagnostics": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
         "mixle.stats.rankings.low_rank_permutation.LowRankPermutationDistribution": {
           "codec": "constructor-validated",
           "migrations": [],
@@ -2196,6 +2265,13 @@
           "state_version": 1
         },
         "mixle.stats.rankings.low_rank_permutation.LowRankPermutationEstimator": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.rankings.low_rank_permutation.LowRankPermutationFitDiagnostics": {
           "codec": "constructor-validated",
           "migrations": [],
           "stability": "provisional",
@@ -2216,6 +2292,13 @@
           "state_fields": null,
           "state_version": 1
         },
+        "mixle.stats.rankings.mallows.MallowsFitDiagnostics": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
         "mixle.stats.rankings.matching.MatchingDistribution": {
           "codec": "constructor-validated",
           "migrations": [],
@@ -2224,6 +2307,13 @@
           "state_version": 1
         },
         "mixle.stats.rankings.matching.MatchingEstimator": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.rankings.matching.MatchingFitDiagnostics": {
           "codec": "constructor-validated",
           "migrations": [],
           "stability": "provisional",
@@ -2266,6 +2356,20 @@
           "state_version": 1
         },
         "mixle.stats.rankings.paired_comparison.ThurstoneMostellerEstimator": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.rankings.paired_comparison.ThurstoneMostellerFitDiagnostics": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.rankings.paired_comparison.TieModelFitDiagnostics": {
           "codec": "constructor-validated",
           "migrations": [],
           "stability": "provisional",
@@ -3213,6 +3317,7 @@
         "mixle.stats.latent.hidden_markov.HiddenMarkovModelDistribution",
         "mixle.stats.latent.hierarchical.HierarchicalNormalDistribution",
         "mixle.stats.latent.hierarchical.HierarchicalNormalEstimator",
+        "mixle.stats.latent.hierarchical.HierarchicalNormalFitDiagnostics",
         "mixle.stats.latent.hierarchical_mixture.HierarchicalMixtureDistribution",
         "mixle.stats.latent.hierarchical_mixture.HierarchicalMixtureEstimator",
         "mixle.stats.latent.hmm_determinize.DeterminizedSequenceDistribution",
@@ -3228,6 +3333,7 @@
         "mixle.stats.latent.labeled_lda.LabeledLDAEstimator",
         "mixle.stats.latent.lda.LDADistribution",
         "mixle.stats.latent.lda.LDAEstimator",
+        "mixle.stats.latent.lda.LDAOptimizationDiagnostics",
         "mixle.stats.latent.lookback_hidden_markov_model.LookbackHiddenMarkovModelDistribution",
         "mixle.stats.latent.lookback_hidden_markov_model.LookbackHiddenMarkovModelEstimator",
         "mixle.stats.latent.mixture.MixtureDistribution",
@@ -3236,6 +3342,7 @@
         "mixle.stats.latent.probabilistic_circuit.ProbabilisticCircuitEstimator",
         "mixle.stats.latent.probabilistic_pca.ProbabilisticPCADistribution",
         "mixle.stats.latent.probabilistic_pca.ProbabilisticPCAEstimator",
+        "mixle.stats.latent.quantized_hidden_markov_model.QuantizedHMMFitDiagnostics",
         "mixle.stats.latent.quantized_hidden_markov_model.QuantizedHiddenMarkovEstimator",
         "mixle.stats.latent.quantized_hidden_markov_model.QuantizedHiddenMarkovModelDistribution",
         "mixle.stats.latent.responsibility_attention.ResponsibilityAttentionDistribution",
@@ -3324,24 +3431,34 @@
         "mixle.stats.processes.temporal.PeriodicTimeEstimator",
         "mixle.stats.rankings.bradley_terry.BradleyTerryDistribution",
         "mixle.stats.rankings.bradley_terry.BradleyTerryEstimator",
+        "mixle.stats.rankings.bradley_terry.BradleyTerryFitDiagnostics",
         "mixle.stats.rankings.ewens.EwensDistribution",
         "mixle.stats.rankings.ewens.EwensEstimator",
+        "mixle.stats.rankings.generalized_mallows.GeneralizedMallowsComputationDiagnostics",
         "mixle.stats.rankings.generalized_mallows.GeneralizedMallowsDistribution",
         "mixle.stats.rankings.generalized_mallows.GeneralizedMallowsEstimator",
+        "mixle.stats.rankings.generalized_mallows.GeneralizedMallowsFitDiagnostics",
         "mixle.stats.rankings.generalized_mallows_model.GeneralizedMallowsModelDistribution",
         "mixle.stats.rankings.generalized_mallows_model.GeneralizedMallowsModelEstimator",
+        "mixle.stats.rankings.generalized_mallows_model.GeneralizedMallowsModelFitDiagnostics",
+        "mixle.stats.rankings.low_rank_permutation.LowRankPermutationComputationDiagnostics",
         "mixle.stats.rankings.low_rank_permutation.LowRankPermutationDistribution",
         "mixle.stats.rankings.low_rank_permutation.LowRankPermutationEstimator",
+        "mixle.stats.rankings.low_rank_permutation.LowRankPermutationFitDiagnostics",
         "mixle.stats.rankings.mallows.MallowsDistribution",
         "mixle.stats.rankings.mallows.MallowsEstimator",
+        "mixle.stats.rankings.mallows.MallowsFitDiagnostics",
         "mixle.stats.rankings.matching.MatchingDistribution",
         "mixle.stats.rankings.matching.MatchingEstimator",
+        "mixle.stats.rankings.matching.MatchingFitDiagnostics",
         "mixle.stats.rankings.paired_comparison.DavidsonDistribution",
         "mixle.stats.rankings.paired_comparison.DavidsonEstimator",
         "mixle.stats.rankings.paired_comparison.RaoKupperDistribution",
         "mixle.stats.rankings.paired_comparison.RaoKupperEstimator",
         "mixle.stats.rankings.paired_comparison.ThurstoneMostellerDistribution",
         "mixle.stats.rankings.paired_comparison.ThurstoneMostellerEstimator",
+        "mixle.stats.rankings.paired_comparison.ThurstoneMostellerFitDiagnostics",
+        "mixle.stats.rankings.paired_comparison.TieModelFitDiagnostics",
         "mixle.stats.rankings.paired_comparison._BaseTieDistribution",
         "mixle.stats.rankings.plackett_luce.PlackettLuceDistribution",
         "mixle.stats.rankings.plackett_luce.PlackettLuceEstimator",
@@ -4525,6 +4642,13 @@
           "state_fields": null,
           "state_version": 1
         },
+        "mixle.stats.latent.hierarchical.HierarchicalNormalFitDiagnostics": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
         "mixle.stats.latent.hierarchical_mixture.HierarchicalMixtureDistribution": {
           "codec": "constructor-validated",
           "migrations": [],
@@ -4630,6 +4754,13 @@
           "state_fields": null,
           "state_version": 1
         },
+        "mixle.stats.latent.lda.LDAOptimizationDiagnostics": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
         "mixle.stats.latent.lookback_hidden_markov_model.LookbackHiddenMarkovModelDistribution": {
           "codec": "constructor-validated",
           "migrations": [],
@@ -4693,6 +4824,13 @@
           "state_version": 1
         },
         "mixle.stats.latent.probabilistic_pca.ProbabilisticPCAEstimator": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.latent.quantized_hidden_markov_model.QuantizedHMMFitDiagnostics": {
           "codec": "constructor-validated",
           "migrations": [],
           "stability": "provisional",
@@ -5302,13 +5440,20 @@
           "state_version": 1
         },
         "mixle.stats.rankings.bradley_terry.BradleyTerryDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
           "state_version": 1
         },
         "mixle.stats.rankings.bradley_terry.BradleyTerryEstimator": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.rankings.bradley_terry.BradleyTerryFitDiagnostics": {
           "codec": "constructor-validated",
           "migrations": [],
           "stability": "provisional",
@@ -5329,6 +5474,13 @@
           "state_fields": null,
           "state_version": 1
         },
+        "mixle.stats.rankings.generalized_mallows.GeneralizedMallowsComputationDiagnostics": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
         "mixle.stats.rankings.generalized_mallows.GeneralizedMallowsDistribution": {
           "codec": "constructor-validated",
           "migrations": [],
@@ -5337,6 +5489,13 @@
           "state_version": 1
         },
         "mixle.stats.rankings.generalized_mallows.GeneralizedMallowsEstimator": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.rankings.generalized_mallows.GeneralizedMallowsFitDiagnostics": {
           "codec": "constructor-validated",
           "migrations": [],
           "stability": "provisional",
@@ -5357,6 +5516,20 @@
           "state_fields": null,
           "state_version": 1
         },
+        "mixle.stats.rankings.generalized_mallows_model.GeneralizedMallowsModelFitDiagnostics": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.rankings.low_rank_permutation.LowRankPermutationComputationDiagnostics": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
         "mixle.stats.rankings.low_rank_permutation.LowRankPermutationDistribution": {
           "codec": "constructor-validated",
           "migrations": [],
@@ -5365,6 +5538,13 @@
           "state_version": 1
         },
         "mixle.stats.rankings.low_rank_permutation.LowRankPermutationEstimator": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.rankings.low_rank_permutation.LowRankPermutationFitDiagnostics": {
           "codec": "constructor-validated",
           "migrations": [],
           "stability": "provisional",
@@ -5385,6 +5565,13 @@
           "state_fields": null,
           "state_version": 1
         },
+        "mixle.stats.rankings.mallows.MallowsFitDiagnostics": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
         "mixle.stats.rankings.matching.MatchingDistribution": {
           "codec": "constructor-validated",
           "migrations": [],
@@ -5393,6 +5580,13 @@
           "state_version": 1
         },
         "mixle.stats.rankings.matching.MatchingEstimator": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.rankings.matching.MatchingFitDiagnostics": {
           "codec": "constructor-validated",
           "migrations": [],
           "stability": "provisional",
@@ -5435,6 +5629,20 @@
           "state_version": 1
         },
         "mixle.stats.rankings.paired_comparison.ThurstoneMostellerEstimator": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.rankings.paired_comparison.ThurstoneMostellerFitDiagnostics": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.rankings.paired_comparison.TieModelFitDiagnostics": {
           "codec": "constructor-validated",
           "migrations": [],
           "stability": "provisional",

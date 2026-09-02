@@ -567,11 +567,16 @@ class LogGaussianAccumulator(AnchoredMomentTrack, SequenceEncodableStatisticAccu
 
         """
         log_x = np.log(x)
-        x_weight = log_x * weight
         # BEFORE the raw fold, so an activation only converts content the gate already vouched for.
         self._anchor_scalar(float(log_x), weight)
+        # A weight of exactly 0.0 must contribute exactly zero regardless of log_x's value --
+        # including log(0) = -inf at this family's own domain boundary, an ordinary EM
+        # responsibility-of-zero call, not misuse. -inf * 0.0 = nan on the LINEAR term alone, before
+        # any squaring, so masking must happen before the first multiply (campaign nine, D-0209).
+        safe_log_x = log_x if weight != 0.0 else 0.0
+        x_weight = safe_log_x * weight
         self.log_sum += x_weight
-        self.log_sum2 += log_x * x_weight
+        self.log_sum2 += safe_log_x * x_weight
         self.count += weight
         self.count2 += weight
 
@@ -830,10 +835,17 @@ class LogGaussianEstimator(ParameterEstimator):
         new_b = old_b + 0.5 * (new_b0 + new_b1)
 
         denom = new_a - 0.5
-        new_sigma2 = new_b / denom if denom > 0.0 else self.min_covar
-        new_sigma2 = max(new_sigma2, self.min_covar)  # match the MLE-path variance floor
+        unfloored_sigma2 = new_b / denom if denom > 0.0 else self.min_covar
+        new_sigma2 = max(unfloored_sigma2, self.min_covar)  # match the MLE-path variance floor
         new_prior = NormalGammaDistribution(new_mu, new_n, new_a, new_b)
-        return LogGaussianDistribution(new_mu, new_sigma2, name=self.name, keys=self.keys, prior=new_prior)
+        rv = LogGaussianDistribution(new_mu, new_sigma2, name=self.name, keys=self.keys, prior=new_prior)
+        if unfloored_sigma2 < self.min_covar:
+            # The conjugate posterior variance collapsed to (or below) the family floor --
+            # disclosed unconditionally, matching the sibling MLE branch's own "variance-floored"
+            # disclosure a few dozen lines below, and GaussianEstimator._estimate_conjugate's
+            # _record_variance_floor precedent (campaign nine, D-0209).
+            rv._numerical_repairs = ("variance-floored(%.6g -> %.6g)" % (unfloored_sigma2, new_sigma2),)
+        return rv
 
     def estimate(self, nobs: float | None, suff_stat: tuple[float, float, float, float]) -> "LogGaussianDistribution":
         """Estimate a log-Gaussian distribution from accumulated log moments.
@@ -891,7 +903,14 @@ class LogGaussianEstimator(ParameterEstimator):
         if count == 0.0 and pc2 in (None, 0.0) and prior_variance is not None:
             sigma2 = prior_variance
 
+        unfloored_sigma2 = sigma2
         sigma2 = max(sigma2, self.min_covar)
+        if unfloored_sigma2 < self.min_covar:
+            # The variance collapsed to (or below) the family floor -- disclosed unconditionally,
+            # the same way GaussianEstimator's own variance floor discloses any time it binds
+            # (campaign nine, D-0209; the same fix as GeneralizedPareto/Gumbel/Student-t/Logistic,
+            # extended here since this family already carries the identical notes infrastructure).
+            notes = notes + ("variance-floored(%.6g -> %.6g)" % (unfloored_sigma2, sigma2),)
         rv = LogGaussianDistribution(mu, sigma2, name=self.name, keys=self.keys, prior=self.prior)
         if notes:
             rv._numerical_repairs = notes

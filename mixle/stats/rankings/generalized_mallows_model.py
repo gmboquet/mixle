@@ -67,6 +67,14 @@ class GeneralizedMallowsModelFitDiagnostics:
     regularized: bool
     pseudo_count: float
 
+    # Every GeneralizedMallowsModelEstimator.estimate() fit attaches this unconditionally, so
+    # without this flag to_serializable()/to_json()/model_hash() raised an unhandled
+    # SerializationError for EVERY fitted instance of this family (campaign nine, D-0209) -- not
+    # registered anywhere else, unlike the sibling mechanism this mirrors (ThurstoneFitDiagnostics,
+    # SpearmanRankingFitDiagnostics). Unannotated on purpose: an annotated name would become a
+    # dataclass field.
+    __pysp_serializable__ = True
+
 
 def _log_psi(theta: float, m: int) -> float:
     """``log sum_{r=0}^{m} exp(-theta r)`` -- log-normalizer of a stage with values ``{0..m}``."""

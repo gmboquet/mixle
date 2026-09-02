@@ -743,8 +743,13 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
             self._activate_anchor(x)
         if self._anchor is not None:
             dx = x - self._anchor
+            # A weight of exactly 0.0 must contribute exactly zero regardless of dx's magnitude, but
+            # squaring dx BEFORE weighting can overflow for an ordinary finite dx, and inf * 0.0 is
+            # nan. Masking dx to 0.0 here keeps a positively-weighted call bit-identical while making
+            # a zero-weight call's contribution exactly zero at any magnitude.
+            safe_dx = dx if weight != 0.0 else 0.0
             self._anchored_sum += dx * weight
-            self._anchored_sum2 += dx * dx * weight
+            self._anchored_sum2 += safe_dx * safe_dx * weight
         x_weight = x * weight
         if self.compensated:
             self._sum_acc.add(x_weight)
@@ -800,6 +805,16 @@ class GaussianAccumulator(SequenceEncodableStatisticAccumulator):
         """
         chunk_sum = np.dot(x, weights)
         chunk_sum2 = np.dot(x * x, weights)
+        if not np.isfinite(chunk_sum2):
+            # A weight of exactly 0.0 must contribute exactly zero to chunk_sum2 regardless of x's
+            # magnitude, but squaring x BEFORE weighting can overflow for an ordinary finite x, and
+            # inf * 0.0 is nan -- silently poisoning the raw second moment for every other,
+            # fully-weighted observation folded in the same chunk. Recomputed with x masked to 0.0
+            # wherever its own weight is exactly zero, only on this rare, already-broken path
+            # (checked via isfinite rather than masked unconditionally, to keep the ordinary path at
+            # its historical cost; see numerics_error_receipts_test.py's disabled-path overhead pin).
+            safe_x = np.where(weights != 0.0, x, 0.0)
+            chunk_sum2 = np.dot(safe_x * safe_x, weights)
         w_sum = weights.sum()
         # Conditioning gate: activate the anchored track only when this chunk's raw moments would
         # corrupt the variance (or the anchor is already live). BEFORE the raw fold, so activation
