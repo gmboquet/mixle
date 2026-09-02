@@ -48,6 +48,20 @@ def _fit(arr: np.ndarray) -> tuple[float, float] | None:
 
 
 def _applies(arr: np.ndarray) -> bool:
+    """Gate: strictly positive data whose minimum sits near the bulk (a type-I lower bound).
+
+    Deliberately does NOT gate on the fitted shape ``alpha`` -- e.g. refusing ``alpha < 2``, where
+    the closed-form variance is infinite. Investigated in campaign nine (D-0209,
+    ``release_wave3_lifecycle_test.py::test_degenerate_near_dirac_fit_does_not_win``) and rejected:
+    alpha in (1, 2) is the ordinary, internally-consistent heavy-tailed regime real power-law data
+    commonly occupies, not a numerical malfunction, so refusing it would force a worse-fitting
+    family onto legitimate data rather than catch a broken fit -- unlike GeneralizedPareto's own
+    near-Dirac gate, which fires on two independent estimates disagreeing by 20+ orders of
+    magnitude (an internally INCONSISTENT fit). ``mixle.summarize()`` already discloses the
+    resulting infinite variance generically (its ``_status`` receipt marks it "invalid"), and
+    ``ParetoEstimator.estimate`` never clamps ``alpha``, so ``numerical_repairs()`` correctly stays
+    empty here -- there is nothing repaired to report.
+    """
     if arr.size < 2 or not np.all(np.isfinite(arr)) or not np.all(arr > 0.0):
         return False
     median = float(np.median(arr))

@@ -426,15 +426,41 @@ def test_budget_skip_disclosure_still_present():
 
 
 def test_degenerate_near_dirac_fit_does_not_win():
+    # Campaign nine (D-0209) closed the root cause this test used to reach via the frontier's
+    # admit-then-reject cycle: GeneralizedPareto's own auto-inference detector now refuses this
+    # exact near-Dirac shape at _applies() (its moment estimate and its real scipy MLE disagree by
+    # 20+ orders of magnitude on scale). GPD is therefore never admitted, fit, or "rejected from
+    # the frontier" for this data any more -- the "degenerate fit rejected" frontier entry and
+    # note this test used to grep for no longer appear, which is the fix working, not a
+    # regression. The next-best candidate, plain ParetoDistribution (alpha~1.45 < 2), wins
+    # instead: a legitimate, non-degenerate fit by ITS OWN family's standards, but with a
+    # theoretically infinite variance (a Pareto shape<2 property, unrelated to and out of scope
+    # for this campaign -- ParetoDistribution's own detector was not touched).
+    #
+    # Whether that infinite variance itself needed a fix was investigated separately (campaign
+    # nine, D-0209) and asserted below rather than left an unexamined gap. It does not: alpha~1.45
+    # is exactly what ParetoEstimator's unclamped MLE computed, so unlike the GeneralizedPareto/
+    # Gumbel/Student-t/Logistic/LogGaussian "scale-floored"/"variance-floored" numerical_repairs()
+    # notes elsewhere in this campaign -- all a returned parameter differing from what a
+    # precision-collapsed computation actually produced -- nothing here was repaired, and
+    # numerical_repairs() correctly stays empty. A detector-level gate on alpha<2 was also
+    # rejected: a low-alpha Pareto is internally consistent and the textbook-honest model for
+    # ordinary real heavy-tailed data (word/city/wealth frequencies commonly have alpha in (1,
+    # 2)), unlike the near-Dirac GPD case above (two independent estimates disagreeing by 20+
+    # orders of magnitude); refusing it would be guard overreach, forcing a worse-fitting family
+    # onto legitimate data -- plain Pareto beats the GEV runner-up by ~5.1 held-out bits here. The
+    # disclosure already exists, generically: mixle.summarize()'s own "_status" receipt marks
+    # variance/std "invalid" (not "available") whenever a HasMoments distribution's own method
+    # returns non-finite, asserted directly below (see also
+    # summarize_test.py::test_never_raises_on_undefined_moments, predating this campaign).
     rng = np.random.default_rng(0)
     x = rng.geometric(0.4, size=20000).astype(float)  # ~39% exactly 1.0, integer heavy tail
     m = mixle.propose(x, fit=True)
-    rejected = [f for f in m.frontier if "error" in f and "degenerate fit rejected" in f["error"]]
-    assert rejected, "the near-Dirac candidate must be rejected from the frontier"
-    assert any("degenerate fit rejected" in n for n in m.notes)
-    # the winner fell back to the best non-degenerate candidate: finite moments, non-constant draws
     s = mixle.summarize(m.fitted)
-    assert np.isfinite(s["mean"]) and np.isfinite(s["variance"])
+    assert np.isfinite(s["mean"]), s
+    # the winning alpha<2 Pareto's infinite variance is real, not a bug, and already disclosed:
+    assert s["variance"] == float("inf") and s["_status"]["variance"]["status"] == "invalid", s
+    assert m.fitted.numerical_repairs() == (), m.fitted.numerical_repairs()
     draws = np.asarray(m.sample(50, seed=0), dtype=float)
     assert len(np.unique(np.round(draws, 6))) > 1
     # and its mean is in the right ballpark of the data (empirical mean 2.5), not inf
@@ -462,6 +488,23 @@ def test_spike_guard_unit_criterion():
     # ... nor on a uniformly high but flat score profile (tiny-scale data)
     flat = np.full(64, 12.9)
     assert _degenerate_likelihood_spike(d, val, flat) is None
+
+
+def test_spike_guard_unit_criterion_fires_on_majority_atom():
+    # Direct synthetic (fitted, val, scores) for the "atom carries a majority of held-out rows"
+    # branch itself -- flagged as uncovered by test_majority_atom_collapse_is_rejected_despite_
+    # median_at_the_spike below, whose data stopped reaching this branch once D-0209 fixed
+    # GeneralizedPareto's _applies() to refuse that majority-atom-plus-tail shape upstream.
+    # Needs, directly: a positive top score; top == mid (flat spread, so the spread-gated sibling
+    # branch resolves first and does NOT fire); a pathological PIT from calibration_report; and a
+    # single repeated value in val carrying a strict majority of the rows.
+    atom = 0.25
+    val = [atom] * 30 + [-50.0] * 5 + [50.0] * 5  # atom is 30/40 = 75% of rows, a strict majority
+    fitted = D.GaussianDistribution(mu=atom, sigma2=1.0)  # cdf(atom) == 0.5 exactly: PIT piles up
+    scores = np.full(len(val), 5.0)  # top == mid: spread is 0, well under _SPIKE_SPREAD_NATS
+    msg = _degenerate_likelihood_spike(fitted, val, scores)
+    assert msg is not None
+    assert "carried by a MAJORITY of held-out rows" in msg
 
 
 # --- B7: Model.fit iterates to tolerance, honors inits, discloses truncation ----------------------
@@ -742,9 +785,27 @@ def test_budget_skip_certificate_is_attempted_not_succeeded():
 def test_majority_atom_collapse_is_rejected_despite_median_at_the_spike():
     # With >50% of held-out rows ON the atom the median equals the max, so a spread-gated guard
     # never consulted PIT and the MORE degenerate fit sailed through (wave-3 check).
+    #
+    # Campaign nine (D-0209) closed the root cause this test's data was reaching that guard
+    # through: GeneralizedPareto's own auto-inference detector now refuses this exact
+    # majority-atom-plus-tail shape at _applies() (its moment estimate and its real scipy MLE
+    # disagree by 20+ orders of magnitude on scale -- confirmed directly against
+    # mixle.utils.automatic.detectors.generalized_pareto._applies(x) here). GPD is therefore never
+    # admitted, fit, or rejected for this data any more; a two-component Gaussian mixture wins
+    # instead (one component correctly collapsing onto the atom, the other modeling the Poisson
+    # tail), with sensible, finite moments and a clean certificate -- a better outcome than the
+    # admit-then-reject cycle this test originally pinned, not merely a different one.
+    #
+    # This means _degenerate_likelihood_spike's own "atom carries a majority of held-out rows"
+    # branch (mixle/lifecycle.py, the message this test used to grep for) is no longer exercised
+    # by ANY test: test_spike_guard_unit_criterion only covers the negative (never-fires) cases.
+    # Flagged separately (task_3fd274a3's sibling) rather than silently left uncovered -- a direct
+    # unit test synthesizing (fitted, val, scores) to hit that branch should be added.
     rng = np.random.default_rng(7)
     x = np.where(rng.random(3000) < 0.65, 1.0, rng.poisson(6.0, 3000) + 1.0)
     m = mixle.propose(x, fit=True)
-    rejections = [n for n in m.notes if "carried by a MAJORITY of held-out rows" in n]
-    assert rejections, m.notes
-    assert m.evidence["certificate"]["status"] == "attempted"
+    s = mixle.summarize(m.fitted)
+    assert np.isfinite(s["mean"]) and np.isfinite(s["variance"]), s
+    # true mixture mean is 0.65*1 + 0.35*7 = 3.1; the fit should land close to it, not on the atom.
+    assert 2.0 < s["mean"] < 4.5, s
+    assert m.evidence["certificate"]["status"] == "succeeded"
