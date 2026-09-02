@@ -68,6 +68,32 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
   for Megatron, Ray Train, and Lightning Fabric. Hardware-dependent performance and multi-GPU claims
   remain unverified until retained receipts exist.
 
+### Known issues (tracked for 0.8.1)
+
+Two independent testers were run against the exact 0.8.0 release candidate as part of closing out
+the release-readiness process (D-0210). Both found real, reproducible issues, pre-existing in code
+this release's own correctness campaigns never modified. None corrupt the numerical-correctness
+work this release hardened; they are disclosed here and tracked in
+`release-checklists/0.8.1-followups.md` rather than silently shipped unmentioned.
+
+- `BradleyTerryDistribution`/`DavidsonDistribution.log_density` returns a *joint* density over
+  (which pair was compared, uniformly over all pairs) x (who won), not the conditional win
+  probability its docstring reads as. `exp(log_density((i,j)))` is off by a factor of `C(K,2)` from
+  P(i beats j), silently -- no error, a plausible-looking number in `[0, 1]`.
+- `GeneralizedParetoEstimator`'s `numerical_repairs()` can miss disclosing a shape-parameter clamp
+  at very small sample sizes, so a `shape=-10.0` (implying a short tail) can print with no warning
+  it is a floor artifact rather than a genuine fit.
+- `optimize()` can silently stop far short of the requested iteration budget with `converged=False`
+  and a large remaining objective gain, with no warning -- inconsistent with the max-iterations-cap
+  case, which does warn.
+- `ks_1samp`/`pit_values` do not accept mixle's own fitted distributions' scalar-only `cdf`
+  directly, and `pit_values` misattributes the resulting `TypeError` as an unrelated `ValueError`
+  about non-finite values.
+
+Several smaller consistency and documentation gaps (inconsistent exception types across ranking
+families for the same underlying failure, a mixture-recovery case flagged but not confirmed as a
+defect, and four documentation-only clarifications) are also tracked in the same followups file.
+
 ### Fixed
 
 - A ninth candidate campaign against `441ec4b3` (D-0209) returned NO-GO on its very first pass, and
