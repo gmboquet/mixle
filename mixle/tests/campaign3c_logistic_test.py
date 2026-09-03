@@ -185,7 +185,12 @@ class ShiftInvariantLogisticVarianceTestCase(unittest.TestCase):
         nobs = float(weights.sum() * c)
         scaled_model = est.estimate(nobs, scaled.value())
         expected_model = est.estimate(nobs, expected.value())
-        self.assertAlmostEqual(scaled_model.loc, expected_model.loc, places=9)
+        # ``places=9`` on a value of 1.7e9 was a ONE-ulp check (the grid step there is 2.4e-7): the two
+        # paths form ``(sum w dx) * c`` and ``sum (w c) dx`` at spread scale and round each onto the
+        # anchor independently, so their locations may legitimately land one grid step apart. It
+        # passed on x86 OpenBLAS and failed by exactly one step on the arm64 kernel. Parity here means
+        # agreement to within a few grid steps of the magnitude, and exactness on the scale.
+        self.assertAlmostEqual(scaled_model.loc, expected_model.loc, delta=4.0 * np.spacing(abs(expected_model.loc)))
         self.assertAlmostEqual(scaled_model.scale, expected_model.scale, places=9)
 
 

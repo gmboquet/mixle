@@ -130,6 +130,39 @@ def scale_anchored_triple(
     return anchor, a_sum * c, a_sum2 * c
 
 
+def anchored_location(
+    anchor: float, a_sum: float, count: float, pseudo_count: float | None = None, prior_mean: float | None = None
+) -> float:
+    """The reported location of an anchored ``(anchor, a_sum)`` track: ``anchor + offset``.
+
+    ``offset`` is the sample mean in anchor-relative coordinates, ``a_sum / count``, blended with a
+    pseudo-count prior the same way the raw form blends it -- ``(sum_x + pc * prior_mean) / (count +
+    pc)`` -- but written as ``(a_sum + pc * (prior_mean - anchor)) / (count + pc)`` so every term is
+    at spread scale and the only large-magnitude operation is the final addition onto ``anchor``.
+
+    Every scalar family that carries the anchored track must form its location THIS way rather than
+    as ``sum_x / count``, and the reason is not accuracy of the location itself but what
+    :func:`anchored_pooled_variance` does with it. That function splits the scatter about the
+    reported location into the scatter about the sample's own mean (all the data, at spread scale)
+    plus ``count * shift**2``, ``shift`` being the displacement of the reported location from the
+    sample mean, and clamps ``shift`` to zero only when it is within :data:`MEAN_ROUNDING_BOUND`
+    (4 ulp) of the magnitude -- the bound a single correctly-rounded division can produce. A raw
+    ``sum_x`` accumulated over ``count`` observations at magnitude 1e15 does NOT carry a 4-ulp
+    error: a SIMD-reduced dot product's summation error grows with the lane count and the reduction
+    tree, and differs by kernel. On x86 OpenBLAS the residual stayed under the clamp; on the arm64
+    NEON kernel the same 600-observation two-component mixture at ``+1e15`` landed a ``shift`` of
+    ~0.9 (7 ulp), which cleared the clamp and was squared straight into the variance: components
+    of true variance 0.25 reported 1.07 and 0.94, with the anchored payload itself carrying the exact
+    answer the whole time. Forming the location from the anchored track makes ``shift`` exactly the
+    rounding of one addition (at most half an ulp), so the clamp is never platform-dependent again.
+    The multivariate and diagonal Gaussian estimators already do this (``anchored[0] +
+    mean_offset``); this is the scalar families' shared equivalent.
+    """
+    if pseudo_count in (None, 0.0) or prior_mean is None:
+        return anchor + a_sum / count
+    return anchor + (a_sum + pseudo_count * (prior_mean - anchor)) / (count + pseudo_count)
+
+
 # --------------------------------------------------------------------------------------------
 # Shift-anchored moment track: the shared repair for every scalar location-scale family.
 #

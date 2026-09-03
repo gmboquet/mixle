@@ -108,6 +108,29 @@ class ExtremeMagnitudeSpreadTestCase(unittest.TestCase):
             self.assertLess(component.sigma2, 1.0)  # pre-fix: 1e+22, the scale-relative floor
             self.assertGreater(component.sigma2, 0.1)
 
+    def test_m_step_location_comes_from_the_anchored_track_not_the_raw_sum(self):
+        # The fit above passed on x86 OpenBLAS and failed on the arm64 NEON kernel with sigma2 of
+        # 1.07 and 0.94 for components of true variance 0.25 -- while the anchored payload reaching
+        # the M-step carried the exact answer (a_sum2/count - (a_sum/count)**2 = 0.2600) on BOTH.
+        # The M-step took its mean from the RAW sum, ``sum_x / count``; a SIMD-reduced sum of 300
+        # values at 1e15 carries a kernel-dependent residual of several grid steps, and once that
+        # residual cleared the 4-ulp mean-rounding clamp it was squared into the variance. This is the
+        # platform-independent statement of that defect: a raw sum carrying an 8-grid-step residual
+        # (1.0 at this magnitude) alongside an exact anchored payload. The location must come from
+        # the anchored track, so the variance is the anchored scatter and the residual is inert.
+        from mixle.stats.univariate.continuous.gaussian import GaussianSuffStat
+
+        anchor, count = 1.0e15 + 39.625, 300.0
+        a_sum, a_sum2 = 108.125, 116.984375  # the real payload of the 40-component fit above
+        residual = 8.0 * np.spacing(anchor) * count
+        raw_sum = anchor * count + a_sum + residual
+        stat = GaussianSuffStat(raw_sum, raw_sum * raw_sum / count + a_sum2, count, count)
+        stat.anchored = (anchor, a_sum, a_sum2)
+        model = GaussianEstimator().estimate(count, stat)
+        self.assertEqual(model.mu, anchor + a_sum / count)
+        self.assertAlmostEqual(model.sigma2, a_sum2 / count - (a_sum / count) ** 2, places=12)  # pre-fix: 1.26
+        self.assertEqual(model.numerical_repairs(), ())
+
 
 class ClampInvariantsTestCase(unittest.TestCase):
     """What the clamp exists for must still hold."""

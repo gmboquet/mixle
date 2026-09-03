@@ -47,6 +47,30 @@ class VerifyGateTest(unittest.TestCase):
         verdict = challenger_beats_champion(champion, challenger, self.data, objective=nll_objective(), min_effect=10.0)
         self.assertFalse(verdict.promote)
 
+    def test_one_ulp_systematic_difference_is_below_resolution_not_a_win(self):
+        # The paired t-test measures directional consistency, not magnitude. A challenger whose
+        # per-observation score is better than the champion's by exactly one ulp on EVERY row --
+        # what two arithmetic paths through the same model produce -- is "significant" at n=600
+        # (observed in the wild: an auto_select challenger identical to its champion, mean_diff
+        # 5.5e-17, p=0.0015, promoted). Below a few ulp of the scores' own magnitude the gate must
+        # report a tie on its own; no caller-chosen min_effect is a plausible guard for this.
+        model = _fit(self.data, 3.0, 2.0)
+
+        def _one_ulp_better_seq(enc, *args, **kwargs):
+            return np.nextafter(model.seq_log_density(enc, *args, **kwargs), np.inf)
+
+        def _one_ulp_better(x, *args, **kwargs):
+            return float(np.nextafter(model.log_density(x, *args, **kwargs), np.inf))
+
+        challenger = _DelegatingWrapper(model, seq_log_density=_one_ulp_better_seq, log_density=_one_ulp_better)
+        verdict = challenger_beats_champion(
+            model, challenger, self.data, objective=nll_objective(), require_calibration=False
+        )
+        self.assertLess(verdict.p_value, 0.05)  # the paired test alone calls this a win
+        self.assertTrue(verdict.evidence["numerical_resolution"]["below_floor"])
+        self.assertEqual(verdict.favored, "tie")
+        self.assertFalse(verdict.promote)
+
     def test_worse_challenger_favors_champion(self):
         champion = _fit(self.data, 3.0, 2.0)
         challenger = GaussianDistribution(0.0, 1.0)  # worse

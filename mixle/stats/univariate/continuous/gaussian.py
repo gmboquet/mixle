@@ -32,6 +32,7 @@ from mixle.stats.univariate.continuous._gaussian_contracts import (
     scalar_gaussian_moments,
 )
 from mixle.stats.univariate.continuous._observation_contracts import (
+    anchored_location,
     consistent_anchored_triple,
     scale_anchored_triple,
     scored_observation,
@@ -1367,7 +1368,11 @@ class GaussianEstimator(ParameterEstimator):
         prior_mean, prior_variance = self.suff_stat
         # A mean pseudo-count is only usable when its prior mean was supplied; unpaired counts
         # mean "no pseudo-observations" and fall through to the plain maximum-likelihood mean.
-        if pc1 not in (None, 0.0) and prior_mean is not None:
+        if anchored is not None:
+            # From the anchored track, not the raw sum (see ``anchored_location``): the raw quotient's
+            # kernel-dependent rounding residual would otherwise be squared into the variance.
+            mu = anchored_location(anchored[0], anchored[1], count, pc1, prior_mean)
+        elif pc1 not in (None, 0.0) and prior_mean is not None:
             mu = (sum_x + pc1 * prior_mean) / (count + pc1)
         elif count > 0.0:
             mu = sum_x / count

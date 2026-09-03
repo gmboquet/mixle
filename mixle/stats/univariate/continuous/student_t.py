@@ -20,6 +20,7 @@ from mixle.stats.compute.pdist import (
 )
 from mixle.stats.univariate.continuous._observation_contracts import (
     AnchoredMomentTrack,
+    anchored_location,
     anchored_pooled_variance,
     consistent_anchored_triple,
     finite_observations,
@@ -421,7 +422,14 @@ class StudentTEstimator(ParameterEstimator):
         if count <= 0.0:
             return StudentTDistribution(self.df, name=self.name, keys=self.keys)
 
-        loc = sum_x / count
+        if anchored is not None:
+            # From the anchored track, not the raw sum (see ``anchored_location``): the raw quotient's
+            # kernel-dependent rounding residual would otherwise be squared into the variance.
+            loc = anchored_location(
+                anchored[0], anchored[1], raw_count, pc if prior_mean is not None else None, prior_mean
+            )
+        else:
+            loc = sum_x / count
         notes: tuple[str, ...] = ()
         if anchored is not None:
             # Only the variance loses to cancellation at large magnitude; the location is a plain
