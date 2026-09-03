@@ -130,7 +130,11 @@ jobs:
   revision-check:
     name: Revision check (single-revision, warnings as errors)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # A clean run took 14m36s on 2026-09-02 (33643571722), already 24s under the old 15m budget; three
+    # straight release/0.8.0 attempts on 2026-09-03 (33705519758) were then killed at 15m15s-15m17s with
+    # "The operation was canceled" -- a hard timeout, not the concurrency cancellation or runner shutdown
+    # this looked like at first glance. 25m keeps real headroom without approaching the build job's 30m.
+    timeout-minutes: 25
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/release/0.8.0'
     # Independent group so PR checks never queue behind a Pages deploy or behind each other; only
     # the latest push on a given PR ref needs to run.
