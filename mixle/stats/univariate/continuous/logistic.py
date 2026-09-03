@@ -19,6 +19,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.univariate.continuous._observation_contracts import (
+    anchored_location,
     consistent_anchored_triple,
     scale_anchored_triple,
     scored_observation,
@@ -631,7 +632,12 @@ class LogisticEstimator(ParameterEstimator):
         if blended_count <= 0.0:
             return LogisticDistribution(name=self.name, keys=self.keys)
 
-        loc = blended_sum_x / blended_count
+        if anchored is not None:
+            # From the anchored track, not the raw sum (see ``anchored_location``): the raw quotient's
+            # kernel-dependent rounding residual would otherwise be squared into the variance.
+            loc = anchored_location(anchored[0], anchored[1], count, pc if prior_mean is not None else None, prior_mean)
+        else:
+            loc = blended_sum_x / blended_count
 
         notes: tuple[str, ...] = ()
         if anchored is not None:

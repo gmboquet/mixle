@@ -33,6 +33,7 @@ from mixle.stats.compute.pdist import (
 )
 from mixle.stats.univariate.continuous._observation_contracts import (
     SquaredPowerSumTrack,
+    anchored_location,
     anchored_pooled_variance,
     consistent_anchored_triple,
     finite_observations,
@@ -353,7 +354,14 @@ class RicianEstimator(ParameterEstimator):
             count += pc
         if count <= 0.0:
             return RicianDistribution(0.0, 1.0, name=self.name, keys=self.keys)
-        m2 = s2 / count
+        if anchored is not None:
+            # From the anchored (x**2) track, not the raw sum (see ``anchored_location``): the raw quotient's
+            # kernel-dependent rounding residual would otherwise be squared into the variance.
+            m2 = anchored_location(
+                anchored[0], anchored[1], raw_count, pc if prior_mean is not None else None, prior_mean
+            )
+        else:
+            m2 = s2 / count
         if anchored is None:
             # Historical raw path, bit-identical: statistics the conditioning gate never needed to
             # anchor, or ones that arrived already reduced and can no longer be corrected.

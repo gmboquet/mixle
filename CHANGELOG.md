@@ -96,6 +96,25 @@ defect, and four documentation-only clarifications) are also tracked in the same
 
 ### Fixed
 
+- The scalar M-step of every family carrying the shift-anchored moment track (Gaussian,
+  log-Gaussian, Logistic, Gumbel, Student-t, Rician, Nakagami) formed its reported location from
+  the raw large-magnitude sum, `sum_x / count`, and the anchored variance then squared the
+  displacement of that location from the anchored sample mean into the variance whenever it
+  cleared a 4-ulp rounding clamp. A SIMD-reduced sum of a few hundred observations at 1e15 carries
+  more than 4 ulp of error, by an amount that depends on the BLAS kernel: on x86 OpenBLAS the
+  residual stayed under the clamp, on the arm64 NEON kernel a two-component mixture at `+1e15`
+  reported component variances of 1.07 and 0.94 for a true 0.25 -- while the anchored payload
+  reaching the M-step carried the exact answer on both. The location now comes from the anchored
+  track (`anchored_location`, the form the multivariate Gaussian and generalized Pareto estimators
+  already used), so the clamp only ever sees the rounding of one addition. This was the
+  intermittent failure at the 13% mark of the hosted ubuntu core lanes since 08-28: the host CPU
+  decided the kernel, and the kernel decided the test. Reproduced and verified in a Linux VM
+  (arm64 native; x86_64 under Rosetta with forced OpenBLAS kernels).
+- `mixle.evolve` verify gate: a challenger whose per-observation score beat the champion's by a
+  fraction of an ulp on every row (an `auto_select` challenger identical to its champion:
+  mean difference 5.5e-17, p = 0.0015) was promoted as verified. The paired t-test measures
+  directional consistency, not magnitude; the gate now reports a tie when the mean difference is
+  below 8 ulp of the scores' own magnitude (`evidence["numerical_resolution"]`).
 - A ninth candidate campaign against `441ec4b3` (D-0209) returned NO-GO on its very first pass, and
   the resulting fix wave then required two further full adversarial review rounds against its own
   diff before one confirmed zero new findings of the dominant recurring defect -- 7, then 12, then

@@ -193,6 +193,11 @@ def _calibration_no_regression(
     return status, {"champion_calib": champ_cal, "challenger_calib": chal_cal, "calib_tol": calib_tol, "ok": ok}
 
 
+# A paired mean difference below this many ulp of the scores' own magnitude is floating-point
+# residue, not an effect (see the resolution floor in challenger_beats_champion).
+_RESOLUTION_ULPS = 8.0
+
+
 def _check_policy(*, alpha: float, min_effect: float, calib_tol: float) -> None:
     """Validate the gate's policy knobs before any of them can authorize a promotion.
 
@@ -357,10 +362,26 @@ def challenger_beats_champion(
     favored_paired = paired["favored"] == "B"  # 'B' is the challenger in paired_score_difference
     effect_ok = abs(mean_diff) >= min_effect
 
+    # Floating-point resolution floor. The paired test measures directional CONSISTENCY, not
+    # magnitude: two score vectors computed for the same model through two arithmetic paths carry a
+    # systematic same-direction rounding residual of a fraction of an ulp on every row, and at n in
+    # the hundreds a t-test calls that "significant" (observed: an auto_select challenger identical
+    # to its champion, mean_diff = 5.5e-17 on nll scores of order 1, p = 0.0015, promoted). No
+    # ``min_effect`` a caller could reasonably pick guards this -- the default is 0.0 and the value
+    # is far below anything a user would think to write -- so the gate refuses it on its own: a
+    # mean difference below a few ulp of the scores' own magnitude is not evidence either way.
+    resolution = (
+        _RESOLUTION_ULPS
+        * np.finfo(np.float64).eps
+        * float(max(np.max(np.abs(champ_vec)), np.max(np.abs(chal_vec)), 1.0e-300))
+    )
+    below_resolution = abs(mean_diff) < resolution
+    evidence["numerical_resolution"] = {"floor": resolution, "below_floor": below_resolution}
+
     favored = (
         "challenger"
-        if (significant and favored_paired and effect_ok)
-        else ("champion" if (significant and paired["favored"] == "A") else "tie")
+        if (significant and favored_paired and effect_ok and not below_resolution)
+        else ("champion" if (significant and paired["favored"] == "A" and not below_resolution) else "tie")
     )
 
     # non-nested robustness cross-check for family swaps
