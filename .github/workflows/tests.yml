@@ -130,6 +130,9 @@ jobs:
         # survives a runner kill that never lets the end-of-run summary print. The sampler logs
         # memory and disk every 10s so the kill can be attributed to exhaustion of one or the other.
         run: |
+          echo "HOST $(lscpu | grep -E 'Model name|Flags' | sed 's/ \+/ /g' | cut -c1-120 | tr '\n' ' ' | sed 's/Flags:.*avx512f.*/Flags: has-avx512/; s/Flags:.*/Flags: no-avx512/')"
+          python -m pip install -q threadpoolctl
+          python -c "from threadpoolctl import threadpool_info; print('BLAS', [(i.get('internal_api'), i.get('architecture'), i.get('num_threads')) for i in threadpool_info()])"
           ( while true; do
               echo "SAMPLE $(date -u +%H:%M:%S) $(free -m | awk '/Mem:/{printf "mem used %s/%s MB avail %s", $3, $2, $7}') $(free -m | awk '/Swap:/{printf "swap %s/%s", $3, $2}') $(df -m / | awk 'NR==2{printf "disk free %s MB", $4}') $(df -m /tmp | awk 'NR==2{printf "tmp free %s MB", $4}') procs $(ps -e --no-headers | wc -l)"
               sleep 10
