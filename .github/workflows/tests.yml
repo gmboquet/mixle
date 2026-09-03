@@ -101,13 +101,14 @@ jobs:
         run: mypy
 
   fast:
-    name: core / py${{ matrix.python-version }}
+    name: core / py${{ matrix.python-version }} / attempt ${{ matrix.attempt }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
+        attempt: [1, 2, 3]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -124,18 +125,32 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[test,highprec]"
-      - name: Run the hard-budget core tier
+      - name: "Run the hard-budget core tier (DIAGNOSTIC - verbose, memory/disk sampler)"
+        # -v makes xdist print "[gwN] [ 13%] FAILED <nodeid>" the moment a test fails, so the name
+        # survives a runner kill that never lets the end-of-run summary print. The sampler logs
+        # memory and disk every 10s so the kill can be attributed to exhaustion of one or the other.
         run: |
+          ( while true; do
+              echo "SAMPLE $(date -u +%H:%M:%S) $(free -m | awk '/Mem:/{printf "mem used %s/%s MB avail %s", $3, $2, $7}') $(free -m | awk '/Swap:/{printf "swap %s/%s", $3, $2}') $(df -m / | awk 'NR==2{printf "disk free %s MB", $4}') $(df -m /tmp | awk 'NR==2{printf "tmp free %s MB", $4}') procs $(ps -e --no-headers | wc -l)"
+              sleep 10
+            done ) &
+          SAMPLER=$!
+          set +e
           python scripts/run_test_tier.py \
             --tier core \
             --candidate-sha "$GITHUB_SHA" \
             --budget-seconds 1500 \
-            --receipt "core-py${{ matrix.python-version }}.json" \
-            -- -n auto
+            --receipt "core-py${{ matrix.python-version }}-${{ matrix.attempt }}.json" \
+            -- -n auto -v
+          rc=$?
+          kill $SAMPLER
+          echo "FINAL $(free -m | awk '/Mem:/{printf "mem used %s/%s", $3, $2}') $(df -m / | awk 'NR==2{printf "disk free %s MB", $4}')"
+          ps -eo pid,ppid,rss,etime,comm --sort=-rss | head -15
+          exit $rc
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: core-tier-py${{ matrix.python-version }}
-          path: core-py${{ matrix.python-version }}.json
+          name: core-tier-py${{ matrix.python-version }}-${{ matrix.attempt }}
+          path: core-py${{ matrix.python-version }}-${{ matrix.attempt }}.json
           if-no-files-found: error
           retention-days: 90
 
