@@ -20,8 +20,14 @@
       "smoke / collection-light",
       "release decisions / accepted review",
       "lint (ruff enforced, mypy advisory)",
-      "core / py3.11",
-      "core / py3.12",
+      "core / py3.11 / shard 0",
+      "core / py3.11 / shard 1",
+      "core / py3.11 / shard 2",
+      "core / py3.11 / shard 3",
+      "core / py3.12 / shard 0",
+      "core / py3.12 / shard 1",
+      "core / py3.12 / shard 2",
+      "core / py3.12 / shard 3",
       "core / macOS arm64 / py3.11",
       "core / macOS arm64 / py3.12",
       "core / minimum versions",
@@ -73,7 +79,7 @@
     {
       "path": "scripts/build_repro_bundle.py",
       "role": "bundle-closure",
-      "sha256": "100a5c6d78a096056dc285ead0d2221b1bb182700513f0378c62b0239cf8ac90"
+      "sha256": "3d13317529633c9d41ad9b7debc31a3c4044809bfe745b56b1ecbdd05038039f"
     },
     {
       "path": "scripts/run_repro_entry.py",
@@ -83,7 +89,7 @@
     {
       "path": ".github/release-required-checks.txt",
       "role": "bundle-closure",
-      "sha256": "9b1250edc6982d7ed8e922005d4858921504ef6f7718ab992978ca85559bc7ee"
+      "sha256": "e2bfc40efe4ad179d655ccc3823fc030882aaa41bc17e6aa93556f72b98f1302"
     },
     {
       "path": "scripts/verify_required_checks.py",
@@ -114,19 +120,19 @@
       },
       "expected": {
         "contains": [
-          "fit : GaussianDistribution(1.5485975768849254, 4.020409881516532",
+          "fit : GaussianDistribution(1.5486, 4.02041",
           "fit : PoissonDistribution(4.027",
           "fit : BernoulliDistribution(0.7004"
         ],
         "format": "text",
-        "stdout_sha256": "3e54938bf429fccaed6673da4187cb1cde04b695f6dee0e88824288620cb93ef"
+        "stdout_sha256": "9c9292b458b3a5120c2e93373151c9ed6f43dae89904802a3fa8f6082bc7c005"
       },
       "id": "gallery-univariate",
       "inputs": [
         {
           "path": "examples/gallery_univariate_example.py",
           "role": "executable",
-          "sha256": "9f844a1713f76ca3854634cf8e4514f4aa6661d58840b03a287d0baae1a5ed48"
+          "sha256": "e6ca36222f486df0a04451eda34b63f987e2780725ef1559e500f455aac8113d"
         }
       ],
       "kind": "self-contained",

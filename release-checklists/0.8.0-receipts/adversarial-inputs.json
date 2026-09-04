@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/automatic_datumnode_edgecases_test.py mixle/tests/automatic_input_types_test.py mixle/tests/automatic_factory_contract_test.py mixle/tests/automatic_oneshot_iterator_test.py mixle/tests/automatic_observation_normalization_test.py mixle/tests/automatic_modality_routing_test.py -p no:randomly -q -m \"\" -n 0 -W error::ResourceWarning",
   "date": "2026-08-22",
-  "evidence_digest": "705117b443422e8a37aaa322f8f887d9afad637d8e6cb5aae9436fa09fb2e293",
+  "evidence_digest": "d07e5ef8d4b2c06795d4ea5f38c399bce7577aedf48f84b60d4111ce30401270",
   "gate": "Adversarial inputs",
   "note": "The checklist never records which files make up the 'focused batch', so I selected the six automatic-modeling files myself; my counts (52/37) therefore do not and should not match the checklist's recorded 28 passed / 39 subtests. Coverage of the named case classes is real: `grep -hoE 'def test_[a-z0-9_]*(empty|missing|mismatch|constant|iterator|coerc)[a-z0-9_]*'` over these six files returns 10 distinct test functions (empty data rejected before component construction, always-empty nested sequence fields, None-as-missing, missing-value fallback recorded, one-shot iterators materialized, and so on). The `-W error::ResourceWarning` condition in the evidence text was reproduced and held.",
   "result": "52 passed, 37 subtests passed in 10.06s; no ResourceWarning escalated to an error"

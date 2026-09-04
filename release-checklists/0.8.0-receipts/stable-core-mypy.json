@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && gh api \"repos/gmboquet/mixle/actions/jobs/96967302250\" --jq '.name, .conclusion, (.steps[] | \"\\(.number). \\(.name) :: \\(.conclusion)\")'",
   "date": "2026-08-22",
-  "evidence_digest": "705117b443422e8a37aaa322f8f887d9afad637d8e6cb5aae9436fa09fb2e293",
+  "evidence_digest": "d07e5ef8d4b2c06795d4ea5f38c399bce7577aedf48f84b60d4111ce30401270",
   "gate": "Stable-core mypy",
   "note": "Hosted evidence is real and specific to the tip -- I confirmed the blocking step by name inside the succeeding lint job, not just the job's overall green. Local corroboration command: `$HOME/mixle/.venv/bin/mypy --follow-imports=skip mixle/scorecard.py mixle/spend.py mixle/registry.py mixle/system/__init__.py mixle/system/core.py mixle/system/spend.py mixle/system/registry.py mixle/system/scorecard.py` (exit 0). Two caveats on the local half: mypy is 2.3.0, not the 2.1.0 the checklist records, and it lives in the Python 3.14.5 .venv (mypy is absent from .venv312) -- acceptable here since mypy is static, but the hosted lane remains the authority.",
   "result": "Hosted on 483add7c: lint job 96967302250 :: success, step 9 \"mypy (typed core, blocking)\" :: success (step 10 whole-tree advisory also success); local rerun of the identical command under mypy 2.3.0 -> \"Success: no issues found in 8 source files\""

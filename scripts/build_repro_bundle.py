@@ -21,7 +21,7 @@ CHECK_EVIDENCE_GENERATOR = "scripts/verify_required_checks.py"
 CANDIDATE_RECORD_PRODUCER = "scripts/release_candidate_record.py"
 
 # The check-evidence record is APPROVAL evidence only if it was produced by this repository's own
-# workflow over the candidate commit's real check runs. A record with the right shape, all 24 names,
+# workflow over the candidate commit's real check runs. A record with the right shape, every required name,
 # distinct integer ids and plausible URLs is not that (SYS5-01: such a record, authored by hand with
 # invented run ids, yielded four verified receipts and a complete manifest). So the record is only
 # ever written by one of the workflows below, which attest it through GitHub's OIDC identity
@@ -79,18 +79,17 @@ _ENTRIES = (
         "configuration": {"seed": "declared in script", "dataset": "synthetic"},
         "expected": {
             "format": "text",
-            # Repinned for the campaign-four shift-sweep wave: StudentTEstimator and
-            # LogGaussianEstimator gained the shift-anchored moment track (this example fits both
-            # directly), the same repair the Gaussian and Logistic families already carried. Two
-            # printed values move in their last two digits -- the Student-t scale
-            # 1.9519185926635496 -> 1.9519185926635638 and the log-Gaussian variance
-            # 0.2512756175947848 -> 0.25127561759478356, each ~6e-15 relative, because ``estimate()``
-            # drives the per-observation ``update`` path, where the anchor activates on the first
-            # observation by design (a scalar update carries no chunk to gate on). New digest
-            # measured three times, byte-identical.
-            "stdout_sha256": "3e54938bf429fccaed6673da4187cb1cde04b695f6dee0e88824288620cb93ef",
+            # Repinned for platform-robust output: the example now rounds every printed float to 6
+            # significant figures (examples/gallery_univariate_example.py:stable). A one-pass fit of
+            # the same seeded sample lands on the same value to ~13 significant figures on every
+            # machine, but the last few digits differ by ULPs because BLAS sums in a different order
+            # per CPU; full-precision printing exposed that and the raw-float stdout hash reproduced
+            # on no platform but the one it was pinned on (macOS arm64, Linux arm64, and the old
+            # pinned value were three distinct hashes). Rounded, the output is identical across
+            # macOS arm64 and Linux arm64; new digest measured on both.
+            "stdout_sha256": "9c9292b458b3a5120c2e93373151c9ed6f43dae89904802a3fa8f6082bc7c005",
             "contains": [
-                "fit : GaussianDistribution(1.5485975768849254, 4.020409881516532",
+                "fit : GaussianDistribution(1.5486, 4.02041",
                 "fit : PoissonDistribution(4.027",
                 "fit : BernoulliDistribution(0.7004",
             ],

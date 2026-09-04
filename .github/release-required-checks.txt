@@ -2,8 +2,14 @@
 smoke / collection-light
 release decisions / accepted review
 lint (ruff enforced, mypy advisory)
-core / py3.11
-core / py3.12
+core / py3.11 / shard 0
+core / py3.11 / shard 1
+core / py3.11 / shard 2
+core / py3.11 / shard 3
+core / py3.12 / shard 0
+core / py3.12 / shard 1
+core / py3.12 / shard 2
+core / py3.12 / shard 3
 core / macOS arm64 / py3.11
 core / macOS arm64 / py3.12
 core / minimum versions

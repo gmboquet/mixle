@@ -101,13 +101,24 @@ jobs:
         run: mypy
 
   fast:
-    name: core / py${{ matrix.python-version }}
+    name: core / py${{ matrix.python-version }} / shard ${{ matrix.shard }}
+    # Split across four runners by the deterministic file-hash shard hook in conftest
+    # (--num-shards/--shard-id), the same mechanism `full` uses. Unsharded, the tier ran ~12 minutes
+    # on a hosted 4-vCPU runner (the identical suite completes in ~3 minutes on a local 4-core VM),
+    # and core / py3.11 was killed by a runner "shutdown signal" three consecutive times at 70-99%
+    # with every test passing, while a memory-profiled replay of the same configuration showed no
+    # OOM and a 2.4 GB peak -- the kills are host reclamation, not anything the job does. Sharding
+    # divides wall time without changing what any test does (the four shards collect exactly the
+    # unsharded set, disjointly). With calibration_gate_test.py routed `slow` in conftest (it alone
+    # was ~330 s of test time, ~80x the next-heaviest core file), the longest shard is ~1 min locally
+    # / ~4 min hosted, and a kill costs a quarter of the tier rather than all of it.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -124,18 +135,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[test,highprec]"
-      - name: Run the hard-budget core tier
+      - name: Run the hard-budget core tier shard
         run: |
           python scripts/run_test_tier.py \
             --tier core \
             --candidate-sha "$GITHUB_SHA" \
             --budget-seconds 1500 \
-            --receipt "core-py${{ matrix.python-version }}.json" \
-            -- -n auto
+            --receipt "core-py${{ matrix.python-version }}-shard${{ matrix.shard }}.json" \
+            -- -n auto --num-shards 4 --shard-id ${{ matrix.shard }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: core-tier-py${{ matrix.python-version }}
-          path: core-py${{ matrix.python-version }}.json
+          name: core-tier-py${{ matrix.python-version }}-shard${{ matrix.shard }}
+          path: core-py${{ matrix.python-version }}-shard${{ matrix.shard }}.json
           if-no-files-found: error
           retention-days: 90
 

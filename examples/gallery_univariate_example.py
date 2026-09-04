@@ -5,8 +5,24 @@ with the one-pass ``estimate`` helper, and print the true vs. recovered paramete
 self-contained (random data only). This is the quickest tour of mixle's scalar leaf families.
 """
 
+import re
+
 from mixle.inference import estimate
 from mixle.stats import *
+
+
+def stable(dist) -> str:
+    """The distribution's text with every float rounded to 6 significant figures.
+
+    A one-pass fit of the same seeded sample lands on the same value to ~13 significant figures on
+    every machine; the last few differ by ULPs because BLAS kernels sum in a different order per CPU.
+    Full-precision printing would expose that platform noise and make this example's output -- which
+    the reproduction bundle pins byte-for-byte -- fail to reproduce off the machine it was pinned on.
+    Six significant figures is far below any real fit difference and far above the ULP noise, so the
+    printed line is identical across platforms.
+    """
+    return re.sub(r"[-+]?\d+\.\d+(?:[eE][-+]?\d+)?", lambda m: format(float(m.group()), ".6g"), str(dist))
+
 
 # (label, true distribution, estimator) -- continuous then discrete.
 CASES = [
@@ -36,5 +52,5 @@ if __name__ == "__main__":
         data = true_dist.sampler(seed=1).sample(5000)
         fit = estimate(data, estimator)
         print("%-20s" % label)
-        print("  true: %s" % true_dist)
-        print("  fit : %s" % fit)
+        print("  true: %s" % stable(true_dist))
+        print("  fit : %s" % stable(fit))

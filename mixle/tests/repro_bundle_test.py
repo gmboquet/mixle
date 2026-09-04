@@ -515,7 +515,7 @@ def test_check_evidence_must_be_the_generators_record_not_an_invented_shape():
     The first SYS3-05 repair validated ``checks == {"tests": "success", "docs": ..., ...}`` -- a
     shape invented for the hand-written review-candidate stubs. scripts/verify_required_checks.py,
     which publish.yml runs, emits ``checks == {<check-run name>: {check_run_id, details_url}}`` for
-    the 24 policy names and writes nothing unless all are completed/success. Under the real
+    every policy name and writes nothing unless all are completed/success. Under the real
     workflow every receipt would therefore have been unbound and the manifest builder would have
     refused, so no candidate could publish -- the same failure the resolver's own comment records
     fixing once before. Found the first time the generator was run on a real candidate.
@@ -678,7 +678,7 @@ def test_a_pinned_wheel_whose_payload_disagrees_with_its_record_is_refused():
 
 
 def test_an_unissued_but_well_shaped_check_record_is_refused():
-    """SYS5-01: shape is not approval. A record with all 24 names, distinct integer ids,
+    """SYS5-01: shape is not approval. A record with every required name, distinct integer ids,
     ``publication_authorized: true`` and URLs containing ``/actions/runs/`` -- authored by hand, its cited
     runs never issued -- produced four verified receipts and a complete manifest. Now the record must
     (1) point at THIS repository's Actions job pages whose job segment is the check-run id, (2) commit

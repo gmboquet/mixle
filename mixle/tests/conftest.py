@@ -56,6 +56,10 @@ FILE_MARKERS: dict[str, MarkerTuple] = {
     # density and/or runs a Monte-Carlo calibration check (100s of samples per held-out point across
     # multiple hop counts) -- legitimately needed for a real coverage/calibration claim, not padding.
     # Unmarked, these alone floor the fast gate at 60+ s; tagged `slow` so they still run in full CI.
+    # Monte-Carlo posterior-calibration checks: one call ~80 s and a dozen at 15-30 s (~330 s of test
+    # time), ~80x the next-heaviest core file and the sole reason a sharded core lane could not drop
+    # below ~140 s. Still runs in the full gate, which is a required release check.
+    "calibration_gate_test.py": ("slow",),
     "belief_walk_test.py": ("torch", "stochastic", "slow"),
     "cycle_consistency_test.py": ("torch", "stochastic", "slow"),
     "cross_modal_model_test.py": ("torch", "stochastic", "slow"),
