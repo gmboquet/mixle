@@ -132,7 +132,7 @@
         {
           "path": "examples/gallery_univariate_example.py",
           "role": "executable",
-          "sha256": "e6ca36222f486df0a04451eda34b63f987e2780725ef1559e500f455aac8113d"
+          "sha256": "b9afa51bd396c9ad19a4f1f57fbce06988c9b6752c67c0b85dca39d24663c856"
         }
       ],
       "kind": "self-contained",

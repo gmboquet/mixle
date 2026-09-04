@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "ls -1d $REVIEW_ARCHIVE/sysreview-*/ | wc -l && grep -cE '^## D-01(7[6-9]|8[0-9])\\b' release-checklists/0.8.0-decisions.md",
   "date": "2026-08-22",
-  "evidence_digest": "d07e5ef8d4b2c06795d4ea5f38c399bce7577aedf48f84b60d4111ce30401270",
+  "evidence_digest": "1b2c697e80815829718ac40f0e9f6af98eabcb2dcfdee049167f53c41abc829b",
   "gate": "Systems reviewer",
   "note": "Closed 2026-08-20 by the release owner on the nine-pass record (D-0189). Pass 9 returned 0 findings on owner-confirmed d797eae5. Two limits accepted knowingly and recorded in D-0189 rather than papered over.",
   "result": "9 per-pass systems-review archives retained and digest-verified; 14 decision entries D-0176..D-0189 record the passes, their 25 findings and the repairs"
