@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "gh api \"repos/gmboquet/mixle/commits/483add7c/check-runs?per_page=100\" --jq '.check_runs[]|select(.name==\"clean-wheel install + import sweep\" or .name==\"smoke / collection-light\" or .name==\"extras matrix / exact candidate\")|\"\\(.name) = \\(.status)/\\(.conclusion)\"'",
   "date": "2026-08-22",
-  "evidence_digest": "898298522d57d47000dcbbe877511d6cb6999cf05764db701fe023404789246e",
+  "evidence_digest": "a188a6b9d9363135a629253a0b68d4e3d5c6aee57e8ac5dbde1814171970edd7",
   "gate": "Maturity tiers and stable boundary",
   "note": "That hosted job is the one whose steps run `verify_installed_schema_manifest.py --profile base` against clean wheel AND sdist installs (.github/workflows/tests.yml:307-375), so it is the right hosted evidence for this row. Local corroboration I also ran: (a) `PYTHONPATH=<worktree> python -m pytest mixle/tests/maturity_manifest_test.py mixle/tests/maturity_registry_test.py mixle/tests/max_stable_test.py mixle/tests/stable_signature_manifest_test.py mixle/tests/schema_manifest_test.py -p no:randomly -q -m \"\" -n 0` -> 60 passed, 2 subtests passed in 12.64s; (b) `verify_installed_schema_manifest.py --profile base` run from OUTSIDE the source tree against a fresh wheel venv and a fresh sdist venv built in this session -> 'base serialization schema matches the imported installation' (exit 0) for both.",
   "result": "clean-wheel install + import sweep = completed/success on 483add7c (job id 96967302174, completed 2026-08-22T02:47:16Z)"

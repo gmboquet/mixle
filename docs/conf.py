@@ -135,7 +135,10 @@ autodoc_mock_imports = [
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
     "numpy": ("https://numpy.org/doc/stable/", None),
-    "scipy": ("https://docs.scipy.org/doc/scipy/", None),
+    # scipy: the remote inventory first, then a vendored copy (SciPy 1.18.0) so an outage of
+    # docs.scipy.org degrades to Sphinx's "working alternatives" info line instead of failing the
+    # warnings-as-errors build (it blocked the 0.8.0 docs gate and would block publish.yml prepare).
+    "scipy": ("https://docs.scipy.org/doc/scipy/", (None, "_inventories/scipy-objects.inv")),
 }
 
 html_theme = "furo"

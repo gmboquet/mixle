@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && for id in 96967319467 96967319489 96967319415; do gh api repos/gmboquet/mixle/actions/jobs/$id --jq '\"JOB: \\(.name) :: \\(.conclusion)\", (.steps[]|select(.number>3 and .number<9)|\"   \\(.name) :: \\(.conclusion)\")'; done",
   "date": "2026-08-22",
-  "evidence_digest": "898298522d57d47000dcbbe877511d6cb6999cf05764db701fe023404789246e",
+  "evidence_digest": "a188a6b9d9363135a629253a0b68d4e3d5c6aee57e8ac5dbde1814171970edd7",
   "gate": "Dependency and static security audit",
   "note": "Stronger than the checklist's 'partial local evidence' record: both isolated-exact-wheel base and complete [all] runtime audits, plus Bandit over shipped source, all ran and passed hosted on the exact candidate, and both CycloneDX SBOMs were generated and bound to candidate+wheel inside those jobs (uploaded as artifacts). Residual: 0 check-runs at this commit match sbom/publish, so the *publication attachment* of those SBOMs to the release is still release-time work and is not evidenced here. I did not download or inspect the SBOM contents.",
   "result": "3/3 required jobs success at 483add7c: pip-audit (base install), pip-audit (all runtime features), bandit (source security); SBOM steps 'Generate and bind the artifact SBOM' and 'Bind complete-runtime SBOM to candidate and wheel' both success"
