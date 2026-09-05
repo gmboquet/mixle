@@ -96,6 +96,15 @@ defect, and four documentation-only clarifications) are also tracked in the same
 
 ### Fixed
 
+- `KDE.evaluate` on multivariate data materialized the full `(points, observations, dimensions)`
+  kernel tensor and several same-sized intermediates in one pass: a routine 250x250 evaluation grid
+  over 1,500 two-dimensional observations peaked near 9 GB, enough to OOM a 16 GB CI runner (it was
+  killing the `full` test lane) and any comparably sized machine a user plots on. Evaluation now
+  proceeds in bounded blocks of query points (about 64 MB per temporary). Each point's density is an
+  independent mean over the sample, so blocking changes no arithmetic or reduction order: results are
+  bit-identical to the previous single pass (verified on the same grid, now 0.5 GB), and the
+  reflected-boundary path, which evaluates twice per query, is bounded the same way.
+
 - The scalar M-step of every family carrying the shift-anchored moment track (Gaussian,
   log-Gaussian, Logistic, Gumbel, Student-t, Rician, Nakagami) formed its reported location from
   the raw large-magnitude sum, `sum_x / count`, and the anchored variance then squared the

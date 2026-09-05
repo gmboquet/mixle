@@ -310,12 +310,27 @@ class KDE:
             self._local_bw = bw_vec[None, :] * scale[:, None]
         self._local_bw.setflags(write=False)
 
+    # Upper bound on the elements of one (block, n, d) kernel temporary: ~8M float64 = 64 MB.
+    _EVAL_BLOCK_ELEMENTS = 1 << 23
+
     def _raw_density(self, x: np.ndarray, local_bw: np.ndarray) -> np.ndarray:
         """Plain (no boundary) Gaussian product-kernel KDE at ``(m, d)`` points ``x`` using
-        per-data-point, per-dimension bandwidths ``local_bw`` (``(n, d)``)."""
-        u = (x[:, None, :] - self.data[None, :, :]) / local_bw[None, :, :]
-        kernel = stats.norm.pdf(u) / local_bw[None, :, :]  # (m, n, d)
-        return np.mean(np.prod(kernel, axis=2), axis=1)  # (m,)
+        per-data-point, per-dimension bandwidths ``local_bw`` (``(n, d)``).
+
+        Evaluated in blocks of query points so the ``(block, n, d)`` kernel tensor stays bounded. The
+        single-pass ``(m, n, d)`` form is 1.5 GB per temporary for a routine 250x250 grid over 1,500
+        2-D observations and peaked near 9 GB across its intermediates -- enough to OOM a 16 GB CI
+        runner. Each point's density is an independent mean over the sample, so blocking over points
+        changes no per-point arithmetic or reduction order: results are bit-identical to single-pass.
+        """
+        n, d = self.data.shape
+        block = max(1, self._EVAL_BLOCK_ELEMENTS // (n * d))
+        if x.shape[0] <= block:
+            u = (x[:, None, :] - self.data[None, :, :]) / local_bw[None, :, :]
+            kernel = stats.norm.pdf(u) / local_bw[None, :, :]  # (m, n, d)
+            return np.mean(np.prod(kernel, axis=2), axis=1)  # (m,)
+        parts = [self._raw_density(x[start : start + block], local_bw) for start in range(0, x.shape[0], block)]
+        return np.concatenate(parts)
 
     def _bounded_density(self, x: np.ndarray) -> np.ndarray:
         """Normalized truncated-Gaussian boundary kernel for a one-dimensional declared support."""

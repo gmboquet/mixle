@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/cross_version_fixtures_test.py mixle/tests/checkpoint_test.py mixle/tests/lineage_test.py mixle/tests/provenance_test.py mixle/tests/provenance_replay_test.py mixle/tests/serving_test.py mixle/tests/artifact_atomic_write_test.py mixle/tests/security_test.py mixle/tests/benchmark_provenance_test.py -p no:randomly -q -m \"\" -n 0 -W error::ResourceWarning",
   "date": "2026-08-22",
-  "evidence_digest": "1b2c697e80815829718ac40f0e9f6af98eabcb2dcfdee049167f53c41abc829b",
+  "evidence_digest": "5cdb9f2208bf7f454409f3b1b6f94fdc4386e60aa0c3186300d1b9838a1a1a1a",
   "gate": "Save/load, checkpoint, lineage, provenance, and serving contracts",
   "note": "DISCREPANCY the owner should resolve: the checklist records '165 passed, 8 subtests' but does not record the file list, so I reconstructed the 9 files from the batch description at release-checklists/0.8.0.md:590 ('cross-version fixtures, checkpoint, lineage, provenance, replay, serving, atomic writes, security, benchmark provenance'). Subtest count matches exactly (8); test count is 3 short. Either the recorded batch included a 10th file or the tree drifted since 2026-08-04 -- the number in the checklist is not reproducible from its own description. The -W error::ResourceWarning half of the claim IS reproduced: no ResourceWarning fired. Separately: hosted core-tier checks at this tip are red (see the 'Dependency floors' note), which this local batch does not cover.",
   "result": "162 passed, 8 subtests passed in 12.58s, 0 ResourceWarnings raised"

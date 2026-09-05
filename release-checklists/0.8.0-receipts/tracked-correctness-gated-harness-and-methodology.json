@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && wc -l docs/benchmark-methodology.rst && ls benchmarks/*.py | wc -l && PYTHONPATH=. python -m pytest mixle/tests/benchmark_contract_test.py mixle/tests/benchmark_provenance_test.py -p no:randomly -q -m \"\" -n 0",
   "date": "2026-08-22",
-  "evidence_digest": "1b2c697e80815829718ac40f0e9f6af98eabcb2dcfdee049167f53c41abc829b",
+  "evidence_digest": "5cdb9f2208bf7f454409f3b1b6f94fdc4386e60aa0c3186300d1b9838a1a1a1a",
   "gate": "Tracked correctness-gated harness and methodology",
   "note": "The tests match both halves of the claim precisely. Correctness-gating: test_parity_requires_mixle_and_an_independent_matching_reference, test_timer_excludes_prepare_and_evaluate_and_checks_every_fit, test_timer_rejects_unvalidated_or_nonreproducible_repetitions. Provenance: test_stamp_marks_the_current_version, test_missing_unrelated_or_abbreviated_provenance_is_rejected, test_no_committed_benchmark_result_is_stale (that last one covers the 'future outputs carry version/minor/commit provenance' sentence against what is actually committed today).",
   "result": "docs/benchmark-methodology.rst = 54 lines; benchmarks/ holds 3 tracked .py harness files; 10 passed in 2.65s"

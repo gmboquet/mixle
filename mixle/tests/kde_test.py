@@ -450,6 +450,23 @@ class MultivariateTest(unittest.TestCase):
         integral = float(dens.sum() * dx * dx)
         self.assertAlmostEqual(integral, 1.0, delta=0.03)
 
+    def test_blocked_evaluation_is_bit_identical_to_single_pass(self):
+        # evaluate() blocks over query points so a routine 250x250 grid over 1,500 2-D observations no
+        # longer materializes ~9 GB of (m, n, d) temporaries (it OOM-killed 16 GB CI runners). Each
+        # point's density is an independent mean over the sample, so blocking must change no bit.
+        rng = np.random.RandomState(11)
+        f = kde(rng.normal(0, 1, (300, 2)))
+        pts = rng.uniform(-3, 3, (1000, 2))
+        original = KDE._EVAL_BLOCK_ELEMENTS
+        try:
+            KDE._EVAL_BLOCK_ELEMENTS = 1 << 30  # one block: the single-pass form
+            single = f.evaluate(pts)
+            KDE._EVAL_BLOCK_ELEMENTS = 64  # 64 // (300 * 2) == 0 -> block of one point, 1000 blocks
+            blocked = f.evaluate(pts)
+        finally:
+            KDE._EVAL_BLOCK_ELEMENTS = original
+        np.testing.assert_array_equal(blocked, single)
+
     def test_per_dimension_bandwidth_uses_joint_dimension_exponent(self):
         # Scott/Silverman must scale each dimension's bandwidth by n^(-1/(d+4)) using the TRUE joint
         # dimension d, not the univariate n^(-1/5) rate -- get the exponent wrong and the per-dimension
