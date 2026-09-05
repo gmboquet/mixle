@@ -233,6 +233,11 @@ jobs:
           done
           (cd dist && sha256sum * > ../metadata/SHA256SUMS)
           python -m venv "$RUNNER_TEMP/sbom-artifact-env"
+          # pip-audit audits everything under this env's site-packages, which includes the pip that
+          # `python -m venv` bootstraps (25.0.1 on the runner, seven published advisories); the build
+          # env pins its pip but this one never did, so the audit failed on tooling with zero findings
+          # in the artifact. Pin an advisory-free pip here before installing the wheel.
+          "$RUNNER_TEMP/sbom-artifact-env/bin/python" -m pip install --upgrade "pip==26.2.1"
           "$RUNNER_TEMP/sbom-artifact-env/bin/python" -m pip install dist/*.whl
           SITE=$("$RUNNER_TEMP/sbom-artifact-env/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
           python -m venv "$RUNNER_TEMP/sbom-tool-env"

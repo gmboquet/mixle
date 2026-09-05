@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "git ls-files .github/ | grep -i template && grep -cE '^\\s*- \\[ \\]' .github/PULL_REQUEST_TEMPLATE.md && PYTHONPATH=. python -m pytest mixle/tests/{public_api_manifest,maturity_manifest,module_ownership,schema_manifest,stable_signature_manifest}_test.py -p no:randomly -q -m '' -n 0 && gh api .../check-runs (core lanes)",
   "date": "2026-08-22",
-  "evidence_digest": "a188a6b9d9363135a629253a0b68d4e3d5c6aee57e8ac5dbde1814171970edd7",
+  "evidence_digest": "353f3de273291c398be7edd45e27dcce782d865154afe242a06ab9f11151d63f",
   "gate": "Feature freeze and public-surface change control",
   "note": "The earlier measurement marked this unverified because no CI job is NAMED for drift and the core lanes were red. Both halves now hold: the drift tests live inside the core tier, and every core lane is green on the exact tip.",
   "result": "1 tracked PR template with 8 required checkboxes and 3 manifest references; drift batch 26 passed, 2 subtests passed in 9.32s; all 5 core lanes that carry those tests completed/success on 5cca9e96"

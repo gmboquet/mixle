@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "PYTHONPATH=. python -m pytest mixle/tests/release_evidence_contract_test.py -p no:randomly -q -m '' -n 0 && ls release-checklists/0.8.0-decisions.md release-checklists/0.8.0-ownership.md && grep -cE '^### R-[0-9]+ ' release-checklists/0.8.0.md",
   "date": "2026-08-22",
-  "evidence_digest": "a188a6b9d9363135a629253a0b68d4e3d5c6aee57e8ac5dbde1814171970edd7",
+  "evidence_digest": "353f3de273291c398be7edd45e27dcce782d865154afe242a06ab9f11151d63f",
   "gate": "Release decision log, ownership, and risk register exist",
   "note": "CORRECTED after audit. The first measurement reported '95 table rows' from `awk 'NR>=409' | grep -c '^|'`. That awk range is unbounded, so all 95 rows came from the two LATER appendices (preflight rehearsal log, backend execution evidence); the risk register itself (lines 409-527) contains zero table rows because it is written as ### headings with prose bullets. The register exists and has 12 ranked entries; the honest command counts those. Nothing about the gate changed -- only the number that evidences it. Note also that release_evidence_contract_test.py asserts on the gate list and the decision log, never on the register.",
   "result": "9 passed in 1.51s; both named documents present; the risk register holds 12 entries, R-01 through R-12"

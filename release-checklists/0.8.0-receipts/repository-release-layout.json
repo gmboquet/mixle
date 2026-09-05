@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/repo_hygiene_scan_test.py -p no:randomly -q -m \"\" -n 0",
   "date": "2026-08-22",
-  "evidence_digest": "a188a6b9d9363135a629253a0b68d4e3d5c6aee57e8ac5dbde1814171970edd7",
+  "evidence_digest": "353f3de273291c398be7edd45e27dcce782d865154afe242a06ab9f11151d63f",
   "gate": "Repository release layout",
   "note": "I separately measured the row's two specific claims: `git ls-files experiments | wc -l` -> 0 tracked files; `git ls-files | grep -c group_attention` -> 0; `/experiments/` is present at .gitignore line 54. Note the whole gate rests on a 2-test file, which is thin coverage for a claim as broad as 'repository release layout'.",
   "result": "2 passed in 2.10s (exit 0)"

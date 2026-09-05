@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/performance_change_policy_test.py mixle/tests/release_gate_negative_controls_test.py -p no:randomly -q -m \"\" -n 0",
   "date": "2026-08-22",
-  "evidence_digest": "a188a6b9d9363135a629253a0b68d4e3d5c6aee57e8ac5dbde1814171970edd7",
+  "evidence_digest": "353f3de273291c398be7edd45e27dcce782d865154afe242a06ab9f11151d63f",
   "gate": "Performance regression policy",
   "note": "Covers both artifacts the evidence text names: performance_change_policy_test.py (the policy in release-checklists/0.8.0-performance-change-policy.md) and release_gate_negative_controls_test.py (the negative controls). I did not independently verify the third clause \u2014 that hosted timing lanes stay informational unless tied to a retained baseline \u2014 since that is a CI-configuration property rather than something these tests assert.",
   "result": "11 passed in 2.12s"

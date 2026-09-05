@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/artifact_atomic_write_test.py mixle/tests/security_test.py -p no:randomly -q -m \"\" -n 0",
   "date": "2026-08-22",
-  "evidence_digest": "a188a6b9d9363135a629253a0b68d4e3d5c6aee57e8ac5dbde1814171970edd7",
+  "evidence_digest": "353f3de273291c398be7edd45e27dcce782d865154afe242a06ab9f11151d63f",
   "gate": "Atomic writes and safe serialization boundary",
   "note": "Exactly the two files the checklist names. Both also re-ran clean inside the 162-test persistence batch under -W error::ResourceWarning.",
   "result": "41 passed in 3.09s"

@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONPATH=$PWD python scripts/verify_license_provenance.py --require-approved; echo EXIT=$?",
   "date": "2026-08-22",
-  "evidence_digest": "a188a6b9d9363135a629253a0b68d4e3d5c6aee57e8ac5dbde1814171970edd7",
+  "evidence_digest": "353f3de273291c398be7edd45e27dcce782d865154afe242a06ab9f11151d63f",
   "gate": "License and ownership provenance",
   "note": "Script passes, but read the record before treating this as an independence gate: release-checklists/0.8.0-license-provenance.json names the reviewer as 'Grant Boquet (release owner; also the sole author -- not an independent third party)'. The script's --require-approved flag only checks that status==approved and that a reviewer, ISO date, and evidence string are present (scripts/verify_license_provenance.py is 60 lines); it does not and cannot check reviewer independence.",
   "result": "printed 'license provenance validated', exit 0; underlying record release=0.8.0, status=approved, review_date=2026-08-04, evidence field 1291 chars"
