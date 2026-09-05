@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "python scripts/check_workflows.py && grep -rhoE 'uses: [^@]+@[^ ]+' .github/workflows/*.yml | grep -vcE '@[0-9a-f]{40}'",
   "date": "2026-08-22",
-  "evidence_digest": "5cdb9f2208bf7f454409f3b1b6f94fdc4386e60aa0c3186300d1b9838a1a1a1a",
+  "evidence_digest": "898298522d57d47000dcbbe877511d6cb6999cf05764db701fe023404789246e",
   "gate": "Workflow supply-chain and shell safety",
   "result": "\"release workflows parse and satisfy immutable-action/shell-input contracts\", exit 0; 6 workflow files, 85 action uses, 0 pinned to anything other than a full 40-character commit"
 }

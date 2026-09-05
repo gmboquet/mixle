@@ -1,0 +1,10 @@
+{
+  "artifact": "mixle.release_gate_receipt/v1",
+  "candidate_commit": "1c2b30b7c50d000277444bdfe990dd651e3d50f1",
+  "command": "python scripts/verify_release_checklist.py --checklist release-checklists/0.8.0.md --receipts release-checklists/0.8.0-receipts --candidate-sha 1c2b30b7c50d000277444bdfe990dd651e3d50f1 --require-final; gh api repos/gmboquet/mixle/commits/1c2b30b7c50d000277444bdfe990dd651e3d50f1/check-runs?per_page=100 --paginate (compared against .github/release-required-checks.txt); gh api repos/gmboquet/mixle/git/tags/<tag-object-sha> --jq .verification",
+  "date": "2026-09-05",
+  "evidence_digest": "898298522d57d47000dcbbe877511d6cb6999cf05764db701fe023404789246e",
+  "gate": "Final release-owner sign-off",
+  "note": "Release owner sign-off for 0.8.0 on the candidate measured at 1c2b30b7. Every other gate row is DONE, EXCLUDED, or POST-RELEASE with a candidate-bound receipt. Hosted evidence on that commit: push run fully green (8 sharded core lanes, 4 full shards, macOS core, minimum versions, docs, security, extras resolver matrix) and a workflow_dispatch run of tests.yml 25/25 including the two dispatch-only lanes and the attested check-evidence record. Two defects found and fixed during the final cycle rather than deferred: the hosted core lane's runner reclamation (sharded x4; calibration_gate_test retriaged out of the quick gate) and a 9 GB transient allocation in KDE.evaluate on multivariate input (bounded, bit-identical). Signed by the release owner.",
+  "result": "verify_release_checklist --require-final: 0 errors after this sign-off; 30/30 required check runs success on 1c2b30b7; tests.yml dispatch 33943175099 25/25 success; v0.8.0 tag object verified=true reason=valid"
+}

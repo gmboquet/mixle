@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "awk 'END{print NR}' release-checklists/inference-stats-audit-2026-08-08.md && grep -cE '^## Pass-[0-9]+ status' release-checklists/inference-stats-audit-2026-08-08.md && ls -1 $REVIEW_ARCHIVE/0.8.0-statistical-review-pass*.md | wc -l",
   "date": "2026-08-22",
-  "evidence_digest": "5cdb9f2208bf7f454409f3b1b6f94fdc4386e60aa0c3186300d1b9838a1a1a1a",
+  "evidence_digest": "898298522d57d47000dcbbe877511d6cb6999cf05764db701fe023404789246e",
   "gate": "Statistical reviewer",
   "note": "Closed 2026-08-11 by the release owner on the campaign record (D-0175): passes 2-23, every finding repaired same-pass with a reproduction and a regression test, and the reviewer's own replays confirming prior closures held (17/17 pass-21 closures at pass 22; 12/17 pass-22 closures fully at pass 23). Two limits are on the record rather than papered over.",
   "result": "the ledger is 484 lines across 11 sections, 6 of them per-pass status records; 4 late-pass reports retained in the archive"
