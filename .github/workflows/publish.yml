@@ -366,10 +366,25 @@ jobs:
           for attempt in 1 2 3 4 5 6; do
             rm -rf testpypi-artifacts
             mkdir testpypi-artifacts
+            # The wheel comes through pip. The sdist must NOT: `pip download --no-binary` prepares
+            # metadata by building the sdist, which installs the pinned build backend
+            # (setuptools==<exact>) from the only index it was given, and TestPyPI does not carry
+            # it -- the 0.8.0 rehearsal (run 34020725246) failed there after the upload had already
+            # succeeded, and the published bytes had to be verified by hand. Fetch the sdist by the
+            # exact URL TestPyPI's JSON API reports; the digest check below is what verifies it.
             if python -m pip download --index-url https://test.pypi.org/simple \
                  --no-deps --only-binary=:all: --dest testpypi-artifacts "mixle==$VERSION" &&
-               python -m pip download --index-url https://test.pypi.org/simple \
-                 --no-deps --no-binary=:all: --dest testpypi-artifacts "mixle==$VERSION"; then
+               python - "$VERSION" <<'EOF'
+          import json, sys, urllib.request
+          version = sys.argv[1]
+          with urllib.request.urlopen(f"https://test.pypi.org/pypi/mixle/{version}/json", timeout=60) as fh:
+              files = json.load(fh)["urls"]
+          sdists = [f for f in files if f["packagetype"] == "sdist"]
+          if len(sdists) != 1:
+              raise SystemExit(f"expected exactly one sdist on TestPyPI for {version}, found {len(sdists)}")
+          urllib.request.urlretrieve(sdists[0]["url"], "testpypi-artifacts/" + sdists[0]["filename"])
+          EOF
+            then
               break
             fi
             test "$attempt" -lt 6
