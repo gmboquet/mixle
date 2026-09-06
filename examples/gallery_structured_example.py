@@ -17,6 +17,8 @@ own galleries (``gallery_graphs_example.py`` for the random-graph families). The
 mixle/tests rather than here.
 """
 
+import re
+
 import numpy as np
 
 from mixle.inference import optimize
@@ -24,6 +26,20 @@ from mixle.stats import *
 from mixle.stats import IntegerChowLiuTreeEstimator
 
 RNG = lambda: np.random.RandomState(1)
+
+
+def stable(obj) -> str:
+    """``obj`` as text with every float rounded to 6 significant figures.
+
+    A one-pass/EM fit of the same seeded sample agrees to ~13 significant figures on every machine;
+    the last few digits differ by ULPs because BLAS kernels sum in a different order per CPU. This
+    example's stdout is pinned byte-for-byte by the reproduction bundle, so the full-precision lines
+    (the Markov transition map, the heterogeneous-mixture component reprs, the record fits) are
+    rounded to 6 significant figures -- far below any real fit difference, far above the ULP noise --
+    so the printed text is identical across platforms. Same helper as gallery_univariate_example.py.
+    """
+    return re.sub(r"[-+]?\d+\.\d+(?:[eE][-+]?\d+)?", lambda m: format(float(m.group()), ".6g"), str(obj))
+
 
 if __name__ == "__main__":
     print("# MarkovChain: first-order chain over symbols with a Poisson length model")
@@ -33,7 +49,7 @@ if __name__ == "__main__":
     m = optimize(
         d.sampler(1).sample(1000), MarkovChainEstimator(len_estimator=PoissonEstimator()), max_its=1, rng=RNG()
     )
-    print("  transitions: %s" % m.transition_map)
+    print("  transitions: %s" % stable(m.transition_map))
 
     print("# HeterogeneousMixture: components drawn from different families (same support x>0)")
     d = HeterogeneousMixtureDistribution([GammaDistribution(2.0, 2.0), LogGaussianDistribution(1.0, 0.25)], [0.5, 0.5])
@@ -43,7 +59,7 @@ if __name__ == "__main__":
         max_its=40,
         rng=RNG(),
     )
-    print("  weights: %s  components: %s" % (np.round(m.w, 2), [str(c) for c in m.components]))
+    print("  weights: %s  components: %s" % (np.round(m.w, 2), [stable(c) for c in m.components]))
 
     print("# IndianBuffetProcess: latent binary feature allocation")
     d = IndianBuffetProcessDistribution(num_features=4, feature_probs=[0.8, 0.5, 0.3, 0.1])
@@ -131,7 +147,7 @@ if __name__ == "__main__":
         max_its=1,
         rng=RNG(),
     )
-    print("  record fit: %s" % m)
+    print("  record fit: %s" % stable(m))
     d = DictRecordDistribution(["height", "count"], [GaussianDistribution(0.0, 1.0), PoissonDistribution(4.0)])
     m = optimize(
         d.sampler(1).sample(1000),
@@ -139,4 +155,4 @@ if __name__ == "__main__":
         max_its=1,
         rng=RNG(),
     )
-    print("  dict-record fit: %s" % m)
+    print("  dict-record fit: %s" % stable(m))

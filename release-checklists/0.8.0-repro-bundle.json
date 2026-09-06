@@ -79,7 +79,7 @@
     {
       "path": "scripts/build_repro_bundle.py",
       "role": "bundle-closure",
-      "sha256": "3d13317529633c9d41ad9b7debc31a3c4044809bfe745b56b1ecbdd05038039f"
+      "sha256": "545b5a54fb09e1b9c49f002a5f3addb3fb8ab60d807703d7d18408f114f8d2a1"
     },
     {
       "path": "scripts/run_repro_entry.py",
@@ -155,14 +155,14 @@
           "held-out mean log-density: -19.791"
         ],
         "format": "text",
-        "stdout_sha256": "4abfe0e6d459a39dfbb457e3495acaec2edf69b4adaaf57ce4dd3cf840a5f98e"
+        "stdout_sha256": "a2d89983e4df1707aa85327a8cec0f33f060cc9c6a325402a1271988095d2858"
       },
       "id": "gallery-structured",
       "inputs": [
         {
           "path": "examples/gallery_structured_example.py",
           "role": "executable",
-          "sha256": "28a6f84fab94299033a8175a1f1a9705fd468f4dfc6e79ec3a87bd505bb77323"
+          "sha256": "199528c250710db17ccbb0e6f8b5c2629fe9da41f67959830af763eb351c1e28"
         }
       ],
       "kind": "self-contained",
@@ -185,11 +185,15 @@
           "chain intact: True"
         ],
         "format": "text",
-        "stdout_sha256": "d1c0f7da932c277dccf7d24e1c5b02ca976dcc08f73200ecf46f0b11ba0612e1",
+        "stdout_sha256": "d5ea13f8aa58a6ab80315b18be62ddc0b4facf553dcdcde89e887fc2094930a7",
         "volatile": [
           {
             "pattern": "git / mixle  : (?:[0-9a-f]{7,40}|unknown) / ",
             "placeholder": "git / mixle  : <commit> / "
+          },
+          {
+            "pattern": "model hash  : [0-9a-f]{16} \\.\\.\\.",
+            "placeholder": "model hash  : <fit-dependent> ..."
           }
         ]
       },

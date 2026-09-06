@@ -100,9 +100,14 @@ def test_declared_volatile_spans_do_not_weaken_the_stdout_digest():
     with pytest.raises(ValueError, match="never matched"):
         runner._validate_output(stale, stdout)
 
-    # the production entry is the one real user of the exemption, and exempts only the commit
+    # the production entry is the one real user of the exemption, and exempts exactly two spans:
+    # the commit it reproduces from, and the model fingerprint (a hash of raw fitted float64
+    # bytes, which differ by ULPs per CPU/BLAS); every other byte of its stdout stays pinned
     provenance = next(e for e in _bundle()["entries"] if e["id"] == "production-provenance")
-    assert [rule["placeholder"] for rule in provenance["expected"]["volatile"]] == ["git / mixle  : <commit> / "]
+    assert [rule["placeholder"] for rule in provenance["expected"]["volatile"]] == [
+        "git / mixle  : <commit> / ",
+        "model hash  : <fit-dependent> ...",
+    ]
 
 
 def test_bundle_rejects_unresolved_license_and_integrity_placeholders():

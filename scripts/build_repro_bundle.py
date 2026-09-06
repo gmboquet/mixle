@@ -105,7 +105,11 @@ _ENTRIES = (
         "configuration": {"seed": "declared in script", "dataset": "synthetic"},
         "expected": {
             "format": "text",
-            "stdout_sha256": "4abfe0e6d459a39dfbb457e3495acaec2edf69b4adaaf57ce4dd3cf840a5f98e",
+            # Repinned for platform-robust output (same treatment as gallery-univariate): the Markov
+            # transition map, the heterogeneous-mixture component reprs, and the record fits printed
+            # raw floats that differ by ULPs per CPU/BLAS; the example now rounds them to 6 significant
+            # figures. The structural/rounded `contains` lines already matched on x86_64 CI.
+            "stdout_sha256": "a2d89983e4df1707aa85327a8cec0f33f060cc9c6a325402a1271988095d2858",
             "contains": [
                 "learned parents: [None, 0, 0]",
                 "held-out mean log-density: -17.965",
@@ -129,13 +133,21 @@ _ENTRIES = (
                 {
                     "pattern": r"git / mixle  : (?:[0-9a-f]{7,40}|unknown) / ",
                     "placeholder": "git / mixle  : <commit> / ",
-                }
+                },
+                # The model fingerprint hashes the fitted parameters' raw float64 bytes
+                # (mixle.data.hashing._canonical), and a fit differs by ULPs per CPU/BLAS, so the hex
+                # cannot be byte-reproduced across arithmetic; "# lineage verified: True" (pinned in
+                # `contains`) is what proves the provenance chain, so the value is normalized away.
+                {
+                    "pattern": r"model hash  : [0-9a-f]{16} \.\.\.",
+                    "placeholder": "model hash  : <fit-dependent> ...",
+                },
             ],
             # Repinned for the c9eb9d2e campaign fix waves: the EM default-initialization repair
             # and FitProvenance.final_objective now describing the RETURNED model change the
             # example's fitted values and its "final loglik" line. New digest measured twice,
             # byte-identical, with every `contains` invariant still holding.
-            "stdout_sha256": "d1c0f7da932c277dccf7d24e1c5b02ca976dcc08f73200ecf46f0b11ba0612e1",
+            "stdout_sha256": "d5ea13f8aa58a6ab80315b18be62ddc0b4facf553dcdcde89e887fc2094930a7",
             "contains": [
                 "# lineage verified: True",
                 "drift on shifted batch: True",
