@@ -1427,6 +1427,120 @@ def _project_init(u0, feasible, rng):
     )
 
 
+def _hard_violation(constraints, slots):
+    """Compile hard constraints into ``violation(u) -> float >= 0`` (zero exactly where they all hold),
+    or ``None`` when some constraint has no continuous residual (a negated relation)."""
+    try:
+        penalty = _soft_penalty(constraints, slots, 2.0)  # -0.5 * 2 * sum(r^2) = -sum(r^2)
+    except ValueError:
+        return None
+    if penalty is None:
+        return None
+    return lambda u: -float(penalty(u))
+
+
+def _repair_feasibility(u, feasible, violation, anchor):
+    """Move the penalty optimum ``u``, which sits O(1/weight) outside the feasible set (exactly on the
+    boundary when a constraint is active), the last hair into it.
+
+    Step against the gradient of ``sqrt(violation)``: that direction is the sum of the normals of
+    exactly the violated constraints, so one small step fixes every active tie at once (two
+    coordinates in the wrong order by 1e-8 get swapped, not both shifted). ``sqrt`` keeps the
+    gradient O(1) where the squared hinge is O(1e-16). Random jitter almost never lands inside a
+    corner in several dimensions, and a segment toward a feasible anchor moves tied coordinates
+    equally and so never reorders them (that is what FU-15's tutorial case does).
+    """
+    if feasible(u):
+        return u
+    scale = np.maximum(np.abs(u), 1.0)
+    h = 1.0e-7 * scale
+    gradient = np.zeros(u.size)
+    for k in range(u.size):
+        plus, minus = u.copy(), u.copy()
+        plus[k] += h[k]
+        minus[k] -= h[k]
+        gradient[k] = (math.sqrt(max(violation(plus), 0.0)) - math.sqrt(max(violation(minus), 0.0))) / (2.0 * h[k])
+    norm = float(np.linalg.norm(gradient))
+    if norm > 0.0 and np.all(np.isfinite(gradient)):
+        direction = -gradient / norm
+        for alpha in np.logspace(-12, 0, 61):
+            candidate = u + alpha * scale * direction
+            if feasible(candidate):
+                return candidate
+    for t in np.logspace(-9, 0, 46):  # last resort: the segment back to the feasible anchor
+        candidate = u + t * (anchor - u)
+        if feasible(candidate):
+            return candidate
+    return u
+
+
+def _derivative_free_constrained(objective, feasible, violation, u0, *, max_iter, tol, rng):
+    """Minimize ``objective`` (already ``-log_target``, soft penalties included) over ``feasible``.
+
+    Returns ``(u, f, algorithm, success, message)``.
+
+    Nelder-Mead against a hard ``1e18`` wall is what FU-15 exposed: in five dimensions the simplex
+    collapses against the infeasible face and either exhausts ``max_iter`` or reports convergence at a
+    nearly constant vector far from the constrained optimum (the tutorial's monotone 5-D mean came
+    back as ``[2, 2, 2, 2, 2.1]`` for column means ``0, 2, 1, 3, 4``). When every hard constraint has a
+    continuous residual, minimize a smooth exterior-penalty surface with Powell instead, ramping the
+    weight and warm-starting so the iterate walks to the constrained optimum without ever meeting a
+    wall; then nudge the result into the feasible set and polish it with a small-simplex Nelder-Mead
+    on the walled objective. Without residuals, fall back to walled Nelder-Mead restarted from its
+    best point while it keeps improving.
+    """
+    from scipy.optimize import minimize
+
+    def finite(value: float) -> float:
+        return float(value) if np.isfinite(value) else 1e18
+
+    def walled(u):
+        if feasible is not None and not feasible(u):
+            return 1e18
+        return finite(objective(u))
+
+    u = np.asarray(u0, dtype=float)
+    if feasible is not None and violation is not None:
+        for weight in (1e1, 1e3, 1e5, 1e7, 1e9):
+            penalized = minimize(
+                lambda z, w=weight: finite(objective(z)) + w * violation(z),
+                u,
+                method="Powell",
+                options={"maxiter": max_iter, "xtol": tol, "ftol": tol},
+            )
+            if np.all(np.isfinite(penalized.x)):
+                u = np.asarray(penalized.x, dtype=float)
+        if not feasible(u):
+            u = _repair_feasibility(u, feasible, violation, np.asarray(u0, dtype=float))
+        if feasible(u):
+            best_u, best_f = u, walled(u)
+            step = 1e-3 * np.maximum(np.abs(u), 1.0)
+            simplex = np.vstack([u] + [u + step * np.eye(u.size)[k] for k in range(u.size)])
+            polish = minimize(
+                walled,
+                u,
+                method="Nelder-Mead",
+                options={"initial_simplex": simplex, "xatol": tol, "fatol": tol, "maxiter": max_iter},
+            )
+            if np.isfinite(polish.fun) and polish.fun < best_f and np.all(np.isfinite(polish.x)) and feasible(polish.x):
+                best_u, best_f = np.asarray(polish.x, dtype=float), float(polish.fun)
+            if np.isfinite(best_f) and best_f < 1e18:
+                return best_u, best_f, "powell-penalty+nelder-mead", True, "constrained optimum reached"
+    last = np.inf
+    result = None
+    for _restart in range(6):
+        result = minimize(walled, u, method="Nelder-Mead", options={"xatol": tol, "fatol": tol, "maxiter": max_iter})
+        u = np.asarray(result.x, dtype=float)
+        f = float(result.fun)
+        if bool(result.success) or not np.isfinite(f) or f >= 1e18:
+            break
+        if last - f <= tol * max(1.0, abs(f)):  # budget exhausted and no longer improving
+            break
+        last = f
+    ok = bool(result.success) and np.isfinite(result.fun) and result.fun < 1e18 and np.all(np.isfinite(result.x))
+    return np.asarray(result.x, dtype=float), float(result.fun), "nelder-mead", ok, str(result.message)
+
+
 def _constrain_target(log_target, feasible):
     """Wrap a log-target so it is -inf outside the feasible region (samplers reject it; the
     region is a hard truncation of the joint posterior)."""
@@ -2267,24 +2381,40 @@ def map_fit(
             return -log_target(u)
 
         clean_gradient = grad is not None and constraints is None and penalty is None and potentials is None
-        grouped_result = minimize(
-            grouped_objective,
-            u0,
-            jac=(lambda u: -grad(u)) if clean_gradient else None,
-            method="L-BFGS-B" if clean_gradient else "Nelder-Mead",
-            options=(
-                {"maxiter": max_iter, "ftol": tol, "gtol": tol}
-                if clean_gradient
-                else {"maxiter": max_iter, "xatol": tol, "fatol": tol}
-            ),
-        )
-        if (
-            not bool(grouped_result.success)
-            or not np.isfinite(grouped_result.fun)
-            or not np.all(np.isfinite(grouped_result.x))
-        ):
-            raise RuntimeError(f"grouped MAP optimization failed: {grouped_result.message}")
-        value_row = _u_to_vals(slots, np.asarray(grouped_result.x, dtype=float)[None, :])[0]
+        if clean_gradient:
+            grouped_result = minimize(
+                grouped_objective,
+                u0,
+                jac=lambda u: -grad(u),
+                method="L-BFGS-B",
+                options={"maxiter": max_iter, "ftol": tol, "gtol": tol},
+            )
+            grouped_x, grouped_fun = grouped_result.x, grouped_result.fun
+            grouped_ok = bool(grouped_result.success)
+            grouped_algorithm, grouped_message, grouped_nit = (
+                "L-BFGS-B",
+                str(grouped_result.message),
+                int(getattr(grouped_result, "nit", 0)),
+            )
+        else:
+            hard_constraints, _soft = _constraint_policy(constraints, penalty)
+            violation = _hard_violation(hard_constraints, slots) if hard_constraints else None
+            grouped_x, grouped_fun, grouped_algorithm, grouped_ok, grouped_message = _derivative_free_constrained(
+                lambda u: -log_target(u),
+                feasible,
+                violation,
+                u0,
+                max_iter=max_iter,
+                tol=tol,
+                rng=np.random.RandomState() if rng is None else rng,
+            )
+            grouped_nit = 0
+        if not grouped_ok or not np.isfinite(grouped_fun) or not np.all(np.isfinite(grouped_x)):
+            raise RuntimeError(
+                f"grouped MAP optimization failed ({grouped_algorithm}): {grouped_message}. "
+                f"Raise max_iter (currently {max_iter}) or loosen tol."
+            )
+        value_row = _u_to_vals(slots, np.asarray(grouped_x, dtype=float)[None, :])[0]
         values = {slot.index: float(value_row[k]) for k, slot in enumerate(slots)}
         group_prior = rv._args[0]
         group_values = np.asarray(
@@ -2295,11 +2425,11 @@ def map_fit(
             slot.name: float(value_row[k]) for k, slot in enumerate(slots) if slot.handle is not group_prior
         }
         optimizer = {
-            "algorithm": "L-BFGS-B" if clean_gradient else "Nelder-Mead",
+            "algorithm": grouped_algorithm,
             "success": True,
-            "iterations": int(getattr(grouped_result, "nit", 0)),
-            "message": str(grouped_result.message),
-            "objective": float(grouped_result.fun),
+            "iterations": grouped_nit,
+            "message": grouped_message,
+            "objective": float(grouped_fun),
         }
         result = IndexedPosterior(
             [(group_prior, group_prior.name or "theta", group_values)],
@@ -2363,27 +2493,29 @@ def map_fit(
     hard_constraints, soft_constraints = _constraint_policy(constraints, penalty)
     soft = _soft_penalty(soft_constraints, slots, _auto_penalty(soft_constraints, penalty))
     feasible = _feasibility(hard_constraints, slots)
-    log_target = _constrain_target(log_target, feasible)
-    log_target = _penalize_target(log_target, soft)
-    log_target = _penalize_target(log_target, _potential_term(potentials, slots))
+    # The smooth part of the target (soft penalties and potentials, no feasibility wall) is what the
+    # penalty ramp in _derivative_free_constrained minimizes; the wall is applied there, not here.
+    smooth_target = _penalize_target(log_target, soft)
+    smooth_target = _penalize_target(smooth_target, _potential_term(potentials, slots))
+    violation = _hard_violation(hard_constraints, slots) if hard_constraints else None
+    project_rng = np.random.RandomState() if rng is None else rng
     u0 = _init_u(slots, dmean, dstd)
     if feasible is not None:
-        u0 = _project_init(u0, feasible, np.random.RandomState() if rng is None else rng)
-
-    def objective(u):
-        if feasible is not None and not feasible(u):
-            return 1e18  # keep the constrained MAP inside the feasible region
-        return -log_target(u)
-
-    res = minimize(
-        objective,
+        u0 = _project_init(u0, feasible, project_rng)
+    x_opt, f_opt, algorithm, ok, message = _derivative_free_constrained(
+        lambda u: -smooth_target(u),
+        feasible,
+        violation,
         u0,
-        method="Nelder-Mead",
-        options={"xatol": tol, "fatol": tol, "maxiter": max_iter},
+        max_iter=max_iter,
+        tol=tol,
+        rng=project_rng,
     )
-    if not bool(res.success) or not np.isfinite(res.fun) or not np.all(np.isfinite(res.x)):
-        raise RuntimeError(f"MAP optimization failed: {res.message}")
-    vals, _ = unpack(res.x)
+    if not ok or not np.isfinite(f_opt) or not np.all(np.isfinite(x_opt)):
+        raise RuntimeError(
+            f"MAP optimization failed ({algorithm}): {message}. Raise max_iter (currently {max_iter}) or loosen tol."
+        )
+    vals, _ = unpack(x_opt)
     return RandomVariable._bound(build(vals), name=rv._name)
 
 

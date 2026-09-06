@@ -895,6 +895,23 @@ def _category(have: frozenset[str], obj: Any = None) -> str:
     return "distribution"
 
 
+def _looks_like_raw_data(obj: Any) -> bool:
+    """A numpy array, a pandas frame/series, or a list/tuple of numbers, rows, or records."""
+    import numpy as np
+
+    if isinstance(obj, np.ndarray):
+        return True
+    if hasattr(obj, "iloc") and hasattr(obj, "shape"):  # pandas DataFrame / Series without importing pandas
+        return True
+    if isinstance(obj, (list, tuple)) and obj:
+        head = obj[0]
+        if isinstance(head, (int, float, str, bytes, np.generic, list, tuple, dict, np.ndarray)) and not isinstance(
+            head, bool
+        ):
+            return not any(hasattr(item, "log_density") for item in obj[:8])
+    return False
+
+
 def describe(obj: Any) -> str:
     """Return a plain-English summary of what ``obj`` is and what you can do with it.
 
@@ -922,6 +939,17 @@ def describe(obj: Any) -> str:
                 type(obj).__name__,
                 type(obj).__name__,
             )
+        )
+    # Raw data is the FIRST thing a newcomer holds, and the top-level docstring routes them here;
+    # "ndarray — no catalogued capability detected" reads as "the library has nothing for this" when
+    # propose() is exactly the answer (FU-09). Route it there instead of describing the container.
+    if _looks_like_raw_data(obj):
+        shape = getattr(obj, "shape", None)
+        what = type(obj).__name__ + ("" if shape is None else " of shape %s" % (tuple(shape),))
+        return (
+            "%s — raw data, not a model. mixle.propose(data) picks a distribution, fits it, and explains why; "
+            "mixle.fit(data, estimator) when you already know the family. describe(model) on either result "
+            "then says what the fitted model can do." % what
         )
     # A class (e.g. a model class) or any non-distribution object is described by its catalogued
     # capabilities only — the rich distribution view needs a live instance.

@@ -138,9 +138,38 @@ def pair(value: Any, dim: int, *, label: str = "comparison") -> tuple[int, int]:
     return first, second
 
 
+def homogeneous_rows(value: Any, width: int, *, label: str) -> np.ndarray:
+    """Return ``value`` as an array of ``width``-item rows, naming the first row of the wrong arity.
+
+    ``np.asarray`` on a ragged sequence -- a 2-item win/loss pair left among 3-item tie comparisons,
+    the natural mistake of not stripping draws before the no-tie estimator -- raises numpy's own
+    "setting an array element with a sequence ... inhomogeneous shape" message before any of the
+    row-numbered validators below ever run, because they only see a rectangular array. Uniformly
+    wrong arity already got a clean ``must have shape (N, k)`` message; the MIXED case fell through.
+    """
+    if isinstance(value, np.ndarray):
+        return value
+    try:
+        return np.asarray(value)
+    except ValueError:
+        pass
+    for index, row in enumerate(value):
+        try:
+            found = len(row)
+        except TypeError:
+            found = None
+        if found != width:
+            raise ValueError(
+                f"{label} row {index} has {found if found is not None else 'no'} items; every comparison must "
+                f"have exactly {width} (2-item winner/loser pairs and 3-item tie comparisons cannot be mixed: "
+                "strip the draws, or use the tie-aware Davidson/Rao-Kupper families)."
+            ) from None
+    raise ValueError(f"{label} must have shape (N, {width}).")
+
+
 def pair_batch(value: Any, dim: int, *, label: str = "comparisons", allow_empty: bool = True) -> np.ndarray:
     """Return an exact ``(N, 2)`` comparison batch."""
-    raw = np.asarray(value)
+    raw = homogeneous_rows(value, 2, label=label)
     if raw.ndim != 2 or raw.shape[1:] != (2,):
         raise ValueError(f"{label} must have shape (N, 2).")
     if not allow_empty and raw.shape[0] == 0:
@@ -171,7 +200,7 @@ def tie_comparison(value: Any, dim: int, *, label: str = "tie comparison") -> tu
 
 def tie_batch(value: Any, dim: int, *, label: str = "tie comparisons", allow_empty: bool = True) -> np.ndarray:
     """Return an exact canonical ``(N, 3)`` tie-comparison batch."""
-    raw = np.asarray(value)
+    raw = homogeneous_rows(value, 3, label=label)
     if raw.ndim != 2 or raw.shape[1:] != (3,):
         raise ValueError(f"{label} must have shape (N, 3).")
     if not allow_empty and raw.shape[0] == 0:

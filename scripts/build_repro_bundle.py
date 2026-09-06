@@ -143,11 +143,16 @@ _ENTRIES = (
                     "placeholder": "model hash  : <fit-dependent> ...",
                 },
             ],
-            # Repinned for the c9eb9d2e campaign fix waves: the EM default-initialization repair
-            # and FitProvenance.final_objective now describing the RETURNED model change the
-            # example's fitted values and its "final loglik" line. New digest measured twice,
-            # byte-identical, with every `contains` invariant still holding.
-            "stdout_sha256": "d5ea13f8aa58a6ab80315b18be62ddc0b4facf553dcdcde89e887fc2094930a7",
+            # Repinned for platform-robust output. Two things in the example were machine-dependent:
+            # the seeded sample itself (RandomState.normal goes through libm's log, which differs by
+            # an ULP between macOS and glibc, so the DATA hash differed per OS) -- the example now
+            # rounds every draw to 6 decimals, which pins the data hash everywhere -- and the number
+            # of checkpoints (well-separated mixture components reached their EM fixed point in ~3
+            # iterations, after which float noise decided whether a later step was "rejected") --
+            # the checkpoint demo now fits overlapping components that are still climbing at
+            # iteration 9. Digest measured identical on macOS arm64 and emulated x86_64 Linux with
+            # the pinned numpy/scipy; the model hash remains the one declared-volatile span.
+            "stdout_sha256": "16ab26daa775255051d484a8fbc4670069c476f3b274b297b47726fa9135c75c",
             "contains": [
                 "# lineage verified: True",
                 "drift on shifted batch: True",

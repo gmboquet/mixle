@@ -2371,6 +2371,11 @@ def dump_models(x, *, verify: bool = True) -> str:
     without this check ``dump_models`` returns text that ``load_models`` cannot read, and the bill
     arrives in another process on another day.
 
+    ``mixle.propose()`` (and ``mixle.Model``) return a :class:`~mixle.lifecycle.Model` wrapper, not a
+    stats model: pass ``model.fitted``, the fitted distribution it wraps, rather than the wrapper
+    itself, which is not registered for serialization and is refused with a ``SerializationError``
+    naming ``register_serializable_callable`` (a detour meant for user callables, not for this).
+
     Pass ``verify=False`` for text wanted to inspect rather than to reload; the JSON is byte-identical
     either way and only the read back is skipped. It is the way to get at the parameters of a model
     whose family has no working decoder yet, since the written state is complete even when the

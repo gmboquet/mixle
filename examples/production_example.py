@@ -31,9 +31,19 @@ from mixle.inference import optimize
 from mixle.inference.production import Registry, Service, detect_drift, fit_with_provenance, verify_lineage
 from mixle.stats import GaussianEstimator, MixtureEstimator
 
+
+def draw(rng: np.random.RandomState, loc: float, scale: float, size: int) -> list[float]:
+    """A seeded Gaussian sample rounded to 6 decimals, so its bytes (and hence the data hash) are the
+    same on every platform. The raw draws are not: ``RandomState.normal`` goes through libm's ``log``,
+    which is not correctly rounded and differs by an ULP between macOS and glibc, so the unrounded
+    sample hashed to a different value per operating system while every derived statistic agreed.
+    """
+    return np.round(rng.normal(loc, scale, size), 6).tolist()
+
+
 if __name__ == "__main__":
     rng = np.random.RandomState(0)
-    data = rng.normal(3.0, 2.0, 4000).tolist()
+    data = draw(rng, 3.0, 2.0, 4000)
 
     # 1. fit with provenance: the model carries a self-describing Header.
     model, header = fit_with_provenance(data, GaussianEstimator(), max_its=30, seed=1)
@@ -53,7 +63,7 @@ if __name__ == "__main__":
 
         # 3. register two versions and promote one to production (an atomic alias swap).
         reg.register(model, "demo")  # v1
-        drifted, _ = fit_with_provenance(rng.normal(9.0, 2.0, 4000).tolist(), GaussianEstimator(), max_its=30)
+        drifted, _ = fit_with_provenance(draw(rng, 9.0, 2.0, 4000), GaussianEstimator(), max_its=30)
         reg.register(drifted, "demo")  # v2
         reg.promote("demo", "v1", alias="production")
         prod, _ = reg.current("demo", "production")
@@ -61,14 +71,18 @@ if __name__ == "__main__":
 
         # 4. serve scoring + check drift against the training sample as reference.
         svc = Service(prod, name="demo", reference=data)
-        lp = svc.score(rng.normal(3.0, 2.0, 500).tolist())
+        lp = svc.score(draw(rng, 3.0, 2.0, 500))
         print("# serving: scored %d records, mean loglik %.2f" % (len(lp), svc.health()["mean_loglik"]))
-        report = detect_drift(prod, data, rng.normal(9.0, 2.0, 500).tolist())  # shifted batch
+        report = detect_drift(prod, data, draw(rng, 9.0, 2.0, 500))  # shifted batch
         print("  drift on shifted batch:", report.drift, "(ks=%.2f)" % report.score["ks"])
 
-        # 5. checkpoint a fit every 3 iterations, then resume from the latest checkpoint.
+        # 5. checkpoint a fit every 3 iterations, then resume from the latest checkpoint. The two
+        # components overlap (means -1 and +1, unit scale) so EM is still climbing at iteration 9:
+        # well-separated components reach their fixed point in about three iterations, after which
+        # float noise decides whether a later iteration counts as an improvement or ends the loop,
+        # and the number of checkpoints would then depend on the machine.
         est = MixtureEstimator([GaussianEstimator(), GaussianEstimator()])
-        seqs = np.concatenate([rng.normal(-5, 1, 3000), rng.normal(5, 1, 3000)]).tolist()
+        seqs = draw(rng, -1.0, 1.0, 3000) + draw(rng, 1.0, 1.0, 3000)
         optimize(
             seqs,
             est,

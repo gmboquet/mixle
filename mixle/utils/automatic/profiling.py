@@ -1858,6 +1858,21 @@ def _pair_index_schedule(num_items: int, max_pairs: int) -> tuple[list[tuple[int
     return pairs, "stratified", total
 
 
+def _multimodal_field_paths(field_series) -> list:
+    """Paths of the numeric fields whose values pass the same multimodality gate the marginal
+    recommender uses to consider a two-component mixture (at least 12 distinct finite values)."""
+    found = []
+    for path, (_role, values) in sorted(field_series.items(), key=lambda u: _path_sort_key(u[0])):
+        try:
+            arr = np.asarray([v for v in values if v is not None], dtype=float)
+        except (TypeError, ValueError):
+            continue
+        arr = arr[np.isfinite(arr)]
+        if arr.size and np.unique(arr).size >= 12 and _looks_multimodal(arr):
+            found.append(path)
+    return found
+
+
 def analyze_structure(
     data,
     pairwise: bool = True,
@@ -1931,7 +1946,18 @@ def analyze_structure(
         ),
     )
 
-    warnings = ["pairwise hints are unconditional; latent mixture/state/topic structure can explain or hide them"]
+    # The mixture caveat used to print on EVERY call, identical each time, so it was skimmed past in
+    # exactly the case it matters (genuinely bimodal two-population data). Now it is issued only for
+    # the fields that actually look multimodal, and names them (FU-11).
+    warnings = []
+    multimodal_fields = _multimodal_field_paths(field_series)
+    if multimodal_fields:
+        named = ", ".join(str(path) for path in multimodal_fields[:5]) + (", ..." if len(multimodal_fields) > 5 else "")
+        warnings.append(
+            "field(s) %s look multimodal (bimodality coefficient above the unimodal reference): pairwise hints "
+            "are conditional on that -- latent mixture/state/topic structure can explain or hide them; consider "
+            "a mixture for those fields (MixtureEstimator over the field's family, fitted with optimize)" % named
+        )
     # analyze_structure is the diagnostic surface, so a malformed table is REPORTED here rather than
     # refused the way get_estimator refuses it -- the whole point of asking for a profile is to see
     # what the data looks like, including that one row does not fit the shape the rest establish.

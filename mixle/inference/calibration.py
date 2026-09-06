@@ -424,11 +424,27 @@ def top_label_confidence(prob: np.ndarray, labels: np.ndarray) -> tuple[np.ndarr
     return confidence, correct
 
 
+def evaluate_cdf(cdf: Callable[[Any], Any], y: np.ndarray) -> np.ndarray:
+    """Apply ``cdf`` to the vector ``y``, element-wise when ``cdf`` only takes scalars.
+
+    Every distribution's ``cdf`` method in this library is scalar-only (``float(x)`` on an array
+    raises ``TypeError``), while the goodness-of-fit and calibration helpers type their ``cdf``
+    argument as vectorized. A fitted model's ``.cdf`` is the most natural thing to hand them, so both
+    conventions are accepted here. A ``TypeError`` raised on a scalar call is a real error in ``cdf``
+    and propagates as-is rather than being re-labelled a values problem (FU-04).
+    """
+    try:
+        return np.asarray(cdf(y), dtype=float)
+    except TypeError:
+        return np.asarray([float(cdf(value)) for value in y], dtype=float)
+
+
 def pit_values(y: np.ndarray, cdf: np.ndarray | Callable[[np.ndarray], np.ndarray]) -> np.ndarray:
     """Probability Integral Transform values ``u_i = F_i(y_i)``.
 
     Under a calibrated continuous predictive distribution the PIT values are Uniform(0, 1). Pass either
-    the precomputed CDF values ``F_i(y_i)`` or a callable ``cdf(y) -> F(y)``.
+    the precomputed CDF values ``F_i(y_i)`` or a callable ``cdf(y) -> F(y)``; a scalar-only callable
+    such as a fitted distribution's ``.cdf`` is evaluated element-wise.
 
     Args:
         y: ``(n,)`` realised values.
@@ -439,8 +455,10 @@ def pit_values(y: np.ndarray, cdf: np.ndarray | Callable[[np.ndarray], np.ndarra
     """
     y = _vector("y", y)
     try:
-        u = np.asarray(cdf(y) if callable(cdf) else cdf, dtype=float)
-    except (TypeError, ValueError) as exc:
+        u = evaluate_cdf(cdf, y) if callable(cdf) else np.asarray(cdf, dtype=float)
+    except ValueError as exc:
+        # Non-numeric CDF VALUES are a values problem; a callable-signature TypeError is not, and used
+        # to be reported here as this same message, sending the user after the wrong cause (FU-04).
         raise ValueError("cdf must return finite values matching y") from exc
     if u.shape != y.shape:
         raise ValueError("cdf values must have the same one-dimensional shape as y")

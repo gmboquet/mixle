@@ -79,7 +79,7 @@
     {
       "path": "scripts/build_repro_bundle.py",
       "role": "bundle-closure",
-      "sha256": "545b5a54fb09e1b9c49f002a5f3addb3fb8ab60d807703d7d18408f114f8d2a1"
+      "sha256": "a5c56fe2423e0ceccb10eb1b34716471f7a6fbafa28b4f2b70d6ddbeb1bdde3c"
     },
     {
       "path": "scripts/run_repro_entry.py",
@@ -185,7 +185,7 @@
           "chain intact: True"
         ],
         "format": "text",
-        "stdout_sha256": "d5ea13f8aa58a6ab80315b18be62ddc0b4facf553dcdcde89e887fc2094930a7",
+        "stdout_sha256": "16ab26daa775255051d484a8fbc4670069c476f3b274b297b47726fa9135c75c",
         "volatile": [
           {
             "pattern": "git / mixle  : (?:[0-9a-f]{7,40}|unknown) / ",
@@ -202,7 +202,7 @@
         {
           "path": "examples/production_example.py",
           "role": "executable",
-          "sha256": "047bd6bfea2bd31b7597775251e4e12f9e3ab52755f1513bc55c5ac9f992cf8b"
+          "sha256": "f868e10ff845e43fd782b30678c216c066894a38e8e1a35be16b8575b385aaa5"
         }
       ],
       "kind": "workflow",

@@ -39,6 +39,7 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.rankings._contracts import (
     finite_nonnegative,
     finite_positive,
+    homogeneous_rows,
     matrix_statistics,
     pair,
     pair_batch,
@@ -241,9 +242,25 @@ class BradleyTerryDistribution(SequenceEncodableProbabilityDistribution):
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x: tuple[int, int]) -> float:
-        """Return the log-probability of one ``(winner, loser)`` comparison."""
+        """Return the JOINT log-probability of one ``(winner, loser)`` comparison.
+
+        The pair is drawn uniformly from all ``K(K-1)/2`` unordered pairs and the winner follows
+        Bradley-Terry, so ``exp(log_density(...))`` sums to one over all ordered pairs and
+        ``exp(log_density((i, j))) + exp(log_density((j, i)))`` is ``1/C(K, 2)`` -- NOT one. It is
+        not ``P(i beats j)``; that conditional is :meth:`win_probability`.
+        """
         w, ell = pair(x, self.dim, label="Bradley-Terry comparison")
         return self.log_w[w] - np.logaddexp(self.log_w[w], self.log_w[ell]) - self.log_pairs
+
+    def win_probability(self, i: int, j: int) -> float:
+        """Return ``P(i beats j | i and j are compared)``: ``sigmoid(log_w[i] - log_w[j])``.
+
+        The conditional a reader of ``log_density`` expects. ``log_density`` is the joint over (which
+        pair, uniformly) x (who won), smaller by the factor ``C(K, 2)``; this quantity satisfies
+        ``win_probability(i, j) + win_probability(j, i) == 1``.
+        """
+        w, ell = pair((i, j), self.dim, label="Bradley-Terry comparison")
+        return float(np.exp(self.log_w[w] - np.logaddexp(self.log_w[w], self.log_w[ell])))
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Return vectorized log-probabilities for encoded pairwise comparisons."""
@@ -355,7 +372,19 @@ class BradleyTerryAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class BradleyTerryEstimator(ParameterEstimator):
-    """Maximum-likelihood log-worths via the Zermelo / MM fixed point (Hunter 2004)."""
+    """Maximum-likelihood log-worths via the Zermelo / MM fixed point (Hunter 2004).
+
+    ``pseudo_count`` adds that many fractional wins to EVERY ordered pair (symmetric smoothing). It
+    is what lets an undefeated or winless competitor, or a disconnected comparison graph, fit at
+    all: the unregularized maximum likelihood does not exist there (Ford 1957), and the estimator
+    refuses rather than return a boundary worth. Choosing it: the top of the ranking is stable over
+    a wide range, but near-tied competitors can swap order and the leader's worth margin shrinks
+    roughly with ``pseudo_count`` relative to the wins per pair, because the prior wins pull every
+    worth toward equality (a 0.05 -> 2.0 sweep on one realistic dataset moved the leader's margin
+    by ~10x while leaving the top order alone). Start near ``0.5``, half a prior win per ordered
+    pair, shrink it as the comparisons per pair grow, read ``fit_diagnostics.regularized`` and
+    ``pseudo_count`` on the result, and compare two values before quoting a margin.
+    """
 
     def __init__(
         self,
@@ -402,10 +431,12 @@ class BradleyTerryEstimator(ParameterEstimator):
             raise RuntimeError("Bradley-Terry MM fitting produced non-finite worths.")
         diagnostics = BradleyTerryFitDiagnostics(
             converged=True,
-            iterations=iterations,
-            l1_change=final_diff,
+            iterations=int(iterations),
+            # _bt_mm hands back numpy scalars; the record is typed float/int and a JSON round-trip
+            # returned plain Python types, so the wrapper type changed across the round-trip (FU-13).
+            l1_change=float(final_diff),
             regularized=regularized,
-            pseudo_count=pseudo_count,
+            pseudo_count=float(pseudo_count),
         )
         return BradleyTerryDistribution(
             log_w,
@@ -430,7 +461,7 @@ class BradleyTerryDataEncoder(DataSequenceEncoder):
     def seq_encode(self, x: Sequence[tuple[int, int]]) -> np.ndarray:
         """Validate and encode ``(winner, loser)`` pairs as an integer matrix."""
         if self.dim is None:
-            raw = np.asarray([list(value) for value in x])
+            raw = homogeneous_rows([list(value) for value in x], 2, label="Bradley-Terry comparisons")
             if raw.ndim != 2 or raw.shape[1:] != (2,) or raw.shape[0] == 0:
                 raise ValueError("BradleyTerryDistribution requires a non-empty sequence of comparisons.")
             inferred = max(2, int(np.max(raw)) + 1)

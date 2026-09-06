@@ -39,6 +39,7 @@ from mixle.stats.compute.pdist import (
 )
 from mixle.stats.rankings._contracts import (
     finite_nonnegative,
+    homogeneous_rows,
     matrix_statistics,
     pair,
     pair_batch,
@@ -61,10 +62,18 @@ class ThurstoneMostellerFitDiagnostics:
 
     method: str
     exact_mle: bool
+    # UNDIRECTED connectivity: every item is reachable from every other through some comparison. A
+    # necessary condition only -- it does not decide whether an unregularized finite fit exists.
     graph_connected: bool
     clipped_pair_probabilities: int
     regularized: bool
     pseudo_count: float
+    # DIRECTED strong connectivity of the win graph (Ford 1957): from every item some directed chain
+    # of wins reaches every other item AND every item is reached by one. This, not
+    # ``graph_connected``, is the condition that gates whether an unregularized finite MLE exists;
+    # ``graph_connected`` can read True on data that still needed ``pseudo_count``. Reported on the
+    # raw counts, before any pseudo-count smoothing.
+    strongly_connected: bool
 
     # Every ThurstoneMostellerEstimator.estimate() fit attaches this unconditionally, so without
     # this flag to_serializable()/to_json()/model_hash() raised an unhandled SerializationError for
@@ -86,9 +95,14 @@ class TieModelFitDiagnostics:
     gradient_norm: float
     worth_boundary_hit: bool
     tie_parameter_boundary_hit: bool
+    # UNDIRECTED connectivity of the comparison graph (necessary, not sufficient for a finite fit).
     graph_connected: bool
     regularized: bool
     pseudo_count: float
+    # DIRECTED strong connectivity of the win graph with a tie counted as evidence in both
+    # directions (Ford 1957): the condition that actually gates whether the unregularized finite MLE
+    # exists, which ``graph_connected`` does not. Reported on the raw counts.
+    strongly_connected: bool
 
     # Every DavidsonEstimator/RaoKupperEstimator.estimate() fit attaches this unconditionally, so
     # without this flag to_serializable()/to_json()/model_hash() raised an unhandled
@@ -109,6 +123,30 @@ def _comparison_graph_connected(counts: np.ndarray) -> bool:
                 seen.add(candidate)
                 frontier.append(candidate)
     return len(seen) == counts.shape[0]
+
+
+def _directed_win_graph_strongly_connected(wins: np.ndarray, ties: np.ndarray | None = None) -> bool:
+    """Ford's (1957) condition for a finite maximum-likelihood fit: the directed win graph is strongly
+    connected. ``wins[i, j] > 0`` is an edge ``i -> j``; a tie is an edge both ways."""
+    adjacency = wins > 0.0
+    if ties is not None:
+        tie = (ties + ties.T) > 0.0
+        adjacency = adjacency | tie
+    n = adjacency.shape[0]
+
+    def reaches_all(graph: np.ndarray) -> bool:
+        seen = np.zeros(n, dtype=bool)
+        seen[0] = True
+        frontier = [0]
+        while frontier:
+            node = frontier.pop()
+            for neighbor in np.flatnonzero(graph[node]):
+                if not seen[neighbor]:
+                    seen[neighbor] = True
+                    frontier.append(int(neighbor))
+        return bool(np.all(seen))
+
+    return reaches_all(adjacency) and reaches_all(adjacency.T)
 
 
 def _paired_win_statistics(value: Any, dim: int) -> tuple[float, np.ndarray]:
@@ -178,9 +216,19 @@ class ThurstoneMostellerDistribution(SequenceEncodableProbabilityDistribution):
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x: tuple[int, int]) -> float:
-        """Return the log probability of one winner-loser pair."""
+        """Return the JOINT log probability of one winner-loser pair.
+
+        The pair is drawn uniformly from all ``K(K-1)/2`` unordered pairs and the winner follows the
+        probit rule, so ``exp(log_density((i, j))) + exp(log_density((j, i)))`` is ``1/C(K, 2)``, not
+        one. ``P(i beats j | compared)`` is :meth:`win_probability`.
+        """
         checked = pair(x, self.dim, label="Thurstone-Mosteller comparison")
         return float(self.seq_log_density(np.asarray([checked], dtype=np.int64))[0])
+
+    def win_probability(self, i: int, j: int) -> float:
+        """Return ``P(i beats j | i and j are compared)`` = ``Phi((mu[i] - mu[j]) / sqrt(2))``."""
+        w, ell = pair((i, j), self.dim, label="Thurstone-Mosteller comparison")
+        return float(ndtr((self.mu[w] - self.mu[ell]) / _SQRT2))
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Score encoded winner-loser pairs."""
@@ -291,7 +339,13 @@ class PairWinAccumulatorFactory(StatisticAccumulatorFactory):
 
 
 class ThurstoneMostellerEstimator(ParameterEstimator):
-    """``mu_i - mu_j = sqrt(2) Phi^{-1}(P(i beats j))`` from the win-count matrix (least squares)."""
+    """``mu_i - mu_j = sqrt(2) Phi^{-1}(P(i beats j))`` from the win-count matrix (least squares).
+
+    ``pseudo_count`` adds that many fractional wins to every ordered pair before the moment step;
+    see :class:`~mixle.stats.rankings.bradley_terry.BradleyTerryEstimator` for how to choose it and
+    what it does to margins. Here it also keeps a never-lost pair away from the ``Phi^{-1}`` clip
+    (``clipped_pair_probabilities`` counts the pairs that hit it).
+    """
 
     def __init__(
         self,
@@ -316,6 +370,7 @@ class ThurstoneMostellerEstimator(ParameterEstimator):
             if not math.isclose(checked_nobs, count, rel_tol=1.0e-10, abs_tol=1.0e-10):
                 raise ValueError("nobs must equal paired-win statistic observation weight.")
         pseudo_count = 0.0 if self.pseudo_count is None else self.pseudo_count
+        strongly_connected = _directed_win_graph_strongly_connected(wins)
         if self.pseudo_count is not None and self.pseudo_count > 0.0:
             wins += self.pseudo_count * (1.0 - np.eye(self.dim))
             count += self.pseudo_count * self.dim * (self.dim - 1)
@@ -328,6 +383,7 @@ class ThurstoneMostellerEstimator(ParameterEstimator):
                 clipped_pair_probabilities=0,
                 regularized=False,
                 pseudo_count=0.0,
+                strongly_connected=False,
             )
             return ThurstoneMostellerDistribution(
                 np.zeros(n),
@@ -353,6 +409,7 @@ class ThurstoneMostellerEstimator(ParameterEstimator):
             clipped_pair_probabilities=clipped,
             regularized=pseudo_count > 0.0,
             pseudo_count=pseudo_count,
+            strongly_connected=strongly_connected,
         )
         return ThurstoneMostellerDistribution(
             mu - mu.mean(),
@@ -376,7 +433,7 @@ class PairDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[tuple[int, int]]) -> np.ndarray:
         """Encode winner-loser pairs as an integer ``(N, 2)`` array."""
-        raw = np.asarray([list(value) for value in x])
+        raw = homogeneous_rows([list(value) for value in x], 2, label="paired comparisons")
         if self.dim is None:
             if raw.ndim != 2 or raw.shape[1:] != (2,) or raw.shape[0] == 0:
                 raise ValueError("requires a non-empty sequence of comparisons.")
@@ -402,7 +459,7 @@ class _TieEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[tuple[int, int, int]]) -> np.ndarray:
         """Encode and canonicalize tie-model comparison triples."""
-        raw = np.asarray([list(value) for value in x])
+        raw = homogeneous_rows([list(value) for value in x], 3, label="tie comparisons")
         if self.dim is None:
             if raw.ndim != 2 or raw.shape[1:] != (3,) or raw.shape[0] == 0:
                 raise ValueError("requires a non-empty sequence of tie comparisons.")
@@ -519,9 +576,26 @@ class _BaseTieDistribution(SequenceEncodableProbabilityDistribution):
         return float(np.exp(self.log_density(x)))
 
     def log_density(self, x) -> float:
-        """Return the log probability of one comparison triple."""
+        """Return the JOINT log probability of one ``(i, j, outcome)`` comparison triple.
+
+        The pair is drawn uniformly from all ``K(K-1)/2`` unordered pairs, so the three outcomes of one
+        pair sum to ``1/C(K, 2)``, not one. The conditional outcome probabilities are
+        :meth:`win_probability` and :meth:`tie_probability`.
+        """
         i, j, o = tie_comparison(x, self.dim)
         return float(self._outcome_logp(np.array([i]), np.array([j]), np.array([o]))[0]) - self.log_pairs
+
+    def _conditional_outcome(self, i: int, j: int, outcome: int) -> float:
+        lo, hi, o = tie_comparison((i, j, outcome), self.dim)
+        return float(np.exp(self._outcome_logp(np.array([lo]), np.array([hi]), np.array([o]))[0]))
+
+    def win_probability(self, i: int, j: int) -> float:
+        """Return ``P(i beats j | i and j are compared)`` (a tie is neither a win nor a loss)."""
+        return self._conditional_outcome(i, j, 0)
+
+    def tie_probability(self, i: int, j: int) -> float:
+        """Return ``P(i and j tie | i and j are compared)``."""
+        return self._conditional_outcome(i, j, 2)
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
         """Score encoded canonicalized comparison triples."""
@@ -685,12 +759,29 @@ def _fit_tie_model(
     *,
     regularized: bool,
     pseudo_count: float,
+    strongly_connected: bool,
 ) -> tuple[np.ndarray, float, TieModelFitDiagnostics]:
-    """Return a validated finite L-BFGS-B fit and its diagnostics."""
+    """Return a validated finite L-BFGS-B fit and its diagnostics.
+
+    ``strongly_connected`` is the directed condition measured on the RAW counts by the caller: the
+    counts received here are already pseudo-count smoothed for a regularized fit, so it cannot be
+    recomputed from them.
+    """
     comparison_counts = wins + wins.T + ties + ties.T
     graph_connected = _comparison_graph_connected(comparison_counts)
     if not graph_connected:
         raise ValueError(f"{model_name} worths are unidentified because the comparison graph is disconnected.")
+    # Same identifiability failure, same exception, same wording as Bradley-Terry: a competitor that
+    # never lost (or never won, ties counting both ways) has no finite worth. Previously this was
+    # only discovered after L-BFGS-B ran into the artificial +-20 bound and surfaced as a
+    # RuntimeError, while Bradley-Terry and Thurstone-Mosteller raised ValueError up front for the
+    # semantically identical condition (FU-06). Regularized fits are finite and proceed.
+    if not strongly_connected and not regularized:
+        raise ValueError(
+            f"{model_name} data have no finite interior MLE because the directed win graph is not strongly "
+            "connected (some competitor never lost, or never won, even counting ties). Supply a positive "
+            "pseudo_count to fit an explicitly regularized boundary case."
+        )
     iu = np.triu_indices(dim, 1)
     a = wins[iu]  # lo beat hi
     b = wins.T[iu]  # hi beat lo
@@ -754,12 +845,19 @@ def _fit_tie_model(
         graph_connected=graph_connected,
         regularized=regularized,
         pseudo_count=pseudo_count,
+        strongly_connected=strongly_connected,
     )
     return theta - theta.mean(), float(parameters[-1]), diagnostics
 
 
 class DavidsonEstimator(ParameterEstimator):
-    """Maximum-likelihood Davidson worths and tie parameter (L-BFGS on the count matrices)."""
+    """Maximum-likelihood Davidson worths and tie parameter (L-BFGS on the count matrices).
+
+    ``pseudo_count`` adds that many fractional wins to every ordered pair and that many ties to every
+    unordered pair; see :class:`~mixle.stats.rankings.bradley_terry.BradleyTerryEstimator` for how to
+    choose it. Without it, data in which some competitor never lost (or never won) has no finite fit
+    and the estimator raises ``ValueError`` rather than return a boundary worth.
+    """
 
     def __init__(
         self,
@@ -779,6 +877,7 @@ class DavidsonEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat) -> DavidsonDistribution:
         """Estimate Davidson worths and tie parameter from sufficient statistics."""
         count, wins, ties = _tie_model_statistics(suff_stat, self.dim, label="Davidson statistics")
+        strongly_connected = _directed_win_graph_strongly_connected(wins, ties)  # on the raw counts
         if nobs is not None:
             checked_nobs = finite_nonnegative(nobs, label="nobs")
             if not math.isclose(checked_nobs, count, rel_tol=1.0e-10, abs_tol=1.0e-10):
@@ -802,6 +901,7 @@ class DavidsonEstimator(ParameterEstimator):
                 graph_connected=False,
                 regularized=False,
                 pseudo_count=0.0,
+                strongly_connected=False,
             )
             return DavidsonDistribution(
                 np.zeros(self.dim),
@@ -820,6 +920,7 @@ class DavidsonEstimator(ParameterEstimator):
             (1e-8, 100.0),
             regularized=pseudo_count > 0.0,
             pseudo_count=pseudo_count,
+            strongly_connected=strongly_connected,
         )
         return DavidsonDistribution(
             log_w,
@@ -831,7 +932,13 @@ class DavidsonEstimator(ParameterEstimator):
 
 
 class RaoKupperEstimator(ParameterEstimator):
-    """Maximum-likelihood Rao-Kupper worths and threshold (L-BFGS on the count matrices)."""
+    """Maximum-likelihood Rao-Kupper worths and threshold (L-BFGS on the count matrices).
+
+    ``pseudo_count`` adds that many fractional wins to every ordered pair and that many ties to every
+    unordered pair; see :class:`~mixle.stats.rankings.bradley_terry.BradleyTerryEstimator` for how to
+    choose it. Without it, data in which some competitor never lost (or never won) has no finite fit
+    and the estimator raises ``ValueError`` rather than return a boundary worth.
+    """
 
     def __init__(
         self,
@@ -851,6 +958,7 @@ class RaoKupperEstimator(ParameterEstimator):
     def estimate(self, nobs: float | None, suff_stat) -> RaoKupperDistribution:
         """Estimate Rao-Kupper worths and threshold from sufficient statistics."""
         count, wins, ties = _tie_model_statistics(suff_stat, self.dim, label="Rao-Kupper statistics")
+        strongly_connected = _directed_win_graph_strongly_connected(wins, ties)  # on the raw counts
         if nobs is not None:
             checked_nobs = finite_nonnegative(nobs, label="nobs")
             if not math.isclose(checked_nobs, count, rel_tol=1.0e-10, abs_tol=1.0e-10):
@@ -874,6 +982,7 @@ class RaoKupperEstimator(ParameterEstimator):
                 graph_connected=False,
                 regularized=False,
                 pseudo_count=0.0,
+                strongly_connected=False,
             )
             return RaoKupperDistribution(
                 np.zeros(self.dim),
@@ -892,6 +1001,7 @@ class RaoKupperEstimator(ParameterEstimator):
             (1.0 + 1.0e-8, 100.0),
             regularized=pseudo_count > 0.0,
             pseudo_count=pseudo_count,
+            strongly_connected=strongly_connected,
         )
         return RaoKupperDistribution(
             log_w,

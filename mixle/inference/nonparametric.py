@@ -286,6 +286,9 @@ def ks_2samp(x: Any, y: Any, *, alternative: str = "two-sided") -> TestResult:
 def ks_1samp(x: Any, cdf: Callable[[np.ndarray], np.ndarray], *, alternative: str = "two-sided") -> TestResult:
     """One-sample Kolmogorov-Smirnov goodness-of-fit test against a fully-specified ``cdf`` callable.
 
+    ``cdf`` may be vectorized (``ndarray -> ndarray``) or scalar-only, such as any fitted mixle
+    distribution's ``.cdf`` method; a scalar-only callable is evaluated element-wise.
+
     The p-value is ASYMPTOTIC in every mode: ``two-sided`` uses the limiting Kolmogorov distribution
     (scipy's ``method='asymp'``) and the one-sided modes use the large-sample exponential bound
     ``exp(-2 n D^2)``. No small-sample (Marsaglia-Tsang-Wang exact) correction is applied, so at
@@ -300,7 +303,9 @@ def ks_1samp(x: Any, cdf: Callable[[np.ndarray], np.ndarray], *, alternative: st
         raise TypeError("cdf must be callable")
     x = np.sort(_sample("x", x))
     n = x.size
-    cdfv = np.asarray(cdf(x), dtype=float)
+    from mixle.inference.calibration import evaluate_cdf  # scalar-only cdf methods are evaluated element-wise
+
+    cdfv = evaluate_cdf(cdf, x)
     if cdfv.shape != x.shape or not np.all(np.isfinite(cdfv)):
         raise ValueError("cdf must return one finite value per observation")
     if np.any((cdfv < 0.0) | (cdfv > 1.0)) or np.any(np.diff(cdfv) < 0.0):

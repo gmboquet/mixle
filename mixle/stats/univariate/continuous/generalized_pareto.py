@@ -1064,8 +1064,16 @@ class GeneralizedParetoEstimator(ParameterEstimator):
                 )
             degenerate._numerical_repairs = notes
             return degenerate
-        xi = 0.5 * (1.0 - m * m / var)
-        xi = min(max(xi, self.xi_min), self.xi_max)
+        raw_xi = 0.5 * (1.0 - m * m / var)
+        xi = min(max(raw_xi, self.xi_min), self.xi_max)
+        if xi != raw_xi:
+            # The shape clamp is a floor/ceiling fallback exactly like the scale floors around it, and a
+            # confidently reported ``shape=-10.0`` (a short, bounded tail) with nothing in
+            # ``numerical_repairs()`` is the opposite of what that method exists to prevent. At n in
+            # {3..6} the moment estimate lands below ``xi_min`` in ~2% of seeded samples and was never
+            # disclosed -- or only the co-occurring scale floor was (FU-02).
+            bound_name = "xi_min" if xi == self.xi_min else "xi_max"
+            notes = notes + ("shape-clamped(moment estimate %.6g -> %s=%.6g)" % (raw_xi, bound_name, xi),)
         scale = max(m * (1.0 - xi), self.min_scale)
         if max_x is not None and xi < -_XI_TOL:
             # A shape<0 method-of-moments fit only matches the first two moments; unlike an MLE

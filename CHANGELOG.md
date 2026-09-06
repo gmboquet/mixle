@@ -68,31 +68,63 @@ to post-0.8 or kept under `mixle.experimental` per the feature freeze.
   for Megatron, Ray Train, and Lightning Fabric. Hardware-dependent performance and multi-GPU claims
   remain unverified until retained receipts exist.
 
-### Known issues (tracked for 0.8.1)
+### Independent-tester findings (resolved before release)
 
-Two independent testers were run against the exact 0.8.0 release candidate as part of closing out
-the release-readiness process (D-0210). Both found real, reproducible issues, pre-existing in code
-this release's own correctness campaigns never modified. None corrupt the numerical-correctness
-work this release hardened; they are disclosed here and tracked in
-`release-checklists/0.8.1-followups.md` rather than silently shipped unmentioned.
+Two independent testers were run against release candidate `dd167be2` as part of closing out the
+release-readiness process (D-0210) and found real, reproducible issues, pre-existing in code this
+release's correctness campaigns never modified. They were first deferred to a 0.8.1 patch and then,
+by release-owner decision, fixed in this release instead. Each has a regression test in
+`mixle/tests/release_081_followups_test.py`; the full ledger, with the tester's evidence and each
+item's disposition, is `release-checklists/0.8.1-followups.md`.
 
-- `BradleyTerryDistribution`/`DavidsonDistribution.log_density` returns a *joint* density over
-  (which pair was compared, uniformly over all pairs) x (who won), not the conditional win
-  probability its docstring reads as. `exp(log_density((i,j)))` is off by a factor of `C(K,2)` from
-  P(i beats j), silently -- no error, a plausible-looking number in `[0, 1]`.
-- `GeneralizedParetoEstimator`'s `numerical_repairs()` can miss disclosing a shape-parameter clamp
-  at very small sample sizes, so a `shape=-10.0` (implying a short tail) can print with no warning
-  it is a floor artifact rather than a genuine fit.
-- `optimize()` can silently stop far short of the requested iteration budget with `converged=False`
-  and a large remaining objective gain, with no warning -- inconsistent with the max-iterations-cap
-  case, which does warn.
-- `ks_1samp`/`pit_values` do not accept mixle's own fitted distributions' scalar-only `cdf`
-  directly, and `pit_values` misattributes the resulting `TypeError` as an unrelated `ValueError`
-  about non-finite values.
+- `BradleyTerryDistribution`, `ThurstoneMostellerDistribution`, `DavidsonDistribution`, and
+  `RaoKupperDistribution` now expose `win_probability(i, j)` (and the tie families
+  `tie_probability(i, j)`), the conditional `P(i beats j | i and j are compared)`. `log_density`
+  is, and always was, the *joint* over (which pair, uniformly over all `C(K, 2)`) x (outcome); its
+  docstring now says so explicitly instead of reading like a win probability.
+- `GeneralizedParetoEstimator` discloses a shape clamp: a moment estimate that lands below
+  `xi_min` (about 2% of seeded samples at n in 3..6) now appears in `numerical_repairs()` as
+  `shape-clamped(...)` rather than printing `shape=-10.0` with no note.
+- `pit_values` and `ks_1samp` accept a scalar-only `cdf` callable, which every fitted mixle
+  distribution's `.cdf` is, evaluating it element-wise; `pit_values` no longer reports a
+  callable-signature `TypeError` as a `ValueError` about non-finite values.
+- A dataset mixing 2-item winner/loser pairs with 3-item tie comparisons now raises a
+  row-numbered `ValueError` naming the offending row and the fix, instead of numpy's
+  "inhomogeneous shape" message.
+- The Davidson and Rao-Kupper estimators raise `ValueError` up front, with the same wording as
+  Bradley-Terry, when the directed win graph is not strongly connected (a competitor that never
+  lost, or never won, even counting ties), rather than a `RuntimeError` discovered when L-BFGS-B
+  hit its artificial bound. Every paired-comparison diagnostics record gains
+  `strongly_connected`, the directed Ford (1957) condition that actually gates a finite fit,
+  next to the undirected `graph_connected` that could read `True` on data that still needed
+  `pseudo_count`.
+- Constrained derivative-free MAP fits (`fit(..., how='map', constraints=[...])` without an
+  analytic gradient) no longer run Nelder-Mead into a hard feasibility wall. In five dimensions
+  that simplex collapsed against the wall and either exhausted `max_iter` or reported convergence
+  at a nearly constant vector far from the constrained optimum. The path now minimizes a smooth
+  exterior-penalty surface with Powell, ramping the weight, repairs the last hair of
+  infeasibility along the violated constraints' normals, and polishes on the walled objective;
+  the tutorial's monotone 5-D mean now matches its pooled-adjacent-violators target. Failure
+  messages name `max_iter`.
+- `describe()` on raw data (an array, a list of rows, a DataFrame) now points at `propose()`
+  instead of "no catalogued capability detected"; `dump_models()` documents that `propose()`
+  returns a `Model` wrapper whose `.fitted` is what to serialize; `propose()`'s
+  latent-structure caveat is issued only for fields that look multimodal, naming them, instead of
+  as identical boilerplate on every call; and every paired-comparison estimator's docstring says
+  how to choose `pseudo_count` and what it does to margins.
+- `BradleyTerryFitDiagnostics` stores `l1_change`, `iterations`, and `pseudo_count` as plain
+  Python scalars; the MM solver returned numpy scalars under the pinned numpy, so the wrapper type
+  changed across a JSON round-trip (FU-13).
+- Two findings were already fixed by later 0.8.0 work and are pinned as guards on the testers'
+  exact constructions: a silently truncated EM run now warns (FU-03), and the mixture tutorial's
+  24 random-init fits are all finite (FU-14).
 
-Several smaller consistency and documentation gaps (inconsistent exception types across ranking
-families for the same underlying failure, a mixture-recovery case flagged but not confirmed as a
-defect, and four documentation-only clarifications) are also tracked in the same followups file.
+One finding is assessed rather than fixed: a two-population GeneralizedPareto mixture that is not
+recovered even via the documented remedy (FU-12). The tester's own held-out log-likelihood did not
+prefer the true generating mixture over the recovered one, which is the signature of an
+identifiability limit of two overlapping heavy tails sharing one threshold, not of a defect;
+`saddle_suspect` and `Model.explain` are the diagnostics to consult. It stays recorded in the
+followups file as a known limitation.
 
 ### Fixed
 
