@@ -32,10 +32,10 @@ deployment.
 
 mixle removes the boilerplate, not the modeling judgment: you still choose the data, the objective,
 and the validation. Not every surface is equally settled, either — the
-**[maturity guide](https://gmboquet.github.io/mixle/maturity.html)** separates the stable center
+**[maturity guide](https://gmboquet.github.io/mixle/v0.8.0/maturity.html)** separates the stable center
 (distributions, estimators, `optimize`) from the provisional workflow layers, and headline claims trace
-to it and to the [release-readiness](https://gmboquet.github.io/mixle/release-readiness.html) and
-[validation](https://gmboquet.github.io/mixle/validation.html) evidence.
+to it and to the [release-readiness](https://gmboquet.github.io/mixle/v0.8.0/release-readiness.html) and
+[validation](https://gmboquet.github.io/mixle/v0.8.0/validation.html) evidence.
 
 **Docs:** [gmboquet.github.io/mixle](https://gmboquet.github.io/mixle/) · **Release notes:**
 [CHANGELOG.md](CHANGELOG.md)
@@ -307,14 +307,14 @@ python scaling_example.py              # same fit by backend= (mp / mpi / spark)
 
 A few examples load pinned open model weights (CLIP, a small LM) on first run; each pin, its cache
 behavior, and its release-evidence status are recorded in the
-[example execution manifest](https://gmboquet.github.io/mixle/0.8.0/example-execution-manifest.html).
+[example execution manifest](https://gmboquet.github.io/mixle/v0.8.0/example-execution-manifest.html).
 Real-dataset walkthroughs live in
 [mixle-notebooks](https://github.com/gmboquet/mixle-notebooks).
 
 ## Tests
 
 15,000+ tests, organized into purpose/time-budget tiers (see the
-[test tiers guide](https://gmboquet.github.io/mixle/test-tiers.html)):
+[test tiers guide](https://gmboquet.github.io/mixle/v0.8.0/test-tiers.html)):
 
 ```sh
 python -m pytest path/to/focused_test.py    # the smallest relevant test while developing
