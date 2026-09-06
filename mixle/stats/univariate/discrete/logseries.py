@@ -261,24 +261,126 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
         far below double rounding.
         """
         kmax = int(self.quantile(1.0 - 1.0e-16)) + 50
-        k = np.arange(1, kmax + 1, dtype=np.float64)
-        lp = k * self.log_p - np.log(k) - self.log_norm
-        return float(-np.sum(np.exp(lp) * lp))
+        total = 0.0
+        start = 1
+        # Summed in bounded blocks, never as one array: at p within ~1e-9 of 1 the quantile is
+        # ~3e10 and a single arange was a 226 GiB allocation. Past the term cap the remaining
+        # tail is a smooth, slowly decaying function of k, and Euler-Maclaurin (integral plus
+        # half the first term) resolves it to double rounding.
+        while start <= kmax and start <= self._SERIES_CAP:
+            stop = min(kmax, start + self._SERIES_BLOCK - 1) + 1
+            lp = self._log_pmf_terms(start, stop)
+            total += float(-np.sum(np.exp(lp) * lp))
+            start = stop
+        if start <= kmax:
+            total += self._entropy_tail(start)
+        return float(total)
 
-    def cdf(self, x: float) -> float:
-        """Cumulative distribution function P(X <= x), support x >= 1 (via scipy logser)."""
+    def _entropy_tail(self, start: int) -> float:
+        """``-sum_{k>=start} p_k log p_k`` by Euler-Maclaurin: ``integral_start^inf f + f(start)/2``."""
         import math
 
-        from scipy.stats import logser
+        from scipy.integrate import quad
+
+        log_p, log_norm = self.log_p, self.log_norm
+
+        def f(x: float) -> float:
+            lp = x * log_p - math.log(x) - log_norm
+            return -math.exp(lp) * lp
+
+        # the integrand decays like p^x: integrate over a few decay lengths, in pieces
+        scale = 1.0 / max(-log_p, 1.0e-300)
+        edges = [float(start)] + [start + scale * m for m in (1, 2, 4, 8, 16, 32, 64)]
+        integral = sum(quad(f, a, b, limit=200)[0] for a, b in zip(edges, edges[1:]))
+        return float(integral + 0.5 * f(float(start)))
+
+    # Block size for the finite series sums below: bounded memory (0.5 MB of float64 per block)
+    # however far into the tail a call has to go.
+    _SERIES_BLOCK = 65_536
+    # Hard cap on scanned terms before the closed-form tail bound takes over (about a second of
+    # numpy time); p within ~1e-8 of 1 needs more terms than that to reach q = 1 - 1e-16.
+    _SERIES_CAP = 50_000_000
+
+    def _log_pmf_terms(self, start: int, stop: int) -> np.ndarray:
+        k = np.arange(start, stop, dtype=np.float64)
+        return k * self.log_p - np.log(k) - self.log_norm
+
+    def _tail_upper_bound(self, k: int) -> float:
+        """An upper bound on ``P(X > k)``: ``sum_{j>k} p^j / j <= p^(k+1) / ((k+1)(1-p))``."""
+        import math
+
+        return math.exp((k + 1) * self.log_p - math.log(k + 1) - math.log1p(-self.p) - self.log_norm)
+
+    def cdf(self, x: float) -> float:
+        """Cumulative distribution function ``P(X <= x)``, support ``x >= 1``.
+
+        Summed directly in bounded blocks (the series has no closed form); past ``_SERIES_CAP``
+        terms the closed-form tail bound stands in, which is exact to double rounding by then.
+        """
+        import math
 
         k = math.floor(float(x))
-        return float(logser.cdf(k, self.p)) if k >= 1 else 0.0
+        if k < 1:
+            return 0.0
+        total = 0.0
+        start = 1
+        while start <= k and start <= self._SERIES_CAP:
+            stop = min(k, start + self._SERIES_BLOCK - 1) + 1
+            total += float(np.sum(np.exp(self._log_pmf_terms(start, stop))))
+            start = stop
+        if start <= k:
+            return float(min(1.0, 1.0 - self._tail_upper_bound(k)))
+        return float(min(1.0, total))
 
     def quantile(self, q: float) -> float:
-        """Inverse CDF F^{-1}(q) (via scipy logser)."""
-        from scipy.stats import logser
+        """Inverse CDF ``F^{-1}(q)``: the smallest ``k`` with ``P(X <= k) >= q``.
 
-        return float(logser.ppf(float(q), self.p))
+        Summed directly in bounded blocks, never through scipy's generic discrete ``ppf``. That
+        search brackets the answer by doubling an upper bound until ``cdf(bound) >= q``, and the
+        summed CDF can saturate one ULP short of a ``q`` this close to one (numpy's SIMD ``exp``
+        and ``log`` round the last bit differently per CPU: the sum reached ``q = 1 - 1e-16``
+        at ``k = 5210`` on arm64 and emulated x86-64 and never did on AVX-512 hosted CI runners),
+        so the bound doubled without limit and the vectorized CDF sums grew until the 16 GB
+        runner was OOM-killed -- through ``entropy()``, which calls this at exactly that ``q``.
+        Here a block whose terms no longer move the running sum, or the term cap, ends the
+        scan, and the closed-form tail bound answers for whatever lies beyond.
+        """
+        import math
+
+        q = float(q)
+        if not 0.0 <= q <= 1.0 or math.isnan(q):
+            raise ValueError("q must be in [0, 1].")
+        if q <= 0.0:
+            return 1.0
+        if q >= 1.0:
+            return math.inf
+        total = 0.0
+        start = 1
+        while start <= self._SERIES_CAP:
+            stop = start + self._SERIES_BLOCK
+            terms = np.exp(self._log_pmf_terms(start, stop))
+            cumulative = total + np.cumsum(terms)
+            hit = np.flatnonzero(cumulative >= q)
+            if hit.size:
+                return float(start + int(hit[0]))
+            new_total = float(cumulative[-1])
+            if new_total == total or terms[-1] < 1.0e-300:  # the series can no longer move the sum
+                break
+            total = new_total
+            start = stop
+        # saturated or capped: the smallest k whose tail bound is below the remaining mass, searched
+        # from the bottom of the support (the bound is monotone in k), never from the scan's end
+        remaining = max(1.0 - q, 5.0e-324)
+        lo, hi = 0, 1
+        while self._tail_upper_bound(hi) > remaining and hi < 2**62:
+            hi *= 2
+        while lo + 1 < hi:
+            mid = (lo + hi) // 2
+            if self._tail_upper_bound(mid) > remaining:
+                lo = mid
+            else:
+                hi = mid
+        return float(hi)
 
     def sampler(self, seed: int | None = None) -> "LogSeriesSampler":
         """Return a sampler for drawing observations from this distribution."""
