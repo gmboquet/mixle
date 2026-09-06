@@ -1066,7 +1066,11 @@ class GeneralizedParetoEstimator(ParameterEstimator):
             return degenerate
         raw_xi = 0.5 * (1.0 - m * m / var)
         xi = min(max(raw_xi, self.xi_min), self.xi_max)
-        if xi != raw_xi:
+        if abs(xi - raw_xi) > 1.0e-4 * max(1.0, abs(raw_xi)):
+            # Disclosed only when the clamp actually MOVES the shape. A moment estimate sitting on the
+            # finite-variance ceiling (exactly 0.5, from a foreign combine whose mean cancelled) is
+            # nudged to ``xi_max = 0.5 - 1e-6``; that is the ceiling's own definition, not a fallback,
+            # and the ordinary foreign-combine contracts require it to stay quiet.
             # The shape clamp is a floor/ceiling fallback exactly like the scale floors around it, and a
             # confidently reported ``shape=-10.0`` (a short, bounded tail) with nothing in
             # ``numerical_repairs()`` is the opposite of what that method exists to prevent. At n in
