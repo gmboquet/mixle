@@ -310,6 +310,21 @@ release (`release-checklists/0.8.2-followups.md`).
 - The README's nested-HMM snippet passes `max_its` and the prose says why: `optimize`'s default of
   10 EM iterations is far too small for the model that snippet builds (P08-F02).
 
+#### Identifiability the likelihood cannot see (A-02, A-03)
+
+- A fitted mixture records how much data each component actually won, on
+  `MixtureDistribution.component_row_mass`, and says so when a component holds fewer effective rows
+  than it has free parameters. EM converges onto such a solution rather than failing at it, so the
+  fit reported `converged=True` with nothing to distinguish a genuinely rare regime from an
+  initialization that latched onto a handful of outliers. The note names the components and points
+  at the recorded masses; the masses are not part of the model's value and do not travel through
+  serialization (A-02).
+- `learn_mixture_structure` takes `tie_tolerance` (1 nat by default) and lets
+  `mixture_structure_health` break a likelihood tie. On a two-regime corpus the regime split and a
+  category split that absorbs both regimes sit within a nat of each other, and which one a restart
+  search returned depended on the seed. Outside the tolerance likelihood still decides -- the
+  receipt is a diagnosis, not an objective (A-03).
+
 
 ## [0.8.1] — 2026-09-07
 

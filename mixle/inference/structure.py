@@ -744,6 +744,7 @@ def learn_mixture_structure(
     n_bins: int = 4,
     max_its: int = 30,
     field_estimators: Sequence[Any] | None = None,
+    tie_tolerance: float = 1.0,
 ) -> MixtureOfDependencyTrees:
     """Fit a :class:`MixtureOfDependencyTrees` by hard EM: discover clusters and each cluster's dependency graph.
 
@@ -759,6 +760,14 @@ def learn_mixture_structure(
     the detector models a multimodal column with a Gaussian MIXTURE, which lets ONE cluster absorb what the
     caller intended as two -- with per-field families pinned to unimodal models, regimes that differ in level
     must separate into different components to score well.
+
+    ``tie_tolerance`` (nats) is how close two restarts' log-likelihoods have to be before
+    :func:`mixture_structure_health` breaks the tie. On a two-regime corpus two optima sit within a
+    nat of each other -- the regime split, whose components pass the receipt, and a category split
+    whose components each absorb both regimes -- and which one the search returned depended on the
+    seed (A-03). Inside the tolerance the healthy candidate wins; outside it likelihood decides,
+    because the receipt is a diagnosis and must not overrule a materially better fit. Set it to
+    ``0.0`` for pure likelihood selection.
     """
     if (
         isinstance(n_components, (bool, np.bool_))
@@ -770,6 +779,11 @@ def learn_mixture_structure(
         raise ValueError("restarts must be a positive integer.")
     if isinstance(max_iter, (bool, np.bool_)) or not isinstance(max_iter, (int, np.integer)) or max_iter < 1:
         raise ValueError("max_iter must be a positive integer.")
+    if isinstance(tie_tolerance, (bool, np.bool_)) or not isinstance(tie_tolerance, (int, float, np.floating)):
+        raise TypeError("tie_tolerance must be a finite, non-negative number of nats")
+    tie_tolerance = float(tie_tolerance)
+    if not np.isfinite(tie_tolerance) or tie_tolerance < 0.0:
+        raise ValueError("tie_tolerance must be a finite, non-negative number of nats")
     data = list(data)
     n = len(data)
     if n == 0:
@@ -783,6 +797,7 @@ def learn_mixture_structure(
     min_size = min(n, max(10, n // (4 * n_components)))
     best: MixtureOfDependencyTrees | None = None
     best_ll = -np.inf
+    best_healthy = False
 
     def learn(subset: list[tuple]) -> DependencyTreeDistribution:
         return learn_structure(
@@ -833,7 +848,20 @@ def learn_mixture_structure(
         # below (MXR-080-1909).
         if not np.isfinite(ll):
             continue
-        if ll > best_ll or best is None:
+        healthy = not mixture_structure_health(model, data)["diagnosis"]
+        # Likelihood first, health as the TIE-BREAK. On a two-regime corpus two optima sit within a
+        # nat of each other: the regime split, whose components each pass the health receipt, and a
+        # category split whose components each absorb both regimes through an inner per-field
+        # mixture. Which one a restart search returned depended on the seed, and the receipt was
+        # left to report the difference after the fact (A-03). Within ``tie_tolerance`` nats the two
+        # candidates are not distinguishable by likelihood, so the one whose components do not hide
+        # a regime split wins. Outside it, likelihood decides -- the receipt is a diagnosis, not an
+        # objective, and must not overrule a materially better fit.
+        if best is None or ll > best_ll + tie_tolerance:
+            best_ll, best, best_healthy = ll, model, healthy
+        elif healthy and not best_healthy and ll > best_ll - tie_tolerance:
+            best_ll, best, best_healthy = ll, model, healthy
+        elif ll > best_ll and healthy == best_healthy:
             best_ll, best = ll, model
     if best is None:
         # Was `assert best is not None`, which `python -O` strips: under -O this returned None to a

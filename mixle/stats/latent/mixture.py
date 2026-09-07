@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import math
+import warnings
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -2029,8 +2030,9 @@ class MixtureEstimator(ParameterEstimator):
             else:
                 w = cpp / cpp.sum()
 
-            return MixtureDistribution(
-                components, w, name=self.name, prior=DirichletDistribution(np.add(counts, alpha))
+            return _disclosing_component_support(
+                MixtureDistribution(components, w, name=self.name, prior=DirichletDistribution(np.add(counts, alpha))),
+                counts,
             )
 
         if self.fixed_weights is not None:
@@ -2062,7 +2064,60 @@ class MixtureEstimator(ParameterEstimator):
             w = np.maximum(w, self.w_min)
             w = w / w.sum()
 
-        return MixtureDistribution(components, w, name=self.name)
+        fitted = MixtureDistribution(components, w, name=self.name)
+        return _disclosing_component_support(fitted, counts)
+
+
+def _disclosing_component_support(fitted: MixtureDistribution, counts: np.ndarray) -> MixtureDistribution:
+    """Record how much data each fitted component actually won, and say so when it is too little.
+
+    A mixture can converge -- ``fit_provenance().converged`` True, no repair recorded -- onto a
+    component that holds a handful of rows: an initialization that latched onto an outlier group, or
+    a component EM simply had no use for. Nothing said so, and on heavy-tailed panels that is how a
+    0.7% component gets reported as a regime (A-02). The share alone is not the test, because a
+    genuinely rare component is a legitimate answer; what is not is a component with fewer effective
+    rows than it has free parameters, which no data has identified.
+    """
+    counts = np.asarray(counts, dtype=float)
+    fitted.component_row_mass = tuple(float(c) for c in counts)
+    unidentified = []
+    for index, component in enumerate(fitted.components):
+        try:
+            free_parameters = _free_parameter_count(component)
+        except Exception:  # noqa: BLE001 - an uncountable family simply is not checked
+            continue
+        if counts[index] < float(free_parameters):
+            unidentified.append((index, float(counts[index]), int(free_parameters)))
+    if unidentified:
+        # Attributed to the caller's own line rather than to the EM driver's: imported here, not at
+        # module scope, because ``estimation`` imports this module.
+        from mixle.inference.estimation import _caller_stacklevel
+
+        # The message names the components and their parameter counts, not the fractional row mass:
+        # ``estimate`` runs once per EM iteration, and a mass that drifts by a hundredth would defeat
+        # the "once per location" warning filter and reprint the same fact every iteration. The exact
+        # masses stay queryable on ``component_row_mass``.
+        detail = ", ".join(
+            "component %d (%d free parameter(s))" % (index, count) for index, _mass, count in unidentified
+        )
+        warnings.warn(
+            "this mixture fit left %d of %d component(s) with less data than they have parameters: "
+            "%s -- see component_row_mass for the effective rows each won. The fit may still report "
+            "converged=True; EM converges to such a solution rather than failing at it. A component "
+            "this small is either a genuinely rare regime that needs more data, or an initialization "
+            "that latched onto a small group, and restarts= or init='dirichlet' distinguishes the "
+            "two." % (len(unidentified), len(fitted.components), detail),
+            UserWarning,
+            stacklevel=_caller_stacklevel(3),
+        )
+    return fitted
+
+
+def _free_parameter_count(component: Any) -> int:
+    """The component's own free-parameter count, via the shared structure-search estimate."""
+    from mixle.inference.structure import _num_free_params
+
+    return int(_num_free_params(component))
 
 
 class _HeteroMixtureEncoded:
