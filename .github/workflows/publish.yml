@@ -367,7 +367,7 @@ jobs:
           test "$(python -c 'import json; print(json.load(open("candidate/metadata/release-candidate.json"))["workflow_run"])')" = "$PREPARE_RUN_ID"
           (cd candidate/dist && sha256sum -c ../metadata/SHA256SUMS)
       - name: Upload the already-verified files to TestPyPI
-        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: candidate/dist/
           repository-url: https://test.pypi.org/legacy/
@@ -537,7 +537,7 @@ jobs:
             candidate/metadata/security/*.json \
             --clobber
       - name: Publish the already-verified files to PyPI
-        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: candidate/dist/
           skip-existing: true
