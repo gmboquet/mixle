@@ -8,12 +8,20 @@ would be worthless.
 
 import hashlib
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "release_metadata.py"
-_WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
+_ROOT = Path(__file__).resolve().parents[2]
+_SCRIPT = _ROOT / "scripts" / "release_metadata.py"
+_WORKFLOWS = _ROOT / ".github" / "workflows"
+# Read from the manifest CONTRIBUTING.md and Dependabot are generated from, rather than repeating the
+# branch name here: a literal in the test is one more place a release-line bump has to be remembered,
+# and forgetting it fails the suite for a reason that has nothing to do with what these gates check.
+_RELEASE_BRANCH = json.loads((_ROOT / "manifests" / "development_policy.json").read_text(encoding="utf-8"))["release"][
+    "target_branch"
+]
 
 
 def _push_trigger(name: str) -> str:
@@ -61,11 +69,11 @@ class ReleaseTipWorkflowTest(unittest.TestCase):
     def test_all_release_gates_run_on_the_exact_release_tip(self):
         for workflow in ("tests.yml", "docs.yml", "security.yml"):
             trigger = _push_trigger(workflow)
-            self.assertIn("branches: [main, release/0.8.1]", trigger, workflow)
+            self.assertIn("branches: [main, %s]" % _RELEASE_BRANCH, trigger, workflow)
 
     def test_release_docs_check_does_not_deploy_pages(self):
         text = (_WORKFLOWS / "docs.yml").read_text(encoding="utf-8")
-        self.assertIn("github.ref == 'refs/heads/release/0.8.1'", text)
+        self.assertIn("github.ref == 'refs/heads/%s'" % _RELEASE_BRANCH, text)
         self.assertEqual(text.count("github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'"), 2)
 
     def test_release_push_gates_are_not_suppressed_by_path_filters(self):

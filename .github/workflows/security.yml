@@ -7,7 +7,7 @@ name: Security
 
 on:
   push:
-    branches: [main, release/0.8.1]
+    branches: [main, release/0.8.2]
   pull_request:
     paths:
       - "pyproject.toml"

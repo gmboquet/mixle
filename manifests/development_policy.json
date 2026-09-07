@@ -7,8 +7,8 @@
     "stable_deprecation_min_minor_releases": 2
   },
   "release": {
-    "milestone": "0.8.1",
-    "target_branch": "release/0.8.1"
+    "milestone": "0.8.2",
+    "target_branch": "release/0.8.2"
   },
   "validation": {
     "advisory": [

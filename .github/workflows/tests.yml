@@ -4,7 +4,7 @@ on:
   # Main and the active release branch run exact-tip CI. Pull-request branches are covered by the
   # pull_request event, so ordinary work branches do not trigger duplicate runs.
   push:
-    branches: [main, release/0.8.1]
+    branches: [main, release/0.8.2]
   pull_request:
   workflow_dispatch:
   schedule:
@@ -21,7 +21,7 @@ permissions:
 jobs:
   decision-reviews:
     name: release decisions / accepted review
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/release/0.8.1')
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/release/0.8.2')
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:

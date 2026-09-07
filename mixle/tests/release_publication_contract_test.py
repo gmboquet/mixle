@@ -10,6 +10,11 @@ from pathlib import Path
 import pytest
 
 _ROOT = Path(__file__).resolve().parents[2]
+# From the manifest CONTRIBUTING.md and Dependabot are generated from, not a literal here: a branch
+# name pinned in a test is one more place a release-line bump has to be remembered.
+_RELEASE_BRANCH = json.loads((_ROOT / "manifests" / "development_policy.json").read_text(encoding="utf-8"))["release"][
+    "target_branch"
+]
 _SCRIPT = _ROOT / "scripts" / "verify_required_checks.py"
 _SHA = "a" * 40
 _REPOSITORY = "gmboquet/mixle"
@@ -240,7 +245,7 @@ def test_publish_workflow_has_fail_closed_candidate_binding():
         'test "$TAG" = "v$VERSION"',
         'test "$(git cat-file -t "refs/tags/$TAG")" = "tag"',
         ".verification.verified",
-        'gh api "repos/$REPOSITORY/branches/release/0.8.1" --jq .commit.sha',
+        'gh api "repos/$REPOSITORY/branches/%s" --jq .commit.sha' % _RELEASE_BRANCH,
         'test "$SHA" = "$RELEASE_SHA"',
         'test "$EVENT_SHA" = "$SHA"',
         "verify_required_checks.py",

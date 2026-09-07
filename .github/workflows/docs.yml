@@ -16,7 +16,7 @@ name: Docs
 
 on:
   push:
-    branches: [main, release/0.8.1]
+    branches: [main, release/0.8.2]
   release:
     types: [published]
   pull_request:
@@ -135,7 +135,7 @@ jobs:
     # "The operation was canceled" -- a hard timeout, not the concurrency cancellation or runner shutdown
     # this looked like at first glance. 25m keeps real headroom without approaching the build job's 30m.
     timeout-minutes: 25
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/release/0.8.1'
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/release/0.8.2'
     # Independent group so PR checks never queue behind a Pages deploy or behind each other; only
     # the latest push on a given PR ref needs to run.
     concurrency:

@@ -10,7 +10,7 @@ name: Extras resolver matrix
 on:
   workflow_dispatch:
   push:
-    branches: [release/0.8.1]
+    branches: [release/0.8.2]
   pull_request:
   schedule:
     - cron: "23 9 * * 1"

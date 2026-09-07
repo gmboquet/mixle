@@ -92,7 +92,7 @@ jobs:
           test "$SHA" = "$(git rev-list -n 1 "refs/tags/$TAG")"
           test "$EVENT_SHA" = "$SHA"
 
-          RELEASE_SHA="$(gh api "repos/$REPOSITORY/branches/release/0.8.1" --jq .commit.sha)"
+          RELEASE_SHA="$(gh api "repos/$REPOSITORY/branches/release/0.8.2" --jq .commit.sha)"
           test "$SHA" = "$RELEASE_SHA"
 
           if [ "$PHASE" = "promote" ]; then
