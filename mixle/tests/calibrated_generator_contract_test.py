@@ -139,6 +139,131 @@ class CanonicalityTest(unittest.TestCase):
             _derive_seed(7, {"a": 1})
         self.assertEqual([entry for entry in caught if "1848" in str(entry.message)], [])
 
+    def test_a_mixle_model_prompt_is_canonical_by_its_parameters(self):
+        """P09-F09: a posterior IS its parameters, and serialization writes exactly those.
+
+        Prompts built by the library itself -- ``PosteriorDescriber`` hands ``serve`` a posterior --
+        used to fall through to the ``repr`` fallback and warn on every call, pointing the user at a
+        library line for a choice they never made.
+        """
+        from mixle.stats import GaussianDistribution
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            seed = _derive_seed(7, GaussianDistribution(1.5, 2.0))
+        self.assertEqual([entry for entry in caught if "1848" in str(entry.message)], [])
+        self.assertTrue(_is_canonically_representable(GaussianDistribution(1.5, 2.0)))
+        self.assertEqual(seed, _derive_seed(7, GaussianDistribution(1.5, 2.0)))
+        self.assertNotEqual(seed, _derive_seed(7, GaussianDistribution(1.5, 3.0)))
+
+    def test_an_unserializable_model_shaped_object_still_warns(self):
+        """The route is opened by serializability, not by merely having a density method."""
+
+        class NotRegistered:
+            def log_density(self, x):
+                return 0.0
+
+        self.assertFalse(_is_canonically_representable(NotRegistered()))
+
+    def test_an_array_is_canonical_by_its_dtype_shape_and_bytes(self):
+        import numpy as np
+
+        self.assertEqual(_seed_key(np.arange(6.0).reshape(2, 3)), _seed_key(np.arange(6.0).reshape(2, 3)))
+        self.assertNotEqual(_seed_key(np.arange(6.0).reshape(2, 3)), _seed_key(np.arange(6.0).reshape(3, 2)))
+        self.assertNotEqual(_seed_key(np.arange(3.0)), _seed_key(np.arange(3, dtype=np.int64)))
+        self.assertEqual(
+            _seed_key(np.arange(6.0).reshape(2, 3).T), _seed_key(np.ascontiguousarray(np.arange(6.0).reshape(2, 3).T))
+        )
+        self.assertIsNone(_seed_key(np.array([object()], dtype=object)))
+
+    def test_a_type_may_declare_its_own_canonical_key(self):
+        class Declared:
+            def __init__(self, value):
+                self.value = value
+
+            def __pysp_seed_key__(self):
+                return ("declared", self.value)
+
+        self.assertTrue(_is_canonically_representable(Declared(3)))
+        self.assertEqual(_derive_seed(7, Declared(3)), _derive_seed(7, Declared(3)))
+        self.assertNotEqual(_derive_seed(7, Declared(3)), _derive_seed(7, Declared(4)))
+
+    def test_a_declared_key_of_NotImplemented_is_not_a_shared_constant(self):
+        """An instance that has no canonical value must not silently share one seed with every other."""
+
+        class Undetermined:
+            def __init__(self, value):
+                self.value = value
+
+            def __pysp_seed_key__(self):
+                return NotImplemented
+
+        # Not "the two seeds differ" -- the repr fallback keys on an address, which is exactly the
+        # unreliability being warned about. The contract is that NotImplemented does not become a
+        # canonical key of its own, so these instances take the warned fallback like any other.
+        self.assertIsNone(_seed_key(Undetermined(1)))
+        self.assertFalse(_is_canonically_representable(Undetermined(1)))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _derive_seed(7, Undetermined(1))
+        self.assertTrue(any("MXR-080-1848" in str(entry.message) for entry in caught))
+
+    def test_a_broken_key_provider_falls_back_rather_than_failing_the_draw(self):
+        class Broken:
+            def __pysp_seed_key__(self):
+                raise RuntimeError("boom")
+
+        self.assertIsNone(_seed_key(Broken()))
+        self.assertIsInstance(_derive_seed(7, Broken()), int)
+
+
+class PosteriorPromptTest(unittest.TestCase):
+    """P09-F09: library code that builds its own prompts must not trip this module's own warning."""
+
+    @staticmethod
+    def _seeds_for(prompt):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            seed = _derive_seed(11, prompt)
+        return seed, [entry for entry in caught if "1848" in str(entry.message)]
+
+    def test_a_conditioned_posterior_is_keyed_by_its_model_and_its_evidence(self):
+        from mixle.inference.condition import condition
+        from mixle.stats import GaussianDistribution
+        from mixle.stats.combinator.composite import CompositeDistribution
+
+        model = CompositeDistribution([GaussianDistribution(0.0, 1.0), GaussianDistribution(1.0, 2.0)])
+        first, noise = self._seeds_for(condition(model, {0: 0.5}))
+        self.assertEqual(noise, [])
+        self.assertEqual(first, self._seeds_for(condition(model, {0: 0.5}))[0])
+        self.assertNotEqual(first, self._seeds_for(condition(model, {0: 1.5}))[0])
+
+    def test_a_posterior_that_was_never_told_what_it_conditions_still_warns(self):
+        from mixle.inference.condition import ConditionReceipt, Posterior
+
+        anonymous = Posterior(
+            sample_fn=lambda n, s: None,
+            log_density_fn=None,
+            mean_fn=lambda path: None,
+            receipt=ConditionReceipt(method="sir"),
+        )
+        self.assertNotEqual(self._seeds_for(anonymous)[1], [])
+
+    def test_a_ppl_posterior_is_keyed_by_its_slots_and_draws(self):
+        import numpy as np
+
+        from mixle.ppl import Normal, free
+
+        rows = list(np.random.RandomState(0).normal(3.0, 1.0, size=60))
+        mu = Normal(0.0, 10.0, name="mu")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fitted = Normal(mu, free).fit(rows, how="mcmc", draws=200, rng=np.random.RandomState(0))
+        posterior = fitted.result
+        seed, noise = self._seeds_for(posterior)
+        self.assertEqual(noise, [])
+        self.assertEqual(seed, self._seeds_for(posterior)[0])
+
 
 class OracleSpendTest(unittest.TestCase):
     """The oracle is consulted once per certification row, and not at all on proposal rows."""

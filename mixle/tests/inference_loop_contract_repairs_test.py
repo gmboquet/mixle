@@ -341,5 +341,77 @@ class LikelihoodFactorMessageTest(unittest.TestCase):
         self.assertEqual(len(model.components), 2)
 
 
+class CapNoteAttributionTest(unittest.TestCase):
+    """P09-F09: a note the caller cannot act on is noise, and one naming a library line is worse.
+
+    ``optimize``'s cap notes hard-coded ``stacklevel=3``, which lands on the caller only for a DIRECT
+    ``optimize(...)``. Every forwarded route -- ``fit()``, ``learn_structure()``, the task verbs --
+    attributed the note to a line inside the library and advised knobs belonging to a call the reader
+    never wrote; one example script printed 44 such lines.
+    """
+
+    ROWS = [float(value) for value in np.random.RandomState(0).normal(size=400)]
+
+    @staticmethod
+    def _cap_notes(callable_):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            callable_()
+        return [entry for entry in caught if "max_its cap" in str(entry.message)]
+
+    def _capped_mixture(self):
+        component = S.GaussianEstimator()
+        return S.MixtureEstimator([component] * 3)
+
+    def test_a_direct_optimize_still_names_its_own_call_line(self):
+        notes = self._cap_notes(
+            lambda: optimize(self.ROWS, self._capped_mixture(), max_its=2, rng=np.random.RandomState(0))
+        )
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0].filename, __file__)
+
+    def test_a_fit_forwarded_note_names_the_fit_call_not_the_forwarding_line(self):
+        from mixle.inference.estimation import fit
+
+        notes = self._cap_notes(
+            lambda: fit(self.ROWS, self._capped_mixture(), max_its=2, out=None, rng=np.random.RandomState(0))
+        )
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0].filename, __file__)
+
+    def test_a_structure_search_does_not_narrate_the_models_it_only_scores(self):
+        """``dependency_gain`` subtracts two log-likelihoods; neither model is ever handed back."""
+        from mixle.inference.structure import dependency_gain
+
+        rng = np.random.RandomState(0)
+        parent = [("a" if value > 0 else "b") for value in rng.normal(size=300)]
+        child = [rng.normal(2.0 if key == "a" else -2.0, 1.0) for key in parent]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            gain = dependency_gain(parent, child, self._capped_mixture(), max_its=2)
+        self.assertTrue(math.isfinite(gain))
+        optimize_notes = [entry for entry in caught if "optimize() stopped" in str(entry.message)]
+        self.assertEqual(optimize_notes, [])
+        own = [entry for entry in caught if "dependency_gain scored" in str(entry.message)]
+        self.assertEqual(len(own), 1)
+        self.assertEqual(own[0].filename, __file__)
+
+    def test_a_structure_search_replays_every_other_warning_the_fits_raise(self):
+        from mixle.inference.structure import dependency_gain
+
+        class Loud(S.GaussianEstimator):
+            def accumulator_factory(self):
+                warnings.warn("a fit-time note the caller should still see", UserWarning, stacklevel=2)
+                return super().accumulator_factory()
+
+        rng = np.random.RandomState(0)
+        parent = [("a" if value > 0 else "b") for value in rng.normal(size=120)]
+        child = [rng.normal(0.0, 1.0) for _ in parent]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            dependency_gain(parent, child, Loud(), max_its=2)
+        self.assertTrue(any("a fit-time note" in str(entry.message) for entry in caught))
+
+
 if __name__ == "__main__":
     unittest.main()

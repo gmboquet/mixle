@@ -31,9 +31,20 @@ if __name__ == "__main__":
     print("  fit: %s" % fit)
 
     print("# RandomDotProductGraph (edge probability from latent node positions)")
-    d = RandomDotProductGraphDistribution(rng.rand(8, 2))
+    # Positions scaled so every inner product lands in [0, 1]: uniform draws on [0, 1]^2 put a few
+    # pairs above 1, which the distribution has to clip -- and a clipped model is no longer the
+    # rank-2 dot-product model these positions define, so the rank-2 fit below would be chasing a
+    # different truth than the one that generated the graphs. numerical_repairs() says so when it
+    # happens; here there is nothing to say, which is what makes the comparison meaningful.
+    positions = rng.rand(8, 2) / np.sqrt(2.0)
+    d = RandomDotProductGraphDistribution(positions)
+    assert d.numerical_repairs() == ()
     fit = estimate(list(d.sampler(1).sample(2000)), d.estimator())
     print("  fit: %s" % fit)
+    print(
+        "  mean |P_fit - P_true| over off-diagonal pairs: %.4f"
+        % float(np.mean(np.abs(fit.edge_marginals() - d.edge_marginals())[~np.eye(8, dtype=bool)]))
+    )
 
     print("# KnowledgeGraph (scored entity/relation triples)")
     d = KnowledgeGraphDistribution(rng.randn(6, 3), rng.randn(2, 3))

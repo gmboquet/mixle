@@ -342,6 +342,23 @@ class SequenceDistribution(SequenceEncodableProbabilityDistribution):
             return DensitySemantics.LIKELIHOOD_FACTOR
         return join_density_semantics(child.density_semantics() for child in (self.dist, self.len_dist))
 
+    def composable_as_component(self) -> bool:
+        """Whether a latent model may use this sequence law as a component.
+
+        Delegated to the element law and the length law, because the density is their product. The
+        two modes above are not delegated: ``null_len_dist`` and ``len_normalized`` are declarations
+        that this object scores sequences without modelling how long one is, and no arithmetic about
+        its children changes that -- the ``len_estimator=`` advice on the refusal is for exactly
+        those. What was wrong was applying that advice to a sequence law that HAS a length model
+        whose categorical is momentarily empty, which is what a component with no responsibility
+        re-estimates to (P10-F13).
+        """
+        from mixle.stats.compute.pdist import every_factor_is_composable
+
+        if self.null_len_dist or self.len_normalized:
+            return False
+        return every_factor_is_composable((self.dist, self.len_dist))
+
     def log_density(self, x: Sequence[T]) -> float:
         """Evaluate the log-density of SequenceDistribution at observed sequence x.
 

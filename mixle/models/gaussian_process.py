@@ -61,6 +61,7 @@ class GaussianProcessRegressor:
         self.log_noise = _raw_positive(torch, engine, noise)
         self.mean = engine.asarray(mean).clone().detach().requires_grad_(True)
         self.jitter = jitter
+        self._jitter_applied = 0.0  # the largest extra diagonal any factorization has needed (see _chol)
 
     def parameters(self):
         """Return trainable raw kernel/noise parameters and the mean."""
@@ -146,6 +147,57 @@ class GaussianProcessRegressor:
         sqrt5 = 5.0**0.5  # matern52
         return amp2 * (1.0 + sqrt5 * r + (5.0 / 3.0) * dist2) * torch.exp(-sqrt5 * r)
 
+    def numerical_repairs(self) -> tuple[str, ...]:
+        """Repairs applied to keep a factorization defined -- ``()`` when none were needed.
+
+        Same channel and same spelling as the distribution families' (``covariance-ridged(...)``):
+        an extra diagonal added to make a covariance factorable is a repair, and a repaired result is
+        an approximation whether or not the objective converged.
+        """
+        if self._jitter_applied <= 0.0:
+            return ()
+        return (
+            "covariance-ridged(%.3g; beyond jitter=%.3g, to factor the GP kernel matrix)"
+            % (self._jitter_applied, self.jitter),
+        )
+
+    def _chol(self, k: Any, eye: Any) -> Any:
+        """Cholesky of ``K + noise*I``, escalating the jitter when roundoff -- not the model -- broke it.
+
+        A GP fitted on a noise-free objective drives its noise parameter toward zero (``log_noise`` is
+        trained, floored only by ``jitter``), and once the acquisition loop clusters points near an
+        optimum the kernel matrix becomes numerically singular: ``linalg.cholesky`` then raised a raw
+        torch ``_LinAlgError`` naming "the leading minor of order 17", from inside ``mixle.doe.minimize``
+        with no user-facing knob to turn (P09-F03: 11 of 12 seeds crashed). The matrix IS positive
+        definite in exact arithmetic -- a covariance always is -- so the repair is the standard one:
+        add a larger multiple of the identity until the factorization succeeds, scaled to the diagonal
+        so it means the same at any amplitude, and record how much was needed. Differentiable
+        throughout (the escalated matrix stays in the graph), so this works during fitting too.
+
+        A failure that survives a jitter of a tenth of the signal variance is not roundoff, and raises
+        with a message naming the surrogate and what to change.
+        """
+        torch = self.torch
+        chol, info = torch.linalg.cholesky_ex(k)
+        if int(info.detach().cpu().item()) == 0:
+            return chol
+        mean_diagonal = float(torch.mean(torch.diagonal(k)).detach().cpu().item())
+        scale = abs(mean_diagonal) if mean_diagonal != 0.0 else 1.0
+        extra = max(self.jitter, scale * 1.0e-10)
+        ceiling = scale * 0.1
+        while extra <= ceiling:
+            chol, info = torch.linalg.cholesky_ex(k + extra * eye)
+            if int(info.detach().cpu().item()) == 0:
+                self._jitter_applied = float(extra)
+                return chol
+            extra *= 10.0
+        raise ValueError(
+            "the Gaussian-process covariance is not numerically positive definite even after adding "
+            "%.3g to its diagonal (mean diagonal %.3g). This is what a duplicated or near-duplicated "
+            "training input looks like to an exact GP -- de-duplicate x, or construct the regressor "
+            "with a larger noise=/jitter= floor." % (float(ceiling), mean_diagonal)
+        )
+
     def log_marginal_likelihood(self, x: Any, y: Any) -> Any:
         """Return the exact GP log marginal likelihood for training data."""
         torch = self.torch
@@ -157,7 +209,7 @@ class GaussianProcessRegressor:
         noise2 = self.log_noise.exp() ** 2
         k = k + (noise2 + self.jitter) * eye
         centered = yy - self.mean
-        chol = torch.linalg.cholesky(k)
+        chol = self._chol(k, eye)
         alpha = torch.cholesky_solve(centered[:, None], chol)[:, 0]
         quad = torch.dot(centered, alpha)
         logdet = 2.0 * torch.sum(torch.log(torch.diagonal(chol)))
@@ -217,7 +269,7 @@ class GaussianProcessRegressor:
             k = self.kernel(x, x)
             eye = torch.eye(n, dtype=y.dtype, device=y.device)
             k = k + (self.log_noise.exp() ** 2 + self.jitter) * eye
-            chol = torch.linalg.cholesky(k)
+            chol = self._chol(k, eye)
             centered = y - self.mean
             alpha = torch.cholesky_solve(centered[:, None], chol)
             kxs = self.kernel(x, xs)

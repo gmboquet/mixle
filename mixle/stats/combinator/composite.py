@@ -319,6 +319,26 @@ class CompositeDistribution(SequenceEncodableProbabilityDistribution):
 
         return join_density_semantics(c.density_semantics() for c in self.dists)
 
+    def composable_as_component(self) -> bool:
+        """Whether a latent model may use this composite as a component.
+
+        A composite's density is the PRODUCT of its fields' densities, so if every field differs from
+        a law only by a positive scale, so does their product -- and a mixture absorbs that scale into
+        the component's own mixing weight, leaving responsibilities unchanged. Without this
+        delegation, a composite over an admissible factor was refused where the bare factor was
+        accepted, which is a state the library's own EM produces: a mixture component that wins no
+        responsibility this iteration re-estimates to an empty categorical, and rebuilding the
+        distribution from those components then raised a TypeError advising ``len_estimator=`` --
+        machinery for sequence models, about a composite of scalars, in a run whose real problem was
+        that a 3-by-3 joint mixture had been given one observation (P10-F13).
+
+        Fields that decline (a ``scoring_only`` factor, a sequence law with no length model) still
+        make the composite decline: one non-generative field is enough to make the product one.
+        """
+        from mixle.stats.compute.pdist import every_factor_is_composable
+
+        return every_factor_is_composable(self.dists)
+
     def log_density(self, x: tuple[Any, ...]) -> float:
         """Evaluates log-density of CompositeDistribution for single observation tuple x.
 

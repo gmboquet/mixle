@@ -198,6 +198,83 @@ release (`release-checklists/0.8.2-followups.md`).
 - A closed parallel encoded-data handle refuses further requests instead of answering every one
   with the estimator's default model and a zero log-density (P06-F04).
 
+#### The PPL and the platform seams (pass 07)
+
+- `.fit()` on a probabilistic program whose parameters are all constants warns instead of
+  returning silently with `result=None`: there was nothing to fit, and three shipped notebooks
+  read the resulting `None` as a fitted model (P07-F03).
+- Grouped Bernoulli-Beta programs (`Bernoulli(Beta(a, b).each()).fit(..., how="mcmc")`) sample
+  again. The grouped target now carries the Beta hyper-parameters analytically and proposes on the
+  logit scale with a delta-method step size, where the generic path accepted none of its proposals
+  (P07-F04).
+- `LocalLevel().fit()` warns when it returns an iteration-capped, unconverged fit, the same way
+  `optimize()` does (P07-F05).
+- `MarkovChainEstimator(pseudo_count=...)` documents what its smoothing covers: the pseudo-count
+  spreads over the fitted state set, so a symbol outside it is outside the chain's support and
+  scores `-inf`. `levels=` is named as the way to smooth over a wider vocabulary (P07-F13).
+- `NumbaKernelFactory.build` raises `KernelCapabilityDeclinedError` when numba is not installed
+  rather than reporting a "numba" kernel it did not build (P07-F15).
+
+#### Reported numbers and README surfaces (pass 08)
+
+- `print_iter=` prints without `out=`: the default output stream is used instead of the argument
+  being silently inert, which is what the tutorials' stored progress output assumed (P08-F04).
+- Effective sample size is clipped to the number of draws it was computed from. An autocorrelation
+  estimate below one can make `n / tau` exceed `n`, and the tutorials printed "HMC ESS 3000" for
+  1000 draws (P08-F08).
+- `TransformDistribution.mean()` and `.variance()` are exact for an `AffineTransform` rather than
+  Monte-Carlo estimates, and raise `NotImplementedError` for transforms with no closed form
+  instead of returning a sampled number the prose calls exact (P08-F14).
+- Fitted PPL regressions round out: a fitted regression stringifies as itself rather than
+  `RV(bound=None)`, `given=` accepts a pandas DataFrame, and `predict()` takes the covariates it
+  is predicting at (P08-F15).
+- A `(N, 1)` column of scores from a user module is accepted as the `N` scalar scores it is, and
+  the error for a genuinely ambiguous shape names `.sum(-1)` (P08-F17).
+
+#### Surrogates, screens and degenerate inputs (passes 09-10)
+
+- The Gaussian-process surrogate escalates its jitter when a kernel matrix loses positive
+  definiteness to roundoff, and discloses how much it needed through `numerical_repairs()`. A
+  noise-free objective drives the fitted noise to its floor, and `mixle.doe.minimize` then failed
+  with a raw torch `_LinAlgError` on 11 of 12 seeds; a matrix no jitter can rescue now raises a
+  message naming the surrogate and the fix (P09-F03).
+- `RandomDotProductGraphDistribution` reports the edge-probability clip it applies when latent
+  inner products fall outside `[0, 1]`. The clamp changes which model is being sampled -- it is no
+  longer the rank-`d` dot-product model the positions define -- and it was silent with
+  `numerical_repairs()` empty (P09-F12).
+- `optimize()`'s cap notes name the caller's own line. They were written for a direct
+  `optimize(...)` and hard-coded a stack level, so every forwarded route -- `fit()`,
+  `learn_structure()`, the task verbs -- attributed them to a library line and advised knobs
+  belonging to a call the reader never wrote; one example script printed 44 such lines. The
+  structure search no longer narrates the candidate models it only scores, and `distill` and
+  `learn_inverse` pass `delta=None` where they deliberately run a fixed number of steps
+  (P09-F09, P10-F09).
+- A posterior can be used as a keyed prompt without tripping the calibrated generator's own
+  reproducibility warning. Seed derivation now recognizes a mixle model by its serialized
+  parameters, an array by its dtype/shape/bytes, and any type that declares `__pysp_seed_key__`;
+  `condition()` and `learn_inverse` posteriors declare theirs from the model and evidence they
+  condition on (P09-F09).
+- `propose().explain()`'s dependency screen quantile-bins any numeric field the discrete encoder
+  cannot represent exactly. Restricting binning to the gaussian/poisson recommendations screened a
+  column for the FAMILY it was recommended rather than for its values, so the quickstart's
+  strongest planted dependence was never reported (P10-F01).
+- Degenerate inputs are refused where the precondition is, not where the arithmetic broke
+  (P10-F13):
+  - a sampler fit with fewer observations than free parameters is refused by name, instead of
+    wandering to scales that raised `OverflowError: (34, 'Result too large')` from inside the
+    lowering table;
+  - a parameter mapping that overflows double precision names the family and its arguments;
+  - `project()` refuses a target family with more components than the sample budget has draws,
+    where it used to return an 8-component fit to one draw;
+  - `JointMixtureDistribution.seq_log_density` returns no scores for an empty encoded batch, as
+    its backend path always has, instead of numpy's "cannot reshape array of size 0";
+  - `empirical_kl_divergence` says it scored zero observations, rather than describing the shape
+    of the score matrix;
+  - a composite or sequence law over an admissible factor is admissible as a mixture component.
+    A component that wins no responsibility re-estimates to an empty categorical, and rebuilding
+    the model then failed with advice about `len_estimator=` in runs that already had one. A
+    sequence law with no length model is still refused, with that same advice.
+
 
 ## [0.8.1] — 2026-09-07
 

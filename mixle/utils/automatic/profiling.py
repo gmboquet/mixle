@@ -1729,7 +1729,17 @@ def _encode_for_pairwise(
         return None
 
     encoded: list[Any] = []
-    if profile.kind in ("numeric", "integer") and profile.recommendation in ("gaussian", "poisson"):
+    # Quantile-bin any numeric field the discrete encoder below cannot represent exactly. Restricting
+    # this to the gaussian/poisson recommendations screened a field for its FAMILY rather than for its
+    # values: a continuous column recommended "mixture" or "generalized_gaussian" has too many distinct
+    # values for the empirical encoder, so it returned None and was dropped from the dependency screen
+    # entirely -- in the quickstart's own data that silently hid the strongest planted dependence
+    # (~0.97 bits), and the profile's "looks multimodal" note was describing exactly the dependence it
+    # then declined to test (P10-F01). Which family to FIT is a different question from whether two
+    # columns can be binned to estimate their mutual information.
+    binnable = profile.kind in ("numeric", "integer")
+    exactly_encodable = len({u for u in values if not _is_missing_value(u)}) <= max_cardinality
+    if binnable and (profile.recommendation in ("gaussian", "poisson") or not exactly_encodable):
         finite = [float(u) for u in values if not _is_missing_value(u) and math.isfinite(float(u))]
         if len(finite) < 2:
             return None

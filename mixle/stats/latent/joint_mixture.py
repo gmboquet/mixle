@@ -332,6 +332,13 @@ class JointMixtureDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         sz, enc_data1, enc_data2 = x
+        if sz == 0:
+            # Same answer the backend path has always given for an empty batch (see
+            # backend_seq_log_density below): no observations, no scores. Without it the reshape
+            # to (0, -1) could not infer a second axis and raised numpy's own message about
+            # "size 0 into shape (0,newaxis)" -- which says nothing about an empty data split
+            # (P10-F13).
+            return np.zeros(0, dtype=float)
         ll_mat1 = np.stack([component.seq_log_density(enc_data1) for component in self.components1], axis=1)
         ll_mat2 = np.stack([component.seq_log_density(enc_data2) for component in self.components2], axis=1)
         pair_scores = ll_mat1[:, :, None] + self.log_joint_weights[None, :, :] + ll_mat2[:, None, :]

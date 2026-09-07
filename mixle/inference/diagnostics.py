@@ -166,7 +166,10 @@ def ess(samples: Any, max_lag: int | None = None) -> np.ndarray:
         var_plus[nonzero],
         lag_limit,
     )
-    out[nonzero] = np.maximum(1.0, n_total / tau)
+    # Capped at the number of draws, like Stan's own reporting: the positivity floor on tau
+    # (1/log10(N)) lets n/tau exceed N by up to log10(N), so a 1000-draw chain reported "ESS 3000"
+    # -- more independent draws than draws -- next to prose reading it as a count (P08-F08).
+    out[nonzero] = np.clip(n_total / tau, 1.0, float(n_total))
     return out
 
 

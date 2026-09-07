@@ -2240,6 +2240,10 @@ class MarkovChainEstimator(ParameterEstimator):
 
         Args:
             pseudo_count (Optional[float]): Used to re-weight sufficient statistics when merged with aggregated data.
+                The smoothing spreads its mass over the state set -- ``levels`` when given, and
+                otherwise the states the training data contains -- so a symbol outside that set is
+                outside the fitted chain's support and scores ``-inf``. Pass ``levels`` with the
+                full vocabulary to give an unseen-but-known symbol a small probability.
             levels (Optional[Iterable[T]]): Set of state values.
             len_estimator (Optional[ParameterEstimator]): ParameterEstimator for length of Markov sequences.
             name (Optional[str]): Set a name for instance of MarkovChainEstimator.
@@ -2536,6 +2540,12 @@ class MarkovChainEstimator(ParameterEstimator):
                 next_state: float(row[next_index] / np.sum(row)) for next_index, next_state in enumerate(checked.states)
             }
         len_dist = self.len_estimator.estimate(checked.length_nobs, checked.length)
+        # The pseudo-count spreads its mass over the state set this fit has -- ``levels`` when the
+        # caller declared one, and otherwise the states the data contains -- so a symbol outside it
+        # is outside the chain's support and scores -inf, which is what a reader who asked for
+        # smoothing does not expect (P07-F13). Not a numerical repair: the smoothing is the model
+        # the caller asked for, not a wall the estimator hit (campaign three pins that). The
+        # estimator's own docstring names ``levels`` as the way to smooth over a wider vocabulary.
         return MarkovChainDistribution(init_prob_map, trans_map, len_dist=len_dist, name=self.name)
 
 

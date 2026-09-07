@@ -741,11 +741,16 @@ def _fit_mlp(x: np.ndarray, y: np.ndarray, n_labels: int, hidden, epochs, lr, se
         # Each call is one checkpoint in a longer gradient trajectory. Returning the checkpoint's final
         # finite update lets the next chunk cross a shallow stochastic valley; early stopping below
         # still selects progress using the aligned full-data cross-entropy.
+        # delta=None asks for a fixed iteration count, which is exactly what this is: one gradient
+        # chunk in a longer trajectory, with early stopping outside the loop. Without it every chunk
+        # emitted a "stopped at the max_its cap (1)" warning pointing at THIS line -- up to 144 per
+        # run of an example, for something the caller cannot act on (P09-F09, P10-F09).
         fit = optimize(
             data,
             leaf.estimator(),
             prev_estimate=leaf,
             max_its=1,
+            delta=None,
             monotone=False,
             track_best=False,
             out=None,

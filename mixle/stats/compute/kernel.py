@@ -17,6 +17,7 @@ from mixle.engines import NUMPY_ENGINE, ComputeEngine
 from mixle.stats.compute.capability_decline import KernelCapabilityDeclinedError
 from mixle.stats.compute.mixture_evidence import normalize_mixture_log_scores
 from mixle.stats.compute.pdist import ParameterEstimator, SequenceEncodableProbabilityDistribution
+from mixle.utils.optional_deps import HAS_NUMBA
 
 
 class _SequenceComponentStats(NamedTuple):
@@ -340,7 +341,19 @@ class NumbaKernelFactory(KernelFactory):
         engine: ComputeEngine,
         estimator: ParameterEstimator | None = None,
     ) -> Kernel:
-        """Prefer generated numba kernels, then fused kernels, then stacked fallback."""
+        """Prefer generated numba kernels, then fused kernels, then stacked fallback.
+
+        Asking this factory for a numba kernel on an install without numba (it is the ``[numba]``
+        extra) used to build and run a pure-Python kernel labelled numba, with no warning -- so a
+        benchmark comparing "numba" against numpy was timing the interpreted path and reporting it
+        as the compiled one (P07-F15). The request is explicit, so the absence is an error.
+        """
+        if not HAS_NUMBA:
+            raise KernelCapabilityDeclinedError(
+                "numba is not installed, so a numba kernel cannot be built (install the extra: "
+                "pip install mixle[numba]). Use GeneratedNumbaKernelFactory to fall back to the "
+                "generic kernel instead of asking for numba by name."
+            )
         if _generated_numba_kernel_available(dist):
             return GeneratedNumbaKernel(dist, engine=engine, estimator=estimator)
         try:
@@ -400,6 +413,11 @@ def _stacked_kernel_after_numba_decline(
 def _generated_numba_kernel_available(dist: SequenceEncodableProbabilityDistribution) -> bool:
     from mixle.stats.compute.declarations import generated_numba_log_density_available
 
+    if not HAS_NUMBA:
+        # Without numba there is no compiled scorer to generate, only an interpreted one wearing
+        # the name -- which the safe factory's own docstring says it must decline in favour of the
+        # generic kernel (P07-F15).
+        return False
     if generated_numba_log_density_available(dist):
         return True
     components = _generated_numba_components(dist)

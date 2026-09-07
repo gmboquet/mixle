@@ -51,6 +51,15 @@ def empirical_kl_divergence(
         ll = np.hstack(chunks)
     except ValueError as exc:
         raise ValueError("density score chunks must have one aligned row per model") from exc
+    if ll.ndim == 2 and ll.shape[0] == 2 and ll.shape[1] == 0:
+        # The shape is right and the content is empty: the encoded batch carried no observations.
+        # Saying "must return a non-empty 2 by n score matrix" pointed at the scoring layer for a
+        # fact about the DATA -- an evaluation split that ended up with zero rows (P10-F13).
+        raise ValueError(
+            "empirical_kl_divergence scored 0 observations: the encoded data holds chunks but no "
+            "rows, which is what a data partition looks like when the split it was asked for is "
+            "smaller than one row. Evaluate on at least one observation."
+        )
     if ll.ndim != 2 or ll.shape[0] != 2 or ll.shape[1] == 0:
         raise ValueError("density evaluation must return a non-empty 2 by n score matrix")
 

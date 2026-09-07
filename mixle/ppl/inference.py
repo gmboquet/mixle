@@ -81,6 +81,11 @@ class _Slot:
     reparam: str | None = None  # 'loc_scale' -> sample z~N(0,1), value = loc + scale*z (non-centered)
     structure: Any = None  # vector/simplex/ordered/Cholesky declaration shared by a public handle
     aliases: tuple[int, ...] = ()  # flat-family argument positions supplied by this canonical slot
+    # A known width for this slot's UNCONSTRAINED coordinate, when the model knows one better than
+    # the generic 1/sqrt(n) rule below. A concentrated Beta prior on a per-group rate is the case:
+    # its logit posterior is much narrower than the default proposal, and a random walk at the
+    # default scale accepts almost nothing in a plate of eighteen groups (P07-F04).
+    proposal_scale: float | None = None
 
 
 # The domain a prior's own draws live in, which is NOT the same thing as the support of the model
@@ -213,6 +218,17 @@ class Posterior:
         dropped = state.pop("_dropped_closures", ())
         self.__dict__.update(state)
         self._dropped_closures = tuple(dropped)
+
+    def __pysp_seed_key__(self) -> tuple:
+        """This posterior's canonical value: the parameters it carries and the draws it holds.
+
+        A posterior handed to a calibrated generator as a PROMPT used to fall through that module's
+        ``repr`` fallback and warn, on every call, that the seed it was deriving was not reproducible
+        -- pointing at a library line for a choice the caller never made (P09-F09). Two posteriors
+        with the same slots and the same draws are the same prompt, and nothing else about the object
+        (the raw chain object, the attached closures) distinguishes what it says.
+        """
+        return ("mixle.ppl.Posterior", tuple(slot.name for slot in self._slots), np.asarray(self._samples))
 
     def _refuse_dropped_closure(self, name: str) -> None:
         if name in getattr(self, "_dropped_closures", ()):
@@ -991,7 +1007,16 @@ def _init_scale(slots, dstd, n) -> np.ndarray:
     """Per-slot proposal scale ~ posterior width: a location (real) slot ~ dstd/sqrt(n);
     a transformed (positive/unit) slot ~ 1/sqrt(n). Adaptation then tunes the magnitude."""
     root = math.sqrt(max(n, 1))
-    return np.asarray([max((dstd if s.support == "real" else 1.0) / root, 1e-3) for s in slots], dtype=float)
+    return np.asarray(
+        [
+            max(
+                s.proposal_scale if s.proposal_scale is not None else (dstd if s.support == "real" else 1.0) / root,
+                1e-3,
+            )
+            for s in slots
+        ],
+        dtype=float,
+    )
 
 
 def _u_to_vals(slots, u) -> np.ndarray:
@@ -2086,6 +2111,168 @@ _HYPER_LP = {  # prior family name -> log-density(value, const-args, xp)
 }
 
 
+def _grouped_logit_scale(prior: RandomVariable, successes: np.ndarray, trials: np.ndarray) -> float:
+    """The posterior width of one group's logit rate, for the sampler's starting scale.
+
+    With both Beta parameters fixed the delta method gives ``Var(logit p) ~ 1/a + 1/b`` exactly;
+    otherwise the spread of the groups' own empirical logits is the available estimate.
+    """
+    fixed = []
+    for arg in prior._args[:2]:
+        if isinstance(arg, RandomVariable) or arg is free:
+            fixed = []
+            break
+        fixed.append(float(arg))
+    if len(fixed) == 2 and min(fixed) > 0.0:
+        return max(math.sqrt(1.0 / fixed[0] + 1.0 / fixed[1]), 1.0e-3)
+    safe = np.clip(np.where(trials > 0, successes / np.maximum(trials, 1.0), 0.5), 1.0e-3, 1.0 - 1.0e-3)
+    logits = np.log(safe / (1.0 - safe))
+    return max(float(np.std(logits)), 1.0e-2)
+
+
+def _grouped_bernoulli_beta_target(rv: RandomVariable, data, want_grad: bool, *, jacobian: bool = True):
+    """Build the joint sampler target for a Bernoulli-Beta grouped (per-unit rate) model.
+
+    ``y_gi ~ Bernoulli(p_g)``, ``p_g ~ Beta(a, b)``, with ``a`` and ``b`` each a constant, ``free``,
+    or a prior. The per-group rate is sampled on the logit scale so every latent is unconstrained
+    for HMC/NUTS, with the ``log p + log(1-p)`` Jacobian carried in the target.
+
+    The grouped path used to accept only a Normal likelihood, so the shrinkage model a Beta-Binomial
+    hierarchy is written as -- ``Bernoulli(Beta(a, b).each())`` -- raised ``NotImplementedError``
+    (P07-F04). The sufficient statistics per group are the successes and the trials, so the whole
+    likelihood is two dot products regardless of how many observations a group holds.
+    """
+    prior = rv._args[0]
+    groups = [np.asarray(_conjugate_observations(rv, group), dtype=float) for group in data]
+    G = len(groups)
+    if G < 1:
+        raise ValueError("grouped model needs at least one group of observations.")
+    trials = np.array([float(g.size) for g in groups])
+    successes = np.array([float(np.sum(g)) for g in groups])
+    if np.any((successes < 0.0) | (successes > trials)):
+        raise ValueError("grouped Bernoulli observations must be 0/1 outcomes.")
+    rate = float(successes.sum() / trials.sum()) if trials.sum() else 0.5
+    rate = min(max(rate, 1.0e-3), 1.0 - 1.0e-3)
+    dmean = float(math.log(rate / (1.0 - rate)))
+    # ``_init_scale`` reads ``dstd`` as a DATA spread whose posterior width is ``dstd/sqrt(n)``, and
+    # here n is the group count, so the value handed over is the posterior logit width scaled back
+    # up by sqrt(G). A concentrated Beta prior makes that width small (delta method:
+    # Var(logit p) ~ 1/a + 1/b), and starting the sampler an order of magnitude wider than the
+    # posterior rejects every proposal in eighteen dimensions.
+    logit_sd = _grouped_logit_scale(prior, successes, trials)
+    dstd = float(math.sqrt(max(G, 1)) * logit_sd)
+
+    specs = [("a", prior._args[0], "positive"), ("b", prior._args[1], "positive")]
+    slots: list[_Slot] = []
+    hyper_cols: dict[str, int] = {}
+    col = 0
+    for nm, arg, support in specs:
+        if isinstance(arg, RandomVariable) or arg is free:
+            prior_dist = lower(arg, target="dist") if isinstance(arg, RandomVariable) else None
+            slots.append(
+                _Slot(
+                    col,
+                    prior_dist,
+                    True,
+                    arg.name if isinstance(arg, RandomVariable) and arg.name else nm,
+                    arg if isinstance(arg, RandomVariable) else None,
+                    support,
+                )
+            )
+            hyper_cols[nm] = col
+            col += 1
+        else:
+            hyper_cols[nm] = -1
+    n_hyper = col
+    const = {nm: float(arg) for (nm, arg, _support) in specs if hyper_cols[nm] < 0}
+
+    # ``unit`` support: the latent is sampled as the logit (unconstrained, which is what HMC/NUTS
+    # need) and reported as the RATE, which is the quantity the model is about. The logit Jacobian
+    # is carried explicitly in the target below.
+    group_structure = _VectorSpec(G, support="unit", name=prior.name or "p")
+    for g in range(G):
+        slots.append(
+            _Slot(
+                n_hyper + g,
+                None,
+                False,
+                f"{prior.name or 'p'}[{g}]",
+                prior,
+                "unit",
+                structure=group_structure,
+                proposal_scale=logit_sd,
+            )
+        )
+
+    def _eval(u, xp):
+        logj = u[0] * 0.0
+        h = {}
+        for nm, _arg, _support in specs:
+            c = hyper_cols[nm]
+            if c < 0:
+                h[nm] = const[nm]
+            else:
+                h[nm] = xp.exp(u[c])
+                if jacobian:
+                    logj = logj + u[c]
+        a, b = h["a"], h["b"]
+        lp = logj
+        for nm, arg, _support in specs:
+            if isinstance(arg, RandomVariable):
+                lp = lp + _HYPER_LP[arg._family.name](h[nm], [float(z) for z in arg._args], xp)
+        theta = u[n_hyper : n_hyper + G]  # logit p
+        # log p and log(1 - p) from the logit, without forming p and losing the tails
+        log_p = -_log1p_exp(-theta, xp)
+        log_q = -_log1p_exp(theta, xp)
+        k = xp.asarray(successes) if xp is np else theta.new_tensor(successes)
+        n = xp.asarray(trials) if xp is np else theta.new_tensor(trials)
+        ll = xp.sum(k * log_p + (n - k) * log_q)
+        # Beta(a, b) on p, plus the logit Jacobian log p + log(1 - p)
+        log_beta = _xlgamma(a, xp) + _xlgamma(b, xp) - _xlgamma(a + b, xp)
+        prior_latent = xp.sum(a * log_p + b * log_q) - float(G) * log_beta
+        return lp + ll + prior_latent
+
+    def log_target(u):
+        value = float(_eval(np.asarray(u, dtype=float), np))
+        return value if math.isfinite(value) else _NEG_INF
+
+    grad = None
+    if want_grad:
+        try:
+            import torch
+
+            def grad(u):  # noqa: F811
+                t = torch.tensor(np.asarray(u, dtype=float), dtype=torch.float64, requires_grad=True)
+                value = _eval(t, torch)
+                (g,) = torch.autograd.grad(value, t)
+                return g.detach().numpy()
+        except Exception:  # noqa: BLE001
+            grad = None
+
+    def build(vals):
+        a = vals[hyper_cols["a"]] if hyper_cols["a"] >= 0 else const["a"]
+        b = vals[hyper_cols["b"]] if hyper_cols["b"] >= 0 else const["b"]
+        return prior._family.make_dist((float(a), float(b)), prior._name)
+
+    return log_target, grad, slots, build, dmean, dstd
+
+
+def _log1p_exp(x, xp):
+    """``log(1 + exp(x))``, stable in both tails and differentiable under torch."""
+    if xp is np:
+        return np.logaddexp(0.0, x)
+    return xp.nn.functional.softplus(x)
+
+
+def _xlgamma(x, xp):
+    """``lgamma(x)`` for a scalar or tensor under either backend."""
+    if xp is np:
+        from scipy.special import gammaln
+
+        return float(gammaln(x))
+    return xp.lgamma(x if hasattr(x, "lgamma") else xp.as_tensor(x, dtype=xp.float64))
+
+
 def _grouped_target(rv: RandomVariable, data, want_grad: bool, *, jacobian: bool = True):
     """Build the joint NUTS/HMC/ensemble target for a Normal-Normal random-intercept model.
 
@@ -2095,11 +2282,18 @@ def _grouped_target(rv: RandomVariable, data, want_grad: bool, *, jacobian: bool
     dmean, dstd)`` compatible with the existing finalize/Posterior path -- so the per-group latents and
     hyperparameters all appear in the posterior summary.
     """
-    if rv._family.name != "Normal":
-        raise NotImplementedError("grouped NUTS currently supports a Normal likelihood.")
     prior = rv._args[0]
+    if rv._family.name == "Bernoulli" and prior._family.name == "Beta":
+        return _grouped_bernoulli_beta_target(rv, data, want_grad=want_grad, jacobian=jacobian)
+    if rv._family.name != "Normal":
+        raise NotImplementedError(
+            "grouped sampling supports a Normal likelihood with a Normal group prior, and a "
+            "Bernoulli likelihood with a Beta group prior; got %s(%s(...))" % (rv._family.name, prior._family.name)
+        )
     if prior._family.name != "Normal":
-        raise NotImplementedError("grouped NUTS currently supports a Normal group prior.")
+        raise NotImplementedError(
+            "grouped sampling supports a Normal group prior for a Normal likelihood; got %s" % prior._family.name
+        )
     noncentered = prior._reparam == "loc_scale"
     groups = [_conjugate_observations(rv, group) for group in data]
     G = len(groups)
@@ -2322,7 +2516,35 @@ def _prepare_target(
     log_target = _constrain_target(log_target, feasible)
     log_target = _penalize_target(log_target, soft)
     log_target = _penalize_target(log_target, _potential_term(potentials, slots))
+    _refuse_fewer_observations_than_parameters(rv, data, slots)
     return log_target, grad, slots, build, dmean, dstd, feasible
+
+
+def _refuse_fewer_observations_than_parameters(rv, data, slots) -> None:
+    """Refuse a fit whose data cannot determine the parameters it is asked to estimate.
+
+    Two observations do not locate a two-component mixture's five parameters. Nothing rejected that,
+    so the sampler wandered into scales around 1e200 and the run ended in a raw
+    ``OverflowError: (34, 'Result too large')`` from a lambda inside the lowering table -- naming no
+    parameter, no model and no cause (P10-F13). The rest of the library refuses this class of input
+    at its own front door (``propose`` wants 3 records, ``solve`` 8 inputs); this is that refusal for
+    the sampling routes, stated in terms the caller can act on.
+
+    Equality is allowed: a fit with exactly as many observations as parameters is degenerate but
+    determined, and it is not this function's job to decide that a saturated model is uninteresting.
+    """
+    if not hasattr(data, "__len__") or not slots:
+        return
+    n_observations = len(data)
+    if n_observations >= len(slots):
+        return
+    names = ", ".join(str(slot.name) for slot in slots)
+    raise ValueError(
+        "%s has %d free parameter(s) (%s) but was given %d observation(s): the posterior is not "
+        "determined by this data, and a sampler on it wanders to scales that overflow double "
+        "precision rather than converging. Fit a simpler model, or supply at least %d observations."
+        % (getattr(rv, "_name", None) or type(rv).__name__, len(slots), names, n_observations, len(slots))
+    )
 
 
 def _exact_int_control(value, name: str, *, minimum: int) -> int:

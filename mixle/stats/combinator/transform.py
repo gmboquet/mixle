@@ -461,6 +461,39 @@ class TransformDistribution(SequenceEncodableProbabilityDistribution):
         self.keys = keys
         self.fit_receipt = fit_receipt
 
+    def mean(self):
+        """Exact mean under an affine map: ``loc + scale * E[X]``.
+
+        An affine map is the one transform whose moments are exact in closed form, and the PPL's
+        ``.mean()``/``.var()`` fall back to Monte Carlo when a distribution defines neither -- so
+        ``3 * Normal(0, 1) + 1`` reported a sampled 1.02 and 8.95 beside prose calling the map
+        exact (P08-F14). Every other transform has no closed form here and says so, which is what
+        sends the caller back to the sampled estimate.
+        """
+        from mixle.stats.combinator.transform import AffineTransform
+
+        if not isinstance(self.transform, AffineTransform):
+            raise NotImplementedError(
+                "%s has no closed-form mean; only an affine transform does." % type(self.transform).__name__
+            )
+        inner = getattr(self.dist, "mean", None)
+        if not callable(inner):
+            raise NotImplementedError("the transformed law has no closed-form mean.")
+        return float(self.transform.loc + self.transform.scale * float(inner()))
+
+    def variance(self):
+        """Exact variance under an affine map: ``scale**2 * Var[X]``."""
+        from mixle.stats.combinator.transform import AffineTransform
+
+        if not isinstance(self.transform, AffineTransform):
+            raise NotImplementedError(
+                "%s has no closed-form variance; only an affine transform does." % type(self.transform).__name__
+            )
+        inner = getattr(self.dist, "variance", None)
+        if not callable(inner):
+            raise NotImplementedError("the transformed law has no closed-form variance.")
+        return float(self.transform.scale * self.transform.scale * float(inner()))
+
     def compute_capabilities(self):
         """Return capabilities delegated from the child distribution where safe."""
         from mixle.stats.compute.capabilities import (

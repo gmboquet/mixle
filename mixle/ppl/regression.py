@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from typing import Any
 
 import numpy as np
 
@@ -71,13 +72,32 @@ def _group_vector(value, label, *, length):
     return out.copy()
 
 
+def _as_covariate_mapping(given: Any) -> Any:
+    """Return ``given`` as a mapping of field name -> column.
+
+    A pandas DataFrame IS a mapping of names to one-dimensional arrays, which is what this argument
+    is documented to take, but it is not a ``Mapping`` -- so the natural spelling was refused with a
+    message describing exactly what a DataFrame is (P08-F15). Duck-typed, so pandas is never
+    imported here.
+    """
+    if given is not None and not isinstance(given, Mapping) and hasattr(given, "columns") and hasattr(given, "items"):
+        return {
+            str(name): column.to_numpy() if hasattr(column, "to_numpy") else column for name, column in given.items()
+        }
+    return given
+
+
 def _validate_conditional_data(rv, data, given):
     """Validate one aligned conditional dataset before any NumPy broadcasting."""
     y = _numeric_vector(data, "response")
     if given is None:
         given = {}
+    given = _as_covariate_mapping(given)
     if not isinstance(given, Mapping):
-        raise TypeError("given must be a mapping from field names to one-dimensional arrays.")
+        raise TypeError(
+            "given must be a mapping from field names to one-dimensional arrays (a pandas "
+            "DataFrame is accepted as one)."
+        )
     given = dict(given)
     numeric_fields, group_fields = set(), set()
     for arg in rv._args:
@@ -358,11 +378,50 @@ def _columns_of(linpred: _LinearPredictor):
     return est, fixed
 
 
+def predict_at(fitted, given: Any, rng) -> np.ndarray:
+    """One predictive draw per row of ``given`` from a fitted regression.
+
+    A fitted regression's law depends on its covariates, so there is no single distribution to draw
+    from and ``predict(n)`` had nothing to do: a caller who passed the covariates instead got
+    "predictive sample count must be an exact positive integer" and one who passed a count got a
+    NotImplementedError about the missing lowering (P08-F15). Draws are from the fitted conditional
+    at each row -- the plug-in predictive, the same one ``predict`` gives a point fit.
+    """
+    result = getattr(fitted, "_result", None)
+    if result is None or not hasattr(result, "beta") or not hasattr(result, "_columns"):
+        raise TypeError(
+            "predict(<covariates>) is for a fitted regression; this model has no conditional fit. "
+            "Pass a draw count instead."
+        )
+    design, offset = _design(result._columns, given)
+    linear = np.asarray(design, dtype=float) @ np.asarray(result.beta, dtype=float) + np.asarray(offset, dtype=float)
+    mean = _apply_link_inverse(linear, result.link)
+    scale = float(result.sigma)
+    if result.link != "identity" or not np.isfinite(scale) or scale <= 0.0:
+        return mean  # a non-Gaussian family's mean response; there is no additive noise scale
+    return mean + scale * np.asarray(rng.normal(size=mean.shape), dtype=float)
+
+
+def _apply_link_inverse(linear: np.ndarray, link: str) -> np.ndarray:
+    """The mean response for a linear predictor under ``link``."""
+    if link == "identity":
+        return linear
+    if link == "log":
+        return np.exp(linear)
+    if link == "logit":
+        return 1.0 / (1.0 + np.exp(-linear))
+    raise NotImplementedError("no inverse link for %r" % link)
+
+
 def _design(columns, given):
     """Build the design matrix for the estimated columns and the fixed offset."""
     est, fixed = columns
+    given = _as_covariate_mapping(given)
     if not isinstance(given, Mapping):
-        raise TypeError("given must be a mapping from field names to one-dimensional arrays.")
+        raise TypeError(
+            "given must be a mapping from field names to one-dimensional arrays (a pandas "
+            "DataFrame is accepted as one)."
+        )
     n = None
     for _, field in est + fixed:
         if field is not None:

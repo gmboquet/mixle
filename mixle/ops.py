@@ -200,6 +200,18 @@ def project(source: Any, target: Any, *, n_samples: int = 20_000, seed: int = 0,
     if isinstance(max_its, bool) or not isinstance(max_its, int) or max_its < 1:
         raise ValueError(f"max_its must be a positive integer, got {max_its!r}")
     estimator = target.estimator() if callable(getattr(target, "estimator", None)) else target
+    # A projection budget below the target family's own component count is not a coarse projection,
+    # it is an undefined one: eight components fitted to a single draw returned silently, with seven
+    # weights at 1e-18 or below and a divergence from the source of order 1e9 (P10-F13). The budget is
+    # the whole accuracy story of an empirical projection, so being told it is too small to define one
+    # is more useful than a model that cannot be distinguished from noise.
+    parts = getattr(estimator, "estimators", None)
+    if parts is not None and n_samples < len(parts):
+        raise ValueError(
+            "project cannot fit a %d-component target from %d draw(s): each component needs at least "
+            "one observation to be identified at all. Raise n_samples, or project onto a smaller family."
+            % (len(parts), n_samples)
+        )
     data = list(source.sampler(seed).sample(n_samples))
     if len(data) != n_samples:
         raise ValueError(f"source sampler returned {len(data)} draws for n_samples={n_samples}")

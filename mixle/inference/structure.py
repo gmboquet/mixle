@@ -17,12 +17,13 @@ composes like any mixle distribution, but *models the dependence a composite dro
 from __future__ import annotations
 
 import copy
+import warnings
 from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
 
-from mixle.inference.estimation import fit
+from mixle.inference.estimation import _caller_stacklevel, fit
 from mixle.stats.combinator.conditional import ConditionalDistributionEstimator
 from mixle.stats.compute.pdist import FitProvenance, FitProvenanceCarrier
 
@@ -138,6 +139,52 @@ def _field_estimator(column: Sequence[Any]) -> Any:
     return get_estimator(list(column))
 
 
+class _scored_under_a_cap:
+    """Score two candidate fits under a shared budget without narrating each one as "unconverged".
+
+    ``dependency_gain`` fits a marginal and a conditional purely to SUBTRACT their log-likelihoods;
+    neither model is ever handed back. Letting ``optimize``'s cap note through made every structure
+    search print several stderr paragraphs about a model the caller cannot see, advising a
+    ``max_its``/``delta`` belonging to a call the caller never wrote (P09-F09). The budget really can
+    bias the comparison, so it is still reported -- once, and naming this function's own ``max_its``.
+    Every other warning the fits raise is replayed untouched.
+
+    A plain context-manager class rather than ``@contextlib.contextmanager``: the note is issued from
+    ``__exit__``, and :func:`_caller_stacklevel` must be able to walk from there out through
+    ``dependency_gain`` to the caller. A generator-based manager puts a ``contextlib`` frame in that
+    path, which reads as "outside the library" and would stop the walk at the wrong line.
+    """
+
+    __slots__ = ("max_its", "_catcher", "_recorded")
+
+    def __init__(self, max_its: int) -> None:
+        self.max_its = int(max_its)
+
+    def __enter__(self) -> _scored_under_a_cap:
+        self._catcher = warnings.catch_warnings(record=True)
+        self._recorded = self._catcher.__enter__()
+        warnings.simplefilter("always")
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        recorded = list(self._recorded)
+        self._catcher.__exit__(*exc_info)
+        capped = False
+        for entry in recorded:
+            if entry.category is UserWarning and "max_its cap" in str(entry.message):
+                capped = True
+                continue
+            warnings.warn_explicit(entry.message, entry.category, entry.filename, entry.lineno)
+        if capped and exc_info[0] is None:
+            warnings.warn(
+                "dependency_gain scored its candidate fits at the max_its cap (%d) before they settled: "
+                "the two log-likelihoods are budget-matched, so the comparison is still meaningful, but "
+                "raise max_its if a borderline gain matters." % self.max_its,
+                UserWarning,
+                stacklevel=_caller_stacklevel(3),
+            )
+
+
 def dependency_gain(
     parent: Sequence[Any],
     child: Sequence[Any],
@@ -163,14 +210,14 @@ def dependency_gain(
     # str/int/bool levels, and ``None`` has no ``<`` against those types (TypeError). repr gives a total,
     # deterministic order regardless of level type mix -- same guard `_GLMFactor.fit` applies in bayesian_network.py.
     levels = sorted(set(parent), key=repr)
-    marginal = fit(child, _clone(child_estimator), max_its=max_its, out=None, rng=rng)
-    ll_marginal = float(np.sum(marginal.seq_log_density(marginal.dist_to_encoder().seq_encode(child))))
-
     pairs = list(zip(parent, child))
     cond_est = ConditionalDistributionEstimator(
         estimator_map={lv: _clone(child_estimator) for lv in levels}, given_estimator=None
     )
-    cond = fit(pairs, cond_est, max_its=max_its, out=None, rng=rng)
+    with _scored_under_a_cap(max_its):
+        marginal = fit(child, _clone(child_estimator), max_its=max_its, out=None, rng=rng)
+        cond = fit(pairs, cond_est, max_its=max_its, out=None, rng=rng)
+    ll_marginal = float(np.sum(marginal.seq_log_density(marginal.dist_to_encoder().seq_encode(child))))
     enc = cond.dist_to_encoder().seq_encode(pairs)
     ll_cond = float(np.sum(cond.seq_log_density(enc)))
 

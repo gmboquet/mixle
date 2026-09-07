@@ -87,8 +87,25 @@ class RandomDotProductGraphDistribution(SequenceEncodableProbabilityDistribution
         self.positions = x
         self.num_nodes = x.shape[0]
         self.dim = x.shape[1]
-        probs = np.clip(x @ x.T, 0.0, 1.0)
+        raw = x @ x.T
+        probs = np.clip(raw, 0.0, 1.0)
         np.fill_diagonal(probs, 0.0)
+        # A clamp here is not a rounding repair: an inner product above 1 (or below 0) means the model
+        # SAMPLED FROM is not the rank-d dot-product model the positions describe, and a fit of these
+        # graphs is then chasing a different truth than the one that generated them. It stayed silent
+        # with numerical_repairs() empty (P09-F12), so a gallery drawing uniform positions on [0,1]^2
+        # -- four of whose 56 off-diagonal products exceed 1 -- compared a rank-2 fit against a model
+        # that is not rank 2 and reported no discrepancy. Disclosed through the library-wide channel:
+        # rescaling the positions by 1/sqrt(max product) is the fix on the caller's side.
+        off_diagonal = ~np.eye(x.shape[0], dtype=bool)
+        clamped = int(np.count_nonzero((raw != probs)[off_diagonal]))
+        if clamped:
+            highest, lowest = float(np.max(raw[off_diagonal])), float(np.min(raw[off_diagonal]))
+            self._numerical_repairs = (
+                "edge-probability-clipped(%d of %d off-diagonal entries; inner products span [%.4g, %.4g], "
+                "so the sampled model is not the rank-%d dot-product model these positions define)"
+                % (clamped, int(np.count_nonzero(off_diagonal)), lowest, highest, x.shape[1]),
+            )
         probs.setflags(write=False)
         self.probs = probs
         self._log_p = np.full_like(probs, -np.inf)

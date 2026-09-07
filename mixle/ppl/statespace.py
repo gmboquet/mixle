@@ -358,6 +358,19 @@ def _kalman_em(y, phi_free, max_its, tol, *, missing="error"):
             break
         ll = next_ll
     termination_reason = "objective_tolerance" if converged else "iteration_limit"
+    if not converged:
+        # The same disclosure ``optimize`` makes for a capped EM run. A state-space fit stopping at
+        # its default budget is not visibly different from a converged one unless the caller thinks
+        # to read ``result.converged``, and the notebooks that print "estimated by maximum
+        # likelihood" beside such a fit had no signal at all (P07-F05).
+        warnings.warn(
+            "the state-space EM stopped at the max_its cap (%d) before the objective settled (last "
+            "change %.3g, delta=%g): the returned fit is unconverged, and its result reports "
+            "converged=False with termination_reason=%r. Raise max_its to fit to convergence."
+            % (iterations, float(change) if change is not None else float("nan"), float(tol), termination_reason),
+            UserWarning,
+            stacklevel=3,
+        )
     return StateSpaceResult(
         phi=phi,
         q=q,

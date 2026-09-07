@@ -143,7 +143,9 @@ class MCMCResult:
             within_var[positive_var],
             lag_limit,
         )
-        ess[positive_var] = np.maximum(1.0, n / tau)
+        # Capped at the number of draws, for the reason in ``mixle.inference.diagnostics.ess``:
+        # tau's positivity floor otherwise reports more independent draws than draws (P08-F08).
+        ess[positive_var] = np.clip(n / tau, 1.0, float(n))
         return float(ess[0]) if arr.ndim == 1 else ess.reshape(arr.shape[1:])
 
     def summary(self, max_lag: int | None = None) -> dict[str, Any]:

@@ -282,8 +282,17 @@ def _preserve_fit_mode(method: Any) -> Any:
 def _validate_scores(scores: Any, rows: int, torch: Any, context: str) -> Any:
     if not isinstance(scores, torch.Tensor):
         raise TypeError(f"{context} must return a Torch tensor.")
+    if tuple(scores.shape) == (rows, 1):
+        # A scalar observation arrives as an ``(N, 1)`` column, so the obvious module -- ``(x - mu)
+        # / s`` with a shape-(1,) parameter -- broadcasts to ``(N, 1)`` and was refused, against a
+        # README that promises any module exposing log_density(x) fits with one call (P08-F17). One
+        # score per row is what the contract wants, and an ``(N, 1)`` block IS one score per row.
+        scores = scores.reshape(rows)
     if tuple(scores.shape) != (rows,):
-        raise ValueError(f"{context} must return exactly one score per row; got shape {tuple(scores.shape)}.")
+        raise ValueError(
+            f"{context} must return exactly one score per row; got shape {tuple(scores.shape)}. "
+            f"Observations arrive as an (N, d) batch, so a per-dimension term needs a .sum(-1)."
+        )
     if not bool(torch.isfinite(scores).all()):
         raise FloatingPointError(f"{context} returned a non-finite score.")
     return scores

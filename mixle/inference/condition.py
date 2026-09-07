@@ -233,15 +233,31 @@ class Posterior:
         mean_fn: Callable[[FieldPath], Any],
         receipt: ConditionReceipt,
         model: Any = None,
+        identity: tuple | None = None,
     ) -> None:
         self._sample_fn = sample_fn
         self._log_density_fn = log_density_fn
         self._mean_fn = mean_fn
         self.receipt = receipt
+        # What this posterior IS -- the model it conditions and the evidence it conditions on. The
+        # object itself is three closures, so nothing about its attributes says which posterior it
+        # is; a caller using one as a keyed prompt (a calibrated generator does) had no canonical
+        # key for it and warned on every call (P09-F09). Optional: a handler that cannot name its
+        # own determinants leaves it None and the caller keeps the honest warning.
+        self._identity = identity
         # The underlying conditioned distribution when the exact path produced one -- lets a caller
         # splice a sub-posterior back into a bigger composite (see CompositeDistribution recursion
         # below). None for SIR posteriors: there is no closed-form distribution object to hand back.
         self.model = model
+
+    def __pysp_seed_key__(self):
+        """This posterior's canonical value: its model and its evidence, when it was told them.
+
+        ``NotImplemented`` -- not a constant -- when it was not: every identity-less posterior
+        sharing one key would silently give them all the same seed, which is the defect this
+        protocol exists to prevent rather than a quiet way out of it.
+        """
+        return NotImplemented if self._identity is None else ("mixle.condition.Posterior", self._identity)
 
     @property
     def possible(self) -> bool:
@@ -273,6 +289,23 @@ class Posterior:
         """Posterior mean of one unobserved field (same ``FieldPath``/``int`` used in ``evidence``)."""
         self._require_possible()
         return self._mean_fn(_norm_path(field))
+
+
+def _conditioning_identity(model: Any, ev: dict[FieldPath, Any]) -> tuple | None:
+    """``(model, evidence)`` in a form a keyed caller can encode, or ``None`` when it has none.
+
+    Two ``condition()`` results are the same posterior exactly when the model and the evidence match,
+    so this is the whole of a posterior's identity. The evidence is sorted by path so an equal dict
+    built in another order gives an equal key; the model travels as its serialized parameters when it
+    has them, which is what makes the pair encodable at all.
+    """
+    try:
+        from mixle.utils.serialization import to_serializable
+
+        described = to_serializable(model)
+    except Exception:  # noqa: BLE001 - an unregistered model simply has no canonical description
+        return None
+    return (described, tuple(sorted(((tuple(path), value) for path, value in ev.items()), key=repr)))
 
 
 def _impossible_posterior(
@@ -394,7 +427,14 @@ def _condition_gaussian_like(model: Any, ev: dict[FieldPath, Any]) -> Posterior:
         return _analytic_mean(cond, pos[path[0]])
 
     receipt = ConditionReceipt(method="exact", log_evidence=log_evidence)
-    return Posterior(sample_fn=sample_fn, log_density_fn=log_density_fn, mean_fn=mean_fn, receipt=receipt, model=cond)
+    return Posterior(
+        sample_fn=sample_fn,
+        log_density_fn=log_density_fn,
+        mean_fn=mean_fn,
+        receipt=receipt,
+        model=cond,
+        identity=_conditioning_identity(model, ev),
+    )
 
 
 def _condition_composite(model: CompositeDistribution, ev: dict[FieldPath, Any], *, seed: int | None) -> Posterior:
@@ -452,7 +492,14 @@ def _condition_composite(model: CompositeDistribution, ev: dict[FieldPath, Any],
         return _analytic_mean(cond.dists[pos[i]])
 
     receipt = ConditionReceipt(method="exact", log_evidence=log_evidence)
-    return Posterior(sample_fn=sample_fn, log_density_fn=log_density_fn, mean_fn=mean_fn, receipt=receipt, model=cond)
+    return Posterior(
+        sample_fn=sample_fn,
+        log_density_fn=log_density_fn,
+        mean_fn=mean_fn,
+        receipt=receipt,
+        model=cond,
+        identity=_conditioning_identity(model, ev),
+    )
 
 
 def _condition_mixture(model: MixtureDistribution, ev: dict[FieldPath, Any]) -> Posterior:
@@ -502,7 +549,14 @@ def _condition_mixture(model: MixtureDistribution, ev: dict[FieldPath, Any]) -> 
         return float(np.sum(cond.w * means))
 
     receipt = ConditionReceipt(method="exact", log_evidence=log_evidence)
-    return Posterior(sample_fn=sample_fn, log_density_fn=log_density_fn, mean_fn=mean_fn, receipt=receipt, model=cond)
+    return Posterior(
+        sample_fn=sample_fn,
+        log_density_fn=log_density_fn,
+        mean_fn=mean_fn,
+        receipt=receipt,
+        model=cond,
+        identity=_conditioning_identity(model, ev),
+    )
 
 
 def _condition_hmm(model: HiddenMarkovModelDistribution, ev: dict[FieldPath, Any]) -> Posterior:
@@ -591,7 +645,14 @@ def _condition_hmm(model: HiddenMarkovModelDistribution, ev: dict[FieldPath, Any
         return float(np.sum(w * means))
 
     receipt = ConditionReceipt(method="exact", log_evidence=float(log_z))
-    post = Posterior(sample_fn=sample_fn, log_density_fn=log_density_fn, mean_fn=mean_fn, receipt=receipt, model=None)
+    post = Posterior(
+        sample_fn=sample_fn,
+        log_density_fn=log_density_fn,
+        mean_fn=mean_fn,
+        receipt=receipt,
+        model=None,
+        identity=_conditioning_identity(model, ev),
+    )
     post.state_marginals = marginals  # convenience for callers wanting q(z_t | evidence) directly
     return post
 
@@ -787,7 +848,14 @@ def _condition_sir(model: Any, ev: dict[FieldPath, Any], *, n_particles: int, se
             raise TypeError("Posterior.mean is defined only for numeric fields.") from exc
         return float(np.sum(w_norm * vals))
 
-    return Posterior(sample_fn=sample_fn, log_density_fn=None, mean_fn=mean_fn, receipt=receipt, model=None)
+    return Posterior(
+        sample_fn=sample_fn,
+        log_density_fn=None,
+        mean_fn=mean_fn,
+        receipt=receipt,
+        model=None,
+        identity=_conditioning_identity(model, ev),
+    )
 
 
 # --------------------------------------------------------------------------------------------- #

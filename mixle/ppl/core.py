@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import inspect
 import math
+import warnings
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from numbers import Integral, Real
 from typing import Any
 
@@ -896,6 +897,15 @@ def ne(lhs, rhs) -> Constraint:
     return _make_constraint(lhs, "!=", rhs)
 
 
+def _overflow_summary(value: Any) -> Any:
+    """A short, printable stand-in for a parameter value in an overflow message."""
+    try:
+        scalar = float(value)
+    except (TypeError, ValueError):
+        return type(value).__name__
+    return scalar
+
+
 class _Potential:
     """A custom additive log-factor on the joint: ``fn(*values)`` evaluated at the current values of
     ``vars`` and added to ``log p(data, theta)``. The PPL counterpart of Stan's ``target +=`` /
@@ -1202,7 +1212,19 @@ class Family:
     def make_dist(self, args: tuple[Any, ...], name: str | None):
         """Construct the concrete distribution for conventional PPL arguments."""
         self.validate_args(args)
-        kwargs = self.to_dist(*args)
+        try:
+            kwargs = self.to_dist(*args)
+        except OverflowError as exc:
+            # A parameter mapping can overflow a Python float on a value that is finite but enormous:
+            # ``sigma2 = sd ** 2`` is not representable past ~1.3e154. A chain that wandered there is
+            # not making a modelling statement, and the raw ``OverflowError: (34, 'Result too large')``
+            # from a lambda inside _lowering said nothing about which parameter or which model (P10-F13).
+            raise ValueError(
+                "%s cannot be built from these parameters: %r is finite but its derived parameters "
+                "overflow double precision. A sampler reaching values this large has not identified "
+                "the model -- check that there are enough observations for the parameters being fitted, "
+                "or constrain the scale." % (self.name, tuple(_overflow_summary(arg) for arg in args))
+            ) from exc
         if name is not None:
             kwargs.setdefault("name", name)
         return self.dist_cls(**kwargs)
@@ -2434,8 +2456,14 @@ class RandomVariable:
             distribution = lower(self, target="dist")
         analytic = getattr(distribution, "mean", None)
         if callable(analytic):
-            value = np.asarray(analytic())
-            return float(value) if value.ndim == 0 else value
+            try:
+                value = np.asarray(analytic())
+            except NotImplementedError:
+                # A law that defines the method but has no closed form for THIS parameterization
+                # (a non-affine transform, say) says so; the sampled estimate below is the answer.
+                value = None
+            if value is not None:
+                return float(value) if value.ndim == 0 else value
         s = np.asarray(self.sample(samples, seed=seed), dtype=float)
         return s.mean(axis=0) if self._kind == "joint" else float(np.mean(s))
 
@@ -2455,7 +2483,11 @@ class RandomVariable:
             distribution = lower(self, target="dist")
         analytic = getattr(distribution, "variance", None)
         if callable(analytic):
-            value = np.asarray(analytic())
+            try:
+                value = np.asarray(analytic())
+            except NotImplementedError:
+                analytic = None
+        if callable(analytic):
             return float(value) if value.ndim == 0 else value
         s = np.asarray(self.sample(samples, seed=seed), dtype=float)
         return s.var(axis=0) if self._kind == "joint" else float(np.var(s))
@@ -2497,14 +2529,22 @@ class RandomVariable:
             self._cache[key] = estimate
         return estimate
 
-    def predict(self, n: int = 1, rng=None):
+    def predict(self, n: int | Mapping[str, Any] = 1, rng=None):
         """Posterior-predictive draws. For a Bayesian fit (conjugate/mcmc/hmc) this
         integrates over parameter uncertainty (draw params from the posterior, then
         data); for a point fit (EM/MAP) it is the plug-in predictive (sample from the
         fitted distribution).
+
+        For a fitted REGRESSION, pass the covariates to predict at -- a mapping of field name to
+        column, or a DataFrame -- and one draw per row comes back. A fitted regression is a
+        conditional law with no single distribution to sample from, so ``predict(count)`` on one
+        had nothing to do and a caller who passed covariates got "predictive sample count must be
+        an exact positive integer" (P08-F15).
         """
         import numpy as _np
 
+        if n is not None and not isinstance(n, (int, np.integer)):
+            return self._predict_at_covariates(n, rng)
         if n is None:
             n = 1
         n = _exact_positive_int(n, "predictive sample count")
@@ -2520,6 +2560,18 @@ class RandomVariable:
             return pred(n, rng)
         seed = int(rng.randint(0, 2**31 - 1) if hasattr(rng, "randint") else rng.integers(0, 2**31 - 1))
         return self.sample(n, seed=seed)
+
+    def _predict_at_covariates(self, given: Any, rng=None):
+        """One predictive draw per row of ``given`` from a fitted conditional (regression) model."""
+        import numpy as _np
+
+        from mixle.ppl.regression import predict_at
+
+        if rng is None:
+            rng = _np.random.RandomState()
+        elif isinstance(rng, (int, np.integer)) and not isinstance(rng, (bool, np.bool_)):
+            rng = _np.random.RandomState(int(rng))
+        return predict_at(self, given, rng)
 
     def posterior(self, x):
         """Posterior over a latent or a parameter.
@@ -2881,6 +2933,18 @@ class RandomVariable:
                 raise ValueError("a fully specified model performs no iterative fit and cannot consume print_iter.")
             if kw:
                 raise ValueError(f"a fully specified model cannot consume fit option(s) {sorted(kw)}.")
+            # Every parameter is a constant, so there is nothing to estimate and the returned model
+            # is the one that went in, with ``result=None``. That used to be entirely silent, so
+            # ``Poisson(2.0).fit(counts)`` looked like a fit and the caller went on to print an
+            # unfitted log-likelihood as a comparison (P07-F03). A constant is the documented way to
+            # HOLD a parameter; the note says which slots to open instead.
+            warnings.warn(
+                "%s.fit() had nothing to estimate: every parameter is a constant, so the returned "
+                "model is the one passed in and its .result is None. Pass `free` in the slots to be "
+                "estimated (e.g. %s(free)) to fit them." % (self._family.name, self._family.name),
+                UserWarning,
+                stacklevel=2,
+            )
             concrete = lower(self, target="dist")
             return _stash_explanation(RandomVariable._bound(concrete, name=self._name))
 
@@ -3143,6 +3207,21 @@ class RandomVariable:
 
     def __repr__(self) -> str:
         if self._kind == "bound":
+            if self._dist is None and self._result is not None:
+                # A fitted CONDITIONAL model (a regression / mixed-effects fit) has no single
+                # distribution to print -- its law depends on the covariates -- so it stringified
+                # as "RV(bound=None)", which reads as unfitted while ``.params`` holds the fit
+                # (P08-F15). Print what was actually estimated.
+                params = getattr(self._result, "params", None) or getattr(self, "params", None)
+                if isinstance(params, Mapping) and params:
+                    terms = ", ".join(
+                        "%s=%.4g" % (name, entry["mean"])
+                        if isinstance(entry, Mapping) and "mean" in entry
+                        else "%s=%s" % (name, entry)
+                        for name, entry in params.items()
+                    )
+                    return "RV(fitted %s: %s)" % (type(self._result).__name__, terms)
+                return "RV(fitted %s)" % type(self._result).__name__
             return f"RV(bound={self._dist!r})"
         inner = ", ".join("free" if _is_free(a) else repr(a) for a in self._args)
         nm = f", name={self._name!r}" if self._name else ""

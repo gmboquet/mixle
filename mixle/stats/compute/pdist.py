@@ -67,6 +67,29 @@ class DensitySemantics(Enum):
     LIKELIHOOD_FACTOR = "likelihood_factor"  # exact score factor, but not a normalized generative law
 
 
+def every_factor_is_composable(children) -> bool:
+    """Whether a combinator over ``children`` may itself serve as a latent-model component.
+
+    A combinator whose density is a PRODUCT of its children's (a composite over fields, a sequence
+    law over elements and a length) differs from a law by a positive scale exactly when each of its
+    children does -- and a mixture absorbs that scale into the component's own mixing weight, leaving
+    responsibilities unchanged. Without this delegation a combinator over an admissible factor was
+    refused where the bare factor was accepted, and the library's own EM produces exactly that state:
+    a component that wins no responsibility re-estimates to an empty categorical, so rebuilding the
+    model from its components failed with advice about ``len_estimator=`` in a run that already had
+    one (P10-F13).
+
+    A child that declines -- a ``scoring_only`` factor -- makes the whole product decline.
+    """
+    for child in children:
+        if child.density_semantics() is not DensitySemantics.LIKELIHOOD_FACTOR:
+            continue
+        admits = getattr(child, "composable_as_component", None)
+        if not (callable(admits) and admits()):
+            return False
+    return True
+
+
 def join_density_semantics(semantics) -> "DensitySemantics":
     """Combine child density semantics for a combinator whose log_density is monotone in its children.
 

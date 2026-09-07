@@ -5,6 +5,7 @@ objects.
 
 """
 
+import sys
 import warnings
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
@@ -164,6 +165,11 @@ def _reject_all_zero_observation_weights(data: Any, entry: str) -> None:
 
 
 # --- estimator coercion -----------------------------------------------------
+# ``optimize``'s own default for ``print_iter``: passing it explicitly at this value is not a
+# request for output, so it never triggers the no-effect note below.
+_OPTIMIZE_PRINT_ITER_DEFAULT = 1
+
+
 def _reusable_observations(data: Any, entry: str = "optimize()") -> Any:
     """Normalize what a fit entry point was handed into a reusable record sequence.
 
@@ -812,6 +818,28 @@ def _record_fit_provenance(
     return model
 
 
+def _caller_stacklevel(default: int) -> int:
+    """The ``stacklevel`` that lands on the first frame OUTSIDE the library.
+
+    ``optimize``'s cap notes were written for a direct ``optimize(...)`` and hard-coded ``stacklevel=3``.
+    Routed through ``fit()`` (one extra frame) or through a task/structure verb (several), they were
+    attributed to a library line the reader never wrote, advising knobs belonging to a call they never
+    made -- 44 such lines from one example script (P09-F09). Walking out to the caller's own frame keeps
+    the direct case identical and makes every forwarded case name the line the reader can act on.
+
+    ``mixle.tests`` counts as outside: a regression test IS the caller whose line the note should name.
+    """
+    frame = sys._getframe(1)  # the helper that is about to warn: stacklevel 1
+    level = 1
+    while frame is not None:
+        module = frame.f_globals.get("__name__", "")
+        if not (module == "mixle" or module.startswith("mixle.")) or module.startswith("mixle.tests"):
+            return level
+        frame = frame.f_back
+        level += 1
+    return default
+
+
 def _warn_if_capped_unconverged(
     trace: "_FitTrace", max_its: int, delta: float | None, *, requested_delta: float | None
 ) -> None:
@@ -861,7 +889,7 @@ def _warn_if_capped_unconverged(
             "max_iterations=%d, converged=False; compare the two to see the shortfall."
             % (int(max_its), int(trace.iterations), int(trace.iterations), int(max_its)),
             UserWarning,
-            stacklevel=3,
+            stacklevel=_caller_stacklevel(3),
         )
         return
     if delta is None or trace.converged:
@@ -887,7 +915,7 @@ def _warn_if_capped_unconverged(
                 "different initialization or restarts=... may get past it."
                 % (int(trace.iterations), int(max_its), float(rejected), float(gain), float(delta)),
                 UserWarning,
-                stacklevel=3,
+                stacklevel=_caller_stacklevel(3),
             )
         return
     if gain is not None and float(gain) < 0.0:
@@ -904,7 +932,7 @@ def _warn_if_capped_unconverged(
             "trajectory will not converge; a different initialization, restarts=..., or a smaller "
             "step for the mutable leaf is what changes it." % (int(max_its), float(gain)),
             UserWarning,
-            stacklevel=3,
+            stacklevel=_caller_stacklevel(3),
         )
         return
     gain_text = ("last objective gain %.3g" % gain) if gain is not None else "final gain unknown"
@@ -914,7 +942,7 @@ def _warn_if_capped_unconverged(
         "Raise max_its to fit to convergence, or pass delta=None to request a fixed iteration count "
         "without this note." % (int(max_its), gain_text, float(delta)),
         UserWarning,
-        stacklevel=3,
+        stacklevel=_caller_stacklevel(3),
     )
 
 
@@ -1796,6 +1824,18 @@ def optimize(
     )
     rng = _resolve_rng_arg(rng, seed)
     data = _reusable_observations(data, "optimize()")
+    if out is None and print_iter not in (0, _OPTIMIZE_PRINT_ITER_DEFAULT):
+        # ``print_iter`` selects how often progress is written to ``out``, and ``out`` defaults to
+        # None (quiet), so passing print_iter alone did exactly nothing -- which is what nine
+        # tutorial cells do, beside stored outputs full of progress lines the candidate never
+        # prints (P08-F04). Documented behaviour, but a taught argument that silently does nothing
+        # is worth one line.
+        warnings.warn(
+            "optimize(print_iter=%r) has no effect without out=: progress is written to `out`, "
+            "which defaults to None (quiet). Pass out=sys.stdout to see the iteration lines." % (print_iter,),
+            UserWarning,
+            stacklevel=2,
+        )
     if fused_options is not None:
         unknown = set(fused_options) - {"parallel", "lse_bits", "lse_span"}
         if unknown:

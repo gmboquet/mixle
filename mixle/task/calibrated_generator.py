@@ -62,6 +62,30 @@ def _derive_seed(base_seed: int, prompt: Any) -> int:
     return int.from_bytes(digest[:8], "big") % (2**32)
 
 
+def _canonical_serialized_key(value: Any) -> Any:
+    """The canonical key of a mixle model/posterior, from its own serialized parameters.
+
+    A distribution or posterior IS determined by its parameters, and the serialization layer already
+    writes exactly those in a canonical, order-independent form. Without this, a library caller that
+    builds its own prompts from posteriors -- PosteriorDescriber does -- tripped this module's
+    reproducibility warning on every call, pointing at a library line for a choice the user never
+    made (P09-F09). Only registered mixle types take this route; anything else falls through.
+    """
+    if isinstance(value, (str, bytes, bytearray, bool, int, float, complex)) or value is None:
+        return None
+    if not (hasattr(value, "log_density") or hasattr(value, "marginals") or hasattr(value, "samples")):
+        return None
+    try:
+        import json
+
+        from mixle.utils.serialization import to_serializable
+
+        encoded = json.dumps(to_serializable(value), sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except Exception:  # noqa: BLE001 - not serializable is not an error here, just not this route
+        return None
+    return _tagged("d", encoded)
+
+
 def _is_canonically_representable(value: Any) -> bool:
     """Whether this value has a canonical encoding -- one determined by its VALUE alone.
 
@@ -91,6 +115,27 @@ def _seed_key(value: Any, _depth: int = 0) -> Any:
     """
     if _depth > 20:  # a self-referential container; repr would print "..." but this would not return
         return None
+    declared = getattr(type(value), "__pysp_seed_key__", None)
+    if declared is not None:
+        # The documented escape hatch, taken by objects that KNOW what their value is. The warning
+        # already advises "your own stable key"; this lets a type answer once instead of every caller
+        # answering at every call site (P09-F09). It must return a value this function can encode.
+        try:
+            key = declared(value)
+        except Exception:  # noqa: BLE001 - a broken key provider falls back rather than failing a draw
+            return None
+        # ``NotImplemented``: the type understands the protocol but THIS instance has no canonical
+        # value (a posterior built from closures that was never told what it conditions on). It must
+        # not encode as a constant -- that would silently give every such instance one shared seed.
+        return None if key is NotImplemented else _seed_key(key, _depth + 1)
+    if isinstance(value, np.ndarray):
+        if value.dtype == object or value.dtype.hasobject:
+            return None  # the elements decide, and an object array's elements are unconstrained
+        contiguous = np.ascontiguousarray(value)
+        return _tagged("a", f"{contiguous.dtype.str}|{contiguous.shape}|{contiguous.tobytes().hex()}")
+    serialized = _canonical_serialized_key(value)
+    if serialized is not None:
+        return serialized
     if isinstance(value, (str, bytes, bytearray)):
         kind = "s" if isinstance(value, str) else "b"
         body = value if isinstance(value, str) else bytes(value).hex()

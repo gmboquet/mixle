@@ -431,10 +431,24 @@ class GradientAuditContractTest(unittest.TestCase):
                 self.value = torch.nn.Parameter(torch.zeros(1))
 
             def log_density(self, rows):
-                return self.value + torch.zeros((len(rows), 1), device=rows.device)
+                # A per-row block wider than one column is genuinely ambiguous -- it is a term per
+                # DIMENSION, and the module has to say how they combine. (An (N, 1) block is not:
+                # it is one score per row, and 0.8.2 accepts it, since a scalar observation arrives
+                # as an (N, 1) column and the obvious module broadcasts to that shape -- P08-F17.)
+                return self.value + torch.zeros((len(rows), 3), device=rows.device)
 
         with self.assertRaisesRegex(RuntimeError, "one score per row"):
             GradEstimator(WrongShape(), m_steps=1).estimate(None, (x, np.ones(2)))
+
+        class ColumnScores(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.value = torch.nn.Parameter(torch.zeros(1))
+
+            def log_density(self, rows):
+                return self.value + torch.zeros((len(rows), 1), device=rows.device)
+
+        GradEstimator(ColumnScores(), m_steps=1).estimate(None, (x, np.ones(2)))
 
         def vector_loss(module, rows, weights):
             return module.log_density(rows)

@@ -305,7 +305,8 @@ def _fit_round(
             accumulator.seq_update(encoded, row_weights, leaf)
             leaf = estimator.estimate(float(row_weights.sum()), accumulator.value())
         return leaf.module
-    fitted = optimize(data, leaf, max_its=max_its, out=None)
+    # delta=None: a fixed step budget chosen by this routine, not a convergence request (P09-F09).
+    fitted = optimize(data, leaf, max_its=max_its, delta=None, out=None)
     return fitted.module
 
 
@@ -727,6 +728,7 @@ class InverseModel:
                 mean_fn=weighted_mean_fn,
                 receipt=receipt,
                 model=None,
+                identity=self._posterior_identity(y_row),
             )
 
         def sample_fn(n: int, s: int | None) -> np.ndarray:
@@ -762,8 +764,27 @@ class InverseModel:
             inverse_receipts=self.receipts,  # the full calibration report (not an M0 field)
         )
         return Posterior(
-            sample_fn=sample_fn, log_density_fn=log_density_fn, mean_fn=mean_fn, receipt=receipt, model=None
+            sample_fn=sample_fn,
+            log_density_fn=log_density_fn,
+            mean_fn=mean_fn,
+            receipt=receipt,
+            model=None,
+            identity=self._posterior_identity(y_row),
         )
+
+    def _posterior_identity(self, y_row: np.ndarray) -> tuple | None:
+        """What ``posterior(y)`` IS: the trained network's weights and the observation it saw.
+
+        An amortized posterior is three closures over ``(module, y_row)``, so a caller that keys on
+        the posterior -- a calibrated generator does -- had nothing canonical to key on and warned on
+        every call (P09-F09). The weights ARE the learned map; ``y_row`` is the rest. ``None`` when
+        the weights cannot be read, which leaves the caller its honest warning.
+        """
+        try:
+            weights = [parameter.detach().cpu().numpy().copy() for parameter in self.module.parameters()]
+        except Exception:  # noqa: BLE001 - an unreadable module simply has no canonical description
+            return None
+        return ("mixle.task.inverse.InverseModel", tuple(weights), np.asarray(y_row, dtype=float))
 
 
 def learn_inverse(
