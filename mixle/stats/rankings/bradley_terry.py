@@ -461,7 +461,7 @@ class BradleyTerryDataEncoder(DataSequenceEncoder):
     def seq_encode(self, x: Sequence[tuple[int, int]]) -> np.ndarray:
         """Validate and encode ``(winner, loser)`` pairs as an integer matrix."""
         if self.dim is None:
-            raw = homogeneous_rows([list(value) for value in x], 2, label="Bradley-Terry comparisons")
+            raw = homogeneous_rows(x, 2, label="Bradley-Terry comparisons")
             if raw.ndim != 2 or raw.shape[1:] != (2,) or raw.shape[0] == 0:
                 raise ValueError("BradleyTerryDistribution requires a non-empty sequence of comparisons.")
             inferred = max(2, int(np.max(raw)) + 1)

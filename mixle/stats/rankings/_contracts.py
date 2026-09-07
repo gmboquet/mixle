@@ -138,7 +138,15 @@ def pair(value: Any, dim: int, *, label: str = "comparison") -> tuple[int, int]:
     return first, second
 
 
-def homogeneous_rows(value: Any, width: int, *, label: str) -> np.ndarray:
+_MIXED_PAIR_HINT = (
+    "2-item winner/loser pairs and 3-item tie comparisons cannot be mixed: strip the draws, or "
+    "use the tie-aware Davidson/Rao-Kupper families"
+)
+
+
+def homogeneous_rows(
+    value: Any, width: int, *, label: str, item: str = "comparison", hint: str = _MIXED_PAIR_HINT
+) -> np.ndarray:
     """Return ``value`` as an array of ``width``-item rows, naming the first row of the wrong arity.
 
     ``np.asarray`` on a ragged sequence -- a 2-item win/loss pair left among 3-item tie comparisons,
@@ -149,20 +157,30 @@ def homogeneous_rows(value: Any, width: int, *, label: str) -> np.ndarray:
     """
     if isinstance(value, np.ndarray):
         return value
+    rows = []
+    for index, row in enumerate(value):
+        if row is None or isinstance(row, (str, bytes)) or not hasattr(row, "__len__"):
+            # A ``None`` row (or any non-sequence) used to fail on the list conversion below with
+            # "'NoneType' object is not iterable" -- numpy's or Python's message, not the
+            # row-numbered one this function exists to produce (P06-F09 (f)).
+            raise ValueError(
+                f"{label} row {index} is not a {item} ({type(row).__name__}); every {item} must be "
+                f"a sequence of exactly {width} items."
+            )
+        rows.append(list(row))
     try:
-        return np.asarray(value)
+        return np.asarray(rows)
     except ValueError:
         pass
-    for index, row in enumerate(value):
+    for index, row in enumerate(rows):
         try:
             found = len(row)
         except TypeError:
             found = None
         if found != width:
             raise ValueError(
-                f"{label} row {index} has {found if found is not None else 'no'} items; every comparison must "
-                f"have exactly {width} (2-item winner/loser pairs and 3-item tie comparisons cannot be mixed: "
-                "strip the draws, or use the tie-aware Davidson/Rao-Kupper families)."
+                f"{label} row {index} has {found if found is not None else 'no'} items; every {item} must "
+                f"have exactly {width} ({hint})."
             ) from None
     raise ValueError(f"{label} must have shape (N, {width}).")
 

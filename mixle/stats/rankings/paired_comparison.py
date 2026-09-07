@@ -433,7 +433,7 @@ class PairDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[tuple[int, int]]) -> np.ndarray:
         """Encode winner-loser pairs as an integer ``(N, 2)`` array."""
-        raw = homogeneous_rows([list(value) for value in x], 2, label="paired comparisons")
+        raw = homogeneous_rows(x, 2, label="paired comparisons")
         if self.dim is None:
             if raw.ndim != 2 or raw.shape[1:] != (2,) or raw.shape[0] == 0:
                 raise ValueError("requires a non-empty sequence of comparisons.")

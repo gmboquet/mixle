@@ -89,6 +89,23 @@ def js_divergence(reference: Any, current: Any, *, bins: int = 20) -> float:
     return 0.5 * kl(p, m) + 0.5 * kl(q, m)
 
 
+def _scalar_log_density(model: Any, record: Any) -> float:
+    """One record's log-density, scoring an unscorable record as impossible rather than raising.
+
+    A NaN is the canonical unscorable record: ``Service.score`` already scores it -inf and counts
+    it under ``n_unscorable``, while the drift path let the encoder's ``UnscorableObservation``
+    escape -- so ``detect_drift``, ``Service.check_drift`` and a ``Monitor`` loop all died on the
+    first NaN in production data, and ``fraction_unscorable_current`` (which exists to fail closed
+    on exactly this) never got to see it (P05-F12).
+    """
+    from mixle.stats.univariate.continuous._observation_contracts import UnscorableObservation
+
+    try:
+        return float(model.log_density(record))
+    except UnscorableObservation:
+        return float("-inf")
+
+
 def _log_densities(model: Any, rows: list) -> np.ndarray:
     """One log-density per row of an ALREADY-MATERIALIZED population.
 
@@ -102,7 +119,7 @@ def _log_densities(model: Any, rows: list) -> np.ndarray:
         enc = model.dist_to_encoder().seq_encode(rows)
         scores = np.asarray(model.seq_log_density(enc), dtype=float)
     except Exception:  # noqa: BLE001 - the batch path is optional; retry the SAME rows scalar-wise
-        scores = np.asarray([model.log_density(x) for x in rows], dtype=float)
+        scores = np.asarray([_scalar_log_density(model, x) for x in rows], dtype=float)
     scores = np.atleast_1d(scores)
     if scores.shape != (len(rows),):
         raise ValueError(
@@ -150,6 +167,10 @@ class DriftReport:
 
     ``reasons`` names every condition that raised the ``drift`` flag, so a verdict driven by lost
     scoring coverage is distinguishable from one driven by a genuine distribution shift.
+
+    The fields cannot be rebound (``frozen=True``) and the containers are copies of what was passed
+    in, so the caller's own objects cannot reach into a report after it is built. The containers
+    themselves stay writable by whoever holds the report -- see :meth:`__post_init__`.
     """
 
     drift: bool
@@ -160,10 +181,15 @@ class DriftReport:
     reasons: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        # A receipt is a record. Detaching severs the caller's alias, so a mutation after
-        # construction cannot rewrite evidence that was already recorded; `frozen=True` above
-        # stops the field being rebound through the receipt itself. Containers keep their
-        # concrete types -- see detach_receipt_container for why (MXR-080-1876).
+        # A receipt is a record. Detaching severs the CALLER's alias -- the dicts and lists this
+        # report holds are copies, so the objects passed in can no longer be mutated through it --
+        # and `frozen=True` above stops a field being rebound on the report itself. What it does
+        # NOT do is make the containers read-only: they keep their concrete types (see
+        # detach_receipt_container for why: mappingproxy cannot be pickled, and the journal's hash
+        # chain distinguishes a tuple from an equal list), so a holder of the report can still
+        # write into `score`, `per_feature` or `reasons`. The earlier wording here promised that a
+        # mutation after construction could not rewrite recorded evidence, which overstated it by
+        # exactly that difference (P05-F08).
         object.__setattr__(self, "score", detach_receipt_container(self.score))
         object.__setattr__(self, "per_feature", detach_receipt_container(self.per_feature))
         object.__setattr__(self, "thresholds", detach_receipt_container(self.thresholds))
@@ -186,7 +212,14 @@ def _raw_columns(records: Any, n_fields: int) -> list[list[Any]]:
     rows = list(records)
     if not rows:
         return [[] for _ in range(max(n_fields, 1))]
-    if not isinstance(rows[0], (tuple, list)):
+    # An ndarray ROW is a record like any other -- a feature pipeline's natural output is
+    # ``np.array(rows)``, whose rows are 1-D arrays rather than tuples. Testing only tuple/list
+    # collapsed the whole batch into ONE scalar column, so a two-field batch was compared against
+    # the reference's first field alone and a false drift verdict tripped a retrain (P05-F06).
+    first = rows[0]
+    if isinstance(first, np.ndarray) and first.ndim == 1:
+        return [[row[i] for row in rows] for i in range(int(first.shape[0]))]
+    if not isinstance(first, (tuple, list)):
         return [list(rows)]
     return [[r[i] for r in rows] for i in range(len(rows[0]))]
 
@@ -260,15 +293,29 @@ def detect_drift(
         ("ks_threshold", ks_threshold, 1.0),
         ("min_scorable_fraction", min_scorable_fraction, 1.0),
         ("unscorable_shift_threshold", unscorable_shift_threshold, 1.0),
+        ("loglik_shift_threshold", loglik_shift_threshold, None),
     ):
+        # Type as well as value: ``float('0.5')`` succeeds, so a STRING threshold passed this check
+        # and died later on "'>' not supported between float and str", from a comparison the caller
+        # never wrote (P05-F16).
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.integer, np.floating)):
+            raise TypeError(f"{label} must be a real number, got {type(value).__name__}")
         numeric = float(value)
+        if label == "loglik_shift_threshold":
+            # A shift threshold is legitimately negative -- it is how far the mean log-likelihood
+            # may fall. A POSITIVE one, though, flags drift whenever the mean shift is below it,
+            # which identical data satisfies: the detector can then never return no-drift (P05-F16).
+            if not np.isfinite(numeric):
+                raise ValueError(f"loglik_shift_threshold must be a finite number; got {value!r}")
+            if numeric > 0.0:
+                raise ValueError(
+                    "loglik_shift_threshold is how far the mean log-likelihood may FALL, so it must "
+                    f"be <= 0; a positive value flags drift on identical data. Got {value!r}"
+                )
+            continue
         if not np.isfinite(numeric) or numeric < 0.0 or (upper is not None and numeric > upper):
             expected = "a finite non-negative number" if upper is None else f"a finite number in [0, {upper:g}]"
             raise ValueError(f"{label} must be {expected}; got {value!r}")
-    if not np.isfinite(float(loglik_shift_threshold)):
-        # A shift threshold is legitimately negative -- it is how far the mean log-likelihood may
-        # fall -- so only finiteness is required of it.
-        raise ValueError(f"loglik_shift_threshold must be a finite number; got {loglik_shift_threshold!r}")
     score = score_drift(model, reference, current)
     reasons: list[str] = []
     if score["ks"] > ks_threshold:

@@ -285,6 +285,22 @@ class MultivariateStudentTDistribution(SequenceEncodableProbabilityDistribution)
         self.name = name
         self.keys = keys
 
+    # --- serialization: constructor parameters only; every derived cache is recomputed by
+    # __init__ on load. Without these hooks the encoder wrote state the decoder refused, so the
+    # family was write-only for to_json/dump_models and Model.deploy fell back to a
+    # code-executing pickle for it (P05-F17). ---
+    _STATE_PARAMETERS = ("dof", "loc", "shape", "name", "keys")
+
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        """Return the constructor parameters this law is rebuilt from."""
+        return {"dof": self.dof, "loc": self.mu, "shape": self.shape, "name": self.name, "keys": self.keys}
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        """Rebuild from serialized parameters through ``__init__`` so every invariant re-runs."""
+        from mixle.utils.serialization import rebuild_through_init
+
+        rebuild_through_init(self, state, parameters=self._STATE_PARAMETERS, label="multivariate Student-t")
+
     def __str__(self) -> str:
         """Return a readable distribution summary."""
         return "MultivariateStudentTDistribution(%s, %s, %s, name=%s, keys=%s)" % (

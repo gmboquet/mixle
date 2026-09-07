@@ -418,6 +418,43 @@ class RVineCopulaDistribution(SequenceEncodableProbabilityDistribution):
         self.name = name
         self.keys = keys
 
+    # --- serialization: constructor parameters only, with the vine's edges written as plain
+    # tuples. ``_Edge`` is ``__slots__``-based and private, so the encoder refused it outright and
+    # a fitted vine had no persistence route at all -- pickle was the only one (P09-F05). The
+    # rebuild goes through ``__init__``, so every vine invariant (proximity, nesting, the sampling
+    # order) is re-checked on load. ---
+    _STATE_PARAMETERS = ("dim", "trees", "candidates", "name", "keys")
+
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        """Return the constructor parameters this vine is rebuilt from, edges as plain tuples."""
+        return {
+            "dim": self.dim,
+            "trees": [[(e.a, e.b, sorted(e.cond), e.copula, e.parents) for e in tree] for tree in self.trees],
+            "candidates": self.candidates,
+            "name": self.name,
+            "keys": self.keys,
+        }
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        """Rebuild from serialized parameters through ``__init__`` so every invariant re-runs."""
+        from mixle.utils.serialization import SerializationError, rebuild_through_init
+
+        if not isinstance(state, dict) or not isinstance(state.get("trees"), (list, tuple)):
+            raise SerializationError("serialized R-vine copula state must carry a sequence of trees")
+        rebuilt = []
+        for tree in state["trees"]:
+            edges = []
+            for edge in tree:
+                if isinstance(edge, _Edge):
+                    edges.append(edge)
+                    continue
+                if not isinstance(edge, (list, tuple)) or len(edge) != 5:
+                    raise SerializationError("a serialized R-vine edge must be (a, b, cond, copula, parents)")
+                a, b, cond, copula, parents = edge
+                edges.append(_Edge(int(a), int(b), frozenset(int(v) for v in cond), copula, parents))
+            rebuilt.append(edges)
+        rebuild_through_init(self, dict(state, trees=rebuilt), parameters=self._STATE_PARAMETERS, label="R-vine copula")
+
     @classmethod
     def independence(
         cls,

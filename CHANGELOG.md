@@ -136,6 +136,68 @@ release (`release-checklists/0.8.2-followups.md`).
 - A grouped constrained MAP reports the objective evaluations its derivative-free cascade actually
   spent instead of a hard-coded `iterations: 0` beside `success: True` (P04-F12).
 
+#### Production and MLOps (pass 05)
+
+- The registry cross-checks what it reads. A version file whose record declares a different
+  version -- two files swapped on disk, which the content digest cannot see because it never
+  covered the file NAME -- is an integrity failure rather than a model served under the other
+  version's alias, defeating the rollback the alias exists for (P05-F01); and a record whose
+  provenance header describes a different family or a different model hash than the model stored
+  beside it is refused the way `Model.load` already refuses one (P05-F02).
+- A damaged, symlinked, or foreign file in a registry directory is reported as a registry problem
+  rather than as a raw `JSONDecodeError` or `OSError(ELOOP)`, and `versions()` lists only `v<int>`
+  ids (P05-F11). Version files are written as strict JSON, so a non-finite header value is refused
+  at `register()` instead of writing a `NaN` literal mixle's own reader rejects (P05-F13).
+- `verify_chain` validates `trust_code` before its try block: an invalid flag raised inside `get()`
+  was caught by the blanket handler and returned as a false "this chain does not verify", blaming
+  intact data for a caller's flag error (P05-F05).
+- `fit_with_provenance`'s model serializes: the attached header is excluded from the model's
+  serialized state, as the registry and the model hasher already excluded it, so a plain Gaussian
+  fitted through that entry point no longer becomes a code-executing pickle in `Model.deploy`
+  (P05-F03). Its `fit_request_digest` is computed from a structural description of the estimator
+  rather than `repr()`, which embedded a memory address and made two byte-identical requests
+  produce different digests (P05-F04).
+- Drift detection reads an ndarray batch as the records it holds, so the verdict depends on the
+  data rather than on whether the batch arrived as a list or an array (P05-F06); an unscorable
+  record is counted the way `Service.score` counts it instead of ending a monitoring loop
+  (P05-F12); and thresholds are checked for type and for being meetable -- a string passed
+  `float()` and died later on a comparison, and a positive `loglik_shift_threshold` flagged drift
+  on identical data (P05-F16).
+- `Registry.checkpointer(every=...)`, `resume=`, `Service(keep=...)` and
+  `Service.from_registry(trust_code=...)` are validated or forwarded: `every=0`/`-1`/`True`
+  checkpointed every iteration, `keep=0` kept an unbounded log while `keep=-1` discarded every
+  event so `health()` reported none, and `trust_code` could not reach the registry load at all
+  (P05-F09, P05-F10, P05-F16). `verify_lineage` reports a non-header as unverified rather than
+  raising (P05-F16).
+- **Eight more families round-trip through JSON.** `Dirichlet`, `DirichletProcessMixture`,
+  `MultivariateStudentT`, `ProbabilisticPCA`, `HierarchicalMixture`, `JointMixture`,
+  `GaussianCopula` and `RVineCopula` (with its pair copulas and per-edge receipts) wrote text
+  `from_json` refused, so every save path cost them a code-executing pickle. Each now writes its
+  constructor parameters and rebuilds through `__init__`, so every invariant re-runs on load
+  (P05-F17, P09-F05, P10-F05).
+- `DriftReport`'s guarantee is stated accurately: its containers are copies, so a caller cannot
+  reach into a built report, but they stay writable by whoever holds it (P05-F08).
+
+#### Data adapters (pass 06)
+
+- The fit verbs normalize what they are handed before anything reads it. A mixle `DataSource`
+  fits on the default automatic path, not only with an explicit estimator (P06-F05); a numpy
+  structured array fits as its rows (P06-F07); a mapping of equal-length columns fits the columns
+  rather than a categorical over their field NAMES (P06-F10); and a masked array, a
+  `numpy.matrix`, a 0-dimensional array, a `timedelta64` array, and a bare string or bytes object
+  are named instead of crashing several frames down or fitting something nobody asked for
+  (P06-F06, P06-F09, P06-F10).
+- A DataFrame's own column labels are no longer read as `(name, source)` alias pairs, so a
+  2-level MultiIndex frame fits (P06-F03); a repeated column label is named as such rather than
+  as "logical fields must be unique" or an `AttributeError` (P06-F09); and a `RecordEstimator`
+  with aliased fields can be fit from a DataFrame, whose rows now arrive keyed by the sources the
+  record encoder asks for (P06-F02).
+- A `None` comparison row and a ragged Mallows ordering get the row-numbered message their
+  sibling families already produced, instead of Python's "not iterable" and numpy's
+  "inhomogeneous shape" (P06-F09).
+- A closed parallel encoded-data handle refuses further requests instead of answering every one
+  with the estimator's default model and a zero log-density (P06-F04).
+
 
 ## [0.8.1] — 2026-09-07
 

@@ -136,7 +136,22 @@ def _bisect_h_inv(pc: Any, w: np.ndarray, b: np.ndarray, iters: int = 60) -> np.
 
 
 class IndependencePairCopula:
+    # A vine's edges hold these, so persisting an R-vine means persisting them: opt into the
+    # serialization registry (P09-F05). Pair copulas are plain parameter carriers -- their state is
+    # their parameters -- so the default object encoding round-trips them.
+    __pysp_serializable__ = True
+
     family = "independence"
+
+    def __pysp_getstate__(self) -> dict:
+        """This copula is parameter-free, so its serialized state is empty."""
+        return {}
+
+    def __pysp_setstate__(self, state: dict) -> None:
+        """Rebuild from the (empty) serialized state."""
+        from mixle.utils.serialization import rebuild_through_init
+
+        rebuild_through_init(self, state, parameters=(), label="IndependencePairCopula")
 
     def logpdf(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         a, _ = _pair_arguments(a, b, label="independence pair-copula density")
@@ -161,12 +176,27 @@ class IndependencePairCopula:
 
 
 class GaussianPairCopula:
+    # A vine's edges hold these, so persisting an R-vine means persisting them: opt into the
+    # serialization registry (P09-F05). Pair copulas are plain parameter carriers -- their state is
+    # their parameters -- so the default object encoding round-trips them.
+    __pysp_serializable__ = True
+
     family = "gaussian"
 
     def __init__(self, rho: float) -> None:
         self.rho = validated_finite_scalar(rho, label="Gaussian pair-copula rho")
         if not -1.0 < self.rho < 1.0:
             raise ValueError("Gaussian pair-copula rho must lie strictly between -1 and 1")
+
+    def __pysp_getstate__(self) -> dict:
+        """Return the constructor parameters this pair copula is rebuilt from."""
+        return {"rho": self.rho}
+
+    def __pysp_setstate__(self, state: dict) -> None:
+        """Rebuild from serialized parameters through ``__init__`` so every invariant re-runs."""
+        from mixle.utils.serialization import rebuild_through_init
+
+        rebuild_through_init(self, state, parameters=("rho",), label="GaussianPairCopula")
 
     def logpdf(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         a, b = _pair_arguments(a, b, label="Gaussian pair-copula density")
@@ -203,12 +233,27 @@ class GaussianPairCopula:
 
 
 class ClaytonPairCopula:
+    # A vine's edges hold these, so persisting an R-vine means persisting them: opt into the
+    # serialization registry (P09-F05). Pair copulas are plain parameter carriers -- their state is
+    # their parameters -- so the default object encoding round-trips them.
+    __pysp_serializable__ = True
+
     family = "clayton"
 
     def __init__(self, theta: float) -> None:
         self.theta = validated_finite_scalar(theta, label="Clayton pair-copula theta")
         if self.theta < 0.0:
             raise ValueError("Clayton pair-copula theta must be non-negative")
+
+    def __pysp_getstate__(self) -> dict:
+        """Return the constructor parameters this pair copula is rebuilt from."""
+        return {"theta": self.theta}
+
+    def __pysp_setstate__(self, state: dict) -> None:
+        """Rebuild from serialized parameters through ``__init__`` so every invariant re-runs."""
+        from mixle.utils.serialization import rebuild_through_init
+
+        rebuild_through_init(self, state, parameters=("theta",), label="ClaytonPairCopula")
 
     def logpdf(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         a, b = _pair_arguments(a, b, label="Clayton pair-copula density")
@@ -253,11 +298,26 @@ class ClaytonPairCopula:
 
 
 class FrankPairCopula:
+    # A vine's edges hold these, so persisting an R-vine means persisting them: opt into the
+    # serialization registry (P09-F05). Pair copulas are plain parameter carriers -- their state is
+    # their parameters -- so the default object encoding round-trips them.
+    __pysp_serializable__ = True
+
     family = "frank"
     _MIN_ABS = 1.0e-4
 
     def __init__(self, theta: float) -> None:
         self.theta = validated_finite_scalar(theta, label="Frank pair-copula theta")
+
+    def __pysp_getstate__(self) -> dict:
+        """Return the constructor parameters this pair copula is rebuilt from."""
+        return {"theta": self.theta}
+
+    def __pysp_setstate__(self, state: dict) -> None:
+        """Rebuild from serialized parameters through ``__init__`` so every invariant re-runs."""
+        from mixle.utils.serialization import rebuild_through_init
+
+        rebuild_through_init(self, state, parameters=("theta",), label="FrankPairCopula")
 
     def logpdf(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         a, b = _pair_arguments(a, b, label="Frank pair-copula density")
@@ -327,12 +387,27 @@ class FrankPairCopula:
 
 
 class GumbelPairCopula:
+    # A vine's edges hold these, so persisting an R-vine means persisting them: opt into the
+    # serialization registry (P09-F05). Pair copulas are plain parameter carriers -- their state is
+    # their parameters -- so the default object encoding round-trips them.
+    __pysp_serializable__ = True
+
     family = "gumbel"
 
     def __init__(self, theta: float) -> None:
         self.theta = validated_finite_scalar(theta, label="Gumbel pair-copula theta")
         if self.theta < 1.0:
             raise ValueError("Gumbel pair-copula theta must be at least one")
+
+    def __pysp_getstate__(self) -> dict:
+        """Return the constructor parameters this pair copula is rebuilt from."""
+        return {"theta": self.theta}
+
+    def __pysp_setstate__(self, state: dict) -> None:
+        """Rebuild from serialized parameters through ``__init__`` so every invariant re-runs."""
+        from mixle.utils.serialization import rebuild_through_init
+
+        rebuild_through_init(self, state, parameters=("theta",), label="GumbelPairCopula")
 
     def logpdf(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         a, b = _pair_arguments(a, b, label="Gumbel pair-copula density")
@@ -373,6 +448,11 @@ class GumbelPairCopula:
 
 
 class StudentTPairCopula:
+    # A vine's edges hold these, so persisting an R-vine means persisting them: opt into the
+    # serialization registry (P09-F05). Pair copulas are plain parameter carriers -- their state is
+    # their parameters -- so the default object encoding round-trips them.
+    __pysp_serializable__ = True
+
     family = "student_t"
     _NU_GRID = (3.0, 5.0, 8.0, 15.0, 30.0)
 
@@ -383,6 +463,16 @@ class StudentTPairCopula:
             raise ValueError("Student-t pair-copula rho must lie strictly between -1 and 1")
         if not self.df > 0.0:
             raise ValueError("Student-t pair-copula df must be positive")
+
+    def __pysp_getstate__(self) -> dict:
+        """Return the constructor parameters this pair copula is rebuilt from."""
+        return {"rho": self.rho, "df": self.df}
+
+    def __pysp_setstate__(self, state: dict) -> None:
+        """Rebuild from serialized parameters through ``__init__`` so every invariant re-runs."""
+        from mixle.utils.serialization import rebuild_through_init
+
+        rebuild_through_init(self, state, parameters=("rho", "df"), label="StudentTPairCopula")
 
     def logpdf(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         a, b = _pair_arguments(a, b, label="Student-t pair-copula density")
@@ -449,6 +539,10 @@ class VinePairFitError(RuntimeError):
 
 @dataclass(frozen=True)
 class PairCandidateEvidence:
+    # Carried on a fitted vine's edges, so persisting the vine means persisting these receipts
+    # too (P09-F05). A frozen record of parameters -- its state is its fields.
+    __pysp_serializable__ = True
+
     """One candidate's training evidence and complexity-adjusted AIC value."""
 
     family: str
@@ -460,6 +554,10 @@ class PairCandidateEvidence:
 
 @dataclass(frozen=True)
 class PairSelectionReceipt:
+    # Carried on a fitted vine's edges, so persisting the vine means persisting these receipts
+    # too (P09-F05). A frozen record of parameters -- its state is its fields.
+    __pysp_serializable__ = True
+
     """Auditable per-edge model-selection receipt."""
 
     schema_version: int

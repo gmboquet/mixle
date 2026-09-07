@@ -69,7 +69,14 @@ _OPTIONAL_SERIALIZATION_MODULES = (
 # (MXR-080-1190/1202). Unlike an authorization, a fit receipt confers no power -- it describes rather
 # than permits -- so preserving it is information, not privilege, and the fail-closed reasoning that
 # keeps a deserialized grant from authorizing (MXR-080-1725) does not transfer here.
-_NON_STATE_ATTRIBUTES = frozenset({"_fit_provenance", "_numerical_repairs"})
+#
+# ``header`` joins them for the same reason: fit_with_provenance attaches the production provenance
+# header to the model it returns, and the two other encode paths (Registry.register and
+# data.hashing.model_hash) already strip it before encoding -- but this one did not, so a plain
+# Gaussian fitted through that entry point could not be written as JSON at all, and Model.deploy
+# fell back to a code-executing pickle for it (P05-F03). The header travels beside the model in
+# the registry record and in the lifecycle artifact; it is not one of the model's parameters.
+_NON_STATE_ATTRIBUTES = frozenset({"_fit_provenance", "_numerical_repairs", "header"})
 
 _STABLE_STATE_FIELDS: dict[str, frozenset[str]] = {
     "mixle.stats.univariate.continuous.exponential.ExponentialDistribution": frozenset(
@@ -1113,3 +1120,33 @@ def from_json(text: str) -> Any:
     except json.JSONDecodeError as exc:
         raise SerializationError("invalid JSON") from exc
     return from_serializable(payload)
+
+
+def rebuild_through_init(instance: Any, state: Any, *, parameters: tuple[str, ...], label: str) -> None:
+    """Rebuild ``instance`` from a serialized parameter state by re-running its own ``__init__``.
+
+    The counterpart of a ``__pysp_getstate__`` that writes constructor parameters only: derived
+    caches are recomputed rather than persisted, so an artifact does not depend on how the caches
+    were laid out when it was written, and every constructor invariant re-runs on load. Families
+    whose state carried derived caches, or whose constructor keyword differs from the attribute
+    name, could not be read back at all -- ``to_json`` produced text ``from_json`` refused, and
+    ``Model.deploy`` fell back to a code-executing pickle for them (P05-F17, P09-F05, P10-F05).
+
+    ``parameters`` names the constructor keywords in the order they are written; each must be
+    present in ``state``, and nothing else may be.
+    """
+    if not isinstance(state, dict):
+        raise SerializationError("serialized %s state must be a dict of constructor parameters" % label)
+    missing = sorted(set(parameters) - set(state))
+    unknown = sorted(set(state) - set(parameters))
+    if missing or unknown:
+        raise SerializationError(
+            "serialized %s state does not match its constructor parameters (missing=%r, extra=%r)"
+            % (label, missing, unknown)
+        )
+    try:
+        type(instance).__init__(instance, **{name: state[name] for name in parameters})
+    except SerializationError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a constructor refusal is an invalid artifact
+        raise SerializationError("serialized %s state was rejected by its constructor: %s" % (label, exc)) from exc

@@ -71,7 +71,13 @@ class Service:
         self.name = name
         self.reference = list(reference) if reference is not None else None
         self.log_path = log_path
-        self.keep = keep
+        # ``keep`` bounds the activity log, and ``activity[-0:]`` is a FULL slice: keep=0 kept
+        # everything (unbounded), keep=-1 discarded every event so health() reported zero events
+        # for batches it had scored -- a monitoring blind spot with no error (P05-F10). Validated
+        # exactly like health(window=...) already is.
+        if isinstance(keep, (bool, np.bool_)) or not isinstance(keep, (int, np.integer)) or int(keep) < 1:
+            raise ValueError(f"Service keep must be a positive integer, got {keep!r}")
+        self.keep = int(keep)
         if not availability_errors or not all(
             isinstance(error, type) and issubclass(error, Exception) for error in availability_errors
         ):
@@ -88,7 +94,11 @@ class Service:
         or misspelled alias raises rather than serving an unpromoted version), while omitting it takes
         the promoted ``production`` model if there is one and the latest registration otherwise.
         """
-        model, header = registry.current(name, alias)
+        # ``trust_code`` belongs to the registry LOAD, not to the Service: forwarding it into
+        # ``cls(...)`` made it an unexpected keyword, so a NeuralLeaf-family entry could not be
+        # served from a registry at all (P05-F16).
+        trust_code = kw.pop("trust_code", False)
+        model, header = registry.current(name, alias, trust_code=trust_code)
         svc = cls(model, name=name, **kw)
         if header is not None and svc.header is None:  # the registry stores the header separately
             svc.header = header

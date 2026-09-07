@@ -354,16 +354,44 @@ def column_records(column: Any) -> list[Any]:
     return _normalized_scalars(values, plan)
 
 
+class _LiteralLabel:
+    """A DataFrame column label to be used as itself, never split into ``(name, source)``.
+
+    A tuple label is ordinary in a MultiIndex-columned frame, and the alias spelling
+    ``field('mean', 'x')`` is also a 2-tuple, so the two are indistinguishable once a label reaches
+    the field helpers. Labels read off the frame are wrapped in this so only a caller's own
+    ``fields=`` spec can carry an alias (P06-F03).
+    """
+
+    __slots__ = ("label",)
+
+    def __init__(self, label: Any) -> None:
+        self.label = label
+
+
 def _field_source(field: Any) -> Any:
+    if isinstance(field, _LiteralLabel):
+        return field.label
     if isinstance(field, tuple) and len(field) == 2:
         return field[1]
     return field
 
 
 def _field_name(field: Any) -> Any:
+    if isinstance(field, _LiteralLabel):
+        return field.label
     if isinstance(field, tuple) and len(field) == 2:
         return field[0]
     return field
+
+
+def _duplicated_column_labels(df: Any) -> list:
+    """Column labels that appear more than once, in order of first appearance."""
+    seen: dict = {}
+    for label in list(df.columns):
+        key = tuple(label) if isinstance(label, tuple) else label
+        seen[key] = seen.get(key, 0) + 1
+    return [label for label, count in seen.items() if count > 1]
 
 
 def dataframe_records(
@@ -393,8 +421,23 @@ def dataframe_records(
     wrote them apart from pandas' own sentinels; they are the wrapped field's data, not this
     column's gap.
     """
+    duplicated = _duplicated_column_labels(df)
+    if duplicated:
+        # A frame with a repeated label cannot be selected column-wise at all: ``df[label]`` gives
+        # a FRAME, not a Series, so a selection by that name died on "'DataFrame' object has no
+        # attribute 'tolist'", and reading every column reported "logical fields must be unique"
+        # without saying the duplicates are the frame's own labels (P06-F09 (e)).
+        raise ValueError(
+            "the DataFrame has repeated column label(s) %s, so a column cannot be selected by "
+            "name. Rename the duplicates (df.columns = [...]) before fitting."
+            % ", ".join(repr(label) for label in duplicated)
+        )
     if fields is None:
-        field_list = list(df.columns)
+        # The frame's OWN labels, never read as ``(name, source)`` alias pairs: a 2-level
+        # MultiIndex (or a flat index of 2-tuples) made every ``('a', 'x')`` label mean "logical
+        # field 'a' from source column 'x'", so two columns under one first level collapsed onto
+        # one logical name and the frame was refused as having non-unique fields (P06-F03).
+        field_list = [_LiteralLabel(label) for label in df.columns]
     elif isinstance(fields, str):
         field_list = [fields]
     else:

@@ -23,6 +23,7 @@ dependency-free leaf that any layer can import without cycles.
 from __future__ import annotations
 
 import inspect
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -909,6 +910,14 @@ def _looks_like_raw_data(obj: Any) -> bool:
             head, bool
         ):
             return not any(hasattr(item, "log_density") for item in obj[:8])
+    # A mapping of equal-length columns is the canonical DataFrame constructor input, and the same
+    # table describe() routes to propose() when it arrives as a frame or a list of rows. It used to
+    # fall through to "dict -- no catalogued capability detected", which reads as "the library has
+    # nothing for this" for data propose() handles (P06-F10).
+    if isinstance(obj, Mapping) and obj:
+        columns = list(obj.values())
+        if all(not isinstance(c, (str, bytes)) and hasattr(c, "__len__") for c in columns):
+            return len({len(c) for c in columns}) == 1
     return False
 
 

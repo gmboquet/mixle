@@ -452,6 +452,30 @@ class DirichletProcessMixtureDistribution(SequenceEncodableProbabilityDistributi
         self._structure_fingerprint = fingerprint
         self.name = name
 
+    # --- serialization: constructor parameters only; every derived cache is recomputed by
+    # __init__ on load. Without these hooks the encoder wrote state the decoder refused, so the
+    # family was write-only for to_json/dump_models and Model.deploy fell back to a
+    # code-executing pickle for it (P05-F17, P10-F05). ---
+    _STATE_PARAMETERS = ("components", "w", "a", "g", "component_priors", "name", "prior")
+
+    def __pysp_getstate__(self) -> dict[str, Any]:
+        """Return the constructor parameters this law is rebuilt from."""
+        return {
+            "components": self.components,
+            "w": self.w,
+            "a": self.a,
+            "g": self.g,
+            "component_priors": self.component_priors,
+            "name": self.name,
+            "prior": self.prior,
+        }
+
+    def __pysp_setstate__(self, state: dict[str, Any]) -> None:
+        """Rebuild from serialized parameters through ``__init__`` so every invariant re-runs."""
+        from mixle.utils.serialization import rebuild_through_init
+
+        rebuild_through_init(self, state, parameters=self._STATE_PARAMETERS, label="Dirichlet process mixture")
+
     def __str__(self) -> str:
         return "DirichletProcessMixtureDistribution([%s], %s, %s, %s, [%s], name=%s, prior=%s)" % (
             ",".join([str(u) for u in self.components]),

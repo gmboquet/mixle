@@ -6,7 +6,7 @@ objects.
 """
 
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from functools import partial
 from typing import IO, Any, NamedTuple, TypeVar
@@ -164,24 +164,101 @@ def _reject_all_zero_observation_weights(data: Any, entry: str) -> None:
 
 
 # --- estimator coercion -----------------------------------------------------
-def _reusable_observations(data: Any) -> Any:
-    """Materialize a one-shot iterator so the data survives being read more than once.
+def _reusable_observations(data: Any, entry: str = "optimize()") -> Any:
+    """Normalize what a fit entry point was handed into a reusable record sequence.
 
-    Estimator inference reads the records to choose a model, and the encoder reads them again to
-    fit it. A generator, ``iter(list)``, ``map``/``filter``/``zip``, or a file object returns itself
-    from ``__iter__`` and is exhausted after the first pass, so ``optimize(x for x in data)`` used
-    to infer a model from 200 observations and then encode zero of them -- returning an empty
-    IgnoredDistribution whose receipt claimed ``converged=True`` over ``n_observations=0``
-    (P03-F02). ``propose()`` already materialized; these entry points did not. A reusable sequence
-    (list, tuple, ndarray, DataFrame, DataSource, RDD) yields a fresh iterator and is returned
-    unchanged.
+    The front door of every fit verb, run before anything reads the data -- structure inference
+    iterates it, estimator inference reads it again, and the encoder a third time -- so a container
+    that only survives one pass, or that iterates as something other than its records, has to be
+    settled here rather than by whichever reader happens to touch it first.
+
+    * a one-shot iterator (a generator, ``iter(list)``, ``map``/``filter``/``zip``, a file object)
+      is materialized: ``optimize(x for x in data)`` used to infer a model from 200 observations
+      and then encode zero of them, returning an empty model whose receipt claimed
+      ``converged=True`` over ``n_observations=0`` (P03-F02, P06-F01);
+    * a numpy structured/record array yields its rows as tuples, which is what
+      ``optimize(sa.tolist())`` fits; the profiler otherwise met an unhashable void scalar
+      (P06-F07);
+    * a mapping of equal-length columns yields one record per row, the shape the same table has as
+      a DataFrame; iterating the mapping modelled its field NAMES (P06-F10);
+    * a masked array, a ``numpy.matrix``, a 0-dimensional array, and a bare string or bytes object
+      are refused by name rather than fitting something nobody asked for or failing several frames
+      down (P06-F06, P06-F09, P06-F10).
+
+    A reusable record sequence (list, tuple, ndarray, DataFrame, RDD) is returned unchanged.
     """
     if data is None:
         return None
+    _reject_masked_data(data, entry)
+    if isinstance(data, (str, bytes, bytearray)):
+        raise ValueError(
+            "%s received a %s, which iterates as its individual characters/bytes -- fitting it "
+            "produces a categorical over those, which is almost never what was meant. Pass a "
+            "sequence of observations (e.g. a list of strings)." % (entry, type(data).__name__)
+        )
+    if isinstance(data, np.matrix):
+        raise ValueError(
+            "%s received a numpy.matrix, whose rows are themselves 2-D matrices rather than "
+            "records. Pass numpy.asarray(data)." % entry
+        )
+    if isinstance(data, np.ndarray):
+        if data.ndim == 0:
+            raise ValueError(
+                "%s received a 0-dimensional array, which carries no observations. Pass a sequence "
+                "of observations (numpy.atleast_1d(data) for a single one)." % entry
+            )
+        if data.dtype.names is not None:
+            return data.tolist()  # a structured/record array's rows, as the tuples they represent
+        if data.dtype.kind in "mM":
+            # timedelta64 / datetime64: numpy yields ``datetime.timedelta`` objects, which no
+            # family's encoder can coerce, so the fit died on "int() argument must be ... not
+            # 'datetime.timedelta'" (P06-F09 (b)). A pandas column of the same dtype fits because
+            # pandas hands over its numeric representation.
+            raise ValueError(
+                "%s received a numpy %s array. Fit its numeric representation instead -- e.g. "
+                "data.astype('int64') for the raw counts, or data / numpy.timedelta64(1, 's') for "
+                "seconds." % (entry, data.dtype.name)
+            )
+        return data
+    if isinstance(data, Mapping):
+        return _records_from_columns(data, entry)
     try:
         return list(data) if iter(data) is data else data
     except TypeError:
         return data  # not iterable: leave it to the caller's own validation
+
+
+def _records_from_columns(columns: Mapping, entry: str) -> list:
+    """One record per row of a mapping of equal-length columns (a DataFrame's constructor input).
+
+    Iterating the mapping itself yields its KEYS, so ``optimize({'x': xs, 'k': ks})`` fitted a
+    categorical over the two field names with no warning (P06-F10). A mapping whose values are not
+    equal-length columns is not a table, and says so.
+    """
+    if not columns:
+        raise ValueError(
+            "%s received an empty mapping. Pass records (a sequence of observations) or a mapping "
+            "of equal-length columns keyed by field name." % entry
+        )
+    lengths = set()
+    for name, column in columns.items():
+        if isinstance(column, (str, bytes)) or not hasattr(column, "__len__"):
+            raise ValueError(
+                "%s received a mapping, which is read as a table of columns, but %r is not a "
+                "column (a sized sequence of values). Pass records instead if this is one "
+                "observation." % (entry, name)
+            )
+        lengths.add(len(column))
+    if len(lengths) != 1:
+        raise ValueError(
+            "%s received a mapping of columns whose lengths differ (%s). Every column must have "
+            "one value per row." % (entry, ", ".join("%s=%d" % (k, len(v)) for k, v in columns.items()))
+        )
+    names = list(columns)
+    rows = int(next(iter(lengths)))
+    if len(names) == 1:
+        return list(columns[names[0]])
+    return [tuple(columns[name][index] for name in names) for index in range(rows)]
 
 
 def _coerce_estimator(estimator: Any, data: Any, fields: Any = None) -> ParameterEstimator:
@@ -230,6 +307,22 @@ def _coerce_estimator(estimator: Any, data: Any, fields: Any = None) -> Paramete
     return estimator
 
 
+def _structure_rows(data: Any) -> list:
+    """The records the automatic-structure search reads, for any container a fit verb accepts.
+
+    ``list(data)`` on a mixle ``DataSource`` raised "'MaterializedSource' object is not iterable",
+    so the DEFAULT ``structure='auto'`` path refused an input the explicit-estimator path and
+    ``normalize_input`` both accept (P06-F05). The DataSource itself is left intact for the
+    structure-tag check that runs alongside; only the rows this search reads are taken from it.
+    """
+    if hasattr(data, "records") and callable(getattr(data, "records", None)) and hasattr(data, "structure"):
+        from mixle.data.core import DataSource
+
+        if isinstance(data, DataSource):
+            return list(data.records())
+    return list(data)
+
+
 def _maybe_structured_model(
     data: Any,
     max_its: int,
@@ -257,7 +350,7 @@ def _maybe_structured_model(
     model. The keyword-only EM knobs (``delta``/``init_p``/``objective``/``reuse_estep_ll``) are
     threaded into that composite fit so it is exactly the fit the caller would otherwise run.
     """
-    rows = list(data)
+    rows = _structure_rows(data)
     if len(rows) < 40:
         return None, None
     first = rows[0]
@@ -481,7 +574,14 @@ def _data_records_for_encoding(data: Any, fields: Any, estimator: Any, model: An
     from mixle.data.sources.pandas_source import dataframe_records
 
     record_fields = _dataframe_fields(fields, estimator, model)
-    return dataframe_records(data, fields=record_fields, as_dict=_recordish(model) or _recordish(estimator))
+    recordish = _recordish(model) or _recordish(estimator)
+    # A record encoder demands its SOURCE keys, and the frame's rows were handed over keyed by the
+    # LOGICAL names, so a RecordEstimator with aliased fields (``field('mean', 'x')``) could not be
+    # fit from a DataFrame at all -- "missing=['x','k'], extra=['mean','kind']" (P06-F02). The
+    # aliases exist precisely to let the record's field names differ from the column names.
+    return dataframe_records(
+        data, fields=record_fields, as_dict=recordish, **({"_dict_keys": "source"} if recordish else {})
+    )
 
 
 # --- shared EM driver ------------------------------------------------------
@@ -1695,7 +1795,7 @@ def optimize(
         track_best=track_best,
     )
     rng = _resolve_rng_arg(rng, seed)
-    data = _reusable_observations(data)
+    data = _reusable_observations(data, "optimize()")
     if fused_options is not None:
         unknown = set(fused_options) - {"parallel", "lse_bits", "lse_span"}
         if unknown:
@@ -2133,7 +2233,7 @@ def fit(
     # below sees the same RandomState the forwarded optimize call would.
     if "seed" in kwargs or "rng" in kwargs:
         kwargs["rng"] = _resolve_rng_arg(kwargs.pop("rng", None), kwargs.pop("seed", None))
-    data = _reusable_observations(data)
+    data = _reusable_observations(data, "fit()")
     if (
         estimator is None
         and kwargs.get("structure", "auto") == "auto"
@@ -2271,7 +2371,7 @@ def best_of(
 
     """
     rng = _resolve_rng_arg(rng, seed)
-    data = _reusable_observations(data)
+    data = _reusable_observations(data, "best_of()")
     if data is None and enc_data is None:
         raise ValueError(
             "best_of() received no observations: data and enc_data are both None. "

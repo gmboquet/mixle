@@ -99,6 +99,20 @@ encoder are the only clean seams; the distribution/estimator pair is a single nu
     * **Extraction boundary:** leave as-is; the prior-construction helpers (``mixture_prior`` and friends)
       could move to a ``_priors`` helper but that is cosmetic, not defect-driven.
 
+``mixle/stats/latent/hierarchical_mixture.py`` (1,504)
+    * **Responsibilities:** the two-level mixture — a mixture over topic-weight rows, each row a
+      mixture over the shared topics — with its EM, sampler, and encoder.
+    * **Stateful globals:** ``TypeVar``\s only.
+    * **Optional imports:** none.
+    * **Hot paths:** the two-level responsibility ``logsumexp`` in ``seq_log_density`` and
+      ``seq_update``.
+    * **Serialization:** ``__pysp_getstate__`` / ``__pysp_setstate__`` write the constructor
+      parameters and rebuild through ``__init__`` (0.8.2, P05-F17); ``dist_to_encoder`` /
+      ``seq_encode`` for data.
+    * **Extraction boundary:** leave as-is; it crossed the 1,500-line threshold by adding the
+      serialization hooks, and its EM is one coupled two-level recursion with no seam that would
+      remove a defect.
+
 ``mixle/stats/latent/lda.py`` (1,966) and ``mixle/stats/latent/labeled_lda.py`` (1,837)
     * **Responsibilities:** LDA and label-supervised LDA — variational E-step, alpha updates.
     * **Stateful globals:** shape aliases only; no registry.

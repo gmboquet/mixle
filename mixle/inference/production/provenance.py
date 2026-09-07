@@ -18,6 +18,7 @@ import secrets
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -212,6 +213,34 @@ def _request_value(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_request_value(v) for v in value]
     return {"type": f"{type(value).__module__}.{type(value).__qualname__}", "repr": repr(value)}
+
+
+def _estimator_description(estimator: Any) -> str:
+    """A structural description of an estimator, stable across identical requests.
+
+    Estimators define no ``__repr__``, so ``repr(estimator)`` is
+    ``<mixle...GaussianEstimator object at 0x125a728d0>`` -- a memory address. The
+    ``fit_request_digest`` hashed it, so two byte-identical fit requests produced different
+    digests and the digest could not do the one job an "immutable request snapshot" digest exists
+    for: matching a header to the request that produced it (P05-F04). The canonical serialization
+    is the structural description; a family that cannot be serialized falls back to its type and
+    its own public attributes, still without an address.
+    """
+    from mixle.utils.serialization import SerializationError, to_serializable
+
+    try:
+        return json.dumps(to_serializable(estimator), sort_keys=True, separators=(",", ":"))
+    except (SerializationError, TypeError, ValueError):
+        fields = {
+            name: repr(value)
+            for name, value in sorted(vars(estimator).items())
+            if not name.startswith("_") and not callable(value)
+        }
+        return "%s.%s(%s)" % (
+            type(estimator).__module__,
+            type(estimator).__qualname__,
+            ", ".join(f"{name}={value}" for name, value in fields.items()),
+        )
 
 
 def _fit_request_digest(request: dict[str, Any]) -> str:
@@ -445,7 +474,7 @@ def fit_with_provenance(
     }
     request = {
         "estimator_type": f"{type(estimator).__module__}.{type(estimator).__qualname__}",
-        "estimator_repr": repr(estimator),
+        "estimator_repr": _estimator_description(estimator),
         "data_hash": dataset_hash(materialized_data),
         "n_records": len(materialized_data),
         "optimize": {k: _request_value(v) for k, v in sorted(request_optimize_kw.items())},
@@ -485,7 +514,17 @@ def verify_lineage(header: Any) -> bool:
     actual model hash to the previous model and transition digests, all records must share one run id,
     and the final executed model hash must equal the header's fitted-model hash.
     """
-    raw = header.to_dict() if isinstance(header, Header) else dict(header or {})
+    if isinstance(header, Header):
+        raw = header.to_dict()
+    elif header is None:
+        raw = {}
+    elif isinstance(header, Mapping):
+        raw = dict(header)
+    else:
+        # "Missing lineage is an unverified result" covers a non-header too: ``dict('x')`` raised
+        # "dictionary update sequence element #0 ..." from inside a verifier documented to return
+        # False rather than raise (P05-F16).
+        return False
     training = raw.get("training") or {}
     records = training.get("convergence") or []
     if training.get("lineage_status") != "recorded" or not records:

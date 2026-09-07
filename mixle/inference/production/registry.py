@@ -12,12 +12,15 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import secrets
 import tempfile
 from collections.abc import Callable
 from copy import copy, deepcopy
 from datetime import UTC, datetime
 from typing import Any
+
+import numpy as np
 
 from mixle.utils.exact import require_explicit_true
 from mixle.utils.serialization import (
@@ -100,6 +103,42 @@ def _safe_segment(seg: str, kind: str = "name") -> str:
     return seg
 
 
+_VERSION_ID = re.compile(r"v[0-9]+")
+
+
+def _refuse_a_header_that_describes_another_model(model: Any, header: Any, name: str, version: str) -> None:
+    """Refuse a record whose provenance header does not describe the model stored beside it.
+
+    The header is the record's own fingerprint of what it contains, and the registry carried it
+    without ever comparing the two -- so a record whose model block had been replaced served the
+    substituted model under the original provenance, and ``Service.from_registry`` then scored with
+    it (P05-F02). ``Model.load`` performs exactly this cross-check on the lifecycle artifact path.
+    A header without those fields (an older record, or a caller's own dict) is left alone: absent
+    is not mismatched.
+    """
+    if not isinstance(header, dict):
+        return
+    declared_type = header.get("model_type")
+    if isinstance(declared_type, str) and declared_type != type(model).__name__:
+        raise ValueError(
+            f"registry integrity failure for {name!r} version {version!r}: the provenance header "
+            f"describes a {declared_type} but the record holds a {type(model).__name__}."
+        )
+    declared_hash = header.get("model_hash")
+    if isinstance(declared_hash, str):
+        from mixle.data.hashing import model_hash
+
+        try:
+            actual = model_hash(model)
+        except Exception:  # noqa: BLE001 - a family with no hashable form cannot be cross-checked
+            return
+        if actual != declared_hash:
+            raise ValueError(
+                f"registry integrity failure for {name!r} version {version!r}: the provenance "
+                "header's model_hash does not match the model stored beside it."
+            )
+
+
 class Registry:
     """A directory of named models, each with numbered versions and movable aliases."""
 
@@ -138,8 +177,10 @@ class Registry:
         d = self._model_dir(name, create=False)
         if not os.path.isdir(d):
             return []
-        vs = [f[:-5] for f in os.listdir(d) if f.endswith(".json")]
-        return sorted(vs, key=lambda v: int(v[1:]) if v[1:].isdigit() else 0)
+        # Only ``v<int>`` names: a stray file dropped into the store used to be listed as a version
+        # (sorted first, with key 0) and then failed inside get() with KeyError('model') (P05-F11).
+        vs = [f[:-5] for f in os.listdir(d) if f.endswith(".json") and _VERSION_ID.fullmatch(f[:-5])]
+        return sorted(vs, key=lambda v: int(v[1:]))
 
     def register(
         self,
@@ -250,7 +291,19 @@ class Registry:
                 fd, tmp = tempfile.mkstemp(dir=d, prefix=f".{ver}.", suffix=".json.tmp")
                 try:
                     with os.fdopen(fd, "w") as f:
-                        json.dump(payload, f)
+                        # allow_nan=False for the same reason mixle.utils.serialization forces it:
+                        # NaN/Infinity are not JSON, mixle's own strict reader refuses them, and a
+                        # non-Python consumer of the registry directory gets an invalid file
+                        # (P05-F13). A header carrying a non-finite number is refused at register
+                        # time rather than written and read back only by Python.
+                        try:
+                            json.dump(payload, f, allow_nan=False)
+                        except ValueError as exc:
+                            raise ValueError(
+                                "registry records are strict JSON: this record contains a NaN or "
+                                "Infinity value (%s). Replace it with null or a finite number "
+                                "before registering." % exc
+                            ) from exc
                         f.flush()
                         os.fsync(f.fileno())
                     try:
@@ -308,6 +361,15 @@ class Registry:
         #                                           the write is unconditional by design.
         # Passing None for resume=False conflated the last two and made every deliberate
         # resume=False on a non-empty name refuse as a "conflict".
+        # ``every`` used to be taken on trust: 0, -1 and True all checkpointed EVERY iteration (the
+        # modulo test is true for each), 1.5 checkpointed once, and '2' and None failed only later,
+        # from inside optimize(), after the fit had started (P05-F09). ``resume`` was truthiness-
+        # coerced, so resume='no' resumed (P05-F16); it is validated exactly like ``lineage`` is.
+        if isinstance(every, (bool, np.bool_)) or not isinstance(every, (int, np.integer)) or int(every) < 1:
+            raise ValueError(f"Registry.checkpointer every must be a positive integer, got {every!r}")
+        every = int(every)
+        if not isinstance(resume, bool):
+            raise TypeError(f"Registry.checkpointer resume must be True or False, got {resume!r}")
         expected_tip: Any = _UNSPECIFIED
         if resume:
             expected_tip = None
@@ -442,12 +504,20 @@ class Registry:
             )
         version = self._resolve_version(name, version)
         payload = self._load_payload(name, version)
+        if "model" not in payload:
+            raise ValueError(
+                f"registry integrity failure for {name!r} version {version!r}: the record has no model block."
+            )
         if trust_code:
             from mixle.utils.serialization import trusted_deserialization
 
             with trusted_deserialization():
-                return from_serializable(payload["model"]), payload.get("header")
-        return from_serializable(payload["model"]), payload.get("header")
+                model = from_serializable(payload["model"])
+        else:
+            model = from_serializable(payload["model"])
+        header = payload.get("header")
+        _refuse_a_header_that_describes_another_model(model, header, name, version)
+        return model, header
 
     def header(self, name: str, version: str = "latest") -> dict | None:
         """Just the provenance header of a version (no model deserialization)."""
@@ -464,11 +534,43 @@ class Registry:
         # O_NOFOLLOW for the same reason as the registration lock: a symlinked version file would
         # otherwise be followed and read JSON from outside the store as though it were a record.
         version_path = os.path.join(self._model_dir(name, create=False), version + ".json")
-        with os.fdopen(os.open(version_path, os.O_RDONLY | os.O_NOFOLLOW)) as f:
-            payload = json.load(f)
+        try:
+            with os.fdopen(os.open(version_path, os.O_RDONLY | os.O_NOFOLLOW)) as f:
+                payload = json.load(f)
+        except json.JSONDecodeError as exc:
+            # A truncated or hand-edited version file used to surface as a raw JSONDecodeError from
+            # inside the json module, naming a line and column of a file the caller never opened
+            # (P05-F11).
+            raise ValueError(
+                f"registry integrity failure for {name!r} version {version!r}: the version file is "
+                f"not valid JSON ({exc}). Repair or remove {version_path!r}."
+            ) from exc
+        except OSError as exc:
+            # O_NOFOLLOW's ELOOP is the refusal working -- a symlinked version file is not followed
+            # -- but it reached the caller as "Too many levels of symbolic links" rather than as a
+            # registry error (P05-F11).
+            raise ValueError(
+                f"registry {name!r} version {version!r} could not be read as a registry record "
+                f"({exc}). A version file must be a regular file inside the store, never a symlink."
+            ) from exc
+        if not isinstance(payload, dict):
+            raise ValueError(
+                f"registry integrity failure for {name!r} version {version!r}: the version file "
+                "does not contain a record object."
+            )
         stored = payload.get("record_digest")
         if stored is not None and stored != _record_digest(payload):
             raise ValueError(f"registry integrity failure for {name!r} version {version!r}")
+        declared = payload.get("version")
+        if declared is not None and declared != version:
+            # The digest covers the payload and never the file NAME, so swapping two version files
+            # verified cleanly and the promoted alias served the other model -- defeating exactly
+            # the rollback the alias exists for (P05-F01).
+            raise ValueError(
+                f"registry integrity failure for {name!r} version {version!r}: the record in "
+                f"{version + '.json'!r} declares version {declared!r}. The version files have been "
+                "swapped or copied over one another."
+            )
         return payload
 
     def record_digest(self, name: str, version: str = "latest") -> str:
@@ -572,6 +674,18 @@ class Registry:
         """
         from mixle.data.hashing import model_hash
 
+        # Validated BEFORE the try below: get() raises for an invalid trust_code, and the blanket
+        # ``except (KeyError, TypeError, ValueError): return False`` swallowed that into a bare
+        # "this chain does not verify" -- a wrong verdict about intact data, caused by a caller-side
+        # flag error (P05-F05). Anything verify_chain RAISES means verification could not be
+        # performed at all, which is a different state from a chain that failed to verify.
+        if trust_code is not False:
+            require_explicit_true(
+                trust_code,
+                "Registry.verify_chain trust_code",
+                because="It opens a trusted-deserialization scope, and a checkpointed model may "
+                "embed a pickle blob whose decode executes code.",
+            )
         versions = self.versions(name)
         if not versions:
             return False

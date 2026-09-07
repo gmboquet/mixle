@@ -39,6 +39,7 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.rankings._contracts import (
     count_matrix_statistics,
     finite_nonnegative,
+    homogeneous_rows,
     log_truncated_geometric_normalizer,
     permutation,
     permutation_batch,
@@ -516,7 +517,21 @@ class MallowsDataEncoder(DataSequenceEncoder):
 
     def seq_encode(self, x: Sequence[Sequence[int]]) -> np.ndarray:
         """Validate and encode orderings as a two-dimensional integer array."""
-        raw = np.asarray([list(row) for row in x])
+        # ``homogeneous_rows`` rather than a bare ``np.asarray``: a ragged ranking used to surface
+        # as numpy's "inhomogeneous shape" message, where PlackettLuce on the same data names the
+        # required length -- the same defect class 0.8.1 fixed for mixed paired comparisons
+        # (P06-F09 (g)).
+        width = None if self.dim is None else int(self.dim)
+        if width is None:
+            first = next((row for row in x), None)
+            width = len(first) if first is not None and hasattr(first, "__len__") else 0
+        raw = homogeneous_rows(
+            x,
+            width,
+            label="Mallows orderings",
+            item="ordering",
+            hint="a full Mallows ordering ranks every item exactly once",
+        )
         if self.dim is None:
             if raw.ndim != 2 or raw.shape[0] == 0:
                 raise ValueError("MallowsDistribution requires a non-empty sequence of orderings.")

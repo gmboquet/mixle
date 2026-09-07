@@ -203,7 +203,14 @@ class RecordDistribution(SequenceEncodableProbabilityDistribution):
         return math.exp(self.log_density(x))
 
     def log_density(self, x: Mapping[Any, Any]) -> float:
-        """Return summed child log densities for one mapping record."""
+        """Return summed child log densities for one mapping record.
+
+        A row that is not keyed by this record's sources scores -inf rather than raising: scalar
+        scoring is total by design here and the encoded path is the strict one (see
+        ``record_contract_test``). What P06-F02 found was that a DataFrame could not be FIT through
+        an aliased record at all -- the frame's rows arrived keyed by the logical names while the
+        encoder wanted the sources -- which is repaired at the conversion, not here.
+        """
         if not _record_matches(x, self.sources, self.dists):
             return -np.inf
         rv = 0.0

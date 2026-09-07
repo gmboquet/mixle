@@ -235,8 +235,16 @@
         "mixle.stats.multivariate.student_t_copula.StudentTCopulaEstimator",
         "mixle.stats.multivariate.vine_copula.CVineCopulaDistribution",
         "mixle.stats.multivariate.vine_copula.CVineCopulaEstimator",
+        "mixle.stats.multivariate.vine_copula.ClaytonPairCopula",
         "mixle.stats.multivariate.vine_copula.DVineCopulaDistribution",
         "mixle.stats.multivariate.vine_copula.DVineCopulaEstimator",
+        "mixle.stats.multivariate.vine_copula.FrankPairCopula",
+        "mixle.stats.multivariate.vine_copula.GaussianPairCopula",
+        "mixle.stats.multivariate.vine_copula.GumbelPairCopula",
+        "mixle.stats.multivariate.vine_copula.IndependencePairCopula",
+        "mixle.stats.multivariate.vine_copula.PairCandidateEvidence",
+        "mixle.stats.multivariate.vine_copula.PairSelectionReceipt",
+        "mixle.stats.multivariate.vine_copula.StudentTPairCopula",
         "mixle.stats.processes.birth_death.BirthDeathSamplingDistribution",
         "mixle.stats.processes.birth_death.BirthDeathSamplingEstimator",
         "mixle.stats.processes.chinese_restaurant_process.ChineseRestaurantProcessDistribution",
@@ -495,7 +503,7 @@
           "state_version": 1
         },
         "mixle.stats.bayes.dirichlet.DirichletDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -509,7 +517,7 @@
           "state_version": 1
         },
         "mixle.stats.bayes.dirichlet_process_mixture.DirichletProcessMixtureDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -1377,7 +1385,7 @@
           "state_version": 1
         },
         "mixle.stats.latent.hierarchical_mixture.HierarchicalMixtureDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -1440,7 +1448,7 @@
           "state_version": 1
         },
         "mixle.stats.latent.joint_mixture.JointMixtureDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -1544,7 +1552,7 @@
           "state_version": 1
         },
         "mixle.stats.latent.probabilistic_pca.ProbabilisticPCADistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -1915,7 +1923,7 @@
           "state_version": 1
         },
         "mixle.stats.multivariate.gaussian_copula.GaussianCopulaDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -1971,7 +1979,7 @@
           "state_version": 1
         },
         "mixle.stats.multivariate.multivariate_student_t.MultivariateStudentTDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -1985,7 +1993,7 @@
           "state_version": 1
         },
         "mixle.stats.multivariate.rvine_copula.RVineCopulaDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -2026,6 +2034,13 @@
           "state_fields": null,
           "state_version": 1
         },
+        "mixle.stats.multivariate.vine_copula.ClaytonPairCopula": {
+          "codec": "class-owned",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
         "mixle.stats.multivariate.vine_copula.DVineCopulaDistribution": {
           "codec": "constructor-validated",
           "migrations": [],
@@ -2035,6 +2050,55 @@
         },
         "mixle.stats.multivariate.vine_copula.DVineCopulaEstimator": {
           "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.multivariate.vine_copula.FrankPairCopula": {
+          "codec": "class-owned",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.multivariate.vine_copula.GaussianPairCopula": {
+          "codec": "class-owned",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.multivariate.vine_copula.GumbelPairCopula": {
+          "codec": "class-owned",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.multivariate.vine_copula.IndependencePairCopula": {
+          "codec": "class-owned",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.multivariate.vine_copula.PairCandidateEvidence": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.multivariate.vine_copula.PairSelectionReceipt": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.multivariate.vine_copula.StudentTPairCopula": {
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -3409,8 +3473,16 @@
         "mixle.stats.multivariate.student_t_copula.StudentTCopulaEstimator",
         "mixle.stats.multivariate.vine_copula.CVineCopulaDistribution",
         "mixle.stats.multivariate.vine_copula.CVineCopulaEstimator",
+        "mixle.stats.multivariate.vine_copula.ClaytonPairCopula",
         "mixle.stats.multivariate.vine_copula.DVineCopulaDistribution",
         "mixle.stats.multivariate.vine_copula.DVineCopulaEstimator",
+        "mixle.stats.multivariate.vine_copula.FrankPairCopula",
+        "mixle.stats.multivariate.vine_copula.GaussianPairCopula",
+        "mixle.stats.multivariate.vine_copula.GumbelPairCopula",
+        "mixle.stats.multivariate.vine_copula.IndependencePairCopula",
+        "mixle.stats.multivariate.vine_copula.PairCandidateEvidence",
+        "mixle.stats.multivariate.vine_copula.PairSelectionReceipt",
+        "mixle.stats.multivariate.vine_copula.StudentTPairCopula",
         "mixle.stats.processes.birth_death.BirthDeathSamplingDistribution",
         "mixle.stats.processes.birth_death.BirthDeathSamplingEstimator",
         "mixle.stats.processes.chinese_restaurant_process.ChineseRestaurantProcessDistribution",
@@ -3768,7 +3840,7 @@
           "state_version": 1
         },
         "mixle.stats.bayes.dirichlet.DirichletDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -3782,7 +3854,7 @@
           "state_version": 1
         },
         "mixle.stats.bayes.dirichlet_process_mixture.DirichletProcessMixtureDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -4650,7 +4722,7 @@
           "state_version": 1
         },
         "mixle.stats.latent.hierarchical_mixture.HierarchicalMixtureDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -4713,7 +4785,7 @@
           "state_version": 1
         },
         "mixle.stats.latent.joint_mixture.JointMixtureDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -4817,7 +4889,7 @@
           "state_version": 1
         },
         "mixle.stats.latent.probabilistic_pca.ProbabilisticPCADistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -5188,7 +5260,7 @@
           "state_version": 1
         },
         "mixle.stats.multivariate.gaussian_copula.GaussianCopulaDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -5244,7 +5316,7 @@
           "state_version": 1
         },
         "mixle.stats.multivariate.multivariate_student_t.MultivariateStudentTDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -5258,7 +5330,7 @@
           "state_version": 1
         },
         "mixle.stats.multivariate.rvine_copula.RVineCopulaDistribution": {
-          "codec": "constructor-validated",
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
@@ -5299,6 +5371,13 @@
           "state_fields": null,
           "state_version": 1
         },
+        "mixle.stats.multivariate.vine_copula.ClaytonPairCopula": {
+          "codec": "class-owned",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
         "mixle.stats.multivariate.vine_copula.DVineCopulaDistribution": {
           "codec": "constructor-validated",
           "migrations": [],
@@ -5308,6 +5387,55 @@
         },
         "mixle.stats.multivariate.vine_copula.DVineCopulaEstimator": {
           "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.multivariate.vine_copula.FrankPairCopula": {
+          "codec": "class-owned",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.multivariate.vine_copula.GaussianPairCopula": {
+          "codec": "class-owned",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.multivariate.vine_copula.GumbelPairCopula": {
+          "codec": "class-owned",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.multivariate.vine_copula.IndependencePairCopula": {
+          "codec": "class-owned",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.multivariate.vine_copula.PairCandidateEvidence": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.multivariate.vine_copula.PairSelectionReceipt": {
+          "codec": "constructor-validated",
+          "migrations": [],
+          "stability": "provisional",
+          "state_fields": null,
+          "state_version": 1
+        },
+        "mixle.stats.multivariate.vine_copula.StudentTPairCopula": {
+          "codec": "class-owned",
           "migrations": [],
           "stability": "provisional",
           "state_fields": null,
