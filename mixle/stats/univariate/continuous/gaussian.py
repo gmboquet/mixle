@@ -135,16 +135,20 @@ def _scaled_variance_floor(unfloored: float, mu: float, min_covar: float, absolu
     an absolute floor cannot -- it refused legitimate small-scale fits and made the same measurement
     disagree with itself across a unit change.
 
-    The scale reference is ``unfloored + mu**2``, and the SUM matters. Keying it on the variance alone
-    when positive and on ``mu**2`` otherwise is homogeneous and equivariant but DISCONTINUOUS at zero:
-    a component whose variance lands at ``+1e-30`` on one code path and at ``0.0`` or ``-1e-30`` on
-    another -- routine for a single-observation component, where the two differ only by cancellation
-    order -- would take floors that differ by many orders of magnitude, so two arithmetically
-    equivalent fits stop agreeing. That is exactly what the accumulator/reweighted-seq_update
-    invariant caught. The sum is continuous in the variance, still homogeneous of degree two in the
-    data scale, and still never materially widens a spread the data implied: it binds only below
-    ``~1e-8 * mu**2``. The absolute floor stays the last resort for data carrying no magnitude either
-    (all-zero observations) or a magnitude no variance can represent.
+    The reference is the variance itself when it is positive, and ``mu**2`` only when it is not. It
+    cannot be ``unfloored + mu**2``: that sum is not SHIFT invariant, and shift invariance is the
+    stronger contract here -- the same data recorded with a large offset (timestamps as seconds since
+    1970, prices around 1e9) would take a floor of ``1e-8 * mu**2``, which swamps any real variance
+    and returns a fit that disagrees with the same data centred. The absolute floor stays the last
+    resort for data carrying no magnitude either (all-zero observations) or a magnitude no variance
+    can represent.
+
+    A consequence worth naming: keyed on the variance, the floor is a fixed FRACTION of the quantity
+    it bounds, so on a positive variance it never binds. It is a guard against zero and against a
+    negative rounding artifact, not a detector of a collapsed component -- a component that shrank to
+    1e-97 around a mean of 0.6 passes through it untouched (P08-F10). What catches that is the
+    mixture-level disclosure: a component holding fewer effective rows than it has free parameters is
+    reported by name (see ``mixle.stats.latent.mixture``), which is what a collapse actually is.
     """
     if absolute:
         return min_covar

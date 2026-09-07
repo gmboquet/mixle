@@ -319,6 +319,12 @@ release (`release-checklists/0.8.2-followups.md`).
   initialization that latched onto a handful of outliers. The note names the components and points
   at the recorded masses; the masses are not part of the model's value and do not travel through
   serialization (A-02).
+- The Gaussian M-step's variance-floor docstring described a scale reference the code does not use
+  and could not use: `unfloored + mu**2` is not shift invariant, and the same data recorded with a
+  large offset would take a floor that swamps its real variance. It now describes the reference the
+  code applies, and names the residual it leaves -- keyed on the variance, the floor is a fixed
+  fraction of the quantity it bounds and so never binds on a positive variance, which is why a
+  collapsed component is caught by the mixture-level disclosure above rather than here (P08-F10).
 - `learn_mixture_structure` takes `tie_tolerance` (1 nat by default) and lets
   `mixture_structure_health` break a likelihood tie. On a two-regime corpus the regime split and a
   category split that absorbs both regimes sit within a nat of each other, and which one a restart
