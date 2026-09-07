@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "73e67a2e8a191a2f5c13e1efa48a79cd86f4466b",
+ "candidate_commit": "5f211a8b3486054b72890c0871eea2a11dca526d",
  "command": "cd . && gh api \"repos/gmboquet/mixle/actions/jobs/96967302231\" --jq '.name, .conclusion, (.steps[] | \"\\(.number). \\(.name) :: \\(.conclusion)\")'",
  "date": "2026-08-22",
- "evidence_digest": "97cb7577e00d399f1e3fd926faea933ded06f98ea0bfd3cd7f33e3e1ed505238",
+ "evidence_digest": "340b0aa10d13aaaa9a497b5d3e4b0824b62e34684da575fe14a907bdf79bbf27",
  "gate": "Independent estimator parity",
  "note": "The checklist's premise is now stale in two ways, both in the release's favour. (1) The hosted lane DID run on this tip -- .github/workflows/tests.yml:441-449 installs scikit-learn and runs the parity test unconditionally on shard 0 (no continue-on-error), and that step is green. (2) 'scikit-learn is not in the base environment' is no longer true: .venv312 has scikit-learn 1.9.0, so I also ran it locally: `PYTHONPATH=... python -m pytest mixle/tests/sklearn_gmm_parity_test.py -p no:randomly -q -m \"\" -n 0 -rs` -> 1 passed, 4 subtests, 0 skipped (I passed -rs specifically to prove the importorskip did not silently skip it).",
  "result": "Hosted on 483add7c: `optional extras / py3.12 / shard 0` :: success, step 10 \"Run scikit-learn GMM fitted-parameter parity (Q5.5)\" :: success; local rerun -> 1 passed, 4 subtests passed in 2.86s under scikit-learn 1.9.0"

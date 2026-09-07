@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "73e67a2e8a191a2f5c13e1efa48a79cd86f4466b",
+ "candidate_commit": "5f211a8b3486054b72890c0871eea2a11dca526d",
  "command": "gh api repos/gmboquet/mixle/commits/$SHA/check-runs --jq '.check_runs[]|select(.name==\"numerical / repeated-seed stress\")|\"\\(.status)/\\(.conclusion)\"'",
  "date": "2026-08-22",
- "evidence_digest": "97cb7577e00d399f1e3fd926faea933ded06f98ea0bfd3cd7f33e3e1ed505238",
+ "evidence_digest": "340b0aa10d13aaaa9a497b5d3e4b0824b62e34684da575fe14a907bdf79bbf27",
  "gate": "Flake/order campaign",
  "note": "The row said 'a repeated randomized hosted campaign is still required on the final tip'. It has now run: this lane is dispatch/schedule-only, so it was `skipped` on every previous candidate and had never executed against one. This is its first success on a release candidate.",
  "result": "numerical / repeated-seed stress = completed/success on 5cca9e96 (dispatch run 32549525054)"

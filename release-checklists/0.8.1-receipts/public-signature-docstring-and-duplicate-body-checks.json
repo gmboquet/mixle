@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "73e67a2e8a191a2f5c13e1efa48a79cd86f4466b",
+ "candidate_commit": "5f211a8b3486054b72890c0871eea2a11dca526d",
  "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/stable_signature_manifest_test.py mixle/tests/signature_docstring_sync_test.py mixle/tests/docstring_references_test.py mixle/tests/duplicate_body_scan_test.py -p no:randomly -q -m \"\" -n 0",
  "date": "2026-08-22",
- "evidence_digest": "97cb7577e00d399f1e3fd926faea933ded06f98ea0bfd3cd7f33e3e1ed505238",
+ "evidence_digest": "340b0aa10d13aaaa9a497b5d3e4b0824b62e34684da575fe14a907bdf79bbf27",
  "gate": "Public signature/docstring and duplicate-body checks",
  "note": "The 'exact reviewed signature record' half of the claim was checked independently: manifests/stable_api_signatures.json holds 453 entries across 11 stable_modules, and stable_signature_manifest_test.py is what pins the live callables against those records. Duplicate-body is covered by duplicate_body_scan_test.py in the same batch (it drives scripts/scan_duplicate_bodies.py against mixle/tests/duplicate_body_manifest.json).",
  "result": "9 passed, 28 subtests passed in 7.62s (exit 0, 0 signature drift failures)"

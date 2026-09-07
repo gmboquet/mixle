@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "73e67a2e8a191a2f5c13e1efa48a79cd86f4466b",
+ "candidate_commit": "5f211a8b3486054b72890c0871eea2a11dca526d",
  "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/external_asset_pinning_test.py -p no:randomly -q -m \"\" -n 0",
  "date": "2026-08-22",
- "evidence_digest": "97cb7577e00d399f1e3fd926faea933ded06f98ea0bfd3cd7f33e3e1ed505238",
+ "evidence_digest": "340b0aa10d13aaaa9a497b5d3e4b0824b62e34684da575fe14a907bdf79bbf27",
  "gate": "External model identity",
  "note": "external_asset_pinning_test.py discovers (not allowlists) every from_pretrained/SentenceTransformer/load_dataset call under mixle/, examples/, scripts/, benchmarks/, docs/ and requires a 40-hex revision. Corroborated in the same session: `python -c 'from mixle.scientist import scientist_asset_manifest; ...'` printed 3 assets with 3/3 full 40-hex revisions -- CLIP openai/clip-vit-base-patch32 @ 3d74acf9..., SmolLM2-360M-Instruct @ a10cc151..., all-MiniLM-L6-v2 @ 1110a243... -- and the PEFT example printed `revision=2f18a2874922d4cc4777cdf9fbf66cfa057a691a` at runtime, so the receipt half of the claim is observed too. 4 unique pinned revisions across mixle/scientist.py + examples/peft_lora_grad_leaf.py.",
  "result": "6 passed in 1.57s"

@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "73e67a2e8a191a2f5c13e1efa48a79cd86f4466b",
+ "candidate_commit": "5f211a8b3486054b72890c0871eea2a11dca526d",
  "command": "cd . && gh api repos/gmboquet/mixle/actions/jobs/96967320212 --jq '.head_sha, .conclusion, (.steps[]|\"\\(.number). \\(.name) :: \\(.conclusion)\")'",
  "date": "2026-08-22",
- "evidence_digest": "97cb7577e00d399f1e3fd926faea933ded06f98ea0bfd3cd7f33e3e1ed505238",
+ "evidence_digest": "340b0aa10d13aaaa9a497b5d3e4b0824b62e34684da575fe14a907bdf79bbf27",
  "gate": "Strict Sphinx build",
  "note": "HOSTED evidence, on the exact candidate. The check-run is named 'Revision check (single-revision, warnings as errors)' (docs.yml:131) and its build step is literally `python -m sphinx -b html -W --keep-going docs \"$RUNNER_TEMP/docs-build-check\"` (docs.yml:172) -- the gate's command, warnings-as-errors, run to completion at 483add7c. It was still in_progress on my first API call and completed during this session. WHAT IS STILL NOT EVIDENCED: the versioned-archive pipeline. 'Assemble versioned HTML' and 'Deploy to Pages' both concluded `skipped` at this commit (they are gated to refs/heads/main), so the archive/SHA-256-sidecar/verify_docs_site half of this row -- and the candidate-SHA binding the checklist flags as the reason it stays HOSTED -- remains outstanding.",
  "result": "head_sha 483add7cc321c934ded4fe70d1af34458196dc4c, job conclusion success; step 5 'sphinx-build -W (current revision only, no polyversion, no deploy)' success, 02:45:31Z -> 02:59:23Z = 13m52s (15-minute job timeout)"

@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "73e67a2e8a191a2f5c13e1efa48a79cd86f4466b",
+ "candidate_commit": "5f211a8b3486054b72890c0871eea2a11dca526d",
  "command": "cd . && grep -c \"^Evidence boundary$\" docs/frontier-integration-note.rst && grep -c \"They do not establish GPU\" docs/frontier-integration-note.rst && PYTHONPATH=. python -c \"import sys; sys.path.insert(0,'scripts'); import check_public_claims as c; n=[str(p.relative_to(c.ROOT)) for p in c._surface_paths(c._load())]; print('claim surfaces:', len(n), '| boundary docs registered:', sum(x in n for x in ['docs/neural-boundary.rst','docs/frontier-integration-note.rst']))\"",
  "date": "2026-08-22",
- "evidence_digest": "97cb7577e00d399f1e3fd926faea933ded06f98ea0bfd3cd7f33e3e1ed505238",
+ "evidence_digest": "340b0aa10d13aaaa9a497b5d3e4b0824b62e34684da575fe14a907bdf79bbf27",
  "gate": "Neural/frontier product boundary",
  "note": "Document-content measurement plus claim-gate coverage; no test asserts this wording directly (grep for 'Evidence boundary' hits only the doc itself). I read the passage: 'CPU tests establish objective parity, accumulation semantics, provider mapping, checkpoint completeness, and capability failures. They do not establish GPU throughput, MFU, overlap efficiency, or multi-node recovery. Those claims remain unverified until retained hardware runs are attached to the GPU claims ledger.' That is exactly the validated-CPU-vs-unverified-hardware distinction the gate claims. Because both files are registered claim surfaces, check_public_claims.py (exit 0, this session) would reject an unregistered overclaim reintroduced into either. The CPU contracts themselves are separately tested: distributed_training_backends_test.py + parallel_training_contracts_test.py ran 25 passed, 12 subtests in this session.",
  "result": "1 'Evidence boundary' section and 1 'They do not establish GPU...' sentence in docs/frontier-integration-note.rst (58 + 108 doc lines total); 2 of the 853 registered claim surfaces are the two boundary docs"

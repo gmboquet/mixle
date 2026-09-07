@@ -467,7 +467,9 @@ jobs:
         run: |
           set -euo pipefail
           # only the repository owner's upload counts as the release owner's attestation
-          UPLOADER="$(gh api "repos/$REPOSITORY/releases/tags/$CANDIDATE_TAG" --jq ".assets[] | select(.name == \"$MANUAL_REHEARSAL_ASSET\") | .uploader.login")"
+          # A draft release is not served by the by-tag endpoint (404 for drafts; the 0.8.1 promotes
+          # 34105506825, 34106234141 and 34107126999 failed here), so resolve it through the list.
+          UPLOADER="$(gh api --paginate "repos/$REPOSITORY/releases" --jq ".[] | select(.tag_name == \"$CANDIDATE_TAG\") | .assets[] | select(.name == \"$MANUAL_REHEARSAL_ASSET\") | .uploader.login")"
           test "$UPLOADER" = "$REPOSITORY_OWNER"
           mkdir -p testpypi
           gh release download "$CANDIDATE_TAG" --repo "$REPOSITORY" --pattern "$MANUAL_REHEARSAL_ASSET" --dir testpypi
@@ -553,8 +555,10 @@ jobs:
                  --dest public-artifacts "mixle==$VERSION"; then
               break
             fi
-            test "$attempt" -lt 6
-            sleep 10
+            # PyPI's simple index lists a fresh upload only after propagation (the same race the
+            # TestPyPI rehearsal hit); wait up to ten minutes before calling the bytes missing.
+            test "$attempt" -lt 40
+            sleep 15
           done
           python scripts/verify_published_artifacts.py \
             --directory public-artifacts \

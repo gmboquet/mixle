@@ -92,8 +92,12 @@ for the 0.8.2 patch (D-0213).
   `prepare_run` was written from an environment string and the verifier compared it with an
   integer, so the first automated promote of 0.8.1 was refused before any upload; the rehearsal
   step also waits up to ten minutes for TestPyPI's simple index to list a fresh upload instead of
-  one minute. Both are workflow-only changes; the candidate that carries them is re-cut and
-  promoted on a manual rehearsal record (D-0214).
+  one minute; the promote's manual-record fetch resolves a draft release through the releases
+  list (the by-tag endpoint does not serve drafts, so D-0211's manual path had never been able to
+  run); the promote's public-index wait is ten minutes likewise; and the local
+  `record_manual_rehearsal.py` compares the prepare run id as text. All are workflow-side
+  changes; the candidate that carries them is re-cut and promoted on a manual rehearsal record
+  (D-0214, D-0215).
 - `optimize()` says when a run ended on a rejected update below its cap while the objective was
   still moving: a two-component generalized-Pareto mixture stopped at iteration 36 of 2,000 with
   the last accepted step still gaining 0.009 against `delta=1e-8`, `converged=False`, and no note

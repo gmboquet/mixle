@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "73e67a2e8a191a2f5c13e1efa48a79cd86f4466b",
+ "candidate_commit": "5f211a8b3486054b72890c0871eea2a11dca526d",
  "command": "cd . && wc -l docs/benchmark-methodology.rst && ls benchmarks/*.py | wc -l && PYTHONPATH=. python -m pytest mixle/tests/benchmark_contract_test.py mixle/tests/benchmark_provenance_test.py -p no:randomly -q -m \"\" -n 0",
  "date": "2026-08-22",
- "evidence_digest": "97cb7577e00d399f1e3fd926faea933ded06f98ea0bfd3cd7f33e3e1ed505238",
+ "evidence_digest": "340b0aa10d13aaaa9a497b5d3e4b0824b62e34684da575fe14a907bdf79bbf27",
  "gate": "Tracked correctness-gated harness and methodology",
  "note": "The tests match both halves of the claim precisely. Correctness-gating: test_parity_requires_mixle_and_an_independent_matching_reference, test_timer_excludes_prepare_and_evaluate_and_checks_every_fit, test_timer_rejects_unvalidated_or_nonreproducible_repetitions. Provenance: test_stamp_marks_the_current_version, test_missing_unrelated_or_abbreviated_provenance_is_rejected, test_no_committed_benchmark_result_is_stale (that last one covers the 'future outputs carry version/minor/commit provenance' sentence against what is actually committed today).",
  "result": "docs/benchmark-methodology.rst = 54 lines; benchmarks/ holds 3 tracked .py harness files; 10 passed in 2.65s"

@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "73e67a2e8a191a2f5c13e1efa48a79cd86f4466b",
+ "candidate_commit": "5f211a8b3486054b72890c0871eea2a11dca526d",
  "command": "cd . && PYTHONPATH=$PWD python scripts/verify_decision_reviews.py release-checklists/0.8.0-decisions.md; echo EXIT=$?; PYTHONPATH=$PWD python -c \"import sys,pathlib;sys.path.insert(0,'scripts');import verify_decision_reviews as v;t=pathlib.Path('release-checklists/0.8.0-decisions.md').read_text();print('entries=%d unresolved=%d'%(len(v._ENTRY.findall(t)),len(v.unresolved_reviews(t))))\"",
  "date": "2026-08-22",
- "evidence_digest": "97cb7577e00d399f1e3fd926faea933ded06f98ea0bfd3cd7f33e3e1ed505238",
+ "evidence_digest": "340b0aa10d13aaaa9a497b5d3e4b0824b62e34684da575fe14a907bdf79bbf27",
  "gate": "Decision review acceptance",
  "note": "Re-measured at the current tip. Independently re-measured 2026-08-22 by an adversarial auditor and a second opinion; the auditor further checked that unresolved=0 is not an artifact of the ^## (D-[0-9]{4}) regex skipping malformed entries: every D-#### heading is unique and matched. The load-bearing number, unresolved=0, holds at both commits.",
  "result": "exit 0, silent, over 195 D-#### entries with 0 unresolved (193/0 at 483add7c before D-0194 and D-0195 were recorded)"

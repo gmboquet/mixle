@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
         sums = parse_sums(sums_text)
         candidate = json.loads((assets / "release-candidate.json").read_text(encoding="utf-8"))
         reproducible = json.loads((assets / "reproducible-builds.json").read_text(encoding="utf-8"))
-        if candidate.get("workflow_run") != args.prepare_run:
+        if str(candidate.get("workflow_run")) != str(args.prepare_run):  # the record is JSON text, the argument an int
             print(
                 f"draft release was prepared by run {candidate.get('workflow_run')}, not {args.prepare_run}",
                 file=sys.stderr,
