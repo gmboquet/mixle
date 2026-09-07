@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "e5cc0105e444e6d6f184ecd69a91417c77c1c37a",
+ "candidate_commit": "be8881b2854b4a795234f6944d30a514293c3293",
  "command": "page-by-page review recorded in release-checklists/0.8.1-reviews/documentation-review.md with 0.8.1-reviews/documentation-stale.json; fixes applied under docs/ (make -C docs apidoc for the API tree); make -C docs html SPHINXOPTS=\"-W --keep-going\"",
  "date": "2026-09-07",
- "evidence_digest": "dc613f704a4e90eb840d3a55decf82c24dba6d7079f454d6cc7ffdc50c31f7e8",
+ "evidence_digest": "971422c662f81677f8a914868654577110f91a6777db4aa21e0f2f3db4142b75",
  "gate": "Documentation reviewed for stale content",
  "note": "The reviewer ran from the candidate venv outside any checkout; import probes resolved every documented name (256 from-imports, 214 dotted names). Two docstrings that the newly generated API pages exposed as invalid RST (mixle.stochastic_opt.risk_adjusted_plan, mixle.utils.callables.accepts_call) were repaired so the -W build passes.",
  "result": "108 pages reviewed (97 toctree pages, conf.py, migrations/README.md, 2 orphan audit records, the api/ tree, the templates); 31 stale items on 16 pages, 30 repaired and 1 kept by design (the ledgered ~90-families claim); 84 public API pages added by apidoc (private modules stay unpaged, as before); Sphinx -W build exit 0 with 0 warnings"

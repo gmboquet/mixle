@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "cd05412883ab12e7ab1ef10d4231bd610d27393d",
+ "candidate_commit": "be8881b2854b4a795234f6944d30a514293c3293",
  "command": "cd . && gh api \"repos/gmboquet/mixle/actions/jobs/96967302250\" --jq '.name, .conclusion, (.steps[] | \"\\(.number). \\(.name) :: \\(.conclusion)\")'",
  "date": "2026-08-22",
- "evidence_digest": "dc613f704a4e90eb840d3a55decf82c24dba6d7079f454d6cc7ffdc50c31f7e8",
+ "evidence_digest": "971422c662f81677f8a914868654577110f91a6777db4aa21e0f2f3db4142b75",
  "gate": "Stable-core mypy",
  "note": "Hosted evidence is real and specific to the tip -- I confirmed the blocking step by name inside the succeeding lint job, not just the job's overall green. Local corroboration command: `$HOME/mixle/.venv/bin/mypy --follow-imports=skip mixle/scorecard.py mixle/spend.py mixle/registry.py mixle/system/__init__.py mixle/system/core.py mixle/system/spend.py mixle/system/registry.py mixle/system/scorecard.py` (exit 0). Two caveats on the local half: mypy is 2.3.0, not the 2.1.0 the checklist records, and it lives in the Python 3.14.5 .venv (mypy is absent from .venv312) -- acceptable here since mypy is static, but the hosted lane remains the authority.",
  "result": "Hosted on 483add7c: lint job 96967302250 :: success, step 9 \"mypy (typed core, blocking)\" :: success (step 10 whole-tree advisory also success); local rerun of the identical command under mypy 2.3.0 -> \"Success: no issues found in 8 source files\""

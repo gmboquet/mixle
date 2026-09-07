@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "cd05412883ab12e7ab1ef10d4231bd610d27393d",
+ "candidate_commit": "be8881b2854b4a795234f6944d30a514293c3293",
  "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/api_consistency_test.py mixle/tests/duplicate_body_scan_test.py mixle/tests/signature_docstring_sync_test.py -p no:randomly -q -m \"\" -n 0",
  "date": "2026-08-22",
- "evidence_digest": "dc613f704a4e90eb840d3a55decf82c24dba6d7079f454d6cc7ffdc50c31f7e8",
+ "evidence_digest": "971422c662f81677f8a914868654577110f91a6777db4aa21e0f2f3db4142b75",
  "gate": "Accidental or duplicate public surface",
  "note": "Exactly the three focused checks the row names, all green on the release tip under Python 3.12.12.",
  "result": "38 passed, 7 subtests passed in 5.78s (exit 0)"
