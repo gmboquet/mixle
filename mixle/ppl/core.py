@@ -1871,6 +1871,17 @@ class RandomVariable:
         return cls("bound", dist=dist, name=name or getattr(dist, "name", None), result=result)
 
     @classmethod
+    def fitted(cls, dist, *, name: str | None = None, result: Any | None = None) -> RandomVariable:
+        """Wrap a concrete distribution as the FITTED random variable a fitter returns.
+
+        This is what every ``@register_fitter`` function has to hand back, and the only way to build
+        one was a private classmethod -- so the shipped extensibility-seam example could not be
+        written against the public surface at all (P09-F13). ``result`` is the optional posterior
+        object a sampling fitter attaches; ``name`` defaults to the distribution's own.
+        """
+        return cls._bound(dist, name=name, result=result)
+
+    @classmethod
     def _apply(cls, base, transform) -> RandomVariable:
         # Apply node: a deterministic transform of one RV (algebra rung 1).
         return cls("apply", args=(base, transform))

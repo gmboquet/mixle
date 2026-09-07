@@ -275,6 +275,41 @@ release (`release-checklists/0.8.2-followups.md`).
     the model then failed with advice about `len_estimator=` in runs that already had one. A
     sequence law with no length model is still refused, with that same advice.
 
+#### Latent-model initialization and the shipped examples (passes 09-10, A-01)
+
+- The hidden-Markov families start from a symmetry-breaking state assignment. Drawing each
+  observation's state uniformly gave every state the same random 1/K subsample, so every emission
+  started at the sample marginal and every transition row uniform -- the symmetric fixed point EM
+  cannot leave. A k-means++ start over the emission stream, the one the mixture family already used
+  and now shares with them, replaces it; it declines to the old draw when the emissions are not a
+  numeric vector space, when the clusters are too unbalanced to be states, or when a split would
+  leave a state carrying no weight, and a declined attempt consumes none of the caller's random
+  stream, so every fallback reproduces exactly what it did before (A-01, P09-F07, P09-F11).
+- `mixle.ops.project` takes `init=` (the member of the target family EM starts from) and `delta=`,
+  and refuses a target family with more components than the sample budget has draws (P10-F03,
+  P10-F13).
+- `mixle.inference.bayesian_network`'s regression factors expose `design_row()`, and
+  `RandomVariable.fitted()` builds the bound variable a registered fitter has to return -- two
+  public-surface gaps three shipped examples were papering over with underscore names (P09-F13).
+- Example repairs: the geoscience inverse's simulator carries the sensor noise its observations
+  have, so the amortized posterior, its SBC and coverage receipts, and the calibrated report all
+  pass rather than demonstrating only the abstain path (P09-F04); `flagship_physics_inverse` uses
+  one sampling budget for its headline interval and its coverage replicates and prints the chain's
+  effective sample size (P09-F08); `frontier_family_showcase`'s closing line counts priced rungs
+  rather than attempted ones (P09-F10); `model_comparison_example` samples to a converged chain and
+  prints the ESS behind the numbers it reports (P10-F06); `structured_hmm_example` picks the best of
+  three restarts by likelihood instead of crashing on its own recovery assertion at one seed in
+  three (P10-F04); `lookback_hmm_example` restarts and prints its held-out gap to the generating
+  model (P10-F07); `mixture_reduction_benchmark` shows EM warm-started from the closed form beside
+  the single cold restart, which is what made the closed form look dominant (P10-F03);
+  `latent_variable_models_example` prints the fitted LDA concentration and the total-variation
+  distance behind its "recovered topics" (P10-F12); `gallery_graphs_example` scales its latent
+  positions so nothing is clipped and prints the fit-vs-truth edge-probability gap (P09-F12); and
+  `peft_lora_grad_leaf` names the optional dependency it is missing and the checkpoint it downloads
+  (P10-F08).
+- The README's nested-HMM snippet passes `max_its` and the prose says why: `optimize`'s default of
+  10 EM iterations is far too small for the model that snippet builds (P08-F02).
+
 
 ## [0.8.1] — 2026-09-07
 

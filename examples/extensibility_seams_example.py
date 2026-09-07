@@ -31,7 +31,7 @@ def _method_of_moments(rv: RandomVariable, data, **_):
     from mixle.stats import GaussianDistribution
 
     x = np.asarray(data, dtype=float)
-    return RandomVariable._bound(GaussianDistribution(x.mean(), x.var(), name=rv._name), name=rv._name)
+    return RandomVariable.fitted(GaussianDistribution(x.mean(), x.var(), name=rv.name), name=rv.name)
 
 
 def demo_register_fitter():

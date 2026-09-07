@@ -12,8 +12,12 @@ from flagship_physics_inverse import K_TRUE, infer_k, observe  # noqa: E402
 
 class PhysicsInverseTest(unittest.TestCase):
     def test_posterior_recovers_the_rate(self):
-        draws, _cert = infer_k(observe(0), 0, draws=800)
+        # infer_k reports its own effective sample size (P09-F08): an interval is a quantile of a
+        # chain, so how many independent draws that chain is worth is part of the claim.
+        draws, _cert, ess = infer_k(observe(0), 0, draws=800)
         self.assertLess(abs(draws.mean() - K_TRUE), 0.15)  # near the truth (up to noise-draw MLE shift)
+        self.assertGreater(ess, 1.0)
+        self.assertLessEqual(ess, float(len(draws)))
 
     def test_certificate_downgrades_under_the_physics_potential(self):
         """The potential caps what the certificate may claim, and says so by name.
@@ -25,7 +29,7 @@ class PhysicsInverseTest(unittest.TestCase):
         -- i.e. asked for exactly the false claim the downgrade exists to prevent -- and the reason
         is worded "CANDIDATE CAPPED", never "DOWNGRADED". The mechanism was working the whole time.
         """
-        _draws, cert = infer_k(observe(0), 0, draws=400)
+        _draws, cert, _ess = infer_k(observe(0), 0, draws=400)
         block = cert.blocks[0]
         self.assertEqual(block.candidate_guarantee.name, "STATIONARY")  # what it would earn
         self.assertEqual(block.guarantee.name, "UNVERIFIED")  # what it earns unreceipted
@@ -36,7 +40,7 @@ class PhysicsInverseTest(unittest.TestCase):
     def test_interval_coverage_over_noise_draws(self):
         hits = 0
         for s in range(5):
-            d, _ = infer_k(observe(s), s, draws=600)
+            d, _cert, _ess = infer_k(observe(s), s, draws=600)
             lo, hi = np.quantile(d, [0.05, 0.95])
             hits += int(lo <= K_TRUE <= hi)
         self.assertGreaterEqual(hits, 3)  # a 90% interval must bracket most of the time

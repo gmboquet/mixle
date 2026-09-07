@@ -66,6 +66,7 @@ from mixle.stats.latent._hidden_markov_numba_kernels import (
     numba_baum_welch_alphas,
     numba_seq_log_density,
 )
+from mixle.stats.latent._initialization import broken_symmetry_states, derived_rng
 from mixle.stats.latent.effective_sample import (
     heal_pooled_statistics as _restore_pool_dict,
 )
@@ -3276,9 +3277,6 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             non_zero_len = len_vec != 0
             weights_nz = weights[non_zero_len]
 
-            idx = self._idx_rng.choice(self.num_states, size=tot_cnt)
-            idx = self._state_draw_within_support(idx, xs_enc, self._idx_rng)
-
             seq_i = []
             for i in range(len(len_vec[non_zero_len])):
                 seq_i.extend([i] * len_vec[non_zero_len][i])
@@ -3286,6 +3284,9 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             seq_i = np.asarray(seq_i, dtype=int)
 
             x_idx_i, x_group_i, x_len_i = np.unique(seq_i, return_index=True, return_counts=True)
+
+            idx = self._initial_state_draw(tot_cnt, xs_enc, self._homogeneous_emissions, weights=weights_nz[seq_i])
+            idx = self._state_draw_within_support(idx, xs_enc, self._idx_rng)
 
             self.init_counts += np.bincount(idx[x_group_i], weights_nz[x_idx_i], minlength=self.num_states)
             self.state_counts += np.bincount(idx, weights_nz[seq_i], minlength=self.num_states)
@@ -3334,7 +3335,10 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             self.len_accumulator.seq_initialize(len_enc, weights, self._len_rng)
 
             tot_cnt = np.sum(sz)
-            states = self._idx_rng.choice(self.num_states, size=tot_cnt)
+            # ``weights[idx]`` is the per-observation weight in the same sequence-major layout the
+            # draw uses (see the note below on why the time-major mirror was wrong), so the
+            # symmetry-breaking start can refuse a split whose states would carry no weight.
+            states = self._initial_state_draw(tot_cnt, xs, self._homogeneous_emissions, weights=weights[idx])
             states = self._state_draw_within_support(states, xs, self._idx_rng)
             nz_idx, nz_idx_group, nz_idx_rep = np.unique(idx, return_index=True, return_inverse=True)
             weights_nz = weights[nz_idx]
@@ -3436,6 +3440,30 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             for group_indices, group_enc in _iter_emission_groups(enc_data):
                 for j in group_indices:
                     self.accumulators[j].seq_update(group_enc, gamma_flat[:, j], estimate.topics[j])
+
+    def _initial_state_draw(self, size: int, enc_data, homogeneous: bool = True, weights=None) -> np.ndarray:
+        """The per-observation state assignment EM starts from.
+
+        A uniform draw gives every state the same random 1/K subsample, so every emission starts at
+        the marginal and every transition row starts uniform -- the symmetric fixed point EM cannot
+        leave. On a well-separated two-state problem three of five seeds stayed there through 400
+        iterations (P09-F07), and an ordinary categorical-emission HMM spent its first ~35 iterations
+        moving the objective by 0.05 per step (A-01). A k-means++ start over the emission stream
+        breaks the symmetry when the emissions live in a vector space; when they do not -- a
+        categorical, composite or ragged leaf -- there is nothing to cluster and the uniform draw is
+        what it has always been.
+        """
+        uniform = self._idx_rng.choice(self.num_states, size=size)
+        if not homogeneous or self.num_states < 2:
+            # Per-state emission encodings are not one shared observation stream, so there is no
+            # single feature matrix to cluster; the uniform draw stands.
+            return uniform
+        # Seeded from the draw itself rather than from ``self._idx_rng``: when the start declines,
+        # the fallback must be the draw the old code would have made, byte for byte.
+        assign = broken_symmetry_states(
+            enc_data, self.num_states, derived_rng(uniform), rows=int(size), weights=weights
+        )
+        return uniform if assign is None else assign
 
     def _state_draw_within_support(self, idx: np.ndarray, enc_data, rng) -> np.ndarray:
         """Redraw any initialization state assignment whose emission law cannot fit that row.

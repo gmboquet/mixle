@@ -125,7 +125,12 @@ if __name__ == "__main__":
         rng=RNG(),
     )
     test = d.sampler(2).sample(50)
-    print("  held-out mean log-density: %.3f" % np.mean([m.log_density(x) for x in test]))
+    # Printed against the generating model, so a reader can see whether the fit recovered anything:
+    # a bare held-out number says nothing about whether both states separated (P09-F07).
+    print(
+        "  held-out mean log-density: %.3f (true model %.3f)"
+        % (np.mean([m.log_density(x) for x in test]), np.mean([d.log_density(x) for x in test]))
+    )
 
     print("# SegmentalHiddenMarkov: HMM with explicit-duration (segmental) states")
     d = SegmentalHiddenMarkovModelDistribution(
@@ -137,11 +142,14 @@ if __name__ == "__main__":
     m = optimize(
         d.sampler(1).sample(400),
         SegmentalHiddenMarkovEstimator([GaussianEstimator(), GaussianEstimator()], len_estimator=PoissonEstimator()),
-        max_its=10,
+        max_its=40,
         rng=RNG(),
     )
     test = d.sampler(2).sample(50)
-    print("  held-out mean log-density: %.3f" % np.mean([m.log_density(x) for x in test]))
+    print(
+        "  held-out mean log-density: %.3f (true model %.3f)"
+        % (np.mean([m.log_density(x) for x in test]), np.mean([d.log_density(x) for x in test]))
+    )
 
     print("# Record / DictRecord: named-field records (each field its own distribution)")
     d = RecordDistribution(["height", "count"], [GaussianDistribution(0.0, 1.0), PoissonDistribution(4.0)])

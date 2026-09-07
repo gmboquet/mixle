@@ -139,12 +139,19 @@ from mixle.models import GradEstimator
 model = optimize(sequences, HiddenMarkovEstimator([
     MixtureEstimator([GaussianEstimator()] * 5),  # one state: a five-cluster mixture
     GradEstimator(my_module),                     # the other: a neural density
-]))
+]), max_its=300)                                  # see the budget note below
 ```
 
 One call, each part fit by the right M-step: Baum-Welch for the Markov dynamics, EM for the mixture
 inside a state, gradient descent for the neural leaf. Every node is an estimator, so the tree nests as
 deep as the model does — the call at the top never changes.
+
+`max_its` is the one knob that is not optional here. `optimize` runs **10** EM iterations by default,
+which is a sensible budget for a single leaf and far too few for a model with this much structure:
+at the default the transition matrix comes back with both rows pointing at one state and the neural
+leaf's scale several times too wide. `optimize` warns when it stops at the cap and
+`model.fit_provenance().converged` is `False`, so an under-budgeted fit says so — but the number to
+raise is `max_its`.
 
 ## Engines & scale
 

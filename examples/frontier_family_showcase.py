@@ -30,6 +30,13 @@ measurements of THIS run. They are measurements on a laptop-scale stand-in, thou
 classification above means: trust the shape of the pipeline and the fact that each receipt is earned,
 not the absolute quality figures.
 
+Concretely, at this scale the ladder does NOT shrink much: on a 6-layer, d_model=16 causal LM,
+``coarsen()`` accepts almost no depth merges at any divergence budget, so the one rung that clears
+its eval gate is within a percent of the headline's parameter count and the cost model -- which
+prices the work actually performed -- puts it above the headline per request. The DONE block prints
+those ratios rather than describing a shrink that did not happen (P09-F10); the halt receipt
+correctly rejects the second rung, whose parameter count went UP.
+
 Run: ``python examples/frontier_family_showcase.py`` (needs ``pip install "mixle[torch]"``; no network).
 Runtime is ~50 s on a laptop CPU.
 """
@@ -229,12 +236,31 @@ def main() -> None:
         assert p.cost_per_request > 0.0
 
     line("DONE")
+    # ``family.rungs`` counts rungs ATTEMPTED; only ``passed_rungs()`` are quantized and priced, and
+    # saying otherwise credited the pipeline with a rung its own halt receipt had rejected (P09-F10).
+    priced = list(family.passed_rungs())
     print(
-        f"headline + {len(family.rungs)} rung(s), each I1-quantized and priced; "
+        f"headline + {len(priced)} priced rung(s) of {len(family.rungs)} attempted "
+        f"({', '.join(priced) if priced else 'none'}), each I1-quantized and priced; "
         f"edge tier served {edge_receipt.n_requests} requests, "
         f"{edge_receipt.n_escalated} escalated to the frontier; "
         f"monotone family frontier: {serve_receipt.is_monotone_frontier()}"
     )
+    # What this run demonstrates is the RECEIPTED pipeline, not a compression win: at this toy scale
+    # (a 6-layer, d_model=16 causal LM) coarsen() accepts almost no depth merges at any budget, so
+    # the accepted rung is within a percent of the headline and the cost model -- which prices the
+    # work actually done -- puts it ABOVE the headline. The receipts say so rather than the narrative
+    # claiming a shrink that did not happen.
+    headline_point = next(p for p in serve_receipt.points if p.name == "headline")
+    for point in serve_receipt.points:
+        if point.name == "headline":
+            continue
+        rung = next(r for r in family.rungs if r.name == point.name)
+        print(
+            f"  {point.name}: {rung.compression_ratio:.3f}x headline parameters at "
+            f"{point.cost_per_request / headline_point.cost_per_request:.2f}x headline cost/request "
+            f"(quality {point.quality:.3f} vs {headline_point.quality:.3f})"
+        )
 
 
 if __name__ == "__main__":

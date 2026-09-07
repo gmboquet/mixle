@@ -13,9 +13,12 @@ family (Distribution / Sampler / Estimator / Accumulator / DataEncoder) fit by m
     machinery does Gaussian / Poisson / heterogeneous topics, so "an LDA-like model over my own emission"
     needs no new class.
 
-This example fits three of them on synthetic data and recovers the planted structure: classic LDA
-(categorical topics), IBP (binary features), and -- the point -- a *non-categorical* admixture (Gaussian
-topics) that no "topic model = words" framing covers.
+This example fits three of them on synthetic data: classic LDA (categorical topics), IBP (binary
+features), and -- the point -- a *non-categorical* admixture (Gaussian topics) that no "topic model =
+words" framing covers. The IBP and the Gaussian admixture recover their planted parameters; the LDA
+section recovers the topic ORDERING and the dominant mass but prints sharper topics than the truth,
+with a fitted concentration well above the generating one, and says so with the numbers behind it
+(P10-F12) -- the variational likelihood is nearly flat along "sharper topics + larger alpha".
 
 To add another "model like that": compose ``HierarchicalMixtureDistribution`` with your topic family
 (admixture over anything), reach for the built-in IBP/PLSI/PPCA, or register a bespoke family via
@@ -39,11 +42,27 @@ def demo_lda():
         [S.CategoricalDistribution(t) for t in true], alpha=[1.0, 1.0], len_dist=S.CategoricalDistribution({14: 1.0})
     )
     docs = [sorted(Counter(u).items()) for u in gen.sampler(seed=1).sample(400)]
-    m = optimize(docs, S.LDAEstimator([S.CategoricalEstimator() for _ in range(2)]), max_its=60, out=None)
-    topics = [[round(float(c.pmap.get(k, 0.0)), 2) for k in range(4)] for c in m.topics]
+    m = optimize(docs, S.LDAEstimator([S.CategoricalEstimator() for _ in range(2)]), max_its=200, delta=None, out=None)
+    # Order the fitted topics against the generating ones before printing them side by side: the
+    # topic index is not identified, and comparing topic 0 with topic 0 is a coin flip.
+    fitted = [np.array([float(c.pmap.get(k, 0.0)) for k in range(4)]) for c in m.topics]
+    truth = [np.array(list(t.values())) for t in true]
+    if sum(np.abs(fitted[0] - truth[0])) > sum(np.abs(fitted[1] - truth[0])):
+        fitted = fitted[::-1]
     print("LDA (categorical topics):")
-    print(f"  true topics:      {[list(t.values()) for t in true]}")
-    print(f"  recovered topics: {topics}")
+    show = lambda rows: [[round(float(v), 2) for v in row] for row in rows]
+    print(f"  true topics:      {show(truth)}")
+    print(f"  recovered topics: {show(fitted)}")
+    print(f"  fitted alpha:     {show([np.asarray(m.alpha)])[0]} (true [1.0, 1.0])")
+    tv = [0.5 * float(np.sum(np.abs(f - t))) for f, t in zip(fitted, truth)]
+    print(f"  total-variation distance per topic: {[round(v, 3) for v in tv]}")
+    # Said plainly rather than left to the side-by-side print: the fit recovers the ORDERING and the
+    # dominant mass, and it is systematically sharper than the truth -- an exact zero where the truth
+    # has 5%. The variational likelihood is nearly flat along "sharper topics + larger alpha", so a
+    # concentration well above the generating 1.0 buys back the sharpness, and this scale (400 docs
+    # of 14 words) cannot separate the two. That is a property of LDA, not a defect here (P10-F12).
+    print("  -> the ordering and dominant mass are recovered; the tails are not: the fit is sharper")
+    print("     than the truth and alpha drifts above it, which the likelihood barely distinguishes.")
 
 
 def demo_ibp():

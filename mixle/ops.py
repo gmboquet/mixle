@@ -164,7 +164,16 @@ def tilt(dist: Any, theta: Any):
     return ExponentialTiltedDistribution(dist, theta)
 
 
-def project(source: Any, target: Any, *, n_samples: int = 20_000, seed: int = 0, max_its: int = 50):
+def project(
+    source: Any,
+    target: Any,
+    *,
+    n_samples: int = 20_000,
+    seed: int = 0,
+    max_its: int = 50,
+    init: Any = None,
+    delta: float | None = 1.0e-6,
+):
     """Variationally project ``source`` onto the family of ``target`` (the sample-based M-projection).
 
     Capability signature: ``Sampleable source x Fittable target -> Distribution``. Draws ``n_samples``
@@ -184,6 +193,18 @@ def project(source: Any, target: Any, *, n_samples: int = 20_000, seed: int = 0,
 
     ``target`` may be a distribution (its :meth:`estimator` supplies the family) or an estimator directly.
     The returned model is a member of the target family; ``describe(project(...))`` shows its capabilities.
+
+    ``init`` is the member of the target family EM starts from. Without it the fit starts from the
+    estimator's own random initialization at ``seed``, which for a latent family means one restart at
+    whichever optimum that draw reaches: a mixture-reduction benchmark read as "closed-form beats EM
+    by 5x" was measuring a single EM start stuck at a degenerate optimum, and the same call warm
+    started from the closed-form solution improved monotonically past it (P10-F03). Passing the
+    closed-form projection, or any other good guess, is the usual way to use this.
+
+    ``delta`` is the fitter's convergence tolerance, or ``None`` for exactly ``max_its`` iterations
+    with no early stop and no unconverged-fit note -- what a budget-matched comparison between two
+    projections wants, since a run that stopped early and one that used its whole budget are not
+    comparable on wall-clock.
     """
     import numpy as np
 
@@ -215,7 +236,9 @@ def project(source: Any, target: Any, *, n_samples: int = 20_000, seed: int = 0,
     data = list(source.sampler(seed).sample(n_samples))
     if len(data) != n_samples:
         raise ValueError(f"source sampler returned {len(data)} draws for n_samples={n_samples}")
-    return fit(data, estimator, max_its=max_its, rng=np.random.RandomState(seed), out=None)
+    return fit(
+        data, estimator, max_its=max_its, delta=delta, rng=np.random.RandomState(seed), out=None, prev_estimate=init
+    )
 
 
 def product_of_experts(dists: Any, weights: Any = None):

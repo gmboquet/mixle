@@ -93,9 +93,17 @@ def what_if_salt(net, *, seed: int):
 def invert_new_observation(depth_prior: GaussianDistribution, y_obs: np.ndarray, *, seed: int):
     """M3: train q(depth | amplitude) against the salt-regime forward physics, then invert ``y_obs``."""
 
+    # The simulator handed to learn_inverse must generate the SAME kind of observation the inversion
+    # will be asked about, sensor noise included. A noise-free forward model made q(depth|amplitude)
+    # a near-deterministic inverse of a noisy measurement -- posterior sd 0.001 km against a true
+    # 0.099, which the SBC and coverage receipts correctly failed and the report correctly abstained
+    # on (P09-F04). The receipts were right; the simulator was the thing that was wrong.
+    forward_rng = np.random.RandomState(seed + 7919)
+
     def forward_salt(theta_row: np.ndarray) -> np.ndarray:
         depth = float(np.ravel(theta_row)[0])
-        return np.asarray(_amplitude(depth, TRUE_FORMATION), dtype=float)
+        clean = np.asarray(_amplitude(depth, TRUE_FORMATION), dtype=float)
+        return clean + SENSOR_NOISE * forward_rng.randn(clean.shape[0])
 
     return learn_inverse(
         forward_salt,
@@ -171,9 +179,16 @@ def main() -> None:
     )
 
     # 4. M5 + A1: a calibrated natural-language report
-    calibration_set = build_calibration_set(inv_model, depth_prior, n=60, seed=999)
+    # tol is the half-width of the tightest claim the describer will offer, and alpha=0.2 asks for a
+    # MARGINAL 80% coverage rate over exchangeable sites, certified at 95% confidence -- not a
+    # per-site guarantee, and void under distribution shift away from this salt regime. A tol below
+    # the posterior's own spread (sd ~0.1 km) cannot reach that rate -- a +/-0.1 km claim covers 58%
+    # of these sites -- so the gate abstains, which is correct but demonstrates only the abstain
+    # path. 250 calibration rows rather than 60 because the certificate is a finite-sample bound: at
+    # 60 rows even 95% observed coverage leaves a Clopper-Pearson upper bound above alpha (P09-F04).
+    calibration_set = build_calibration_set(inv_model, depth_prior, n=250, seed=999)
     describer = PosteriorDescriber(
-        "depth_km", tol=0.1, k=3, alpha=0.2, width_multiples=(1.0, 3.0, 10.0), n_probe=300, seed=0
+        "depth_km", tol=0.2, k=3, alpha=0.2, width_multiples=(1.0, 3.0, 10.0), n_probe=300, seed=0
     )
     describer.calibrate(calibration_set, seed=0)
     # No per-call seed here: the certificate covers the generator's own prompt-derived serving

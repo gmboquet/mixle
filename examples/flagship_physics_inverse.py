@@ -11,8 +11,11 @@ the trajectory, as a Bayesian inverse problem:
     ``k`` is prior x physics-evidence, sampled by MCMC;
   * the UQ is HONEST: a credible interval per dataset, plus an ILLUSTRATION of the receipt that
     would matter at scale -- coverage across repeated noise draws, reported with its exact binomial
-    interval. Twelve replicates cannot validate a 90% coverage claim (12/12 is consistent with any
-    true coverage above ~74%), and the printout says so instead of calling coverage "checked";
+    interval. Every posterior here, headline and replicate, is sampled at the SAME budget with its
+    effective sample size printed, so the interval shown for a dataset is the interval that dataset
+    contributes to the coverage count. Twelve replicates cannot validate a 90% coverage claim
+    (11/12 is consistent with any true coverage above ~62%), and the printout says so instead of
+    calling coverage "checked";
   * the CERTIFICATE downgrades: a potential-augmented fit optimizes a modified objective, so the
     block's STATIONARY candidate is CAPPED to UNVERIFIED with the custom potential named in the
     reason, instead of a false closed-form claim. Both numbers are on the certificate --
@@ -32,6 +35,11 @@ from mixle.ppl import Normal, potential
 K_TRUE = 1.4
 SIGMA = 0.03
 T = np.linspace(0.1, 2.0, 40)
+# One sampling budget for every posterior in this script -- the headline interval and each coverage
+# replicate. The random-walk chain on this sharply peaked potential is strongly autocorrelated, so a
+# 1500-draw run kept only ~70 effective draws and its 5%/95% quantiles moved enough between budgets
+# to flip a dataset from miss to hit (P09-F08). Thinning by 4 at 6000 draws keeps ~1100 effective.
+DRAWS, BURN, THIN = 6000, 1000, 4
 
 
 def observe(seed: int) -> np.ndarray:
@@ -39,8 +47,14 @@ def observe(seed: int) -> np.ndarray:
     return np.exp(-K_TRUE * T) + SIGMA * rng.randn(len(T))
 
 
-def infer_k(y_obs: np.ndarray, seed: int, draws: int = 1500):
-    """Posterior draws over k: broad prior + the physics forward model as evidence."""
+def infer_k(y_obs: np.ndarray, seed: int, draws: int = DRAWS):
+    """Posterior draws over k: broad prior + the physics forward model as evidence.
+
+    Returns ``(draws, certificate, bulk_ess)``. The budget is one constant for every call: the
+    headline interval and the coverage replicates used to run at different draw counts, and the
+    quantiles of a strongly autocorrelated chain are noisy enough at 800 draws that the SAME dataset
+    was printed as a 90%-interval miss in one place and counted as a hit in the other (P09-F08).
+    """
     k = Normal(1.0, 2.0, name="k")
 
     def physics_ll(kv: float) -> float:
@@ -51,10 +65,11 @@ def infer_k(y_obs: np.ndarray, seed: int, draws: int = 1500):
         how="mcmc",
         potentials=potential(physics_ll, k),
         draws=draws,
-        burn=400,
+        burn=BURN,
+        thin=THIN,
         rng=np.random.RandomState(seed + 1000),
     )
-    return np.asarray(fit._result.samples()).ravel(), fit.certificate
+    return np.asarray(fit.result.samples()).ravel(), fit.certificate, float(fit.summary()["k"]["ess_bulk"])
 
 
 def main() -> None:
@@ -63,9 +78,14 @@ def main() -> None:
     print("=" * 72)
 
     y = observe(0)
-    draws, cert = infer_k(y, 0)
+    draws, cert, ess = infer_k(y, 0)
     lo, hi = np.quantile(draws, [0.05, 0.95])
     print(f"one dataset : posterior mean {draws.mean():.3f}, 90% CI [{lo:.3f}, {hi:.3f}]")
+    # An interval is a quantile of a chain, so the chain's effective sample size is part of the
+    # claim: printed here rather than left for the reader to wonder about.
+    print(f"              bulk ESS {ess:.0f} of {len(draws)} retained draws (thin={THIN})")
+    if not lo <= K_TRUE <= hi:
+        print(f"              this dataset's interval EXCLUDES the true k={K_TRUE} -- one of the 10% that should")
     print(
         f"certificate : {cert.guarantee.name} "
         f"(candidate {cert.blocks[0].candidate_guarantee.name}, capped by the physics potential)"
@@ -77,7 +97,7 @@ def main() -> None:
     # claim, and the exact Clopper-Pearson interval below is what n=12 can actually say.
     n_rep, hits = 12, 0
     for s in range(n_rep):
-        d, _ = infer_k(observe(s), s, draws=800)
+        d, _cert, _ess = infer_k(observe(s), s)
         lo, hi = np.quantile(d, [0.05, 0.95])
         hits += int(lo <= K_TRUE <= hi)
     ci_lo = float(beta.ppf(0.025, hits, n_rep - hits + 1)) if hits else 0.0

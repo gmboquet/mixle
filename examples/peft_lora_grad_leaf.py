@@ -22,9 +22,15 @@ The receipt uses disjoint deterministic train and held-out sequences. After fitt
 Run: ``python examples/peft_lora_grad_leaf.py``
 (needs ``pip install "mixle[torch]" transformers peft`` -- peft/transformers are example-only deps, not a
 mixle extra, since GradLeaf itself has no opinion on what module you hand it).
+
+NETWORK: this script downloads a ~2 MB test checkpoint from the Hugging Face Hub the first time it
+runs (``peft-internal-testing/tiny-random-gpt2``, pinned to one revision), and reads it from the
+local Hub cache afterwards. Set ``HF_HUB_OFFLINE=1`` to require the cache.
 """
 
 from __future__ import annotations
+
+import sys
 
 import numpy as np
 
@@ -145,5 +151,20 @@ def main() -> None:
     print("OK: only LoRA adapters moved; the base is untouched; held-out likelihood improved.")
 
 
+def _explain_a_missing_optional_dependency(exc: ModuleNotFoundError) -> str:
+    """One line naming what is missing and how to get it, instead of a bare traceback (P10-F08)."""
+    return (
+        f"this example needs the optional dependency {exc.name!r}, which is not installed. "
+        'Install the example-only dependencies with: pip install "mixle[torch]" transformers peft '
+        "(they are not mixle dependencies -- GradLeaf has no opinion on what module you hand it). "
+        f"The run also downloads {CHECKPOINT} (revision {CHECKPOINT_REVISION[:12]}) from the "
+        "Hugging Face Hub on first use."
+    )
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except ModuleNotFoundError as missing:
+        print(_explain_a_missing_optional_dependency(missing), file=sys.stderr)
+        raise SystemExit(1) from None

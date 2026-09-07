@@ -63,6 +63,7 @@ from mixle.stats.latent._hidden_markov_numba_kernels import (
     numba_baum_welch_alphas,
     numba_seq_log_density,
 )
+from mixle.stats.latent._initialization import broken_symmetry_states, derived_rng
 from mixle.stats.latent.effective_sample import (
     heal_pooled_statistics,
     require_finite_count_totals,
@@ -1137,6 +1138,26 @@ class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAc
 
         # per-position sparse soft state assignment, mirroring initialize()
         ww = rng.dirichlet(np.ones(num_states) / (num_states**2), size=tot_cnt)
+        # A blind per-position draw gives every state the same random 1/K subsample of the emissions,
+        # so all K start at the marginal and EM opens on the symmetric fixed point (A-01). Two of four
+        # seeds then landed hundreds of nats below the generating model with nothing printed to show
+        # it (P10-F07). A k-means++ partition of the emission stream breaks the symmetry; emissions
+        # that are not a numeric vector space have nothing to cluster and keep the Dirichlet draw.
+        if num_states > 1 and tot_cnt > 0:
+            floor = 1.0e-3 / num_states
+            top = 1.0 - floor * (num_states - 1)
+            seq_assign = broken_symmetry_states(enc_sdata, num_states, derived_rng(ww), rows=len(ims))
+            if seq_assign is not None:
+                ww[ims, :] = floor
+                ww[ims, seq_assign] = top
+                init_assign = (
+                    broken_symmetry_states(enc_idata, num_states, derived_rng(ww), rows=len(imi))
+                    if self.lag > 0
+                    else None
+                )
+                if init_assign is not None:
+                    ww[imi, :] = floor
+                    ww[imi, init_assign] = top
 
         w_init = ww[imi, :] * weights[idi][:, None]
         w_seq = ww[ims, :] * weights[ids][:, None]

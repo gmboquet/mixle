@@ -39,6 +39,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.latent._initialization import broken_symmetry_states, derived_rng
 from mixle.stats.latent.effective_sample import (
     validate_effective_sample_mass,
     validated_count_array,
@@ -560,7 +561,15 @@ class SegmentalHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             self._rng_initialize(rng)
         idx, sz, enc_by_state, len_enc = x
         total = len(idx)
+        # A uniform draw gives every state the same random 1/K subsample, so every emission starts at
+        # the marginal and EM opens on the symmetric fixed point (A-01); the gallery's segmental fit
+        # was 3.4 nats/observation short of the converged one (P09-F11). A k-means++ start over the
+        # observations breaks that; a non-numeric emission has nothing to cluster and keeps the draw.
         states = self._state_rng.choice(self.num_states, size=total)
+        if self.num_states > 1 and len(enc_by_state):
+            broken = broken_symmetry_states(enc_by_state[0], self.num_states, derived_rng(states), rows=total)
+            if broken is not None:
+                states = broken
         offsets = np.concatenate([[0], np.cumsum(sz)]).astype(int)
         weighted_state = np.zeros((total, self.num_states), dtype=np.float64)
 

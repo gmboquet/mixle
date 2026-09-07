@@ -48,16 +48,26 @@ def low_rank():
     # of 1.5-2.0 against a recovery bound of 0.5 mean the printed "recovered" is earned by the
     # optimizer, not planted by the initialization (the old Uniform(-1,1) init with an error<1
     # oracle passed a fitter that returned its input unchanged).
-    offsets = [rng.uniform(1.5, 2.0) * rng.choice([-1.0, 1.0]) for _ in range(k)]
-    init = StructuredHMM(
-        gaussians([4 * i + offsets[i] for i in range(k)]),
-        np.ones(k) / k,
-        LowRankTransition(_row_normalize(rng.rand(k, r)), _row_normalize(rng.rand(r, k))),
-    )
     truth = [4.0 * i for i in range(k)]
-    init_error = max(abs(m - t) for m, t in zip(sorted(e.mu for e in init.emissions), truth))
-    fit = optimize(seqs, init.estimator(), prev_estimate=init, max_its=40, out=None)
-    fit_error = max(abs(m - t) for m, t in zip(sorted(e.mu for e in fit.emissions), truth))
+    # RESTARTS, and 150 iterations rather than 40. A single displaced start reaches a merged-state
+    # optimum on roughly one seed in three -- fit error 4.05 at RandomState(1), 1.59 at (200) -- and
+    # the example then crashed on its own recovery assertion (P10-F04). More iterations do not fix
+    # that (seed 1 is still at 2.4 after 400); a different start does, and keeping the restart with
+    # the best likelihood is how a caller picks between them without looking at the truth.
+    init_error, best, best_objective = 0.0, None, -np.inf
+    for _restart in range(3):
+        offsets = [rng.uniform(1.5, 2.0) * rng.choice([-1.0, 1.0]) for _ in range(k)]
+        init = StructuredHMM(
+            gaussians([4 * i + offsets[i] for i in range(k)]),
+            np.ones(k) / k,
+            LowRankTransition(_row_normalize(rng.rand(k, r)), _row_normalize(rng.rand(r, k))),
+        )
+        init_error = max(init_error, max(abs(m - t) for m, t in zip(sorted(e.mu for e in init.emissions), truth)))
+        candidate = optimize(seqs, init.estimator(), prev_estimate=init, max_its=150, delta=None, out=None)
+        objective = float(np.sum(candidate.seq_log_density(candidate.dist_to_encoder().seq_encode(seqs))))
+        if objective > best_objective:
+            best_objective, best = objective, candidate
+    fit_error = max(abs(m - t) for m, t in zip(sorted(e.mu for e in best.emissions), truth))
     if not (fit_error < 0.5 < init_error):
         raise RuntimeError(
             f"recovery NOT demonstrated: fit error {fit_error:.2f} must be < 0.5 while the "
@@ -65,7 +75,8 @@ def low_rank():
         )
     print(
         f"1. Low-rank HMM (K={k}, rank={r}): transition params {2 * k * r} vs dense {k * k}; "
-        f"means recovered to max error {fit_error:.2f} from an init error of {init_error:.2f}"
+        f"means recovered to max error {fit_error:.2f} from an init error of {init_error:.2f} "
+        f"(best of 3 restarts by likelihood)"
     )
 
 

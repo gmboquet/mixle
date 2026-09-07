@@ -54,6 +54,7 @@ from mixle.stats.compute.pdist import (
     prefix_contract_error,
 )
 from mixle.stats.compute.posterior import CategoricalLatentPosterior, ImpossiblePosteriorError
+from mixle.stats.latent._initialization import kmeanspp_assignment, numeric_feature_matrix
 from mixle.stats.latent.effective_sample import (
     heal_pooled_statistics,
     require_finite_count_totals,
@@ -1104,12 +1105,6 @@ class MixtureSampler(DistributionSampler):
 
 
 MIXTURE_INIT_STRATEGIES = ("dirichlet", "kmeans++")
-# Lloyd (k-means) iterations run from the k-means++ seeds before responsibilities are assigned; the
-# loop stops early once the assignment is stable, which on ordinary data takes well under this cap.
-_KMEANS_LLOYD_ITERATIONS = 20
-# The smallest share of ``n / k`` rows a k-means cluster may hold and still seed a component; below
-# it the k-means++ start is abandoned for the Dirichlet initialization (see the comment in place).
-_KMEANS_MIN_CLUSTER_FRACTION = 0.05
 """The closed set of ``init=`` strategies the mixture EM accumulator implements.
 
 ``"kmeans++"`` (the default) seeds near-hard responsibilities from k-means++ centers when the
@@ -1552,87 +1547,32 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         """Best-effort extraction of a dense (kept_n, d) numeric feature matrix from encoded data.
 
         Returns ``None`` (so we fall back to the Dirichlet path) when the encoded data is not a
-        simple real-valued array — e.g. composite/tuple encodings, ragged sequences, non-numeric
+        simple real-valued array -- e.g. composite/tuple encodings, ragged sequences, non-numeric
         dtypes. k-means++ only makes sense for vector-space leaves (Gaussian / diagonal Gaussian).
         """
         if isinstance(x, _HeteroMixtureEncoded):
             return None
-        try:
-            arr = np.asarray(x)
-        except (TypeError, ValueError):
-            return None
-        if arr.dtype == object or not np.issubdtype(arr.dtype, np.number):
-            return None
-        if arr.ndim == 1:
-            arr = arr[:, None]
-        elif arr.ndim != 2:
-            return None
-        if arr.shape[0] != len(keep_idx):
-            return None
-        arr = arr[keep_idx]
-        if arr.shape[0] == 0 or not np.isfinite(arr).all():
-            return None
-        return np.asarray(arr, dtype=float)
+        features = numeric_feature_matrix(x, rows=len(keep_idx))
+        return None if features is None else features[keep_idx]
 
     def _kmeanspp_responsibilities(self, x: Any, keep_idx: np.ndarray) -> np.ndarray | None:
         """P4 k-means++ seeding: assign near-hard responsibilities from nearest k-means++ center.
 
         Falls back to ``None`` (legacy Dirichlet init) when a numeric feature matrix cannot be
-        extracted from the encoded data. This sidesteps the random-Dirichlet EM saddle for
-        Gaussian-mixture initialization with no new dependency.
+        extracted from the encoded data, or when the resulting clusters are unbalanced enough that
+        one of them is an outlier group rather than a component (see ``kmeanspp_assignment``). This
+        sidesteps the random-Dirichlet EM saddle for Gaussian-mixture initialization with no new
+        dependency; the hidden-Markov families take the same start through the same helper.
         """
         feats = self._feature_matrix(x, keep_idx)
         if feats is None:
             return None
-
-        n, _ = feats.shape
-        k = self.num_components
-        rng = self._w_rng
-        centers_idx = np.empty(k, dtype=int)
-        centers_idx[0] = rng.randint(n)
-        closest_sq = np.sum((feats - feats[centers_idx[0]]) ** 2, axis=1)
-
-        for c in range(1, k):
-            total = float(closest_sq.sum())
-            if total <= 0.0 or not np.isfinite(total):
-                centers_idx[c] = rng.randint(n)
-            else:
-                probs = closest_sq / total
-                centers_idx[c] = int(rng.choice(n, p=probs))
-            new_sq = np.sum((feats - feats[centers_idx[c]]) ** 2, axis=1)
-            closest_sq = np.minimum(closest_sq, new_sq)
-
-        centers = feats[centers_idx]
-        # squared distances (n, k); assign each kept point to its nearest center
-        dists = np.sum((feats[:, None, :] - centers[None, :, :]) ** 2, axis=2)
-        assign = np.argmin(dists, axis=1)
-        # Lloyd iterations from the k-means++ seeds (what sklearn's ``init_params="kmeans"`` does):
-        # the seeding alone picks a far outlier as a center with probability proportional to its
-        # squared distance, and the near-hard responsibilities then hand that component a handful
-        # of rows, from which EM shrinks it into a degenerate spike it never leaves (a 1500-row
-        # two-regime panel came back as weights 0.993 / 0.007 with ``converged=True`` on the seed a
-        # shipped notebook uses; 0.8.1 adversarial review P07-F02). Moving each center to the mean
-        # of its rows pulls an outlier seed onto the mass of its cluster before EM starts.
-        for _lloyd in range(_KMEANS_LLOYD_ITERATIONS):
-            for c in range(k):
-                members = assign == c
-                if np.any(members):
-                    centers[c] = feats[members].mean(axis=0)
-            dists = np.sum((feats[:, None, :] - centers[None, :, :]) ** 2, axis=2)
-            new_assign = np.argmin(dists, axis=1)
-            if np.array_equal(new_assign, assign):
-                break
-            assign = new_assign
-        # A cluster that still holds only a handful of rows after Lloyd is an outlier the seeding
-        # latched onto, not a component (heavy-tailed regimes do this to k-means at any seed);
-        # starting EM from it produces the spike above. Hand such a start to the Dirichlet
-        # initialization instead, which spreads every row across the components.
-        min_members = max(feats.shape[1] + 1, int(_KMEANS_MIN_CLUSTER_FRACTION * n / k))
-        if np.min(np.bincount(assign, minlength=k)) < min_members:
+        assign = kmeanspp_assignment(feats, self.num_components, self._w_rng)
+        if assign is None:
             return None
 
-        sz = len(keep_idx)
-        ww = np.zeros((sz, k))
+        k = self.num_components
+        ww = np.zeros((len(keep_idx), k))
         # soft-ish responsibilities: dominant mass on nearest center, small floor on the rest so
         # no component starts byte-degenerate even if a center captures few points.
         kept_rows = np.nonzero(keep_idx)[0]

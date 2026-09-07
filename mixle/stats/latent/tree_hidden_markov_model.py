@@ -44,6 +44,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.latent._initialization import broken_symmetry_states, derived_rng
 from mixle.stats.latent.effective_sample import (
     validate_effective_sample_mass,
     validated_count_array,
@@ -1208,6 +1209,21 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         enc_x = self.acc_to_encoder().seq_encode([x])
         self.seq_initialize(enc_x, weights=np.asarray([weight]), rng=rng)
 
+    def _initial_state_draw(self, size: int, enc_x) -> np.ndarray:
+        """The per-node state assignment EM starts from -- see ``HiddenMarkovAccumulator``.
+
+        A uniform draw starts every state at the marginal emission, and on the shipped gallery's
+        well-separated two-state tree three of five seeds collapsed to identical emissions and stayed
+        there through 400 iterations (P09-F07, A-01). A k-means++ start over the emission stream
+        breaks that symmetry; a non-numeric emission has nothing to cluster and keeps the draw.
+        """
+        uniform = self._idx_rng.choice(self.num_states, replace=True, size=size)
+        if self.num_states < 2:
+            return uniform
+        # Seeded from the draw itself, so a declined start leaves the fallback bit-identical.
+        assign = broken_symmetry_states(enc_x, self.num_states, derived_rng(uniform), rows=int(size))
+        return uniform if assign is None else assign
+
     def seq_initialize(self, x: E, weights: np.ndarray, rng: np.random.RandomState) -> None:
         """Vectorized initialization of sufficient statistics from sequence encoded trees.
 
@@ -1228,9 +1244,7 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
         if x[0] is not None:
             tz, _, (xbi, xp, xc, xl, txz, tp, tpz), enc_x, len_enc = x[0]
 
-            states = np.ascontiguousarray(
-                self._idx_rng.choice(self.num_states, replace=True, size=tz[-1]), dtype=np.int64
-            )
+            states = np.ascontiguousarray(self._initial_state_draw(tz[-1], enc_x), dtype=np.int64)
 
             # The kernel signature is EXPLICIT (int32 x6, int64 states, float64 weights): coerce the
             # caller-supplied weights at the boundary -- integer weights (np.ones with an int dtype, a
@@ -1273,7 +1287,7 @@ class TreeHiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             cnt, tz, _, (idx, xbi, xp, xc, level_idx, p_nxt, eta_p, i_nxt, rns, rni), enc_x, len_enc = x[1]
 
             num_states = self.num_states
-            states = self._idx_rng.choice(self.num_states, replace=True, size=cnt)
+            states = self._initial_state_draw(cnt, enc_x)
 
             #  Get root node states
             root_states = np.bincount(states[rns], weights=weights[rni], minlength=num_states)

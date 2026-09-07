@@ -24,13 +24,20 @@ Run: ``python examples/model_comparison_example.py``
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from mixle.ppl import Mix, Normal, StudentT, compare, free, loo, waic
 
 N_PER_MODE = 300  # 600 observations total
 MODE_SEP = 6.0  # modes at -6 and +6, sigma=1 -> unambiguously two separate clusters
-DRAWS, BURN = 1200, 600  # MCMC posterior draws per model (kept modest so the demo runs quickly)
+# MCMC posterior draws per model. Not "modest so the demo runs quickly": at 1200/600 the
+# random-walk chains on the two scale parameters come back with a bulk ESS around 3, and the
+# posterior SUMMARY printed as "B's fitted component means" is then a summary of a chain that has
+# not mixed -- sigma2 1.6 against a true 1.0 (P10-F06). These settings reach a worst bulk ESS in the
+# hundreds and recover the planted parameters, and the run still takes a couple of seconds.
+DRAWS, BURN, THIN = 6000, 2000, 4
 
 
 def bimodal_data(rng: np.random.RandomState) -> np.ndarray:
@@ -43,13 +50,13 @@ def bimodal_data(rng: np.random.RandomState) -> np.ndarray:
 def fit_candidates(y: np.ndarray) -> tuple:
     """Fit the three candidates with how='mcmc' so every model carries posterior draws."""
     a = Normal(free, free, name="A_single_normal").fit(
-        y, how="mcmc", draws=DRAWS, burn=BURN, rng=np.random.RandomState(1)
+        y, how="mcmc", draws=DRAWS, burn=BURN, thin=THIN, rng=np.random.RandomState(1)
     )
     b = Mix([Normal(free, free), Normal(free, free)], name="B_two_component_mixture").fit(
-        y, how="mcmc", draws=DRAWS, burn=BURN, rng=np.random.RandomState(2)
+        y, how="mcmc", draws=DRAWS, burn=BURN, thin=THIN, rng=np.random.RandomState(2)
     )
     c = StudentT(free, free, free, name="C_student_t").fit(
-        y, how="mcmc", draws=DRAWS, burn=BURN, rng=np.random.RandomState(3)
+        y, how="mcmc", draws=DRAWS, burn=BURN, thin=THIN, rng=np.random.RandomState(3)
     )
     return a, b, c
 
@@ -66,6 +73,38 @@ def print_ranking(rows: list[dict], by: str) -> None:
         print("".join(cells))
 
 
+def print_chain_health(fit, label: str) -> None:
+    """Print the chain diagnostics behind a posterior-summary number.
+
+    ``.dist`` on an MCMC fit is a posterior SUMMARY, and a summary of a chain that has not mixed is
+    not a fitted parameter: on some seeds this model's scale parameters come back with a bulk ESS of
+    about 3 out of 1200 draws and a sigma2 60% above the truth, with nothing printed to say so
+    (P10-F06). ESS and split-R-hat are already in ``summary()``; this puts them next to the numbers
+    they qualify.
+    """
+    summary = fit.summary()
+    parameters = {name: row for name, row in summary.items() if isinstance(row, dict) and "ess_bulk" in row}
+    if not parameters:
+        return
+    worst = min(parameters.items(), key=lambda item: item[1]["ess_bulk"])
+    print(
+        f"  {label}'s chain health: worst bulk ESS {worst[1]['ess_bulk']:.0f} on {worst[0]!r}, "
+        f"acceptance {summary['_acceptance_rate']:.2f}"
+    )
+    for name, row in sorted(parameters.items()):
+        rhat = row.get("split_r_hat")
+        rhat_text = "n/a (single chain)" if rhat is None or math.isnan(rhat) else f"{rhat:.3f}"
+        print(
+            f"    {name:<12} mean {row['mean']:>8.3f}  ess_bulk {row['ess_bulk']:>7.1f}  "
+            f"ess_tail {row['ess_tail']:>7.1f}  split_r_hat {rhat_text}"
+        )
+    if worst[1]["ess_bulk"] < 100.0:
+        print(
+            "    -> fewer than 100 effective draws: the posterior summary printed above is noisy, and "
+            "the 'loglik' column is that summary's likelihood, not a maximized one."
+        )
+
+
 def main():
     print("# mixle.ppl model comparison -- waic, loo, compare()\n")
 
@@ -77,7 +116,9 @@ def main():
 
     b_means = sorted(comp.mu for comp in b.dist.components)
     print(f"B's fitted component means (true {-MODE_SEP:.0f}, {MODE_SEP:.0f}): [{b_means[0]:.2f}, {b_means[1]:.2f}]")
-    print(f"A's fitted (mean, sd) forced to average both modes: ({a.dist.mu:.2f}, {np.sqrt(a.dist.sigma2):.2f})\n")
+    print(f"A's fitted (mean, sd) forced to average both modes: ({a.dist.mu:.2f}, {np.sqrt(a.dist.sigma2):.2f})")
+    print_chain_health(b, "B")
+    print()
 
     print("## compare(by='loo')  -- Pareto-smoothed importance-sampling leave-one-out")
     rows_loo = compare([a, b, c], y, by="loo")

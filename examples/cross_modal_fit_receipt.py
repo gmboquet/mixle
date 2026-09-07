@@ -96,9 +96,7 @@ def _clg_mean(factor, record: tuple) -> float:
 
     Uses the factor's OWN design-row builder (which lays out vector parents per its vec_dims), so the
     readout is exactly the closed-form linear map the fit produced -- not a reconstruction."""
-    from mixle.inference.bayesian_network import _design_row
-
-    row = _design_row(factor.parents, [record[p] for p in factor.parents], factor.discrete, factor.vec_dims)
+    row = factor.design_row([record[p] for p in factor.parents])
     return float(np.dot(row, factor.coef))
 
 

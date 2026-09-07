@@ -831,7 +831,12 @@ class HiddenMarkovModelTestCase(unittest.TestCase):
             [GaussianEstimator(), GaussianEstimator()], len_estimator=CategoricalEstimator()
         )
         m, objs = OptimizeConvergenceTestCase.run_optimize(est, seqs, max_its=30, seed=4, delta=1.0e-9)
-        self.assertGreater(len(objs), 3)
+        # Not "more than three iterations": the symmetry-breaking start (A-01) puts these
+        # well-separated states in the right groups before the first M-step, so the fit is the
+        # complete-data MLE after one iteration and the second confirms it. What the run must still
+        # be is monotone, which is what the trajectory is checked for -- the longer trajectory that
+        # gives that check its teeth is exercised on overlapping states below.
+        self.assertGreaterEqual(len(objs), 2)
         self.assertTrue(np.all(np.diff(objs) >= -1.0e-6), "HMM penalized objective decreased: %s" % str(np.diff(objs)))
 
         order = np.argsort([t.mu for t in m.topics])
@@ -841,6 +846,36 @@ class HiddenMarkovModelTestCase(unittest.TestCase):
 
         trans = m.transitions[np.ix_(order, order)]
         self.assertTrue(np.allclose(trans, truth.transitions, atol=0.08))
+
+    def test_overlapping_states_climb_monotonically_over_many_iterations(self):
+        """Where the start cannot separate the states outright, the climb must still be monotone."""
+        truth = HiddenMarkovModelDistribution(
+            topics=[GaussianDistribution(-0.6, 1.0), GaussianDistribution(0.6, 1.0)],
+            w=[0.5, 0.5],
+            transitions=[[0.9, 0.1], [0.2, 0.8]],
+            len_dist=CategoricalDistribution({20: 1.0}),
+        )
+        seqs = truth.sampler(seed=3).sample(size=200)
+        est = HiddenMarkovModelEstimator(
+            [GaussianEstimator(), GaussianEstimator()], len_estimator=CategoricalEstimator()
+        )
+        _m, objs = OptimizeConvergenceTestCase.run_optimize(est, seqs, max_its=30, seed=4, delta=1.0e-9)
+        self.assertGreater(len(objs), 3)
+        self.assertTrue(np.all(np.diff(objs) >= -1.0e-6), "HMM penalized objective decreased: %s" % str(np.diff(objs)))
+
+    def test_a_separated_two_state_fit_recovers_at_every_seed(self):
+        """A-01/P09-F07: a uniform state draw left EM on the symmetric plateau at most seeds."""
+        truth = self.make_dist()
+        seqs = truth.sampler(seed=11).sample(size=200)
+        est = HiddenMarkovModelEstimator(
+            [GaussianEstimator(), GaussianEstimator()], len_estimator=CategoricalEstimator()
+        )
+        for seed in range(5):
+            with self.subTest(seed=seed):
+                model, _objs = OptimizeConvergenceTestCase.run_optimize(est, seqs, max_its=40, seed=seed, delta=1.0e-9)
+                mus = sorted(float(topic.mu) for topic in model.topics)
+                self.assertAlmostEqual(mus[0], -5.0, delta=0.3)
+                self.assertAlmostEqual(mus[1], 5.0, delta=0.3)
 
 
 class NestedHMMTestCase(unittest.TestCase):

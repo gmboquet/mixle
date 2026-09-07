@@ -302,6 +302,17 @@ class _LinearGaussianFactor:
     def _row(self, values: Sequence[Any]) -> np.ndarray:
         return _design_row(self.parents, values, self.discrete, self.vec_dims)
 
+    def design_row(self, values: Sequence[Any]) -> np.ndarray:
+        """The design row this factor's own fit uses, for one record's parent values.
+
+        Public because a reader evaluating the learned linear map at a record has no other way to lay
+        the parents out the way the fit did -- vector parents expanded per ``vec_dims``, discrete
+        parents one-hot drop-first, then a trailing intercept -- and a shipped example was reaching
+        into this module's private builder to do it (P09-F13). ``values`` are the parent values in
+        ``self.parents`` order; the result pairs elementwise with ``self.coef``.
+        """
+        return self._row(values)
+
     def _design(self, cols: list[list[Any]]) -> np.ndarray:
         return np.stack([self._row([cols[p][j] for p in self.parents]) for j in range(len(cols[self.child]))])
 

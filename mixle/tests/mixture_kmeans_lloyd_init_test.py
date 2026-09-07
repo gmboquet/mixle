@@ -19,7 +19,7 @@ import numpy as np
 
 from mixle.inference import optimize
 from mixle.stats import MixtureEstimator, MultivariateGaussianEstimator
-from mixle.stats.latent import mixture as mixture_module
+from mixle.stats.latent import _initialization as init_module
 
 
 def two_regime_panel(seed=0, days=1500):
@@ -76,17 +76,17 @@ class LloydIterationsTest(unittest.TestCase):
         # seeds 0-2; which seeds depends on the BLAS, so the sweep is over the same panels and
         # seeds the test above requires the fix to survive): this pins the mechanism the fix
         # addresses, not a property of the data.
-        saved = mixture_module._KMEANS_LLOYD_ITERATIONS, mixture_module._KMEANS_MIN_CLUSTER_FRACTION
+        saved = init_module.LLOYD_ITERATIONS, init_module.MIN_CLUSTER_FRACTION
         try:
-            mixture_module._KMEANS_LLOYD_ITERATIONS = 0
-            mixture_module._KMEANS_MIN_CLUSTER_FRACTION = 0.0
+            init_module.LLOYD_ITERATIONS = 0
+            init_module.MIN_CLUSTER_FRACTION = 0.0
             smallest = min(
                 self.fit_weights(two_regime_panel(panel_seed)[0], seed)[0]
                 for panel_seed in (0, 1, 3)
                 for seed in range(6)
             )
         finally:
-            mixture_module._KMEANS_LLOYD_ITERATIONS, mixture_module._KMEANS_MIN_CLUSTER_FRACTION = saved
+            init_module.LLOYD_ITERATIONS, init_module.MIN_CLUSTER_FRACTION = saved
         if smallest >= 0.05:
             # The trajectory is BLAS-dependent; a platform on which no seed in the sweep collapses
             # cannot exhibit the mechanism, and says so rather than failing or passing silently.
