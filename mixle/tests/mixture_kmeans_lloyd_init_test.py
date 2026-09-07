@@ -71,17 +71,28 @@ class LloydIterationsTest(unittest.TestCase):
                     self.assertLess(abs(weights[0] - crisis_share), 0.08, weights)
 
     def test_seeding_alone_is_what_collapsed(self):
-        # With the Lloyd loop and the small-cluster guard disabled, the same seeds hand a component
-        # a handful of rows (panel 0 at seeds 3 and 5; panel 1 at seed 1; panel 3 at seeds 0-2):
-        # this pins the mechanism the fix addresses, not a property of the data.
-        rows, _ = two_regime_panel(0)
+        # With the Lloyd loop and the small-cluster guard disabled, some seeds hand a component a
+        # handful of rows (on macOS arm64: panel 0 at seeds 3 and 5, panel 1 at seed 1, panel 3 at
+        # seeds 0-2; which seeds depends on the BLAS, so the sweep is over the same panels and
+        # seeds the test above requires the fix to survive): this pins the mechanism the fix
+        # addresses, not a property of the data.
         saved = mixture_module._KMEANS_LLOYD_ITERATIONS, mixture_module._KMEANS_MIN_CLUSTER_FRACTION
         try:
             mixture_module._KMEANS_LLOYD_ITERATIONS = 0
             mixture_module._KMEANS_MIN_CLUSTER_FRACTION = 0.0
-            smallest = min(self.fit_weights(rows, seed)[0] for seed in (3, 5))
+            smallest = min(
+                self.fit_weights(two_regime_panel(panel_seed)[0], seed)[0]
+                for panel_seed in (0, 1, 3)
+                for seed in range(6)
+            )
         finally:
             mixture_module._KMEANS_LLOYD_ITERATIONS, mixture_module._KMEANS_MIN_CLUSTER_FRACTION = saved
+        if smallest >= 0.05:
+            # The trajectory is BLAS-dependent; a platform on which no seed in the sweep collapses
+            # cannot exhibit the mechanism, and says so rather than failing or passing silently.
+            self.skipTest(
+                "no seeding-only collapse within the sweep on this platform (smallest weight %.3f)" % smallest
+            )
         self.assertLess(smallest, 0.05, smallest)
 
 

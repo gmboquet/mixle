@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "c9c5fbbbbd63afbebcaa00d4bf4471d7464d8b02",
+ "candidate_commit": "cd05412883ab12e7ab1ef10d4231bd610d27393d",
  "command": "python scripts/check_workflows.py && grep -rhoE 'uses: [^@]+@[^ ]+' .github/workflows/*.yml | grep -vcE '@[0-9a-f]{40}'",
  "date": "2026-08-22",
- "evidence_digest": "83af0633c3cad1852761f43f5cefc995d9c85f07655396d7e80d46c533608086",
+ "evidence_digest": "dc613f704a4e90eb840d3a55decf82c24dba6d7079f454d6cc7ffdc50c31f7e8",
  "gate": "Workflow supply-chain and shell safety",
  "result": "\"release workflows parse and satisfy immutable-action/shell-input contracts\", exit 0; 6 workflow files, 85 action uses, 0 pinned to anything other than a full 40-character commit"
 }

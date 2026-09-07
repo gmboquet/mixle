@@ -11,7 +11,6 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
-   mixle.stats.univariate.discrete._count_contracts
    mixle.stats.univariate.discrete.bernoulli
    mixle.stats.univariate.discrete.beta_binomial
    mixle.stats.univariate.discrete.binomial

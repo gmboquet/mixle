@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "c9c5fbbbbd63afbebcaa00d4bf4471d7464d8b02",
+ "candidate_commit": "cd05412883ab12e7ab1ef10d4231bd610d27393d",
  "command": "ten independent reviewer passes (reports: release-checklists/0.8.1-reviews/pass-01..10/{report.md,findings.json}); execution fact on the repaired wheel: for nb in $(find notebooks -name '*.ipynb'); do jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=1800 $nb; done (5400 s for malware_certificate_embedding; JAVA_HOME=openjdk@17, pyspark and peft installed) and for f in examples/*.py; do python $f; done with a 1800 s Python-side timeout",
  "date": "2026-09-07",
- "evidence_digest": "83af0633c3cad1852761f43f5cefc995d9c85f07655396d7e80d46c533608086",
+ "evidence_digest": "dc613f704a4e90eb840d3a55decf82c24dba6d7079f454d6cc7ffdc50c31f7e8",
  "gate": "Ten AI adversarial reviews of the notebooks and examples",
  "note": "The reviewed wheel was 3190de82\u2026 (tree 6040ea38); the repairs changed the tree, so the execution fact was re-run on the repaired wheel 30a2d60e\u2026 (examples) / c288d994\u2026 (notebooks) built from the tree this receipt is bound to (minus the receipts directory). The two environment gaps of the first batch run (no pyspark/JDK; a 30-minute batch cap on a notebook whose manifest records a 51-minute solo cost) were closed by installing the declared dependencies and giving that notebook its solo budget. The notebook run used the wheel built before the last three repairs landed (the rejected-update warning, the contract-test paths, two docstrings), none of which changes what a notebook computes; the 57 examples were re-run on the final wheel 30a2d60e\u2026, and the four reproduction-bundle entries were re-verified on it (arm64) and on emulated x86-64 (c288d994\u2026, identical library code for those entries).",
  "result": "134 findings across the ten passes (7 blocking, 46 real, 54 minor, 27 docs): 7/7 blocking and 27/27 docs repaired with regression tests or re-executed artifacts and the reviewers' reproductions re-run on the repaired tree; 100 real/minor dispositioned in 0.8.2-followups.md (D-0213); execution fact on wheel 30a2d60e\u2026 (examples) / c288d994\u2026 (notebooks): 131 of 131 notebooks and 57 of 57 examples exit 0"

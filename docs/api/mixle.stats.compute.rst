@@ -11,7 +11,6 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
-   mixle.stats.compute._sampling
    mixle.stats.compute.backend
    mixle.stats.compute.capabilities
    mixle.stats.compute.capability_decline

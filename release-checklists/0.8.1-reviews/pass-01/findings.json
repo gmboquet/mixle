@@ -134,7 +134,7 @@
     "severity": "docs",
     "title": "gallery_univariate_example.py presents a biased Binomial fit (n=9, p=0.444 for true n=10, p=0.4) as parameter recovery with no remark",
     "surface": "examples/gallery_univariate_example.py (BinomialEstimator(min_val=0) with no max_val)",
-    "reproduction": "cd <workdir> && /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python /Users/grantboquet/mixle/.ci-repro-colima/corpus-081/examples/gallery_univariate_example.py | grep -A2 '^Binomial'",
+    "reproduction": "cd <workdir> && <review-root>/candidate-081/venv/bin/python <review-root>/corpus-081/examples/gallery_univariate_example.py | grep -A2 '^Binomial'",
     "expected": "Either BinomialEstimator(min_val=0, max_val=10) so the row recovers n=10, p~0.4 like every other row, or a printed note that n is estimated as the sample maximum and is biased low.",
     "observed": "  true: BinomialDistribution(p=0.4, n=10, ...)\n  fit : BinomialDistribution(p=0.444022, n=9, min_val=0, ...)\nEvery other family in the gallery recovers within ~2%; this row is 11% off in p and wrong in n, under a docstring that says it prints 'the true vs. recovered parameters'.",
     "notes": "Not a library bug (P(X=10)=1e-4, so no 10 appears in 5000 draws); it is the example's framing that is misleading. The example's output is pinned byte-for-byte by the reproduction bundle, so the pinned output carries the wrong fit."

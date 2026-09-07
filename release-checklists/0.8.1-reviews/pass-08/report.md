@@ -3,9 +3,9 @@
 - Wheel: `mixle-0.8.1-py3-none-any.whl`, sha256 `3190de824b710780422d898b38cbe154f708747bf668d1c359bf58720fdc333d`, git tree `6040ea38`, branch `release/0.8.1`.
 - Version verification (run from this work dir, outside any checkout):
   `python -c "import mixle, importlib.metadata as m; print(m.version('mixle'), mixle.__path__[0])"` ->
-  `0.8.1 /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/lib/python3.12/site-packages/mixle`
-- Interpreter: `/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python` (3.12). torch 2.14.0, transformers 5.16.1, pyspark 4.2.0, mpiexec present, JAVA_HOME = openjdk@17.
-- Work dir: `/Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-08/` (executed notebooks in `executed-tut/`, `executed-ds/`; diffs in `tut-diff.txt`, `ds-diff.txt`; README scripts in `readme/`; helper scripts `run_nbs.py`, `nbdiff.py`, `showcell.py`, `imports_ast.py`).
+  `0.8.1 <review-root>/candidate-081/venv/lib/python3.12/site-packages/mixle`
+- Interpreter: `<review-root>/candidate-081/venv/bin/python` (3.12). torch 2.14.0, transformers 5.16.1, pyspark 4.2.0, mpiexec present, JAVA_HOME = openjdk@17.
+- Work dir: `<review-root>/reviews-081/pass-08/` (executed notebooks in `executed-tut/`, `executed-ds/`; diffs in `tut-diff.txt`, `ds-diff.txt`; README scripts in `readme/`; helper scripts `run_nbs.py`, `nbdiff.py`, `showcell.py`, `imports_ast.py`).
 - Nothing outside the work dir was modified; the venv was not touched.
 
 ## Executed notebooks (nbconvert --execute, ExecutePreprocessor.timeout=1500, subprocess-bounded at 1800 s, 3 at a time)

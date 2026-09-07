@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "c9c5fbbbbd63afbebcaa00d4bf4471d7464d8b02",
+ "candidate_commit": "cd05412883ab12e7ab1ef10d4231bd610d27393d",
  "command": "$SC/twineenv/bin/twine check $SC/dist-a/mixle-0.8.0-py3-none-any.whl $SC/dist-a/mixle-0.8.0.tar.gz   (twineenv created with `python -m venv` + `pip install twine==7.0.0`)",
  "date": "2026-08-22",
- "evidence_digest": "83af0633c3cad1852761f43f5cefc995d9c85f07655396d7e80d46c533608086",
+ "evidence_digest": "dc613f704a4e90eb840d3a55decf82c24dba6d7079f454d6cc7ffdc50c31f7e8",
  "gate": "`twine check`",
  "note": "LOCAL, NOT HOSTED. `twine check` appears in exactly one place in CI \u2014 .github/workflows/publish.yml:214 \u2014 and publish.yml has never run for 0.8.0 (`gh run list --workflow publish.yml` newest run is v0.7.0, 2026-07-09), so there is no hosted twine evidence on 483add7c. twine is not installed in either project venv; I created a throwaway venv in scratch and pinned twine==7.0.0 to match 0.8.0-build-requirements.txt (reported version string confirms 7.0.0 with readme-renderer 45.0). The artifacts checked are the ones I built locally from `git archive 483add7c`, not candidate bytes.",
  "result": "twine version 7.0.0; 2 artifacts checked, both PASSED, exit 0"

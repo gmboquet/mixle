@@ -11,7 +11,6 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
-   mixle.stats.sequences._keyed_accumulator
    mixle.stats.sequences.integer_markov_chain
    mixle.stats.sequences.markov_chain
    mixle.stats.sequences.markov_transform

@@ -6,11 +6,11 @@
 - **Version verification** (run from the pass work dir, outside any checkout):
 
 ```
-$ /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python -c "import mixle, importlib.metadata as m; print(m.version('mixle'), mixle.__path__[0])"
-0.8.1 /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/lib/python3.12/site-packages/mixle
+$ <review-root>/candidate-081/venv/bin/python -c "import mixle, importlib.metadata as m; print(m.version('mixle'), mixle.__path__[0])"
+0.8.1 <review-root>/candidate-081/venv/lib/python3.12/site-packages/mixle
 ```
 
-- **Work dir:** `/Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-01/` (all scratch scripts and outputs referenced below live there; nothing outside it was modified).
+- **Work dir:** `<review-root>/reviews-081/pass-01/` (all scratch scripts and outputs referenced below live there; nothing outside it was modified).
 - Note: this Mac has no `timeout`/`gtimeout` binary; a subprocess wrapper `pyt.py <secs> <cmd...>` in the work dir was used for every bounded run.
 
 ## Corpus executed on the candidate

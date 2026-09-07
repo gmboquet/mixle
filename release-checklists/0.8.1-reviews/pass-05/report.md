@@ -3,11 +3,11 @@
 - Pass: 05 of 10
 - Focus: `mixle.inference.production` (fit_with_provenance / Header / verify_lineage, Registry, Service, detect_drift, Monitor), `mixle.lifecycle.Model` (fit / explain / deploy / load), `mixle.stats.dump_models` / `load_models`, `to_json` / `from_json`, `model_hash`, checkpoint / resume.
 - Wheel: `mixle-0.8.1-py3-none-any.whl`, sha256 `3190de824b710780422d898b38cbe154f708747bf668d1c359bf58720fdc333d`, built from tree `6040ea38` (branch `release/0.8.1`).
-- Version verification (run from `/Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/`):
+- Version verification (run from `<review-root>/reviews-081/pass-05/`):
   `python -c "import mixle, importlib.metadata as m; print(m.version('mixle'), mixle.__path__[0])"` ->
-  `0.8.1 /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/lib/python3.12/site-packages/mixle` (Python 3.12.12).
+  `0.8.1 <review-root>/candidate-081/venv/lib/python3.12/site-packages/mixle` (Python 3.12.12).
   `environment_info()` inside the candidate reports `git_commit=6040ea38c322715a974701898e369f9cc8f40c18`, `provenance_source=installed-artifact-build-provenance`, `mixle_version=0.8.1`.
-- Work dir: `/Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/` (attack scripts in `attacks/`, one standalone reproduction per finding in `repro/`, executed notebooks `executed-N.ipynb`, example logs `ex-*.log`, run table `corpus_results.txt`). Nothing outside the work dir was modified.
+- Work dir: `<review-root>/reviews-081/pass-05/` (attack scripts in `attacks/`, one standalone reproduction per finding in `repro/`, executed notebooks `executed-N.ipynb`, example logs `ex-*.log`, run table `corpus_results.txt`). Nothing outside the work dir was modified.
 
 ## Corpus execution
 
@@ -107,4 +107,4 @@ All exit 0. `production_example.py` prints the claimed chain (`lineage verified:
 - Worst finding: **P05-F01** — a registry's promoted alias silently serves a different version after two version files are swapped on disk (the record digest never binds the file name), defeating the atomic-swap/rollback guarantee the Registry exists to provide; closely followed by P05-F03, where the library's own provenance header turns a plain Gaussian into a pickle artifact through `Model.deploy`.
 - Everything the release claims about `trust_code`, per-file integrity, concurrency, and chain corruption detection held under attack; the gaps are in what is *not* bound (file name, header-vs-model, data hash, request identity) and in a corpus notebook whose executed output now contradicts its text.
 - 8 notebooks and 5 examples executed on the candidate, all exit 0; 51 of 63 fitted families round-trip through JSON bit-exactly with process-stable hashes.
-- Reproductions: one standalone script per finding under `/Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/repro/`.
+- Reproductions: one standalone script per finding under `<review-root>/reviews-081/pass-05/repro/`.

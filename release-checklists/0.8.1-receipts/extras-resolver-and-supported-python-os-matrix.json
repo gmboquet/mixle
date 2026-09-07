@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "c9c5fbbbbd63afbebcaa00d4bf4471d7464d8b02",
+ "candidate_commit": "cd05412883ab12e7ab1ef10d4231bd610d27393d",
  "command": "PYTHONPATH=. python scripts/check_optional_extras.py && grep -E '^requires-python' pyproject.toml && gh api .../check-runs (install .[*] lanes and 'extras matrix / exact candidate')",
  "date": "2026-08-22",
- "evidence_digest": "83af0633c3cad1852761f43f5cefc995d9c85f07655396d7e80d46c533608086",
+ "evidence_digest": "dc613f704a4e90eb840d3a55decf82c24dba6d7079f454d6cc7ffdc50c31f7e8",
  "gate": "Extras resolver and supported Python/OS matrix",
  "note": "The earlier measurement withheld this because it had not exercised verify_extra_profile.py per profile. The aggregate lane 'extras matrix / exact candidate' is exactly the job that does so and it is green on the exact tip, which is the evidence the row claims. 24 profiles are declared against 28 extras; the 4 omitted are data/docs/lint/test, which carry no runtime feature.",
  "result": "check_optional_extras.py: 'all equals the runtime-feature extra union', exit 0; requires-python = \">=3.11,<3.13\"; 24 of 24 install-extra lanes and 'extras matrix / exact candidate' completed/success on 5cca9e96"

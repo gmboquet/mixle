@@ -2,12 +2,12 @@
 
 - **Pass:** 06
 - **Focus:** data input surfaces — pandas DataFrame/Series adapters, record distributions reading columns by name, numpy arrays of every dtype/shape, lists of records/dicts/tuples, mappings of columns, DataSource / normalize_input / one-shot iterators, missing-value handling (None, NaN, pd.NA, pd.NaT, inf), datetime/categorical/string columns, the `mp` and `local` backends, rankings/paired-comparison encoders.
-- **Wheel:** `/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/dist/mixle-0.8.1-py3-none-any.whl`, sha256 `3190de824b710780422d898b38cbe154f708747bf668d1c359bf58720fdc333d` (re-hashed locally, matches)
+- **Wheel:** `<review-root>/candidate-081/dist/mixle-0.8.1-py3-none-any.whl`, sha256 `3190de824b710780422d898b38cbe154f708747bf668d1c359bf58720fdc333d` (re-hashed locally, matches)
 - **Tree:** `6040ea38` (branch release/0.8.1)
 - **Version verification line (run from the work dir, outside any checkout):**
-  `0.8.1 /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/lib/python3.12/site-packages/mixle`
+  `0.8.1 <review-root>/candidate-081/venv/lib/python3.12/site-packages/mixle`
 - **Interpreter / deps:** Python 3.12.12, pandas 3.0.5, numpy 2.5.3, scipy 1.18.1
-- **Work dir:** `/Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-06/` (attack scripts in `attacks/`, outputs `attacks/*.out`, consolidated reproductions in `repro.py` / `repro.out`). Nothing outside the work dir was modified. macOS has no `timeout(1)`; `tmo.py` in the work dir is the subprocess-timeout wrapper used everywhere.
+- **Work dir:** `<review-root>/reviews-081/pass-06/` (attack scripts in `attacks/`, outputs `attacks/*.out`, consolidated reproductions in `repro.py` / `repro.out`). Nothing outside the work dir was modified. macOS has no `timeout(1)`; `tmo.py` in the work dir is the subprocess-timeout wrapper used everywhere.
 
 ## Executed corpus notebooks (nbconvert --execute, timeout 1200 s per cell)
 
@@ -46,7 +46,7 @@ Surface: `optimize(generator)`, `optimize(iter(list))`, `optimize(map(...))`, `f
 
 Reproduction (from a directory outside any checkout):
 ```
-PY=/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python
+PY=<review-root>/candidate-081/venv/bin/python
 $PY -c "import numpy as np, mixle; from mixle.inference import optimize, fit
 xs=[float(v) for v in np.random.RandomState(0).normal(size=200)]
 m=optimize(iter(xs), max_its=3); print(m, m.log_density(xs[0]))
@@ -122,7 +122,7 @@ Expected: an error stating the handle is closed. Observed: `200`, `GaussianDistr
 
 ### P06-F09 (minor) — raw `TypeError`/`RecursionError`/`AttributeError`/numpy messages where neighbouring paths give row-numbered ContractErrors
 
-Reproduce all with `$PY /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-06/repro.py | sed -n '/# F09/,/# F10/p'`:
+Reproduce all with `$PY <review-root>/reviews-081/pass-06/repro.py | sed -n '/# F09/,/# F10/p'`:
 (a) `np.matrix` input -> `RecursionError` (profiler recurses on matrix rows); (b) numpy `timedelta64` array -> `TypeError: int() argument ... not 'datetime.timedelta'` (a pandas timedelta column fits); (c) 0-d array with an estimator -> `TypeError: len() of unsized object`; (d) `bytes` -> "Integer-categorical observations must be finite exact integers"; (e) DataFrame with a duplicated column name and `fields=['x']` -> `AttributeError: 'DataFrame' object has no attribute 'tolist'`; without `fields` the message "logical fields must be unique" never mentions duplicate column names; (f) `ThurstoneMostellerEstimator` with a `None` row -> `TypeError: 'NoneType' object is not iterable`, whereas `BradleyTerryEstimator` says "row 50 has no items ..."; (g) `MallowsEstimator` with a ragged ranking -> numpy's "inhomogeneous shape" message, whereas `PlackettLuceEstimator` says "full Plackett-Luce rankings must all have length 4". (g) is the same defect class the 0.8.1 changelog says was closed for mixed 2-/3-tuple paired comparisons.
 
 ### P06-F10 (minor) — a mapping of columns is silently fit as a categorical over the column names

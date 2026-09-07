@@ -11,8 +11,6 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
-   mixle.stats.latent._attention_contracts
-   mixle.stats.latent._hidden_markov_numba_kernels
    mixle.stats.latent.chained_attention
    mixle.stats.latent.dirac_length
    mixle.stats.latent.effective_sample

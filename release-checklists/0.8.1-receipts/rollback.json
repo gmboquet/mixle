@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "c9c5fbbbbd63afbebcaa00d4bf4471d7464d8b02",
+ "candidate_commit": "cd05412883ab12e7ab1ef10d4231bd610d27393d",
  "command": "grep -rl -iE 'yank' docs/ release-checklists/ CHANGELOG.md README.md | while read f; do grep -iE 'yank' \"$f\" | grep -viqE 'yanked (numpy|upstream)' && echo \"$f\"; done | wc -l",
  "date": "2026-08-22",
- "evidence_digest": "83af0633c3cad1852761f43f5cefc995d9c85f07655396d7e80d46c533608086",
+ "evidence_digest": "dc613f704a4e90eb840d3a55decf82c24dba6d7079f454d6cc7ffdc50c31f7e8",
  "gate": "Rollback",
  "note": "CORRECTED after audit. The first measurement counted 5 files matching /yank/, but 2 of those matched an unrelated dependency advisory ('the declared numpy floor 2.4.0 is yanked upstream') rather than mixle's rollback policy. Filtering that out leaves 3. Documented policy, not a machine gate: nothing enforces it at publish time and nothing can -- it governs what a human does after a bad release.",
  "result": "3 documents state the yank-not-delete rollback policy: release-checklists/0.8.0.md, 0.7.0.md and README.md"

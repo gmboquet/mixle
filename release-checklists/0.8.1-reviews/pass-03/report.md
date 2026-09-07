@@ -5,8 +5,8 @@
 - Wheel: `mixle-0.8.1-py3-none-any.whl` sha256 `3190de824b710780422d898b38cbe154f708747bf668d1c359bf58720fdc333d` (re-hashed locally, matches), built from tree `6040ea38` on `release/0.8.1`.
 - Version verification (run from the work dir, not a source checkout):
   `python -c "import mixle, importlib.metadata as m; print(m.version('mixle'), mixle.__path__[0])"` ->
-  `0.8.1 /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/lib/python3.12/site-packages/mixle` (Python 3.12.12)
-- Work dir: `/Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-03/` (attack scripts and raw outputs under `attacks/`, notebook logs `log-nb-*.txt`, example logs `log-ex-*.txt`, executed notebooks `executed-N-*.ipynb`). Nothing outside the work dir was modified.
+  `0.8.1 <review-root>/candidate-081/venv/lib/python3.12/site-packages/mixle` (Python 3.12.12)
+- Work dir: `<review-root>/reviews-081/pass-03/` (attack scripts and raw outputs under `attacks/`, notebook logs `log-nb-*.txt`, example logs `log-ex-*.txt`, executed notebooks `executed-N-*.ipynb`). Nothing outside the work dir was modified.
 
 ## Executed corpus notebooks (nbconvert --execute, kernel pinned to the candidate venv's `python3`, timeout 1200 s)
 
@@ -101,4 +101,4 @@ With `monotone=False` (or a mutable/neural leaf), a capped run warns "before the
 - Worst: P03-F01 -- the default `optimize(data)`/`fit(data)` path returns a `HeterogeneousBayesianNetwork` with no `fit_provenance()`/`numerical_repairs()` at all, so the receipt the release advertises as the answer to "did this fit converge?" is missing exactly where the quickstart and skeptic examples send users, while the per-factor fits underneath it hit their caps.
 - Runner-up: P03-F02 -- `estimator=None` on a generator/iterator silently returns a converged-looking fit of zero observations that scores everything `-inf`.
 - All 8 notebooks and 8 examples in scope executed with exit 0 on the candidate; the EM loop's convergence/early-stop disclosures fire as documented on every forced case, and log-likelihoods in receipts match direct sums to 1e-13.
-- Nothing outside `/Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-03/` was modified.
+- Nothing outside `<review-root>/reviews-081/pass-03/` was modified.

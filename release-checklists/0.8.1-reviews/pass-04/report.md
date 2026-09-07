@@ -2,13 +2,13 @@
 
 - **Pass:** 04 of 10 (independent)
 - **Focus:** `mixle.ppl` — RandomVariable construction, `.fit` (`map`/`mcmc`/`hmc`/`nuts`/`ensemble`/`vi`/`laplace`/`auto`/`posterior`/`sample`), constraints (`< > <= >=`, `eq`, `ne`, `increasing`/`decreasing`/`convex`/`concave`/`lipschitz`, `& | ~`), `penalty=`, `potentials=`, `given()`/`constrain()`, `summary()`, `params`, `explain_fit`, and the rewritten derivative-free constrained MAP path (Powell penalty ramp + feasibility repair + Nelder-Mead polish; grouped path too).
-- **Wheel:** `/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/dist/mixle-0.8.1-py3-none-any.whl`
+- **Wheel:** `<review-root>/candidate-081/dist/mixle-0.8.1-py3-none-any.whl`
   sha256 `3190de824b710780422d898b38cbe154f708747bf668d1c359bf58720fdc333d` (re-hashed locally, matches), built from tree `6040ea38` on `release/0.8.1`.
-- **Version verification** (run from `/Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-04/`):
+- **Version verification** (run from `<review-root>/reviews-081/pass-04/`):
   `python -c "import mixle, importlib.metadata as m; print(m.version('mixle'), mixle.__path__[0])"` →
-  `0.8.1 /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/lib/python3.12/site-packages/mixle`
+  `0.8.1 <review-root>/candidate-081/venv/lib/python3.12/site-packages/mixle`
 - Interpreter: CPython 3.12.12; torch 2.14.0 present in the venv (torch-absent paths exercised by patching `mixle.ppl.autograd.torch_available` in-process; the venv was not modified).
-- Work dir (all scripts, logs, executed notebooks): `/Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-04/`. Nothing outside it was modified.
+- Work dir (all scripts, logs, executed notebooks): `<review-root>/reviews-081/pass-04/`. Nothing outside it was modified.
 
 ## Corpus executed on the candidate
 
@@ -61,7 +61,7 @@ Output logs: `ex-<name>.log`. Printed values are consistent with the scripts' ow
 
 **Surface:** `RandomVariable.fit(data, how='map'|'auto', constraints=[increasing(v) | decreasing(v) | convex(v) | concave(v) | ...])` → `mixle.ppl.inference.map_fit` → `_derivative_free_constrained` → `_repair_feasibility` (`inference.py` lines 1442–1475, 1477–1541).
 
-**Reproduction:** `cd /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-04 && <venv>/bin/python repro_F01.py` (no monkeypatching; numpy/scipy + wheel only). Output on the candidate:
+**Reproduction:** `cd <review-root>/reviews-081/pass-04 && <venv>/bin/python repro_F01.py` (no monkeypatching; numpy/scipy + wheel only). Output on the candidate:
 
 ```
 --- increasing d=10           (column means = RandomState(101).permutation(10)*0.3, sd 0.5, n=200/column, var fixed)

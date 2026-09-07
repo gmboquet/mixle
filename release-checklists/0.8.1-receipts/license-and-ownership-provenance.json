@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "c9c5fbbbbd63afbebcaa00d4bf4471d7464d8b02",
+ "candidate_commit": "cd05412883ab12e7ab1ef10d4231bd610d27393d",
  "command": "cd . && PYTHONPATH=$PWD python scripts/verify_license_provenance.py --require-approved; echo EXIT=$?",
  "date": "2026-08-22",
- "evidence_digest": "83af0633c3cad1852761f43f5cefc995d9c85f07655396d7e80d46c533608086",
+ "evidence_digest": "dc613f704a4e90eb840d3a55decf82c24dba6d7079f454d6cc7ffdc50c31f7e8",
  "gate": "License and ownership provenance",
  "note": "Script passes, but read the record before treating this as an independence gate: release-checklists/0.8.0-license-provenance.json names the reviewer as 'Grant Boquet (release owner; also the sole author -- not an independent third party)'. The script's --require-approved flag only checks that status==approved and that a reviewer, ISO date, and evidence string are present (scripts/verify_license_provenance.py is 60 lines); it does not and cannot check reviewer independence.",
  "result": "printed 'license provenance validated', exit 0; underlying record release=0.8.0, status=approved, review_date=2026-08-04, evidence field 1291 chars"

@@ -20,7 +20,6 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
-   mixle.inference._advi
    mixle.inference.backend_respecialization
    mixle.inference.backends
    mixle.inference.bayesian_network

@@ -11,8 +11,6 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
-   mixle.task._ledger
-   mixle.task._teacher
    mixle.task.acquire
    mixle.task.active
    mixle.task.artifact

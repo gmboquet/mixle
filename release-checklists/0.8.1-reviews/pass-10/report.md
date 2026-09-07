@@ -4,7 +4,7 @@
 - Wheel: `mixle-0.8.1-py3-none-any.whl`, sha256 `3190de824b710780422d898b38cbe154f708747bf668d1c359bf58720fdc333d`, built from tree `6040ea38` (branch `release/0.8.1`).
 - Version verification (run from this work dir, outside any checkout):
   `python -c "import mixle, importlib.metadata as m; print(m.version('mixle'), mixle.__path__[0])"` →
-  `0.8.1 /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/lib/python3.12/site-packages/mixle`
+  `0.8.1 <review-root>/candidate-081/venv/lib/python3.12/site-packages/mixle`
 - Interpreter: candidate venv Python 3.12; optional deps present: torch 2.14.0, sklearn 1.9.0, sympy 1.14.0, transformers 5.16.1, pyspark, dask, mpi4py. Absent: `peft`, `pulp`, `openai`, `anthropic`. No API keys in the environment; nothing in this range needs one.
 - Corpus copies are byte-identical to the source-tree copies (`cmp` over all 57 files).
 - Method: every script executed from `runs/` with `subprocess.run(timeout=1800)`, 3 concurrent, `MPLBACKEND=Agg`, `PYTHONPATH` unset; stdout/stderr per script in `runs/`. Then per-script ground-truth checks (hand arithmetic or scratch scripts in `attacks/`), a seed-offset attack (every literal seed +100/+200/+300, 26 scripts × 3, `attacks/seeds/`), a data-size attack (10 % and a single observation, 25 scripts × 2, `attacks/sizes/`), and a `dump_models`/`load_models` round-trip over the fitted families (`attacks/json_roundtrip.py`).
@@ -124,4 +124,4 @@ Clear refusals elsewhere (`propose requires at least three records`, `solve() ne
 - Worst: P10-F02 — the shipped LDA example survives only because seed 1 happens to converge; 9 of 12 sampling seeds (and the shipped seed at 300 documents) crash `optimize()` with `LDAConvergenceError` on a residual of ~1e-8, a fail-closed guard destroying an otherwise finished fit.
 - Runner-up: P10-F05 — `dump_models` refuses the models of two shipped examples while the serialization manifest registers both as `constructor-validated`.
 - The examples' printed arithmetic (paired tests, dollar accounting, NPV, symbolic scores) all reproduces by hand; the defects are in what the examples conclude (F03, F06, F12) and in how fragile their own paths are to a seed change (F02, F04).
-- All evidence is under `/Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-10/{runs,attacks}`.
+- All evidence is under `<review-root>/reviews-081/pass-10/{runs,attacks}`.

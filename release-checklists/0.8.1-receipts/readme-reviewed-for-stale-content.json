@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "c9c5fbbbbd63afbebcaa00d4bf4471d7464d8b02",
+ "candidate_commit": "cd05412883ab12e7ab1ef10d4231bd610d27393d",
  "command": "line-by-line review recorded in release-checklists/0.8.1-reviews/readme-review.md; every fenced Python block executed verbatim on the candidate venv from /tmp (adversarial pass 08 repeated this independently, see 0.8.1-reviews/pass-08/report.md); links checked against the v0.8.1/ docs-site layout and git ls-files",
  "date": "2026-09-07",
- "evidence_digest": "83af0633c3cad1852761f43f5cefc995d9c85f07655396d7e80d46c533608086",
+ "evidence_digest": "dc613f704a4e90eb840d3a55decf82c24dba6d7079f454d6cc7ffdc50c31f7e8",
  "gate": "README reviewed for stale content",
  "note": "The ~90-families claim is kept as the number manifests/public_claims.json owns (E1-graded, guarded by model_catalog_test); the raw count of exported *Distribution classes is 165 and is not what the README claims. Two README rough edges carried to 0.8.2 (P08-F02 nested-HMM snippet budget, P08-F04 print_iter without out=).",
  "result": "3 stale items repaired (the [all]-extra sentence, the 40-of-41 base-distribution count, the enumeration snippet that raised on a current install -- repaired in the library, autoregressive_reduced_precision_test.py); 10 docs-site links all under v0.8.1/; 7 of 7 README snippets execute; tests badge 15,000+ against 16,538 collected"

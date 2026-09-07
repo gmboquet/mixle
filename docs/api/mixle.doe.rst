@@ -11,7 +11,6 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
-   mixle.doe._contracts
    mixle.doe.active
    mixle.doe.amplify
    mixle.doe.analysis

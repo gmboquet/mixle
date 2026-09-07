@@ -11,7 +11,6 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
-   mixle.experimental.typed_runtime._exact_controls
    mixle.experimental.typed_runtime.acceptance
    mixle.experimental.typed_runtime.benchmark
    mixle.experimental.typed_runtime.boundary

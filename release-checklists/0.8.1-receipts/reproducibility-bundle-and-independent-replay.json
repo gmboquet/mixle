@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "c9c5fbbbbd63afbebcaa00d4bf4471d7464d8b02",
+ "candidate_commit": "cd05412883ab12e7ab1ef10d4231bd610d27393d",
  "command": "python scripts/run_repro_entry.py --bundle release-checklists/0.8.0-repro-bundle.json --entry <each of gallery-univariate, gallery-structured, production-provenance, scaling-backend>, in a clean virtualenv installing only the built 0.8.0 wheel plus numpy==2.4.6 scipy==1.17.1",
  "date": "2026-09-04",
- "evidence_digest": "83af0633c3cad1852761f43f5cefc995d9c85f07655396d7e80d46c533608086",
+ "evidence_digest": "dc613f704a4e90eb840d3a55decf82c24dba6d7079f454d6cc7ffdc50c31f7e8",
  "gate": "Reproducibility bundle and independent replay",
  "note": "All four local-tier entries (gallery-univariate, gallery-structured, production-provenance, scaling-backend) reproduced byte-for-byte from the built 0.8.0 wheel installed into a clean virtualenv with the bundle's pinned arithmetic (numpy 2.4.6 / scipy 1.17.1); every entry's executing_artifact.installed_distribution and .installed_content_verified were true, confirming wheel-based execution rather than a shadowing source tree. gallery-univariate previously printed raw fitted floats that differed by ULPs per CPU/BLAS and reproduced on no platform but the one it was pinned on (macOS arm64 gave 63bd1ee7, Linux arm64 gave 7b1b2378, and the old pinned value was 3e54938b -- three distinct hashes); this was verified independent of the M-step location fix, since the D-0210 candidate dd167be2 produced the same 63bd1ee7 on this machine. examples/gallery_univariate_example.py now rounds every printed float to 6 significant figures (well above ULP noise, well below any real fit difference) and reproduces identically across macOS arm64 and Linux arm64 (9c9292b4). Replay performed by the release owner's agent, extending the D-0210 independent-replay override to this candidate; the mechanical independence (separate build, separate clean install, separate extracted source tree, no shared state) is real, though it is not evidence of independence from the implementation author's own blind spots.",
  "result": "4 of 4 bundle entries reproduced byte-for-byte; installed_content_verified=true for all 4."

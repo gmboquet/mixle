@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "c9c5fbbbbd63afbebcaa00d4bf4471d7464d8b02",
+ "candidate_commit": "cd05412883ab12e7ab1ef10d4231bd610d27393d",
  "command": "cd . && grep -cE \"^- \\*\\*(Supported|Optional \\(CI\\)|Tested, not CI-gated|Hardware-gated)\\*\\*\" docs/backend-support.rst && for L in \"Supported\" \"Optional (CI)\" \"Tested, not CI-gated\" \"Hardware-gated\"; do printf \"%s=%s \" \"$L\" \"$(grep -cxF \"     - $L\" docs/backend-support.rst)\"; done",
  "date": "2026-08-22",
- "evidence_digest": "83af0633c3cad1852761f43f5cefc995d9c85f07655396d7e80d46c533608086",
+ "evidence_digest": "dc613f704a4e90eb840d3a55decf82c24dba6d7079f454d6cc7ffdc50c31f7e8",
  "gate": "Support levels and bounded wording",
  "note": "This is a document-content measurement, not a test: nothing in mixle/tests/ or scripts/ references docs/backend-support.rst (grep found only docs/index.rst), so no automated gate enforces this wording or keeps it in sync with the workflows. I read the file and all four levels are defined with bounded language, and the Tested-not-CI-gated rows do point at the backend-execution-evidence appendix as the evidence text claims. One cosmetic defect worth fixing: the Ray row duplicates the sentence 'Retained local execution evidence: the backend-execution-evidence appendix of release-checklists/0.8.0.md.' twice in a row.",
  "result": "4 support-level definitions defined; 12 matrix rows labelled: Supported=2, Optional (CI)=5, Tested-not-CI-gated=4, Hardware-gated=1"

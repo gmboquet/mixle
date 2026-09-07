@@ -2,9 +2,9 @@
 
 - Focus: latent-structure models — mixtures (MixtureEstimator, DiagonalGaussian, HeterogeneousMixture), HMMs and variants (lookback, segmental, tree, quantized), Markov chains, LDA, Chow-Liu / Bayesian networks, posterior/responsibility APIs.
 - Wheel: `mixle-0.8.1-py3-none-any.whl`, sha256 `3190de824b710780422d898b38cbe154f708747bf668d1c359bf58720fdc333d`, tree `6040ea38` (branch release/0.8.1).
-- Version verification (run from `/Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-02/`):
+- Version verification (run from `<review-root>/reviews-081/pass-02/`):
   `python -c "import mixle, importlib.metadata as m; print(m.version('mixle'), mixle.__path__[0])"` →
-  `0.8.1 /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/lib/python3.12/site-packages/mixle`
+  `0.8.1 <review-root>/candidate-081/venv/lib/python3.12/site-packages/mixle`
 - Interpreter: Python 3.12.12; numpy 2.5.3, scipy 1.18.1; **numba is NOT installed** in the candidate venv (it is only the `[numba]` extra), which is exactly the base-install configuration and matters for F01.
 - Every nbconvert run used `--ExecutePreprocessor.kernel_name=python3` (the venv's own kernelspec); a stale `mixle-notebooks-venv` kernel exists on the machine and was deliberately bypassed. macOS has no `timeout`; a small Python wrapper (`tmo.py`) enforced wall-clock limits.
 
@@ -264,4 +264,4 @@ Both construct `JointMixtureDistribution([...],[...], w1, w2=[0.7,0.2,0.1], taus
 - Worst: **P02-F01** — on a base install (`pip install mixle`, no numba extra) the documented `HiddenMarkovModelDistribution.seq_posterior` returns `None` silently, and returns `None` unconditionally when `terminal_states` is set, although the marginals compute correctly when the gate is bypassed.
 - Close second: **P02-F02** — a fitted `ChowLiuTreeDistribution` cannot be serialized at all.
 - All 10 notebooks and 8 examples in this area execute cleanly on the candidate; no output contradicts the candidate except the deprecated joint-mixture construction in two tutorials.
-- Nothing outside `/Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-02/` was modified.
+- Nothing outside `<review-root>/reviews-081/pass-02/` was modified.

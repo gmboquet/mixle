@@ -11,9 +11,6 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
-   mixle.stats.multivariate._copula_common
-   mixle.stats.multivariate._multinomial_contracts
-   mixle.stats.multivariate._vector_contracts
    mixle.stats.multivariate.categorical_multinomial
    mixle.stats.multivariate.clayton_copula
    mixle.stats.multivariate.composition

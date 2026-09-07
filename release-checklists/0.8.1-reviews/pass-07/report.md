@@ -4,8 +4,8 @@
 - Focus: `notebooks/applications/` (19 of 20; `malware_certificate_embedding.ipynb` skipped per brief), `notebooks/exploration_geoscience/` (11), `notebooks/architecture_studies/` (6)
 - Candidate wheel: `mixle-0.8.1-py3-none-any.whl`, sha256 `3190de824b710780422d898b38cbe154f708747bf668d1c359bf58720fdc333d`, git tree `6040ea38` (branch `release/0.8.1`)
 - Version verification (run from the pass work dir, outside any source checkout):
-  `0.8.1 /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/lib/python3.12/site-packages/mixle`
-- Work dir: `/Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-07/` (executed notebooks in `executed/`, stored-vs-fresh diffs in `diffs/`, attack scripts `atk_*.py`, runner logs in `logs/`)
+  `0.8.1 <review-root>/candidate-081/venv/lib/python3.12/site-packages/mixle`
+- Work dir: `<review-root>/reviews-081/pass-07/` (executed notebooks in `executed/`, stored-vs-fresh diffs in `diffs/`, attack scripts `atk_*.py`, runner logs in `logs/`)
 - Environment note that matters for every timing claim: the candidate venv has **no `numba`** (`mixle[numba]` is an optional extra; `pip show numba` -> not found). Every "numba" number in `architecture_studies/` was therefore produced by mixle's non-numba path. See P07-F11 / P07-F15.
 - Companion packages in the venv: mixle-pde / mixle-physics / mixle-sim at `0.8.0.dev0`; 12 notebooks in scope import `mixle_pde`.
 

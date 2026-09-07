@@ -11,10 +11,6 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
-   mixle.models._forest
-   mixle.models._kernels
-   mixle.models._neural_serial
-   mixle.models._result
    mixle.models.coarsening
    mixle.models.compress
    mixle.models.continual

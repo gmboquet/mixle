@@ -11,8 +11,6 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
-   mixle.stats.rankings._contracts
-   mixle.stats.rankings._permutation_kernels
    mixle.stats.rankings.bradley_terry
    mixle.stats.rankings.ewens
    mixle.stats.rankings.generalized_mallows

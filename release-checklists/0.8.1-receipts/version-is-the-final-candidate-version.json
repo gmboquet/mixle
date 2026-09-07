@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "c9c5fbbbbd63afbebcaa00d4bf4471d7464d8b02",
+ "candidate_commit": "cd05412883ab12e7ab1ef10d4231bd610d27393d",
  "command": "cd . && /Users/grantboquet/mixle/.venv312/bin/python3 -m build --no-isolation --wheel --sdist --outdir <scratch>/dist . && <fresh venv>/bin/pip install --no-deps <scratch>/dist/mixle-0.8.1-py3-none-any.whl && cd /tmp && <fresh venv>/bin/python -c \"import importlib.metadata as m; print(m.version('mixle'))\" && curl -s https://test.pypi.org/pypi/mixle/json | python3 -c \"import json,sys; print(sorted(json.load(sys.stdin)['releases']))\" && curl -s https://pypi.org/pypi/mixle/json | python3 -c \"import json,sys; print(sorted(json.load(sys.stdin)['releases']))\"",
  "date": "2026-09-07",
- "evidence_digest": "83af0633c3cad1852761f43f5cefc995d9c85f07655396d7e80d46c533608086",
+ "evidence_digest": "dc613f704a4e90eb840d3a55decf82c24dba6d7079f454d6cc7ffdc50c31f7e8",
  "gate": "Version is the final candidate version",
  "note": "Built with the pinned closure of 0.8.1-build-requirements.txt (setuptools 83.0.0, wheel 0.47.0, build 1.5.0) on the candidate tree before the receipts were written; the final candidate artifacts come from CI prepare on the tagged commit and are re-verified there. The index queries are live JSON-API reads on the date recorded.",
  "result": "pyproject.toml version = 0.8.1; build exit 0 producing mixle-0.8.1-py3-none-any.whl (5577555 B) and mixle-0.8.1.tar.gz; the installed wheel reports 0.8.1 from importlib.metadata; TestPyPI releases = ['0.8.0'], PyPI releases = ['0.6.0', '0.6.1', '0.6.2', '0.7.0'] on 2026-09-07 (0.8.1 absent from both)"
