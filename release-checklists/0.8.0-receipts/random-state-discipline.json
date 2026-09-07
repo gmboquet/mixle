@@ -3,7 +3,7 @@
   "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
   "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/fit_seed_test.py mixle/tests/sampler_seed_test.py -p no:randomly -q -m \"\" -n 0",
   "date": "2026-08-22",
-  "evidence_digest": "d449b1be05e007f239dd381a11dd23aed1b4cdc73f34defc142cabef78106afc",
+  "evidence_digest": "3f88d3e27754cb078fd2b96c9ac2e048e3f2f3a6f006e6bf452b2d7a3d613fc3",
   "gate": "Random-state discipline",
   "note": "Both named files pass. Scope limit worth stating: this evidences determinism-under-seed and per-test global-state restoration as those two files assert it; it is not a cross-suite proof that no other test leaks global RNG state -- that would be the Flake/order campaign's job, which has not run (see that gate).",
   "result": "7 passed, 522 subtests passed in 2.78s (exit 0)"

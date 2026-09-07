@@ -58,10 +58,14 @@ def parse_sums(text: str) -> dict[str, str]:
 
 def fetch_testpypi_files(version: str, project: str = "mixle") -> dict[str, str]:
     """``{filename: sha256}`` of what TestPyPI serves for ``project==version`` (``{}`` if absent)."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", project) or not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*(?:[a-z0-9.]*)", version):
+        raise Refusal(f"refusing to build a TestPyPI URL from {project!r} / {version!r}")
     url = f"https://test.pypi.org/pypi/{project}/{version}/json"
     request = urllib.request.Request(url, headers={"User-Agent": "mixle-release-gate"})
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310 - fixed https host
+        # the scheme and host are fixed above and both path segments are validated; no caller
+        # input can redirect this to file:// or another scheme (bandit B310)
+        with urllib.request.urlopen(request, timeout=60) as response:  # nosec B310
             payload = json.load(response)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
