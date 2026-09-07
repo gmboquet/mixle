@@ -4,17 +4,17 @@ Document ID: CORE-DOC-RELEASES-001
 Version scope: 0.8.x development
 Owner: PRJ-CORE
 
-Core uses semantic versioning. Version 0.8.0 is the current development target
+Core uses semantic versioning. Version 0.8.1 is the current release target (the 0.8.0 candidate tree; 0.8.0 was never published, decision D-0212)
 and remains unreleased until all applicable gates have accepted evidence.
 
 ## Pull requests
 
-Every release-bound pull request targets release/0.8.0, carries milestone
-0.8.0, and declares:
+Every release-bound pull request targets release/0.8.1, carries milestone
+0.8.1, and declares:
 
 ~~~text
-Target-Release: REL-PRJ-CORE-0.8.0
-Release-Milestone: 0.8.0
+Target-Release: REL-PRJ-CORE-0.8.1
+Release-Milestone: 0.8.1
 Release-Scope: included
 Work-Id: WORK-YYYYMMDD-NNNN
 Change-Id: CHG-YYYYMMDD-NNNN

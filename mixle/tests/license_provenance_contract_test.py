@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-RECORD = ROOT / "release-checklists" / "0.8.0-license-provenance.json"
+RECORD = ROOT / "release-checklists" / "0.8.1-license-provenance.json"
 
 
 def _load():

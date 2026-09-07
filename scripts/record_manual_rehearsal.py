@@ -9,7 +9,7 @@ candidate's bytes -- the one situation this record is for; see ``verify_rehearsa
 The record is then uploaded to the draft release (``--upload``), where the promote phase fetches
 it by name and re-verifies it.
 
-    python scripts/record_manual_rehearsal.py --tag v0.8.0 --prepare-run 34042540432 --upload
+    python scripts/record_manual_rehearsal.py --tag v0.8.1 --prepare-run <prepare-run-id> --upload
 """
 
 from __future__ import annotations

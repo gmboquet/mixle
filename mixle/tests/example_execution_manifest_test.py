@@ -11,7 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "build_example_execution_manifest.py"
-BUNDLE = ROOT / "release-checklists" / "0.8.0-repro-bundle.json"
+BUNDLE = ROOT / "release-checklists" / "0.8.1-repro-bundle.json"
 
 
 def _module():
@@ -33,8 +33,8 @@ class ExampleExecutionManifestTest(unittest.TestCase):
                 {
                     "artifact": "mixle.release_candidate/v1",
                     "commit": "a" * 40,
-                    "tag": "v0.8.0",
-                    "version": "0.8.0",
+                    "tag": "v0.8.1",
+                    "version": "0.8.1",
                     "workflow_run": "123",
                 }
             ),
@@ -44,7 +44,7 @@ class ExampleExecutionManifestTest(unittest.TestCase):
         self.wheel.write_text(
             json.dumps(
                 {
-                    "filename": "mixle-0.8.0-py3-none-any.whl",
+                    "filename": "mixle-0.8.1-py3-none-any.whl",
                     "sha256": "b" * 64,
                     "size_bytes": 100,
                 }
@@ -102,7 +102,7 @@ class ExampleExecutionManifestTest(unittest.TestCase):
             return {
                 "attested": True,
                 "record_sha256": digest,
-                "signer_workflow": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.0",
+                "signer_workflow": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.1",
                 "source_digest": commit,
                 "run_invocation_uri": signed[digest],
                 "verifier": dict(self.verifier),
@@ -221,7 +221,7 @@ class ExampleExecutionManifestTest(unittest.TestCase):
                 "checks": len(self.bundle["candidate_binding"]["required_checks"]),
                 "attested": True,
                 "attestation": {
-                    "signer_workflow": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.0",
+                    "signer_workflow": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.1",
                     "source_digest": "a" * 40,
                     "run_invocation_uri": "https://github.com/gmboquet/mixle/actions/runs/1/attempts/1",
                     "run_id": "1",
@@ -229,7 +229,7 @@ class ExampleExecutionManifestTest(unittest.TestCase):
                 },
                 "live_regeneration": {
                     "sha256": self.live_evidence_digest,
-                    "signer_workflow": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.0",
+                    "signer_workflow": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.1",
                     "source_digest": "a" * 40,
                     "run_invocation_uri": "https://github.com/gmboquet/mixle/actions/runs/2/attempts/1",
                     "run_id": "2",

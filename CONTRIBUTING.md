@@ -11,7 +11,7 @@ pip install -e ".[test,lint,docs]"  # add other extras (torch, numba, spark, ...
 git config core.hooksPath .githooks # auto-format + lint-fix staged files before every commit
 ```
 
-Python 3.11 or 3.12 is required; those are the complete 0.8.0 release matrix.
+Python 3.11 or 3.12 is required; those are the complete 0.8.1 release matrix.
 
 <!-- BEGIN GENERATED DEVELOPMENT POLICY -->
 ## Authoritative development policy
@@ -19,7 +19,7 @@ Python 3.11 or 3.12 is required; those are the complete 0.8.0 release matrix.
 This summary is generated from `manifests/development_policy.json`; edit the manifest and rerun
 `python scripts/render_contributing_policy.py` rather than changing this block by hand.
 
-Current work targets `release/0.8.0` and milestone `0.8.0`. Automated
+Current work targets `release/0.8.1` and milestone `0.8.1`. Automated
 dependency updates target the same branch. Retarget both the manifest and Dependabot deliberately
 when the release line changes.
 
@@ -59,7 +59,7 @@ security or data-corruption repairs may fail closed immediately, but must be doc
 - Include a test plan: what you ran, what passed, what you narrowed the test selection to and why.
 - Resolve the active target from the authoritative policy manifest; do not infer it from the default
   branch.
-- Update `CHANGELOG.md`'s `[0.8.0] — Unreleased` section for any user-visible change (new public API, fixed
+- Update `CHANGELOG.md`'s current release section for any user-visible change (new public API, fixed
   bug, behavior change). Purely internal refactors with no visible effect don't need an entry.
 - Required hosted checks must be green before merge. Optional-backend and security evidence is required
   when the changed surface or release gate makes it applicable.

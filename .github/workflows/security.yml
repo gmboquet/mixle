@@ -7,7 +7,7 @@ name: Security
 
 on:
   push:
-    branches: [main, release/0.8.0]
+    branches: [main, release/0.8.1]
   pull_request:
     paths:
       - "pyproject.toml"
@@ -60,7 +60,7 @@ jobs:
       - name: Build and install the exact wheel in an isolated artifact environment
         run: |
           python -m pip install --upgrade "pip==26.1.2"
-          python -m pip install -r release-checklists/0.8.0-build-requirements.txt
+          python -m pip install -r release-checklists/0.8.1-build-requirements.txt
           python -m build --no-isolation --wheel --outdir dist
           python -m venv "$RUNNER_TEMP/artifact-env"
           "$RUNNER_TEMP/artifact-env/bin/python" -m pip install --upgrade pip
@@ -125,7 +125,7 @@ jobs:
       - name: Build and install exact wheel with the complete runtime-feature union
         run: |
           python -m pip install --upgrade "pip==26.1.2"
-          python -m pip install -r release-checklists/0.8.0-build-requirements.txt
+          python -m pip install -r release-checklists/0.8.1-build-requirements.txt
           python -m build --no-isolation --wheel --outdir dist
           python -m venv "$RUNNER_TEMP/artifact-all-env"
           "$RUNNER_TEMP/artifact-all-env/bin/python" -m pip install --upgrade pip

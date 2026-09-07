@@ -1,0 +1,245 @@
+{
+  "acceptance": "Every entry is local and self-contained: each passes exact output validation offline, and retained candidate/check/wheel records bind the bundle to publication.",
+  "artifact": "mixle.reproduction_bundle/v2",
+  "candidate_binding": {
+    "candidate_record_producer": "scripts/release_candidate_record.py",
+    "check_evidence_attestation": {
+      "bundle_record": "metadata/release-check-evidence.sigstore.json",
+      "check_runs_record": "metadata/check-runs.json",
+      "predicate_type": "https://github.com/gmboquet/mixle/release-check-evidence/v1",
+      "signer_workflows": [
+        ".github/workflows/publish.yml",
+        ".github/workflows/tests.yml"
+      ],
+      "verifier": "gh attestation verify --bundle --repo --cert-identity-regex --cert-oidc-issuer --source-digest --predicate-type --deny-self-hosted-runners"
+    },
+    "check_evidence_generator": "scripts/verify_required_checks.py",
+    "policy": "exact-publish-workflow-candidate",
+    "repository": "gmboquet/mixle",
+    "required_checks": [
+      "smoke / collection-light",
+      "release decisions / accepted review",
+      "lint (ruff enforced, mypy advisory)",
+      "core / py3.11 / shard 0",
+      "core / py3.11 / shard 1",
+      "core / py3.11 / shard 2",
+      "core / py3.11 / shard 3",
+      "core / py3.12 / shard 0",
+      "core / py3.12 / shard 1",
+      "core / py3.12 / shard 2",
+      "core / py3.12 / shard 3",
+      "core / macOS arm64 / py3.11",
+      "core / macOS arm64 / py3.12",
+      "core / minimum versions",
+      "full / py3.12 / shard 0",
+      "full / py3.12 / shard 1",
+      "full / py3.12 / shard 2",
+      "full / py3.12 / shard 3",
+      "full / coverage floor",
+      "clean-wheel install + import sweep",
+      "optional extras / py3.12 / shard 0",
+      "optional extras / py3.12 / shard 1",
+      "numerical / repeated-seed stress",
+      "hardware / MPI and torchrun",
+      "extras matrix / exact candidate",
+      "Revision check (single-revision, warnings as errors)",
+      "gitleaks (full history)",
+      "pip-audit (base install)",
+      "pip-audit (all runtime features)",
+      "bandit (source security)"
+    ],
+    "required_checks_policy": ".github/release-required-checks.txt",
+    "required_records": [
+      "metadata/release-candidate.json",
+      "metadata/release-check-evidence.json",
+      "metadata/release-check-evidence.sigstore.json",
+      "metadata/check-runs.json",
+      "metadata/SHA256SUMS",
+      "metadata/mixle-0.8.1-py3-none-any.whl.json",
+      "metadata/reproduction-*.json"
+    ],
+    "rule": "The final bundle is incomplete unless these retained records bind its source commit, approved checks, wheel SHA-256, and local entry receipts to the signed v0.8.1 tag."
+  },
+  "closure": [
+    {
+      "path": "pyproject.toml",
+      "role": "bundle-closure",
+      "sha256": "71e6f87616cfb9876cf99fcf821fcfd924aeb1c32cd84f2f48e2ee8daf5f66db"
+    },
+    {
+      "path": "release-checklists/0.8.1-repro-environment.json",
+      "role": "bundle-closure",
+      "sha256": "bc1ea3d27928da04f4ec5479b777ee9b34443b48c1f6c12b22baf26c38b6953e"
+    },
+    {
+      "path": "release-checklists/0.8.1-repro-requirements.txt",
+      "role": "bundle-closure",
+      "sha256": "a6a43c1d3e2b88285c33c2ad238e6942dcba45a4b419efa03749efc7f2aa3979"
+    },
+    {
+      "path": "scripts/build_repro_bundle.py",
+      "role": "bundle-closure",
+      "sha256": "94dd714e1af69b5657b11e3ff2e2406911e35670fc5e2451bf4a6b803b5a5ded"
+    },
+    {
+      "path": "scripts/run_repro_entry.py",
+      "role": "bundle-closure",
+      "sha256": "4f6d5670559abbf3890bb823aa1aba0b53298e8c14d75cc866f59a70b97a122f"
+    },
+    {
+      "path": ".github/release-required-checks.txt",
+      "role": "bundle-closure",
+      "sha256": "e257a7db23dfa1d608f6282989089ced96c16035e8ec8dc315a552b4c0a1f1bd"
+    },
+    {
+      "path": "scripts/verify_required_checks.py",
+      "role": "bundle-closure",
+      "sha256": "14ae5f67225ce5c706ca87d259228a35944e8f5e17b3d5a2e2b72d6805cd2367"
+    },
+    {
+      "path": "scripts/release_candidate_record.py",
+      "role": "bundle-closure",
+      "sha256": "2d59506c7bcbe487eb786e85b523ec5b841ce7f923421e7aad0dffc8702e3f33"
+    }
+  ],
+  "code_license": {
+    "files": [
+      "LICENSE",
+      "NOTICE"
+    ],
+    "spdx": "MIT"
+  },
+  "entries": [
+    {
+      "argv": [
+        "examples/gallery_univariate_example.py"
+      ],
+      "configuration": {
+        "dataset": "synthetic",
+        "seed": "declared in script"
+      },
+      "expected": {
+        "contains": [
+          "fit : GaussianDistribution(1.5486, 4.02041",
+          "fit : PoissonDistribution(4.027",
+          "fit : BernoulliDistribution(0.7004"
+        ],
+        "format": "text",
+        "stdout_sha256": "9c9292b458b3a5120c2e93373151c9ed6f43dae89904802a3fa8f6082bc7c005"
+      },
+      "id": "gallery-univariate",
+      "inputs": [
+        {
+          "path": "examples/gallery_univariate_example.py",
+          "role": "executable",
+          "sha256": "b9afa51bd396c9ad19a4f1f57fbce06988c9b6752c67c0b85dca39d24663c856"
+        }
+      ],
+      "kind": "self-contained",
+      "script": "examples/gallery_univariate_example.py",
+      "tier": "local",
+      "timeout_seconds": 30
+    },
+    {
+      "argv": [
+        "examples/gallery_structured_example.py"
+      ],
+      "configuration": {
+        "dataset": "synthetic",
+        "seed": "declared in script"
+      },
+      "expected": {
+        "contains": [
+          "learned parents: [None, 0, 0]",
+          "held-out mean log-density: -17.965",
+          "held-out mean log-density: -19.791"
+        ],
+        "format": "text",
+        "stdout_sha256": "a2d89983e4df1707aa85327a8cec0f33f060cc9c6a325402a1271988095d2858"
+      },
+      "id": "gallery-structured",
+      "inputs": [
+        {
+          "path": "examples/gallery_structured_example.py",
+          "role": "executable",
+          "sha256": "199528c250710db17ccbb0e6f8b5c2629fe9da41f67959830af763eb351c1e28"
+        }
+      ],
+      "kind": "self-contained",
+      "script": "examples/gallery_structured_example.py",
+      "tier": "local",
+      "timeout_seconds": 30
+    },
+    {
+      "argv": [
+        "examples/production_example.py"
+      ],
+      "configuration": {
+        "dataset": "synthetic",
+        "seed": "declared in script"
+      },
+      "expected": {
+        "contains": [
+          "# lineage verified: True",
+          "drift on shifted batch: True",
+          "chain intact: True"
+        ],
+        "format": "text",
+        "stdout_sha256": "aa6e4d987ca9245e44c0730d68103479d62e4ad2cce7c0a87559e572d03faa9b",
+        "volatile": [
+          {
+            "pattern": "git / mixle  : (?:[0-9a-f]{7,40}|unknown) / ",
+            "placeholder": "git / mixle  : <commit> / "
+          },
+          {
+            "pattern": "model hash  : [0-9a-f]{16} \\.\\.\\.",
+            "placeholder": "model hash  : <fit-dependent> ..."
+          }
+        ]
+      },
+      "id": "production-provenance",
+      "inputs": [
+        {
+          "path": "examples/production_example.py",
+          "role": "executable",
+          "sha256": "f868e10ff845e43fd782b30678c216c066894a38e8e1a35be16b8575b385aaa5"
+        }
+      ],
+      "kind": "workflow",
+      "script": "examples/production_example.py",
+      "tier": "local",
+      "timeout_seconds": 30
+    },
+    {
+      "argv": [
+        "examples/scaling_example.py"
+      ],
+      "configuration": {
+        "dataset": "synthetic",
+        "workers": 4
+      },
+      "expected": {
+        "contains": [
+          "backend='local'   : mu=2.00  P(a)=0.60  lam=4.01",
+          "backend='mp' (x4) : mu=2.00  P(a)=0.60  lam=4.01"
+        ],
+        "format": "text",
+        "stdout_sha256": "5fd8dd73c1c9062439a5a47b0c4266433c1992718b0c6c0a961330319645fe1a"
+      },
+      "id": "scaling-backend",
+      "inputs": [
+        {
+          "path": "examples/scaling_example.py",
+          "role": "executable",
+          "sha256": "eea4361e2676a12493cfb4758d910f30cde401f684214b32532a61be3d87549e"
+        }
+      ],
+      "kind": "backend",
+      "script": "examples/scaling_example.py",
+      "tier": "local",
+      "timeout_seconds": 30
+    }
+  ],
+  "environment": "release-checklists/0.8.1-repro-environment.json",
+  "release": "0.8.1"
+}

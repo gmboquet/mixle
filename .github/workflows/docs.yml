@@ -16,7 +16,7 @@ name: Docs
 
 on:
   push:
-    branches: [main, release/0.8.0]
+    branches: [main, release/0.8.1]
   release:
     types: [published]
   pull_request:
@@ -37,7 +37,7 @@ permissions:
 # workflow-level concurrency gates the run before any job-level group applies. Every release-branch
 # docs check therefore serialized through the single global queue, where a newly queued run cancels
 # the previously queued one; that is what produced the recurring "Docs: cancelled" conclusions on
-# release/0.8.0, misread for days as runner flakiness. The one-Pages-deployment-at-a-time
+# release/0.8.1, misread for days as runner flakiness. The one-Pages-deployment-at-a-time
 # serialization the group was actually for now lives on the deploy job itself, which is the only
 # thing that needs it. cancel-in-progress supersedes stale check runs on PR/release refs but never
 # cancels a run that can reach the deploy job.
@@ -131,11 +131,11 @@ jobs:
     name: Revision check (single-revision, warnings as errors)
     runs-on: ubuntu-latest
     # A clean run took 14m36s on 2026-09-02 (33643571722), already 24s under the old 15m budget; three
-    # straight release/0.8.0 attempts on 2026-09-03 (33705519758) were then killed at 15m15s-15m17s with
+    # straight release/0.8.1 attempts on 2026-09-03 (33705519758) were then killed at 15m15s-15m17s with
     # "The operation was canceled" -- a hard timeout, not the concurrency cancellation or runner shutdown
     # this looked like at first glance. 25m keeps real headroom without approaching the build job's 30m.
     timeout-minutes: 25
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/release/0.8.0'
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/release/0.8.1'
     # Independent group so PR checks never queue behind a Pages deploy or behind each other; only
     # the latest push on a given PR ref needs to run.
     concurrency:

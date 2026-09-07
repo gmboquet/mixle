@@ -4,7 +4,7 @@ on:
   # Main and the active release branch run exact-tip CI. Pull-request branches are covered by the
   # pull_request event, so ordinary work branches do not trigger duplicate runs.
   push:
-    branches: [main, release/0.8.0]
+    branches: [main, release/0.8.1]
   pull_request:
   workflow_dispatch:
   schedule:
@@ -21,7 +21,7 @@ permissions:
 jobs:
   decision-reviews:
     name: release decisions / accepted review
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/release/0.8.0')
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/release/0.8.1')
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
@@ -32,7 +32,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Block release sign-off on pending decision reviews
-        run: python scripts/verify_decision_reviews.py release-checklists/0.8.0-decisions.md
+        run: |
+          python scripts/verify_decision_reviews.py release-checklists/0.8.0-decisions.md
+          python scripts/verify_decision_reviews.py release-checklists/0.8.1-decisions.md
 
   smoke:
     name: smoke / collection-light
@@ -334,7 +336,7 @@ jobs:
       - name: Build the wheel and source distribution
         run: |
           python -m pip install --upgrade "pip==26.1.2"
-          python -m pip install -r release-checklists/0.8.0-build-requirements.txt
+          python -m pip install -r release-checklists/0.8.1-build-requirements.txt
           python -m build --no-isolation --outdir dist
       - name: Install each artifact into its own clean base environment
         run: |

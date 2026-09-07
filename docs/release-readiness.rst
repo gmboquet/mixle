@@ -8,7 +8,7 @@ evidence must exist before the branch can be treated as a releasable artifact.
 Supported Environment
 ---------------------
 
-The 0.8.0 package metadata declares Python 3.11 and 3.12
+The 0.8.1 package metadata declares Python 3.11 and 3.12
 (``>=3.11,<3.13``), exactly matching the hosted interpreter matrix. The
 effective release matrix is the intersection of that declaration and the
 optional dependencies used by a given surface:
@@ -140,7 +140,7 @@ Use explicit readiness labels in release evidence:
 Avoid ambiguous status like "looks good" or "probably fine"; it is not useful
 when a release has to be audited later.
 
-A specific release's checklist (for example ``release-checklists/0.8.0.md`` in
+A specific release's checklist (for example ``release-checklists/0.8.1.md`` in
 the repository root, not under ``docs/``) is the concrete, per-release
 instantiation of this page's methodology and may define its own status
 vocabulary tailored to that release's gates -- e.g. distinguishing a gate that

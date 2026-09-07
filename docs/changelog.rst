@@ -10,6 +10,15 @@ summarizes user-visible documentation, public API coverage, validation
 expectations, and migration guidance. Use :doc:`release-notes` for the detailed
 current-release narrative and the git history for exact implementation commits.
 
+0.8.1
+-----
+
+The first published release of the 0.8 line: the 0.8.0 candidate tree plus the post-candidate
+fixes recorded in ``CHANGELOG.md`` (the bounded log-series series, the independent-tester
+findings, the shape-clamp disclosure, the README links, and the rehearsal fixes). 0.8.0 was never
+published; see decision D-0212 in ``release-checklists/0.8.1-decisions.md``. Migration guidance is
+unchanged from 0.8.0: see :doc:`migrations/0.8.1`.
+
 0.8.0
 -----
 

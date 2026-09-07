@@ -27,7 +27,7 @@ def test_release_documents_have_made_the_final_transition() -> None:
     the guard now points the other way and catches a regression back to draft wording, which would
     make publish.yml's own `check_release_document_state.py` gate fail at verify-candidate time.
     """
-    assert _module().validate(ROOT, "0.8.0") == []
+    assert _module().validate(ROOT, "0.8.1") == []
 
 
 def test_released_document_state_passes(tmp_path: Path) -> None:

@@ -1,4 +1,4 @@
-# Exact check-run names required on the release/0.8.0 tip before publication.
+# Exact check-run names required on the release/0.8.1 tip before publication.
 smoke / collection-light
 release decisions / accepted review
 lint (ruff enforced, mypy advisory)

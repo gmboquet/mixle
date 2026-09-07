@@ -41,14 +41,14 @@ def _make_candidate(root: Path) -> tuple[str, str, str, str]:
     dist = root / "dist"
     dist.mkdir(parents=True)
 
-    whl = dist / "mixle-0.8.0-py3-none-any.whl"
+    whl = dist / "mixle-0.8.1-py3-none-any.whl"
     with zipfile.ZipFile(whl, "w") as archive:
         archive.writestr("mixle/_build_provenance.json", provenance)
 
-    sdist = dist / "mixle-0.8.0.tar.gz"
+    sdist = dist / "mixle-0.8.1.tar.gz"
     with tarfile.open(sdist, "w:gz") as archive:
         payload = provenance.encode("utf-8")
-        info = tarfile.TarInfo("mixle-0.8.0/mixle/_build_provenance.json")
+        info = tarfile.TarInfo("mixle-0.8.1/mixle/_build_provenance.json")
         info.size = len(payload)
         import io
 
@@ -61,7 +61,7 @@ def _make_candidate(root: Path) -> tuple[str, str, str, str]:
 
     brief = (
         "# mixle candidate\n\n"
-        f"- Source commit: `{commit}` (branch release/0.8.0, exact tip)\n"
+        f"- Source commit: `{commit}` (branch release/0.8.1, exact tip)\n"
         f"- Source tree: `{tree}`\n"
         f"- `{whl.name}` — SHA-256 `{whl_sha}`\n"
         f"- `{sdist.name}` — SHA-256 `{sdist_sha}`\n\n"
@@ -78,7 +78,7 @@ def _make_candidate(root: Path) -> tuple[str, str, str, str]:
 
     (root / "release-candidate-attestation.json").write_text(
         '{"artifact":"mixle.release_candidate_attestation/v1","candidate_commit":"%s",'
-        '"candidate_tree":"%s","version":"0.8.0","wheel_sha256":"%s","sdist_sha256":"%s",'
+        '"candidate_tree":"%s","version":"0.8.1","wheel_sha256":"%s","sdist_sha256":"%s",'
         '"owner_declaration":"PENDING","declared_by":null,"declared_at":null}' % (commit, tree, whl_sha, sdist_sha)
     )
     return commit, tree, whl_sha, sdist_sha

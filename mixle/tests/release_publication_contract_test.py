@@ -240,7 +240,7 @@ def test_publish_workflow_has_fail_closed_candidate_binding():
         'test "$TAG" = "v$VERSION"',
         'test "$(git cat-file -t "refs/tags/$TAG")" = "tag"',
         ".verification.verified",
-        'gh api "repos/$REPOSITORY/branches/release/0.8.0" --jq .commit.sha',
+        'gh api "repos/$REPOSITORY/branches/release/0.8.1" --jq .commit.sha',
         'test "$SHA" = "$RELEASE_SHA"',
         'test "$EVENT_SHA" = "$SHA"',
         "verify_required_checks.py",
@@ -421,7 +421,7 @@ def test_candidate_record_producer_writes_what_the_receipt_resolver_requires():
     runner = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(runner)
-    bundle = json.loads((_ROOT / "release-checklists" / "0.8.0-repro-bundle.json").read_text(encoding="utf-8"))
+    bundle = json.loads((_ROOT / "release-checklists" / "0.8.1-repro-bundle.json").read_text(encoding="utf-8"))
 
     tree = "7a" * 20
     with tempfile.TemporaryDirectory() as directory:
@@ -435,9 +435,9 @@ def test_candidate_record_producer_writes_what_the_receipt_resolver_requires():
                     "--tree",
                     tree,
                     "--tag",
-                    "v0.8.0",
+                    "v0.8.1",
                     "--version",
-                    "0.8.0",
+                    "0.8.1",
                     "--workflow-run",
                     "123",
                     "--out",
@@ -451,8 +451,8 @@ def test_candidate_record_producer_writes_what_the_receipt_resolver_requires():
             "artifact": "mixle.release_candidate/v1",
             "commit": _SHA,
             "tree": tree,
-            "tag": "v0.8.0",
-            "version": "0.8.0",
+            "tag": "v0.8.1",
+            "version": "0.8.1",
             "workflow_run": "123",
         }
         # the resolver's candidate-identity checks pass on the producer's record and fail on
@@ -470,10 +470,10 @@ def test_candidate_record_producer_writes_what_the_receipt_resolver_requires():
     for bad in (
         {"commit": _SHA[:39], "tree": tree},
         {"commit": _SHA, "tree": tree.upper()},
-        {"commit": _SHA, "tree": tree, "tag": "0.8.0"},
+        {"commit": _SHA, "tree": tree, "tag": "0.8.1"},
         {"commit": _SHA, "tree": tree, "workflow_run": " "},
     ):
-        arguments = {"commit": _SHA, "tree": tree, "tag": "v0.8.0", "version": "0.8.0", "workflow_run": "123"}
+        arguments = {"commit": _SHA, "tree": tree, "tag": "v0.8.1", "version": "0.8.1", "workflow_run": "123"}
         arguments.update(bad)
         with pytest.raises(ValueError):
             producer.release_candidate_record(**arguments)

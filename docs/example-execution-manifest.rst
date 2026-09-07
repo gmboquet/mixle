@@ -13,7 +13,7 @@ The dated narrative below is historical engineering context, **not** 0.8.0
 release evidence. The authoritative record is the generated
 ``example-execution-manifest.json`` attached to the GitHub release. Publication
 builds it only after all entries in
-``release-checklists/0.8.0-repro-bundle.json`` have passing receipts. It binds
+``release-checklists/0.8.1-repro-bundle.json`` have passing receipts. It binds
 every required example's exact command, dependency tier, duration, output
 validation contract, and output/receipt digests to the final 40-character
 candidate commit and exact wheel SHA-256. Missing, failed, duplicated, stale,
@@ -359,7 +359,7 @@ the process fails if that contract is absent or false. Publication's
 ``mixle.example_execution_manifest/v2`` therefore records
 ``execution_status``, ``claim_status``, and ``acceptance_contract`` separately.
 The exact-output and JSON assertions in
-``release-checklists/0.8.0-repro-bundle.json`` are the release claim oracles.
+``release-checklists/0.8.1-repro-bundle.json`` are the release claim oracles.
 Inventory entries below that merely say “Execute” are runnability targets, not
 claim evidence.
 

@@ -29,7 +29,7 @@ class BoundSbomTest(unittest.TestCase):
     def test_sbom_requires_mixle_and_exact_artifact_identity(self):
         binder = _load("bind_sbom.py")
         raw = {"bomFormat": "CycloneDX", "components": [{"name": "mixle"}, {"name": "numpy"}]}
-        wheel = {"filename": "mixle-0.8.0-py3-none-any.whl", "sha256": "a" * 64, "size_bytes": 10}
+        wheel = {"filename": "mixle-0.8.1-py3-none-any.whl", "sha256": "a" * 64, "size_bytes": 10}
         result = binder.bind(raw, wheel, "b" * 40)
         self.assertEqual(result["inventory_scope"], "isolated-wheel-environment:base")
         self.assertEqual(result["profile"], "base")
@@ -53,7 +53,7 @@ class BoundSbomTest(unittest.TestCase):
         derived one are not the same evidence.
         """
         binder = _load("bind_sbom.py")
-        wheel = {"filename": "mixle-0.8.0-py3-none-any.whl", "sha256": "a" * 64, "size_bytes": 10, "version": "0.8.0"}
+        wheel = {"filename": "mixle-0.8.1-py3-none-any.whl", "sha256": "a" * 64, "size_bytes": 10, "version": "0.8.1"}
         raw = {"bomFormat": "CycloneDX", "components": [{"name": "numpy", "version": "2.4.6"}]}
         result = binder.bind(raw, wheel, "b" * 40)
 
@@ -70,7 +70,7 @@ class BoundSbomTest(unittest.TestCase):
 
     def test_a_malformed_inventory_is_still_refused(self):
         binder = _load("bind_sbom.py")
-        wheel = {"filename": "mixle-0.8.0-py3-none-any.whl", "sha256": "a" * 64, "size_bytes": 10}
+        wheel = {"filename": "mixle-0.8.1-py3-none-any.whl", "sha256": "a" * 64, "size_bytes": 10}
         with self.assertRaises(ValueError):
             binder.bind({"bomFormat": "not-cyclonedx", "components": []}, wheel, "b" * 40)
         with self.assertRaises(ValueError):
@@ -82,8 +82,8 @@ class PublishedArtifactIdentityTest(unittest.TestCase):
         verifier = _load("verify_published_artifacts.py")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            wheel = root / "mixle-0.8.0-py3-none-any.whl"
-            sdist = root / "mixle-0.8.0.tar.gz"
+            wheel = root / "mixle-0.8.1-py3-none-any.whl"
+            sdist = root / "mixle-0.8.1.tar.gz"
             wheel.write_bytes(b"wheel")
             sdist.write_bytes(b"sdist")
             sums = root.parent / f"{root.name}-SHA256SUMS"
@@ -115,7 +115,7 @@ class EnvironmentReceiptTest(unittest.TestCase):
                             "artifact": "mixle.environment_receipt/v1",
                             "profile": profile,
                             "candidate_commit": "a" * 40,
-                            "resolved_dependencies": ["mixle==0.8.0"],
+                            "resolved_dependencies": ["mixle==0.8.1"],
                             "passed": True,
                         }
                     ),
@@ -159,7 +159,7 @@ class DecisionReviewTest(unittest.TestCase):
         the row itself rather than to the file: a caveat that survives only because some other row
         happens to repeat the phrase is not a caveat on this gate.
         """
-        checklist = (ROOT / "release-checklists" / "0.8.0.md").read_text(encoding="utf-8")
+        checklist = (ROOT / "release-checklists" / "0.8.1.md").read_text(encoding="utf-8")
         required = (ROOT / ".github" / "release-required-checks.txt").read_text(encoding="utf-8")
         self.assertIn("Decision review acceptance | `DONE`", checklist)
         row = next(line for line in checklist.splitlines() if line.startswith("| Decision review acceptance |"))
@@ -215,7 +215,7 @@ class HostedWorkflowContractTest(unittest.TestCase):
         self.assertEqual(tests.count("scripts/import_sweep.py"), 2)
         self.assertIn("--profile full", tests)
         self.assertIn("serialization_audit_contracts_test.py", tests)
-        self.assertIn("0.8.0-build-requirements.txt", publish)
+        self.assertIn("0.8.1-build-requirements.txt", publish)
         self.assertIn("build_environment_receipt.py", publish)
         self.assertGreaterEqual(publish.count("--no-isolation"), 2)
         self.assertIn("REQUESTED_VERSION: ${{ inputs.version }}", post)

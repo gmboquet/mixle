@@ -20,7 +20,7 @@ on:
         type: choice
         options: [prepare, testpypi, promote]
       tag:
-        description: "Signed annotated candidate tag (for example v0.8.0)"
+        description: "Signed annotated candidate tag (for example v0.8.1)"
         required: true
         type: string
       prepare_run_id:
@@ -92,7 +92,7 @@ jobs:
           test "$SHA" = "$(git rev-list -n 1 "refs/tags/$TAG")"
           test "$EVENT_SHA" = "$SHA"
 
-          RELEASE_SHA="$(gh api "repos/$REPOSITORY/branches/release/0.8.0" --jq .commit.sha)"
+          RELEASE_SHA="$(gh api "repos/$REPOSITORY/branches/release/0.8.1" --jq .commit.sha)"
           test "$SHA" = "$RELEASE_SHA"
 
           if [ "$PHASE" = "promote" ]; then
@@ -123,8 +123,8 @@ jobs:
           python scripts/verify_license_provenance.py --require-approved
           python scripts/check_release_document_state.py --version "$VERSION"
           python scripts/verify_release_checklist.py \
-            --checklist release-checklists/0.8.0.md \
-            --receipts release-checklists/0.8.0-receipts \
+            --checklist release-checklists/0.8.1.md \
+            --receipts release-checklists/0.8.1-receipts \
             --candidate-sha "$SHA" \
             --require-final
           # every page: the generator requires the runs to add up to GitHub's total_count, because
@@ -208,8 +208,8 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
           python -m pip install --upgrade "pip==26.1.2"
-          python -m pip install -r release-checklists/0.8.0-build-requirements.txt
-          python -m pip install -r release-checklists/0.8.0-repro-requirements.txt
+          python -m pip install -r release-checklists/0.8.1-build-requirements.txt
+          python -m pip install -r release-checklists/0.8.1-repro-requirements.txt
           export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD)"
           export MIXLE_SOURCE_COMMIT="$CANDIDATE_SHA"
           export MIXLE_SOURCE_TREE="$(git rev-parse 'HEAD^{tree}')"
@@ -218,7 +218,7 @@ jobs:
           git archive HEAD | tar -x -C source-a
           git archive HEAD | tar -x -C source-b
           python scripts/build_environment_receipt.py \
-            --requirements release-checklists/0.8.0-build-requirements.txt \
+            --requirements release-checklists/0.8.1-build-requirements.txt \
             --out metadata/build-environment.json
           (cd source-a && python -m build --no-isolation --outdir ../dist-a)
           (cd source-b && python -m build --no-isolation --outdir ../dist-b)
@@ -268,7 +268,7 @@ jobs:
             --format cyclonedx-json -o metadata/raw-sbom.json
           python scripts/bind_sbom.py \
             --cyclonedx metadata/raw-sbom.json \
-            --wheel-metadata metadata/mixle-0.8.0-py3-none-any.whl.json \
+            --wheel-metadata metadata/mixle-0.8.1-py3-none-any.whl.json \
             --candidate-sha "$CANDIDATE_SHA" \
             --waivers metadata/accepted-waivers.json \
             --out metadata/sbom.json
@@ -295,7 +295,7 @@ jobs:
           "$RUNNER_TEMP/repro-env/bin/python" -m pip install --quiet dist/*.whl
           # the bundle pins the reproduction environment exactly; byte-identical stdout is only
           # meaningful under the arithmetic that produced it.
-          python -c 'import json,pathlib;d=json.loads(pathlib.Path("release-checklists/0.8.0-repro-environment.json").read_text());print("\n".join(f"{k}=={v}" for k,v in d["dependencies"].items()))' > "$RUNNER_TEMP/repro-pins.txt"
+          python -c 'import json,pathlib;d=json.loads(pathlib.Path("release-checklists/0.8.1-repro-environment.json").read_text());print("\n".join(f"{k}=={v}" for k,v in d["dependencies"].items()))' > "$RUNNER_TEMP/repro-pins.txt"
           "$RUNNER_TEMP/repro-env/bin/python" -m pip install --quiet -r "$RUNNER_TEMP/repro-pins.txt"
           # Each receipt is written OUTSIDE the records root and moved in only after the runner
           # exits successfully. Redirecting stdout straight to metadata/reproduction-$entry.json
@@ -514,9 +514,9 @@ jobs:
           # phase regenerated approval from the GitHub API minutes ago (promotion/), and the two
           # must select the same check runs
           python scripts/build_example_execution_manifest.py \
-            --bundle release-checklists/0.8.0-repro-bundle.json \
+            --bundle release-checklists/0.8.1-repro-bundle.json \
             --candidate candidate/metadata/release-candidate.json \
-            --wheel-metadata candidate/metadata/mixle-0.8.0-py3-none-any.whl.json \
+            --wheel-metadata candidate/metadata/mixle-0.8.1-py3-none-any.whl.json \
             --receipt candidate/metadata/reproduction-gallery-univariate.json \
             --receipt candidate/metadata/reproduction-gallery-structured.json \
             --receipt candidate/metadata/reproduction-production-provenance.json \

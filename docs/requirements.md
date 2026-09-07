@@ -28,7 +28,7 @@ invariant and tolerance.
 
 ## Traceability
 
-Pull requests targeting 0.8.0 identify the active release, work ID, change ID,
+Pull requests targeting 0.8.1 identify the active release, work ID, change ID,
 requirements, focused validation, and limitations. The canonical requirement,
 work, change, evidence, capability, and release records are maintained in the
 Mixle status repository.

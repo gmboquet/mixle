@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_RECORD = ROOT / "release-checklists" / "0.8.0-license-provenance.json"
+DEFAULT_RECORD = ROOT / "release-checklists" / "0.8.1-license-provenance.json"
 
 
 def validate(record: object, *, require_approved: bool = False) -> list[str]:

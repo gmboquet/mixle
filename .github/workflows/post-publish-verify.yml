@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Published version to verify from PyPI (e.g. 0.8.0)"
+        description: "Published version to verify from PyPI (e.g. 0.8.1)"
         required: true
         type: string
 

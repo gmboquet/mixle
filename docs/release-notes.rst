@@ -1,12 +1,12 @@
 Release Notes
 =============
 
-Mixle 0.8.0 is the credibility, correctness, and evidence release. It retains
+Mixle 0.8.1 is the credibility, correctness, and evidence release, published as the first release of the 0.8 line (0.8.0 was prepared under the same evidence but never published; decision D-0212). It retains
 the library's broad probabilistic-modeling surface while making maturity,
 compatibility, numerical behavior, release claims, and operational limits
 explicit and machine-checkable.
 
-This page describes the unreleased 0.8.0 branch. It is not a publication
+This page describes the 0.8.1 release branch. It is not a publication
 claim. Final artifact hashes, exact-tip CI results, independent review, and
 post-publication verification remain release gates.
 
@@ -51,7 +51,7 @@ Scientific workflow building blocks
 Compatibility and dependency changes
 ------------------------------------
 
-0.8.0 tightens several public contracts in ways that are source-incompatible:
+0.8.1 (as the 0.8.0 candidate) tightens several public contracts in ways that are source-incompatible:
 they raise, or return something with a different meaning, rather than warning.
 The classes of change are code-execution gates that now require the ``True``
 singleton rather than a truthy value, public Boolean flags that no longer
@@ -96,5 +96,5 @@ artifact, clean-wheel and resolver evidence tied to that candidate, realistic
 backend and performance receipts for retained claims, independent statistical
 and systems review, external clean-install reproduction, final sign-off, and
 post-publication verification. See :doc:`release-readiness`,
-:doc:`claim-evidence-ledger`, and the tracked 0.8.0 checklist for the current
+:doc:`claim-evidence-ledger`, and the tracked 0.8.1 checklist for the current
 state.

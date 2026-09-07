@@ -7,6 +7,7 @@ orphan: true
 Document ID: CORE-DOC-MIGRATIONS-001
 Owner: PRJ-CORE
 
+- [0.8.1 migration notes](0.8.1.md) (the published 0.8 release; the per-surface steps are in the 0.8.0 notes)
 - [0.8.0 development migration notes](0.8.0.md)
 
 Each release with a caller-visible compatibility change adds or updates one

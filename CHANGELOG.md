@@ -4,7 +4,45 @@ All notable changes to mixle are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [0.8.0] — 2026-08-26
+## [0.8.1] — 2026-09-07
+
+The first published release of the 0.8 line. 0.8.1 is the 0.8.0 candidate tree, exactly as
+prepared, verified, and documented below, plus the post-candidate fixes listed here; it is released
+under a new version because the 0.8.0 artifact filenames were consumed on TestPyPI by an earlier
+candidate during the release rehearsal and a package index never accepts a filename twice, so no
+0.8.0 candidate could complete the rehearsal again (decision D-0212). Nothing below the 0.8.0
+heading was shipped under that number; every entry there ships here.
+
+### Changed since the 0.8.0 candidate
+
+- The log-series CDF, quantile, and entropy are finite computations in bounded memory. The
+  quantile went through scipy's generic discrete `ppf`, whose bracketing search does not
+  terminate when the summed CDF saturates one ULP short of `q = 1 - 1e-16`, and `entropy()`
+  reached it at exactly that `q` and then allocated one array up to the quantile (226 GiB at
+  `p = 1 - 1e-9`). This was the cause of every "runner has received a shutdown signal" kill on
+  the release CI. Both are now block-summed with saturation detection, a closed-form tail bound,
+  and an Euler-Maclaurin tail for entropy.
+- The independent-tester findings are resolved (see "Independent-tester findings" under 0.8.0).
+- The GeneralizedPareto shape clamp is disclosed in `numerical_repairs()` only when it moves the
+  shape; a moment estimate nudged onto the finite-variance ceiling stays silent.
+- The README's documentation links point at the versioned docs site (`v0.8.1/`), where the docs
+  deploy places them; the 0.8.0 candidate's README linked four pages at the site root, which is
+  only a redirect, and one under a path without the version prefix.
+- The release rehearsal fetches the sdist from TestPyPI by its exact URL instead of letting pip
+  build its metadata, which needed a build-backend pin TestPyPI does not carry; and `promote`
+  accepts a verified manual rehearsal record in the one case the automated rehearsal cannot
+  apply (D-0211).
+- The 0.8.1 checklist replaces the two-independent-tester gate with ten AI adversarial reviews of
+  the notebook corpus and the examples, and adds README and documentation stale-content review
+  gates (D-0212).
+
+## [0.8.0] — 2026-08-26 (never published; superseded by 0.8.1)
+
+**This version was not released.** Its candidate was prepared and rehearsed on TestPyPI, and the
+rehearsal consumed the 0.8.0 artifact filenames, so the corrected candidate could not be rehearsed
+under the same number. Everything in this section shipped as 0.8.1 (D-0212). The entries are kept
+under their original heading because the checklist, decision ledger, and audit records cite them.
+
 
 The credibility, stability, and proof release: turning mixle from a broad, fast-moving research
 package into one whose supported core, performance, artifacts, and public claims can be independently
@@ -1190,7 +1228,8 @@ FSDP2/Spark/MPI transports).
   users on too-old dependencies get a clear resolver error instead of obscure runtime breakage.
 
 [Unreleased]: https://github.com/gmboquet/mixle/compare/v0.7.0...HEAD
-[0.8.0]: https://github.com/gmboquet/mixle/compare/v0.7.0...v0.8.0
+[0.8.1]: https://github.com/gmboquet/mixle/compare/v0.7.0...v0.8.1
+[0.8.0]: https://github.com/gmboquet/mixle/compare/v0.7.0...v0.8.1
 [0.7.0]: https://github.com/gmboquet/mixle/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/gmboquet/mixle/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/gmboquet/mixle/compare/v0.6.0...v0.6.1

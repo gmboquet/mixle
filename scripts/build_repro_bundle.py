@@ -1,4 +1,4 @@
-"""Build the content-addressed 0.8.0 reproduction-bundle specification."""
+"""Build the content-addressed 0.8.1 reproduction-bundle specification."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-BUNDLE = ROOT / "release-checklists" / "0.8.0-repro-bundle.json"
+BUNDLE = ROOT / "release-checklists" / "0.8.1-repro-bundle.json"
 
 # The check-evidence record that binds a candidate to APPROVED checks is produced by exactly one
 # generator (scripts/verify_required_checks.py, run by publish.yml) over exactly one policy (the
@@ -45,8 +45,8 @@ CHECK_EVIDENCE_ATTESTATION = {
 
 _CLOSURE_PATHS = (
     "pyproject.toml",
-    "release-checklists/0.8.0-repro-environment.json",
-    "release-checklists/0.8.0-repro-requirements.txt",
+    "release-checklists/0.8.1-repro-environment.json",
+    "release-checklists/0.8.1-repro-requirements.txt",
     "scripts/build_repro_bundle.py",
     "scripts/run_repro_entry.py",
     REQUIRED_CHECKS_POLICY,
@@ -152,7 +152,7 @@ _ENTRIES = (
             # the checkpoint demo now fits overlapping components that are still climbing at
             # iteration 9. Digest measured identical on macOS arm64 and emulated x86_64 Linux with
             # the pinned numpy/scipy; the model hash remains the one declared-volatile span.
-            "stdout_sha256": "16ab26daa775255051d484a8fbc4670069c476f3b274b297b47726fa9135c75c",
+            "stdout_sha256": "aa6e4d987ca9245e44c0730d68103479d62e4ad2cce7c0a87559e572d03faa9b",  # 0.8.1: the provenance line prints the version
             "contains": [
                 "# lineage verified: True",
                 "drift on shifted batch: True",
@@ -202,7 +202,7 @@ def build() -> dict:
         entries.append(entry)
     return {
         "artifact": "mixle.reproduction_bundle/v2",
-        "release": "0.8.0",
+        "release": "0.8.1",
         "candidate_binding": {
             "policy": "exact-publish-workflow-candidate",
             "repository": REPOSITORY,
@@ -212,7 +212,7 @@ def build() -> dict:
                 CHECK_EVIDENCE_ATTESTATION["bundle_record"],
                 CHECK_EVIDENCE_ATTESTATION["check_runs_record"],
                 "metadata/SHA256SUMS",
-                "metadata/mixle-0.8.0-py3-none-any.whl.json",
+                "metadata/mixle-0.8.1-py3-none-any.whl.json",
                 "metadata/reproduction-*.json",
             ],
             "required_checks": _required_check_names(),
@@ -222,10 +222,10 @@ def build() -> dict:
             "candidate_record_producer": CANDIDATE_RECORD_PRODUCER,
             "rule": (
                 "The final bundle is incomplete unless these retained records bind its source commit, "
-                "approved checks, wheel SHA-256, and local entry receipts to the signed v0.8.0 tag."
+                "approved checks, wheel SHA-256, and local entry receipts to the signed v0.8.1 tag."
             ),
         },
-        "environment": "release-checklists/0.8.0-repro-environment.json",
+        "environment": "release-checklists/0.8.1-repro-environment.json",
         "closure": [_input(path, "bundle-closure") for path in _CLOSURE_PATHS],
         "code_license": {"spdx": "MIT", "files": ["LICENSE", "NOTICE"]},
         "acceptance": (

@@ -237,6 +237,7 @@ reference under :doc:`api/modules` covers the broad public module surface;
    scientific-validity
    operations
    releases
+   migrations/0.8.1
    migrations/0.8.0
 
 .. toctree::
