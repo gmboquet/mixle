@@ -87,11 +87,14 @@ class MixtureInitValidationTest(unittest.TestCase):
             _gaussian_mixture_estimator(robust=True, init="k-means++")
 
     def test_the_accumulator_layer_policies_init_too(self):
-        for factory in (
-            lambda value: MixtureAccumulator([GaussianAccumulator(), GaussianAccumulator()], init=value),
-            lambda value: MixtureAccumulatorFactory([], init=value),
+        # Labelled by name, not by the lambda itself: execnet cannot serialize a function, so a
+        # failing subtest reported "DumpError: can't serialize <class 'function'>" under xdist
+        # instead of the assertion that failed.
+        for label, factory in (
+            ("MixtureAccumulator", lambda value: MixtureAccumulator([GaussianAccumulator(), GaussianAccumulator()], init=value)),
+            ("MixtureAccumulatorFactory", lambda value: MixtureAccumulatorFactory([], init=value)),
         ):
-            with self.subTest(factory=factory):
+            with self.subTest(factory=label):
                 self.assertEqual(factory("dirichlet").init, "dirichlet")
                 with self.assertRaises(ValueError):
                     factory("k-means++")

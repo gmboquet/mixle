@@ -17,6 +17,7 @@ mainstream tool does (Stan/PyMC: you write it; sklearn/pomegranate: independence
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from typing import Any
 
@@ -32,6 +33,7 @@ from mixle.inference.structure import (
     _is_real_valued,
     _num_free_params,
 )
+from mixle.stats.compute.pdist import FitProvenance, FitProvenanceCarrier
 
 _LOG_2PI = float(np.log(2.0 * np.pi))
 
@@ -637,8 +639,14 @@ def _leaf_fit(values: list, template: Any, max_its: int, weights: np.ndarray | N
     return est.estimate(None, acc.value())
 
 
-class HeterogeneousBayesianNetwork:
-    """A DAG joint over a heterogeneous record: ``log p(x) = sum_i log P(x_i | parents(i))`` over fitted factors."""
+class HeterogeneousBayesianNetwork(FitProvenanceCarrier):
+    """A DAG joint over a heterogeneous record: ``log p(x) = sum_i log P(x_i | parents(i))`` over fitted factors.
+
+    Carries the fitting receipt like every other public fitting result. This is what ``optimize(data)``
+    and ``fit(data)`` return by default, and it was the one such result that could not say how it had
+    been fitted at all -- ``fit_provenance()`` and ``numerical_repairs()`` did not exist on it
+    (P03-F01), even though the sibling structure learner already carried both.
+    """
 
     __pysp_serializable__ = True
 
@@ -649,6 +657,14 @@ class HeterogeneousBayesianNetwork:
     def __str__(self) -> str:
         e = [f"{p}->{f.child}" for f in self.factors for p in f.parents]
         return f"HeterogeneousBayesianNetwork(fields={len(self.factors)}, edges=[{', '.join(e) or 'none'}])"
+
+    def _repaired_children(self):
+        """Each factor's fitted law, so a leaf's repair reaches the network's receipt (P02-F05)."""
+        return tuple(
+            ("field[%d]" % factor.child, getattr(factor, "dist", None))
+            for factor in self.factors
+            if getattr(factor, "dist", None) is not None
+        )
 
     def edges(self) -> list[tuple[int, int]]:
         """Return DAG edges as ``(parent_field, child_field)`` pairs."""
@@ -675,8 +691,22 @@ class HeterogeneousBayesianNetwork:
         }
 
     def log_density(self, x: tuple) -> float:
-        """Evaluate the joint log density of one record."""
-        return float(sum(f.log_density(x) for f in self.factors))
+        """Evaluate the joint log density of one record.
+
+        The record's width is checked against the network's: a short record used to raise a bare
+        ``IndexError: tuple index out of range`` and a long one was scored on its first fields with
+        the extras ignored, so a five-tuple got a plausible number from a four-field net (P02-F07).
+        A field the factors cannot score (a NaN in a Gaussian factor, say) makes the whole record
+        impossible rather than NaN, which is what every other law in the package returns for
+        evidence outside its support.
+        """
+        if len(x) != len(self.factors):
+            raise ValueError(
+                "this network has %d field(s) but the record has %d. Score records of the same width "
+                "the network was fitted on." % (len(self.factors), len(x))
+            )
+        total = float(sum(f.log_density(x) for f in self.factors))
+        return total if not math.isnan(total) else -math.inf
 
     def seq_log_density(self, encoded: Any) -> np.ndarray:
         """Evaluate joint log density for encoded records."""
@@ -1225,7 +1255,24 @@ def learn_bayesian_network(
     final = [
         _fit_factor(c, parents[c], cols, discrete, levels, templates[c], max_its, w, vec_dims) for c in range(n_fields)
     ]
-    return HeterogeneousBayesianNetwork(final)
+    network = HeterogeneousBayesianNetwork(final)
+    # As for learn_structure (see mixle.inference.structure): a structure search scores candidate
+    # edges and then fits each factor, so it reports one search pass and declares itself
+    # unconverged -- an unproven greedy optimum -- rather than borrowing EM's vocabulary for
+    # iterations it never ran. Per-factor repairs are reported under the field they came from.
+    return network.with_fit_provenance(
+        FitProvenance(
+            algorithm="bayesian-network-structure-search(max-parents=%d, per-factor-em-cap=%d)"
+            % (max_parents, max_its),
+            estimator="learn_bayesian_network",
+            objective="bic-penalized-conditional-likelihood",
+            iterations=1,
+            max_iterations=1,
+            converged=False,
+            n_observations=n,
+            repairs=network.numerical_repairs(),
+        )
+    )
 
 
 def _is_vector_col(col: Sequence[Any]) -> bool:

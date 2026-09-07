@@ -16,6 +16,11 @@ from typing import Any
 
 import numpy as np
 
+# The largest finite ``log`` a double can exponentiate back. Laws whose closed-form moments or
+# density terms are products of gamma functions overflow past it; each one reports the limit
+# (``inf``, or a zero density) rather than escaping an ``OverflowError`` from ``math`` (P01-F10).
+LOG_FLOAT_MAX = math.log(np.finfo(np.float64).max)
+
 
 class UnscorableObservation(ValueError):
     """A record a scorer refuses because it lies outside the law's admissible observation space.
@@ -833,3 +838,45 @@ def masked_chunk_second_moment(x: Any, weights: Any) -> tuple[float, float, floa
         safe_xx = np.where(ww != 0.0, xx, 0.0)
         chunk_sum2 = np.dot(safe_xx * safe_xx, ww)
     return float(ww.sum()), float(np.dot(xx, ww)), float(chunk_sum2)
+
+
+def refuse_unsupported_observation(admissible: bool, weight: float, *, message: str) -> None:
+    """Raise ``message`` when an inadmissible scalar observation carries weight.
+
+    EM legitimately drives a component's responsibility for a row outside its support to zero,
+    so a zero-weight violation is not one; every other inadmissible observation is data the law
+    cannot be fitted on. Several accumulators used to spell this as ``if x >= 0:`` and drop the
+    rest, which turned a sign error or a NaN-contaminated column into a confident wrong fit
+    (P01-F05, P01-F06, P01-F07, P01-F08, P01-F09).
+    """
+    if not admissible and weight != 0.0:
+        raise ValueError(message)
+
+
+def refuse_unsupported_observations(admissible: np.ndarray, weights: np.ndarray, *, message: str) -> None:
+    """Raise ``message % count`` when any inadmissible observation carries weight.
+
+    The vectorized counterpart of :func:`refuse_unsupported_observation`; ``message`` takes the
+    number of offending rows, which estimation reports per encoded chunk.
+    """
+    offending = int(np.count_nonzero(~np.asarray(admissible, dtype=bool) & (np.asarray(weights) != 0.0)))
+    if offending:
+        raise ValueError(message % offending)
+
+
+def one_dimensional_observations(values: np.ndarray, *, label: str) -> np.ndarray:
+    """Return ``values`` as a flat array, refusing anything that is not a sequence of scalars.
+
+    A univariate law's encoder used to pass a ``(n, 1)`` column array straight through, so
+    scoring returned an ``(n, 1)`` block of densities and the accumulator failed later on a
+    shape mismatch deep inside ``np.dot`` (P01-F13, P06-F08). ``df[['x']].values`` is the common
+    way to produce one, so the refusal names the shape and the one-line fix.
+    """
+    array = np.asarray(values)
+    if array.ndim == 1:
+        return array
+    raise ValueError(
+        "%s expects a one-dimensional sequence of scalar observations, but the data has shape %r. "
+        "Flatten it with numpy.ravel(data) (a column selected as df[['x']].values is the usual "
+        "source of an (n, 1) array; df['x'] gives the one-dimensional form)." % (label, array.shape)
+    )

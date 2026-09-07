@@ -37,6 +37,9 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import (
+    refuse_unsupported_observations,
+)
 
 _MIN_IG_PARAM = 1.0e-12
 _MAX_IG_PARAM = 1.0e12
@@ -346,6 +349,14 @@ class InverseGaussianSampler(DistributionSampler):
         return self.rng.wald(self.dist.mu, self.dist.lam, size=size)
 
 
+_INVERSE_GAUSSIAN_SUPPORT_MESSAGE = (
+    "InverseGaussianDistribution has support x > 0, but at least %d encoded observation(s) carrying "
+    "weight lie outside it. The encoder admits them so a mixture whose other component owns those "
+    "values can score the batch (they score -inf here), but fitting this law on them would fold a "
+    "NaN or an out-of-support value into its own sufficient statistics."
+)
+
+
 class InverseGaussianAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate weighted count, sum, and sum of reciprocals for inverse Gaussian estimation."""
 
@@ -367,6 +378,16 @@ class InverseGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
+    def supported_rows(self, x) -> np.ndarray:
+        """Encoded rows this law can be fitted on: finite and strictly positive.
+
+        The encoder admits out-of-support observations so that a mixture can encode a whole batch
+        against every component (P02-F03); this is the predicate that keeps them out of the
+        sufficient statistics, and the one a latent model's initialization consults before it hands
+        this component any responsibility.
+        """
+        return np.isfinite(x[0]) & (np.asarray(x[0]) > 0.0)
+
     def seq_update(
         self,
         x: tuple[np.ndarray, np.ndarray, np.ndarray],
@@ -374,6 +395,7 @@ class InverseGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         estimate: InverseGaussianDistribution | None,
     ) -> None:
         """Accumulate transformed sufficient statistics from encoded data."""
+        refuse_unsupported_observations(self.supported_rows(x), weights, message=_INVERSE_GAUSSIAN_SUPPORT_MESSAGE)
         vals, inv_vals, _ = x
         self.sum += np.dot(vals, weights)
         self.sum_inv += np.dot(inv_vals, weights)
@@ -507,9 +529,16 @@ class InverseGaussianDataEncoder(DataSequenceEncoder):
     def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Encode observations as values, reciprocal values, and log-values."""
         rv = np.asarray(x, dtype=np.float64)
-        if rv.size and (np.any(rv <= 0.0) or np.any(~np.isfinite(rv))):
-            raise ValueError("InverseGaussianDistribution has support x > 0.")
-        with np.errstate(divide="ignore"):
+        nan_count = int(np.count_nonzero(np.isnan(rv)))
+        if nan_count:
+            raise ValueError(
+                "InverseGaussian observations contain %d NaN value(s). NaN marks missing data, not a "
+                "support violation; drop or impute the missing entries before fitting." % nan_count
+            )
+        # An out-of-support observation is scored, not refused: the scalar path returns -inf for it and a
+        # mixture whose other component owns that value has to be able to encode the whole batch
+        # (P02-F03). Only NaN stays refused -- it is missing data, not a zero-density point.
+        with np.errstate(divide="ignore", invalid="ignore"):
             inv = 1.0 / rv
             lx = np.log(rv)
         return rv, inv, lx

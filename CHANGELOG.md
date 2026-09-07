@@ -4,6 +4,88 @@ All notable changes to mixle are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+Repairs for the findings the ten adversarial reviews of the 0.8.1 candidate deferred to this
+release (`release-checklists/0.8.2-followups.md`).
+
+#### Univariate laws (pass 01)
+
+- `PoissonDistribution.entropy()` and `NegativeBinomialDistribution.entropy()` are bounded in
+  memory. Both summed the series into one array as wide as the effective support: 3.2 GB at a rate
+  of 1e8 and a 7 PiB `MemoryError` at 1e15, the same shape that OOM-killed CI through the
+  log-series quantile in 0.8.0. Poisson now uses the classical asymptotic series from `lam = 1e3`
+  upward, the negative binomial its Gaussian limit with the Edgeworth correction once the support
+  outruns the summation cap, and everything below is summed one bounded block at a time (P01-F02).
+- `WeibullDistribution.log_density` returns `-inf` where the vectorized path and scipy do, instead
+  of escaping an `OverflowError` from `math.pow` (P01-F04), and `WeibullEstimator` discloses its
+  shape ceiling, scale floor and unresolvable-shape wall in `numerical_repairs()` (P01-F03).
+- `ExponentialEstimator`, `PoissonEstimator`, `GeometricEstimator`, `UniformEstimator` and
+  `LogSeriesEstimator` refuse the observations they used to drop from the sufficient statistics in
+  silence -- a negative, NaN, infinite, or fractional value now raises naming the family and its
+  support instead of producing a confident fit of the remaining rows (P01-F05..F09). Their rate,
+  probability and width floors are reported through `numerical_repairs()` when they bind.
+- `WeibullDistribution.mean/variance`, `BetaDistribution.variance`, `LogSeriesDistribution.mean`
+  and `variance`, and `SkewNormalDistribution.entropy` return their limits at extreme but
+  constructible parameters instead of raising `OverflowError`/`ZeroDivisionError` or returning NaN
+  (P01-F10).
+- `PoissonDistribution.quantile` returns a finite count for rates past 1e12, where scipy's generic
+  discrete `ppf` returns NaN for mid-range `q` while the CDF keeps working (P01-F11); and the
+  discrete families' quantiles return their own support bounds at `q = 0` and `q = 1` rather than
+  scipy's out-of-support `-1`, with `GumbelDistribution` returning the infinities every other
+  continuous family already returned (P01-F12).
+- An `(n, 1)` column array into a univariate estimator is refused by an error naming the estimator,
+  the row shape, and `numpy.ravel`, instead of numpy's identical "only 0-dimensional arrays can be
+  converted to Python scalars" for all thirty families (P01-F13, P06-F08).
+
+#### Latent models (pass 02)
+
+- `HiddenMarkovModelDistribution.seq_posterior` returns the documented smoothing marginals on a
+  base (numba-free) install and with `terminal_states` set, where it used to return `None`
+  (P02-F01). The added route decodes the batch and runs the same exact forward-backward
+  `latent_posterior` uses; it agrees with the numba kernel to 1e-14.
+- A fitted `ChowLiuTreeDistribution` serializes: `freeze()` keys a support value by its type, and
+  the encoder refused the resulting bare Python type, which left the family with no persistence
+  path at all. Value types now encode by name from a closed table (P02-F02).
+- **A support-limited component can be mixed.** Every support-limited encoder admitted only
+  in-support values, so an ordinary Gaussian-plus-Exponential mixture over data with a negative
+  observation could not be encoded, batch-scored, or fitted -- while the scalar path scored the
+  same observation `-inf` without complaint. The encoders now admit out-of-support observations
+  and the vectorized scorers return the `-inf` the scalar path returns; fitting a law on one is
+  refused by the accumulator (with a zero-weight row exempt, as EM produces); and mixture,
+  heterogeneous-mixture and hidden-Markov initialization consult each component's support before
+  handing it any responsibility (P02-F03).
+- A numerical repair applied to a component is reported by its container: a mixture or HMM whose
+  every component was variance-floored reported `repairs=()` (P02-F05).
+- `learn_bayesian_network` names an empty corpus and ragged records instead of raising
+  `IndexError` or silently dropping the extra fields of the wider rows, and
+  `HeterogeneousBayesianNetwork.log_density` refuses a record of the wrong width and scores a
+  record it cannot evaluate as impossible rather than NaN (P02-F07).
+- `HiddenMarkovModelDistribution.components` exists, matching the constructor alias (P02-F08).
+- `LDAEstimator` returns a fitted model with a warning and a receipt when its Dirichlet alpha solve
+  cannot converge, instead of raising `LDAConvergenceError` out of `optimize()` (P02-F09, P10-F02).
+  The strict solver still raises; only the estimator's default changed. A solve whose steps stop
+  shrinking while alpha keeps growing is now classified as diverging rather than budget-exhausted.
+- A lag-0 lookback hidden Markov model samples what it scores, and a scalar emission family put
+  where a window law belongs is named at encode and score time instead of failing inside numpy's
+  own coercion (P02-F04).
+
+#### The inference loop (pass 03)
+
+- `optimize(data)` and `fit(data)`'s default automatic-structure return carries its fitting
+  receipt: `HeterogeneousBayesianNetwork` had neither `fit_provenance()` nor `numerical_repairs()`,
+  though it is what the flagship one-call path returns (P03-F01).
+- A one-shot iterator (a generator, `iter(list)`, `map`) is materialized before estimator
+  inference consumes it. `optimize(x for x in data)` used to infer a model from the records and
+  then encode none of them, returning an empty model whose receipt claimed `converged=True` over
+  zero observations (P03-F02, P06-F01).
+- `optimize(enc_data=...)` refuses an encoded batch with no rows rather than returning a model
+  built entirely from the parameter floors and stamping it converged; `seq_initialize` and
+  `seq_estimate` stay total on such a batch, as their own regression tests require, but say so
+  (P03-F03).
+
 ## [0.8.1] — 2026-09-07
 
 The first published release of the 0.8 line. 0.8.1 is the 0.8.0 candidate tree, exactly as

@@ -7,7 +7,9 @@ corpus's mean expected log-topic-proportions cannot be matched by any finite Dir
 and reports it distinctly, naming the remedies that actually work.
 """
 
+import math
 import unittest
+import warnings
 
 import numpy as np
 
@@ -24,32 +26,50 @@ class LDAAlphaDivergenceDiagnosticsTest(unittest.TestCase):
         # The tester's minimal reproduction: a single short, skewed two-word document is enough
         # to make the E-step's gamma symmetric across topics, which pins mean_log_p exactly on
         # (or past) the boundary where no finite alpha exists.
+        #
+        # 0.8.2 turns that into a warned, receipted fit rather than an exception out of optimize()
+        # (P02-F09): the classification and the advice are unchanged, they now travel on the
+        # model's diagnostics and in a UserWarning instead of in a raised error.
         doc_a = [("a", 3.0), ("b", 1.0)]
 
-        with self.assertRaises(LDAConvergenceError) as caught:
-            optimize([doc_a], self._estimator(), out=None)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            fitted = optimize([doc_a], self._estimator(), out=None)
 
-        diagnostics = caught.exception.diagnostics
-        self.assertFalse(diagnostics.converged)
-        self.assertEqual(diagnostics.termination_reason, "alpha_diverging")
+        # The corpus's own alpha solve -- the first one, from the estimator's starting alpha -- is
+        # the one that diagnoses the non-existence; later EM iterations restart from an already
+        # enormous alpha whose target has drifted a few ULPs inside the boundary, so they honestly
+        # report an exhausted budget. The fit is reported unconverged either way.
+        self.assertFalse(fitted.fit_diagnostics.converged)
+        reasons = [str(item.message) for item in caught if "alpha solve stopped" in str(item.message)]
+        self.assertTrue(any("alpha_diverging" in reason for reason in reasons), reasons[:1])
 
-        message = str(caught.exception)
+        message = next(reason for reason in reasons if "alpha_diverging" in reason)
         # The message must not leave "raise max_alpha_iter" as the implied remedy, and must name
         # both real escape hatches by their actual constructor keyword.
         self.assertIn("max_alpha_iter will not help", message)
         self.assertIn("fixed_alpha=", message)
         self.assertIn("alpha_threshold", message)
 
+    def test_the_solver_itself_still_raises_when_asked_strictly(self):
+        # The exception class is still the strict solver's contract; only the estimator's default
+        # changed (P02-F09).
+        with self.assertRaises(LDAConvergenceError) as caught:
+            update_alpha(np.ones(2), np.array([-math.log(2.0), -math.log(2.0)]), 1.0e-8, max_iter=50)
+        self.assertEqual(caught.exception.diagnostics.termination_reason, "alpha_diverging")
+
     def test_raising_max_alpha_iter_does_not_resolve_the_divergence(self):
         # Guards the message's own claim: a caller who (reasonably, given the old message) tries
-        # a much larger budget must still fail, and still be told it's divergence, not a slow fit.
+        # a much larger budget must still be told it's divergence, not a slow fit.
         doc_a = [("a", 3.0), ("b", 1.0)]
         est = self._estimator(max_alpha_iter=50_000)
 
-        with self.assertRaises(LDAConvergenceError) as caught:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
             optimize([doc_a], est, out=None)
 
-        self.assertEqual(caught.exception.diagnostics.termination_reason, "alpha_diverging")
+        reasons = [str(item.message) for item in caught if "alpha solve stopped" in str(item.message)]
+        self.assertTrue(any("alpha_diverging" in reason for reason in reasons), reasons[:1])
 
     def test_fixed_alpha_escape_hatch_named_in_the_message_actually_works(self):
         doc_a = [("a", 3.0), ("b", 1.0)]

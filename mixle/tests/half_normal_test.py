@@ -39,9 +39,18 @@ class HalfNormalTestCase(unittest.TestCase):
     def test_off_support_is_neg_inf(self):
         dist = HalfNormalDistribution(1.5)
         self.assertEqual(dist.log_density(-0.5), -np.inf)
-        # the encoder enforces the non-negative support contract up front.
+        # The encoder ADMITS an out-of-support observation and the vectorized scorer returns the
+        # same -inf the scalar path does, so a mixture whose other component owns the negative
+        # values can encode and score the whole batch (P02-F03). Fitting THIS law on one is what
+        # the accumulator refuses.
+        encoded = dist.dist_to_encoder().seq_encode([-1.0, 0.5])
+        np.testing.assert_array_equal(dist.seq_log_density(encoded)[:1], np.array([-np.inf]))
+        accumulator = dist.estimator().accumulator_factory().make()
         with self.assertRaises(ValueError):
-            dist.dist_to_encoder().seq_encode([-1.0, 0.5])
+            accumulator.seq_update(encoded, np.ones(2), dist)
+        # ... and admits it at zero weight, which is what an E-step hands a component for a row
+        # outside its support.
+        accumulator.seq_update(encoded, np.array([0.0, 1.0]), dist)
 
     def test_string_round_trip(self):
         dist = HalfNormalDistribution(1.5, name="hn", keys="k")

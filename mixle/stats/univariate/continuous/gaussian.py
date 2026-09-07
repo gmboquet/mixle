@@ -34,6 +34,7 @@ from mixle.stats.univariate.continuous._gaussian_contracts import (
 from mixle.stats.univariate.continuous._observation_contracts import (
     anchored_location,
     consistent_anchored_triple,
+    one_dimensional_observations,
     scale_anchored_triple,
     scored_observation,
     warn_uncorrectable_raw_moments,
@@ -1465,7 +1466,7 @@ class GaussianDataEncoder(DataSequenceEncoder):
                 "drop the masked entries, or use OptionalEstimator/MISSING for missingness-aware "
                 "fitting." % int(np.ma.count_masked(x))
             )
-        rv = np.asarray(x, dtype=float)
+        rv = one_dimensional_observations(np.asarray(x, dtype=float), label="GaussianDataEncoder")
 
         if np.any(np.isnan(rv)):
             # NaN is MISSING data, not an out-of-support value: "requires support x in (-inf,inf)"

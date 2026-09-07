@@ -62,6 +62,10 @@ T = TypeVar("T")
 class HeterogeneousMixtureDistribution(SequenceEncodableProbabilityDistribution):
     """Mixture distribution with component-specific observation encoders."""
 
+    def _repaired_children(self):
+        """The mixture's components, so a component's repair reaches the mixture's receipt (P02-F05)."""
+        return tuple(("components[%d]" % index, part) for index, part in enumerate(self.components))
+
     def compute_capabilities(self):
         """Return compute-backend metadata shared by heterogeneous mixture components."""
         from mixle.stats.compute.capabilities import DistributionCapabilities, intersect_engine_ready
@@ -731,6 +735,23 @@ class HeterogeneousMixtureAccumulator(SequenceEncodableStatisticAccumulator):
             ww[keep_idx, :] = rng.dirichlet(
                 alpha=np.ones(self.num_components) / (self.num_components**2), size=keep_len
             )
+        # The E-step gives a component no responsibility for a row it scores -inf; initialization
+        # draws blind, so without this a Gaussian/Exponential mixture handed the Exponential a share
+        # of the negative rows and failed before the first E-step ran (P02-F03).
+        touched = False
+        for tag, tag_idxs in enumerate(tag_list):
+            for i in tag_idxs:
+                mask = self.accumulators[i].supported_rows(enc_data[tag])
+                if mask is None:
+                    continue
+                mask = np.asarray(mask, dtype=bool)
+                if mask.ndim != 1 or mask.shape[0] != ww.shape[0] or mask.all():
+                    continue
+                ww[~mask, i] = 0.0
+                touched = True
+        if touched:
+            totals = ww.sum(axis=1, keepdims=True)
+            np.divide(ww, np.where(totals > 0.0, totals, 1.0), out=ww)
         ww *= np.reshape(weights, (sz, 1))
 
         for tag, tag_idxs in enumerate(tag_list):

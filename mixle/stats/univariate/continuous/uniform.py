@@ -18,7 +18,11 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.stats.univariate.continuous._observation_contracts import scored_observation
+from mixle.stats.univariate.continuous._observation_contracts import (
+    refuse_unsupported_observation,
+    refuse_unsupported_observations,
+    scored_observation,
+)
 
 
 class UniformDistribution(SequenceEncodableProbabilityDistribution):
@@ -202,6 +206,14 @@ class UniformSampler(DistributionSampler):
         return self.rng.uniform(self.dist.low, self.dist.high, size=size)
 
 
+_UNIFORM_SUPPORT_MESSAGE = (
+    "UniformDistribution requires finite observations, but at least %d observation(s) carrying "
+    "weight are NaN or infinite (estimation encodes in chunks; the first offending chunk "
+    "refuses). NaN used to be ignored by the min/max accumulation, so the fitted support came "
+    "from the remaining rows with no note that any had been dropped."
+)
+
+
 class UniformAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate weighted min/max support statistics."""
 
@@ -214,6 +226,11 @@ class UniformAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: float, weight: float, estimate: UniformDistribution | None) -> None:
         """Accumulate support bounds and count from one weighted observation."""
+        refuse_unsupported_observation(
+            math.isfinite(x),
+            weight,
+            message=_UNIFORM_SUPPORT_MESSAGE % 1,
+        )
         if weight > 0.0:
             self.count += weight
             self.min_val = min(self.min_val, x)
@@ -225,6 +242,7 @@ class UniformAccumulator(SequenceEncodableStatisticAccumulator):
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: UniformDistribution | None) -> None:
         """Accumulate support bounds and count from encoded observations."""
+        refuse_unsupported_observations(np.isfinite(x), weights, message=_UNIFORM_SUPPORT_MESSAGE)
         mask = weights > 0.0
         if np.any(mask):
             self.count += np.sum(weights[mask], dtype=np.float64)
@@ -320,11 +338,19 @@ class UniformEstimator(ParameterEstimator):
         elif self.pseudo_count is not None and self.suff_stat is not None:
             low = min(low, self.suff_stat[0])
             high = max(high, self.suff_stat[1])
+        repairs: tuple[str, ...] = ()
         if high <= low:
+            # A zero-width support is not a uniform law at all, so the endpoints are pushed apart
+            # to ``min_width``. That floor used to bind silently, so a fit on identical points
+            # reported a support of width 1e-8 as if the data had produced it (P01-F08).
+            repairs = ("width-floored(%.6g -> %.6g)" % (high - low, self.min_width),)
             mid = 0.5 * (low + high)
             low = mid - 0.5 * self.min_width
             high = mid + 0.5 * self.min_width
-        return UniformDistribution(low, high, name=self.name, keys=self.keys)
+        dist = UniformDistribution(low, high, name=self.name, keys=self.keys)
+        if repairs:
+            dist._numerical_repairs = repairs
+        return dist
 
 
 class UniformDataEncoder(DataSequenceEncoder):

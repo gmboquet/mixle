@@ -114,8 +114,11 @@ class SeedKeyTest(unittest.TestCase):
 
 class CanonicalityTest(unittest.TestCase):
     def test_canonical_types_are_accepted(self):
+        # subTest params travel to the xdist controller when a subtest fails, and execnet can only
+        # serialize a small set of types -- a bytearray param turned a real failure into
+        # "DumpError: can't serialize <class 'bytearray'>" with no sign of which case failed.
         for value in ("a", b"a", bytearray(b"a"), 1, 1.5, True, None, (1, "b"), [1], {1}, {"a": 1}):
-            with self.subTest(value=value):
+            with self.subTest(value=repr(value)):
                 self.assertTrue(_is_canonically_representable(value))
 
     def test_defining_a_repr_is_not_proof_of_canonicality(self):

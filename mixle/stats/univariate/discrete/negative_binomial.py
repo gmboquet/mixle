@@ -20,6 +20,7 @@ from typing import Any
 
 import numpy as np
 from numpy.random import RandomState
+from scipy.special import betaln
 
 from mixle.stats.compute.pdist import (
     DataSequenceEncoder,
@@ -30,7 +31,13 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.stats.univariate.discrete._count_contracts import exact_integer_observations
+from mixle.stats.univariate.discrete._count_contracts import (
+    ENTROPY_TERM_CAP,
+    blocked_entropy,
+    exact_integer_observations,
+    gaussian_limit_entropy,
+    validated_quantile_probability,
+)
 from mixle.utils.special import digamma, valid_integer
 from mixle.utils.vector import gammaln
 
@@ -257,20 +264,74 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
         """Variance Var[X]: r(1-p)/p^2."""
         return float(self.r * (1.0 - self.p) / (self.p * self.p))
 
+    # A support wider than the term cap whose skewness is under this is close enough to its
+    # Gaussian limit for the Edgeworth entropy to hold to double rounding (both corrections are
+    # then below 1e-4 nats of a quantity that is at least 10 nats).
+    _ENTROPY_GAUSSIAN_SKEWNESS = 1.0e-2
+
     def entropy(self) -> float:
-        """Shannon entropy in nats, by exact summation of the standard series.
+        """Shannon entropy in nats, by summation of the standard series in bounded memory.
 
         The negative-binomial entropy ``-sum_k p_k log p_k`` has no closed form (Johnson, Kemp &
         Kotz, *Univariate Discrete Distributions*, ch. 5). The series is summed over the support
         up to this distribution's own quantile at ``1 - 1e-16`` (plus a safety margin), beyond
-        which the tail mass is far below double rounding -- the same effective-support truncation
-        PoissonDistribution.entropy() uses, but driven by the exact CDF (via ``betainc``) rather
-        than a Gaussian-tail heuristic, since the negative binomial can be heavy-tailed.
+        which the tail mass is far below double rounding -- driven by the exact CDF (via
+        ``betainc``) rather than a Gaussian-tail heuristic, since the negative binomial can be
+        heavy-tailed. The sum is taken one bounded block at a time and, once the support is
+        wider than ``ENTROPY_TERM_CAP`` counts, the remainder is the Euler-Maclaurin integral of
+        the smooth extension: ``r = 1e8`` used to allocate a single 3.2 GB array here (P01-F02),
+        and the quantile that bounded the scan is itself NaN at extreme parameters (P01-F11),
+        which the tail branch now absorbs instead of propagating.
         """
-        kmax = int(self.quantile(1.0 - 1.0e-16)) + 50
-        k = np.arange(kmax + 1, dtype=np.float64)
-        lp = gammaln(k + self.r) - self.log_gamma_r - gammaln(k + 1.0) + self.r * self.log_p + k * self.log_1p
-        return float(-np.sum(np.exp(lp) * lp))
+        variance = self.variance()
+        skewness = (2.0 - self.p) / math.sqrt(self.r * (1.0 - self.p))
+        excess_kurtosis = (6.0 - 6.0 * self.p + self.p**2) / (self.r * (1.0 - self.p))
+        end = self._effective_support_end()
+        wider_than_the_cap = not math.isfinite(end) or end > ENTROPY_TERM_CAP
+        if wider_than_the_cap and abs(skewness) <= self._ENTROPY_GAUSSIAN_SKEWNESS:
+            # Too many counts to sum, and near enough to its Gaussian limit that the Edgeworth
+            # correction is below double rounding -- which is also the regime where the naive
+            # log-pmf's gammaln terms cancel to noise, so a quadrature of them would be worse
+            # than the closed form.
+            return gaussian_limit_entropy(variance, skewness, excess_kurtosis)
+        return blocked_entropy(
+            self._log_pmf_terms,
+            self._log_pmf_at,
+            support_start=0,
+            effective_support_end=end,
+            mean=self.mean(),
+            sd=math.sqrt(variance),
+            decay_length=-1.0 / self.log_1p if self.log_1p < 0.0 else None,
+        )
+
+    def _effective_support_end(self) -> float:
+        """The count past which the remaining entropy terms are below double rounding.
+
+        Bounded from the law's own moments rather than from ``quantile(1 - 1e-16)``: the
+        quantile is a search over the support, so it costs twelve seconds where the support runs
+        to 1e10 counts (and is NaN at extremes, P01-F11) -- to decide a branch that only needs to
+        know whether the support is wider than the summation cap. Forty-five standard deviations
+        covers a light tail and forty-five geometric decay lengths a heavy one (a remaining mass
+        of ``exp(-45)``); the extra terms either way are exact zeros to double precision.
+        """
+        decay_length = -1.0 / self.log_1p if self.log_1p < 0.0 else 0.0
+        width = max(math.sqrt(self.variance()), decay_length)
+        return math.ceil(self.mean() + 45.0 * width + 45.0)
+
+    def _log_pmf_terms(self, start: int, stop: int) -> np.ndarray:
+        """``log p_k`` over the half-open integer block ``[start, stop)``."""
+        k = np.arange(start, stop, dtype=np.float64)
+        return -np.log(k + self.r) - betaln(k + 1.0, self.r) + self.r * self.log_p + k * self.log_1p
+
+    def _log_pmf_at(self, x: float) -> float:
+        """``log p_x`` at a real ``x``, the smooth extension the tail quadrature integrates.
+
+        Written through ``betaln`` rather than as a difference of ``gammaln`` terms: at counts
+        of order 1e9 the two gamma logs are ~2e10 apart in magnitude and their difference is
+        the O(log x) quantity wanted, so the naive spelling jitters by ~4e-6 between adjacent
+        counts -- enough noise for the tail quadrature to fail its tolerance.
+        """
+        return float(-math.log(x + self.r) - betaln(x + 1.0, self.r) + self.r * self.log_p + x * self.log_1p)
 
     def cdf(self, x: float) -> float:
         """Cumulative distribution function P(X <= x) = I_p(r, floor(x)+1)."""
@@ -282,10 +343,20 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
         return float(betainc(self.r, k + 1, self.p)) if k >= 0 else 0.0
 
     def quantile(self, q: float) -> float:
-        """Inverse CDF F^{-1}(q) (via scipy nbinom)."""
+        """Inverse CDF ``F^{-1}(q)`` (via scipy nbinom).
+
+        The endpoints are the support's own bounds -- ``0`` at ``q = 0`` and ``inf`` at
+        ``q = 1`` -- rather than scipy's ``-1``, which is outside the support this law scores
+        (P01-F12).
+        """
         from scipy.stats import nbinom
 
-        return float(nbinom.ppf(float(q), self.r, self.p))
+        q = validated_quantile_probability(q, label="NegativeBinomialDistribution.quantile")
+        if q <= 0.0:
+            return 0.0
+        if q >= 1.0:
+            return math.inf
+        return float(nbinom.ppf(q, self.r, self.p))
 
     def sampler(self, seed: int | None = None) -> "NegativeBinomialSampler":
         """Return a sampler for drawing observations from this distribution."""

@@ -610,6 +610,10 @@ class MixtureDistribution(SequenceEncodableProbabilityDistribution):
         leaves.append(w_logits)
         return MixtureGradientFitState(self, components, w_logits)
 
+    def _repaired_children(self):
+        """The mixture's components, so a component's repair reaches the mixture's receipt (P02-F05)."""
+        return tuple(("components[%d]" % index, part) for index, part in enumerate(self.components))
+
     def seq_posterior(self, x: T1) -> np.ndarray:
         """Return vectorized component responsibilities for encoded observations.
 
@@ -1504,11 +1508,36 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
             ww[keep_idx, :] = self._w_rng.dirichlet(
                 alpha=np.ones(self.num_components) / (self.num_components**2), size=keep_len
             )
+        ww = self._without_unsupported_responsibilities(x, ww)
         ww *= np.reshape(weights, (sz, 1))
 
         for i in range(self.num_components):
             self.accumulators[i].seq_initialize(_component_enc(x, i), ww[:, i], self._acc_rng[i])
             self.comp_counts[i] += np.sum(ww[:, i])
+
+    def _without_unsupported_responsibilities(self, x: T1, ww: np.ndarray) -> np.ndarray:
+        """Zero each component's initialization responsibility on rows outside that component's support.
+
+        The E-step already does this -- a component scores an out-of-support row -inf and gets no
+        responsibility for it -- but initialization draws its responsibilities blind, so a mixture of
+        a Gaussian and an Exponential used to hand the Exponential a share of the negative rows and
+        fail before the first E-step ever ran (P02-F03). A row no component can score keeps its zero
+        row here; scoring reports it as impossible evidence, which is the honest answer.
+        """
+        touched = False
+        for i in range(self.num_components):
+            mask = self.accumulators[i].supported_rows(_component_enc(x, i))
+            if mask is None:
+                continue
+            mask = np.asarray(mask, dtype=bool)
+            if mask.ndim != 1 or mask.shape[0] != ww.shape[0] or mask.all():
+                continue
+            ww[~mask, i] = 0.0
+            touched = True
+        if touched:
+            totals = ww.sum(axis=1, keepdims=True)
+            np.divide(ww, np.where(totals > 0.0, totals, 1.0), out=ww)
+        return ww
 
     def _feature_matrix(self, x: Any, keep_idx: np.ndarray) -> np.ndarray | None:
         """Best-effort extraction of a dense (kept_n, d) numeric feature matrix from encoded data.

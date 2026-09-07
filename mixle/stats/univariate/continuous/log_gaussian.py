@@ -35,6 +35,7 @@ from mixle.stats.univariate.continuous._observation_contracts import (
     anchored_location,
     anchored_pooled_variance,
     consistent_anchored_triple,
+    refuse_unsupported_observations,
     scored_observation,
     warn_uncorrectable_raw_moments,
 )
@@ -294,11 +295,15 @@ class LogGaussianDistribution(SequenceEncodableProbabilityDistribution):
 
         """
         # out-of-place so torch tensors with requires_grad pass through cleanly
-        rv = x - self.mu
-        rv = rv * rv
-        rv = rv * (-0.5 / self.sigma2)
-        rv = rv + self.log_const
-        rv = rv - x
+        with np.errstate(invalid="ignore"):
+            rv = x - self.mu
+            rv = rv * rv
+            rv = rv * (-0.5 / self.sigma2)
+            rv = rv + self.log_const
+            rv = rv - x
+        # The encoding IS log(x), so anything outside (0, inf) arrives here as NaN or an infinity
+        # and its density is zero -- the value the scalar path returns for it (P02-F03).
+        rv = np.where(np.isfinite(x), rv, -np.inf)
 
         return rv
 
@@ -497,6 +502,14 @@ def _rebuild_log_gaussian_suff_stat(values: tuple, anchored: tuple | None) -> "L
     return LogGaussianSuffStat(values[0], values[1], values[2], values[3], anchored=anchored)
 
 
+_LOG_GAUSSIAN_SUPPORT_MESSAGE = (
+    "LogGaussianDistribution has support x in (0, inf), but at least %d encoded observation(s) carrying "
+    "weight lie outside it. The encoder admits them so a mixture whose other component owns those "
+    "values can score the batch (they score -inf here), but fitting this law on them would fold a "
+    "NaN or an out-of-support value into its own sufficient statistics."
+)
+
+
 class LogGaussianAccumulator(AnchoredMomentTrack, SequenceEncodableStatisticAccumulator):
     """Accumulate weighted log-scale moments for log-Gaussian estimation.
 
@@ -611,6 +624,16 @@ class LogGaussianAccumulator(AnchoredMomentTrack, SequenceEncodableStatisticAccu
         """
         self.seq_update(x, weights, None)
 
+    def supported_rows(self, x) -> np.ndarray:
+        """Encoded rows this law can be fitted on: finite on the log scale, i.e. strictly positive.
+
+        The encoder admits out-of-support observations so that a mixture can encode a whole batch
+        against every component (P02-F03); this is the predicate that keeps them out of the
+        sufficient statistics, and the one a latent model's initialization consults before it hands
+        this component any responsibility.
+        """
+        return np.isfinite(x)
+
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: LogGaussianDistribution | None) -> None:
         """Vectorized update of sufficient statistics from encoded sequence x.
 
@@ -628,6 +651,7 @@ class LogGaussianAccumulator(AnchoredMomentTrack, SequenceEncodableStatisticAccu
         # the same values; ``_anchor_fold_chunk`` runs the conditioning gate and then folds both,
         # maintaining ``count``. This family carries a SECOND count for the variance's own weight
         # total, which tracks the first one exactly, so it takes the same increment.
+        refuse_unsupported_observations(self.supported_rows(x), weights, message=_LOG_GAUSSIAN_SUPPORT_MESSAGE)
         count_before = self.count
         self._anchor_fold_chunk(x, weights)
         self.count2 += self.count - count_before
@@ -963,6 +987,7 @@ class LogGaussianDataEncoder(DataSequenceEncoder):
         with np.errstate(divide="ignore", invalid="ignore"):
             rv = np.asarray(np.log(arr), dtype=float)
 
-        if np.any(np.isnan(rv)) or np.any(np.isinf(rv)):
-            raise ValueError("LogGaussianDistribution requires support x in (0,inf).")
+        # An out-of-support observation is scored, not refused: the scalar path returns -inf for it and a
+        # mixture whose other component owns that value has to be able to encode the whole batch
+        # (P02-F03). Only NaN stays refused -- it is missing data, not a zero-density point.
         return rv

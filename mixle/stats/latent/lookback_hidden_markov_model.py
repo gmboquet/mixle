@@ -523,7 +523,7 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
                 obs_log_likelihood[i] += init_comps[i].log_density(x[:lag])
         else:
             for i in range(num_states):
-                obs_log_likelihood[i] += comps[i].log_density(x[0:1])
+                obs_log_likelihood[i] += _window_log_density(comps[i], x[0:1])
 
         if np.max(obs_log_likelihood) == -np.inf:
             return -np.inf
@@ -924,19 +924,54 @@ class LookbackHiddenMarkovModelSampler(DistributionSampler):
         return rv
 
 
+def _window_log_density(topic, window):
+    """Score one lookback window, naming the requirement when the topic is not a window law.
+
+    At lag 0 the topics model length-1 windows, so scoring hands them a one-element sequence. A
+    scalar family put here instead failed with numpy's or Python's own coercion message, naming
+    neither this model nor the wrapper that fixes it (P02-F04).
+    """
+    try:
+        return topic.log_density(window)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "a lookback hidden Markov model's emission laws model windows of observations, and "
+            "%s could not score one: %s. Wrap a scalar family in a "
+            "SequenceEstimator/SequenceDistribution (a length-1 sequence law), or -- at lag 0 -- use "
+            "HiddenMarkovModelDistribution, which takes scalar emissions directly." % (type(topic).__name__, exc)
+        ) from exc
+
+
 def _emit_unconditioned(sampler):
-    """One draw from an emission sampler with no history to condition on (the lag == 0 case).
+    """The one observation a lag == 0 emission contributes, given no history to condition on.
 
     At lag 0 the model is an ordinary HMM: there is no lookback window, so "emit given an empty
     history" is just an unconditional draw. Calling sample_given([]) unconditionally demanded a
     conditional sampler interface that the emission does not need and mostly does not have --
     GaussianSampler and SequenceSampler have no sample_given at all, and the conditional laws that
-    do have it reject an empty path when their own lag is >= 1. That left the lag == 0 sampling
-    path with no usable emission type, including the SequenceDistribution emissions this model's
-    own engine test builds (that test only fits and scores, so it never reached this line).
+    do have it reject an empty path when their own lag is >= 1.
+
+    The topics model length-(lag + 1) WINDOWS, which at lag 0 means one-element windows: scoring
+    hands the topic ``x[t:t+1]``, so the sampler has to unwrap the window it drew and contribute
+    its single element. Emitting the window itself made the sampler produce sequences the same
+    distribution could not score (P02-F04).
     """
     given = getattr(sampler, "sample_given", None)
-    return given([]) if callable(given) else sampler.sample()
+    window = given([]) if callable(given) else sampler.sample()
+    return _single_window_observation(window)
+
+
+def _single_window_observation(window):
+    """The lone observation inside a length-1 lookback window.
+
+    An emission law over length-1 windows can spell its draw either way: a ``SequenceDistribution``
+    returns the one-element window, a hand-written window law may return the observation itself.
+    Scoring hands the topic ``x[t:t+1]``, so the sequence spelling is unwrapped and the scalar
+    spelling passed through -- both then sample exactly what the same distribution scores (P02-F04).
+    """
+    if isinstance(window, (list, tuple, np.ndarray)) and len(window) == 1:
+        return window[0]
+    return window
 
 
 class LookbackHiddenMarkovModelEstimatorAccumulator(SequenceEncodableStatisticAccumulator):
@@ -2047,7 +2082,19 @@ class LookbackHiddenMarkovModelDataEncoder(DataSequenceEncoder):
         ims = np.asarray(ims, dtype=np.int32)
         imi = np.asarray(imi, dtype=np.int32)
         sz = np.asarray(sz, dtype=np.int32)
-        xss = self.encoder.seq_encode(xss)
+        try:
+            xss = self.encoder.seq_encode(xss)
+        except (TypeError, ValueError) as exc:
+            # The emission laws model length-(lag + 1) WINDOWS, so at lag 0 they see one-element
+            # sequences, not scalars -- a scalar family used to fail here with its own shape or
+            # hashability message, naming neither this model nor the wrapper that fixes it
+            # (P02-F04).
+            raise ValueError(
+                "a lookback hidden Markov model's emission laws model length-%d windows of "
+                "observations, and this one could not encode them: %s. Wrap a scalar family in a "
+                "SequenceEstimator/SequenceDistribution (a length-%d sequence law), or -- at lag 0 -- "
+                "use HiddenMarkovModelEstimator, which takes scalar emissions directly." % (lag + 1, exc, lag + 1)
+            ) from exc
         xsi = self.init_encoder.seq_encode(xsi) if lag > 0 else None
 
         return (ids, idi, ims, imi, sz, xss, xsi), len_enc

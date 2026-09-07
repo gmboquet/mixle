@@ -28,6 +28,9 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import (
+    refuse_unsupported_observations,
+)
 from mixle.utils.aliasing import broadcast_pseudo_count
 from mixle.utils.special import digamma, gammaln, trigamma
 
@@ -464,6 +467,14 @@ class GammaSampler(DistributionSampler):
         return self.rng.gamma(shape=self.dist.k, scale=self.dist.theta, size=size)
 
 
+_GAMMA_SUPPORT_MESSAGE = (
+    "GammaDistribution has support x > 0, but at least %d encoded observation(s) carrying "
+    "weight lie outside it. The encoder admits them so a mixture whose other component owns those "
+    "values can score the batch (they score -inf here), but fitting this law on them would fold a "
+    "NaN or an out-of-support value into its own sufficient statistics."
+)
+
+
 class GammaAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate weighted count, sum, and log-sum statistics for Gamma estimation."""
 
@@ -546,6 +557,16 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum += x * weight
         self.sum_of_logs += log(x) * weight
 
+    def supported_rows(self, x) -> np.ndarray:
+        """Encoded rows this law can be fitted on: finite and strictly positive.
+
+        The encoder admits out-of-support observations so that a mixture can encode a whole batch
+        against every component (P02-F03); this is the predicate that keeps them out of the
+        sufficient statistics, and the one a latent model's initialization consults before it hands
+        this component any responsibility.
+        """
+        return np.isfinite(x[0]) & (np.asarray(x[0]) > 0.0)
+
     def seq_update(
         self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: Optional["GammaDistribution"]
     ) -> None:
@@ -574,6 +595,7 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
                 "zeros, or model them separately (e.g. an Exponential or a hurdle-style "
                 "composite)." % zero_count
             )
+        refuse_unsupported_observations(self.supported_rows(x), weights, message=_GAMMA_SUPPORT_MESSAGE)
         self.sum += np.dot(x[0], weights)
         self.sum_of_logs += np.dot(x[1], weights)
         self.count += np.sum(weights)
@@ -840,8 +862,9 @@ class GammaDataEncoder(DataSequenceEncoder):
                 "Gamma observations contain %d NaN value(s). NaN marks missing data, not a support "
                 "violation; drop or impute the missing entries before fitting." % nan_count
             )
-        if np.any(rv1 < 0) or np.any(~np.isfinite(rv1)):
-            raise ValueError("GammaDistribution has support x > 0.")
-        with np.errstate(divide="ignore"):
+        # An out-of-support observation is scored, not refused: the scalar path returns -inf for
+        # it and a mixture whose other component owns that value has to be able to encode the whole
+        # batch (P02-F03). Only NaN stays refused -- it is missing data, not a zero-density point.
+        with np.errstate(divide="ignore", invalid="ignore"):
             rv2 = np.log(rv1)
         return rv1, rv2

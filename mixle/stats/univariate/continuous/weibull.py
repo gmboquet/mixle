@@ -18,6 +18,10 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import (
+    LOG_FLOAT_MAX,
+    refuse_unsupported_observations,
+)
 
 # The declared support is x >= 0, and scoring an exact zero works (density 0, 1/scale, or inf by
 # shape) -- but *fitting* on exact zeros cannot: for any shape != 1 the log-density at 0 is -inf or
@@ -36,7 +40,7 @@ def _weibull_cv2(shape: float) -> float:
     a = math.lgamma(1.0 + 2.0 / shape)
     b = math.lgamma(1.0 + 1.0 / shape)
     t = a - 2.0 * b
-    if t >= math.log(np.finfo(float).max):
+    if t >= LOG_FLOAT_MAX:
         return np.inf
     return math.exp(t) - 1.0
 
@@ -155,7 +159,13 @@ class WeibullDistribution(SequenceEncodableProbabilityDistribution):
                 return -np.inf
             return -self.log_scale
         z = x / self.scale
-        return self.log_shape - self.log_scale + (self.shape - 1.0) * math.log(z) - z**self.shape
+        log_z = math.log(z)
+        # ``z ** shape`` escapes a Python OverflowError once ``shape * log z`` passes the float
+        # range, where the vectorized path and scipy both return -inf: the density really is zero
+        # there, so a scalar scoring loop over the same data must not crash (P01-F04).
+        if self.shape * log_z > LOG_FLOAT_MAX:
+            return -np.inf
+        return self.log_shape - self.log_scale + (self.shape - 1.0) * log_z - z**self.shape
 
     def seq_log_density(self, x: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded observations."""
@@ -236,18 +246,32 @@ class WeibullDistribution(SequenceEncodableProbabilityDistribution):
         return float(_sp.ppf(q, self.shape, scale=self.scale))
 
     def mean(self) -> float:
-        """Mean scale * Gamma(1 + 1/shape)."""
+        """Mean scale * Gamma(1 + 1/shape).
+
+        ``Gamma(1 + 1/shape)`` diverges as the shape goes to zero, where ``math.gamma`` raises
+        an ``OverflowError`` rather than returning the limit scipy reports (P01-F10). Summed in
+        logs so the divergence arrives as ``inf``.
+        """
         import math
 
-        return float(self.scale * math.gamma(1.0 + 1.0 / self.shape))
+        log_mean = self.log_scale + math.lgamma(1.0 + 1.0 / self.shape)
+        return math.inf if log_mean > LOG_FLOAT_MAX else float(math.exp(log_mean))
 
     def variance(self) -> float:
-        """Variance scale^2 * (Gamma(1+2/shape) - Gamma(1+1/shape)^2)."""
+        """Variance scale^2 * (Gamma(1+2/shape) - Gamma(1+1/shape)^2).
+
+        Both gamma terms diverge together as the shape goes to zero; the difference diverges
+        with them, so the limit is ``inf`` rather than an ``OverflowError`` (P01-F10).
+        """
         import math
 
-        g1 = math.gamma(1.0 + 1.0 / self.shape)
-        g2 = math.gamma(1.0 + 2.0 / self.shape)
-        return float(self.scale * self.scale * (g2 - g1 * g1))
+        log_g1 = math.lgamma(1.0 + 1.0 / self.shape)
+        log_g2 = math.lgamma(1.0 + 2.0 / self.shape)
+        # Gamma(1+2/k) >= Gamma(1+1/k)^2 by log-convexity, so the bracket is non-negative and
+        # its log is log_g2 + log1p(-exp(2 log_g1 - log_g2)).
+        log_bracket = log_g2 + math.log1p(-math.exp(min(0.0, 2.0 * log_g1 - log_g2)))
+        log_variance = 2.0 * self.log_scale + log_bracket
+        return math.inf if log_variance > LOG_FLOAT_MAX else float(math.exp(log_variance))
 
     def entropy(self) -> float:
         """Differential entropy gamma*(1 - 1/shape) + log(scale/shape) + 1."""
@@ -291,6 +315,14 @@ class WeibullSampler(DistributionSampler):
         return self.dist.scale * self.rng.weibull(self.dist.shape, size=size)
 
 
+_WEIBULL_SUPPORT_MESSAGE = (
+    "WeibullDistribution has support x >= 0, but at least %d encoded observation(s) carrying "
+    "weight lie outside it. The encoder admits them so a mixture whose other component owns those "
+    "values can score the batch (they score -inf here), but fitting this law on them would fold a "
+    "NaN or an out-of-support value into its own sufficient statistics."
+)
+
+
 class WeibullAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate weighted first and second moments for Weibull estimation."""
 
@@ -321,6 +353,16 @@ class WeibullAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
+    def supported_rows(self, x) -> np.ndarray:
+        """Encoded rows this law can be fitted on: finite and non-negative.
+
+        The encoder admits out-of-support observations so that a mixture can encode a whole batch
+        against every component (P02-F03); this is the predicate that keeps them out of the
+        sufficient statistics, and the one a latent model's initialization consults before it hands
+        this component any responsibility.
+        """
+        return np.isfinite(x[0]) & (np.asarray(x[0]) >= 0.0)
+
     def seq_update(
         self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: WeibullDistribution | None
     ) -> None:
@@ -329,6 +371,7 @@ class WeibullAccumulator(SequenceEncodableStatisticAccumulator):
         zero_evidence = int(np.count_nonzero((xx == 0.0) & (np.asarray(weights) > 0.0)))
         if zero_evidence:
             raise ValueError(_WEIBULL_ZERO_FIT_MESSAGE % zero_evidence)
+        refuse_unsupported_observations(self.supported_rows(x), weights, message=_WEIBULL_SUPPORT_MESSAGE)
         chunk_sum2 = np.dot(xx * xx, weights)
         if not np.isfinite(chunk_sum2):
             # Same hazard as WeibullAccumulator.update: squaring xx BEFORE weighting can overflow
@@ -419,11 +462,33 @@ class WeibullEstimator(ParameterEstimator):
         if count <= 0.0:
             return WeibullDistribution(1.0, 1.0, name=self.name, keys=self.keys)
 
-        mean = max(sum_x / count, self.min_scale)
+        raw_mean = sum_x / count
+        mean = max(raw_mean, self.min_scale)
         var = max(sum_x2 / count - mean * mean, 0.0)
         shape = _shape_from_moments(mean, var, self.min_shape, self.max_shape)
-        scale = mean / math.exp(math.lgamma(1.0 + 1.0 / shape))
-        return WeibullDistribution(shape, max(scale, self.min_scale), name=self.name, keys=self.keys)
+        raw_scale = mean / math.exp(math.lgamma(1.0 + 1.0 / shape))
+        scale = max(raw_scale, self.min_scale)
+        rv = WeibullDistribution(shape, scale, name=self.name, keys=self.keys)
+        # Both moment-matching guards are hard walls, not converged estimates: the shape solver
+        # refuses to search outside [min_shape, max_shape] (the shape diverges as the coefficient
+        # of variation goes to zero, so any zero-variance sample lands on the ceiling), and the
+        # scale is floored so the resulting law is not a delta. Neither was disclosed, so a fit
+        # on three identical points reported a shape of exactly 1000 as if the data asked for it
+        # (P01-F03); every other clamping family in the package reports its wall.
+        repairs: tuple[str, ...] = ()
+        if var <= 0.0 or raw_mean <= 0.0:
+            repairs += ("shape-unresolvable(zero sample variance -> %.6g)" % shape,)
+        elif shape >= self.max_shape:
+            repairs += ("shape-clamped(moment estimate -> max_shape=%.6g)" % self.max_shape,)
+        elif shape <= self.min_shape:
+            repairs += ("shape-clamped(moment estimate -> min_shape=%.6g)" % self.min_shape,)
+        if raw_scale < self.min_scale:
+            repairs += ("scale-floored(%.6g -> %.6g)" % (raw_scale, self.min_scale),)
+        if raw_mean < self.min_scale:
+            repairs += ("mean-floored(%.6g -> %.6g)" % (raw_mean, self.min_scale),)
+        if repairs:
+            rv._numerical_repairs = repairs
+        return rv
 
 
 class WeibullDataEncoder(DataSequenceEncoder):
@@ -444,8 +509,9 @@ class WeibullDataEncoder(DataSequenceEncoder):
                 "Weibull observations contain %d NaN value(s). NaN marks missing data, not a "
                 "support violation; drop or impute the missing entries before fitting." % nan_count
             )
-        if rv.size and np.any(rv < 0.0):
-            raise ValueError("WeibullDistribution requires observations x >= 0.")
-        with np.errstate(divide="ignore"):
+        # An out-of-support observation is scored, not refused: the scalar path returns -inf for it and a
+        # mixture whose other component owns that value has to be able to encode the whole batch
+        # (P02-F03). Only NaN stays refused -- it is missing data, not a zero-density point.
+        with np.errstate(divide="ignore", invalid="ignore"):
             lx = np.log(rv)
         return rv, lx

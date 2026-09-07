@@ -25,10 +25,15 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import (
+    refuse_unsupported_observation,
+    refuse_unsupported_observations,
+)
 from mixle.stats.univariate.continuous.beta import BetaDistribution
 from mixle.stats.univariate.discrete._count_contracts import (
     CachedParameterLaw,
     exact_integer_observations,
+    validated_quantile_probability,
 )
 from mixle.utils.special import digamma
 
@@ -301,10 +306,19 @@ class GeometricDistribution(CachedParameterLaw, SequenceEncodableProbabilityDist
         return float(1.0 - (1.0 - self.p) ** k) if k >= 1 else 0.0
 
     def quantile(self, q: float) -> float:
-        """Inverse CDF F^{-1}(q), support >= 1 (via scipy geom)."""
+        """Inverse CDF ``F^{-1}(q)``, support ``k >= 1`` (via scipy geom).
+
+        The endpoints are the support's own bounds -- ``1`` at ``q = 0`` and ``inf`` at
+        ``q = 1``; scipy's ``0`` at ``q = 0`` is outside the support this law scores (P01-F12).
+        """
         from scipy.stats import geom
 
-        return float(geom.ppf(float(q), self.p))
+        q = validated_quantile_probability(q, label="GeometricDistribution.quantile")
+        if q <= 0.0:
+            return 1.0
+        if q >= 1.0:
+            return math.inf
+        return float(geom.ppf(q, self.p))
 
     def entropy(self) -> float:
         """Shannon entropy (-(1-p) log(1-p) - p log p) / p (nats)."""
@@ -481,6 +495,15 @@ class GeometricSampler(DistributionSampler):
         return self.rng.geometric(p=self.dist.p, size=size)
 
 
+_GEOMETRIC_SUPPORT_MESSAGE = (
+    "GeometricDistribution has support k in {1, 2, 3, ...}, but at least %d observation(s) "
+    "carrying weight are below one, fractional, NaN, or infinite (estimation encodes in chunks; "
+    "the first offending chunk refuses). Those observations used to be dropped from the "
+    "sufficient statistics without a word, and zeros -- which the law scores -inf -- were among "
+    "them."
+)
+
+
 class GeometricAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate weighted count and sum statistics for Geometric estimation."""
 
@@ -515,9 +538,14 @@ class GeometricAccumulator(SequenceEncodableStatisticAccumulator):
             None
 
         """
-        if x >= 1:
-            self.sum += x * weight
-            self.count += weight
+        refuse_unsupported_observation(
+            (isinstance(x, (int, np.integer)) or (isinstance(x, float) and math.isfinite(x) and x.is_integer()))
+            and x >= 1,
+            weight,
+            message=_GEOMETRIC_SUPPORT_MESSAGE % 1,
+        )
+        self.sum += x * weight
+        self.count += weight
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Optional["GeometricDistribution"]) -> None:
         """Vectorized update of sufficient statistics from encoded sequence x.
@@ -534,6 +562,11 @@ class GeometricAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        refuse_unsupported_observations(
+            np.isfinite(x) & (np.asarray(x) >= 1),
+            weights,
+            message=_GEOMETRIC_SUPPORT_MESSAGE,
+        )
         self.sum += np.dot(x, weights)
         self.count += np.sum(weights)
 
@@ -720,8 +753,14 @@ class GeometricEstimator(ParameterEstimator):
         else:
             p = suff_stat[0] / suff_stat[1]
 
-        p = float(np.clip(p, 1.0e-12, 1.0 - 1.0e-12))
-        return GeometricDistribution(p, name=self.name, keys=self.keys)
+        clamped = float(np.clip(p, 1.0e-12, 1.0 - 1.0e-12))
+        dist = GeometricDistribution(clamped, name=self.name, keys=self.keys)
+        if clamped != p:
+            # The clamp keeps p strictly inside (0, 1) -- p = 1 is a point mass at 1 and p = 0 is
+            # not a distribution -- but it used to bind silently, so a fit on three ones reported
+            # 0.999999999999 as if the data had asked for it (P01-F07).
+            dist._numerical_repairs = ("geometric-p-clamped(%.3g -> %s)" % (p, clamped),)
+        return dist
 
 
 class GeometricDataEncoder(DataSequenceEncoder):
@@ -758,5 +797,7 @@ class GeometricDataEncoder(DataSequenceEncoder):
         return exact_integer_observations(
             x,
             label="Geometric observations",
-            minimum=1,
+            # An out-of-support count is scored, not refused: the scalar path returns -inf for it
+            # and a mixture whose other component owns that value has to be able to encode the
+            # whole batch (P02-F03). The integer contract itself still holds.
         )

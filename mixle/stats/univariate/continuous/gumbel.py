@@ -217,8 +217,20 @@ class GumbelDistribution(SequenceEncodableProbabilityDistribution):
         return math.exp(-math.exp(-(float(x) - self.loc) / self.scale))
 
     def quantile(self, q: float) -> float:
-        """Inverse CDF F^{-1}(q)."""
-        return float(self.loc - self.scale * math.log(-math.log(float(q))))
+        """Inverse CDF ``F^{-1}(q)``.
+
+        ``q = 0`` and ``q = 1`` return the support's bounds, ``-inf`` and ``+inf``: Gumbel was
+        the one continuous family that raised there, where Gaussian, Laplace and the rest already
+        returned the infinities (P01-F12).
+        """
+        q = float(q)
+        if math.isnan(q) or not 0.0 <= q <= 1.0:
+            raise ValueError("GumbelDistribution.quantile: q must be in [0, 1].")
+        if q <= 0.0:
+            return -math.inf
+        if q >= 1.0:
+            return math.inf
+        return float(self.loc - self.scale * math.log(-math.log(q)))
 
     def mean(self) -> float:
         """Mean E[X] = loc + scale * euler_gamma."""

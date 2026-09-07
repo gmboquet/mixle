@@ -26,7 +26,11 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.univariate.continuous.beta import BetaDistribution
-from mixle.stats.univariate.discrete._count_contracts import exact_integer_observations, nonnegative_weights
+from mixle.stats.univariate.discrete._count_contracts import (
+    exact_integer_observations,
+    nonnegative_weights,
+    validated_quantile_probability,
+)
 from mixle.utils.special import digamma
 from mixle.utils.vector import gammaln
 
@@ -475,11 +479,21 @@ class BinomialDistribution(SequenceEncodableProbabilityDistribution):
         return float((1.0 - 6.0 * p * (1.0 - p)) / (n * p * (1.0 - p)))
 
     def quantile(self, q: float) -> float:
-        """Inverse CDF F^{-1}(q) over min_val + {0..n} (via scipy binom)."""
+        """Inverse CDF ``F^{-1}(q)`` over ``min_val + {0..n}`` (via scipy binom).
+
+        The endpoints are the support's own bounds -- ``min_val`` at ``q = 0`` and
+        ``min_val + n`` at ``q = 1`` -- rather than scipy's ``-1``, which is outside the support
+        this law scores (P01-F12).
+        """
         from scipy.stats import binom
 
         shift = float(getattr(self, "min_val", 0) or 0)
-        return float(shift + binom.ppf(float(q), self.n, self.p))
+        q = validated_quantile_probability(q, label="BinomialDistribution.quantile")
+        if q <= 0.0:
+            return shift
+        if q >= 1.0:
+            return shift + float(self.n)
+        return float(shift + binom.ppf(q, self.n, self.p))
 
     def mode(self) -> float:
         """Mode min_val + floor((n+1)p)."""

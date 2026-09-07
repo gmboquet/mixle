@@ -153,6 +153,26 @@ def _reject_all_zero_observation_weights(data: Any, entry: str) -> None:
 
 
 # --- estimator coercion -----------------------------------------------------
+def _reusable_observations(data: Any) -> Any:
+    """Materialize a one-shot iterator so the data survives being read more than once.
+
+    Estimator inference reads the records to choose a model, and the encoder reads them again to
+    fit it. A generator, ``iter(list)``, ``map``/``filter``/``zip``, or a file object returns itself
+    from ``__iter__`` and is exhausted after the first pass, so ``optimize(x for x in data)`` used
+    to infer a model from 200 observations and then encode zero of them -- returning an empty
+    IgnoredDistribution whose receipt claimed ``converged=True`` over ``n_observations=0``
+    (P03-F02). ``propose()`` already materialized; these entry points did not. A reusable sequence
+    (list, tuple, ndarray, DataFrame, DataSource, RDD) yields a fresh iterator and is returned
+    unchanged.
+    """
+    if data is None:
+        return None
+    try:
+        return list(data) if iter(data) is data else data
+    except TypeError:
+        return data  # not iterable: leave it to the caller's own validation
+
+
 def _coerce_estimator(estimator: Any, data: Any, fields: Any = None) -> ParameterEstimator:
     """Resolve the ``estimator`` argument to a concrete ``ParameterEstimator``.
 
@@ -1621,6 +1641,7 @@ def optimize(
         track_best=track_best,
     )
     rng = _resolve_rng_arg(rng, seed)
+    data = _reusable_observations(data)
     if fused_options is not None:
         unknown = set(fused_options) - {"parallel", "lse_bits", "lse_span"}
         if unknown:
@@ -1759,6 +1780,15 @@ def optimize(
         _reject_masked_data(data, "optimize()")
         if not _estimator_carries_prior(estimator if init_estimator is None else init_estimator):
             _reject_all_zero_observation_weights(data, "optimize()")
+    else:
+        # The pre-encoded spelling of the same empty corpus: a zero-row batch used to return a
+        # model made entirely of a variance floor, stamped converged over zero observations
+        # (P03-F03). ``_encoded_row_count`` is the number already computed for the receipt.
+        if _encoded_row_count(enc_data) == 0:
+            raise ValueError(
+                "optimize() received no observations: enc_data carries zero rows. "
+                "Pass a non-empty data sequence or a non-empty pre-encoded batch."
+            )
 
     est = estimator if init_estimator is None else init_estimator
 
@@ -2041,6 +2071,7 @@ def fit(
     # below sees the same RandomState the forwarded optimize call would.
     if "seed" in kwargs or "rng" in kwargs:
         kwargs["rng"] = _resolve_rng_arg(kwargs.pop("rng", None), kwargs.pop("seed", None))
+    data = _reusable_observations(data)
     if (
         estimator is None
         and kwargs.get("structure", "auto") == "auto"
@@ -2178,6 +2209,7 @@ def best_of(
 
     """
     rng = _resolve_rng_arg(rng, seed)
+    data = _reusable_observations(data)
     if data is None and enc_data is None:
         raise ValueError(
             "best_of() received no observations: data and enc_data are both None. "

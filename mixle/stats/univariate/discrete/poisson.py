@@ -28,10 +28,40 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import (
+    refuse_unsupported_observation,
+    refuse_unsupported_observations,
+)
 from mixle.stats.univariate.continuous.gamma import GammaDistribution
-from mixle.stats.univariate.discrete._count_contracts import exact_integer_observations
+from mixle.stats.univariate.discrete._count_contracts import (
+    blocked_entropy,
+    exact_integer_observations,
+    validated_quantile_probability,
+)
 from mixle.utils.special import digamma
 from mixle.utils.vector import gammaln
+
+_POISSON_SUPPORT_MESSAGE = (
+    "PoissonDistribution has support x in {0, 1, 2, ...}, but at least %d observation(s) carrying "
+    "weight are negative, fractional, NaN, or infinite (estimation encodes in chunks; the first "
+    "offending chunk refuses). Negative counts used to be averaged straight into the rate, and an "
+    "all-negative sample produced a floored rate rather than an error."
+)
+_MIN_POISSON_RATE = 1.0e-12
+
+
+def _floored_poisson(lam: float, *, name, keys) -> "PoissonDistribution":
+    """Build a Poisson at ``lam``, disclosing the rate floor when it binds.
+
+    The floor keeps an all-zero (or empty-after-weighting) sample from producing ``lam = 0``,
+    which is not a Poisson at all. It used to bind silently, so a fit on ``[0, 0, 0]`` looked
+    like a converged estimate of a rate of 1e-12 (P01-F06); Bernoulli already reports its clamp.
+    """
+    floored = max(lam, _MIN_POISSON_RATE)
+    dist = PoissonDistribution(floored, name=name, keys=keys)
+    if lam < _MIN_POISSON_RATE:
+        dist._numerical_repairs = ("poisson-rate-floored(%.6g -> %.6g)" % (lam, _MIN_POISSON_RATE),)
+    return dist
 
 
 def _fisher_mean_var(dist):
@@ -342,25 +372,93 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         """Excess kurtosis 1/lambda."""
         return float(1.0 / self.lam)
 
+    # Above this rate the asymptotic series is exact to double rounding and the direct sum is
+    # neither affordable (1e15 terms) nor accurate (the naive log-pmf cancels at that size).
+    _ENTROPY_ASYMPTOTIC_LAM = 1.0e3
+
     def entropy(self) -> float:
-        """Shannon entropy in nats, by exact summation of the standard series.
+        """Shannon entropy in nats, by summation of the standard series in bounded memory.
 
         The Poisson entropy ``-sum_k p_k log p_k`` has no closed form; the series is summed over
         the effective support ``k <= lam + 40 sqrt(lam) + 40``, beyond which the remaining terms
-        are far below double rounding (the tail mass decays super-geometrically).
+        are far below double rounding (the tail mass decays super-geometrically). The sum is
+        taken one bounded block at a time, and from ``lam = 1e3`` upward the classical asymptotic
+        series stands in for it exactly: ``lam = 1e8`` used to allocate a single 3.2 GB array
+        here and ``lam = 1e15`` a 7 PiB one (P01-F02).
         """
-        from scipy.special import gammaln
+        if self.lam >= self._ENTROPY_ASYMPTOTIC_LAM:
+            # Knessl, "Integral representations and asymptotic expansions for Shannon and Renyi
+            # entropies", Appl. Math. Lett. 11 (1998). The neglected term is O(lam^-4), below
+            # double rounding from lam = 1e3 upward, and the series stays exact where summing
+            # 1e15 terms cannot -- and where x log(lam) - gammaln(x + 1) cancels to noise.
+            return float(
+                0.5 * math.log(2.0 * math.pi * math.e * self.lam)
+                - 1.0 / (12.0 * self.lam)
+                - 1.0 / (24.0 * self.lam**2)
+                - 19.0 / (360.0 * self.lam**3)
+            )
+        return blocked_entropy(
+            self._log_pmf_terms,
+            self._log_pmf_at,
+            support_start=0,
+            effective_support_end=math.ceil(self.lam + 40.0 * math.sqrt(self.lam) + 40.0),
+            mean=self.lam,
+            sd=math.sqrt(self.lam),
+        )
 
-        kmax = int(math.ceil(self.lam + 40.0 * math.sqrt(self.lam) + 40.0))
-        k = np.arange(kmax + 1, dtype=np.float64)
-        log_p = k * math.log(self.lam) - self.lam - gammaln(k + 1.0)
-        return float(-np.sum(np.exp(log_p) * log_p))
+    def _log_pmf_terms(self, start: int, stop: int) -> np.ndarray:
+        """``log p_k`` over the half-open integer block ``[start, stop)``."""
+        k = np.arange(start, stop, dtype=np.float64)
+        return k * math.log(self.lam) - self.lam - gammaln(k + 1.0)
+
+    def _log_pmf_at(self, x: float) -> float:
+        """``log p_x`` at a real ``x``, the smooth extension the tail quadrature integrates."""
+        return float(x * math.log(self.lam) - self.lam - gammaln(x + 1.0))
 
     def quantile(self, q: float) -> float:
-        """Inverse CDF F^{-1}(q) (via scipy poisson)."""
+        """Inverse CDF ``F^{-1}(q)``: the smallest ``k`` with ``P(X <= k) >= q``.
+
+        The endpoints are the support's own bounds -- ``0`` at ``q = 0`` and ``inf`` at
+        ``q = 1`` -- rather than scipy's ``-1``, which is outside the support this law scores
+        (P01-F12). Past ``lam ~ 1e12`` scipy's generic discrete ``ppf`` returns NaN for
+        mid-range ``q`` while the CDF keeps working; there the answer is bracketed from the
+        normal approximation and bisected on this law's own CDF (P01-F11).
+        """
         from scipy.stats import poisson
 
-        return float(poisson.ppf(float(q), self.lam))
+        q = validated_quantile_probability(q, label="PoissonDistribution.quantile")
+        if q <= 0.0:
+            return 0.0
+        if q >= 1.0:
+            return math.inf
+        value = float(poisson.ppf(q, self.lam))
+        if math.isnan(value):
+            return self._quantile_by_bisection(q)
+        return value
+
+    def _quantile_by_bisection(self, q: float) -> float:
+        """Smallest ``k`` with ``cdf(k) >= q``, bracketed from the normal approximation."""
+        from scipy.stats import norm
+
+        sd = math.sqrt(self.lam)
+        centre = self.lam + sd * float(norm.ppf(q))
+        low, high = math.floor(centre - 1.0), math.ceil(centre + 1.0)
+        low = max(low, 0)
+        width = max(sd, 1.0)
+        while low > 0 and self.cdf(low) >= q:
+            low = max(0, low - math.ceil(width))
+            width *= 2.0
+        width = max(sd, 1.0)
+        while self.cdf(high) < q:
+            high += math.ceil(width)
+            width *= 2.0
+        while low < high:
+            middle = low + (high - low) // 2
+            if self.cdf(middle) >= q:
+                high = middle
+            else:
+                low = middle + 1
+        return float(low)
 
     def mode(self) -> float:
         """Mode floor(lambda)."""
@@ -603,6 +701,12 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        refuse_unsupported_observation(
+            isinstance(x, (int, np.integer)) or (isinstance(x, float) and math.isfinite(x) and x.is_integer()),
+            weight,
+            message=_POISSON_SUPPORT_MESSAGE % 1,
+        )
+        refuse_unsupported_observation(x >= 0, weight, message=_POISSON_SUPPORT_MESSAGE % 1)
         self.sum += x * weight
         self.count += weight
 
@@ -626,6 +730,11 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        refuse_unsupported_observations(
+            np.isfinite(x[0]) & (np.asarray(x[0]) >= 0),
+            weights,
+            message=_POISSON_SUPPORT_MESSAGE,
+        )
         self.sum += np.dot(x[0], weights)
         self.count += weights.sum()
 
@@ -778,11 +887,11 @@ class PoissonEstimator(ParameterEstimator):
 
         if self.pseudo_count is not None and self.suff_stat is not None:
             lam = (psum + self.suff_stat * self.pseudo_count) / (nobs + self.pseudo_count)
-            return PoissonDistribution(max(float(lam), 1.0e-12), name=self.name, keys=self.keys)
+            return _floored_poisson(float(lam), name=self.name, keys=self.keys)
         elif nobs == 0.0:
             return PoissonDistribution(1.0, name=self.name, keys=self.keys)
         else:
-            return PoissonDistribution(max(float(psum / nobs), 1.0e-12), name=self.name, keys=self.keys)
+            return _floored_poisson(float(psum / nobs), name=self.name, keys=self.keys)
 
 
 class PoissonDataEncoder(DataSequenceEncoder):
@@ -820,7 +929,9 @@ class PoissonDataEncoder(DataSequenceEncoder):
         rv1 = exact_integer_observations(
             x,
             label="Poisson observations",
-            minimum=0,
+            # An out-of-support count is scored, not refused: the scalar path returns -inf for it
+            # and a mixture whose other component owns that value has to be able to encode the
+            # whole batch (P02-F03). The integer contract itself still holds.
         )
         rv2 = gammaln(rv1 + 1.0)
         return rv1, rv2

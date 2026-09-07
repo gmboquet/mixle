@@ -20,6 +20,9 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import (
+    refuse_unsupported_observations,
+)
 from mixle.utils.special import digamma, gammaln, trigamma
 
 # The encoder admits the closed interval [0, 1] because *scoring* boundary values is well defined
@@ -233,7 +236,10 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
         right = np.inf if self.b < 1.0 else (-self.log_const if self.b == 1.0 else -np.inf)
         with np.errstate(invalid="ignore"):
             interior = (self.a - 1.0) * lx + (self.b - 1.0) * l1mx - self.log_const
-        return np.where(values == 0.0, left, np.where(values == 1.0, right, interior))
+        inside = (values > 0.0) & (values < 1.0)
+        # Outside [0, 1] the density is zero -- what the scalar path returns -- and the encoded
+        # logs are NaN there, so the interior expression cannot stand in for it (P02-F03).
+        return np.where(values == 0.0, left, np.where(values == 1.0, right, np.where(inside, interior, -np.inf)))
 
     @staticmethod
     def backend_log_density_from_params(log_x: Any, log1m_x: Any, a: Any, b: Any, engine: Any) -> Any:
@@ -291,8 +297,18 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
         return float(self.a / (self.a + self.b))
 
     def variance(self) -> float:
-        """Variance Var[X] of the distribution."""
-        return float(self.a * self.b / ((self.a + self.b) ** 2 * (self.a + self.b + 1.0)))
+        """Variance Var[X] of the distribution.
+
+        Formed in logs: at concentrations near the float floor ``(a + b) ** 2`` underflows to
+        zero and the direct quotient raised ``ZeroDivisionError`` where the variance is a
+        perfectly ordinary number (``a = b = 1e-300`` is the fair coin on {0, 1}, variance 0.25 --
+        P01-F10).
+        """
+        import math
+
+        total = self.a + self.b
+        log_variance = math.log(self.a) + math.log(self.b) - 2.0 * math.log(total) - math.log1p(total)
+        return float(math.exp(log_variance))
 
     def entropy(self) -> float:
         """Differential entropy ln B(a,b) - (a-1)psi(a) - (b-1)psi(b) + (a+b-2)psi(a+b)."""
@@ -346,6 +362,14 @@ class BetaSampler(DistributionSampler):
         return self.rng.beta(self.dist.a, self.dist.b, size=size)
 
 
+_BETA_SUPPORT_MESSAGE = (
+    "BetaDistribution has support x in [0, 1], but at least %d encoded observation(s) carrying "
+    "weight lie outside it. The encoder admits them so a mixture whose other component owns those "
+    "values can score the batch (they score -inf here), but fitting this law on them would fold a "
+    "NaN or an out-of-support value into its own sufficient statistics."
+)
+
+
 class BetaAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate sufficient statistics for beta estimation."""
 
@@ -376,6 +400,16 @@ class BetaAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
+    def supported_rows(self, x) -> np.ndarray:
+        """Encoded rows this law can be fitted on: finite and inside the unit interval.
+
+        The encoder admits out-of-support observations so that a mixture can encode a whole batch
+        against every component (P02-F03); this is the predicate that keeps them out of the
+        sufficient statistics, and the one a latent model's initialization consults before it hands
+        this component any responsibility.
+        """
+        return np.isfinite(x[2]) & (np.asarray(x[2]) >= 0.0) & (np.asarray(x[2]) <= 1.0)
+
     def seq_update(
         self,
         x: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
@@ -383,6 +417,7 @@ class BetaAccumulator(SequenceEncodableStatisticAccumulator):
         estimate: BetaDistribution | None,
     ) -> None:
         """Accumulate weighted statistics from encoded observations."""
+        refuse_unsupported_observations(self.supported_rows(x), weights, message=_BETA_SUPPORT_MESSAGE)
         lx, l1mx, xx, xx2 = x
         ww = np.asarray(weights, dtype=np.float64)
         boundary = (xx == 0.0) | (xx == 1.0)
@@ -533,7 +568,8 @@ class BetaDataEncoder(DataSequenceEncoder):
                 "Beta observations contain %d NaN value(s). NaN marks missing data, not a support "
                 "violation; drop or impute the missing entries before fitting." % nan_count
             )
-        if rv.size and (np.any(rv < 0.0) or np.any(rv > 1.0) or np.any(~np.isfinite(rv))):
-            raise ValueError("BetaDistribution requires finite observations in [0, 1].")
-        with np.errstate(divide="ignore"):
+        # An out-of-support observation is scored, not refused: the scalar path returns -inf for it and a
+        # mixture whose other component owns that value has to be able to encode the whole batch
+        # (P02-F03). Only NaN stays refused -- it is missing data, not a zero-density point.
+        with np.errstate(divide="ignore", invalid="ignore"):
             return np.log(rv), np.log1p(-rv), rv, rv * rv

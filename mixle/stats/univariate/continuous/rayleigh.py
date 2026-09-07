@@ -18,6 +18,9 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import (
+    refuse_unsupported_observations,
+)
 
 # The declared support is x >= 0, and scoring an exact zero works (the density vanishes there) --
 # but *fitting* on exact zeros cannot: log f(0) = -inf for every sigma, so the EM objective is
@@ -228,6 +231,14 @@ class RayleighSampler(DistributionSampler):
         return self.rng.rayleigh(scale=self.dist.sigma, size=size)
 
 
+_RAYLEIGH_SUPPORT_MESSAGE = (
+    "RayleighDistribution has support x >= 0, but at least %d encoded observation(s) carrying "
+    "weight lie outside it. The encoder admits them so a mixture whose other component owns those "
+    "values can score the batch (they score -inf here), but fitting this law on them would fold a "
+    "NaN or an out-of-support value into its own sufficient statistics."
+)
+
+
 class RayleighAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate weighted squared observations."""
 
@@ -254,6 +265,16 @@ class RayleighAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
+    def supported_rows(self, x) -> np.ndarray:
+        """Encoded rows this law can be fitted on: finite and non-negative.
+
+        The encoder admits out-of-support observations so that a mixture can encode a whole batch
+        against every component (P02-F03); this is the predicate that keeps them out of the
+        sufficient statistics, and the one a latent model's initialization consults before it hands
+        this component any responsibility.
+        """
+        return np.isfinite(x[0]) & (np.asarray(x[0]) >= 0.0)
+
     def seq_update(
         self,
         x: tuple[np.ndarray, np.ndarray, np.ndarray],
@@ -264,6 +285,7 @@ class RayleighAccumulator(SequenceEncodableStatisticAccumulator):
         zero_evidence = int(np.count_nonzero((x[0] == 0.0) & (np.asarray(weights) > 0.0)))
         if zero_evidence:
             raise ValueError(_RAYLEIGH_ZERO_FIT_MESSAGE % zero_evidence)
+        refuse_unsupported_observations(self.supported_rows(x), weights, message=_RAYLEIGH_SUPPORT_MESSAGE)
         self.count += np.sum(weights, dtype=np.float64)
         chunk_sum2 = np.dot(x[1], weights)
         if not np.isfinite(chunk_sum2):
@@ -362,8 +384,9 @@ class RayleighDataEncoder(DataSequenceEncoder):
                 "Rayleigh observations contain %d NaN value(s). NaN marks missing data, not a "
                 "support violation; drop or impute the missing entries before fitting." % nan_count
             )
-        if rv.size and np.any(rv < 0.0):
-            raise ValueError("RayleighDistribution requires observations x >= 0.")
-        with np.errstate(divide="ignore"):
+        # An out-of-support observation is scored, not refused: the scalar path returns -inf for it and a
+        # mixture whose other component owns that value has to be able to encode the whole batch
+        # (P02-F03). Only NaN stays refused -- it is missing data, not a zero-density point.
+        with np.errstate(divide="ignore", invalid="ignore"):
             lx = np.log(rv)
         return rv, rv * rv, lx

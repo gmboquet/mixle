@@ -9,6 +9,7 @@ and assigns ``-np.inf`` outside the support.
 Reference: Johnson, Kotz & Balakrishnan, *Continuous Univariate Distributions* (2nd ed., Wiley, 1994/95).
 """
 
+import math
 from collections.abc import Sequence
 from typing import Any, Optional
 
@@ -24,7 +25,11 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.stats.univariate.continuous._observation_contracts import scored_observation
+from mixle.stats.univariate.continuous._observation_contracts import (
+    refuse_unsupported_observation,
+    refuse_unsupported_observations,
+    scored_observation,
+)
 from mixle.stats.univariate.continuous.gamma import GammaDistribution
 from mixle.utils.special import digamma
 
@@ -32,6 +37,14 @@ from mixle.utils.special import digamma
 def _fisher_mean_var(dist):
     mean = float(dist.beta) if hasattr(dist, "beta") else 1.0 / float(dist.lam)
     return mean, mean * mean
+
+
+_EXPONENTIAL_SUPPORT_MESSAGE = (
+    "ExponentialDistribution has support x >= 0, but at least %d observation(s) carrying weight "
+    "are negative, NaN, or infinite (estimation encodes in chunks; the first offending chunk "
+    "refuses). Those observations used to be dropped from the sufficient statistics without a "
+    "word, so a sign error or a NaN-contaminated column produced a confident fit of the rest."
+)
 
 
 class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
@@ -420,9 +433,13 @@ class ExponentialAccumulator(SequenceEncodableStatisticAccumulator):
             None
 
         """
-        if x >= 0:
-            self.sum += x * weight
-            self.count += weight
+        refuse_unsupported_observation(
+            math.isfinite(x) and x >= 0.0,
+            weight,
+            message=_EXPONENTIAL_SUPPORT_MESSAGE % 1,
+        )
+        self.sum += x * weight
+        self.count += weight
 
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Optional["ExponentialDistribution"]) -> None:
         """Vectorized update of sufficient statistics from encoded sequence x.
@@ -440,8 +457,19 @@ class ExponentialAccumulator(SequenceEncodableStatisticAccumulator):
             None.
 
         """
+        refuse_unsupported_observations(self.supported_rows(x), weights, message=_EXPONENTIAL_SUPPORT_MESSAGE)
         self.sum += np.dot(x, weights)
         self.count += np.sum(weights, dtype=np.float64)
+
+    def supported_rows(self, x) -> np.ndarray:
+        """Encoded rows this law can be fitted on: finite and non-negative.
+
+        The encoder admits out-of-support observations so that a mixture can encode a whole batch
+        against every component (P02-F03); this is the predicate that keeps them out of the
+        sufficient statistics, and the one a latent model's initialization consults before it hands
+        this component any responsibility.
+        """
+        return np.isfinite(x) & (np.asarray(x) >= 0.0)
 
     def initialize(self, x: float, weight: float, rng: Optional["np.random.RandomState"]) -> None:
         """Initialize sufficient statistics of ExponentialAccumulator with weighted observation.
@@ -662,7 +690,13 @@ class ExponentialDataEncoder(DataSequenceEncoder):
         """
         rv = np.asarray(x, dtype=float)
 
-        if np.any(rv < 0) or np.any(np.isnan(rv)):
-            raise ValueError("Exponential requires x >= 0.")
-
+        nan_count = int(np.count_nonzero(np.isnan(rv)))
+        if nan_count:
+            raise ValueError(
+                "Exponential observations contain %d NaN value(s). NaN marks missing data, not a "
+                "support violation; drop or impute the missing entries before fitting." % nan_count
+            )
+        # An out-of-support observation is scored, not refused: the scalar path returns -inf for it and a
+        # mixture whose other component owns that value has to be able to encode the whole batch
+        # (P02-F03). Only NaN stays refused -- it is missing data, not a zero-density point.
         return rv

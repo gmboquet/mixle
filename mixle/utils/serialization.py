@@ -882,6 +882,40 @@ def _restore_numerical_repairs(obj: Any, payload: dict[str, Any]) -> None:
     object.__setattr__(obj, "_numerical_repairs", tuple(repairs))
 
 
+# ``freeze()`` keys a support value as ``(type(x), x)`` so that a bool and an int which compare
+# equal stay distinct outcomes. That puts a bare Python type inside the dictionary keys of every
+# distribution which de-duplicates its support, and the callable encoder refused it -- which left
+# ChowLiuTreeDistribution with no persistence path at all (P02-F02). These types encode by name
+# from a closed table and decode from the same one; a payload can never name a type that is not
+# in it, so nothing here resolves or imports what an artifact asks for.
+_FROZEN_KEY_TYPES: dict[str, type] = {
+    "NoneType": type(None),
+    "bool": bool,
+    "bytes": bytes,
+    "complex": complex,
+    "float": float,
+    "frozenset": frozenset,
+    "int": int,
+    "str": str,
+    "tuple": tuple,
+}
+_FROZEN_KEY_TYPE_NAMES: dict[type, str] = {value: name for name, value in _FROZEN_KEY_TYPES.items()}
+
+
+def _encode_value_type(value: type) -> dict[str, Any]:
+    """Encode one of the value types a ``freeze()`` key can carry."""
+    return {TAG: "value-type", "name": _FROZEN_KEY_TYPE_NAMES[value]}
+
+
+def _decode_value_type(payload: dict[str, Any]) -> type:
+    """Decode a ``freeze()`` key's value type from the closed table."""
+    _require_fields(payload, {TAG, "name"})
+    name = payload["name"]
+    if not isinstance(name, str) or name not in _FROZEN_KEY_TYPES:
+        raise SerializationError("serialized value type %r is not one of the frozen key types" % (name,))
+    return _FROZEN_KEY_TYPES[name]
+
+
 def _encode_callable(value: Callable[..., Any]) -> dict[str, Any]:
     callable_id = _CALLABLE_IDS.get(value)
     if callable_id is None:
@@ -937,6 +971,8 @@ def _encode(value: Any, active: set[int], memo: dict[int, str]) -> Any:
         return _encode_sequence("set", sorted(value, key=_canonical_sort_key), active, memo)
     if isinstance(value, dict):
         return _encode_dict(value, active, memo)
+    if isinstance(value, type) and value in _FROZEN_KEY_TYPE_NAMES:
+        return _encode_value_type(value)
     if callable(value) or hasattr(value, "__dict__"):
         # Instances of a registered serializable class encode via their object state even when they
         # are callable (e.g. a data-carrying routing object), so they round-trip from their __dict__
@@ -1029,6 +1065,8 @@ def _decode(payload: Any, references: dict[str, Any], depth: int, budget: list[i
         return range(start, stop, step)
     if tag == "callable":
         return _decode_callable(payload)
+    if tag == "value-type":
+        return _decode_value_type(payload)
     if tag == "object":
         return _decode_object(payload, references, depth, budget)
     if tag == "ref":

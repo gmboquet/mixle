@@ -32,6 +32,10 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import (
+    refuse_unsupported_observation,
+    refuse_unsupported_observations,
+)
 from mixle.stats.univariate.discrete._count_contracts import exact_integer_observations
 from mixle.utils.special import valid_integer
 
@@ -56,6 +60,11 @@ def _solve_p(mean: float) -> float:
         else:
             hi = mid
     return 0.5 * (lo + hi)
+
+
+# Below this shape the closed-form variance is 0/0 in double precision and its series stands in;
+# the series truncation error is O(p^4), far below rounding at the switch point.
+_VARIANCE_SERIES_P = 1.0e-4
 
 
 class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
@@ -199,7 +208,9 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
     def seq_log_density(self, x: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
         """Return vectorized log-mass values for sequence-encoded (k, log k) observations."""
         k, log_k = x
-        return k * self.log_p - log_k - self.log_norm
+        with np.errstate(invalid="ignore"):
+            rv = k * self.log_p - log_k - self.log_norm
+        return np.where(np.asarray(k) >= 1, rv, -np.inf)
 
     def backend_seq_log_density(self, x: tuple[Any, Any], engine: Any) -> Any:
         """Engine-neutral vectorized log-mass for encoded data."""
@@ -241,7 +252,9 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
         """Mean E[X] = -p / ((1-p) log(1-p))."""
         import math
 
-        l1m = math.log(1.0 - self.p)
+        # ``log1p(-p)``, not ``log(1 - p)``: the latter rounds to exactly zero for p below the
+        # float epsilon and divided by it (P01-F10), where the mean's limit is a plain 1.
+        l1m = math.log1p(-self.p)
         return float(-self.p / ((1.0 - self.p) * l1m))
 
     def variance(self) -> float:
@@ -249,7 +262,15 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
         import math
 
         p = self.p
-        l1m = math.log(1.0 - p)
+        if p < _VARIANCE_SERIES_P:
+            # Both ``p + log1p(-p)`` and ``log1p(-p) ** 2`` collapse to zero well before p does,
+            # so the direct quotient is 0/0 for small p (P01-F10). Factoring the leading p^2 out
+            # of each leaves ``p * S / ((1-p)^2 T^2)`` with S -> 1/2 and T -> 1, i.e. the limit
+            # ``p / 2 -> 0`` scipy reports.
+            s = 0.5 + p / 3.0 + p * p / 4.0 + p * p * p / 5.0
+            t = 1.0 + p / 2.0 + p * p / 3.0 + p * p * p / 4.0
+            return float(p * s / ((1.0 - p) ** 2 * t * t))
+        l1m = math.log1p(-p)
         return float(-p * (p + l1m) / ((1.0 - p) ** 2 * l1m * l1m))
 
     def entropy(self) -> float:
@@ -469,6 +490,14 @@ class LogSeriesSampler(DistributionSampler):
         return int(rv) if size is None else rv
 
 
+_LOGSERIES_SUPPORT_MESSAGE = (
+    "LogSeriesDistribution has support k in {1, 2, 3, ...}, but at least %d observation(s) "
+    "carrying weight are below one, fractional, NaN, or infinite (estimation encodes in chunks; "
+    "the first offending chunk refuses). NaN and infinity used to surface as a raw int() "
+    "conversion error naming neither the family nor the support."
+)
+
+
 class LogSeriesAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate weighted count and sum for log-series estimation."""
 
@@ -479,8 +508,12 @@ class LogSeriesAccumulator(SequenceEncodableStatisticAccumulator):
 
     def update(self, x: int, weight: float, estimate: LogSeriesDistribution | None) -> None:
         """Accumulate weighted count and total for one positive integer."""
-        if int(x) < 1:
-            raise ValueError("LogSeriesDistribution has support k >= 1.")
+        refuse_unsupported_observation(
+            (isinstance(x, (int, np.integer)) or (isinstance(x, float) and math.isfinite(x) and x.is_integer()))
+            and x >= 1,
+            weight,
+            message=_LOGSERIES_SUPPORT_MESSAGE % 1,
+        )
         self.count += weight
         self.sum += float(x) * weight
 
@@ -492,6 +525,11 @@ class LogSeriesAccumulator(SequenceEncodableStatisticAccumulator):
         self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: LogSeriesDistribution | None
     ) -> None:
         """Accumulate weighted count and total from encoded observations."""
+        refuse_unsupported_observations(
+            np.isfinite(x[0]) & (np.asarray(x[0]) >= 1),
+            weights,
+            message=_LOGSERIES_SUPPORT_MESSAGE,
+        )
         self.count += np.sum(weights, dtype=np.float64)
         self.sum += np.dot(x[0], weights)
 
@@ -558,7 +596,14 @@ class LogSeriesEstimator(ParameterEstimator):
         if count <= 0.0:
             return LogSeriesDistribution(0.5, name=self.name, keys=self.keys)
         mean = total / count
-        return LogSeriesDistribution(_solve_p(mean), name=self.name, keys=self.keys)
+        p = _solve_p(mean)
+        dist = LogSeriesDistribution(p, name=self.name, keys=self.keys)
+        if p <= _MIN_P:
+            # The mean of a log-series is at least one and rises with p; a sample mean at (or
+            # below) one asks for p = 0, which is not a distribution, so the solver returns its
+            # floor. It used to do so silently (P01-F09).
+            dist._numerical_repairs = ("logseries-p-floored(sample mean %.6g -> p=%.6g)" % (mean, _MIN_P),)
+        return dist
 
 
 class LogSeriesDataEncoder(DataSequenceEncoder):
@@ -575,6 +620,9 @@ class LogSeriesDataEncoder(DataSequenceEncoder):
         rv = exact_integer_observations(
             x,
             label="Log-series observations",
-            minimum=1,
+            # An out-of-support count is scored, not refused: the scalar path returns -inf for it
+            # and a mixture whose other component owns that value has to be able to encode the
+            # whole batch (P02-F03). The integer contract itself still holds.
         )
-        return rv, np.log(rv)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return rv, np.log(rv)

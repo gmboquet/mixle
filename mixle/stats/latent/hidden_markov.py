@@ -1611,9 +1611,16 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         Each returned array holds the forward-backward SMOOTHING marginals ``P(z_t = k | x_1..T)``
         (one row per position), matching every other ``seq_posterior`` in the package. Pass
         ``filtered=True`` for the forward-only filtered probabilities ``P(z_t = k | x_1..t)``.
+
+        A base install has no numba (it is the ``[numba]`` extra), and ``terminal_states`` turns the
+        numba route off outright, so this used to return ``None`` on the default configuration --
+        a documented API that silently produced nothing (P02-F01). Those two routes now decode the
+        batch into per-sequence emission log-densities and run the same exact forward-backward
+        ``latent_posterior`` uses, with the terminal-state restriction folded into the last
+        position's emissions.
         """
-        if not self.use_numba:
-            return None
+        if not self.use_numba or self.terminal_states is not None:
+            return self._seq_posterior_by_chain(x, filtered=filtered)
 
         vec.require_possible_log_evidence(
             self.seq_log_density(x),
@@ -1653,6 +1660,62 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         kernel(num_states, tz, pr_obs, init_pvec, tran_mat, weights, alphas, xi_acc, pi_acc)
 
         return [alphas[tz[i] : tz[i + 1], :] for i in range(len(tz) - 1)]
+
+    def _seq_posterior_by_chain(self, x: E2, *, filtered: bool) -> list[np.ndarray]:
+        """Per-sequence state marginals through the exact chain posterior, for any encoding.
+
+        The numba kernel is the fast path for a whole batch; this is the one that always exists.
+        Each sequence's emission log-densities are read out of the encoded batch and handed to
+        :class:`~mixle.stats.compute.posterior.MarkovChainLatentPosterior`, whose forward-backward
+        is the same recursion ``latent_posterior`` is validated on.
+        """
+        from scipy.special import softmax
+
+        vec.require_possible_log_evidence(
+            self.seq_log_density(x),
+            context="HiddenMarkovModelDistribution.seq_posterior",
+        )
+        posteriors = []
+        for log_b in self._per_sequence_state_log_densities(x):
+            if log_b.shape[0] == 0:
+                posteriors.append(np.zeros((0, self.n_states), dtype=np.float64))
+                continue
+            terminal_mask = getattr(self, "_terminal_mask", None)
+            if terminal_mask is not None:
+                # Restricting the path to end in a terminal state is one more observation at the
+                # last position: log-evidence 0 on those states and -inf on the rest.
+                log_b = np.array(log_b, dtype=np.float64, copy=True)
+                log_b[-1, ~terminal_mask] = -np.inf
+            chain = MarkovChainLatentPosterior(self.log_w, self.log_transitions, log_b)
+            posteriors.append(softmax(chain._log_alpha, axis=1) if filtered else chain.marginals())
+        return posteriors
+
+    def _per_sequence_state_log_densities(self, x: E1 | E2) -> list[np.ndarray]:
+        """Split an encoded batch into one ``(T_i, n_states)`` emission log-density block per sequence."""
+        x0, x1 = x
+        if x1 is None:
+            (_, _, _, _, idx_mat, _, enc_data), _, _ = x0
+            per_state = self._state_seq_log_densities(enc_data)
+            return [np.asarray(per_state[row[row >= 0]], dtype=np.float64) for row in np.asarray(idx_mat)]
+        (idx, sz, enc_data), _ = x1
+        per_state = self._state_seq_log_densities(enc_data)
+        bounds = np.concatenate([[0], np.asarray(sz)]).cumsum().astype(int)
+        return [np.asarray(per_state[bounds[i] : bounds[i + 1]], dtype=np.float64) for i in range(len(bounds) - 1)]
+
+    def _repaired_children(self):
+        """The emission laws, so an emission's repair reaches the model's receipt (P02-F05)."""
+        children = tuple(("topics[%d]" % index, part) for index, part in enumerate(self.topics))
+        return children if self.len_dist is None else children + (("len_dist", self.len_dist),)
+
+    @property
+    def components(self) -> tuple[SequenceEncodableProbabilityDistribution, ...]:
+        """The emission distributions, under the constructor's documented ``components`` alias.
+
+        ``HiddenMarkovModelDistribution(components=...)`` has been accepted since 0.8.0 but the
+        attribute only ever existed as ``topics``, so the alias did not round-trip the way
+        ``MixtureDistribution.components`` does (P02-F08).
+        """
+        return self.topics
 
     def viterbi(self, x: list[T]) -> np.ndarray:
         """Return the most likely latent-state path for a single observation sequence.
@@ -3003,6 +3066,16 @@ class HiddenMarkovSampler(DistributionSampler):
             raise RuntimeError("HiddenMarkovSampler requires either a length distribution or terminal value set.")
 
 
+def _component_enc_for_state(enc_data, state: int, homogeneous: bool):
+    """The encoded emissions state ``state`` sees, for either emission layout."""
+    if homogeneous:
+        return enc_data
+    for group_indices, group_enc in _iter_emission_groups(enc_data):
+        if state in group_indices:
+            return group_enc
+    return enc_data
+
+
 class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
     """Baum-Welch sufficient-statistic accumulator for HMM chain and emission parameters."""
 
@@ -3204,6 +3277,7 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             weights_nz = weights[non_zero_len]
 
             idx = self._idx_rng.choice(self.num_states, size=tot_cnt)
+            idx = self._state_draw_within_support(idx, xs_enc, self._idx_rng)
 
             seq_i = []
             for i in range(len(len_vec[non_zero_len])):
@@ -3261,6 +3335,7 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
 
             tot_cnt = np.sum(sz)
             states = self._idx_rng.choice(self.num_states, size=tot_cnt)
+            states = self._state_draw_within_support(states, xs, self._idx_rng)
             nz_idx, nz_idx_group, nz_idx_rep = np.unique(idx, return_index=True, return_inverse=True)
             weights_nz = weights[nz_idx]
 
@@ -3361,6 +3436,37 @@ class HiddenMarkovAccumulator(SequenceEncodableStatisticAccumulator):
             for group_indices, group_enc in _iter_emission_groups(enc_data):
                 for j in group_indices:
                     self.accumulators[j].seq_update(group_enc, gamma_flat[:, j], estimate.topics[j])
+
+    def _state_draw_within_support(self, idx: np.ndarray, enc_data, rng) -> np.ndarray:
+        """Redraw any initialization state assignment whose emission law cannot fit that row.
+
+        The uniform state draw is blind to the emission supports, so an HMM whose states are a
+        Gaussian and an Exponential assigned a negative observation to the Exponential and failed
+        before the first E-step -- which would have given that state no responsibility for it at all
+        (P02-F03). A row no state can fit keeps its draw; scoring reports it as impossible evidence.
+        """
+        supports = []
+        for state in range(self.num_states):
+            mask = self.accumulators[state].supported_rows(
+                _component_enc_for_state(enc_data, state, self._homogeneous_emissions)
+            )
+            if mask is None:  # this state's law admits every row
+                supports.append(np.ones(idx.shape[0], dtype=bool))
+                continue
+            mask = np.asarray(mask, dtype=bool)
+            if mask.ndim != 1 or mask.shape[0] != idx.shape[0]:
+                return idx
+            supports.append(mask)
+        support = np.column_stack(supports)
+        if support.all():
+            return idx
+        misassigned = np.flatnonzero(~support[np.arange(idx.shape[0]), idx])
+        idx = np.array(idx, copy=True)
+        for row in misassigned:
+            allowed = np.flatnonzero(support[row])
+            if allowed.size:
+                idx[row] = int(rng.choice(allowed))
+        return idx
 
     def seq_update(self, x, weights: np.ndarray, estimate: HiddenMarkovModelDistribution) -> None:
         """Vectorized accumulator update from encoded HMM observation sequences.

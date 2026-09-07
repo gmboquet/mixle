@@ -288,7 +288,7 @@ class PriorDensityTestCase(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             d.cross_entropy(NormalGammaDistribution(0.0, 1.0, 2.0, 3.0))
 
-    def test_support_boundaries_match_scalar_and_raise_on_seq_encode(self):
+    def test_support_boundaries_match_between_the_scalar_and_encoded_paths(self):
         # Scalar log_density returns -inf for out-of-support values...
         with np.errstate(divide="ignore", invalid="ignore"):
             self.assertEqual(BetaDistribution(2.0, 3.0).log_density(0.0), -np.inf)
@@ -298,7 +298,9 @@ class PriorDensityTestCase(unittest.TestCase):
             self.assertEqual(GeometricDistribution(0.3).log_density(0), -np.inf)
             self.assertEqual(PoissonDistribution(3.0).log_density(-1), -np.inf)
 
-        # ...but mixle.stats validates the support at seq_encode time.
+        # ...and since 0.8.2 the encoded path agrees instead of refusing the batch: a mixture
+        # whose other component owns those values has to be able to encode and score all of it
+        # (P02-F03). Fitting THIS law on an out-of-support row is what the accumulator refuses.
         for dist, data in [
             (ExponentialDistribution(2.0), [-1.0, 0.5]),
             (GammaDistribution(2.0, 3.0), [-1.0, 0.0, 2.0]),
@@ -306,8 +308,13 @@ class PriorDensityTestCase(unittest.TestCase):
             (PoissonDistribution(3.0), [-1, 0, 3]),
         ]:
             with self.subTest(dist=type(dist).__name__):
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    encoded = _encode(dist, data)
+                    scores = np.asarray(dist.seq_log_density(encoded), dtype=np.float64)
+                np.testing.assert_allclose(scores, [dist.log_density(value) for value in data], equal_nan=True)
+                accumulator = dist.estimator().accumulator_factory().make()
                 with self.assertRaises(ValueError):
-                    _encode(dist, data)
+                    accumulator.seq_update(encoded, np.ones(len(data)), dist)
 
     def test_seq_expected_log_density_falls_back_without_conjugate_prior(self):
         from mixle.stats.univariate.discrete.bernoulli import BernoulliDistribution

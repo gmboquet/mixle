@@ -35,6 +35,9 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import (
+    refuse_unsupported_observations,
+)
 
 _MIN_SIGMA = float(np.finfo(float).tiny)
 _HALF_LOG_2_OVER_PI = 0.5 * math.log(2.0 / math.pi)
@@ -291,6 +294,14 @@ class HalfNormalSampler(DistributionSampler):
         return np.abs(self.rng.normal(0.0, self.dist.sigma, size=size))
 
 
+_HALF_NORMAL_SUPPORT_MESSAGE = (
+    "HalfNormalDistribution has support x >= 0, but at least %d encoded observation(s) carrying "
+    "weight lie outside it. The encoder admits them so a mixture whose other component owns those "
+    "values can score the batch (they score -inf here), but fitting this law on them would fold a "
+    "NaN or an out-of-support value into its own sufficient statistics."
+)
+
+
 class HalfNormalAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate weighted count and sum of squares for half-normal estimation."""
 
@@ -314,10 +325,21 @@ class HalfNormalAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
+    def supported_rows(self, x) -> np.ndarray:
+        """Encoded rows this law can be fitted on: finite and non-negative.
+
+        The encoder admits out-of-support observations so that a mixture can encode a whole batch
+        against every component (P02-F03); this is the predicate that keeps them out of the
+        sufficient statistics, and the one a latent model's initialization consults before it hands
+        this component any responsibility.
+        """
+        return np.isfinite(x[0]) & (np.asarray(x[0]) >= 0.0)
+
     def seq_update(
         self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: HalfNormalDistribution | None
     ) -> None:
         """Accumulate weighted squared observations from encoded data."""
+        refuse_unsupported_observations(self.supported_rows(x), weights, message=_HALF_NORMAL_SUPPORT_MESSAGE)
         raw_vals, sq_vals = x
         chunk_sum2 = np.dot(sq_vals, weights)
         if not np.isfinite(chunk_sum2):
@@ -420,6 +442,13 @@ class HalfNormalDataEncoder(DataSequenceEncoder):
     def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
         """Encode observations as values and squared values."""
         rv = np.asarray(x, dtype=np.float64)
-        if rv.size and (np.any(rv < 0.0) or np.any(np.isnan(rv))):
-            raise ValueError("HalfNormalDistribution has support x >= 0.")
+        nan_count = int(np.count_nonzero(np.isnan(rv)))
+        if nan_count:
+            raise ValueError(
+                "HalfNormal observations contain %d NaN value(s). NaN marks missing data, not a "
+                "support violation; drop or impute the missing entries before fitting." % nan_count
+            )
+        # An out-of-support observation is scored, not refused: the scalar path returns -inf for it and a
+        # mixture whose other component owns that value has to be able to encode the whole batch
+        # (P02-F03). Only NaN stays refused -- it is missing data, not a zero-density point.
         return rv, rv * rv

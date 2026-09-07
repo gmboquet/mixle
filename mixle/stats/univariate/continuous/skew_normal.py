@@ -148,6 +148,11 @@ class SkewNormalDistribution(SequenceEncodableProbabilityDistribution):
         def integrand(y: float) -> float:
             log_phi = -_HALF_LOG_2PI - 0.5 * y * y
             log_cdf = float(log_ndtr(alpha * y))
+            if not math.isfinite(log_cdf):
+                # ``Phi(alpha y)`` underflows for a large enough shape, and the product is then
+                # ``0 * -inf = nan`` (P01-F10) where ``p log p -> 0``. Returning the limit leaves
+                # the half-normal entropy the shape is converging to.
+                return 0.0
             return 2.0 * math.exp(log_phi + log_cdf) * log_cdf
 
         e_log_cdf, _ = integrate.quad(integrand, -np.inf, np.inf, limit=200)

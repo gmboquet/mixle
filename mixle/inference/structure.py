@@ -28,8 +28,26 @@ from mixle.stats.compute.pdist import FitProvenance, FitProvenanceCarrier
 
 
 def _columns(data: Sequence[tuple]) -> list[list[Any]]:
-    """Transpose a list of record tuples into per-field columns."""
+    """Transpose a list of record tuples into per-field columns.
+
+    The width and non-emptiness are checked here rather than left to an ``IndexError`` from the
+    transpose: an empty corpus used to surface as "list index out of range", and a ragged one had
+    the extra fields of the wider rows silently dropped, so a fit over 2- and 3-tuples returned a
+    two-field network with no note that a third of the data had been discarded (P02-F07).
+    """
+    if not len(data):
+        raise ValueError(
+            "structure learning received no records: the data is empty. A DAG (or dependency tree) "
+            "cannot be searched without observations."
+        )
     n = len(data[0])
+    for index, row in enumerate(data):
+        if len(row) != n:
+            raise ValueError(
+                "structure learning requires records of one fixed width, but record %d has %d field(s) "
+                "where record 0 has %d. Pad, drop, or wrap the short/long records (an Optional field "
+                "models a genuinely missing value) before fitting." % (index, len(row), n)
+            )
     return [[row[i] for row in data] for i in range(n)]
 
 

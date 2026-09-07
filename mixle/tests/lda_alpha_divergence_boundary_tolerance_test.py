@@ -12,6 +12,7 @@ unchanged. update_alpha() now widens the boundary check by a small absolute tole
 """
 
 import unittest
+import warnings
 
 import numpy as np
 
@@ -29,17 +30,20 @@ class LDAAlphaDivergenceBoundaryToleranceTest(unittest.TestCase):
         # zero-evidence case that pins mean_log_p exactly on the non-existence boundary. Every one
         # of these topic counts is the same degenerate case mathematically and must be classified
         # identically -- pre-fix, only K in {2, 4, 8} were.
+        # 0.8.2 delivers this classification as a warned, receipted fit rather than an exception
+        # out of optimize() (P02-F09); the classification and the advice are unchanged.
         for num_topics in (2, 3, 4, 5, 6, 8):
             with self.subTest(num_topics=num_topics):
                 est = self._estimator(num_topics)
-                with self.assertRaises(LDAConvergenceError) as caught:
-                    optimize([[], [], []], est, out=None)
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    fitted = optimize([[], [], []], est, out=None)
 
-                diagnostics = caught.exception.diagnostics
-                self.assertFalse(diagnostics.converged)
-                self.assertEqual(diagnostics.termination_reason, "alpha_diverging")
+                self.assertIsNotNone(fitted.fit_diagnostics)
+                reasons = [str(item.message) for item in caught if "alpha solve stopped" in str(item.message)]
+                self.assertTrue(any("alpha_diverging" in reason for reason in reasons), reasons[:1])
 
-                message = str(caught.exception)
+                message = next(reason for reason in reasons if "alpha_diverging" in reason)
                 self.assertIn("max_alpha_iter will not help", message)
                 self.assertIn("fixed_alpha=", message)
                 self.assertIn("alpha_threshold", message)

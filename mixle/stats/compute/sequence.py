@@ -12,6 +12,7 @@ half-initialized ``mixle.stats``. ``mixle.stats`` re-exports them, so the public
 from __future__ import annotations
 
 import pickle
+import warnings
 from collections.abc import Sequence
 from contextlib import suppress
 from typing import Any, TypeVar
@@ -341,6 +342,37 @@ def density(
     return np.exp(log_density(data, model))
 
 
+def encoded_row_count(enc_data: Any) -> int | None:
+    """Rows behind a local encoded batch, or ``None`` when the encoding does not report a count."""
+    try:
+        if isinstance(enc_data, list):
+            return int(sum(int(chunk[0]) for chunk in enc_data))
+        count = getattr(enc_data, "num_records", None)
+        return None if count is None else int(count)
+    except Exception:  # noqa: BLE001 - a count that cannot be read is reported as unknown
+        return None
+
+
+def disclose_empty_encoded_batch(enc_data: Any, entry_point: str) -> None:
+    """Warn that a zero-row encoded batch produces a default model, not a fit.
+
+    These low-level primitives are deliberately total on an empty corpus -- D-0203/D-0204 and T4-02
+    repaired three separate crashes there, and the repo's own pipelines call them directly -- so
+    they still return the estimator's default model. What they must not do is hand that model back
+    with nothing said: it is built from the parameter floors, not from data (P03-F03). The fitting
+    entry point that would stamp such a model ``converged=True`` over ``n_observations=0``
+    (``optimize(enc_data=...)``) refuses outright instead. A backend handle or an encoding that
+    cannot report a count is left alone: unknown is not zero.
+    """
+    if encoded_row_count(enc_data) == 0:
+        warnings.warn(
+            "%s received an encoded batch with zero rows: the result is the estimator's default "
+            "model built from its parameter floors, not a fit of any data." % entry_point,
+            UserWarning,
+            stacklevel=3,
+        )
+
+
 def seq_estimate(
     enc_data: list[tuple[int, T]] | pyspark.rdd.RDD, estimator: ParameterEstimator, prev_estimate: T_D
 ) -> T_D:
@@ -365,6 +397,7 @@ def seq_estimate(
 
     """
     validate_estimator_keys(estimator)
+    disclose_empty_encoded_batch(enc_data, "seq_estimate()")
 
     if hasattr(enc_data, "pysp_seq_estimate"):
         # parallel-backend handle (mixle.utils.parallel.multiprocessing / mixle.utils.parallel.mpi)
@@ -471,6 +504,7 @@ def seq_initialize(
     """
     validate_estimator_keys(estimator)
     p = validate_initialization_probability(p)
+    disclose_empty_encoded_batch(enc_data, "seq_initialize()")
 
     if hasattr(enc_data, "pysp_seq_initialize"):
         # parallel-backend handle (mixle.utils.parallel.multiprocessing / mixle.utils.parallel.mpi)
@@ -685,6 +719,32 @@ def initialize(
         return estimator.estimate(validated_initialized_observations(nobs), accumulator.value())
 
 
+def _non_scalar_row_error(row: Any, estimator: Any, index: int) -> ValueError | None:
+    """Explain a scalar accumulator's failure on an array row, or ``None`` if that is not it.
+
+    A ``(n, 1)`` column array iterates as length-1 arrays, which every univariate accumulator
+    failed on with numpy's "only 0-dimensional arrays can be converted to Python scalars" --
+    identical for all thirty families and naming neither the estimator nor the shape (P01-F13).
+    ``df[['x']].values`` is the usual way to reach it.
+
+    The diagnosis is proved rather than guessed: the same accumulator is offered the row's single
+    element as a scalar, and the message is only produced when that succeeds. A law whose
+    observations really are arrays therefore keeps its own error.
+    """
+    shape = getattr(row, "shape", None)
+    if shape is None or len(shape) == 0 or int(np.prod(shape)) != 1:
+        return None
+    try:
+        estimator.accumulator_factory().make().update(float(np.reshape(row, -1)[0]), 1.0, None)
+    except Exception:  # noqa: BLE001 -- the scalar is refused too, so the shape is not the cause
+        return None
+    return ValueError(
+        "%s expects a scalar observation per row, but row %d is an array of shape %r. Flatten the "
+        "data with numpy.ravel(data) (a column selected as df[['x']].values is the usual source "
+        "of an (n, 1) array; df['x'] gives the one-dimensional form)." % (type(estimator).__name__, index, tuple(shape))
+    )
+
+
 def estimate(
     data: Sequence[T] | pyspark.rdd.RDD,
     estimator: ParameterEstimator,
@@ -758,10 +818,18 @@ def estimate(
         idata = iter(data)
         accumulator = estimator.accumulator_factory().make()
         nobs = 0.0
+        row = None
 
-        for x in idata:
-            nobs += 1.0
-            accumulator.update(x, 1.0, estimate=prev_estimate)
-
-        merge_accumulator_keys(accumulator)
-        return estimator.estimate(nobs, accumulator.value())
+        try:
+            for row in idata:
+                nobs += 1.0
+                accumulator.update(row, 1.0, estimate=prev_estimate)
+            merge_accumulator_keys(accumulator)
+            return estimator.estimate(nobs, accumulator.value())
+        except (TypeError, ValueError) as exc:
+            # An array row can also poison the sufficient statistics silently and fail only in
+            # the M-step, so the diagnosis covers the whole accumulation, not just the update.
+            shaped = _non_scalar_row_error(row, estimator, int(nobs) - 1)
+            if shaped is None:
+                raise
+            raise shaped from exc

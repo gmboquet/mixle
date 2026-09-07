@@ -33,6 +33,9 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import (
+    refuse_unsupported_observations,
+)
 from mixle.utils.special import digamma, gammaln, trigamma
 
 _MIN_PARAM = 1.0e-12
@@ -219,7 +222,11 @@ class InverseGammaDistribution(SequenceEncodableProbabilityDistribution):
     def seq_log_density(self, x: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
         """Return vectorized log-density values for sequence-encoded (log x, 1/x) observations."""
         log_x, inv_x = x
-        return self.log_const - (self.alpha + 1.0) * log_x - self.beta * inv_x
+        with np.errstate(invalid="ignore"):
+            rv = self.log_const - (self.alpha + 1.0) * log_x - self.beta * inv_x
+        # The encoding is (log x, 1/x), so anything outside (0, inf) arrives as NaN or an infinity
+        # in one of the two and its density is zero -- what the scalar path returns (P02-F03).
+        return np.where(np.isfinite(log_x) & np.isfinite(inv_x), rv, -np.inf)
 
     def backend_seq_log_density(self, x: tuple[Any, Any], engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded data."""
@@ -307,6 +314,14 @@ class InverseGammaSampler(DistributionSampler):
         return 1.0 / self.rng.gamma(shape=self.dist.alpha, scale=1.0 / self.dist.beta, size=size)
 
 
+_INVERSE_GAMMA_SUPPORT_MESSAGE = (
+    "InverseGammaDistribution has support x > 0, but at least %d encoded observation(s) carrying "
+    "weight lie outside it. The encoder admits them so a mixture whose other component owns those "
+    "values can score the batch (they score -inf here), but fitting this law on them would fold a "
+    "NaN or an out-of-support value into its own sufficient statistics."
+)
+
+
 class InverseGammaAccumulator(SequenceEncodableStatisticAccumulator):
     """Accumulate weighted count, sum of reciprocals, and sum of negative logs for inverse-gamma estimation."""
 
@@ -328,10 +343,21 @@ class InverseGammaAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
+    def supported_rows(self, x) -> np.ndarray:
+        """Encoded rows this law can be fitted on: finite and strictly positive.
+
+        The encoder admits out-of-support observations so that a mixture can encode a whole batch
+        against every component (P02-F03); this is the predicate that keeps them out of the
+        sufficient statistics, and the one a latent model's initialization consults before it hands
+        this component any responsibility.
+        """
+        return np.isfinite(x[0]) & np.isfinite(x[1])
+
     def seq_update(
         self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: InverseGammaDistribution | None
     ) -> None:
         """Accumulate transformed sufficient statistics from encoded data."""
+        refuse_unsupported_observations(self.supported_rows(x), weights, message=_INVERSE_GAMMA_SUPPORT_MESSAGE)
         log_x, inv_x = x
         self.count += np.sum(weights, dtype=np.float64)
         self.sum_inv += np.dot(inv_x, weights)
@@ -449,7 +475,14 @@ class InverseGammaDataEncoder(DataSequenceEncoder):
     def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
         """Encode observations as log-values and reciprocal values."""
         rv = np.asarray(x, dtype=np.float64)
-        if rv.size and (np.any(rv <= 0.0) or np.any(~np.isfinite(rv))):
-            raise ValueError("InverseGammaDistribution has support x > 0.")
-        with np.errstate(divide="ignore"):
+        nan_count = int(np.count_nonzero(np.isnan(rv)))
+        if nan_count:
+            raise ValueError(
+                "InverseGamma observations contain %d NaN value(s). NaN marks missing data, not a "
+                "support violation; drop or impute the missing entries before fitting." % nan_count
+            )
+        # An out-of-support observation is scored, not refused: the scalar path returns -inf for it and a
+        # mixture whose other component owns that value has to be able to encode the whole batch
+        # (P02-F03). Only NaN stays refused -- it is missing data, not a zero-density point.
+        with np.errstate(divide="ignore", invalid="ignore"):
             return np.log(rv), 1.0 / rv

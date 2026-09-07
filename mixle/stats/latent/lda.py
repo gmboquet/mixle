@@ -13,6 +13,7 @@ used to sample the number of words in a given document.
 
 """
 
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -81,6 +82,24 @@ class LDAOptimizationDiagnostics:
     # fitted instance of either family (campaign nine, D-0209). Unannotated on purpose: an
     # annotated name would become a dataclass field.
     __pysp_serializable__ = True
+
+
+# A solve whose last step is still at least this fraction of its first, with a still-growing
+# alpha, is walking off rather than converging slowly (see the classification in update_alpha).
+_ALPHA_STALLED_STEP_RATIO = 0.5
+
+_ALPHA_ESCAPE_ADVICE = {
+    "alpha_diverging": (
+        "alpha is diverging to infinity, not converging slowly: this corpus's mean expected "
+        "log-topic-proportions cannot be matched by any finite Dirichlet alpha, so raising "
+        "max_alpha_iter will not help. Pass fixed_alpha=<array> to LDAEstimator to skip the alpha "
+        "solve entirely, or loosen alpha_threshold (e.g. 1e-3) to accept a softer criterion."
+    ),
+    "other": (
+        "Raise max_alpha_iter to give the solve more budget, loosen alpha_threshold (e.g. 1e-3), "
+        "or pass fixed_alpha=<array> to skip the alpha solve entirely."
+    ),
+}
 
 
 class LDAConvergenceError(RuntimeError):
@@ -1318,13 +1337,35 @@ class LDAEstimator(ParameterEstimator):
                 mean_of_logs = sum_of_logs / doc_counts
 
             # new_alpha, _ = find_alpha(prev_alpha, sum_of_logs/doc_counts, gamma_threshold*np.sqrt(float(doc_counts)))
+            # Non-strict: an alpha solve that runs out of budget (or whose target no finite alpha
+            # can reach) returns its last valid iterate, and this estimator reports that the way
+            # every other estimator reports non-convergence -- a fitted model, a warning, and a
+            # receipt -- instead of raising out of optimize() with nothing (P02-F09).
             new_alpha, _, alpha_diagnostics = update_alpha(
                 prev_alpha,
                 mean_of_logs,
                 self.alpha_threshold,
                 max_iter=self.max_alpha_iter,
                 return_diagnostics=True,
+                strict=False,
             )
+            if not alpha_diagnostics.converged:
+                warnings.warn(
+                    "LDA's Dirichlet alpha solve stopped at %d/%d iterations (%s; residual=%g): the "
+                    "returned model carries the last valid alpha iterate and its fit_diagnostics "
+                    "report converged=False. %s"
+                    % (
+                        alpha_diagnostics.iterations,
+                        alpha_diagnostics.max_iterations,
+                        alpha_diagnostics.termination_reason,
+                        alpha_diagnostics.final_residual,
+                        _ALPHA_ESCAPE_ADVICE[
+                            "alpha_diverging" if alpha_diagnostics.termination_reason == "alpha_diverging" else "other"
+                        ],
+                    ),
+                    UserWarning,
+                    stacklevel=2,
+                )
         else:
             new_alpha = np.asarray(self.fixed_alpha).copy()
             alpha_diagnostics = LDAOptimizationDiagnostics(
@@ -1462,6 +1503,7 @@ def update_alpha(
     *,
     max_iter: int = 1000,
     return_diagnostics: bool = False,
+    strict: bool = True,
 ):
     """Fixed-point update of the Dirichlet parameter alpha given mean expected log proportions.
 
@@ -1469,6 +1511,10 @@ def update_alpha(
         alpha_curr (np.ndarray): Current alpha estimate.
         mean_log_p (np.ndarray): Mean expected log topic proportions across documents.
         alpha_threshold (float): Convergence threshold for the fixed-point iteration.
+        strict (bool): Raise :class:`LDAConvergenceError` when the solve does not converge.
+            ``False`` returns the last valid iterate together with the diagnostics that say so,
+            which is how an estimator turns a solver's non-convergence into a warned, receipted
+            fit rather than no fit at all (P02-F09).
 
     Returns:
         Tuple of (updated alpha, number of iterations performed).
@@ -1520,6 +1566,9 @@ def update_alpha(
     # cannot swallow real convergent fits.
     alpha_target_unreachable = bool(logsumexp(mean_log_p) >= -_ALPHA_BOUNDARY_TOL)
 
+    first_step = None
+    last_step = float("inf")
+    start_sum = float(alpha.sum())
     while res > threshold and its_cnt < budget:
         alpha_old = alpha
         candidate = np.asarray(digammainv(mean_log_p + digamma(alpha.sum())), dtype=np.float64)
@@ -1533,7 +1582,11 @@ def update_alpha(
                 final_residual=float("inf"),
                 objective_trace=tuple(objective_trace),
             )
-            raise LDAConvergenceError(diagnostics)
+            if strict:
+                raise LDAConvergenceError(diagnostics)
+            # The candidate is unusable, but the previous iterate is a valid Dirichlet parameter and
+            # the diagnostics say the solve stopped early -- a fit with a receipt beats no fit.
+            return (alpha_old, its_cnt, diagnostics) if return_diagnostics else (alpha_old, its_cnt)
         candidate_objective = _dirichlet_alpha_objective(candidate, mean_log_p)
         previous_objective = objective_trace[-1]
         if candidate_objective < previous_objective - 1.0e-12 * max(1.0, abs(previous_objective)):
@@ -1546,16 +1599,33 @@ def update_alpha(
                 final_residual=float(np.abs(candidate - alpha_old).sum() / candidate.sum()),
                 objective_trace=tuple(objective_trace + [candidate_objective]),
             )
-            raise LDAConvergenceError(diagnostics)
+            if strict:
+                raise LDAConvergenceError(diagnostics)
+            return (alpha_old, its_cnt, diagnostics) if return_diagnostics else (alpha_old, its_cnt)
         alpha = candidate
         objective_trace.append(candidate_objective)
-        res = float(np.abs(alpha - alpha_old).sum() / alpha.sum())
+        step = float(np.abs(alpha - alpha_old).sum())
+        if first_step is None:
+            first_step = step
+        last_step = step
+        res = float(step / alpha.sum())
         its_cnt += 1
 
     converged = res <= threshold
+    # A fixed point that is genuinely converging shrinks its step; one that is walking off to
+    # infinity keeps taking steps of the same size while the residual falls only because it is
+    # divided by a growing sum. The boundary test above catches the case exactly on the
+    # non-existence boundary, but an EM run that starts each solve from the previous (already huge)
+    # alpha drifts a few ULPs below it and was then reported as ordinary slow convergence from the
+    # second EM iteration onward -- which is the misdiagnosis this classification exists to prevent.
+    walking_off = (
+        first_step is not None
+        and last_step >= _ALPHA_STALLED_STEP_RATIO * first_step
+        and float(alpha.sum()) > start_sum
+    )
     if converged:
         termination_reason = "converged"
-    elif alpha_target_unreachable:
+    elif alpha_target_unreachable or walking_off:
         termination_reason = "alpha_diverging"
     else:
         termination_reason = "iteration_budget_exhausted"
@@ -1569,7 +1639,7 @@ def update_alpha(
         final_residual=res,
         objective_trace=tuple(objective_trace),
     )
-    if not diagnostics.converged:
+    if not diagnostics.converged and strict:
         raise LDAConvergenceError(diagnostics)
     if return_diagnostics:
         return alpha, its_cnt, diagnostics

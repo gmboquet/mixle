@@ -404,9 +404,29 @@ class FitProvenanceCarrier:
         """
         return getattr(self, "_fit_provenance", None)
 
+    def _repaired_children(self) -> "tuple[tuple[str, Any], ...]":
+        """Labelled child distributions whose repairs this object also discloses.
+
+        Empty for a leaf. A container overrides it so that a repair applied to a leaf is not lost at
+        the container's boundary: a two-component mixture whose every component was variance-floored
+        reported ``numerical_repairs() == ()`` and a ``fit_provenance().repairs`` of ``()``, while the
+        same estimator outside a mixture reported the floor (P02-F05).
+        """
+        return ()
+
     def numerical_repairs(self) -> tuple[str, ...]:
-        """Numerical repairs applied while building this object -- ``()`` when none were recorded."""
-        return tuple(getattr(self, "_numerical_repairs", ()))
+        """Numerical repairs applied while building this object -- ``()`` when none were recorded.
+
+        Repairs recorded on child distributions are reported too, under the child's label, so a
+        container's receipt says what its leaves had to repair (P02-F05).
+        """
+        own = tuple(getattr(self, "_numerical_repairs", ()))
+        nested = tuple(
+            "%s.%s" % (label, repair)
+            for label, child in self._repaired_children()
+            for repair in (tuple(child.numerical_repairs()) if hasattr(child, "numerical_repairs") else ())
+        )
+        return tuple(dict.fromkeys(own + nested))
 
     def with_fit_provenance(self, provenance: "FitProvenance") -> "FitProvenanceCarrier":
         """Record ``provenance`` on this object and return it."""
@@ -447,8 +467,17 @@ class ProbabilityDistribution(FitProvenanceCarrier, ABC):
 
         An empty tuple means *no repair was recorded*, which for a family that records none is not the
         same as a proof that none occurred.
+
+        Repairs recorded on child distributions are reported too, under the child's label, so a
+        container's receipt says what its leaves had to repair (P02-F05).
         """
-        return tuple(getattr(self, "_numerical_repairs", ()))
+        own = tuple(getattr(self, "_numerical_repairs", ()))
+        nested = tuple(
+            "%s.%s" % (label, repair)
+            for label, child in self._repaired_children()
+            for repair in (tuple(child.numerical_repairs()) if hasattr(child, "numerical_repairs") else ())
+        )
+        return tuple(dict.fromkeys(own + nested))
 
     def with_fit_provenance(self, provenance: "FitProvenance") -> "ProbabilityDistribution":
         """Record ``provenance`` on this object and return it.
@@ -1411,6 +1440,17 @@ class SequenceEncodableStatisticAccumulator(StatisticAccumulator[SS]):
     def get_seq_lambda(self):
         """Return optional low-level sequence-update kernels used by generated code."""
         pass
+
+    def supported_rows(self, x) -> np.ndarray | None:
+        """Encoded rows this accumulator can be fitted on, or ``None`` when every row qualifies.
+
+        Support-limited laws admit out-of-support observations at encode time so that a mixture can
+        encode one batch against every component (P02-F03) -- the component that does not own a
+        value scores it -inf, and the E-step gives it no responsibility for that row. Initialization
+        draws responsibilities before any model exists, so a latent model asks each component for
+        this mask first and never seeds a component from a row it could not be fitted on.
+        """
+        return None
 
     @abstractmethod
     def seq_update(self, x, weights: np.ndarray, estimate) -> None:

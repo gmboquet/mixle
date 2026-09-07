@@ -4084,6 +4084,30 @@
         "return_annotation": "None"
       }
     },
+    "mixle.stats.univariate.continuous.exponential.ExponentialAccumulator.supported_rows": {
+      "kind": "class-method",
+      "signature": {
+        "parameters": [
+          {
+            "annotation": null,
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "self"
+          },
+          {
+            "annotation": null,
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "x"
+          }
+        ],
+        "return_annotation": "numpy.ndarray"
+      }
+    },
     "mixle.stats.univariate.continuous.exponential.ExponentialAccumulator.update": {
       "kind": "class-method",
       "signature": {
@@ -5310,6 +5334,30 @@
           }
         ],
         "return_annotation": "None"
+      }
+    },
+    "mixle.stats.univariate.continuous.gamma.GammaAccumulator.supported_rows": {
+      "kind": "class-method",
+      "signature": {
+        "parameters": [
+          {
+            "annotation": null,
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "self"
+          },
+          {
+            "annotation": null,
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "x"
+          }
+        ],
+        "return_annotation": "numpy.ndarray"
       }
     },
     "mixle.stats.univariate.continuous.gamma.GammaAccumulator.update": {
@@ -8021,6 +8069,30 @@
           }
         ],
         "return_annotation": "None"
+      }
+    },
+    "mixle.stats.univariate.continuous.log_gaussian.LogGaussianAccumulator.supported_rows": {
+      "kind": "class-method",
+      "signature": {
+        "parameters": [
+          {
+            "annotation": null,
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "self"
+          },
+          {
+            "annotation": null,
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "x"
+          }
+        ],
+        "return_annotation": "numpy.ndarray"
       }
     },
     "mixle.stats.univariate.continuous.log_gaussian.LogGaussianAccumulator.update": {

@@ -119,9 +119,12 @@ class GammaZeroSupportTest(unittest.TestCase):
         self.assertNotIn("support x > 0,", msg)
 
     def test_negative_keeps_standard_support_error(self):
+        # The refusal moved from the encoder to the accumulator when the encoder began admitting
+        # out-of-support values for mixtures to score (P02-F03); it still names the family and the
+        # support, and still stops the fit.
         with self.assertRaises(ValueError) as ctx:
             mixle.Model(D.GammaEstimator()).fit(np.array([-1.0, 1.0, 2.0]))
-        self.assertIn("GammaDistribution has support x > 0.", str(ctx.exception))
+        self.assertIn("GammaDistribution has support x > 0", str(ctx.exception))
 
 
 class WeibullRayleighZeroFitTest(unittest.TestCase):
@@ -134,10 +137,12 @@ class WeibullRayleighZeroFitTest(unittest.TestCase):
         self.assertIn("exactly 0.0", msg)
         self.assertNotIn("fused EM", msg)
 
-    def test_weibull_negative_error_unchanged(self):
+    def test_weibull_negative_error_still_names_the_support(self):
+        # As for Gamma above: the encoder admits the negative so a mixture can score it, and the
+        # accumulator refuses to fit on it (P02-F03).
         with self.assertRaises(ValueError) as ctx:
             mixle.Model(D.WeibullEstimator()).fit(np.array([-1.0, 1.0, 2.0]))
-        self.assertIn("WeibullDistribution requires observations x >= 0.", str(ctx.exception))
+        self.assertIn("WeibullDistribution has support x >= 0", str(ctx.exception))
 
     def test_weibull_nan_named_as_missing_data(self):
         with self.assertRaises(ValueError) as ctx:
