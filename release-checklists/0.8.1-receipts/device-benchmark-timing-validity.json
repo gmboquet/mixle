@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "be8881b2854b4a795234f6944d30a514293c3293",
+ "candidate_commit": "73e67a2e8a191a2f5c13e1efa48a79cd86f4466b",
  "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/engine_benchmark_timing_test.py -p no:randomly -q -m \"\" -n 0",
  "date": "2026-08-22",
- "evidence_digest": "971422c662f81677f8a914868654577110f91a6777db4aa21e0f2f3db4142b75",
+ "evidence_digest": "97cb7577e00d399f1e3fd926faea933ded06f98ea0bfd3cd7f33e3e1ed505238",
  "gate": "Device benchmark timing validity",
  "note": "Only 2 tests, but they are load-bearing and I read them: test_timer_brackets_every_region_with_synchronization asserts the exact 11-event consume/sync interleaving around warmup plus every measured repetition, and test_measured_workloads_have_numerical_parity_gates asserts examples/engine_benchmark_example.py contains >=3 np.testing.assert_allclose parity gates plus both torch.cuda.synchronize and torch.mps.synchronize. Caveat: the second test is a source-text assertion over the example, not an execution of it, and no CUDA/MPS device was exercised in this run.",
  "result": "2 passed in 2.24s"

@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "be8881b2854b4a795234f6944d30a514293c3293",
+ "candidate_commit": "73e67a2e8a191a2f5c13e1efa48a79cd86f4466b",
  "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/example_acceptance_oracle_test.py -p no:randomly -q -m \"\" -n 0",
  "date": "2026-08-22",
- "evidence_digest": "971422c662f81677f8a914868654577110f91a6777db4aa21e0f2f3db4142b75",
+ "evidence_digest": "97cb7577e00d399f1e3fd926faea933ded06f98ea0bfd3cd7f33e3e1ed505238",
  "gate": "Modality claims match implemented inputs",
  "note": "The test executes the example and checks the emitted artifact name, so the artifact-schema half is directly evidenced. Docs half checked by grep in the same session: docs/examples.rst 1 mention, docs/example-execution-manifest.rst 1 mention, examples/cross_modal_fit_receipt.py 2 mentions of the multi-vector naming; the example's module docstring states the inputs are Gaussian features, not encoded image/signal observations, with no alignment objective. Residual cosmetic gap: the file is still named examples/cross_modal_fit_receipt.py and mixle/tests/ still carries 5 cross_modal_*_test.py files, so the old 'cross-modal' name survives in paths even though schema/docs/oracle use the new one.",
  "result": "2 passed in 3.10s; oracle asserts receipt artifact == \"mixle.multi_vector_fit_acceptance/v1\""

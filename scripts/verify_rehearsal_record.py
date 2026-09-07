@@ -97,7 +97,9 @@ def verify(
     sums_digest = hashlib.sha256(sums_text.encode("utf-8")).hexdigest()
     artifact = record.get("artifact")
     _require(record.get("candidate_commit") == candidate_sha, "record is bound to a different candidate commit")
-    _require(record.get("prepare_run") == prepare_run, "record is bound to a different prepare run")
+    # The automated record is written by the workflow from an environment string and the manual
+    # record by a script from an integer; a run id is the same run either way.
+    _require(str(record.get("prepare_run")) == str(prepare_run), "record is bound to a different prepare run")
     _require(record.get("sums_sha256") == sums_digest, "record is bound to a different SHA256SUMS")
     _require(record.get("passed") is True, "record does not claim a passed rehearsal")
 

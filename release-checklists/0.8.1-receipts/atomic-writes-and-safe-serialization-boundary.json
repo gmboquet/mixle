@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "be8881b2854b4a795234f6944d30a514293c3293",
+ "candidate_commit": "73e67a2e8a191a2f5c13e1efa48a79cd86f4466b",
  "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/artifact_atomic_write_test.py mixle/tests/security_test.py -p no:randomly -q -m \"\" -n 0",
  "date": "2026-08-22",
- "evidence_digest": "971422c662f81677f8a914868654577110f91a6777db4aa21e0f2f3db4142b75",
+ "evidence_digest": "97cb7577e00d399f1e3fd926faea933ded06f98ea0bfd3cd7f33e3e1ed505238",
  "gate": "Atomic writes and safe serialization boundary",
  "note": "Exactly the two files the checklist names. Both also re-ran clean inside the 162-test persistence batch under -W error::ResourceWarning.",
  "result": "41 passed in 3.09s"

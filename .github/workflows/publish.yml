@@ -403,8 +403,11 @@ jobs:
             then
               break
             fi
-            test "$attempt" -lt 6
-            sleep 10
+            # TestPyPI's simple index lists a fresh upload only after propagation; the 0.8.1
+            # rehearsal (run 34093207858) uploaded successfully and then failed here after six
+            # tries over one minute, and the re-dispatch passed once the index had caught up.
+            test "$attempt" -lt 40
+            sleep 15
           done
           python scripts/verify_published_artifacts.py \
             --directory testpypi-artifacts \
@@ -412,7 +415,7 @@ jobs:
           python -m venv "$RUNNER_TEMP/testpypi-env"
           "$RUNNER_TEMP/testpypi-env/bin/python" -m pip install testpypi-artifacts/*.whl
           "$RUNNER_TEMP/testpypi-env/bin/python" scripts/import_sweep.py
-          python -c 'import hashlib,json,os,pathlib; sums=pathlib.Path("candidate/metadata/SHA256SUMS"); pathlib.Path("testpypi-rehearsal.json").write_text(json.dumps({"artifact":"mixle.testpypi_rehearsal/v1","candidate_commit":os.environ["CANDIDATE_SHA"],"prepare_run":os.environ["PREPARE_RUN_ID"],"sums_sha256":hashlib.sha256(sums.read_bytes()).hexdigest(),"passed":True},sort_keys=True)+"\n")'
+          python -c 'import hashlib,json,os,pathlib; sums=pathlib.Path("candidate/metadata/SHA256SUMS"); pathlib.Path("testpypi-rehearsal.json").write_text(json.dumps({"artifact":"mixle.testpypi_rehearsal/v1","candidate_commit":os.environ["CANDIDATE_SHA"],"prepare_run":int(os.environ["PREPARE_RUN_ID"]),"sums_sha256":hashlib.sha256(sums.read_bytes()).hexdigest(),"passed":True},sort_keys=True)+"\n")'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: testpypi-rehearsal-${{ needs.verify-candidate.outputs.candidate-sha }}

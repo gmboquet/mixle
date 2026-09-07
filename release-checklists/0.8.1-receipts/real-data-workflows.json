@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "be8881b2854b4a795234f6944d30a514293c3293",
+ "candidate_commit": "73e67a2e8a191a2f5c13e1efa48a79cd86f4466b",
  "command": "cd . && echo \"example files: $(ls examples | grep -icE 'adult|sunspot|banking')\"; echo \"dataset-name hits under examples/: $(grep -rilE 'banking77|sunspots|adult' examples | wc -l | tr -d ' ')\"; echo \"datasets dependency lines in pyproject.toml: $(grep -cE '^\\s*\\\"?datasets[\\\"><=~ ]' pyproject.toml)\"; echo \"datasets anywhere in pyproject.toml: $(grep -c 'datasets' pyproject.toml)\"; echo \"manifest hits: $(grep -rilE 'banking77|sunspots|adult' manifests | wc -l | tr -d ' ')\"",
  "date": "2026-08-22",
- "evidence_digest": "971422c662f81677f8a914868654577110f91a6777db4aa21e0f2f3db4142b75",
+ "evidence_digest": "97cb7577e00d399f1e3fd926faea933ded06f98ea0bfd3cd7f33e3e1ed505238",
  "gate": "Real-data workflows",
  "note": "This gate asserts a removal, so the evidence is a measured absence and every count is 0. Repo-wide the three dataset names survive in exactly three documentation places, all of which describe the removal rather than use the data: docs/example-execution-manifest.rst:133 ('Real-data flagship demonstrations (Banking77, UCI Adult, sunspots) were removed'), docs/audits/0.8.0-exhaustive-code-review.md, and docs/audits/0.8.0-finding-dispositions.md. mixle/tests/release_claims_hygiene_test.py carries a matching comment and asserts the retracted headline numbers from those examples stay absent from CHANGELOG.md and the two surviving examples; it passed (3 passed) in this session. I could not verify the 'real-data demonstrations live in notebooks outside the repository' clause \u2014 those notebooks are outside this tree.",
  "result": "0 matching example files (57 examples/*.py remain), 0 dataset-name hits under examples/, 0 datasets lines in pyproject.toml (0 occurrences of the string anywhere in it), 0 hits in manifests/"

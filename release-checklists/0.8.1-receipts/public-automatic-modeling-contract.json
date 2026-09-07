@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "be8881b2854b4a795234f6944d30a514293c3293",
+ "candidate_commit": "73e67a2e8a191a2f5c13e1efa48a79cd86f4466b",
  "command": "cd . && wc -l docs/automatic-modeling-contract.rst && PYTHONPATH=. python -m pytest mixle/tests/automatic_factory_contract_test.py -p no:randomly -q -m \"\" -n 0",
  "date": "2026-08-22",
- "evidence_digest": "971422c662f81677f8a914868654577110f91a6777db4aa21e0f2f3db4142b75",
+ "evidence_digest": "97cb7577e00d399f1e3fd926faea933ded06f98ea0bfd3cd7f33e3e1ed505238",
  "gate": "Public automatic-modeling contract",
  "note": "Both halves of the evidence sentence checked: the contract document exists in the tree at the stated path, and the test that enforces it passes. I verified the document's existence and size, not that its prose fully matches what the test asserts -- that mapping is a human review, not something I measured.",
  "result": "docs/automatic-modeling-contract.rst present at 94 lines; automatic_factory_contract_test.py -> 8 passed, 37 subtests passed in 2.25s (exit 0)"

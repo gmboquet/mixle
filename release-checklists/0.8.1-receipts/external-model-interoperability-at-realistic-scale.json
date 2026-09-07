@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "be8881b2854b4a795234f6944d30a514293c3293",
+ "candidate_commit": "73e67a2e8a191a2f5c13e1efa48a79cd86f4466b",
  "command": "PYTHONPATH=. python scripts/check_public_claims.py && python -c 'json.load(open(\"manifests/public_claims.json\"))'",
  "date": "2026-08-22",
- "evidence_digest": "971422c662f81677f8a914868654577110f91a6777db4aa21e0f2f3db4142b75",
+ "evidence_digest": "97cb7577e00d399f1e3fd926faea933ded06f98ea0bfd3cd7f33e3e1ed505238",
  "gate": "External-model interoperability at realistic scale",
  "note": "DISPOSITION IS EXCLUSION, NOT COMPLETION -- flagged for the owner. The row's own text says the substantive evidence 'requires retained model/backend execution' and that 'no broad 0.8.0 claim is made without it'. That is the definition of an excluded scope, not a gate that was passed: nothing here was executed at scale and nothing should be read as if it were. The measurement establishes only the negative half -- that the shipped claim ledger makes no such claim, so there is no unbacked assertion to retract. If the owner prefers, this row should read EXCLUDED rather than DONE; the evidence is identical either way.",
  "result": "exit 0, validated 11 claims across 853 public surfaces; 0 of the 11 registered claims asserts external-model interoperability at realistic scale"

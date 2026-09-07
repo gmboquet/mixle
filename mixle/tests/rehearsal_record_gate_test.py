@@ -87,6 +87,20 @@ class VerifyFunctionTest(unittest.TestCase):
             with self.assertRaises(self.module.Refusal):
                 self._verify(bad)
 
+    def test_automated_record_with_the_workflows_string_typed_prepare_run_is_accepted(self):
+        # publish.yml writes prepare_run from an environment string ("34091612593"); the verifier's
+        # --prepare-run is an int. The first automated promote (0.8.1, run 34094030813) was refused
+        # on exactly that comparison, so a run id is now matched as text in both forms.
+        module = _load()
+        summary = module.verify(
+            _automated(prepare_run="34042540432"),
+            candidate_sha=_SHA,
+            prepare_run=34042540432,
+            sums_text=_SUMS,
+            manual=False,
+        )
+        self.assertIn("accepted", summary)
+
     def test_forms_cannot_be_swapped(self):
         with self.assertRaisesRegex(self.module.Refusal, "manual one was declared"):
             self._verify(_automated(), manual=True)

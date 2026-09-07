@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "be8881b2854b4a795234f6944d30a514293c3293",
+ "candidate_commit": "73e67a2e8a191a2f5c13e1efa48a79cd86f4466b",
  "command": "gh api repos/gmboquet/mixle/commits/$SHA/check-runs --paginate --slurp (tier lanes) and python -c to read the budget tables out of scripts/run_test_tier.py and scripts/run_smoke.py",
  "date": "2026-08-22",
- "evidence_digest": "971422c662f81677f8a914868654577110f91a6777db4aa21e0f2f3db4142b75",
+ "evidence_digest": "97cb7577e00d399f1e3fd926faea933ded06f98ea0bfd3cd7f33e3e1ed505238",
  "gate": "Purpose/time-budget test tiers",
  "note": "CORRECTED WORDING. The row said all six tiers enforce budgets 'via scripts/run_test_tier.py'; that script's _BUDGETS holds only 5 entries and does not know about smoke. Smoke is budgeted too, by scripts/run_smoke.py, which refuses any timeout outside 1..30 s and raises if the suite exceeds it. So the claim holds and the named mechanism was half wrong -- two scripts, not one.",
  "result": "all 6 tiers completed/success on the exact tip -- smoke, core (x5 lanes incl. minimum floors and macOS arm64), full (4 shards + coverage floor), optional (2 shards), numerical, hardware; budgets are core 1500s, full 5400s, optional 2700s, numerical 1800s, hardware 1200s, and smoke 30s"

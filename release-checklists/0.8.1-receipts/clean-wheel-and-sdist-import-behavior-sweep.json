@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "be8881b2854b4a795234f6944d30a514293c3293",
+ "candidate_commit": "73e67a2e8a191a2f5c13e1efa48a79cd86f4466b",
  "command": "gh api \"repos/gmboquet/mixle/commits/483add7c/check-runs?per_page=100\" --jq '.check_runs[]|select(.name==\"clean-wheel install + import sweep\")|\"\\(.status)/\\(.conclusion)\"'  [plus local replication, see note]",
  "date": "2026-08-22",
- "evidence_digest": "971422c662f81677f8a914868654577110f91a6777db4aa21e0f2f3db4142b75",
+ "evidence_digest": "97cb7577e00d399f1e3fd926faea933ded06f98ea0bfd3cd7f33e3e1ed505238",
  "gate": "Clean wheel and sdist import/behavior sweep",
  "note": "Hosted job is genuine and green on the exact tip. I also replicated its steps locally end-to-end against the artifacts I built from `git archive 483add7c`: two fresh venvs (one wheel, one sdist), `pip check` -> 'No broken requirements found.' on both, `scripts/import_sweep.py` -> 'swept 809 public modules ... from site-packages' on both, then invariant_catalog + serialization_audit_contracts + serialization + smoke run from /private/tmp (outside the source tree, with a site-packages assertion) -> '34 passed, 1 skipped, 39 subtests passed' on both, then `verify_installed_schema_manifest.py --profile base` OK on both. Drift: the checklist says 808 public modules; the tip sweeps 809.",
  "result": "hosted: completed/success (1 job, id 96967302174); local replication: wheel env and sdist env each pip check clean, import_sweep 809 public modules each, behavior batch 34 passed / 1 skipped / 39 subtests each"

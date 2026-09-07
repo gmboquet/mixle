@@ -88,6 +88,12 @@ for the 0.8.2 patch (D-0213).
   from the spread of the four brightest patches, the gate calibrates on the mix it serves, and clear
   volumes are served while faint ones abstain. `gallery_univariate_example.py` fixes the binomial
   `n` (`max_val=10`) instead of presenting a sample-maximum `n = 9` as parameter recovery.
+- The release workflow's automated promote path accepts its own rehearsal record: the record's
+  `prepare_run` was written from an environment string and the verifier compared it with an
+  integer, so the first automated promote of 0.8.1 was refused before any upload; the rehearsal
+  step also waits up to ten minutes for TestPyPI's simple index to list a fresh upload instead of
+  one minute. Both are workflow-only changes; the candidate that carries them is re-cut and
+  promoted on a manual rehearsal record (D-0214).
 - `optimize()` says when a run ended on a rejected update below its cap while the objective was
   still moving: a two-component generalized-Pareto mixture stopped at iteration 36 of 2,000 with
   the last accepted step still gaining 0.009 against `delta=1e-8`, `converged=False`, and no note
