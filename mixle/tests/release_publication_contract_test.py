@@ -282,6 +282,29 @@ def test_publication_is_recoverable_two_phase_and_public_transition_is_last():
     )
 
 
+def test_promote_accepts_exactly_one_rehearsal_form_and_re_derives_the_manual_one():
+    # D-0211: a version an earlier candidate already put on TestPyPI can never pass the automated
+    # rehearsal again (filenames are never reusable there; bytes depend on the commit timestamp),
+    # so promote may instead take a manual record attached to the draft release -- verified by the
+    # same script in both forms, uploaded by the repository owner, and with its smoke re-derived in
+    # the job rather than trusted.
+    workflow = (_ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
+    assert "manual_rehearsal_asset:" in workflow
+    assert 'test -z "$MANUAL_REHEARSAL_ASSET"' in workflow  # never alongside a run id, never outside promote
+    assert 'test -n "$MANUAL_REHEARSAL_ASSET"' in workflow
+    assert "if: inputs.testpypi_run_id != ''" in workflow  # the automated artifact only when its run exists
+    assert "if: inputs.testpypi_run_id == ''" in workflow
+    assert 'test "$UPLOADER" = "$REPOSITORY_OWNER"' in workflow
+    assert workflow.count("verify_rehearsal_record.py") == 2  # both forms go through the one verifier
+    assert "--manual" in workflow
+    assert "promote-smoke" in workflow and "scripts/import_sweep.py" in workflow
+    manual_smoke = workflow.index("promote-smoke")
+    # the promote job's publish step is the LAST use of the action (the testpypi job's comes first)
+    assert manual_smoke < workflow.rindex("gh-action-pypi-publish")  # re-derived before anything is published
+    assert (_ROOT / "scripts" / "verify_rehearsal_record.py").is_file()
+    assert (_ROOT / "scripts" / "record_manual_rehearsal.py").is_file()
+
+
 def test_release_check_policy_is_nonempty_and_unique():
     module = _load()
     names = module.required_check_names(_ROOT / ".github" / "release-required-checks.txt")

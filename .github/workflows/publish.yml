@@ -28,7 +28,11 @@ on:
         required: false
         type: string
       testpypi_run_id:
-        description: "Successful TestPyPI rehearsal run ID (required for promote)"
+        description: "Successful TestPyPI rehearsal run ID (promote: this or manual_rehearsal_asset, never both)"
+        required: false
+        type: string
+      manual_rehearsal_asset:
+        description: "promote only: name of the manual rehearsal record attached to the draft release (testpypi-rehearsal-manual-<sha8>.json), for a version an earlier candidate already put on TestPyPI"
         required: false
         type: string
 
@@ -74,6 +78,7 @@ jobs:
           PHASE: ${{ inputs.phase }}
           PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
           TESTPYPI_RUN_ID: ${{ inputs.testpypi_run_id }}
+          MANUAL_REHEARSAL_ASSET: ${{ inputs.manual_rehearsal_asset }}
         run: |
           set -euo pipefail
           VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
@@ -92,16 +97,27 @@ jobs:
 
           if [ "$PHASE" = "promote" ]; then
             test -n "$PREPARE_RUN_ID"
-            test -n "$TESTPYPI_RUN_ID"
             case "$PREPARE_RUN_ID" in *[!0-9]*) exit 1;; esac
-            case "$TESTPYPI_RUN_ID" in *[!0-9]*) exit 1;; esac
+            # Exactly one rehearsal form: the automated run, or -- only when an earlier candidate of
+            # this same version already occupies TestPyPI, so no later candidate's bytes can ever be
+            # rehearsed there -- the manual record attached to the draft release (D-0211). The
+            # promote job verifies the record and re-derives its smoke itself.
+            if [ -n "$TESTPYPI_RUN_ID" ]; then
+              test -z "$MANUAL_REHEARSAL_ASSET"
+              case "$TESTPYPI_RUN_ID" in *[!0-9]*) exit 1;; esac
+            else
+              test -n "$MANUAL_REHEARSAL_ASSET"
+              case "$MANUAL_REHEARSAL_ASSET" in testpypi-rehearsal-manual-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json) ;; *) exit 1;; esac
+            fi
           elif [ "$PHASE" = "testpypi" ]; then
             test -n "$PREPARE_RUN_ID"
             test -z "$TESTPYPI_RUN_ID"
+            test -z "$MANUAL_REHEARSAL_ASSET"
             case "$PREPARE_RUN_ID" in *[!0-9]*) exit 1;; esac
           else
             test -z "$PREPARE_RUN_ID"
             test -z "$TESTPYPI_RUN_ID"
+            test -z "$MANUAL_REHEARSAL_ASSET"
           fi
 
           python scripts/verify_license_provenance.py --require-approved
@@ -431,26 +447,61 @@ jobs:
           name: candidate-approval-${{ needs.verify-candidate.outputs.candidate-sha }}-promote
           path: promotion
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: inputs.testpypi_run_id != ''
         with:
           name: testpypi-rehearsal-${{ needs.verify-candidate.outputs.candidate-sha }}
           path: testpypi
           run-id: ${{ inputs.testpypi_run_id }}
           github-token: ${{ github.token }}
+      - name: Fetch the manual rehearsal record from the draft release
+        if: inputs.testpypi_run_id == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ needs.verify-candidate.outputs.candidate-tag }}
+          MANUAL_REHEARSAL_ASSET: ${{ inputs.manual_rehearsal_asset }}
+          REPOSITORY: ${{ github.repository }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          # only the repository owner's upload counts as the release owner's attestation
+          UPLOADER="$(gh api "repos/$REPOSITORY/releases/tags/$CANDIDATE_TAG" --jq ".assets[] | select(.name == \"$MANUAL_REHEARSAL_ASSET\") | .uploader.login")"
+          test "$UPLOADER" = "$REPOSITORY_OWNER"
+          mkdir -p testpypi
+          gh release download "$CANDIDATE_TAG" --repo "$REPOSITORY" --pattern "$MANUAL_REHEARSAL_ASSET" --dir testpypi
       - name: Re-verify immutable prepared evidence
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ needs.verify-candidate.outputs.candidate-sha }}
           CANDIDATE_TAG: ${{ needs.verify-candidate.outputs.candidate-tag }}
+          VERSION: ${{ needs.verify-candidate.outputs.candidate-version }}
           PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
+          TESTPYPI_RUN_ID: ${{ inputs.testpypi_run_id }}
+          MANUAL_REHEARSAL_ASSET: ${{ inputs.manual_rehearsal_asset }}
           REPOSITORY: ${{ github.repository }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
           test "$(gh release view "$CANDIDATE_TAG" --json isDraft --jq .isDraft)" = "true"
           test "$(python -c 'import json; print(json.load(open("candidate/metadata/release-candidate.json"))["commit"])')" = "$CANDIDATE_SHA"
           test "$(python -c 'import json; print(json.load(open("candidate/metadata/release-candidate.json"))["workflow_run"])')" = "$PREPARE_RUN_ID"
-          test "$(python -c 'import json; print(json.load(open("testpypi/testpypi-rehearsal.json"))["candidate_commit"])')" = "$CANDIDATE_SHA"
-          test "$(python -c 'import json; print(json.load(open("testpypi/testpypi-rehearsal.json"))["prepare_run"])')" = "$PREPARE_RUN_ID"
-          test "$(python -c 'import hashlib,json; r=json.load(open("testpypi/testpypi-rehearsal.json")); print(r["sums_sha256"] == hashlib.sha256(open("candidate/metadata/SHA256SUMS","rb").read()).hexdigest())')" = "True"
+          if [ -n "$TESTPYPI_RUN_ID" ]; then
+            python scripts/verify_rehearsal_record.py \
+              --record testpypi/testpypi-rehearsal.json \
+              --candidate-sha "$CANDIDATE_SHA" --prepare-run "$PREPARE_RUN_ID" \
+              --sums candidate/metadata/SHA256SUMS
+          else
+            python scripts/verify_rehearsal_record.py \
+              --record "testpypi/$MANUAL_REHEARSAL_ASSET" --manual \
+              --candidate-sha "$CANDIDATE_SHA" --prepare-run "$PREPARE_RUN_ID" \
+              --sums candidate/metadata/SHA256SUMS \
+              --version "$VERSION" --uploader "$REPOSITORY_OWNER"
+            # the record's smoke is re-derived here, not trusted: a clean install of the prepared
+            # wheel and the same import sweep the automated rehearsal runs
+            python -m venv "$RUNNER_TEMP/promote-smoke"
+            "$RUNNER_TEMP/promote-smoke/bin/python" -m pip install candidate/dist/*.whl
+            "$RUNNER_TEMP/promote-smoke/bin/python" scripts/import_sweep.py
+            cp "testpypi/$MANUAL_REHEARSAL_ASSET" candidate/metadata/testpypi-rehearsal-manual.json
+          fi
           cp promotion/release-check-evidence.json candidate/metadata/promotion-check-evidence.json
           (cd candidate/dist && sha256sum -c ../metadata/SHA256SUMS)
           SECURITY_RUN="$(python -c 'import json, re; u=json.load(open("promotion/release-check-evidence.json"))["checks"]["pip-audit (all runtime features)"]["details_url"]; print(re.search(r"/actions/runs/([0-9]+)/", u).group(1))')"
