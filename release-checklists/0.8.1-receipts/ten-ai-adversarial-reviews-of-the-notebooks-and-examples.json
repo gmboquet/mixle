@@ -1,6 +1,6 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "cd05412883ab12e7ab1ef10d4231bd610d27393d",
+ "candidate_commit": "e5cc0105e444e6d6f184ecd69a91417c77c1c37a",
  "command": "ten independent reviewer passes (reports: release-checklists/0.8.1-reviews/pass-01..10/{report.md,findings.json}); execution fact on the repaired wheel: for nb in $(find notebooks -name '*.ipynb'); do jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=1800 $nb; done (5400 s for malware_certificate_embedding; JAVA_HOME=openjdk@17, pyspark and peft installed) and for f in examples/*.py; do python $f; done with a 1800 s Python-side timeout",
  "date": "2026-09-07",
  "evidence_digest": "dc613f704a4e90eb840d3a55decf82c24dba6d7079f454d6cc7ffdc50c31f7e8",

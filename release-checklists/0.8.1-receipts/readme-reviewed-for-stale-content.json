@@ -1,6 +1,6 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "cd05412883ab12e7ab1ef10d4231bd610d27393d",
+ "candidate_commit": "e5cc0105e444e6d6f184ecd69a91417c77c1c37a",
  "command": "line-by-line review recorded in release-checklists/0.8.1-reviews/readme-review.md; every fenced Python block executed verbatim on the candidate venv from /tmp (adversarial pass 08 repeated this independently, see 0.8.1-reviews/pass-08/report.md); links checked against the v0.8.1/ docs-site layout and git ls-files",
  "date": "2026-09-07",
  "evidence_digest": "dc613f704a4e90eb840d3a55decf82c24dba6d7079f454d6cc7ffdc50c31f7e8",

@@ -1,7 +1,7 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "cd05412883ab12e7ab1ef10d4231bd610d27393d",
- "command": "cd . && /Users/grantboquet/mixle/.venv312/bin/python3 -m build --no-isolation --wheel --sdist --outdir <scratch>/dist . && <fresh venv>/bin/pip install --no-deps <scratch>/dist/mixle-0.8.1-py3-none-any.whl && cd /tmp && <fresh venv>/bin/python -c \"import importlib.metadata as m; print(m.version('mixle'))\" && curl -s https://test.pypi.org/pypi/mixle/json | python3 -c \"import json,sys; print(sorted(json.load(sys.stdin)['releases']))\" && curl -s https://pypi.org/pypi/mixle/json | python3 -c \"import json,sys; print(sorted(json.load(sys.stdin)['releases']))\"",
+ "candidate_commit": "e5cc0105e444e6d6f184ecd69a91417c77c1c37a",
+ "command": "cd . && <build-venv>/bin/python3 -m build --no-isolation --wheel --sdist --outdir <scratch>/dist . && <fresh venv>/bin/pip install --no-deps <scratch>/dist/mixle-0.8.1-py3-none-any.whl && cd /tmp && <fresh venv>/bin/python -c \"import importlib.metadata as m; print(m.version('mixle'))\" && curl -s https://test.pypi.org/pypi/mixle/json | python3 -c \"import json,sys; print(sorted(json.load(sys.stdin)['releases']))\" && curl -s https://pypi.org/pypi/mixle/json | python3 -c \"import json,sys; print(sorted(json.load(sys.stdin)['releases']))\"",
  "date": "2026-09-07",
  "evidence_digest": "dc613f704a4e90eb840d3a55decf82c24dba6d7079f454d6cc7ffdc50c31f7e8",
  "gate": "Version is the final candidate version",
