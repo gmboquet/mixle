@@ -435,9 +435,18 @@ def evaluate_cdf(cdf: Callable[[Any], Any], y: np.ndarray) -> np.ndarray:
     and propagates as-is rather than being re-labelled a values problem (FU-04).
     """
     try:
-        return np.asarray(cdf(y), dtype=float)
+        values = np.asarray(cdf(y), dtype=float)
     except TypeError:
         return np.asarray([float(cdf(value)) for value in y], dtype=float)
+    if values.shape == y.shape:
+        return values
+    # A callable that takes the array without raising but hands back one value is scalar-only in
+    # effect, which is exactly what this function's contract says it accepts. Reporting it as a
+    # shape mismatch of the CDF VALUES sent the caller after the wrong cause -- the misattribution
+    # FU-04 was about, still standing for this spelling of it (P03-F12).
+    if values.ndim == 0 or values.size == 1:
+        return np.asarray([float(cdf(value)) for value in y], dtype=float)
+    return values
 
 
 def pit_values(y: np.ndarray, cdf: np.ndarray | Callable[[np.ndarray], np.ndarray]) -> np.ndarray:

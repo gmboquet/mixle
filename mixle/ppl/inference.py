@@ -27,6 +27,7 @@ convergence diagnostics, relabeling); parallel chains; inequality/region constra
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -192,11 +193,42 @@ class Posterior:
         self.tail_ess = None  # {param: tail effective sample size}
         self.num_divergences = 0  # NUTS divergent transitions (post-warmup, summed over chains)
 
+    # The fitters attach two callables built as local closures over the lowered model: ``build``
+    # (a vals-dict -> concrete distribution) and ``predictive``. Neither survives pickling, and
+    # their presence made every posterior-bearing fit unpicklable -- while explain_fit's docstring
+    # says the record travels with the model through pickling (P04-F05). The draws, the raw chain,
+    # the diagnostics and the fit record are all plain data and do travel; the two closures are
+    # dropped and replaced by a stand-in that says so, so a restored posterior summarizes and
+    # reports exactly as before and only the two model-rebuilding calls refuse.
+    _CLOSURE_FIELDS = ("predictive", "build")
+
+    def __getstate__(self) -> dict:
+        state = dict(self.__dict__)
+        state["_dropped_closures"] = tuple(name for name in self._CLOSURE_FIELDS if state.get(name) is not None)
+        for name in self._CLOSURE_FIELDS:
+            state[name] = None
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        dropped = state.pop("_dropped_closures", ())
+        self.__dict__.update(state)
+        self._dropped_closures = tuple(dropped)
+
+    def _refuse_dropped_closure(self, name: str) -> None:
+        if name in getattr(self, "_dropped_closures", ()):
+            raise ValueError(
+                "this posterior was restored from a pickle, and %s() rebuilds the model from a "
+                "closure over the lowered program that pickling cannot carry. The draws, the raw "
+                "chain and the diagnostics survived -- summary(), the ESS/R-hat fields and the "
+                "explain_fit record all work. Re-fit the model to get %s() back." % (name, name)
+            )
+
     def pointwise_log_likelihood(self, data) -> np.ndarray:
         """Return the ``(n_draws, n_obs)`` log-likelihood of ``data`` under each posterior draw.
 
         This is the input to the predictive model-comparison diagnostics (WAIC, PSIS-LOO).
         """
+        self._refuse_dropped_closure("build")
         if self.build is None:
             raise ValueError("this posterior cannot recompute the pointwise log-likelihood.")
         data = list(data)
@@ -787,12 +819,33 @@ def _composite_target_parts(rv: RandomVariable, data):
     return None, slots, build, unpack, (dmean, dstd)
 
 
+def validated_potentials(potentials) -> list:
+    """Return ``potentials`` as a list of potentials, refusing anything else by name.
+
+    A string is iterable, so ``potentials='x'`` walked straight into the resolution loop and failed
+    with "'str' object has no attribute 'vars'" (P04-F11).
+    """
+    if isinstance(potentials, _Potential):
+        return [potentials]
+    if isinstance(potentials, (str, bytes)) or not isinstance(potentials, Iterable):
+        raise TypeError(
+            "potentials must be a mixle.ppl potential (from potential(...)) or a sequence of them, "
+            "got %s" % type(potentials).__name__
+        )
+    entries = list(potentials)
+    for entry in entries:
+        if not isinstance(entry, _Potential):
+            raise TypeError(
+                "potentials must be mixle.ppl potentials (from potential(...)), got %s" % type(entry).__name__
+            )
+    return entries
+
+
 def _potential_latents(potentials) -> tuple:
     """Unique RVs referenced by ``potentials`` (an auxiliary latent may appear only here)."""
     if potentials is None:
         return ()
-    if isinstance(potentials, _Potential):
-        potentials = [potentials]
+    potentials = validated_potentials(potentials)
     out, seen = [], set()
     for p in potentials:
         for v in p.vars:
@@ -1052,6 +1105,34 @@ def _attach_convergence(post, slots, arr, results) -> None:
 
 
 # ------------------------------------------------------------------- result assembly
+def _refuse_a_chain_that_never_moved(results, *, how: str, constrained: bool) -> None:
+    """Refuse a "posterior" whose sampler accepted nothing.
+
+    A zero acceptance rate means every proposal was rejected and every draw is the starting point
+    repeated: ``summary()`` then reports a mean at that point, a standard deviation of exactly
+    zero and NaN diagnostics -- a degenerate answer presented as a posterior (P04-F04). With a hard
+    constraint active this is the ordinary outcome for HMC, whose leapfrog trajectories leave the
+    feasible region and are rejected wholesale, which is why the docstrings point at ``'mcmc'`` and
+    ``'ensemble'`` for that case; the guard covers every sampler because the symptom, not the
+    cause, is what makes the result unusable.
+    """
+    rates = [getattr(result, "acceptance_rate", None) for result in results]
+    rates = [float(rate) for rate in rates if rate is not None]
+    if not rates or max(rates) > 0.0:
+        return
+    advice = (
+        " A hard constraint truncates the target, and this sampler's proposals all left the "
+        "feasible region: how='mcmc' or how='ensemble' samples a truncated posterior, and "
+        "penalty=<float> turns the constraint into a soft one every sampler can follow."
+        if constrained
+        else " Reduce step_size (or raise num_steps / draws) so the sampler can move."
+    )
+    raise RuntimeError(
+        "%s accepted none of its proposals: every draw is the starting point repeated, so the "
+        "result is a point, not a posterior.%s" % (how, advice)
+    )
+
+
 def _finalize(rv, slots, res, build) -> RandomVariable:
     """Convert one chain's unconstrained samples to value space, relabel mixtures, attach the
     convergence diagnostics, and build the posterior-mean distribution. Shared by RW-MCMC and HMC."""
@@ -1625,6 +1706,47 @@ _PENALTY_CERTIFICATION_GAP = 1.0e-4
 _SQP_MARGIN_SHIFT = 1.0e-7
 
 
+def _map_failure_message(entry: str, algorithm: str, message: str, objective, start, max_iter: int) -> str:
+    """Name what actually stopped a MAP solve, not just the budget.
+
+    "Optimization terminated successfully.. Raise max_iter" was the message for a non-finite
+    objective and for a start the repair could not move into the feasible set alike -- neither of
+    which more iterations fixes (P04-F07). The objective is probed once at the start, so a target
+    that is non-finite everywhere is reported as that.
+    """
+    try:
+        at_start = float(objective(start))
+    except Exception:  # noqa: BLE001 - the diagnosis is best-effort
+        at_start = float("nan")
+    if not np.isfinite(at_start):
+        return (
+            "%s failed (%s): the objective is not finite at the starting point, so no optimizer can "
+            "make progress. Check for a non-finite penalty= weight, a potential returning nan/inf, "
+            "or data outside the model's support -- raising max_iter cannot help." % (entry, algorithm)
+        )
+    if "feasible set" in message:
+        return (
+            "%s failed (%s): %s. The constraints admit no point the repair could reach from the "
+            "start; check that they are mutually satisfiable, or pass penalty=<float> to enforce "
+            "them softly." % (entry, algorithm, message)
+        )
+    return "%s failed (%s): %s. Raise max_iter (currently %d) or loosen tol." % (entry, algorithm, message, max_iter)
+
+
+class _EvaluationCounter:
+    """Wrap an objective and count the calls a derivative-free cascade makes to it."""
+
+    __slots__ = ("_objective", "count")
+
+    def __init__(self, objective) -> None:
+        self._objective = objective
+        self.count = 0
+
+    def __call__(self, u):
+        self.count += 1
+        return self._objective(u)
+
+
 def _derivative_free_constrained(objective, feasible, violation, u0, *, max_iter, tol, rng, margins=None):
     """Minimize ``objective`` (already ``-log_target``, soft penalties included) over ``feasible``.
 
@@ -1825,6 +1947,14 @@ def _soft_penalty(constraints, slots, weight):
     """
     if constraints is None or weight is None:
         return None
+    # ``penalty`` scales the whole objective, so inf or NaN makes it non-finite everywhere and the
+    # optimizer then fails with "Optimization terminated successfully.. Raise max_iter", blaming a
+    # budget for a target that has no finite value at all (P04-F07). Validated like tol and
+    # max_iter, which are already checked.
+    if isinstance(weight, (bool, np.bool_)) or not isinstance(weight, (int, float, np.integer, np.floating)):
+        raise TypeError("penalty must be a finite positive number, got %s" % type(weight).__name__)
+    if not np.isfinite(weight) or float(weight) <= 0.0:
+        raise ValueError("penalty must be a finite positive number, got %r" % (weight,))
     if isinstance(constraints, Constraint):
         constraints = [constraints]
     constraints = list(constraints)
@@ -1863,9 +1993,7 @@ def _potential_term(potentials, slots):
     """
     if potentials is None:
         return None
-    if isinstance(potentials, _Potential):
-        potentials = [potentials]
-    potentials = list(potentials)
+    potentials = validated_potentials(potentials)
     if not potentials:
         return None
     groups = _handle_groups(slots)
@@ -2218,8 +2346,15 @@ def _finite_control(value, name: str, *, lower: float, strict: bool = False) -> 
     return value
 
 
+# The convergence diagnostics need four draws per chain to split a chain in half and compare the
+# halves; below that ``summary()`` is all NaN and the standard deviation is exactly 0 with one draw.
+# ``draws=1 chains=2`` already raised from inside split_rhat, so one chain accepting it was the
+# inconsistency (P04-F11).
+_MIN_SAMPLER_DRAWS = 4
+
+
 def _sampler_controls(draws, burn, thin, chains, parallel, rng):
-    draws = _exact_int_control(draws, "draws", minimum=1)
+    draws = _exact_int_control(draws, "draws", minimum=_MIN_SAMPLER_DRAWS)
     burn = _exact_int_control(burn, "burn", minimum=0)
     thin = _exact_int_control(thin, "thin", minimum=1)
     chains = _exact_int_control(chains, "chains", minimum=1)
@@ -2227,11 +2362,29 @@ def _sampler_controls(draws, burn, thin, chains, parallel, rng):
         raise TypeError("parallel must be False, True, 'process', or 'thread'")
     if parallel not in {False, True, "process", "thread"}:
         raise ValueError("parallel must be False, True, 'process', or 'thread'")
+    return draws, burn, thin, chains, parallel, validated_sampler_rng(rng)
+
+
+def validated_sampler_rng(rng) -> np.random.RandomState:
+    """Coerce ``rng`` to a ``RandomState``, accepting the spellings ``predict()`` already accepts.
+
+    The samplers took only a ``RandomState`` while ``predict()`` took ints and ``Generator``s, so
+    the same ``rng=0`` worked on one call and raised on the next (P04-F11).
+    """
     if rng is None:
-        rng = np.random.RandomState()
-    if not isinstance(rng, np.random.RandomState):
-        raise TypeError("rng must be a numpy.random.RandomState")
-    return draws, burn, thin, chains, parallel, rng
+        return np.random.RandomState()
+    if isinstance(rng, np.random.RandomState):
+        return rng
+    if isinstance(rng, (bool, np.bool_)):
+        raise TypeError("rng must be a numpy RandomState, a Generator, or an integer seed, got a bool")
+    if isinstance(rng, (int, np.integer)):
+        return np.random.RandomState(int(rng))
+    if isinstance(rng, np.random.Generator):
+        return np.random.RandomState(int(rng.integers(2**31 - 1)))
+    raise TypeError(
+        "rng must be a numpy.random.RandomState, a numpy.random.Generator, or an integer seed, "
+        "got %s" % type(rng).__name__
+    )
 
 
 def ensemble_fit(
@@ -2403,7 +2556,9 @@ def hmc_fit(
         )
 
     if chains == 1:
-        return _finalize(rv, slots, run_one(int(rng.randint(1, 2**31))), build)
+        single = run_one(int(rng.randint(1, 2**31)))
+        _refuse_a_chain_that_never_moved([single], how="hmc", constrained=constraints is not None)
+        return _finalize(rv, slots, single, build)
     kw = {
         "draws": draws,
         "burn": burn,
@@ -2413,6 +2568,7 @@ def hmc_fit(
         "missing": missing,
     }
     results = _run_chains(run_one, _hmc_worker, (rv, data, kw), chains, parallel, rng)
+    _refuse_a_chain_that_never_moved(results, how="hmc", constrained=constraints is not None)
     return _finalize_chains(rv, slots, results, build)
 
 
@@ -2625,8 +2781,14 @@ def map_fit(
             hard_constraints, _soft = _constraint_policy(constraints, penalty)
             violation = _hard_violation(hard_constraints, slots) if hard_constraints else None
             margins = _hard_margins(hard_constraints, slots) if hard_constraints else None
+            # The derivative-free path is a cascade (SLSQP, then a penalty ramp, then Nelder-Mead)
+            # with no single iteration count to report, and a hard-coded ``iterations: 0`` beside
+            # ``success: True`` read as "the optimizer did nothing" (P04-F12). Objective
+            # evaluations ARE countable and are what the cascade spends, so the receipt reports
+            # those and omits the iteration count it does not have.
+            evaluations = _EvaluationCounter(lambda u: -log_target(u))
             grouped_x, grouped_fun, grouped_algorithm, grouped_ok, grouped_message = _derivative_free_constrained(
-                lambda u: -log_target(u),
+                evaluations,
                 feasible,
                 violation,
                 u0,
@@ -2635,11 +2797,18 @@ def map_fit(
                 rng=np.random.RandomState() if rng is None else rng,
                 margins=margins,
             )
-            grouped_nit = 0
+            grouped_nit = None
+            grouped_evaluations = evaluations.count
         if not grouped_ok or not np.isfinite(grouped_fun) or not np.all(np.isfinite(grouped_x)):
             raise RuntimeError(
-                f"grouped MAP optimization failed ({grouped_algorithm}): {grouped_message}. "
-                f"Raise max_iter (currently {max_iter}) or loosen tol."
+                _map_failure_message(
+                    "grouped MAP optimization",
+                    grouped_algorithm,
+                    grouped_message,
+                    lambda u: -log_target(u),
+                    u0,
+                    max_iter,
+                )
             )
         value_row = _u_to_vals(slots, np.asarray(grouped_x, dtype=float)[None, :])[0]
         values = {slot.index: float(value_row[k]) for k, slot in enumerate(slots)}
@@ -2654,10 +2823,13 @@ def map_fit(
         optimizer = {
             "algorithm": grouped_algorithm,
             "success": True,
-            "iterations": grouped_nit,
             "message": grouped_message,
             "objective": float(grouped_fun),
         }
+        if grouped_nit is not None:
+            optimizer["iterations"] = grouped_nit
+        else:
+            optimizer["objective_evaluations"] = int(grouped_evaluations)
         result = IndexedPosterior(
             [(group_prior, group_prior.name or "theta", group_values)],
             scalar_values,
@@ -2742,7 +2914,7 @@ def map_fit(
     )
     if not ok or not np.isfinite(f_opt) or not np.all(np.isfinite(x_opt)):
         raise RuntimeError(
-            f"MAP optimization failed ({algorithm}): {message}. Raise max_iter (currently {max_iter}) or loosen tol."
+            _map_failure_message("MAP optimization", algorithm, message, lambda u: -smooth_target(u), u0, max_iter)
         )
     vals, _ = unpack(x_opt)
     return RandomVariable._bound(build(vals), name=rv._name)
@@ -3096,10 +3268,28 @@ class ConjugatePosterior:
     ideal case VB approximates: exact, instant, no iteration.
     """
 
+    # As for :class:`Posterior`: the fitter attaches a posterior-predictive closure over the
+    # lowered model, which pickling cannot carry and which made every conjugate fit unpicklable
+    # (P04-F05). The exact posterior itself -- families, hyperparameters, means, and the draw --
+    # is plain data and travels.
+    _CLOSURE_FIELDS = ("predictive",)
+
     def __init__(self, post: dict):
         self.post = post
         self.acceptance_rate = None
         self.predictive = None
+
+    def __getstate__(self) -> dict:
+        state = dict(self.__dict__)
+        state["_dropped_closures"] = tuple(name for name in self._CLOSURE_FIELDS if state.get(name) is not None)
+        for name in self._CLOSURE_FIELDS:
+            state[name] = None
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        dropped = state.pop("_dropped_closures", ())
+        self.__dict__.update(state)
+        self._dropped_closures = tuple(dropped)
 
     def _entry(self, param):
         for nm, e in self.post.items():
@@ -3125,6 +3315,36 @@ class ConjugatePosterior:
         return {nm: {"mean": e["mean"], "posterior": e["name"], "hyper": e["hyper"]} for nm, e in self.post.items()}
 
 
+class _ConjugateDraw:
+    """A picklable posterior draw for one conjugate parameter.
+
+    The conjugate specs used to carry their sampler as a lambda closed over the posterior
+    hyperparameters, which is what made every conjugate fit unpicklable (P04-F05). The
+    hyperparameters are already on the entry, so the draw is a small object over them instead.
+    """
+
+    __slots__ = ("family", "args")
+
+    def __init__(self, family: str, *args: float) -> None:
+        self.family = family
+        self.args = tuple(float(value) if np.isscalar(value) else np.asarray(value, dtype=float) for value in args)
+
+    def __call__(self, count, rng):
+        if self.family == "normal":
+            mean, sd = self.args
+            return rng.normal(mean, sd, count)
+        if self.family == "gamma":
+            shape, rate = self.args
+            return rng.gamma(shape, 1.0 / rate, count)
+        if self.family == "beta":
+            a, b = self.args
+            return rng.beta(a, b, count)
+        if self.family == "dirichlet":
+            (alpha,) = self.args
+            return rng.dirichlet(alpha, count)
+        raise ValueError("unknown conjugate posterior family %r" % (self.family,))
+
+
 def _conj_normal_mean(prior_args, fixed, stats, handle, index):
     m0, s0 = float(prior_args[0]), float(prior_args[1])  # prior mean, sd
     sigma2 = float(fixed[1]) ** 2  # known variance (slot 1)
@@ -3138,7 +3358,7 @@ def _conj_normal_mean(prior_args, fixed, stats, handle, index):
         "name": "Normal",
         "mean": pm,
         "hyper": {"mean": pm, "sd": math.sqrt(pv)},
-        "sample": lambda k, rng: rng.normal(pm, math.sqrt(pv), k),
+        "sample": _ConjugateDraw("normal", pm, math.sqrt(pv)),
     }
 
 
@@ -3152,7 +3372,7 @@ def _conj_poisson_gamma(prior_args, fixed, stats, handle, index):
         "name": "Gamma",
         "mean": A / B,
         "hyper": {"shape": A, "rate": B},
-        "sample": lambda k, rng: rng.gamma(A, 1.0 / B, k),
+        "sample": _ConjugateDraw("gamma", A, B),
     }
 
 
@@ -3166,7 +3386,7 @@ def _conj_exponential_gamma(prior_args, fixed, stats, handle, index):
         "name": "Gamma",
         "mean": A / B,
         "hyper": {"shape": A, "rate": B},
-        "sample": lambda k, rng: rng.gamma(A, 1.0 / B, k),
+        "sample": _ConjugateDraw("gamma", A, B),
     }
 
 
@@ -3180,7 +3400,7 @@ def _conj_bernoulli_beta(prior_args, fixed, stats, handle, index):
         "name": "Beta",
         "mean": A / (A + B),
         "hyper": {"a": A, "b": B},
-        "sample": lambda k, rng: rng.beta(A, B, k),
+        "sample": _ConjugateDraw("beta", A, B),
     }
 
 
@@ -3203,7 +3423,7 @@ def _conj_categorical_dirichlet(prior_args, fixed, stats, handle, index):
         "name": "Dirichlet",
         "mean": post / post.sum(),  # the K-vector of posterior-mean category probabilities
         "hyper": {"alpha": post},
-        "sample": lambda k, rng: rng.dirichlet(post, k),
+        "sample": _ConjugateDraw("dirichlet", post),
     }
 
 
@@ -3220,7 +3440,7 @@ def _conj_negbinomial_beta(prior_args, fixed, stats, handle, index):
         "name": "Beta",
         "mean": A / (A + B),
         "hyper": {"a": A, "b": B},
-        "sample": lambda k, rng: rng.beta(A, B, k),
+        "sample": _ConjugateDraw("beta", A, B),
     }
 
 
@@ -3237,7 +3457,7 @@ def _conj_gamma_rate(prior_args, fixed, stats, handle, index):
         "name": "Gamma",
         "mean": A / B,  # posterior mean of the rate
         "hyper": {"a": A, "b": B},
-        "sample": lambda kk, rng: rng.gamma(A, 1.0 / B, kk),
+        "sample": _ConjugateDraw("gamma", A, B),
     }
 
 
@@ -3254,7 +3474,7 @@ def _conj_binomial_beta(prior_args, fixed, stats, handle, index):
         "name": "Beta",
         "mean": A / (A + B),
         "hyper": {"a": A, "b": B},
-        "sample": lambda k, rng: rng.beta(A, B, k),
+        "sample": _ConjugateDraw("beta", A, B),
     }
 
 
@@ -3270,7 +3490,7 @@ def _conj_geometric_beta(prior_args, fixed, stats, handle, index):
         "name": "Beta",
         "mean": A / (A + B),
         "hyper": {"a": A, "b": B},
-        "sample": lambda k, rng: rng.beta(A, B, k),
+        "sample": _ConjugateDraw("beta", A, B),
     }
 
 
@@ -3356,6 +3576,29 @@ def _conjugate_observations(rv: RandomVariable, data) -> np.ndarray:
     return np.asarray(values, dtype=float)
 
 
+class _NormalGammaDraw:
+    """A picklable draw from one margin of a Normal-Gamma posterior.
+
+    ``column`` selects the margin: 0 is the mean, 1 the precision (returned as a standard
+    deviation when ``as_sigma``). Written as an object rather than a closure over a local ``_draw``
+    for the reason in :class:`_ConjugateDraw` -- a lambda kept every Normal(free, free) conjugate
+    fit unpicklable (P04-F05).
+    """
+
+    __slots__ = ("law", "column", "as_sigma")
+
+    def __init__(self, law, column: int, *, as_sigma: bool = False) -> None:
+        self.law = law
+        self.column = int(column)
+        self.as_sigma = bool(as_sigma)
+
+    def __call__(self, count, rng):
+        drawn = np.asarray(self.law.sampler(seed=int(rng.randint(1, 2**31))).sample(count), dtype=float).reshape(
+            count, 2
+        )[:, self.column]
+        return 1.0 / np.sqrt(drawn) if self.as_sigma else drawn
+
+
 def _nig_conjugate_fit(rv, data, *, mu0=0.0, kappa=1.0e-6, alpha=2.0, beta=1.0) -> RandomVariable:
     """Closed-form Normal-Inverse-Gamma (NormalGamma) posterior for ``Normal(free, free)`` -- the most
     common Bayesian model: unknown mean AND variance, jointly conjugate.
@@ -3400,7 +3643,7 @@ def _nig_conjugate_fit(rv, data, *, mu0=0.0, kappa=1.0e-6, alpha=2.0, beta=1.0) 
             "name": "StudentT",
             "mean": mu_n,
             "hyper": {"mu_n": mu_n, "kappa_n": lam_n, "df": 2.0 * a_n},
-            "sample": lambda k, rng: _draw(k, rng)[:, 0],
+            "sample": _NormalGammaDraw(nig, 0),
         },
         "sigma": {
             "index": 1,
@@ -3408,7 +3651,7 @@ def _nig_conjugate_fit(rv, data, *, mu0=0.0, kappa=1.0e-6, alpha=2.0, beta=1.0) 
             "name": "sqrt-InverseGamma",
             "mean": mean_sigma,
             "hyper": {"alpha_n": a_n, "beta_n": b_n},
-            "sample": lambda k, rng: 1.0 / np.sqrt(_draw(k, rng)[:, 1]),
+            "sample": _NormalGammaDraw(nig, 1, as_sigma=True),
         },
     }
     fitted = GaussianDistribution(mu_n, mean_sigma2)

@@ -158,8 +158,17 @@ def _owned_generative_components(
                 non_generative.append(index)
     if neutral or non_generative:
         invalid = sorted(set(neutral).union(non_generative))
+        # "Likelihood factor" is the contract's word for it; the reader has to be told what makes a
+        # component one, which in practice is almost always a sequence law with no length model
+        # (P03-F13). Name the offending families and the fix.
+        offenders = ", ".join(sorted({type(owned[index]).__name__ for index in invalid}))
         raise TypeError(
-            f"{label} components must be generative probability laws; likelihood factors found at indices {invalid}."
+            f"{label} components must be generative probability laws; likelihood factors found at "
+            f"indices {invalid} ({offenders}). A component is a likelihood factor when it does not "
+            "model everything it emits -- most often a sequence law with no length distribution, "
+            "which scores a sequence but cannot say how long one is. Pass len_estimator=... "
+            "(e.g. SequenceEstimator(..., len_estimator=PoissonEstimator())) or len_dist=... so "
+            "every component is a full generative law over the same observations."
         )
     return owned
 

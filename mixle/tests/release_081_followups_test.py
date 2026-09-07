@@ -303,7 +303,9 @@ class MixtureHintIsConditionalTest(unittest.TestCase):
         )
         hits = [w for w in bimodal.warnings if "look multimodal" in w]
         self.assertEqual(len(hits), 1, bimodal.warnings)
-        self.assertIn("(0,)", hits[0])
+        # The note uses format_path's '$[0]' spelling, like every other note in the list; it used
+        # to leak the raw internal tuple (P03-F08).
+        self.assertIn("$[0]", hits[0])
 
 
 if __name__ == "__main__":

@@ -223,6 +223,11 @@ def _is_free(x: Any) -> bool:
     return x is free
 
 
+def _is_unbound_parameter(x: Any) -> bool:
+    """A ``free(d, name=...)`` parameter handle that no fit has resolved yet."""
+    return isinstance(x, RandomVariable) and x._kind == "param" and getattr(x, "_result", None) is None
+
+
 # --------------------------------------------------------------- covariates / GLM
 class Field:
     """A named covariate (data column) for regression: ``a * Field("x") + b``."""
@@ -2836,7 +2841,23 @@ class RandomVariable:
                         )
                     else:
                         change_note = f"(requested how={_original_how!r}; resolved to {how!r} by fit)"
-                    explanation["reason"] = f"{explanation.get('reason', '')} {change_note}".strip()
+                    # Read at the RESOLVED route, ``explain_fit`` reports "explicit how='map'" and
+                    # loses why the router chose it -- the pre-fit call on the same model says
+                    # "constraints/potentials need the numerical joint -> MAP" (P04-F09). When the
+                    # routing explanation for the ORIGINAL request lands on the same route, its
+                    # reason is the one that explains this fit.
+                    reason = explanation.get("reason", "")
+                    try:
+                        requested = self.explain_fit(
+                            how=_original_how,
+                            constraints=kw.get("constraints"),
+                            potentials=kw.get("potentials"),
+                        )
+                        if requested.get("route") == explanation.get("route"):
+                            reason = requested.get("reason", reason)
+                    except Exception:  # noqa: BLE001 - the resolved reason is a fine fallback
+                        pass
+                    explanation["reason"] = f"{reason} {change_note}".strip()
                 rv._cache["_fit_explanation"] = explanation
             except Exception:  # noqa: BLE001 - best-effort; must never block a fit
                 pass
@@ -3284,6 +3305,10 @@ def lower(rv: RandomVariable, *, target: str = "dist"):
     if isinstance(fam, CompositeFamily):
         fam.validate_args(rv._args)
         if target == "dist":
+            if any(_is_free(a) or _is_unbound_parameter(a) for a in rv._args):
+                # Same guard as the scalar path below: a vector ``free(d, name=...)`` handle used to
+                # reach the family's own lowering and fail inside numpy (P04-F10).
+                raise ValueError(f"{fam.name} has unresolved `free` parameters; call .fit(data) first.")
             result = fam.dist_fn(rv._args, lambda c: lower(c, target="dist"))
         elif target == "estimator":
             result = fam.est_fn(rv._args, lambda c: lower(c, target="estimator"), rv._name, rv._keys)
@@ -3306,7 +3331,10 @@ def lower(rv: RandomVariable, *, target: str = "dist"):
         return est
 
     if target == "dist":
-        if any(_is_free(a) for a in rv._args):
+        if any(_is_free(a) or _is_unbound_parameter(a) for a in rv._args):
+            # ``free(5, name='v')`` is a parameter HANDLE, not the ``free`` sentinel, so a vector
+            # parameter slipped past this guard and failed several frames later inside numpy with
+            # "setting an array element with a sequence." (P04-F10).
             raise ValueError(f"{fam.name} has unresolved `free` parameters; call .fit(data) first.")
         if any(isinstance(a, RandomVariable) for a in rv._args):
             raise NotImplementedError("latent/random parameters (a distribution in a slot) land in build slice 5.")

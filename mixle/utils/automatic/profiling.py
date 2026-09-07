@@ -1952,7 +1952,12 @@ def analyze_structure(
     warnings = []
     multimodal_fields = _multimodal_field_paths(field_series)
     if multimodal_fields:
-        named = ", ".join(str(path) for path in multimodal_fields[:5]) + (", ..." if len(multimodal_fields) > 5 else "")
+        # ``format_path`` -- the same '$', '$[0]', "$['key']['height']" spelling every other note in
+        # this list uses. The raw internal tuple leaked into user-facing text, so a scalar column was
+        # named "()" and a dict field "('key', 'height')", including the 'key' path segment (P03-F08).
+        named = ", ".join(format_path(path) for path in multimodal_fields[:5]) + (
+            ", ..." if len(multimodal_fields) > 5 else ""
+        )
         warnings.append(
             "field(s) %s look multimodal (bimodality coefficient above the unimodal reference): pairwise hints "
             "are conditional on that -- latent mixture/state/topic structure can explain or hide them; consider "

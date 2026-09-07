@@ -1393,6 +1393,12 @@ def _refresh_frozen_identifier_leaves(estimator: Any, rows: list, field_paths: l
     return _rebuild(refreshed) if changed else estimator
 
 
+# One training row makes every candidate a variance-floored point fit, so the holdout
+# comparison measures the parameter floors instead of the data (P03-F11). Two rows already
+# carry a spread, so the floor is no longer what is being compared.
+_MIN_TRAINING_ROWS = 2
+
+
 def propose(
     data: Any,
     *,
@@ -1520,6 +1526,17 @@ def propose(
     train = [rows[i] for i in order[n_val:]]
     if not train:
         raise ValueError("holdout leaves no training rows; lower holdout or provide more records")
+    if len(train) < _MIN_TRAINING_ROWS:
+        # "At least three records" leaves a ONE-row training split at the default holdout, and every
+        # candidate then fits a variance-floored point mass whose held-out mean log-density is around
+        # -1e8 -- presented, with no note, as a comparison of verified candidates (P03-F11). The
+        # degenerate-spike guard downstream looks for an implausibly HIGH score and never fires on it.
+        raise ValueError(
+            "propose() would train every candidate on %d row(s) (%d record(s) at holdout=%g): a "
+            "single-row fit is a variance-floored point mass, and comparing candidates on it "
+            "measures the floor rather than the data. Provide at least %d records, or lower "
+            "holdout." % (len(train), len(rows), holdout, _MIN_TRAINING_ROWS + n_val)
+        )
     rec = recommend_model(train, **recommend_kw)
     candidates: list[tuple[str, Any]] = [("recommended", rec.estimator)]
     # optimize()'s own no-estimator auto-structure-search (structure="auto", the default, reached by

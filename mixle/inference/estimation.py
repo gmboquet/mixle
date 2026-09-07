@@ -47,10 +47,21 @@ def _resolve_rng_arg(rng: RandomState | int | None, seed: int | None) -> RandomS
     unchanged so each caller keeps its own default.
     """
     value = coalesce_alias("rng", rng, "seed", seed, required=False, default=None)
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError("rng must be a numpy RandomState, a Generator, or an integer seed, got a bool")
     if isinstance(value, (int, np.integer)):
         return RandomState(int(value))
     if isinstance(value, np.random.Generator):
         return RandomState(int(value.integers(2**31 - 1)))
+    if value is not None and not isinstance(value, RandomState):
+        # Anything else reached the internals and failed on the first ``.randint`` with numpy's or
+        # Python's own message, naming neither the argument nor what it should have been -- a str
+        # gave "'str' object has no attribute 'randint'" and a random.Random gave a signature
+        # error from the stdlib (P03-F09).
+        raise TypeError(
+            "rng must be a numpy.random.RandomState, a numpy.random.Generator, or an integer seed, "
+            "got %s" % type(value).__name__
+        )
     return value
 
 
@@ -779,6 +790,23 @@ def _warn_if_capped_unconverged(
                 stacklevel=3,
             )
         return
+    if gain is not None and float(gain) < 0.0:
+        # Best-seen selection (monotone=False, or any mutable/neural leaf) returns the best iterate
+        # rather than the last one, so the trajectory is free to go downhill. Reporting that as
+        # "the objective has not settled yet" and advising "raise max_its" inverted the situation:
+        # more iterations of the same descent do not converge (P03-F06). The receipt is unchanged --
+        # it already carries the best model's objective and the last accepted one separately.
+        warnings.warn(
+            "optimize() stopped at the max_its cap (%d) with the objective going down (last step "
+            "%.3g): the returned model is the BEST iterate seen, not the last one, and its "
+            "fit_provenance() reports converged=False with final_objective for the model returned "
+            "and last_accepted_objective for where the run ended. More iterations of the same "
+            "trajectory will not converge; a different initialization, restarts=..., or a smaller "
+            "step for the mutable leaf is what changes it." % (int(max_its), float(gain)),
+            UserWarning,
+            stacklevel=3,
+        )
+        return
     gain_text = ("last objective gain %.3g" % gain) if gain is not None else "final gain unknown"
     warnings.warn(
         "optimize() stopped at the max_its cap (%d) before the objective settled (%s, delta=%g): the "
@@ -1154,9 +1182,15 @@ def _validate_optimize_controls(
         is_bool(delta)
         or not isinstance(delta, (int, float, np.integer, np.floating))
         or not np.isfinite(delta)
-        or float(delta) < 0.0
+        or float(delta) <= 0.0
     ):
-        raise ValueError(f"optimize(): delta must be None or a finite non-negative number, got {delta!r}")
+        # Zero used to be accepted and could never be satisfied: the convergence test is
+        # ``0.0 <= gain < delta``, so a run with delta=0 always spent its whole budget and then
+        # warned that the objective had "not settled" at a gain of exactly zero (P03-F05).
+        # ``delta=None`` is the documented way to ask for a fixed iteration count.
+        raise ValueError(
+            f"optimize(): delta must be None (a fixed iteration count) or a finite positive number, got {delta!r}"
+        )
     if (
         is_bool(init_p)
         or not isinstance(init_p, (int, float, np.integer, np.floating))
@@ -1181,6 +1215,26 @@ def _validate_optimize_controls(
         if not (is_bool(value) or (optional and value is None)):
             expected = "None or a boolean" if optional else "a boolean"
             raise TypeError(f"optimize(): {name} must be {expected}, got {value!r}")
+
+
+def _declares_a_prior(prior: Any, _depth: int = 0) -> bool:
+    """Whether ``get_prior()`` actually returned a prior, rather than a container of nothing.
+
+    A container estimator returns one entry per child: ``CompositeEstimator.get_prior()`` is
+    ``[None, None]`` for two prior-free children, and ``Optional``/``Sequence`` return
+    ``(None, None)``. Those are not ``None``, so every prior-free top-level composite -- which is
+    what estimator inference returns for tabular data -- resolved to ``'map'``, stamped a receipt
+    saying a penalized objective was maximized when the final objective was the plain
+    log-likelihood, and lost the fused E-step, which only ``'mle'`` can take (P03-F04). The same
+    all-Nones convention ``_estimator_carries_prior`` uses settles it.
+    """
+    if prior is None or _depth > 6:
+        return False
+    if isinstance(prior, (tuple, list)):
+        return any(_declares_a_prior(entry, _depth + 1) for entry in prior)
+    if isinstance(prior, dict):
+        return any(_declares_a_prior(entry, _depth + 1) for entry in prior.values())
+    return True
 
 
 def _resolve_objective(
@@ -1209,7 +1263,7 @@ def _resolve_objective(
     # get_prior() is None while model_log_density is still genuinely non-zero from a nested child's
     # prior, so a None get_prior() falls through to that check rather than concluding 'mle' outright.
     get_prior = getattr(estimator, "get_prior", None)
-    if callable(get_prior) and get_prior() is not None:
+    if callable(get_prior) and _declares_a_prior(get_prior()):
         return "map"
     if _model_objective(estimator, model) != 0.0:
         return "map"
@@ -1795,6 +1849,14 @@ def optimize(
     if prev_estimate is None:
         data_encoder = est.accumulator_factory().make().acc_to_encoder()
     else:
+        if not hasattr(prev_estimate, "dist_to_encoder"):
+            # Handing an ESTIMATOR here is the natural slip, and it used to surface as
+            # "'GaussianEstimator' object has no attribute 'dist_to_encoder'" (P03-F09).
+            raise TypeError(
+                "optimize(prev_estimate=...) takes a fitted distribution to start from, not %s. "
+                "Pass a model (e.g. a previous optimize() result); the estimator goes in the "
+                "`estimator` argument." % type(prev_estimate).__name__
+            )
         data_encoder = prev_estimate.dist_to_encoder()
 
     encode_model = prev_estimate

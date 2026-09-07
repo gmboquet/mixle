@@ -85,6 +85,57 @@ release (`release-checklists/0.8.2-followups.md`).
   built entirely from the parameter floors and stamping it converged; `seq_initialize` and
   `seq_estimate` stay total on such a batch, as their own regression tests require, but say so
   (P03-F03).
+- `optimize(objective='auto')` reports `'mle'` for a prior-free container. `CompositeEstimator`,
+  `Optional` and `Sequence` return one `get_prior()` entry per child, so a container of prior-free
+  children is `[None, None]` rather than `None` and every automatically inferred tabular fit
+  claimed a penalized objective it never maximized -- and lost the fused E-step, which only
+  `'mle'` can take (P03-F04).
+- `optimize(delta=0)` is refused. The convergence test is `gain < delta`, so zero could never be
+  met: the run always spent its whole budget and then warned that the objective had not settled at
+  a gain of exactly zero. `delta=None` remains the way to ask for a fixed iteration count
+  (P03-F05).
+- The max_its-cap warning says so when the trajectory went **down**. Under best-seen selection
+  (`monotone=False`, or any mutable/neural leaf) the returned model is the best iterate, so
+  reporting a negative gain as "not settled yet" and advising "raise max_its" inverted the
+  situation (P03-F06).
+- `propose()`'s multimodality note names fields in the same `$`, `$[0]`, `$['key']['height']`
+  spelling as every other note, instead of the raw internal path tuple (P03-F08); and it refuses a
+  split that would train every candidate on one row, where the held-out comparison measures the
+  variance floor rather than the data (P03-F11).
+- `rng=`, `prev_estimate=` and `potentials=` name themselves when given the wrong type, instead of
+  failing later on somebody else's `AttributeError`; the documented low-level
+  `seq_encode`/`seq_initialize` pipeline accepts the same `rng` spellings `optimize` does
+  (P03-F09).
+- A `cdf` callable that takes an array without raising but returns one value is evaluated
+  element-wise, as the docstring says, rather than reported as a shape mismatch of the CDF values
+  (P03-F12); and the "likelihood factors found" refusal names the family and `len_estimator=`,
+  which is what a caller has to change (P03-F13).
+
+#### The probabilistic-programming layer (pass 04)
+
+- A sampler that accepted none of its proposals is refused instead of being returned as a
+  posterior. An active hard constraint left HMC rejecting every leapfrog trajectory, so `summary()`
+  reported the projected starting point with a standard deviation of exactly zero and NaN
+  diagnostics; the refusal names `how='mcmc'`/`'ensemble'` and `penalty=` (P04-F04).
+- Every posterior-bearing fit pickles -- conjugate, mcmc, hmc, nuts, ensemble, laplace and vi --
+  against a docstring that already promised the fit record travels with the model through pickling.
+  The conjugate posteriors' draws are objects over their hyperparameters rather than lambdas, and
+  the two closures over the lowered program (`build`, `predictive`) are dropped with a stand-in
+  that says so, so a restored posterior summarizes and reports exactly as before (P04-F05).
+- `penalty=` is validated finite and positive, and a failed MAP names what stopped it -- a
+  non-finite objective at the starting point, or constraints the repair could not reach -- rather
+  than "Optimization terminated successfully.. Raise max_iter" (P04-F07).
+- A model fitted with `how='auto'` keeps the router's own reason in its `explain_fit()` record
+  instead of replacing it with "explicit how='map'" (P04-F09).
+- An unfitted **vector** `free(d, name=...)` parameter raises the same "unresolved `free`
+  parameters" message a scalar one does, instead of numpy's "setting an array element with a
+  sequence." several frames later (P04-F10).
+- `draws` has the floor the diagnostics need (four per chain, the same one `chains=2` already
+  enforced from inside `split_rhat`), `potentials=` refuses a string by name, and the samplers take
+  the integer seeds and `Generator`s `predict()` already took (P04-F11).
+- A grouped constrained MAP reports the objective evaluations its derivative-free cascade actually
+  spent instead of a hard-coded `iterations: 0` beside `success: True` (P04-F12).
+
 
 ## [0.8.1] — 2026-09-07
 

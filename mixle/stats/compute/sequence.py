@@ -342,6 +342,30 @@ def density(
     return np.exp(log_density(data, model))
 
 
+def validated_random_state(rng: Any, entry_point: str) -> np.random.RandomState:
+    """Coerce ``rng`` to a ``RandomState``, naming the argument when it cannot be.
+
+    The high-level ``optimize`` accepts an int seed and a ``Generator``; the documented low-level
+    pipeline did not, and anything but a ``RandomState`` -- ``None``, an int, a ``Generator`` --
+    failed on the first ``.randint`` with numpy's own attribute error, naming neither the argument
+    nor the accepted spellings (P03-F09).
+    """
+    if isinstance(rng, np.random.RandomState):
+        return rng
+    if isinstance(rng, (bool, np.bool_)):
+        raise TypeError(
+            "%s: rng must be a numpy RandomState, a Generator, or an integer seed, got a bool" % entry_point
+        )
+    if isinstance(rng, (int, np.integer)):
+        return np.random.RandomState(int(rng))
+    if isinstance(rng, np.random.Generator):
+        return np.random.RandomState(int(rng.integers(2**31 - 1)))
+    raise TypeError(
+        "%s: rng must be a numpy.random.RandomState, a numpy.random.Generator, or an integer seed, "
+        "got %s" % (entry_point, type(rng).__name__)
+    )
+
+
 def encoded_row_count(enc_data: Any) -> int | None:
     """Rows behind a local encoded batch, or ``None`` when the encoding does not report a count."""
     try:
@@ -504,6 +528,7 @@ def seq_initialize(
     """
     validate_estimator_keys(estimator)
     p = validate_initialization_probability(p)
+    rng = validated_random_state(rng, "seq_initialize()")
     disclose_empty_encoded_batch(enc_data, "seq_initialize()")
 
     if hasattr(enc_data, "pysp_seq_initialize"):
