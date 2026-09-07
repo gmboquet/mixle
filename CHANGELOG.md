@@ -310,7 +310,20 @@ release (`release-checklists/0.8.2-followups.md`).
 - The README's nested-HMM snippet passes `max_its` and the prose says why: `optimize`'s default of
   10 EM iterations is far too small for the model that snippet builds (P08-F02).
 
-#### Identifiability the likelihood cannot see (A-02, A-03)
+#### Identifiability the likelihood cannot see (A-02, A-03, P07-F03, P08-F09)
+
+- `mixle.utils.automatic.get_estimator` takes `unimodal_leaves=`, and `get_dpm_mixture` passes it.
+  The detector adds a per-field 2-component Gaussian mixture whenever a column looks multimodal,
+  which is right for a standalone fit and wrong for the COMPONENTS of an outer mixture: the outer
+  mixture is what models multimodality, and one inside a component lets that component absorb
+  several regimes. A Dirichlet-process mixture built that way stopped shrinking its truncation and
+  clustered a four-segment corpus worse than its own numeric fields alone. Same trap
+  `learn_mixture_structure` closes with `field_estimators`, now closed where the caller never chose
+  the leaf families (P08-F09).
+- A PPL family declares the parameters its estimator does NOT fit (`register_family(...,
+  holds_fixed=...)`), and writing `free` in one of those slots says so. `StudentTEstimator` is a
+  fixed-df moment fit by design, so `StudentT(free, free, free)` returned the family's default
+  degrees of freedom -- and a shipped notebook printed that default as an estimate (P07-F03).
 
 - A fitted mixture records how much data each component actually won, on
   `MixtureDistribution.component_row_mass`, and says so when a component holds fewer effective rows

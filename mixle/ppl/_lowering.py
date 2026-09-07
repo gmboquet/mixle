@@ -317,6 +317,10 @@ register_family(
     seed_at=lambda v, s: {"df": 5.0, "loc": float(v), "scale": (float(s) or 1.0)},
     positive=(True, False, True),
     read=lambda d: {"df": d.df, "loc": d.loc, "scale": d.scale},
+    # StudentTEstimator is a fixed-df moment fit by design (the exact MLE has no closed-form update);
+    # only loc and scale move. Declared so ``StudentT(free, free, free)`` says so instead of returning
+    # the default df dressed as an estimate -- which a shipped notebook printed as the fitted value.
+    holds_fixed=("df",),
 )
 register_family(
     "LogNormal",

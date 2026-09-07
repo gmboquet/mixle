@@ -1135,6 +1135,7 @@ class Family:
         "read",
         "support",
         "validator",
+        "holds_fixed",
     )
 
     def __init__(
@@ -1150,6 +1151,7 @@ class Family:
         read=None,
         support=None,
         validator=None,
+        holds_fixed=(),
     ):
         self.name = name
         self.dist_cls = dist_cls
@@ -1176,6 +1178,12 @@ class Family:
         # Optional family-specific validation supplements the common finite/support contract below.
         # It receives the complete conventional argument tuple.
         self.validator = validator
+        # Conventional parameter names this family's EM estimator does NOT move. Writing ``free`` in
+        # such a slot is not an error -- the estimator is documented as fixed there, and its other
+        # parameters are still fitted -- but silence made it look fitted: a shipped notebook read a
+        # Student-t's degrees of freedom off a ``StudentT(free, free, free)`` fit and reported the
+        # placeholder as an estimate. ``make_estimator`` says so once instead.
+        self.holds_fixed = tuple(holds_fixed)
 
     def validate_args(self, args: tuple[Any, ...]) -> None:
         """Validate fixed conventional parameters without rejecting symbolic parameter expressions."""
@@ -1231,6 +1239,17 @@ class Family:
 
     def make_estimator(self, name: str | None, keys: str | None):
         """Construct the estimator associated with this family."""
+        if self.holds_fixed:
+            held = ", ".join(self.holds_fixed)
+            warnings.warn(
+                "%s's estimator does not fit %s, so `free` there keeps the family default and the "
+                "fitted object reports that default as though it had been estimated. Every other "
+                "parameter IS fitted. Fit %s with a gradient route "
+                "(mixle.inference.gradient_fit.fit_mle / fit_map), or select it yourself by "
+                "comparing fits at several fixed values." % (self.name, held, held),
+                UserWarning,
+                stacklevel=3,
+            )
         kwargs: dict[str, Any] = {}
         if name is not None:
             kwargs["name"] = name
@@ -1307,8 +1326,13 @@ def register_family(
     read=None,
     support=None,
     validator=None,
+    holds_fixed=(),
 ) -> Family:
-    """Register a flat PPL family and its distribution/estimator lowering rules."""
+    """Register a flat PPL family and its distribution/estimator lowering rules.
+
+    ``holds_fixed`` names the conventional parameters this family's EM estimator leaves alone, so a
+    ``free`` written in one of those slots is disclosed rather than silently ignored.
+    """
     if not isinstance(name, str) or not name:
         raise ValueError("family name must be a non-empty string.")
     if name in _FAMILIES:
@@ -1328,6 +1352,7 @@ def register_family(
         read=read,
         support=support,
         validator=validator,
+        holds_fixed=holds_fixed,
     )
     _FAMILIES[name] = fam
     _DIST_TO_FAMILY[dist_cls] = fam

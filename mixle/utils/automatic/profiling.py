@@ -748,7 +748,7 @@ def _origin_anchored_scores_unmeasurable(arr: np.ndarray) -> bool:
     return shape * magnitude > _ORIGIN_ANCHORED_MAX_CONDITION
 
 
-def _numeric_candidate_bics(arr: np.ndarray, nobs: int) -> dict[str, float]:
+def _numeric_candidate_bics(arr: np.ndarray, nobs: int, *, unimodal_leaves: bool = False) -> dict[str, float]:
     """Return per-candidate BIC code lengths for numeric data (support-typed).
 
     Gaussian and Student-t apply to any real data; a 2-component Gaussian mixture is added only when
@@ -769,7 +769,13 @@ def _numeric_candidate_bics(arr: np.ndarray, nobs: int) -> dict[str, float]:
     centered = arr - float(arr.mean()) if unmeasurable else None
     # The 2-component mixture is added only for plausibly-multimodal data with enough distinct
     # values that its components cannot collapse onto a few points (which would overfit wildly).
-    if arr.size and np.unique(arr).size >= 12 and _looks_multimodal(arr):
+    # ``unimodal_leaves`` is what a caller building the COMPONENTS of an outer mixture passes: the
+    # outer mixture is the thing that models multimodality, and a per-field mixture inside a
+    # component lets one component absorb several regimes -- the identifiability trap
+    # ``learn_mixture_structure`` documents and closes with ``field_estimators``. Left open, a
+    # Dirichlet-process mixture over such components saturated its truncation and clustered WORSE
+    # than the numeric fields alone (P08-F09).
+    if not unimodal_leaves and arr.size and np.unique(arr).size >= 12 and _looks_multimodal(arr):
         candidates["mixture"] = _mixture_bic_bits(arr, nobs)
     if arr.size and np.all(arr > 0.0) and not unmeasurable:
         candidates["lognormal"] = _lognormal_bic_bits(arr, nobs)
@@ -2408,7 +2414,15 @@ class DatumNode:
             string_support=tuple(string_view.vdict),
         )
 
-    def _leaf_estimator(self, pseudo_count, emp_suff_stat, use_bstats, recommendation: str | None = None):
+    def _leaf_estimator(
+        self,
+        pseudo_count,
+        emp_suff_stat,
+        use_bstats,
+        recommendation: str | None = None,
+        *,
+        unimodal_leaves: bool = False,
+    ):
         if self.obj_count > 0 or len(self.vdict) == 0:
             if len(self.vdict) > 0:
                 # A scalar type the profiler does not recognize -- datetime64/Timestamp being the
@@ -2479,7 +2493,7 @@ class DatumNode:
                 builders.setdefault(_d.name, _d.factory)
             arr = _value_array_from_vdict(self.vdict)
             if arr.size:
-                bics = _numeric_candidate_bics(arr, arr.size)
+                bics = _numeric_candidate_bics(arr, arr.size, unimodal_leaves=unimodal_leaves)
                 if bics:
                     best = recommendation if recommendation in bics and recommendation in builders else None
                     if best is None:
@@ -2581,8 +2595,12 @@ class DatumNode:
         recommendations: dict[tuple[Any, ...], str] | None = None,
         path: tuple[Any, ...] = (),
         modality: str | None = None,
+        unimodal_leaves: bool = False,
     ):
         """Infer and return an estimator for the profiled observations.
+
+        ``unimodal_leaves`` keeps a per-field 2-component Gaussian mixture out of the candidate set,
+        for a caller building the components of an outer mixture (see :func:`_numeric_candidate_bics`).
 
         **What happens to values that are not ordinary numbers.** :func:`mixle.inference.optimize`,
         the entry point most callers reach this through, summarizes this policy in its own docstring
@@ -2643,6 +2661,7 @@ class DatumNode:
                             emp_suff_stat,
                             use_bstats=use_bstats,
                             recommendations=recommendations,
+                            unimodal_leaves=unimodal_leaves,
                             path=path + ("key", k),
                         )
                         for k in keys
@@ -2660,6 +2679,7 @@ class DatumNode:
                             emp_suff_stat,
                             use_bstats=use_bstats,
                             recommendations=recommendations,
+                            unimodal_leaves=unimodal_leaves,
                             path=path + (index,),
                         )
                         for index, u in enumerate(self.children)
@@ -2687,6 +2707,7 @@ class DatumNode:
                             emp_suff_stat,
                             use_bstats=use_bstats,
                             recommendations=recommendations,
+                            unimodal_leaves=unimodal_leaves,
                             path=path + (index,),
                         )
                         for index, u in enumerate(self.children)
@@ -2702,6 +2723,7 @@ class DatumNode:
                         emp_suff_stat,
                         use_bstats=use_bstats,
                         recommendations=recommendations,
+                        unimodal_leaves=unimodal_leaves,
                         path=path + ("element",),
                     ),
                     len_dict=self.len_dict,
@@ -2716,6 +2738,7 @@ class DatumNode:
                 emp_suff_stat,
                 use_bstats,
                 recommendation=recommendations.get(path),
+                unimodal_leaves=unimodal_leaves,
             )
 
         if self.none_count > 0:
@@ -3248,8 +3271,15 @@ def get_estimator(
     *,
     modality: str | None = None,
     ragged: str = "auto",
+    unimodal_leaves: bool = False,
 ):
     """Profile ``data`` and return the automatically selected estimator.
+
+    ``unimodal_leaves=True`` keeps a per-field 2-component Gaussian mixture out of the candidate set.
+    Pass it when the result will be a COMPONENT of an outer mixture: the outer mixture is what models
+    multimodality, and a mixture inside a component lets one component absorb several regimes -- the
+    identifiability trap :func:`~mixle.inference.structure.learn_mixture_structure` closes with
+    ``field_estimators`` and :func:`~mixle.utils.automatic.get_dpm_mixture` now closes by default.
 
     ``ragged`` governs rows that do not all carry the same number of fields, a shape that is
     genuinely ambiguous between a table with a malformed row and variable-length sequence data.
@@ -3278,7 +3308,13 @@ def get_estimator(
     _apply_ragged_policy(rows, ragged)
     root = DatumNode(data=rows)
     _warn_nonfinite_reclassified_as_missing(root)
-    return root.get_estimator(pseudo_count, emp_suff_stat, use_bstats=use_bstats, modality=modality)
+    return root.get_estimator(
+        pseudo_count,
+        emp_suff_stat,
+        use_bstats=use_bstats,
+        modality=modality,
+        unimodal_leaves=unimodal_leaves,
+    )
 
 
 def get_prototype(

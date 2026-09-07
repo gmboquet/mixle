@@ -980,7 +980,16 @@ def get_dpm_mixture(
     if not callable(getattr(out, "write", None)):
         raise TypeError("out must be a writable stream or None")
 
-    comp_ests = [get_estimator(rows, pseudo_count=pseudo_count, use_bstats=True) for _ in range(max_components)]
+    # unimodal_leaves: these estimators are the mixture's COMPONENTS, and the mixture is what models
+    # multimodality. With a per-field 2-component Gaussian mixture in the candidate set, one stick
+    # could absorb several regimes and the truncation stopped shrinking -- a 4-segment corpus came
+    # back with all 12 sticks carrying material weight and clustered WORSE than its numeric fields
+    # alone (P08-F09). This is the same trap ``learn_mixture_structure`` closes with
+    # ``field_estimators``; here the caller never chose the leaf families, so the factory closes it.
+    comp_ests = [
+        get_estimator(rows, pseudo_count=pseudo_count, use_bstats=True, unimodal_leaves=True)
+        for _ in range(max_components)
+    ]
     if _estimates_nothing(comp_ests[0]):
         # Every field resolved to an Ignored (frozen) factor, so each stick would score every row
         # identically and EM would return its initialization unchanged -- a "fit" of nothing.
